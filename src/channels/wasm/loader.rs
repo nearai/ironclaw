@@ -15,7 +15,7 @@ use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::wasm::capabilities::ChannelCapabilities;
 use crate::channels::wasm::error::WasmChannelError;
 use crate::channels::wasm::runtime::WasmChannelRuntime;
-use crate::channels::wasm::schema::ChannelCapabilitiesFile;
+use crate::channels::wasm::schema::{ChannelCapabilitiesFile, ChannelInstallSource};
 use crate::channels::wasm::wrapper::WasmChannel;
 use crate::db::SettingsStore;
 use crate::pairing::PairingStore;
@@ -167,9 +167,12 @@ impl WasmChannelLoader {
             "Loaded WASM channel from file"
         );
 
+        let install_source = cap_file.as_ref().and_then(|f| f.install_source);
+
         Ok(LoadedChannel {
             channel,
             capabilities_file: cap_file,
+            install_source,
         })
     }
 
@@ -281,6 +284,9 @@ pub struct LoadedChannel {
 
     /// The parsed capabilities file (if present).
     pub capabilities_file: Option<ChannelCapabilitiesFile>,
+
+    /// Optional install provenance declared in capabilities metadata.
+    pub install_source: Option<ChannelInstallSource>,
 }
 
 impl LoadedChannel {
@@ -324,6 +330,11 @@ impl LoadedChannel {
             .as_ref()
             .map(|f| f.webhook_secret_managed_by_host())
             .unwrap_or(true)
+    }
+
+    /// Install provenance metadata, when present in capabilities.
+    pub fn install_source(&self) -> Option<ChannelInstallSource> {
+        self.install_source
     }
 }
 

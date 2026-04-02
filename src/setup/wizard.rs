@@ -20,7 +20,8 @@ use secrecy::{ExposeSecret, SecretString};
 
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::wasm::{
-    ChannelCapabilitiesFile, available_channel_names, install_bundled_channel,
+    ChannelCapabilitiesFile, ChannelInstallSource, available_channel_names,
+    install_bundled_channel, should_reject_wasm_channel_name,
 };
 use crate::config::OAUTH_PLACEHOLDER;
 use crate::llm::models::{
@@ -3686,10 +3687,17 @@ async fn install_missing_bundled_channels(
 ///
 /// Returns a deduplicated, sorted list of channel names available for selection.
 fn build_channel_options(discovered: &[(String, ChannelCapabilitiesFile)]) -> Vec<String> {
-    let mut names: Vec<String> = discovered.iter().map(|(name, _)| name.clone()).collect();
+    let mut names: Vec<String> = discovered
+        .iter()
+        .filter(|(name, caps)| !should_reject_wasm_channel_name(name, caps.install_source))
+        .map(|(name, _)| name.clone())
+        .collect();
 
     // Add bundled channels
     for bundled in available_channel_names().iter().copied() {
+        if should_reject_wasm_channel_name(bundled, Some(ChannelInstallSource::Bundled)) {
+            continue;
+        }
         if !names.iter().any(|name| name == bundled) {
             names.push(bundled.to_string());
         }
@@ -3698,6 +3706,12 @@ fn build_channel_options(discovered: &[(String, ChannelCapabilitiesFile)]) -> Ve
     // Add registry channels
     if let Some(catalog) = load_registry_catalog() {
         for manifest in catalog.list(Some(crate::registry::manifest::ManifestKind::Channel), None) {
+            if should_reject_wasm_channel_name(
+                &manifest.name,
+                Some(ChannelInstallSource::Registry),
+            ) {
+                continue;
+            }
             if !names.iter().any(|n| n == &manifest.name) {
                 names.push(manifest.name.clone());
             }

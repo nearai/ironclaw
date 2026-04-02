@@ -7,15 +7,92 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::channels::wasm::{
-    LoadedChannel, RegisteredEndpoint, SharedWasmChannel, TELEGRAM_CHANNEL_NAME, WasmChannel,
-    WasmChannelLoader, WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig,
-    bot_username_setting_key, create_wasm_channel_router,
+    ChannelInstallSource, LoadedChannel, RegisteredEndpoint, SharedWasmChannel,
+    TELEGRAM_CHANNEL_NAME, WasmChannel, WasmChannelLoader, WasmChannelRouter,
+    WasmChannelRuntime, WasmChannelRuntimeConfig, bot_username_setting_key,
+    create_wasm_channel_router,
 };
 use crate::config::Config;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::pairing::PairingStore;
 use crate::secrets::SecretsStore;
+
+/// Return true if a channel name is reserved and must not be claimed by a
+/// dynamically loaded WASM module.
+pub fn is_reserved_wasm_channel_name(name: &str) -> bool {
+    matches!(
+        reserved_wasm_channel_name_policy(name),
+        ReservedWasmChannelNamePolicy::AlwaysReserved
+    )
+}
+
+/// Name policy for dynamically loaded WASM channels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReservedWasmChannelNamePolicy {
+    /// Never allow this name from a dynamically loaded WASM channel.
+    AlwaysReserved,
+    /// Allow only when install provenance is trusted.
+    ReservedUnlessTrustedInstall,
+    /// Name is not reserved.
+    NotReserved,
+}
+
+/// Determine the reserved-name policy for a WASM channel name.
+pub fn reserved_wasm_channel_name_policy(name: &str) -> ReservedWasmChannelNamePolicy {
+    // Reserved channel names that WASM modules must not claim.
+    // A malicious module could otherwise register as a trusted built-in
+    // channel and bypass cross-channel authorization checks.
+    //
+    // This list includes:
+    // - All built-in channel names (prevent impersonation)
+    // - Trusted approval channels from session::TRUSTED_APPROVAL_CHANNELS
+    // - The bootstrap sentinel (universal approval wildcard)
+    use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
+
+    let mut reserved: Vec<&str> = vec![
+        "cli",
+        "repl",
+        "http",
+        "signal",
+        "slack-relay",
+        "secret_save",
+    ];
+    reserved.extend(TRUSTED_APPROVAL_CHANNELS);
+    reserved.push(BOOTSTRAP_SOURCE_CHANNEL);
+
+    let name_lower = name.to_ascii_lowercase();
+    if reserved.contains(&name_lower.as_str()) {
+        return ReservedWasmChannelNamePolicy::AlwaysReserved;
+    }
+
+    // Keep Telegram available as a bundled/registry WASM channel while still
+    // allowing policy tightening by provenance in future upgrades.
+    if name_lower == "telegram" {
+        return ReservedWasmChannelNamePolicy::ReservedUnlessTrustedInstall;
+    }
+
+    ReservedWasmChannelNamePolicy::NotReserved
+}
+
+/// Return true if a WASM channel should be rejected by name and install source.
+pub fn should_reject_wasm_channel_name(
+    name: &str,
+    install_source: Option<ChannelInstallSource>,
+) -> bool {
+    match reserved_wasm_channel_name_policy(name) {
+        ReservedWasmChannelNamePolicy::AlwaysReserved => true,
+        ReservedWasmChannelNamePolicy::ReservedUnlessTrustedInstall => {
+            // Compatibility: existing installs may not have provenance stamped.
+            // Treat unknown source as trusted for now to avoid breaking upgrades.
+            !matches!(
+                install_source,
+                Some(ChannelInstallSource::Bundled) | Some(ChannelInstallSource::Registry) | None
+            )
+        }
+        ReservedWasmChannelNamePolicy::NotReserved => false,
+    }
+}
 
 /// Result of WASM channel setup.
 pub struct WasmChannelSetup {
@@ -72,33 +149,11 @@ pub async fn setup_wasm_channels(
     let mut channels: Vec<(String, Box<dyn crate::channels::Channel>)> = Vec::new();
     let mut channel_names: Vec<String> = Vec::new();
 
-    // Reserved channel names that WASM modules must not claim.
-    // A malicious module could otherwise register as a trusted built-in
-    // channel and bypass cross-channel authorization checks.
-    //
-    // This list includes:
-    // - All built-in channel names (prevent impersonation)
-    // - Trusted approval channels from session::TRUSTED_APPROVAL_CHANNELS
-    // - The bootstrap sentinel (universal approval wildcard)
-    use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
-
-    let mut reserved: Vec<&str> = vec![
-        "cli",
-        "repl",
-        "http",
-        "signal",
-        "telegram",
-        "slack-relay",
-        "secret_save",
-    ];
-    reserved.extend(TRUSTED_APPROVAL_CHANNELS);
-    reserved.push(BOOTSTRAP_SOURCE_CHANNEL);
-
     for loaded in results.loaded {
-        let name_lower = loaded.name().to_ascii_lowercase();
-        if reserved.contains(&name_lower.as_str()) {
+        if should_reject_wasm_channel_name(loaded.name(), loaded.install_source()) {
             tracing::warn!(
                 channel = %loaded.name(),
+                install_source = ?loaded.install_source(),
                 "Rejected WASM channel with reserved name"
             );
             continue;
@@ -106,6 +161,7 @@ pub async fn setup_wasm_channels(
         // Also reject any name that collides with an already-registered
         // channel to prevent a WASM module from shadowing a channel that
         // was registered earlier in the startup sequence.
+        let name_lower = loaded.name().to_ascii_lowercase();
         if registered_channel_names
             .iter()
             .any(|n| n.to_ascii_lowercase() == name_lower)
@@ -498,29 +554,16 @@ async fn inject_channel_secrets_into_config(
 #[cfg(test)]
 mod tests {
     use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
-
-    /// Build the same reserved-name list that `setup_wasm_channels` uses.
-    fn reserved_names() -> Vec<&'static str> {
-        let mut reserved: Vec<&str> = vec![
-            "cli",
-            "repl",
-            "http",
-            "signal",
-            "telegram",
-            "slack-relay",
-            "secret_save",
-        ];
-        reserved.extend(TRUSTED_APPROVAL_CHANNELS);
-        reserved.push(BOOTSTRAP_SOURCE_CHANNEL);
-        reserved
-    }
+    use crate::channels::wasm::setup::{
+        is_reserved_wasm_channel_name, should_reject_wasm_channel_name,
+    };
+    use crate::channels::wasm::ChannelInstallSource;
 
     #[test]
     fn reserved_names_include_trusted_approval_channels() {
-        let reserved = reserved_names();
         for &trusted in TRUSTED_APPROVAL_CHANNELS {
             assert!(
-                reserved.contains(&trusted),
+                is_reserved_wasm_channel_name(trusted),
                 "trusted approval channel '{}' must be in WASM reserved names",
                 trusted
             );
@@ -529,9 +572,8 @@ mod tests {
 
     #[test]
     fn reserved_names_include_bootstrap_sentinel() {
-        let reserved = reserved_names();
         assert!(
-            reserved.contains(&BOOTSTRAP_SOURCE_CHANNEL),
+            is_reserved_wasm_channel_name(BOOTSTRAP_SOURCE_CHANNEL),
             "__bootstrap__ sentinel must be in WASM reserved names"
         );
     }
@@ -539,30 +581,47 @@ mod tests {
     #[test]
     fn reserved_names_reject_case_insensitive() {
         // The setup logic lowercases the WASM channel name before checking.
-        // Verify that "Web" or "GATEWAY" would be caught.
-        let reserved = reserved_names();
+        // Verify that mixed-case trusted names would be caught.
         let test_cases = ["Web", "GATEWAY", "CLI", "Repl", "__BOOTSTRAP__"];
         for name in test_cases {
-            let lowered = name.to_ascii_lowercase();
             assert!(
-                reserved.contains(&lowered.as_str()),
-                "'{}' (lowercased to '{}') should match a reserved name",
-                name,
-                lowered
+                is_reserved_wasm_channel_name(name),
+                "'{}' should match a reserved name case-insensitively",
+                name
             );
         }
     }
 
     #[test]
     fn non_reserved_names_allowed() {
-        let reserved = reserved_names();
-        let allowed = ["discord", "my-custom-channel", "slack-bot"];
+        let allowed = ["discord", "my-custom-channel", "slack-bot", "telegram"];
         for name in allowed {
             assert!(
-                !reserved.contains(&name),
+                !is_reserved_wasm_channel_name(name),
                 "'{}' should NOT be reserved",
                 name
             );
         }
+    }
+
+    #[test]
+    fn telegram_allowed_for_trusted_or_legacy_unknown_source() {
+        assert!(!should_reject_wasm_channel_name(
+            "telegram",
+            Some(ChannelInstallSource::Bundled)
+        ));
+        assert!(!should_reject_wasm_channel_name(
+            "telegram",
+            Some(ChannelInstallSource::Registry)
+        ));
+        assert!(!should_reject_wasm_channel_name("telegram", None));
+    }
+
+    #[test]
+    fn telegram_rejected_for_explicit_local_source() {
+        assert!(should_reject_wasm_channel_name(
+            "telegram",
+            Some(ChannelInstallSource::Local)
+        ));
     }
 }

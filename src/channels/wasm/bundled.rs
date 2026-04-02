@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 use tokio::fs;
 
+use crate::channels::wasm::{ChannelCapabilitiesFile, ChannelInstallSource};
+
 /// Compile-time project root, used to locate channels-src/ in dev builds.
 const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
@@ -123,6 +125,26 @@ pub async fn install_bundled_channel(
         .await
         .map_err(|e| format!("Failed to copy {}: {}", caps_src.display(), e))?;
 
+    stamp_install_source(&caps_dst, ChannelInstallSource::Bundled).await?;
+
+    Ok(())
+}
+
+async fn stamp_install_source(path: &Path, source: ChannelInstallSource) -> Result<(), String> {
+    let raw = fs::read(path)
+        .await
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+
+    let mut caps = ChannelCapabilitiesFile::from_bytes(&raw)
+        .map_err(|e| format!("Invalid channel capabilities {}: {}", path.display(), e))?;
+    caps.install_source = Some(source);
+
+    let rewritten = serde_json::to_vec_pretty(&caps)
+        .map_err(|e| format!("Failed to serialize {}: {}", path.display(), e))?;
+    fs::write(path, rewritten)
+        .await
+        .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+
     Ok(())
 }
 
@@ -137,6 +159,7 @@ pub fn available_channel_names() -> Vec<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    use crate::channels::wasm::{ChannelCapabilitiesFile, ChannelInstallSource};
     use tempfile::tempdir;
     use tokio::fs;
 
@@ -175,5 +198,28 @@ mod tests {
         // Original file should be untouched
         let existing = fs::read(&wasm_path).await.unwrap();
         assert_eq!(existing, b"custom");
+    }
+
+    #[tokio::test]
+    async fn test_stamp_install_source_writes_bundled_marker() {
+        let dir = tempdir().unwrap();
+        let caps_path = dir.path().join("telegram.capabilities.json");
+        fs::write(
+            &caps_path,
+            br#"{
+                "name": "telegram",
+                "capabilities": {}
+            }"#,
+        )
+        .await
+        .unwrap();
+
+        stamp_install_source(&caps_path, ChannelInstallSource::Bundled)
+            .await
+            .unwrap();
+
+        let raw = fs::read(&caps_path).await.unwrap();
+        let caps = ChannelCapabilitiesFile::from_bytes(&raw).unwrap();
+        assert_eq!(caps.install_source, Some(ChannelInstallSource::Bundled));
     }
 }

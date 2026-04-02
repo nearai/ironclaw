@@ -6,6 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use tokio::fs;
 
 use crate::bootstrap::ironclaw_base_dir;
+use crate::channels::wasm::{ChannelCapabilitiesFile, ChannelInstallSource};
 use crate::registry::catalog::RegistryError;
 use crate::registry::manifest::{BundleDefinition, ExtensionManifest, ManifestKind, SourceSpec};
 
@@ -304,6 +305,9 @@ impl RegistryInstaller {
             fs::copy(&caps_source, &target_caps)
                 .await
                 .map_err(RegistryError::Io)?;
+            if manifest.kind == ManifestKind::Channel {
+                stamp_channel_install_source(&target_caps, ChannelInstallSource::Registry).await?;
+            }
             true
         } else {
             false
@@ -531,6 +535,10 @@ impl RegistryInstaller {
             }
         };
 
+        if manifest.kind == ManifestKind::Channel && has_capabilities {
+            stamp_channel_install_source(&target_caps, ChannelInstallSource::Registry).await?;
+        }
+
         println!("  Installed to {}", target_wasm.display());
 
         let mut warnings = Vec::new();
@@ -631,6 +639,24 @@ impl RegistryInstaller {
 
         (outcomes, auth_hints)
     }
+}
+
+async fn stamp_channel_install_source(
+    path: &Path,
+    source: ChannelInstallSource,
+) -> Result<(), RegistryError> {
+    let raw = fs::read(path).await.map_err(RegistryError::Io)?;
+    let mut caps = ChannelCapabilitiesFile::from_bytes(&raw).map_err(|e| RegistryError::ManifestRead {
+        path: path.to_path_buf(),
+        reason: format!("invalid channel capabilities JSON: {}", e),
+    })?;
+    caps.install_source = Some(source);
+    let rewritten = serde_json::to_vec_pretty(&caps).map_err(|e| RegistryError::ManifestRead {
+        path: path.to_path_buf(),
+        reason: format!("failed to serialize channel capabilities JSON: {}", e),
+    })?;
+    fs::write(path, rewritten).await.map_err(RegistryError::Io)?;
+    Ok(())
 }
 
 /// Download an artifact from a URL.
