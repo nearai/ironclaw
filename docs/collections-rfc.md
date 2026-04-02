@@ -94,7 +94,7 @@ One tool per collection with an `operation` parameter is the best design. Fewer 
 
 `StructuredStore` trait (10 async methods), fully implemented for both PostgreSQL (JSONB operators) and libSQL (`json_extract`). Records stored as JSONB in a shared `structured_records` table, discriminated by `(user_id, collection)`. 7 field types: `Text`, `Number`, `Date`, `Time`, `DateTime`, `Bool`, `Enum{values}`.
 
-Validation coerces LLM quirks: "12" → 12, "true" → true, "tomorrow" → 2026-04-03. Schema alteration supports adding/removing fields and enum values without migrating existing records.
+Validation coerces LLM quirks: "12" → 12, "true" → true, "tomorrow" → 2026-04-03. Schema alteration supports adding/removing fields and enum values without migrating existing records. Composite index on `(user_id, collection, created_at)` plus GIN index on JSONB data.
 
 ### Tools
 
@@ -116,7 +116,7 @@ On restart, existing schemas are loaded and tools registered before the first co
 
 Collections are scoped by `user_id`, same as existing memory isolation. Every query includes `WHERE user_id = $1`. Tool definitions are filtered per-user in the dispatcher, job workers, and routine engine.
 
-For cross-user read access (e.g., a shared household list), `source_scope` allows a tool to query another user's data. `source_scope` is stripped from untrusted inputs (LLM tool calls, REST API) and can only be set through trusted seeding paths.
+For cross-user read access (e.g., a shared household list), `source_scope` allows a tool to query another user's data. `source_scope` is stripped in two places: `CollectionRegisterTool::execute()` sets `schema.source_scope = None` after deserializing LLM params, and `collections_register_handler` does the same for REST API input. Only server-side seeding (direct `db.register_collection()` calls) can set `source_scope`.
 
 ## Tool scaling
 
