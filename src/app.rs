@@ -330,14 +330,13 @@ impl AppBuilder {
                         let path = entry.path();
                         if path.extension().and_then(|e| e.to_str()) == Some("json") {
                             tools.load_credential_mappings(&path);
-                        } else if path.is_dir() {
-                            if let Ok(sub) = std::fs::read_dir(&path) {
-                                for sub_entry in sub.flatten() {
-                                    let sub_path = sub_entry.path();
-                                    if sub_path.extension().and_then(|e| e.to_str()) == Some("json")
-                                    {
-                                        tools.load_credential_mappings(&sub_path);
-                                    }
+                        } else if path.is_dir()
+                            && let Ok(sub) = std::fs::read_dir(&path)
+                        {
+                            for sub_entry in sub.flatten() {
+                                let sub_path = sub_entry.path();
+                                if sub_path.extension().and_then(|e| e.to_str()) == Some("json") {
+                                    tools.load_credential_mappings(&sub_path);
                                 }
                             }
                         }

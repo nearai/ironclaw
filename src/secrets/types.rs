@@ -279,20 +279,22 @@ pub fn host_matches_pattern(host: &str, pattern: &str) -> bool {
         return true;
     }
     // Support patterns with port: "127.0.0.1:8080" matches host "127.0.0.1"
-    if pattern.contains(':') {
-        if let Some(pattern_host) = pattern.split(':').next() {
-            if pattern_host == host {
-                return true;
-            }
-        }
+    if pattern.contains(':')
+        && pattern
+            .split(':')
+            .next()
+            .is_some_and(|pattern_host| pattern_host == host)
+    {
+        return true;
     }
     // Support wildcard: *.example.com matches sub.example.com
-    if let Some(suffix) = pattern.strip_prefix("*.") {
-        if host.ends_with(suffix) && host.len() > suffix.len() {
-            let prefix = &host[..host.len() - suffix.len()];
-            if prefix.ends_with('.') || prefix.is_empty() {
-                return true;
-            }
+    if let Some(suffix) = pattern.strip_prefix("*.")
+        && host.ends_with(suffix)
+        && host.len() > suffix.len()
+    {
+        let prefix = &host[..host.len() - suffix.len()];
+        if prefix.ends_with('.') || prefix.is_empty() {
+            return true;
         }
     }
     false
