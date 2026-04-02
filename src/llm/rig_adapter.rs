@@ -16,7 +16,6 @@ use rig::message::{
     UserContent,
 };
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
@@ -650,19 +649,11 @@ where
     }
 
     fn cache_write_multiplier(&self) -> Decimal {
-        match self.cache_retention {
-            CacheRetention::None => Decimal::ONE,
-            CacheRetention::Short => Decimal::new(125, 2), // 1.25× (125% of input rate)
-            CacheRetention::Long => Decimal::TWO,          // 2.0×  (200% of input rate)
-        }
+        self.cache_retention.write_multiplier()
     }
 
     fn cache_read_discount(&self) -> Decimal {
-        if self.cache_retention != CacheRetention::None {
-            dec!(10) // Anthropic: 90% discount (cost = input_rate / 10)
-        } else {
-            Decimal::ONE
-        }
+        self.cache_retention.read_discount()
     }
 
     async fn complete(
@@ -1248,37 +1239,24 @@ mod tests {
         );
     }
 
-    /// Verify that the multiplier match arms in `RigAdapter::cache_write_multiplier`
-    /// produce the expected values. We use a standalone helper because constructing
-    /// a real `RigAdapter` requires a rig `Model` (which needs network/provider setup).
-    /// The helper mirrors the same match expression — if the impl drifts, the
-    /// `test_build_rig_request_*` tests will still catch regressions end-to-end.
     #[test]
     fn test_cache_write_multiplier_values() {
         use rust_decimal::Decimal;
-        // None → 1.0× (no surcharge)
+        assert_eq!(CacheRetention::None.write_multiplier(), Decimal::ONE);
         assert_eq!(
-            cache_write_multiplier_for(CacheRetention::None),
-            Decimal::ONE
-        );
-        // Short → 1.25× (25% surcharge)
-        assert_eq!(
-            cache_write_multiplier_for(CacheRetention::Short),
+            CacheRetention::Short.write_multiplier(),
             Decimal::new(125, 2)
         );
-        // Long → 2.0× (100% surcharge)
-        assert_eq!(
-            cache_write_multiplier_for(CacheRetention::Long),
-            Decimal::TWO
-        );
+        assert_eq!(CacheRetention::Long.write_multiplier(), Decimal::TWO);
     }
 
-    fn cache_write_multiplier_for(retention: CacheRetention) -> rust_decimal::Decimal {
-        match retention {
-            CacheRetention::None => rust_decimal::Decimal::ONE,
-            CacheRetention::Short => rust_decimal::Decimal::new(125, 2),
-            CacheRetention::Long => rust_decimal::Decimal::TWO,
-        }
+    #[test]
+    fn test_cache_read_discount_values() {
+        use rust_decimal::Decimal;
+        use rust_decimal_macros::dec;
+        assert_eq!(CacheRetention::None.read_discount(), Decimal::ONE);
+        assert_eq!(CacheRetention::Short.read_discount(), dec!(10));
+        assert_eq!(CacheRetention::Long.read_discount(), dec!(10));
     }
 
     // -- supports_prompt_cache tests --

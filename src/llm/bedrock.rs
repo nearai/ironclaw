@@ -13,14 +13,15 @@ use aws_config::{BehaviorVersion, Region};
 use aws_sdk_bedrockruntime::Client;
 use aws_sdk_bedrockruntime::operation::converse::ConverseError;
 use aws_sdk_bedrockruntime::types::{
-    AnyToolChoice, AutoToolChoice, ContentBlock, ConversationRole, InferenceConfiguration, Message,
-    StopReason, SystemContentBlock, Tool, ToolChoice, ToolConfiguration, ToolInputSchema,
-    ToolResultBlock, ToolResultContentBlock, ToolResultStatus, ToolSpecification, ToolUseBlock,
+    AnyToolChoice, AutoToolChoice, CachePointBlock, CachePointType, CacheTtl, ContentBlock,
+    ConversationRole, InferenceConfiguration, Message, StopReason, SystemContentBlock, Tool,
+    ToolChoice, ToolConfiguration, ToolInputSchema, ToolResultBlock, ToolResultContentBlock,
+    ToolResultStatus, ToolSpecification, ToolUseBlock,
 };
 use aws_smithy_types::Document;
 use rust_decimal::Decimal;
 
-use crate::llm::config::BedrockConfig;
+use crate::llm::config::{BedrockConfig, CacheRetention};
 use crate::llm::error::LlmError;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata, ToolCall,
@@ -36,6 +37,9 @@ pub struct BedrockProvider {
     cross_region_prefix: String,
     /// Active model ID (with cross-region prefix), switchable at runtime via `set_model()`.
     active_model: RwLock<String>,
+    /// Prompt cache retention policy. When not `None`, injects `CachePointBlock`
+    /// into system, tool, and message content blocks.
+    cache_retention: CacheRetention,
 }
 
 impl BedrockProvider {
@@ -61,11 +65,32 @@ impl BedrockProvider {
 
         let client = Client::new(&sdk_config);
 
+        let cache_retention = if config.cache_retention != CacheRetention::None
+            && !supports_bedrock_cache(&config.model)
+        {
+            tracing::warn!(
+                model = %config.model,
+                "Prompt caching not supported for this model; disabling"
+            );
+            CacheRetention::None
+        } else {
+            config.cache_retention
+        };
+
+        if cache_retention != CacheRetention::None {
+            tracing::info!(
+                retention = %cache_retention,
+                model = %config.model,
+                "Bedrock prompt caching enabled"
+            );
+        }
+
         Ok(Self {
             client,
             display_model: config.model.clone(),
             cross_region_prefix,
             active_model: RwLock::new(model_id),
+            cache_retention,
         })
     }
 
@@ -102,7 +127,7 @@ impl LlmProvider for BedrockProvider {
         // but complete() has no tools to build a toolConfig — strip them.
         strip_tool_blocks(&mut messages);
 
-        let (system_blocks, bedrock_messages) = convert_messages(&messages)?;
+        let (mut system_blocks, mut bedrock_messages) = convert_messages(&messages)?;
 
         if bedrock_messages.is_empty() {
             return Err(LlmError::RequestFailed {
@@ -110,6 +135,16 @@ impl LlmProvider for BedrockProvider {
                 reason: "Bedrock requires at least one user or assistant message".to_string(),
             });
         }
+
+        // Inject cache points (CP1: system, CP3: last user message).
+        // No CP2 because complete() has no tool config.
+        let mut empty_tools = Vec::new();
+        inject_cache_points(
+            self.cache_retention,
+            &mut system_blocks,
+            &mut empty_tools,
+            &mut bedrock_messages,
+        )?;
 
         let mut builder = self
             .client
@@ -134,14 +169,19 @@ impl LlmProvider for BedrockProvider {
 
         let (text, _tool_calls) = extract_content_blocks(response.output())?;
         let (input_tokens, output_tokens) = extract_token_usage(response.usage());
+        let (cache_read, cache_write) = extract_cache_usage(response.usage());
+
+        if cache_read > 0 {
+            tracing::debug!(cache_read, cache_write, "Bedrock prompt cache hit");
+        }
 
         Ok(CompletionResponse {
             content: text,
             input_tokens,
             output_tokens,
             finish_reason: map_stop_reason(response.stop_reason()),
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: cache_write,
+            cache_read_input_tokens: cache_read,
         })
     }
 
@@ -154,15 +194,15 @@ impl LlmProvider for BedrockProvider {
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
 
-        let tool_config = build_tool_config(&request.tools, request.tool_choice.as_deref())?;
+        let tool_specs = build_tool_specs(&request.tools, request.tool_choice.as_deref())?;
 
-        // When tool_config is None (empty tools or tool_choice="none") but messages
+        // When tool_specs is None (empty tools or tool_choice="none") but messages
         // contain tool history, strip tool blocks to avoid Bedrock validation error.
-        if tool_config.is_none() {
+        if tool_specs.is_none() {
             strip_tool_blocks(&mut messages);
         }
 
-        let (system_blocks, bedrock_messages) = convert_messages(&messages)?;
+        let (mut system_blocks, mut bedrock_messages) = convert_messages(&messages)?;
 
         if bedrock_messages.is_empty() {
             return Err(LlmError::RequestFailed {
@@ -170,6 +210,33 @@ impl LlmProvider for BedrockProvider {
                 reason: "Bedrock requires at least one user or assistant message".to_string(),
             });
         }
+
+        // Inject cache points into system, tools, and last user message.
+        // Nova models don't support caching in toolConfig — skip CP2 for them.
+        let enable_tool_cache = supports_tool_cache(&self.display_model);
+        let tool_config = if let Some((mut tools, choice)) = tool_specs {
+            let mut no_tools = Vec::new();
+            inject_cache_points(
+                self.cache_retention,
+                &mut system_blocks,
+                if enable_tool_cache {
+                    &mut tools
+                } else {
+                    &mut no_tools
+                },
+                &mut bedrock_messages,
+            )?;
+            Some(assemble_tool_config(tools, choice)?)
+        } else {
+            let mut empty_tools = Vec::new();
+            inject_cache_points(
+                self.cache_retention,
+                &mut system_blocks,
+                &mut empty_tools,
+                &mut bedrock_messages,
+            )?;
+            None
+        };
 
         let mut builder = self
             .client
@@ -198,6 +265,11 @@ impl LlmProvider for BedrockProvider {
 
         let (text, tool_calls) = extract_content_blocks(response.output())?;
         let (input_tokens, output_tokens) = extract_token_usage(response.usage());
+        let (cache_read, cache_write) = extract_cache_usage(response.usage());
+
+        if cache_read > 0 {
+            tracing::debug!(cache_read, cache_write, "Bedrock prompt cache hit");
+        }
 
         Ok(ToolCompletionResponse {
             content: if text.is_empty() { None } else { Some(text) },
@@ -205,8 +277,8 @@ impl LlmProvider for BedrockProvider {
             input_tokens,
             output_tokens,
             finish_reason: map_stop_reason(response.stop_reason()),
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: cache_write,
+            cache_read_input_tokens: cache_read,
         })
     }
 
@@ -240,6 +312,116 @@ impl LlmProvider for BedrockProvider {
         }
         Ok(())
     }
+
+    fn cache_write_multiplier(&self) -> Decimal {
+        self.cache_retention.write_multiplier()
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        self.cache_retention.read_discount()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Prompt cache support
+// ---------------------------------------------------------------------------
+
+/// Strip the cross-region inference prefix from a Bedrock model ID.
+fn strip_cross_region_prefix(model: &str) -> &str {
+    model
+        .strip_prefix("us.")
+        .or_else(|| model.strip_prefix("eu."))
+        .or_else(|| model.strip_prefix("apac."))
+        .or_else(|| model.strip_prefix("global."))
+        .unwrap_or(model)
+}
+
+/// Check if a Bedrock model supports prompt caching.
+///
+/// Only Claude 3+ and Amazon Nova models support `CachePointBlock` in the
+/// Converse API. Returns `false` for older Claude models, Llama, Cohere, etc.
+fn supports_bedrock_cache(model: &str) -> bool {
+    let base = strip_cross_region_prefix(model);
+
+    base.starts_with("anthropic.claude-3")
+        || base.starts_with("anthropic.claude-4")
+        || base.starts_with("anthropic.claude-opus")
+        || base.starts_with("anthropic.claude-sonnet")
+        || base.starts_with("anthropic.claude-haiku")
+        || base.starts_with("amazon.nova-")
+}
+
+/// Check if a Bedrock model supports caching in the `tools` field.
+///
+/// Amazon Nova models only support caching in `system` and `messages`,
+/// not in `toolConfig`. Claude models support all three.
+fn supports_tool_cache(model: &str) -> bool {
+    !strip_cross_region_prefix(model).starts_with("amazon.nova-")
+}
+
+/// Build a `CachePointBlock` from the given retention policy.
+///
+/// `Short` produces a block with the server default TTL (5 minutes).
+/// `Long` explicitly sets `CacheTtl::OneHour`.
+fn build_cache_point(retention: CacheRetention) -> Result<CachePointBlock, LlmError> {
+    let mut builder = CachePointBlock::builder().r#type(CachePointType::Default);
+    if retention == CacheRetention::Long {
+        builder = builder.ttl(CacheTtl::OneHour);
+    }
+    builder.build().map_err(|e| LlmError::RequestFailed {
+        provider: "bedrock".to_string(),
+        reason: format!("Failed to build CachePointBlock: {}", e),
+    })
+}
+
+/// Inject cache points into system blocks, tools, and messages.
+///
+/// Up to 3 cache points are inserted:
+/// - CP1: after the last system content block
+/// - CP2: after the last tool definition
+/// - CP3: in the last User message's content blocks
+///
+/// No-op when `retention` is `None` or when the target vector is empty.
+fn inject_cache_points(
+    retention: CacheRetention,
+    system_blocks: &mut Vec<SystemContentBlock>,
+    tools: &mut Vec<Tool>,
+    messages: &mut [Message],
+) -> Result<(), LlmError> {
+    if retention == CacheRetention::None {
+        return Ok(());
+    }
+
+    // CP1: system prompt
+    if !system_blocks.is_empty() {
+        system_blocks.push(SystemContentBlock::CachePoint(build_cache_point(
+            retention,
+        )?));
+    }
+
+    // CP2: tool definitions
+    if !tools.is_empty() {
+        tools.push(Tool::CachePoint(build_cache_point(retention)?));
+    }
+
+    // CP3: last user message — append a CachePoint content block
+    if let Some(idx) = messages
+        .iter()
+        .rposition(|m| *m.role() == ConversationRole::User)
+    {
+        let mut content = messages[idx].content().to_vec();
+        content.push(ContentBlock::CachePoint(build_cache_point(retention)?));
+        messages[idx] = Message::builder()
+            .role(ConversationRole::User)
+            .set_content(Some(content))
+            .build()
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "bedrock".to_string(),
+                reason: format!("Failed to rebuild Message with cache point: {}", e),
+            })?;
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -497,12 +679,24 @@ fn push_message(
 // Tool configuration
 // ---------------------------------------------------------------------------
 
-/// Build Bedrock `ToolConfiguration` from IronClaw tool definitions.
-fn build_tool_config(
+/// Resolved tool specs and tool choice, ready for cache point injection
+/// before assembly into `ToolConfiguration`.
+type ToolSpecs = (Vec<Tool>, Option<ToolChoice>);
+
+/// Build Bedrock tool specs and resolve tool choice from IronClaw definitions.
+///
+/// Returns `None` when tools are empty or `tool_choice` is `"none"`.
+/// The returned `Vec<Tool>` can be mutated (e.g. to inject a `CachePoint`)
+/// before passing to [`assemble_tool_config`].
+fn build_tool_specs(
     tools: &[ToolDefinition],
     tool_choice: Option<&str>,
-) -> Result<Option<ToolConfiguration>, LlmError> {
+) -> Result<Option<ToolSpecs>, LlmError> {
     if tools.is_empty() {
+        return Ok(None);
+    }
+
+    if tool_choice == Some("none") {
         return Ok(None);
     }
 
@@ -524,26 +718,28 @@ fn build_tool_config(
         .collect::<Result<Vec<_>, LlmError>>()?;
 
     let choice = match tool_choice {
-        Some("none") => {
-            // If tool_choice is "none", don't send tool config at all
-            return Ok(None);
-        }
         Some("required") => Some(ToolChoice::Any(AnyToolChoice::builder().build())),
         // "auto" or anything else
         _ => Some(ToolChoice::Auto(AutoToolChoice::builder().build())),
     };
 
-    let mut builder = ToolConfiguration::builder().set_tools(Some(bedrock_tools));
+    Ok(Some((bedrock_tools, choice)))
+}
+
+/// Assemble a `ToolConfiguration` from a (possibly cache-point-injected) tool
+/// list and resolved tool choice.
+fn assemble_tool_config(
+    tools: Vec<Tool>,
+    choice: Option<ToolChoice>,
+) -> Result<ToolConfiguration, LlmError> {
+    let mut builder = ToolConfiguration::builder().set_tools(Some(tools));
     if let Some(c) = choice {
         builder = builder.tool_choice(c);
     }
-
-    let config = builder.build().map_err(|e| LlmError::RequestFailed {
+    builder.build().map_err(|e| LlmError::RequestFailed {
         provider: "bedrock".to_string(),
         reason: format!("Failed to build ToolConfiguration: {}", e),
-    })?;
-
-    Ok(Some(config))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -595,6 +791,28 @@ fn extract_token_usage(usage: Option<&aws_sdk_bedrockruntime::types::TokenUsage>
             u32::try_from(u.input_tokens()).unwrap_or(0),
             u32::try_from(u.output_tokens()).unwrap_or(0),
         ),
+        None => (0, 0),
+    }
+}
+
+/// Extract prompt-cache token counts from the response.
+///
+/// Returns `(cache_read, cache_write)` mapped to
+/// `(cache_read_input_tokens, cache_creation_input_tokens)` in response structs.
+/// Both SDK fields are `Option<i32>`; absent or negative values map to 0.
+fn extract_cache_usage(usage: Option<&aws_sdk_bedrockruntime::types::TokenUsage>) -> (u32, u32) {
+    match usage {
+        Some(u) => {
+            let read = u
+                .cache_read_input_tokens()
+                .and_then(|v| u32::try_from(v).ok())
+                .unwrap_or(0);
+            let write = u
+                .cache_write_input_tokens()
+                .and_then(|v| u32::try_from(v).ok())
+                .unwrap_or(0);
+            (read, write)
+        }
         None => (0, 0),
     }
 }
@@ -749,6 +967,7 @@ pub(crate) fn document_to_json(doc: &Document) -> serde_json::Value {
 mod tests {
     use super::*;
     use crate::llm::provider::{ChatMessage, Role};
+    use rust_decimal_macros::dec;
 
     #[test]
     fn test_json_to_document_round_trip() {
@@ -902,19 +1121,19 @@ mod tests {
     }
 
     #[test]
-    fn test_build_tool_config_empty_tools() {
-        let result = build_tool_config(&[], None).unwrap();
+    fn test_build_tool_specs_empty_tools() {
+        let result = build_tool_specs(&[], None).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
-    fn test_build_tool_config_none_choice() {
-        let result = build_tool_config(&[], Some("none")).unwrap();
+    fn test_build_tool_specs_none_choice() {
+        let result = build_tool_specs(&[], Some("none")).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
-    fn test_build_tool_config_with_tools() {
+    fn test_build_tool_specs_with_tools() {
         let tools = vec![ToolDefinition {
             name: "echo".to_string(),
             description: "Echoes input".to_string(),
@@ -926,7 +1145,7 @@ mod tests {
             }),
         }];
 
-        let result = build_tool_config(&tools, Some("auto")).unwrap();
+        let result = build_tool_specs(&tools, Some("auto")).unwrap();
         assert!(result.is_some());
     }
 
@@ -1136,14 +1355,14 @@ mod tests {
     }
 
     #[test]
-    fn test_build_tool_config_required_choice() {
+    fn test_build_tool_specs_required_choice() {
         let tools = vec![ToolDefinition {
             name: "echo".to_string(),
             description: "Echoes".to_string(),
             parameters: serde_json::json!({"type": "object"}),
         }];
 
-        let result = build_tool_config(&tools, Some("required")).unwrap();
+        let result = build_tool_specs(&tools, Some("required")).unwrap();
         assert!(result.is_some());
     }
 
@@ -1309,7 +1528,7 @@ mod tests {
 
         // Simulate complete_with_tools() with empty tools
         crate::llm::provider::sanitize_tool_messages(&mut messages);
-        let tool_config = build_tool_config(&[], None).unwrap();
+        let tool_config = build_tool_specs(&[], None).unwrap();
         assert!(tool_config.is_none());
 
         if tool_config.is_none() {
@@ -1378,7 +1597,7 @@ mod tests {
 
     #[test]
     fn test_complete_with_tools_choice_none_strips_history() {
-        // tool_choice="none" causes build_tool_config to return None,
+        // tool_choice="none" causes build_tool_specs to return None,
         // which should trigger stripping of tool blocks from messages.
         let tools = vec![ToolDefinition {
             name: "echo".to_string(),
@@ -1400,7 +1619,7 @@ mod tests {
         ];
 
         crate::llm::provider::sanitize_tool_messages(&mut messages);
-        let tool_config = build_tool_config(&tools, Some("none")).unwrap();
+        let tool_config = build_tool_specs(&tools, Some("none")).unwrap();
         assert!(tool_config.is_none());
 
         if tool_config.is_none() {
@@ -1414,6 +1633,406 @@ mod tests {
                 assert!(!block.is_tool_use());
                 assert!(!block.is_tool_result());
             }
+        }
+    }
+
+    // ── Prompt caching tests ────────────────────────────────────────
+
+    #[test]
+    fn test_supports_bedrock_cache_claude3_models() {
+        assert!(supports_bedrock_cache(
+            "anthropic.claude-3-5-sonnet-20241022-v2:0"
+        ));
+        assert!(supports_bedrock_cache(
+            "anthropic.claude-3-7-sonnet-20250219-v1:0"
+        ));
+        assert!(supports_bedrock_cache(
+            "anthropic.claude-3-5-haiku-20241022-v1:0"
+        ));
+    }
+
+    #[test]
+    fn test_supports_bedrock_cache_claude4_models() {
+        assert!(supports_bedrock_cache(
+            "anthropic.claude-sonnet-4-20250514-v1:0"
+        ));
+        assert!(supports_bedrock_cache(
+            "anthropic.claude-opus-4-20250514-v1:0"
+        ));
+        assert!(supports_bedrock_cache(
+            "anthropic.claude-haiku-4-5-20251001-v1:0"
+        ));
+        assert!(supports_bedrock_cache(
+            "anthropic.claude-4-some-future-model"
+        ));
+    }
+
+    #[test]
+    fn test_supports_bedrock_cache_nova_models() {
+        assert!(supports_bedrock_cache("amazon.nova-micro-v1:0"));
+        assert!(supports_bedrock_cache("amazon.nova-lite-v1:0"));
+        assert!(supports_bedrock_cache("amazon.nova-pro-v1:0"));
+        assert!(supports_bedrock_cache("amazon.nova-premier-v1:0"));
+        assert!(supports_bedrock_cache("amazon.nova-2-lite-v1:0"));
+    }
+
+    #[test]
+    fn test_supports_bedrock_cache_cross_region() {
+        assert!(supports_bedrock_cache(
+            "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+        ));
+        assert!(supports_bedrock_cache(
+            "eu.anthropic.claude-opus-4-20250514-v1:0"
+        ));
+        assert!(supports_bedrock_cache("apac.amazon.nova-pro-v1:0"));
+        assert!(supports_bedrock_cache(
+            "global.anthropic.claude-3-7-sonnet-20250219-v1:0"
+        ));
+    }
+
+    #[test]
+    fn test_supports_bedrock_cache_unsupported_models() {
+        assert!(!supports_bedrock_cache("anthropic.claude-2"));
+        assert!(!supports_bedrock_cache("anthropic.claude-2.1"));
+        assert!(!supports_bedrock_cache("anthropic.claude-instant-v1"));
+        assert!(!supports_bedrock_cache("meta.llama3-70b-instruct-v1:0"));
+        assert!(!supports_bedrock_cache("cohere.command-r-plus-v1:0"));
+        assert!(!supports_bedrock_cache("mistral.mistral-large-latest"));
+    }
+
+    #[test]
+    fn test_build_cache_point_short() {
+        let point = build_cache_point(CacheRetention::Short).unwrap();
+        assert_eq!(*point.r#type(), CachePointType::Default);
+        assert!(point.ttl().is_none());
+    }
+
+    #[test]
+    fn test_build_cache_point_long() {
+        let point = build_cache_point(CacheRetention::Long).unwrap();
+        assert_eq!(*point.r#type(), CachePointType::Default);
+        assert_eq!(*point.ttl().unwrap(), CacheTtl::OneHour);
+    }
+
+    #[test]
+    fn test_inject_cache_points_none_is_noop() {
+        let mut system = vec![SystemContentBlock::Text("You are helpful.".to_string())];
+        let mut tools = vec![Tool::ToolSpec(
+            ToolSpecification::builder()
+                .name("echo")
+                .description("Echoes")
+                .input_schema(ToolInputSchema::Json(json_to_document(
+                    &serde_json::json!({"type": "object"}),
+                )))
+                .build()
+                .unwrap(),
+        )];
+        let mut messages = vec![
+            Message::builder()
+                .role(ConversationRole::User)
+                .set_content(Some(vec![ContentBlock::Text("Hello".to_string())]))
+                .build()
+                .unwrap(),
+        ];
+
+        inject_cache_points(CacheRetention::None, &mut system, &mut tools, &mut messages).unwrap();
+
+        assert_eq!(system.len(), 1);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(messages[0].content().len(), 1);
+    }
+
+    #[test]
+    fn test_inject_cache_points_system_and_messages() {
+        let mut system = vec![
+            SystemContentBlock::Text("You are helpful.".to_string()),
+            SystemContentBlock::Text("Be concise.".to_string()),
+        ];
+        let mut tools = Vec::new();
+        let mut messages = vec![
+            Message::builder()
+                .role(ConversationRole::User)
+                .set_content(Some(vec![ContentBlock::Text("Hello".to_string())]))
+                .build()
+                .unwrap(),
+            Message::builder()
+                .role(ConversationRole::Assistant)
+                .set_content(Some(vec![ContentBlock::Text("Hi!".to_string())]))
+                .build()
+                .unwrap(),
+            Message::builder()
+                .role(ConversationRole::User)
+                .set_content(Some(vec![ContentBlock::Text("How are you?".to_string())]))
+                .build()
+                .unwrap(),
+        ];
+
+        inject_cache_points(
+            CacheRetention::Short,
+            &mut system,
+            &mut tools,
+            &mut messages,
+        )
+        .unwrap();
+
+        // CP1: system gets a cache point appended
+        assert_eq!(system.len(), 3);
+        assert!(system[2].is_cache_point());
+
+        // CP2: no tools, so no tool cache point
+        assert!(tools.is_empty());
+
+        // CP3: last user message (index 2) gets a cache point
+        let last_user = &messages[2];
+        assert_eq!(last_user.content().len(), 2);
+        assert!(last_user.content()[0].is_text());
+        assert!(last_user.content()[1].is_cache_point());
+
+        // First user message should be untouched
+        assert_eq!(messages[0].content().len(), 1);
+    }
+
+    #[test]
+    fn test_inject_cache_points_with_tools() {
+        let mut system = vec![SystemContentBlock::Text("System.".to_string())];
+        let mut tools = vec![
+            Tool::ToolSpec(
+                ToolSpecification::builder()
+                    .name("echo")
+                    .description("Echoes")
+                    .input_schema(ToolInputSchema::Json(json_to_document(
+                        &serde_json::json!({"type": "object"}),
+                    )))
+                    .build()
+                    .unwrap(),
+            ),
+            Tool::ToolSpec(
+                ToolSpecification::builder()
+                    .name("search")
+                    .description("Searches")
+                    .input_schema(ToolInputSchema::Json(json_to_document(
+                        &serde_json::json!({"type": "object"}),
+                    )))
+                    .build()
+                    .unwrap(),
+            ),
+        ];
+        let mut messages = vec![
+            Message::builder()
+                .role(ConversationRole::User)
+                .set_content(Some(vec![ContentBlock::Text("Go".to_string())]))
+                .build()
+                .unwrap(),
+        ];
+
+        inject_cache_points(CacheRetention::Long, &mut system, &mut tools, &mut messages).unwrap();
+
+        // CP1: system
+        assert_eq!(system.len(), 2);
+        assert!(system[1].is_cache_point());
+
+        // CP2: tools
+        assert_eq!(tools.len(), 3);
+        assert!(tools[2].is_cache_point());
+        // Verify TTL is 1h for Long retention
+        let cache_tool = tools[2].as_cache_point().unwrap();
+        assert_eq!(*cache_tool.ttl().unwrap(), CacheTtl::OneHour);
+
+        // CP3: last user message
+        assert_eq!(messages[0].content().len(), 2);
+        assert!(messages[0].content()[1].is_cache_point());
+    }
+
+    #[test]
+    fn test_inject_cache_points_empty_inputs() {
+        let mut system = Vec::new();
+        let mut tools = Vec::new();
+        let mut messages: Vec<Message> = Vec::new();
+
+        inject_cache_points(
+            CacheRetention::Short,
+            &mut system,
+            &mut tools,
+            &mut messages,
+        )
+        .unwrap();
+
+        // All empty — no cache points added
+        assert!(system.is_empty());
+        assert!(tools.is_empty());
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_inject_cache_points_no_user_messages() {
+        let mut system = vec![SystemContentBlock::Text("System.".to_string())];
+        let mut tools = Vec::new();
+        // Only an assistant message, no user message
+        let mut messages = vec![
+            Message::builder()
+                .role(ConversationRole::Assistant)
+                .set_content(Some(vec![ContentBlock::Text("Hi".to_string())]))
+                .build()
+                .unwrap(),
+        ];
+
+        inject_cache_points(
+            CacheRetention::Short,
+            &mut system,
+            &mut tools,
+            &mut messages,
+        )
+        .unwrap();
+
+        // CP1: system gets cache point
+        assert_eq!(system.len(), 2);
+        assert!(system[1].is_cache_point());
+
+        // CP3: no user message, so assistant message is untouched
+        assert_eq!(messages[0].content().len(), 1);
+        assert!(messages[0].content()[0].is_text());
+    }
+
+    #[test]
+    fn test_extract_cache_usage_present() {
+        let usage = aws_sdk_bedrockruntime::types::TokenUsage::builder()
+            .input_tokens(1000)
+            .output_tokens(200)
+            .total_tokens(1200)
+            .cache_read_input_tokens(500)
+            .cache_write_input_tokens(300)
+            .build()
+            .unwrap();
+        let (read, write) = extract_cache_usage(Some(&usage));
+        assert_eq!(read, 500);
+        assert_eq!(write, 300);
+    }
+
+    #[test]
+    fn test_extract_cache_usage_none() {
+        let (read, write) = extract_cache_usage(None);
+        assert_eq!(read, 0);
+        assert_eq!(write, 0);
+    }
+
+    #[test]
+    fn test_extract_cache_usage_absent_fields() {
+        // TokenUsage without cache fields set
+        let usage = aws_sdk_bedrockruntime::types::TokenUsage::builder()
+            .input_tokens(100)
+            .output_tokens(50)
+            .total_tokens(150)
+            .build()
+            .unwrap();
+        let (read, write) = extract_cache_usage(Some(&usage));
+        assert_eq!(read, 0);
+        assert_eq!(write, 0);
+    }
+
+    #[test]
+    fn test_cache_retention_write_multiplier() {
+        assert_eq!(CacheRetention::None.write_multiplier(), Decimal::ONE);
+        assert_eq!(CacheRetention::Short.write_multiplier(), dec!(1.25));
+        assert_eq!(CacheRetention::Long.write_multiplier(), Decimal::TWO);
+    }
+
+    #[test]
+    fn test_cache_retention_read_discount() {
+        assert_eq!(CacheRetention::None.read_discount(), Decimal::ONE);
+        assert_eq!(CacheRetention::Short.read_discount(), dec!(10));
+        assert_eq!(CacheRetention::Long.read_discount(), dec!(10));
+    }
+
+    #[test]
+    fn test_assemble_tool_config_with_cache_point() {
+        // Verify that assemble_tool_config accepts a tool list with a cache point.
+        let tools = vec![
+            Tool::ToolSpec(
+                ToolSpecification::builder()
+                    .name("echo")
+                    .description("Echoes")
+                    .input_schema(ToolInputSchema::Json(json_to_document(
+                        &serde_json::json!({"type": "object"}),
+                    )))
+                    .build()
+                    .unwrap(),
+            ),
+            Tool::CachePoint(build_cache_point(CacheRetention::Short).unwrap()),
+        ];
+        let choice = Some(ToolChoice::Auto(AutoToolChoice::builder().build()));
+        let config = assemble_tool_config(tools, choice);
+        assert!(config.is_ok());
+    }
+
+    #[test]
+    fn test_supports_tool_cache() {
+        // Claude models support tool caching
+        assert!(supports_tool_cache(
+            "anthropic.claude-3-5-sonnet-20241022-v2:0"
+        ));
+        assert!(supports_tool_cache("anthropic.claude-opus-4-20250514-v1:0"));
+        assert!(supports_tool_cache(
+            "us.anthropic.claude-sonnet-4-20250514-v1:0"
+        ));
+
+        // Nova models do NOT support tool caching
+        assert!(!supports_tool_cache("amazon.nova-pro-v1:0"));
+        assert!(!supports_tool_cache("amazon.nova-lite-v1:0"));
+        assert!(!supports_tool_cache("us.amazon.nova-micro-v1:0"));
+    }
+
+    #[test]
+    fn test_cache_retention_from_str_aliases() {
+        assert_eq!(
+            "none".parse::<CacheRetention>().unwrap(),
+            CacheRetention::None
+        );
+        assert_eq!(
+            "off".parse::<CacheRetention>().unwrap(),
+            CacheRetention::None
+        );
+        assert_eq!(
+            "disabled".parse::<CacheRetention>().unwrap(),
+            CacheRetention::None
+        );
+        assert_eq!(
+            "short".parse::<CacheRetention>().unwrap(),
+            CacheRetention::Short
+        );
+        assert_eq!(
+            "5m".parse::<CacheRetention>().unwrap(),
+            CacheRetention::Short
+        );
+        assert_eq!(
+            "ephemeral".parse::<CacheRetention>().unwrap(),
+            CacheRetention::Short
+        );
+        assert_eq!(
+            "long".parse::<CacheRetention>().unwrap(),
+            CacheRetention::Long
+        );
+        assert_eq!(
+            "1h".parse::<CacheRetention>().unwrap(),
+            CacheRetention::Long
+        );
+    }
+
+    #[test]
+    fn test_cache_retention_from_str_invalid() {
+        assert!("bogus".parse::<CacheRetention>().is_err());
+        assert!("".parse::<CacheRetention>().is_err());
+    }
+
+    #[test]
+    fn test_cache_retention_display_round_trip() {
+        for variant in [
+            CacheRetention::None,
+            CacheRetention::Short,
+            CacheRetention::Long,
+        ] {
+            let s = variant.to_string();
+            let parsed: CacheRetention = s.parse().unwrap();
+            assert_eq!(parsed, variant);
         }
     }
 }

@@ -239,11 +239,13 @@ impl LlmConfig {
                 .bedrock_profile
                 .clone()
                 .or(optional_env("AWS_PROFILE")?);
+            let cache_retention = resolve_cache_retention("BEDROCK_CACHE_RETENTION")?;
             Some(BedrockConfig {
                 region,
                 model,
                 cross_region,
                 profile,
+                cache_retention,
             })
         } else {
             None
@@ -586,18 +588,8 @@ impl LlmConfig {
         };
 
         // Resolve Anthropic prompt cache retention from env (default: Short).
-        let cache_retention: CacheRetention = if canonical_id == "anthropic" {
-            optional_env("ANTHROPIC_CACHE_RETENTION")?
-                .and_then(|val| match val.parse::<CacheRetention>() {
-                    Ok(r) => Some(r),
-                    Err(e) => {
-                        tracing::warn!(
-                            "Invalid ANTHROPIC_CACHE_RETENTION: {e}; defaulting to short"
-                        );
-                        None
-                    }
-                })
-                .unwrap_or_default()
+        let cache_retention = if canonical_id == "anthropic" {
+            resolve_cache_retention("ANTHROPIC_CACHE_RETENTION")?
         } else {
             CacheRetention::default()
         };
@@ -617,6 +609,19 @@ impl LlmConfig {
             unsupported_params,
         })
     }
+}
+
+/// Resolve a `CacheRetention` from an env var, defaulting to `Short`.
+fn resolve_cache_retention(env_var: &str) -> Result<CacheRetention, ConfigError> {
+    Ok(optional_env(env_var)?
+        .and_then(|val| match val.parse::<CacheRetention>() {
+            Ok(r) => Some(r),
+            Err(e) => {
+                tracing::warn!("Invalid {env_var}: {e}; defaulting to short");
+                None
+            }
+        })
+        .unwrap_or_default())
 }
 
 /// Parse `LLM_EXTRA_HEADERS` value into a list of (key, value) pairs.
