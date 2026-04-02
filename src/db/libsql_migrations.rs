@@ -825,6 +825,36 @@ CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
     ),
     (
         15,
+        "conversation_source_channel",
+        // Add source_channel to conversations for cross-channel approval authorization.
+        // Marked as idempotent (see IDEMPOTENT_ADD_COLUMN_MIGRATIONS below)
+        // because SQLite does not support IF NOT EXISTS for ADD COLUMN.
+        // The runner checks pragma_table_info before executing the ALTER.
+        r#"
+ALTER TABLE conversations ADD COLUMN source_channel TEXT;
+"#,
+    ),
+    (
+        16,
+        "document_versions",
+        r#"
+CREATE TABLE IF NOT EXISTS memory_document_versions (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL REFERENCES memory_documents(id) ON DELETE CASCADE,
+    version INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    changed_by TEXT,
+    UNIQUE(document_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_doc_versions_lookup
+    ON memory_document_versions(document_id, version DESC);
+"#,
+    ),
+    (
+        17,
         "user_identities",
         r#"
 CREATE TABLE IF NOT EXISTS user_identities (
@@ -845,43 +875,13 @@ CREATE INDEX IF NOT EXISTS idx_user_identities_user ON user_identities(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_identities_email ON user_identities(email) WHERE email IS NOT NULL;
 "#,
     ),
-    (
-        16,
-        "conversation_source_channel",
-        // Add source_channel to conversations for cross-channel approval authorization.
-        // Marked as idempotent (see IDEMPOTENT_ADD_COLUMN_MIGRATIONS below)
-        // because SQLite does not support IF NOT EXISTS for ADD COLUMN.
-        // The runner checks pragma_table_info before executing the ALTER.
-        r#"
-ALTER TABLE conversations ADD COLUMN source_channel TEXT;
-"#,
-    ),
-    (
-        17,
-        "document_versions",
-        r#"
-CREATE TABLE IF NOT EXISTS memory_document_versions (
-    id TEXT PRIMARY KEY,
-    document_id TEXT NOT NULL REFERENCES memory_documents(id) ON DELETE CASCADE,
-    version INTEGER NOT NULL,
-    content TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    changed_by TEXT,
-    UNIQUE(document_id, version)
-);
-
-CREATE INDEX IF NOT EXISTS idx_doc_versions_lookup
-    ON memory_document_versions(document_id, version DESC);
-"#,
-    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already
 /// exists (e.g. because the base SCHEMA was updated to include it).
 /// Each entry is `(version, table_name, column_name)`.
 const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] =
-    &[(16, "conversations", "source_channel")];
+    &[(15, "conversations", "source_channel")];
 
 /// Check whether `table` already contains `column` via `pragma_table_info`.
 async fn column_exists(
@@ -904,9 +904,9 @@ async fn column_exists(
     Ok(rows.next().await.ok().flatten().is_some())
 }
 
-/// Repair databases where V15 was recorded as "document_versions" instead of
-/// "user_identities" due to a migration numbering error in an earlier release.
-/// Deletes the stale _migrations row so V15 reruns with the correct SQL.
+/// Repair databases where V15 was recorded as "document_versions" due to a
+/// migration numbering conflict in an earlier release. Deletes the stale
+/// _migrations row so V15 reruns with the correct SQL (conversation_source_channel).
 async fn repair_misnumbered_v15(
     conn: &libsql::Connection,
 ) -> Result<(), crate::error::DatabaseError> {
@@ -956,10 +956,9 @@ async fn repair_misnumbered_v15(
 pub async fn run_incremental(conn: &libsql::Connection) -> Result<(), crate::error::DatabaseError> {
     use crate::error::DatabaseError;
 
-    // Repair: an earlier release mis-numbered V15 as "document_versions"
-    // instead of "user_identities", so the user_identities CREATE TABLE
-    // never ran. If V15 is recorded but the table doesn't exist, delete
-    // the stale record so V15 reruns with the correct SQL.
+    // Repair: an earlier release mis-recorded V15 as "document_versions".
+    // Delete the stale record so V15 reruns as conversation_source_channel
+    // and V16 (user_identities) can apply.
     repair_misnumbered_v15(conn).await?;
 
     let mut applied_count = 0;
