@@ -633,6 +633,9 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         };
         let store = self.pairing_store.clone();
         let result: Result<crate::db::PairingRequestRecord, crate::error::DatabaseError> =
+            // SAFETY: block_in_place requires a multi-thread Tokio runtime. WASM channel
+            // callbacks are always invoked from a multi-thread runtime worker thread.
+            // Do NOT use this pattern in #[tokio::test] (which uses current_thread by default).
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async move {
                     store.upsert_request(&channel, &id, meta).await
@@ -659,6 +662,9 @@ impl near::agent::channel_host::Host for ChannelStoreData {
     ) -> Result<Option<String>, String> {
         let store = self.pairing_store.clone();
         let result: Result<Option<crate::ownership::Identity>, crate::error::DatabaseError> =
+            // SAFETY: block_in_place requires a multi-thread Tokio runtime. WASM channel
+            // callbacks are always invoked from a multi-thread runtime worker thread.
+            // Do NOT use this pattern in #[tokio::test] (which uses current_thread by default).
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async move {
                     store.resolve_identity(&channel, &external_id).await
@@ -2482,7 +2488,6 @@ impl WasmChannel {
 
             // Convert to IncomingMessage
             let mut msg = IncomingMessage::new(&self.name, &resolved_user_id, &emitted.content)
-                .with_owner_id(&self.owner_scope_id)
                 .with_sender_id(&emitted.user_id);
 
             if let Some(name) = emitted.user_name {
@@ -2787,7 +2792,6 @@ impl WasmChannel {
             // Convert to IncomingMessage
             let mut msg =
                 IncomingMessage::new(dispatch.channel_name, &resolved_user_id, &emitted.content)
-                    .with_owner_id(dispatch.owner_scope_id)
                     .with_sender_id(&emitted.user_id);
 
             if let Some(name) = emitted.user_name {
@@ -5720,7 +5724,6 @@ mod tests {
 
         let msg = rx.try_recv().expect("Should receive message"); // safety: test-only assertion
         assert_eq!(msg.user_id, "owner-scope"); // safety: test-only assertion
-        assert_eq!(msg.owner_id, "owner-scope"); // safety: test-only assertion
         assert_eq!(msg.sender_id, "telegram-owner"); // safety: test-only assertion
         assert_eq!(msg.conversation_scope(), Some("12345")); // safety: test-only assertion
         let stored_metadata = last_broadcast_metadata.read().await.clone();
@@ -5762,7 +5765,6 @@ mod tests {
 
         let msg = rx.try_recv().expect("Should receive message"); // safety: test-only assertion
         assert_eq!(msg.user_id, "guest-42"); // safety: test-only assertion
-        assert_eq!(msg.owner_id, "owner-scope"); // safety: test-only assertion
         assert_eq!(msg.sender_id, "guest-42"); // safety: test-only assertion
         assert_eq!(msg.conversation_scope(), Some("999")); // safety: test-only assertion
         assert!(last_broadcast_metadata.read().await.is_none()); // safety: test-only assertion
