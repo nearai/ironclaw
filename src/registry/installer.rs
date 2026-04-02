@@ -645,21 +645,51 @@ async fn stamp_channel_install_source(
     path: &Path,
     source: ChannelInstallSource,
 ) -> Result<(), RegistryError> {
+    // Read existing capabilities JSON
     let raw = fs::read(path).await.map_err(RegistryError::Io)?;
-    let mut caps = ChannelCapabilitiesFile::from_bytes(&raw).map_err(|e| {
+
+    // Parse as generic JSON to preserve unknown fields
+    let mut value: serde_json::Value = serde_json::from_slice(&raw).map_err(|e| {
         RegistryError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("invalid channel capabilities JSON: {}", e),
         ))
     })?;
-    caps.install_source = Some(source);
-    let rewritten = serde_json::to_vec_pretty(&caps).map_err(|e| {
+
+    // Ensure the root is an object so we can set install_source
+    let obj = value.as_object_mut().ok_or_else(|| {
+        RegistryError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "channel capabilities JSON must be a JSON object",
+        ))
+    })?;
+
+    // Serialize the new install_source value and update only that field
+    let install_source_value =
+        serde_json::to_value(&source).map_err(|e| {
+            RegistryError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("failed to serialize install_source: {}", e),
+            ))
+        })?;
+    obj.insert("install_source".to_string(), install_source_value);
+
+    // Serialize the updated JSON
+    let rewritten = serde_json::to_vec_pretty(&value).map_err(|e| {
         RegistryError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("failed to serialize channel capabilities JSON: {}", e),
         ))
     })?;
-    fs::write(path, rewritten).await.map_err(RegistryError::Io)?;
+
+    // Write to a temporary file first, then atomically rename
+    let tmp_path = path.with_extension("tmp");
+    fs::write(&tmp_path, rewritten)
+        .await
+        .map_err(RegistryError::Io)?;
+    fs::rename(&tmp_path, path)
+        .await
+        .map_err(RegistryError::Io)?;
     Ok(())
 }
 
