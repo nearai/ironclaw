@@ -347,13 +347,22 @@ impl ToolRegistry {
                 _ => continue,
             };
 
-            for host in &host_patterns {
-                mappings.push(CredentialMapping {
-                    secret_name: secret_name.clone(),
-                    location: location.clone(),
-                    host_patterns: vec![host.clone()],
-                });
-            }
+            let path_patterns: Vec<String> = entry
+                .get("path_patterns")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            mappings.push(CredentialMapping {
+                secret_name,
+                location,
+                host_patterns,
+                path_patterns,
+            });
         }
 
         let count = mappings.len();

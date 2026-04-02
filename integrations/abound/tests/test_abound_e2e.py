@@ -92,7 +92,7 @@ print(f"  Token:   {user_token[:16]}...")
 print("\n--- Setup: Inject Abound credentials ---")
 
 r = admin.put(
-    f"{BASE_URL}/api/admin/users/{user_id}/secrets/abound_external_token",
+    f"{BASE_URL}/api/admin/users/{user_id}/secrets/abound_read_token",
     json={"value": ABOUND_BEARER_TOKEN, "provider": "abound"},
 )
 check("inject bearer token", r.status_code == 200, f"got {r.status_code}: {r.text[:200]}")

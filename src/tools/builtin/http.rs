@@ -576,8 +576,9 @@ impl Tool for HttpTool {
             self.secrets_store.as_ref(),
         ) {
             let cred_host = parsed_url.host_str().unwrap_or("").to_string();
+            let cred_path = parsed_url.path();
             let matched: Vec<crate::secrets::CredentialMapping> =
-                registry.find_for_host(&cred_host);
+                registry.find_for_url(&cred_host, cred_path);
             tracing::debug!(
                 host = %cred_host,
                 matched_count = matched.len(),

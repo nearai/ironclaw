@@ -32,16 +32,20 @@ The Dockerfile already sets these.
 After creating a user via the Admin API, inject their Abound credentials:
 
 ```bash
-# Inject bearer token (per-user, from Abound)
-PUT /api/admin/users/{user_id}/secrets/abound_external_token
-{"value": "<user's abound token>", "provider": "abound"}
+# Inject read token (per-user, for account info, exchange rate, notifications)
+PUT /api/admin/users/{user_id}/secrets/abound_read_token
+{"value": "<user's abound read token>", "provider": "abound"}
+
+# Inject write token (per-user, for send-wire only)
+PUT /api/admin/users/{user_id}/secrets/abound_write_token
+{"value": "<user's abound write token>", "provider": "abound"}
 
 # Inject shared API key
 PUT /api/admin/users/{user_id}/secrets/abound_api_key
 {"value": "<shared X-API-KEY>", "provider": "abound"}
 ```
 
-The `http` tool will auto-inject `Authorization: Bearer` and `X-API-KEY` headers for all requests to Abound's hosts.
+Credentials are path-scoped: `abound_read_token` is injected for read endpoints, `abound_write_token` only for send-wire. `X-API-KEY` is injected for all Abound hosts.
 
 ## Running Tests
 

@@ -369,6 +369,7 @@ impl CredentialMappingSchema {
             secret_name: self.secret_name.clone(),
             location: self.location.to_credential_location(),
             host_patterns: self.host_patterns.clone(),
+            path_patterns: Vec::new(),
         }
     }
 }

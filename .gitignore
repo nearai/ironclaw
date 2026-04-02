@@ -40,3 +40,4 @@ __pycache__/
 *.pyo
 *.pyd
 engine_trace_*.json
+integrations/abound/tests/run_test.sh

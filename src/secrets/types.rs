@@ -222,14 +222,37 @@ pub struct CredentialMapping {
     pub location: CredentialLocation,
     /// Host patterns this credential applies to (glob syntax).
     pub host_patterns: Vec<String>,
+    /// Optional path prefixes to scope this credential to specific endpoints.
+    /// When empty, matches all paths on the host. When set, the request path
+    /// must start with one of these prefixes for the credential to be injected.
+    #[serde(default)]
+    pub path_patterns: Vec<String>,
 }
 
 impl CredentialMapping {
+    /// Returns true if this mapping matches the given host and path.
+    pub fn matches(&self, host: &str, path: &str) -> bool {
+        let host_match = self
+            .host_patterns
+            .iter()
+            .any(|pattern| host_matches_pattern(host, pattern));
+        if !host_match {
+            return false;
+        }
+        if self.path_patterns.is_empty() {
+            return true;
+        }
+        self.path_patterns
+            .iter()
+            .any(|prefix| path.starts_with(prefix.as_str()))
+    }
+
     pub fn bearer(secret_name: impl Into<String>, host_pattern: impl Into<String>) -> Self {
         Self {
             secret_name: secret_name.into(),
             location: CredentialLocation::AuthorizationBearer,
             host_patterns: vec![host_pattern.into()],
+            path_patterns: Vec::new(),
         }
     }
 
@@ -245,8 +268,34 @@ impl CredentialMapping {
                 prefix: None,
             },
             host_patterns: vec![host_pattern.into()],
+            path_patterns: Vec::new(),
         }
     }
+}
+
+/// Check if a hostname matches a pattern (supports `*.` wildcard and port stripping).
+pub fn host_matches_pattern(host: &str, pattern: &str) -> bool {
+    if pattern == host {
+        return true;
+    }
+    // Support patterns with port: "127.0.0.1:8080" matches host "127.0.0.1"
+    if pattern.contains(':') {
+        if let Some(pattern_host) = pattern.split(':').next() {
+            if pattern_host == host {
+                return true;
+            }
+        }
+    }
+    // Support wildcard: *.example.com matches sub.example.com
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        if host.ends_with(suffix) && host.len() > suffix.len() {
+            let prefix = &host[..host.len() - suffix.len()];
+            if prefix.ends_with('.') || prefix.is_empty() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
