@@ -427,12 +427,6 @@ impl From<ConfigError> for ToolError {
     }
 }
 
-fn env_value(key: &str) -> Option<String> {
-    crate::config::helpers::env_or_override(key)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
 pub fn is_derived_nearai_mcp_server(server: &McpServerConfig) -> bool {
     server.env_managed && server.name == NEARAI_MCP_SERVER_NAME
 }
@@ -446,8 +440,8 @@ pub fn derived_server_display_name(server: &McpServerConfig) -> Option<&'static 
 }
 
 pub fn derive_nearai_mcp_server_from_env() -> Option<McpServerConfig> {
-    let url = env_value(NEARAI_MCP_URL_ENV);
-    let api_key = env_value(NEARAI_MCP_API_KEY_ENV);
+    let url = crate::config::helpers::env_or_override(NEARAI_MCP_URL_ENV);
+    let api_key = crate::config::helpers::env_or_override(NEARAI_MCP_API_KEY_ENV);
 
     let (url, api_key) = match (url, api_key) {
         (Some(url), Some(api_key)) => (url, api_key),
@@ -462,10 +456,7 @@ pub fn derive_nearai_mcp_server_from_env() -> Option<McpServerConfig> {
         }
     };
 
-    let headers = HashMap::from([(
-        "Authorization".to_string(),
-        format!("Bearer {}", api_key.trim()),
-    )]);
+    let headers = HashMap::from([("Authorization".to_string(), format!("Bearer {}", api_key))]);
 
     let mut server = McpServerConfig::new(NEARAI_MCP_SERVER_NAME, url)
         .with_headers(headers)
