@@ -10,6 +10,7 @@ use futures::Stream;
 use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
+use uuid::Uuid;
 
 use crate::channels::web::types::AppEvent;
 
@@ -24,6 +25,7 @@ const MAX_CONNECTIONS: u64 = 100;
 /// to subscribers that match that user_id.
 #[derive(Debug, Clone)]
 pub(crate) struct ScopedEvent {
+    pub(crate) id: String,
     pub(crate) user_id: Option<String>,
     pub(crate) event: AppEvent,
 }
@@ -37,18 +39,27 @@ pub(crate) struct ScopedEvent {
 pub struct SseManager {
     tx: broadcast::Sender<ScopedEvent>,
     connection_count: Arc<AtomicU64>,
+    boot_id: Arc<str>,
+    next_event_id: Arc<AtomicU64>,
     max_connections: u64,
 }
 
 impl SseManager {
     /// Create a new SSE manager.
     pub fn new() -> Self {
+        Self::with_max_connections(MAX_CONNECTIONS)
+    }
+
+    /// Create a new SSE manager with a custom connection limit.
+    pub fn with_max_connections(max_connections: u64) -> Self {
         // Buffer 256 events; slow clients will miss events (acceptable for SSE with reconnect)
         let (tx, _) = broadcast::channel(256);
         Self {
             tx,
             connection_count: Arc::new(AtomicU64::new(0)),
-            max_connections: MAX_CONNECTIONS,
+            boot_id: Arc::<str>::from(Uuid::new_v4().to_string()),
+            next_event_id: Arc::new(AtomicU64::new(1)),
+            max_connections,
         }
     }
 
@@ -61,11 +72,13 @@ impl SseManager {
     /// only be called before the server starts accepting connections (i.e.,
     /// during startup wiring). Calling it after connections are established
     /// will break connection tracking and allow exceeding `MAX_CONNECTIONS`.
-    pub(crate) fn from_sender(tx: broadcast::Sender<ScopedEvent>) -> Self {
+    pub(crate) fn from_sender(tx: broadcast::Sender<ScopedEvent>, max_connections: u64) -> Self {
         Self {
             tx,
             connection_count: Arc::new(AtomicU64::new(0)),
-            max_connections: MAX_CONNECTIONS,
+            boot_id: Arc::<str>::from(Uuid::new_v4().to_string()),
+            next_event_id: Arc::new(AtomicU64::new(1)),
+            max_connections,
         }
     }
 
@@ -74,12 +87,23 @@ impl SseManager {
         self.tx.clone()
     }
 
+    /// Get the configured connection limit.
+    pub fn max_connections(&self) -> u64 {
+        self.max_connections
+    }
+
+    fn next_scoped_event(&self, user_id: Option<String>, event: AppEvent) -> ScopedEvent {
+        let seq = self.next_event_id.fetch_add(1, Ordering::Relaxed);
+        ScopedEvent {
+            id: format!("{}:{seq}", self.boot_id),
+            user_id,
+            event,
+        }
+    }
+
     /// Broadcast an event to all connected clients (global/unscoped).
     pub fn broadcast(&self, event: AppEvent) {
-        let _ = self.tx.send(ScopedEvent {
-            user_id: None,
-            event,
-        });
+        let _ = self.tx.send(self.next_scoped_event(None, event));
     }
 
     /// Broadcast an event scoped to a specific user.
@@ -87,10 +111,9 @@ impl SseManager {
     /// Only subscribers for this user_id (or unscoped subscribers) will
     /// receive the event.
     pub fn broadcast_for_user(&self, user_id: &str, event: AppEvent) {
-        let _ = self.tx.send(ScopedEvent {
-            user_id: Some(user_id.to_string()),
-            event,
-        });
+        let _ = self
+            .tx
+            .send(self.next_scoped_event(Some(user_id.to_string()), event));
     }
 
     /// Get current number of active connections.
@@ -153,6 +176,7 @@ impl SseManager {
     pub fn subscribe(
         &self,
         user_id: Option<String>,
+        last_event_id: Option<String>,
     ) -> Option<Sse<impl Stream<Item = Result<Event, Infallible>> + Send + 'static + use<>>> {
         // Atomically increment only if below the limit.
         let counter = Arc::clone(&self.connection_count);
@@ -171,23 +195,29 @@ impl SseManager {
         let stream = BroadcastStream::new(rx)
             .filter_map(move |result| match result {
                 Ok(scoped) => match (&user_id, &scoped.user_id) {
-                    (_, None) => Some(scoped.event),
-                    (None, _) => Some(scoped.event),
-                    (Some(sub), Some(ev)) if sub == ev => Some(scoped.event),
+                    (_, None) => Some(scoped),
+                    (None, _) => Some(scoped),
+                    (Some(sub), Some(ev)) if sub == ev => Some(scoped),
                     _ => None,
                 },
                 Err(_) => None,
             })
-            .filter_map(|event| {
-                let data = match serde_json::to_string(&event) {
+            .filter_map(move |scoped| {
+                if !is_event_after(last_event_id.as_deref(), &scoped.id) {
+                    return None;
+                }
+                let data = match serde_json::to_string(&scoped.event) {
                     Ok(s) => s,
                     Err(e) => {
                         tracing::warn!("Failed to serialize SSE event: {}", e);
                         return None;
                     }
                 };
-                let event_type = event.event_type();
-                Some(Ok(Event::default().event(event_type).data(data)))
+                let event_type = scoped.event.event_type();
+                Some(Ok(Event::default()
+                    .id(scoped.id)
+                    .event(event_type)
+                    .data(data)))
             });
 
         // Wrap in a stream that decrements on drop
@@ -201,6 +231,27 @@ impl SseManager {
                 .keep_alive(KeepAlive::new().interval(Duration::from_secs(30)).text("")),
         )
     }
+}
+
+fn parse_event_id(id: &str) -> Option<(&str, u64)> {
+    let (boot_id, seq) = id.split_once(':')?;
+    Some((boot_id, seq.parse().ok()?))
+}
+
+fn is_event_after(last_event_id: Option<&str>, current_event_id: &str) -> bool {
+    let Some(last_event_id) = last_event_id else {
+        return true;
+    };
+    let Some((last_boot_id, last_seq)) = parse_event_id(last_event_id) else {
+        return true;
+    };
+    let Some((current_boot_id, current_seq)) = parse_event_id(current_event_id) else {
+        return true;
+    };
+    if last_boot_id != current_boot_id {
+        return true;
+    }
+    current_seq > last_seq
 }
 
 impl Default for SseManager {
@@ -243,6 +294,7 @@ mod tests {
     fn test_sse_manager_creation() {
         let manager = SseManager::new();
         assert_eq!(manager.connection_count(), 0);
+        assert_eq!(manager.max_connections(), MAX_CONNECTIONS);
     }
 
     #[test]
@@ -330,7 +382,7 @@ mod tests {
 
         // Third should be rejected
         assert!(manager.subscribe_raw(None).is_none());
-        assert!(manager.subscribe(None).is_none());
+        assert!(manager.subscribe(None, None).is_none());
     }
 
     #[tokio::test]
@@ -370,5 +422,19 @@ mod tests {
         // Bob only gets the global heartbeat (alice's event was filtered)
         let e = bob.next().await.unwrap(); // safety: test-only
         assert!(matches!(e, AppEvent::Heartbeat)); // safety: test assertion
+    }
+
+    #[test]
+    fn test_is_event_after_filters_same_boot_duplicates() {
+        assert!(is_event_after(Some("boot:4"), "boot:5"));
+        assert!(!is_event_after(Some("boot:5"), "boot:5"));
+        assert!(!is_event_after(Some("boot:6"), "boot:5"));
+    }
+
+    #[test]
+    fn test_is_event_after_ignores_other_boots_and_invalid_ids() {
+        assert!(is_event_after(Some("old-boot:99"), "new-boot:1"));
+        assert!(is_event_after(Some("not-an-id"), "new-boot:1"));
+        assert!(is_event_after(Some("boot:1"), "also-bad"));
     }
 }

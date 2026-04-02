@@ -105,6 +105,7 @@ const STREAM_DEBOUNCE_MS = 50;
 let _connectionLostTimer = null;
 let _connectionLostAt = null;
 let _reconnectAttempts = 0;
+let _lastSseEventId = null;
 
 // --- Send Cooldown State ---
 let _sendCooldown = false;
@@ -385,14 +386,33 @@ function updateRestartButtonVisibility() {
 
 // --- SSE ---
 
-function connectSSE() {
+function rememberSseEventId(event) {
+  if (!event || !event.lastEventId) return;
+  _lastSseEventId = event.lastEventId;
+  window.__e2eLastSseEventId = event.lastEventId;
+}
+
+function connectSSE(lastEventIdOverride) {
   if (eventSource) eventSource.close();
 
   // In OIDC mode the reverse proxy provides auth; no query token needed.
-  const chatSseUrl = (token && !oidcProxyAuth)
+  let chatSseUrl = (token && !oidcProxyAuth)
     ? '/api/chat/events?token=' + encodeURIComponent(token)
     : '/api/chat/events';
+  const lastEventId = lastEventIdOverride || _lastSseEventId;
+  if (lastEventId) {
+    chatSseUrl += (chatSseUrl.includes('?') ? '&' : '?')
+      + 'last_event_id=' + encodeURIComponent(lastEventId);
+  }
   eventSource = new EventSource(chatSseUrl);
+  window.__e2eCurrentSseUrl = chatSseUrl;
+
+  const addTrackedEventListener = (eventType, handler) => {
+    eventSource.addEventListener(eventType, (event) => {
+      rememberSseEventId(event);
+      handler(event);
+    });
+  };
 
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
@@ -460,7 +480,7 @@ function connectSSE() {
     }
   };
 
-  eventSource.addEventListener('response', (e) => {
+  addTrackedEventListener('response', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) {
       if (data.thread_id) {
@@ -494,7 +514,7 @@ function connectSSE() {
     }
   });
 
-  eventSource.addEventListener('thinking', (e) => {
+  addTrackedEventListener('thinking', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) {
       if (data.thread_id) debouncedLoadThreads();
@@ -504,7 +524,7 @@ function connectSSE() {
     showActivityThinking(data.message);
   });
 
-  eventSource.addEventListener('suggestions', (e) => {
+  addTrackedEventListener('suggestions', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
     if (data.suggestions && data.suggestions.length > 0) {
@@ -512,13 +532,13 @@ function connectSSE() {
     }
   });
 
-  eventSource.addEventListener('tool_started', (e) => {
+  addTrackedEventListener('tool_started', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
     addToolCard(data.name);
   });
 
-  eventSource.addEventListener('tool_completed', (e) => {
+  addTrackedEventListener('tool_completed', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
     completeToolCard(data.name, data.success, data.error, data.parameters);
@@ -529,13 +549,13 @@ function connectSSE() {
     }
   });
 
-  eventSource.addEventListener('tool_result', (e) => {
+  addTrackedEventListener('tool_result', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
     setToolCardOutput(data.name, data.preview);
   });
 
-  eventSource.addEventListener('stream_chunk', (e) => {
+  addTrackedEventListener('stream_chunk', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
     finalizeActivityGroup();
@@ -566,7 +586,7 @@ function connectSSE() {
     }
   });
 
-  eventSource.addEventListener('status', (e) => {
+  addTrackedEventListener('status', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) {
       if (data.thread_id) debouncedLoadThreads();
@@ -582,12 +602,12 @@ function connectSSE() {
     }
   });
 
-  eventSource.addEventListener('job_started', (e) => {
+  addTrackedEventListener('job_started', (e) => {
     const data = JSON.parse(e.data);
     showJobCard(data);
   });
 
-  eventSource.addEventListener('approval_needed', (e) => {
+  addTrackedEventListener('approval_needed', (e) => {
     const data = JSON.parse(e.data);
     const hasThread = !!data.thread_id;
     const forCurrentThread = !hasThread || isCurrentThread(data.thread_id);
@@ -604,26 +624,26 @@ function connectSSE() {
     if (currentTab === 'settings') refreshCurrentSettingsTab();
   });
 
-  eventSource.addEventListener('auth_required', (e) => {
+  addTrackedEventListener('auth_required', (e) => {
     handleAuthRequired(JSON.parse(e.data));
   });
 
-  eventSource.addEventListener('auth_completed', (e) => {
+  addTrackedEventListener('auth_completed', (e) => {
     const data = JSON.parse(e.data);
     handleAuthCompleted(data);
   });
 
-  eventSource.addEventListener('extension_status', (e) => {
+  addTrackedEventListener('extension_status', (e) => {
     if (currentTab === 'settings') refreshCurrentSettingsTab();
   });
 
-  eventSource.addEventListener('image_generated', (e) => {
+  addTrackedEventListener('image_generated', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
     addGeneratedImage(data.data_url, data.path);
   });
 
-  eventSource.addEventListener('error', (e) => {
+  addTrackedEventListener('error', (e) => {
     if (e.data) {
       const data = JSON.parse(e.data);
       if (!isCurrentThread(data.thread_id)) return;
@@ -633,7 +653,7 @@ function connectSSE() {
     }
   });
 
-  eventSource.addEventListener('turn_cost', (e) => {
+  addTrackedEventListener('turn_cost', (e) => {
     const event = JSON.parse(e.data);
     if (!isCurrentThread(event.thread_id)) return;
     // Add cost badge below last assistant message
@@ -655,7 +675,7 @@ function connectSSE() {
     'job_status', 'job_result'
   ];
   for (const evtType of jobEventTypes) {
-    eventSource.addEventListener(evtType, (e) => {
+    addTrackedEventListener(evtType, (e) => {
       const data = JSON.parse(e.data);
       const jobId = data.job_id;
       if (!jobId) return;

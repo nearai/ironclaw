@@ -1719,17 +1719,33 @@ pub async fn clear_auth_mode(state: &GatewayState, user_id: &str) {
 }
 
 async fn chat_events_handler(
+    Query(params): Query<ChatEventsQuery>,
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let sse = state.sse.subscribe(Some(user.user_id)).ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Too many connections".to_string(),
-    ))?;
+    let last_event_id = params.last_event_id.or_else(|| {
+        headers
+            .get("last-event-id")
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned)
+    });
+    let sse = state
+        .sse
+        .subscribe(Some(user.user_id), last_event_id)
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Too many connections".to_string(),
+        ))?;
     Ok((
         [("X-Accel-Buffering", "no"), ("Cache-Control", "no-cache")],
         sse,
     ))
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ChatEventsQuery {
+    last_event_id: Option<String>,
 }
 
 /// Check whether an Origin header value points to a local address.
