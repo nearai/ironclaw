@@ -237,6 +237,36 @@ except Exception as e:
 print()
 
 # -----------------------------------------------------------
+# 5. Streaming: exchange rate
+# -----------------------------------------------------------
+print("--- 5. Streaming: exchange rate ---")
+try:
+    stream = client.responses.create(
+        model="default",
+        input="What's the current USD to INR rate on Abound?",
+        stream=True,
+    )
+    events = []
+    full_text = ""
+    for event in stream:
+        events.append(event.type)
+        if event.type == "response.output_text.delta":
+            full_text += event.delta
+
+    check("has response.created", "response.created" in events,
+          f"events: {events[:5]}")
+    check("has response.completed", "response.completed" in events,
+          f"events: {events[-5:]}")
+    check("has text deltas", len(full_text) > 0, f"text={full_text[:100]}")
+    check("mentions rate in stream", any(t in full_text.lower() for t in ["rate", "inr", "exchange"]),
+          f"streamed text doesn't mention rate")
+    print(f"  Events: {len(events)} total")
+    print(f"  Text: {full_text[:300]}")
+except Exception as e:
+    check("streaming succeeded", False, str(e))
+print()
+
+# -----------------------------------------------------------
 # Summary
 # -----------------------------------------------------------
 print(f"=== Results: {passed} passed, {failed} failed ===")
