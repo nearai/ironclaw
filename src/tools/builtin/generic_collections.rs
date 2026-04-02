@@ -1182,4 +1182,55 @@ mod tests {
         let grace_records = grace_result.result["results"].as_array().unwrap();
         assert_eq!(grace_records[0]["data"]["name"], "yogurt");
     }
+
+    /// A unified tool created for andrew (owner_user_id="andrew") should not
+    /// leak data when executed with a JobContext for grace. The tool uses
+    /// `owner_scope(ctx)` which resolves to `ctx.user_id` when source_scope
+    /// is None, so grace's context should query grace's scope — not andrew's.
+    #[tokio::test]
+    async fn wrong_context_tool_isolation() {
+        let (db, _dir) = setup().await;
+        let schema = grocery_schema();
+
+        // Register collection for andrew only — grace has NO collection.
+        db.register_collection("andrew", &schema)
+            .await
+            .expect("register for andrew");
+
+        // Create tool owned by andrew.
+        let tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "andrew");
+
+        let andrew_ctx = test_ctx("andrew");
+
+        // Andrew adds records through the tool.
+        tool.execute(
+            json!({ "operation": "add", "data": { "name": "steak" } }),
+            &andrew_ctx,
+        )
+        .await
+        .expect("andrew add steak");
+
+        tool.execute(
+            json!({ "operation": "add", "data": { "name": "wine" } }),
+            &andrew_ctx,
+        )
+        .await
+        .expect("andrew add wine");
+
+        // Now execute the SAME tool with grace's context.
+        // Since source_scope is None, owner_scope(ctx) returns ctx.user_id = "grace".
+        // Grace has no collection registered, but query_records will just return
+        // empty for a non-existent collection/user pair rather than andrew's data.
+        let grace_ctx = test_ctx("grace");
+        let grace_result = tool
+            .execute(json!({ "operation": "query" }), &grace_ctx)
+            .await
+            .expect("query with grace ctx should succeed");
+
+        // Grace must see 0 records — not andrew's 2 records.
+        assert_eq!(
+            grace_result.result["count"], 0,
+            "grace should not see andrew's records when using andrew's tool with grace's context"
+        );
+    }
 }

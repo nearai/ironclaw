@@ -1882,4 +1882,298 @@ async fn add_required_field_old_records_still_queryable() {
     assert!(result.is_err(), "DB layer should reject records missing new required field");
 }
 
+// ==================== SQL Injection / order_by safety ====================
+
+#[tokio::test]
+async fn order_by_injection_rejected() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &grocery_schema())
+        .await
+        .expect("register grocery_items");
+
+    db.insert_record(
+        user,
+        "grocery_items",
+        json!({"name": "Apples", "category": "produce", "quantity": 5}),
+    )
+    .await
+    .expect("insert apples");
+
+    db.insert_record(
+        user,
+        "grocery_items",
+        json!({"name": "Bread", "category": "pantry", "quantity": 2}),
+    )
+    .await
+    .expect("insert bread");
+
+    // Attempt SQL injection via order_by — the semicolon and space should be
+    // rejected by validate_field_name (only alphanumeric + underscore allowed).
+    let result = db
+        .query_records(
+            user,
+            "grocery_items",
+            &[],
+            Some("name; DROP TABLE structured_records"),
+            100,
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "order_by with SQL injection payload should be rejected, got: {:?}",
+        result,
+    );
+
+    // Verify the table still exists and records are intact.
+    let records = db
+        .query_records(user, "grocery_items", &[], Some("name"), 100)
+        .await
+        .expect("records should still be queryable after injection attempt");
+    assert_eq!(records.len(), 2, "both records should survive");
+}
+
+#[tokio::test]
+async fn order_by_nonexistent_field() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &grocery_schema())
+        .await
+        .expect("register grocery_items");
+
+    db.insert_record(
+        user,
+        "grocery_items",
+        json!({"name": "Milk", "category": "dairy"}),
+    )
+    .await
+    .expect("insert milk");
+
+    // "nonexistent_field" passes validate_field_name (it's alphanumeric + underscore)
+    // but doesn't exist in the schema. The DB layer doesn't reject this — it just
+    // orders by a JSON path that extracts NULL for all rows. Records still return.
+    let result = db
+        .query_records(
+            user,
+            "grocery_items",
+            &[],
+            Some("nonexistent_field"),
+            100,
+        )
+        .await;
+
+    // NOTE: The current implementation does NOT validate order_by against the
+    // registered schema fields — it only validates the identifier syntax.
+    // A nonexistent field quietly orders by NULL (all equal), which means the
+    // query succeeds and returns all records. This is arguably a bug — the DB
+    // could validate order_by against the schema — but it's not a safety issue.
+    assert!(
+        result.is_ok(),
+        "nonexistent field should not cause an error (only syntax is validated)"
+    );
+    let records = result.unwrap();
+    assert_eq!(records.len(), 1, "the one record should still be returned");
+    assert_eq!(records[0].data["name"], "Milk");
+}
+
+// ==================== Delete sibling survives ====================
+
+#[tokio::test]
+async fn delete_sibling_survives() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &grocery_schema())
+        .await
+        .expect("register grocery_items");
+
+    let milk_id = db
+        .insert_record(
+            user,
+            "grocery_items",
+            json!({"name": "Milk", "category": "dairy"}),
+        )
+        .await
+        .expect("insert milk");
+
+    let eggs_id = db
+        .insert_record(
+            user,
+            "grocery_items",
+            json!({"name": "Eggs", "category": "dairy"}),
+        )
+        .await
+        .expect("insert eggs");
+
+    // Delete milk.
+    db.delete_record(user, milk_id)
+        .await
+        .expect("delete milk");
+
+    // Eggs should still be retrievable by ID.
+    let eggs = db.get_record(user, eggs_id).await.expect("eggs should still exist");
+    assert_eq!(eggs.data["name"], "Eggs");
+
+    // Only 1 record should remain in the collection.
+    let remaining = db
+        .query_records(user, "grocery_items", &[], None, 100)
+        .await
+        .expect("query after delete");
+    assert_eq!(remaining.len(), 1, "exactly 1 record should remain");
+    assert_eq!(remaining[0].data["name"], "Eggs");
+}
+
+// ==================== Drop collection cross-user isolation ====================
+
+#[tokio::test]
+async fn drop_cross_user_isolation() {
+    let (db, _dir) = setup().await;
+    let alice = "alice";
+    let bob = "bob";
+
+    // Both users register groceries.
+    db.register_collection(alice, &grocery_schema())
+        .await
+        .expect("register for alice");
+    db.register_collection(bob, &grocery_schema())
+        .await
+        .expect("register for bob");
+
+    // Both insert records.
+    db.insert_record(
+        alice,
+        "grocery_items",
+        json!({"name": "Alice's Apples", "category": "produce"}),
+    )
+    .await
+    .expect("alice inserts");
+
+    db.insert_record(
+        bob,
+        "grocery_items",
+        json!({"name": "Bob's Bananas", "category": "produce"}),
+    )
+    .await
+    .expect("bob inserts");
+
+    // Drop alice's collection.
+    db.drop_collection(alice, "grocery_items")
+        .await
+        .expect("drop alice's collection");
+
+    // Alice's collection and records should be gone.
+    let alice_collections = db.list_collections(alice).await.expect("list alice");
+    assert!(
+        alice_collections.is_empty(),
+        "alice should have no collections after drop"
+    );
+    let alice_records = db
+        .query_records(alice, "grocery_items", &[], None, 100)
+        .await
+        .expect("query alice's grocery_items");
+    assert!(
+        alice_records.is_empty(),
+        "alice should have no records after drop"
+    );
+
+    // Bob's collection and records should be intact.
+    let bob_collections = db.list_collections(bob).await.expect("list bob");
+    assert_eq!(bob_collections.len(), 1, "bob should still have 1 collection");
+    assert_eq!(bob_collections[0].collection, "grocery_items");
+
+    let bob_records = db
+        .query_records(bob, "grocery_items", &[], None, 100)
+        .await
+        .expect("query bob's grocery_items");
+    assert_eq!(bob_records.len(), 1, "bob should still have 1 record");
+    assert_eq!(bob_records[0].data["name"], "Bob's Bananas");
+}
+
+// ==================== Aggregation with filters ====================
+
+#[tokio::test]
+async fn aggregate_with_filter() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &nanny_schema())
+        .await
+        .expect("register nanny_shifts");
+
+    // Insert 5 shifts with varying hours: 6, 7, 8.5, 9, 10
+    let shifts = [
+        ("2026-03-01", 6.0),
+        ("2026-03-02", 7.0),
+        ("2026-03-03", 8.5),
+        ("2026-03-04", 9.0),
+        ("2026-03-05", 10.0),
+    ];
+    for (date, hours) in &shifts {
+        db.insert_record(
+            user,
+            "nanny_shifts",
+            json!({
+                "date": date,
+                "start_time": format!("{date}T09:00:00+00:00"),
+                "hours": hours,
+            }),
+        )
+        .await
+        .expect("insert shift");
+    }
+
+    // Sum ALL hours (no filter): 6 + 7 + 8.5 + 9 + 10 = 40.5
+    let total = db
+        .aggregate(
+            user,
+            "nanny_shifts",
+            &Aggregation {
+                operation: AggOp::Sum,
+                field: Some("hours".to_string()),
+                group_by: None,
+                filters: vec![],
+            },
+        )
+        .await
+        .expect("sum all");
+    let total_val = total.as_f64().expect("total sum");
+    assert!(
+        (total_val - 40.5).abs() < 0.001,
+        "total sum should be 40.5, got {total_val}"
+    );
+
+    // Sum with filter: hours > 8. Should include 8.5 + 9 + 10 = 27.5
+    let filtered = db
+        .aggregate(
+            user,
+            "nanny_shifts",
+            &Aggregation {
+                operation: AggOp::Sum,
+                field: Some("hours".to_string()),
+                group_by: None,
+                filters: vec![Filter {
+                    field: "hours".to_string(),
+                    op: FilterOp::Gt,
+                    value: json!(8),
+                }],
+            },
+        )
+        .await
+        .expect("sum filtered hours > 8");
+    let filtered_val = filtered.as_f64().expect("filtered sum");
+    assert!(
+        (filtered_val - 27.5).abs() < 0.001,
+        "filtered sum (hours > 8) should be 27.5, got {filtered_val}"
+    );
+
+    // Verify filtered sum != total sum — the filter actually applied.
+    assert!(
+        (total_val - filtered_val).abs() > 1.0,
+        "filtered sum should differ from total sum"
+    );
+}
+
 // Boot-scan tests are in src/tools/registry.rs (unit tests) since ToolRegistry is private.
