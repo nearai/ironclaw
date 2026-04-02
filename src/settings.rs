@@ -409,6 +409,46 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub signal_group_allow_from: Option<String>,
 
+    /// Matrix homeserver URL (e.g. `https://matrix.org`).
+    #[serde(default)]
+    pub matrix_homeserver: Option<String>,
+
+    /// Matrix bot username (localpart only, e.g. `mybot`).
+    /// Wizard-only: saved during onboarding so re-onboarding can show the
+    /// current value and only require re-entering the password. Not read by
+    /// `ChannelsConfig::resolve` and not present in `MatrixConfig`.
+    #[serde(default)]
+    pub matrix_username: Option<String>,
+
+    /// Matrix bot access token (syt_...).
+    /// Prefer storing in the encrypted secrets DB via `ironclaw onboard`.
+    #[serde(default, skip_serializing)]
+    pub matrix_access_token: Option<String>,
+
+    /// Matrix DM allow list (comma-separated Matrix user IDs).
+    #[serde(default)]
+    pub matrix_allow_from: Option<String>,
+
+    /// Matrix DM policy: "open", "allowlist", or "pairing". Default: "pairing".
+    #[serde(default)]
+    pub matrix_dm_policy: Option<String>,
+
+    /// Matrix owner restriction — only this user ID is accepted.
+    #[serde(default)]
+    pub matrix_owner_id: Option<String>,
+
+    /// Matrix sync poll interval in seconds. Default: 5.
+    #[serde(default)]
+    pub matrix_poll_interval_secs: Option<u32>,
+
+    /// Whether to auto-join invited rooms. Default: true.
+    #[serde(default)]
+    pub matrix_auto_join: Option<bool>,
+
+    /// Display name for the Matrix bot. Default: "IronClaw".
+    #[serde(default)]
+    pub matrix_display_name: Option<String>,
+
     /// Per-channel owner user IDs. When set, the channel only responds to this user.
     /// Key: channel name (e.g., "telegram"), Value: owner user ID.
     #[serde(default)]
@@ -454,6 +494,15 @@ impl Default for ChannelSettings {
             signal_dm_policy: None,
             signal_group_policy: None,
             signal_group_allow_from: None,
+            matrix_homeserver: None,
+            matrix_username: None,
+            matrix_access_token: None,
+            matrix_allow_from: None,
+            matrix_dm_policy: None,
+            matrix_owner_id: None,
+            matrix_poll_interval_secs: None,
+            matrix_auto_join: None,
+            matrix_display_name: None,
             wasm_channel_owner_ids: std::collections::HashMap::new(),
             wasm_channels: Vec::new(),
             wasm_channels_enabled: true,

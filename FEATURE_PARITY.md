@@ -78,7 +78,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Feishu/Lark | ✅ | 🚧 | P3 | WASM channel with Event Subscription v2.0; Bitable/Docx tools planned |
 | LINE | ✅ | ❌ | P3 | |
 | WebChat | ✅ | ✅ | - | Web gateway chat |
-| Matrix | ✅ | ❌ | P3 | E2EE support |
+| Matrix | ✅ | 🚧 | P3 | Native channel (SDK + poll fallback); E2EE via `matrix-e2ee` feature gate; WASM channel also available |
 | Mattermost | ✅ | ❌ | P3 | Emoji reactions, interactive buttons, model picker |
 | Google Chat | ✅ | ❌ | P3 | |
 | MS Teams | ✅ | ❌ | P3 | |
@@ -577,7 +577,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 ### P3 - Lower Priority
 
 - ❌ Discord channel
-- ❌ Matrix channel
+- 🚧 Matrix channel (native SDK + poll fallback; E2EE enabled via feature gate; media and rich threading pending)
 - ❌ Other messaging platforms
 - ❌ TTS/audio features
 - ❌ Video support

@@ -709,6 +709,41 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
+    // Add Matrix channel if configured and not CLI-only mode.
+    if !cli.cli_only
+        && let Some(ref matrix_config) = config.channels.matrix
+    {
+        let mut matrix_channel = ironclaw::channels::MatrixChannel::new(
+            matrix_config.clone(),
+            components.db.clone(),
+            Arc::clone(&components.ownership_cache),
+        )
+        .map_err(ironclaw::error::Error::Channel)?;
+
+        // Attach the secrets store so the SDK path can persist the device ID
+        // after first login.  Only compiled in when matrix-sdk-channel is on.
+        #[cfg(feature = "matrix-sdk-channel")]
+        if let Some(ref store) = components.secrets_store {
+            matrix_channel = matrix_channel.with_secrets(
+                std::sync::Arc::clone(store),
+                &config.owner_id,
+            );
+        }
+
+        channel_names.push("matrix".to_string());
+        channels.add(Box::new(matrix_channel)).await;
+        tracing::info!(
+            homeserver = %matrix_config.homeserver,
+            dm_policy = %matrix_config.dm_policy,
+            "Matrix channel enabled"
+        );
+        if matrix_config.allow_from.is_empty() && matrix_config.dm_policy == "allowlist" {
+            tracing::warn!(
+                "Matrix channel dm_policy=allowlist but allow_from is empty — all messages will be denied."
+            );
+        }
+    }
+
     // Add Signal channel if configured and not CLI-only mode.
     if enable_non_cli && let Some(ref signal_config) = config.channels.signal {
         let signal_channel = SignalChannel::new(
@@ -1375,6 +1410,13 @@ async fn async_main() -> anyhow::Result<()> {
                 // Inject channel secrets from database into thread-safe overlay
                 // (similar to inject_llm_keys_from_secrets for LLM providers)
                 if let Some(ref secrets_store) = sighup_secrets_store {
+                    // Re-inject all known secrets (LLM keys + channel tokens incl. matrix).
+                    ironclaw::config::inject_llm_keys_from_secrets(
+                        secrets_store.as_ref(),
+                        &sighup_owner_id,
+                    )
+                    .await;
+
                     // Inject HTTP webhook secret from encrypted store
                     if let Ok(webhook_secret) = secrets_store
                         .get_decrypted(&sighup_owner_id, "http_webhook_secret")

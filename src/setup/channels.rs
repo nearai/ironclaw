@@ -477,6 +477,280 @@ pub struct HttpSetupResult {
     pub host: String,
 }
 
+/// Result of Matrix channel setup.
+#[derive(Debug, Clone)]
+pub struct MatrixSetupResult {
+    pub enabled: bool,
+    pub homeserver: String,
+    /// The bot's Matrix username (localpart), saved to settings for display on re-onboard.
+    pub username: String,
+    pub allow_from: String,
+    pub dm_policy: String,
+    pub owner_id: Option<String>,
+    pub poll_interval_secs: Option<u32>,
+    pub auto_join: bool,
+    pub display_name: Option<String>,
+}
+
+/// Existing Matrix settings — used to pre-fill prompts when re-running setup.
+pub struct ExistingMatrixSettings<'a> {
+    pub homeserver: Option<&'a str>,
+    pub username: Option<&'a str>,
+    pub allow_from: Option<&'a str>,
+    pub dm_policy: Option<&'a str>,
+    pub owner_id: Option<&'a str>,
+    pub display_name: Option<&'a str>,
+}
+
+/// Prompt helper: show `[current_value]` in the label and return the existing
+/// value unchanged when the user presses Enter without typing anything.
+fn prompt_with_default(label: &str, current: &str) -> Result<String, ChannelSetupError> {
+    let entered = input(&format!("{} [{}]", label, current))?;
+    if entered.trim().is_empty() {
+        Ok(current.to_string())
+    } else {
+        Ok(entered)
+    }
+}
+
+/// Same as `prompt_with_default` but for optional fields: empty input keeps
+/// the existing value; a single `-` clears it.
+fn prompt_optional_with_default(
+    label: &str,
+    current: Option<&str>,
+) -> Result<Option<String>, ChannelSetupError> {
+    let hint = match current {
+        Some(v) if !v.is_empty() => format!("{} [{}] (- to clear)", label, v),
+        _ => format!("{} (Enter to skip)", label),
+    };
+    let entered = input(&hint)?;
+    match entered.trim() {
+        "" => Ok(current.map(str::to_string)),
+        "-" => Ok(None),
+        v => Ok(Some(v.to_string())),
+    }
+}
+
+pub async fn setup_matrix(
+    secrets: &SecretsContext,
+    existing: ExistingMatrixSettings<'_>,
+) -> Result<MatrixSetupResult, ChannelSetupError> {
+    println!("Matrix Channel Setup:");
+    println!();
+    print_info("IronClaw connects to Matrix using the Client-Server API.");
+    print_info("You will need a dedicated Matrix bot account.");
+    print_info("IronClaw logs in with username + password to get its own device");
+    print_info("session — this avoids sharing a token with Element or other clients.");
+    println!();
+    if existing.homeserver.is_some() {
+        print_info("Press Enter on any prompt to keep the existing value.");
+        print_info("For optional fields, enter - to clear the current value.");
+        print_info("Leave username/password blank to keep the existing credentials.");
+        println!();
+    }
+
+    // ── Homeserver ────────────────────────────────────────────────────────────
+
+    let homeserver = match existing.homeserver {
+        Some(current) => prompt_with_default("Matrix homeserver URL", current)?,
+        None => input("Matrix homeserver URL (e.g. https://matrix.org)")?,
+    };
+
+    match Url::parse(&homeserver) {
+        Ok(url) if url.scheme() == "http" || url.scheme() == "https" => {}
+        Ok(_) => {
+            print_error("URL must use http or https scheme");
+            return Err(ChannelSetupError::Validation(
+                "Invalid homeserver URL: must use http or https scheme".to_string(),
+            ));
+        }
+        Err(e) => {
+            print_error(&format!("Invalid URL: {}", e));
+            return Err(ChannelSetupError::Validation(format!(
+                "Invalid homeserver URL: {}",
+                e
+            )));
+        }
+    }
+    let homeserver = homeserver.trim_end_matches('/').to_string();
+
+    // ── Login with username + password ────────────────────────────────────────
+    // This gives IronClaw its own device session independent of any Element
+    // session, so token rotation by another client doesn't invalidate us.
+
+    let username = match existing.username {
+        Some(current) => prompt_with_default("Matrix username (localpart only)", current)?,
+        None => input("Matrix username (localpart only, e.g. mybot)")?,
+    };
+
+    let password = if existing.homeserver.is_some() {
+        let raw = secret_input("Matrix password (Enter to keep existing session)")?;
+        if raw.expose_secret().trim().is_empty() { None } else { Some(raw) }
+    } else {
+        Some(secret_input("Matrix password")?)
+    };
+
+    // ── Perform login if a password was supplied ──────────────────────────────
+    // Username is always known (either entered or from existing settings).
+    // Only re-login when a password is provided — otherwise keep existing token.
+
+    let bot_user_id: String = if let Some(password) = password {
+        print_info("Logging in to Matrix...");
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|e| ChannelSetupError::Network(format!("HTTP client error: {}", e)))?;
+
+        // Fresh login — always get a new device ID. The old device session
+        // (if any) is orphaned on the homeserver but that's expected when
+        // explicitly re-providing credentials.
+        let login_body = serde_json::json!({
+            "type": "m.login.password",
+            "identifier": {
+                "type": "m.id.user",
+                "user": username,
+            },
+            "password": password.expose_secret(),
+            "initial_device_display_name": "IronClaw",
+        });
+
+        let login_url = format!("{}/_matrix/client/v3/login", homeserver);
+
+        let resp = http.post(&login_url).json(&login_body).send().await
+            .map_err(|e| ChannelSetupError::Network(format!("Login request failed: {}", e)))?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            let body = resp.text().await.unwrap_or_default();
+            print_error(&format!("Login failed: {}", body));
+            return Err(ChannelSetupError::Validation(format!("Login failed: {}", body)));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ChannelSetupError::Network(format!("Login returned {}: {}", status, body)));
+        }
+
+        let login_resp: serde_json::Value = resp.json().await
+            .map_err(|e| ChannelSetupError::Network(format!("Failed to parse login response: {}", e)))?;
+
+        // Login succeeded — now wipe the SDK store so the new device starts
+        // with clean crypto state. Deferred to after login so that a failed
+        // login attempt doesn't destroy existing E2EE keys.
+        let sdk_store_path = crate::bootstrap::ironclaw_base_dir().join("matrix-sdk");
+        if sdk_store_path.exists() {
+            print_info("Wiping SDK store for fresh device session...");
+            if let Err(e) = std::fs::remove_dir_all(&sdk_store_path) {
+                print_error(&format!("Failed to wipe SDK store: {}", e));
+            }
+        }
+        // Write a `.fresh` marker so the startup sync loop knows to prime
+        // (discard backfill) instead of resuming from a stored position.
+        // The channel startup removes this marker after the priming sync.
+        if let Err(e) = std::fs::create_dir_all(&sdk_store_path) {
+            print_error(&format!("Failed to recreate SDK store dir: {}", e));
+        }
+        if let Err(e) = std::fs::write(sdk_store_path.join(".fresh"), b"") {
+            print_error(&format!("Failed to write .fresh marker: {}", e));
+        }
+
+        let token = login_resp
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                ChannelSetupError::Network("Login response missing access_token".to_string())
+            })?;
+        let device_id = login_resp
+            .get("device_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                ChannelSetupError::Network("Login response missing device_id".to_string())
+            })?;
+        let uid = login_resp
+            .get("user_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                ChannelSetupError::Network("Login response missing user_id".to_string())
+            })?;
+
+        print_success(&format!("Logged in as {} (device: {})", uid, device_id));
+
+        let token_secret = SecretString::from(token.to_string());
+        secrets.save_secret("matrix_access_token", &token_secret).await?;
+
+        // Persist device_id so start() reuses this session on restart.
+        let device_secret = SecretString::from(device_id.to_string());
+        secrets.save_secret("matrix_device_id", &device_secret).await?;
+
+        print_success("Credentials saved to encrypted secrets database.");
+        uid.to_string()
+    } else {
+        print_info("Keeping existing credentials.");
+        "(unchanged)".to_string()
+    };
+
+    // ── Optional settings — all default to existing values ───────────────────
+
+    println!();
+
+    let allow_from = match existing.allow_from {
+        Some(current) if !current.is_empty() =>
+            prompt_with_default(
+                "Allow from (comma-separated Matrix user IDs, '*' for anyone, empty for pairing)",
+                current,
+            )?,
+        _ => optional_input(
+            "Allow from (comma-separated Matrix user IDs, '*' for anyone, empty for pairing mode)",
+            Some("default: (pairing mode — unknown users get a pairing code)"),
+        )?
+        .unwrap_or_default(),
+    };
+
+    let dm_policy = match existing.dm_policy {
+        Some(current) => prompt_with_default("DM policy (open, allowlist, pairing)", current)?,
+        None => optional_input(
+            "DM policy (open, allowlist, pairing)",
+            Some("default: pairing"),
+        )?
+        .unwrap_or_else(|| "pairing".to_string()),
+    };
+
+    let owner_id = prompt_optional_with_default(
+        "Owner user ID (restrict to single Matrix user ID, e.g. @you:matrix.org)",
+        existing.owner_id,
+    )?
+    .filter(|s| !s.is_empty());
+
+    let display_name = prompt_optional_with_default(
+        "Bot display name in Matrix",
+        existing.display_name,
+    )?
+    .filter(|s| !s.is_empty());
+
+    // ── Summary ───────────────────────────────────────────────────────────────
+
+    println!();
+    print_success(&format!("Matrix channel configured for {}", homeserver));
+    if bot_user_id != "(unchanged)" {
+        print_info(&format!("Bot: {}", bot_user_id));
+    }
+    print_info(&format!("DM policy: {}", dm_policy));
+    if !allow_from.is_empty() {
+        print_info(&format!("Allow from: {}", allow_from));
+    }
+
+    Ok(MatrixSetupResult {
+        enabled: true,
+        homeserver,
+        username,
+        allow_from,
+        dm_policy,
+        owner_id,
+        poll_interval_secs: None,
+        auto_join: true,
+        display_name,
+    })
+}
+
 /// Result of Signal channel setup.
 #[derive(Debug, Clone)]
 pub struct SignalSetupResult {

@@ -54,7 +54,7 @@ pub use self::agent::AgentConfig;
 pub use self::builder::BuilderModeConfig;
 pub use self::channels::{
     ChannelsConfig, CliConfig, DEFAULT_GATEWAY_PORT, GatewayConfig, GatewayOidcConfig, HttpConfig,
-    SignalConfig, TuiChannelConfig,
+    MatrixConfig, SignalConfig, TuiChannelConfig,
 };
 pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsql_path};
 pub use self::embeddings::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig};
@@ -187,6 +187,7 @@ impl Config {
                 gateway: None,
                 signal: None,
                 tui: None,
+                matrix: None,
                 wasm_channels_dir: std::env::temp_dir().join("ironclaw-test-channels"),
                 wasm_channels_enabled: false,
                 configured_wasm_channels: Vec::new(),
@@ -388,12 +389,34 @@ impl Config {
         Ok(())
     }
 
-    /// Re-resolve only the LLM config after credential injection.
+    /// Re-resolve channel config after secrets have been injected.
     ///
-    /// Called by `AppBuilder::init_secrets()` after injecting API keys into
-    /// the env overlay. Only rebuilds `self.llm` — all other config fields
-    /// are unaffected, preserving values from the initial config load (or
-    /// from `Config::for_testing()` in test mode).
+    /// Called in Phase 2 after `inject_llm_keys_from_secrets` so that channel
+    /// tokens stored in the encrypted DB (e.g. `matrix_access_token`) are
+    /// available when `ChannelsConfig::resolve` reads from the env overlay.
+    pub async fn re_resolve_channels(
+        &mut self,
+        store: Option<&(dyn crate::db::SettingsStore + Sync)>,
+        user_id: &str,
+        toml_path: Option<&std::path::Path>,
+    ) -> Result<(), ConfigError> {
+        // TOML as base, then DB on top (DB wins) — same layering as
+        // re_resolve_llm_with_secrets.
+        let settings = if let Some(store) = store {
+            let mut s = Settings::default();
+            Self::apply_toml_overlay(&mut s, toml_path)?;
+            if let Ok(map) = store.get_all_settings(user_id).await {
+                let db_settings = Settings::from_db_map(&map);
+                s.merge_from(&db_settings);
+            }
+            s
+        } else {
+            Settings::default()
+        };
+        self.channels = ChannelsConfig::resolve(&settings, &self.owner_id)?;
+        Ok(())
+    }
+
     pub async fn re_resolve_llm(
         &mut self,
         store: Option<&(dyn crate::db::SettingsStore + Sync)>,
@@ -560,6 +583,12 @@ pub async fn inject_llm_keys_from_secrets(
     let mut mappings: Vec<(&str, &str)> = vec![
         ("llm_nearai_api_key", "NEARAI_API_KEY"),
         ("llm_anthropic_oauth_token", "ANTHROPIC_OAUTH_TOKEN"),
+        // Native channel secrets — injected from the encrypted DB so they can
+        // be set via `ironclaw onboard`, `ironclaw secret set`, or the web UI.
+        ("matrix_access_token", "MATRIX_ACCESS_TOKEN"),
+        // Device ID persisted after first login — reused so the SDK doesn't
+        // create a new device on every restart (which would orphan old sessions).
+        ("matrix_device_id", "MATRIX_DEVICE_ID"),
     ];
 
     // Dynamically discover secret->env mappings from the provider registry.

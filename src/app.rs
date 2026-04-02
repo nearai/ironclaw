@@ -325,16 +325,25 @@ impl AppBuilder {
                     .await;
             }
 
-            // Inject LLM API keys from encrypted storage
+            // Inject LLM API keys + channel tokens from encrypted storage.
             crate::config::inject_llm_keys_from_secrets(secrets.as_ref(), &self.config.owner_id)
                 .await;
 
-            // Re-resolve only the LLM config with newly available keys,
-            // including keys hydrated from the secrets store.
+            // Re-resolve LLM and channel config with newly available secrets.
             let settings_store: Option<&(dyn crate::db::SettingsStore + Sync)> =
                 self.db.as_ref().map(|db| db.as_ref() as _);
             let toml_path = self.toml_path.as_deref();
             let owner_id = self.config.owner_id.clone();
+
+            // Re-resolve channel config with newly injected secrets.
+            if let Err(e) = self
+                .config
+                .re_resolve_channels(settings_store, &owner_id, toml_path)
+                .await
+            {
+                tracing::warn!("Failed to re-resolve channel config after secret injection: {e}");
+            }
+
             // is_operator=true: owner_id is the operator/admin scope.
             if let Err(e) = self
                 .config
