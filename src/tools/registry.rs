@@ -25,7 +25,7 @@ use crate::tools::builtin::{
     ToolUpgradeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain};
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolDiscoverySummary, ToolDomain};
 use crate::tools::wasm::{
     Capabilities, OAuthRefreshConfig, ResourceLimits, SharedCredentialRegistry, WasmError,
     WasmStorageError, WasmToolRuntime, WasmToolStore, WasmToolWrapper,
@@ -334,15 +334,37 @@ impl ToolRegistry {
         tracing::debug!("Registered 5 development tools");
     }
 
-    /// Register memory tools with a workspace.
+    /// Register memory tools with a workspace resolver.
+    ///
+    /// Memory tools require a workspace resolver for persistence. Call this after
+    /// `register_builtin_tools()` if you have a workspace available.
+    pub fn register_memory_tools_with_resolver(
+        &self,
+        resolver: Arc<dyn crate::tools::builtin::memory::WorkspaceResolver>,
+    ) {
+        self.register_sync(Arc::new(MemorySearchTool::new(Arc::clone(&resolver))));
+        self.register_sync(Arc::new(MemoryWriteTool::new(Arc::clone(&resolver))));
+        self.register_sync(Arc::new(MemoryReadTool::new(Arc::clone(&resolver))));
+        self.register_sync(Arc::new(MemoryTreeTool::new(resolver)));
+
+        tracing::debug!("Registered 4 memory tools");
+    }
+
+    /// Register memory tools with a fixed workspace (backward compatibility).
     ///
     /// Memory tools require a workspace for persistence. Call this after
     /// `register_builtin_tools()` if you have a workspace available.
     pub fn register_memory_tools(&self, workspace: Arc<Workspace>) {
-        self.register_sync(Arc::new(MemorySearchTool::new(Arc::clone(&workspace))));
-        self.register_sync(Arc::new(MemoryWriteTool::new(Arc::clone(&workspace))));
-        self.register_sync(Arc::new(MemoryReadTool::new(Arc::clone(&workspace))));
-        self.register_sync(Arc::new(MemoryTreeTool::new(workspace)));
+        self.register_sync(Arc::new(MemorySearchTool::from_workspace(Arc::clone(
+            &workspace,
+        ))));
+        self.register_sync(Arc::new(MemoryWriteTool::from_workspace(Arc::clone(
+            &workspace,
+        ))));
+        self.register_sync(Arc::new(MemoryReadTool::from_workspace(Arc::clone(
+            &workspace,
+        ))));
+        self.register_sync(Arc::new(MemoryTreeTool::from_workspace(workspace)));
 
         tracing::debug!("Registered 4 memory tools");
     }
@@ -361,7 +383,7 @@ impl ToolRegistry {
         job_manager: Option<Arc<ContainerJobManager>>,
         store: Option<Arc<dyn Database>>,
         job_event_tx: Option<
-            tokio::sync::broadcast::Sender<(uuid::Uuid, crate::channels::web::types::SseEvent)>,
+            tokio::sync::broadcast::Sender<(uuid::Uuid, String, ironclaw_common::AppEvent)>,
         >,
         inject_tx: Option<tokio::sync::mpsc::Sender<crate::channels::IncomingMessage>>,
         prompt_queue: Option<PromptQueue>,
@@ -652,6 +674,9 @@ impl ToolRegistry {
         if let Some(s) = reg.schema {
             wrapper = wrapper.with_schema(s);
         }
+        if let Some(summary) = reg.discovery_summary {
+            wrapper = wrapper.with_discovery_summary(summary);
+        }
         if let Some(store) = reg.secrets_store {
             wrapper = wrapper.with_secrets_store(store);
         }
@@ -726,6 +751,7 @@ impl ToolRegistry {
             limits: None,
             description: Some(&tool_with_binary.tool.description),
             schema: Some(tool_with_binary.tool.parameters_schema.clone()),
+            discovery_summary: None,
             secrets_store: self.secrets_store.clone(),
             oauth_refresh: None,
         })
@@ -769,6 +795,8 @@ pub struct WasmToolRegistration<'a> {
     pub description: Option<&'a str>,
     /// Optional parameter schema override.
     pub schema: Option<serde_json::Value>,
+    /// Optional curated discovery guidance for `tool_info(detail: "summary")`.
+    pub discovery_summary: Option<ToolDiscoverySummary>,
     /// Secrets store for credential injection at request time.
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.

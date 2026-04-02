@@ -1,6 +1,7 @@
 {
   "version": "0.2.0",
   "wit_version": "0.3.0",
+  "description": "Read and send messages from a Telegram user account. Supports contacts, chat history, message search, sending, forwarding, and deletion via encrypted MTProto.",
   "http": {
     "allowlist": [
       {
@@ -35,7 +36,7 @@
       },
       {
         "name": "telegram_api_hash",
-        "prompt": "Telegram API Hash"
+        "prompt": "Telegram API Hash (from my.telegram.org/apps — alphanumeric string)"
       }
     ]
   }

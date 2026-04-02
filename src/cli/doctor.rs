@@ -95,7 +95,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
 
     check(
         "Routines config",
-        check_routines_config(),
+        check_routines_config(&settings),
         &mut passed,
         &mut failed,
         &mut skipped,
@@ -457,8 +457,8 @@ fn check_embeddings(settings: &Settings) -> CheckResult {
 
 // ── Routines config ─────────────────────────────────────────
 
-fn check_routines_config() -> CheckResult {
-    match crate::config::RoutineConfig::resolve() {
+fn check_routines_config(settings: &Settings) -> CheckResult {
+    match crate::config::RoutineConfig::resolve(settings) {
         Ok(config) => {
             if config.enabled {
                 CheckResult::Pass(format!(
@@ -797,7 +797,8 @@ mod tests {
 
     #[test]
     fn check_routines_config_does_not_panic() {
-        let result = check_routines_config();
+        let settings = Settings::default();
+        let result = check_routines_config(&settings);
         match result {
             CheckResult::Pass(_) | CheckResult::Fail(_) | CheckResult::Skip(_) => {}
         }
@@ -926,7 +927,8 @@ mod tests {
         unsafe {
             std::env::remove_var("ROUTINES_ENABLED");
         }
-        match check_routines_config() {
+        let settings = Settings::default();
+        match check_routines_config(&settings) {
             CheckResult::Pass(msg) => {
                 assert!(
                     msg.contains("enabled"),

@@ -17,14 +17,14 @@ use uuid::Uuid;
 
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
-use crate::channels::web::types::SseEvent;
 use crate::context::{ContextManager, JobContext, JobState};
 use crate::db::Database;
 use crate::history::SandboxJobRecord;
 use crate::orchestrator::auth::CredentialGrant;
-use crate::orchestrator::job_manager::{ContainerJobManager, JobMode};
+use crate::orchestrator::job_manager::{ContainerJobManager, JobCreationParams, JobMode};
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
+use ironclaw_common::AppEvent;
 
 /// Lazy scheduler reference, filled after Agent::new creates the Scheduler.
 ///
@@ -85,7 +85,7 @@ pub struct CreateJobTool {
     job_manager: Option<Arc<ContainerJobManager>>,
     store: Option<Arc<dyn Database>>,
     /// Broadcast sender for job events (used to subscribe a monitor).
-    event_tx: Option<tokio::sync::broadcast::Sender<(Uuid, SseEvent)>>,
+    event_tx: Option<tokio::sync::broadcast::Sender<(Uuid, String, AppEvent)>>,
     /// Injection channel for pushing messages into the agent loop.
     inject_tx: Option<tokio::sync::mpsc::Sender<IncomingMessage>>,
     /// Encrypted secrets store for validating credential grants.
@@ -120,7 +120,7 @@ impl CreateJobTool {
     /// monitor that forwards Claude Code output to the main agent loop.
     pub fn with_monitor_deps(
         mut self,
-        event_tx: tokio::sync::broadcast::Sender<(Uuid, SseEvent)>,
+        event_tx: tokio::sync::broadcast::Sender<(Uuid, String, AppEvent)>,
         inject_tx: tokio::sync::mpsc::Sender<IncomingMessage>,
     ) -> Self {
         self.event_tx = Some(event_tx);
@@ -362,8 +362,7 @@ impl CreateJobTool {
         explicit_dir: Option<PathBuf>,
         wait: bool,
         mode: JobMode,
-        credential_grants: Vec<CredentialGrant>,
-        acp_agent: Option<crate::config::acp::AcpAgentConfig>,
+        params: JobCreationParams,
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
@@ -378,7 +377,7 @@ impl CreateJobTool {
         let project_dir_str = project_dir.display().to_string();
 
         // Serialize credential grants so restarts can reload them.
-        let credential_grants_json = match serde_json::to_string(&credential_grants) {
+        let credential_grants_json = match serde_json::to_string(&params.credential_grants) {
             Ok(json) => json,
             Err(e) => {
                 tracing::warn!(
@@ -423,7 +422,7 @@ impl CreateJobTool {
         {
             let job_id_copy = job_id;
             let mode_str = if mode == JobMode::Acp
-                && let Some(ref agent) = acp_agent
+                && let Some(ref agent) = params.acp_agent
             {
                 format!("acp:{}", agent.name)
             } else {
@@ -438,14 +437,7 @@ impl CreateJobTool {
 
         // Create the container job with the pre-determined job_id.
         let _token = jm
-            .create_job(
-                job_id,
-                task,
-                Some(project_dir),
-                mode,
-                credential_grants,
-                acp_agent,
-            )
+            .create_job(job_id, task, Some(project_dir), mode, params)
             .await
             .map_err(|e| {
                 self.update_status(
@@ -869,6 +861,18 @@ impl Tool for CreateJobTool {
                                         secrets store (via 'ironclaw tool auth' or web UI). Example: \
                                         {\"github_token\": \"GITHUB_TOKEN\", \"npm_token\": \"NPM_TOKEN\"}",
                         "additionalProperties": { "type": "string" }
+                    },
+                    "mcp_servers": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional list of MCP server names to make available in the container. \
+                                        If omitted, the full master config is mounted. If empty, no MCP servers \
+                                        are available. Only effective when MCP_PER_JOB_ENABLED=true."
+                    },
+                    "max_iterations": {
+                        "type": "integer",
+                        "description": "Maximum number of agent loop iterations for the worker. \
+                                        Defaults to 50, capped at 500. Use lower values for simple tasks."
                     }
                 },
                 "required": ["title", "description"]
@@ -955,6 +959,29 @@ impl Tool for CreateJobTool {
             // Parse and validate credential grants
             let credential_grants = self.parse_credentials(&params, &ctx.user_id).await?;
 
+            // Parse optional MCP server filter and iteration cap.
+            // Validate types: warn if present but wrong type so callers know why it was ignored.
+            let mcp_servers: Option<Vec<String>> = match params.get("mcp_servers") {
+                Some(v) if v.is_array() => v.as_array().map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                }),
+                Some(_) => {
+                    tracing::warn!("mcp_servers parameter is not an array — ignoring");
+                    None
+                }
+                None => None,
+            };
+            let max_iterations: Option<u32> = match params.get("max_iterations") {
+                Some(v) if v.is_u64() || v.is_i64() => v.as_u64().map(|n| n.clamp(1, 500) as u32),
+                Some(_) => {
+                    tracing::warn!("max_iterations parameter is not a number — ignoring");
+                    None
+                }
+                None => None,
+            };
+
             // Combine title and description into the task prompt for the sub-agent.
             let task = format!("{}\n\n{}", title, description);
             self.execute_sandbox(
@@ -962,8 +989,12 @@ impl Tool for CreateJobTool {
                 explicit_dir,
                 wait,
                 mode,
-                credential_grants,
-                acp_agent,
+                JobCreationParams {
+                    credential_grants,
+                    mcp_servers,
+                    max_iterations,
+                    acp_agent,
+                },
                 ctx,
             )
             .await
@@ -1622,8 +1653,7 @@ mod tests {
                 None,
                 false,
                 JobMode::Worker,
-                vec![],
-                None,
+                JobCreationParams::default(),
                 &JobContext::default(),
             )
             .await;

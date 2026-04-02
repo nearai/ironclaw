@@ -11,10 +11,13 @@ use uuid::Uuid;
 
 use crate::error::WorkspaceError;
 
-use crate::workspace::document::{MemoryChunk, MemoryDocument, WorkspaceEntry};
+use crate::workspace::document::{
+    DocumentVersion, MemoryChunk, MemoryDocument, VersionSummary, WorkspaceEntry,
+};
 use crate::workspace::search::{RankedResult, SearchConfig, SearchResult, fuse_results};
 
 /// Database repository for workspace operations.
+#[derive(Clone)]
 pub struct Repository {
     pool: Pool,
 }
@@ -700,5 +703,234 @@ impl Repository {
             all_entries.extend(self.list_directory(uid, agent_id, directory).await?);
         }
         Ok(crate::workspace::merge_workspace_entries(all_entries))
+    }
+
+    // ==================== Metadata ====================
+
+    pub async fn update_document_metadata(
+        &self,
+        id: Uuid,
+        metadata: &serde_json::Value,
+    ) -> Result<(), WorkspaceError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE memory_documents SET metadata = $2, updated_at = NOW() WHERE id = $1",
+            &[&id, &metadata],
+        )
+        .await
+        .map_err(|e| WorkspaceError::SearchFailed {
+            reason: format!("Failed to update metadata: {e}"),
+        })?;
+        Ok(())
+    }
+
+    pub async fn find_config_documents(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+    ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, user_id, agent_id, path, content,
+                       created_at, updated_at, metadata
+                FROM memory_documents
+                WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2
+                  AND (path LIKE '%/.config' OR path = '.config')
+                ORDER BY path
+                "#,
+                &[&user_id, &agent_id],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to find config documents: {e}"),
+            })?;
+        Ok(rows.iter().map(|r| self.row_to_document(r)).collect())
+    }
+
+    // ==================== Versioning ====================
+
+    pub async fn save_version(
+        &self,
+        document_id: Uuid,
+        content: &str,
+        content_hash: &str,
+        changed_by: Option<&str>,
+    ) -> Result<i32, WorkspaceError> {
+        let mut conn = self.conn().await?;
+
+        // Use a transaction to prevent concurrent writers from allocating
+        // the same version number. The SELECT FOR UPDATE locks the existing
+        // version rows for this document, serializing concurrent inserts.
+        let tx = conn
+            .transaction()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to start transaction: {e}"),
+            })?;
+
+        // Lock the parent document row to serialize concurrent version writes.
+        // We lock memory_documents (which always exists) instead of
+        // memory_document_versions (which may have no rows yet — FOR UPDATE
+        // on an empty result set locks nothing).
+        tx.execute(
+            "SELECT 1 FROM memory_documents WHERE id = $1 FOR UPDATE",
+            &[&document_id],
+        )
+        .await
+        .map_err(|e| WorkspaceError::SearchFailed {
+            reason: format!("Failed to lock document for versioning: {e}"),
+        })?;
+
+        let row = tx
+            .query_one(
+                "SELECT COALESCE(MAX(version), 0) + 1 AS next_version \
+                 FROM memory_document_versions WHERE document_id = $1",
+                &[&document_id],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to get next version number: {e}"),
+            })?;
+        let next_version: i32 = row.get(0);
+
+        tx.execute(
+            r#"
+            INSERT INTO memory_document_versions
+                (id, document_id, version, content, content_hash, changed_by)
+            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)
+            "#,
+            &[
+                &document_id,
+                &next_version,
+                &content,
+                &content_hash,
+                &changed_by,
+            ],
+        )
+        .await
+        .map_err(|e| WorkspaceError::SearchFailed {
+            reason: format!("Failed to save version: {e}"),
+        })?;
+
+        tx.commit()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to commit version: {e}"),
+            })?;
+
+        Ok(next_version)
+    }
+
+    pub async fn get_version(
+        &self,
+        document_id: Uuid,
+        version: i32,
+    ) -> Result<DocumentVersion, WorkspaceError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT id, document_id, version, content, content_hash,
+                       created_at, changed_by
+                FROM memory_document_versions
+                WHERE document_id = $1 AND version = $2
+                "#,
+                &[&document_id, &version],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to get version: {e}"),
+            })?
+            .ok_or(WorkspaceError::VersionNotFound {
+                document_id,
+                version,
+            })?;
+        Ok(DocumentVersion {
+            id: row.get(0),
+            document_id: row.get(1),
+            version: row.get(2),
+            content: row.get(3),
+            content_hash: row.get(4),
+            created_at: row.get(5),
+            changed_by: row.get(6),
+        })
+    }
+
+    pub async fn list_versions(
+        &self,
+        document_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<VersionSummary>, WorkspaceError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT version, content_hash, created_at, changed_by
+                FROM memory_document_versions
+                WHERE document_id = $1
+                ORDER BY version DESC
+                LIMIT $2
+                "#,
+                &[&document_id, &limit],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to list versions: {e}"),
+            })?;
+        Ok(rows
+            .iter()
+            .map(|row| VersionSummary {
+                version: row.get(0),
+                content_hash: row.get(1),
+                created_at: row.get(2),
+                changed_by: row.get(3),
+            })
+            .collect())
+    }
+
+    pub async fn get_latest_version_number(
+        &self,
+        document_id: Uuid,
+    ) -> Result<Option<i32>, WorkspaceError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_one(
+                "SELECT MAX(version) FROM memory_document_versions WHERE document_id = $1",
+                &[&document_id],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to get latest version number: {e}"),
+            })?;
+        Ok(row.get(0))
+    }
+
+    pub async fn prune_versions(
+        &self,
+        document_id: Uuid,
+        keep_count: i32,
+    ) -> Result<u64, WorkspaceError> {
+        let conn = self.conn().await?;
+        let result = conn
+            .execute(
+                r#"
+                DELETE FROM memory_document_versions
+                WHERE document_id = $1
+                  AND version NOT IN (
+                      SELECT version FROM memory_document_versions
+                      WHERE document_id = $1
+                      ORDER BY version DESC
+                      LIMIT $2
+                  )
+                "#,
+                &[&document_id, &(keep_count as i64)],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to prune versions: {e}"),
+            })?;
+        Ok(result)
     }
 }

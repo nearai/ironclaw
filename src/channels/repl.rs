@@ -75,6 +75,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/suggest",
     "/thread",
     "/resume",
+    "/reasoning",
 ];
 
 /// Rustyline helper for slash-command tab completion.
@@ -430,6 +431,18 @@ impl ReplChannel {
             let _ = execute!(stderr, terminal::Clear(terminal::ClearType::FromCursorDown));
         }
     }
+
+    async fn finish_single_message_turn(&self) {
+        if self.single_message.is_none() {
+            return;
+        }
+
+        let tx = self.msg_tx.lock().ok().and_then(|mut guard| guard.take());
+        if let Some(tx) = tx {
+            let msg = IncomingMessage::new("repl", &self.user_id, "/quit");
+            let _ = tx.send(msg).await;
+        }
+    }
 }
 
 impl Default for ReplChannel {
@@ -479,8 +492,12 @@ impl Channel for ReplChannel {
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = mpsc::channel(32);
-        // Store tx so send_status can inject approval responses directly
-        if let Ok(mut guard) = self.msg_tx.lock() {
+        // Store tx so send_status can inject approval responses directly.
+        // Skip for single-message mode — no interactive approval is needed
+        // and the extra sender would keep the stream open after /quit.
+        if self.single_message.is_none()
+            && let Ok(mut guard) = self.msg_tx.lock()
+        {
             *guard = Some(tx.clone());
         }
         let single_message = self.single_message.clone();
@@ -495,11 +512,10 @@ impl Channel for ReplChannel {
 
             // Single message mode: send it and return
             if let Some(msg) = single_message {
-                let incoming = IncomingMessage::new("repl", &user_id, &msg).with_timezone(&sys_tz);
+                let incoming = IncomingMessage::new("repl", &user_id, &msg)
+                    .with_metadata(serde_json::json!({ "single_message_mode": true }))
+                    .with_timezone(&sys_tz);
                 let _ = tx.blocking_send(incoming);
-                // Ensure the agent exits after handling exactly one turn in -m mode,
-                // even when other channels (gateway/http) are enabled.
-                let _ = tx.blocking_send(IncomingMessage::new("repl", &user_id, "/quit"));
                 return;
             }
 
@@ -662,6 +678,7 @@ impl Channel for ReplChannel {
             println!();
             println!();
             self.stdin_locked.store(false, Ordering::Relaxed);
+            self.finish_single_message_turn().await;
             return Ok(());
         }
 
@@ -680,6 +697,7 @@ impl Channel for ReplChannel {
         println!();
         // Unlock stdin so readline can resume
         self.stdin_locked.store(false, Ordering::Relaxed);
+        self.finish_single_message_turn().await;
         Ok(())
     }
 
@@ -779,6 +797,7 @@ impl Channel for ReplChannel {
                 let msg_tx = Arc::clone(&self.msg_tx);
                 let user_id = self.user_id.clone();
                 let lock_flag = Arc::clone(&self.stdin_locked);
+                let single_message_mode = self.single_message.is_some();
                 tokio::task::spawn_blocking(move || {
                     let action = run_approval_selector(allow_always).unwrap_or("n");
                     // Unlock stdin so readline can resume after approval
@@ -787,7 +806,12 @@ impl Channel for ReplChannel {
                         return;
                     };
                     if let Some(tx) = guard.as_ref() {
-                        let msg = IncomingMessage::new("repl", &user_id, action);
+                        let msg = if single_message_mode {
+                            IncomingMessage::new("repl", &user_id, action)
+                                .with_metadata(serde_json::json!({ "single_message_mode": true }))
+                        } else {
+                            IncomingMessage::new("repl", &user_id, action)
+                        };
                         let _ = tx.blocking_send(msg);
                     }
                 });
@@ -841,6 +865,19 @@ impl Channel for ReplChannel {
             StatusUpdate::Suggestions { .. } => {
                 // Suggestions are only rendered by the web gateway
             }
+            StatusUpdate::ReasoningUpdate {
+                narrative,
+                decisions,
+            } => {
+                if !narrative.is_empty() {
+                    let display = truncate_for_preview(&narrative, CLI_STATUS_MAX);
+                    eprintln!("  \x1b[94m\u{25B6} {display}\x1b[0m");
+                }
+                for d in &decisions {
+                    let display = truncate_for_preview(&d.rationale, CLI_STATUS_MAX);
+                    eprintln!("    \x1b[90m\u{2192} {}: {display}\x1b[0m", d.tool_name);
+                }
+            }
             StatusUpdate::TurnCost { .. } => {
                 // Cost display is handled by the TUI channel
             }
@@ -875,25 +912,33 @@ impl Channel for ReplChannel {
 #[cfg(test)]
 mod tests {
     use futures::StreamExt;
+    use tokio::time::{Duration, timeout};
 
     use super::*;
 
+    /// Regression: single-message mode must close the stream after the one
+    /// message so callers (and tests) don't hang forever.
     #[tokio::test]
-    async fn single_message_mode_sends_message_then_quit() {
+    async fn single_message_mode_sends_message_and_closes_stream() {
         let repl = ReplChannel::with_message("hi".to_string());
         let mut stream = repl.start().await.expect("repl start should succeed");
 
-        let first = stream.next().await.expect("first message missing");
+        let first = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("timed out waiting for first message")
+            .expect("first message missing");
         assert_eq!(first.channel, "repl");
         assert_eq!(first.content, "hi");
 
-        let second = stream.next().await.expect("quit message missing");
-        assert_eq!(second.channel, "repl");
-        assert_eq!(second.content, "/quit");
-
+        // The spawned thread sent the message and returned, dropping its
+        // sender. Because we skip storing a clone in msg_tx for single-
+        // message mode, the stream should close immediately.
         assert!(
-            stream.next().await.is_none(),
-            "stream should end after /quit"
+            timeout(Duration::from_secs(1), stream.next())
+                .await
+                .expect("timed out waiting for stream to close")
+                .is_none(),
+            "stream should end after the single message"
         );
     }
 }

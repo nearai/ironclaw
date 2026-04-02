@@ -31,8 +31,8 @@ use chrono_tz::Tz;
 use tokio::sync::mpsc;
 
 use crate::channels::OutgoingResponse;
-use crate::db::Database;
 use crate::llm::{ChatMessage, CompletionRequest, LlmProvider, Reasoning};
+use crate::tenant::AdminScope;
 use crate::workspace::Workspace;
 use crate::workspace::hygiene::HygieneConfig;
 
@@ -57,6 +57,9 @@ pub struct HeartbeatConfig {
     pub quiet_hours_end: Option<u32>,
     /// Timezone for fire_at and quiet hours evaluation (IANA name).
     pub timezone: Option<String>,
+    /// When true, cycle through all users with routines instead of
+    /// running heartbeat for a single user. Requires a database store.
+    pub multi_tenant: bool,
 }
 
 impl Default for HeartbeatConfig {
@@ -71,6 +74,7 @@ impl Default for HeartbeatConfig {
             quiet_hours_start: None,
             quiet_hours_end: None,
             timezone: None,
+            multi_tenant: false,
         }
     }
 }
@@ -178,7 +182,7 @@ pub struct HeartbeatRunner {
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
-    store: Option<Arc<dyn Database>>,
+    store: Option<AdminScope>,
     consecutive_failures: u32,
 }
 
@@ -207,8 +211,8 @@ impl HeartbeatRunner {
         self
     }
 
-    /// Set the database store for persistent heartbeat conversations.
-    pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
+    /// Set the admin-scoped database store for persistent heartbeat conversations.
+    pub fn with_store(mut self, store: AdminScope) -> Self {
         self.store = Some(store);
         self
     }
@@ -272,8 +276,8 @@ impl HeartbeatRunner {
                         .await;
                 if report.had_work() {
                     tracing::info!(
-                        daily_logs_deleted = report.daily_logs_deleted,
-                        conversation_docs_deleted = report.conversation_docs_deleted,
+                        directories_cleaned = ?report.directories_cleaned,
+                        versions_pruned = report.versions_pruned,
                         "heartbeat: memory hygiene deleted stale documents"
                     );
                 }
@@ -493,7 +497,7 @@ pub fn spawn_heartbeat(
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
-    store: Option<Arc<dyn Database>>,
+    store: Option<AdminScope>,
 ) -> tokio::task::JoinHandle<()> {
     let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm);
     if let Some(tx) = response_tx {
@@ -506,6 +510,181 @@ pub fn spawn_heartbeat(
     tokio::spawn(async move {
         runner.run().await;
     })
+}
+
+/// Spawn a multi-user heartbeat runner that cycles through all users who
+/// have routines (enabled or not). Each tick, it queries the DB for distinct
+/// user_ids, creates a per-user workspace, and runs a heartbeat check for
+/// each user concurrently. Per-user failure counts are tracked independently.
+pub fn spawn_multi_user_heartbeat(
+    config: HeartbeatConfig,
+    hygiene_config: HygieneConfig,
+    llm: Arc<dyn LlmProvider>,
+    response_tx: Option<mpsc::Sender<OutgoingResponse>>,
+    store: AdminScope,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if !config.enabled {
+            tracing::info!("Multi-user heartbeat is disabled");
+            return;
+        }
+
+        let mut tick_interval = if config.fire_at.is_none() {
+            let mut iv = tokio::time::interval(config.interval);
+            iv.tick().await; // skip immediate tick
+            Some(iv)
+        } else {
+            None
+        };
+
+        // Track consecutive failures per user so we can disable heartbeat
+        // for persistently-failing users (same semantics as single-user mode).
+        let mut user_failures: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+
+        tracing::info!("Starting multi-user heartbeat loop");
+
+        loop {
+            if let Some(fire_at) = config.fire_at {
+                let sleep_dur = duration_until_next_fire(fire_at, config.resolved_tz());
+                tokio::time::sleep(sleep_dur).await;
+            } else if let Some(ref mut iv) = tick_interval {
+                iv.tick().await;
+            }
+
+            if config.is_quiet_hours() {
+                continue;
+            }
+
+            // Get distinct user_ids from routines
+            let user_ids = match store.list_all_routines().await {
+                Ok(routines) => {
+                    let mut ids: Vec<String> = routines
+                        .iter()
+                        .map(|r| r.user_id.clone())
+                        .collect::<std::collections::HashSet<_>>()
+                        .into_iter()
+                        .collect();
+                    ids.sort();
+                    ids
+                }
+                Err(e) => {
+                    tracing::error!("Multi-user heartbeat: failed to list routines: {}", e);
+                    continue;
+                }
+            };
+
+            // Run user heartbeats (and hygiene) concurrently so one slow LLM
+            // call doesn't block others. Cap concurrency to avoid flooding the
+            // LLM provider. Hygiene runs inside the same JoinSet so it is
+            // tracked and bounded by the same concurrency cap.
+            const MAX_CONCURRENT_HEARTBEATS: usize = 8;
+            let mut join_set = tokio::task::JoinSet::new();
+
+            for user_id in &user_ids {
+                // Skip users that have exceeded max_failures
+                let failures = user_failures.get(user_id).copied().unwrap_or(0);
+                if failures >= config.max_failures {
+                    continue;
+                }
+
+                let workspace = Arc::new(Workspace::new_with_db(user_id, Arc::clone(store.db())));
+
+                // Drain completed tasks to stay within the concurrency cap.
+                while join_set.len() >= MAX_CONCURRENT_HEARTBEATS {
+                    if let Some(join_result) = join_set.join_next().await {
+                        collect_heartbeat_result(join_result, &mut user_failures, &config);
+                    }
+                }
+
+                let uid = user_id.clone();
+                // In multi-tenant mode, clear notify_user_id so that
+                // HeartbeatRunner::send_notification falls back to
+                // workspace.user_id() — each user's heartbeat should persist
+                // and notify that user, not the shared config target.
+                let mut cfg = config.clone();
+                cfg.notify_user_id = None;
+                let hyg = hygiene_config.clone();
+                let llm_clone = llm.clone();
+                let tx = response_tx.clone();
+                let admin = store.clone();
+
+                join_set.spawn(async move {
+                    // Run memory hygiene per user (same as single-user heartbeat)
+                    // inside the tracked task so concurrency is bounded.
+                    let report = crate::workspace::hygiene::run_if_due(&workspace, &hyg).await;
+                    if report.had_work() {
+                        tracing::info!(
+                            user_id = uid,
+                            directories_cleaned = ?report.directories_cleaned,
+                            versions_pruned = report.versions_pruned,
+                            "multi-user heartbeat: memory hygiene deleted stale documents"
+                        );
+                    }
+
+                    let mut runner = HeartbeatRunner::new(cfg, hyg, workspace, llm_clone);
+                    if let Some(tx) = tx {
+                        runner = runner.with_response_channel(tx);
+                    }
+                    runner = runner.with_store(admin);
+
+                    let result = runner.check_heartbeat().await;
+                    if let HeartbeatResult::NeedsAttention(msg) = &result {
+                        runner.send_notification(msg).await;
+                    }
+                    (uid, result)
+                });
+            }
+
+            // Collect remaining results and update failure counts
+            while let Some(join_result) = join_set.join_next().await {
+                collect_heartbeat_result(join_result, &mut user_failures, &config);
+            }
+        }
+    })
+}
+
+/// Process a single JoinSet result from the multi-user heartbeat loop.
+fn collect_heartbeat_result(
+    join_result: Result<(String, HeartbeatResult), tokio::task::JoinError>,
+    user_failures: &mut std::collections::HashMap<String, u32>,
+    config: &HeartbeatConfig,
+) {
+    let (uid, result) = match join_result {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::error!("Multi-user heartbeat task panicked: {}", e);
+            return;
+        }
+    };
+    match result {
+        HeartbeatResult::Ok => {
+            tracing::trace!(user_id = uid, "Multi-user heartbeat OK");
+            user_failures.remove(&uid);
+        }
+        HeartbeatResult::NeedsAttention(_) => {
+            tracing::info!(user_id = uid, "Multi-user heartbeat needs attention");
+            user_failures.remove(&uid);
+        }
+        HeartbeatResult::Skipped => {}
+        HeartbeatResult::Failed(err) => {
+            let count = user_failures.entry(uid.clone()).or_insert(0);
+            *count += 1;
+            tracing::error!(
+                user_id = uid,
+                consecutive_failures = *count,
+                "Multi-user heartbeat failed: {}",
+                err
+            );
+            if *count >= config.max_failures {
+                tracing::error!(
+                    user_id = uid,
+                    "Multi-user heartbeat disabled for user after {} consecutive failures",
+                    count
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -726,7 +905,7 @@ mod tests {
             Arc<crate::workspace::Workspace>,
             Arc<dyn crate::llm::LlmProvider>,
             Option<tokio::sync::mpsc::Sender<crate::channels::OutgoingResponse>>,
-            Option<Arc<dyn crate::db::Database>>,
+            Option<AdminScope>,
         ) -> tokio::task::JoinHandle<()> = spawn_heartbeat;
         let _ = _fn_ptr;
     }

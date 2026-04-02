@@ -276,8 +276,33 @@ impl LlmProvider for OpenAiCodexProvider {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        // Build a reverse map so we can translate sanitized names back to originals.
+        // Only needed when sanitization actually changes a name (e.g. MCP tools with dots).
+        let name_map: std::collections::HashMap<String, String> = request
+            .tools
+            .iter()
+            .filter_map(|t| {
+                let sanitized = sanitize_tool_name(&t.name);
+                if sanitized != t.name {
+                    Some((sanitized, t.name.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         let body = self.build_request_body(&request.messages, Some(&request.tools));
-        let parsed = self.send_request(body).await?;
+        let mut parsed = self.send_request(body).await?;
+
+        // Reverse-map sanitized tool names back to originals so the caller
+        // can look them up in the tool registry.
+        if !name_map.is_empty() {
+            for tc in &mut parsed.tool_calls {
+                if let Some(original) = name_map.get(&tc.name) {
+                    tc.name = original.clone();
+                }
+            }
+        }
 
         let finish_reason = if !parsed.tool_calls.is_empty() {
             FinishReason::ToolUse
@@ -421,7 +446,7 @@ fn convert_message(msg: &ChatMessage, index: usize) -> Vec<serde_json::Value> {
                         serde_json::json!({
                             "type": "function_call",
                             "call_id": tc.id,
-                            "name": tc.name,
+                            "name": sanitize_tool_name(&tc.name),
                             "arguments": args_str,
                         })
                     })
@@ -452,6 +477,20 @@ fn convert_message(msg: &ChatMessage, index: usize) -> Vec<serde_json::Value> {
     }
 }
 
+/// Sanitize a tool name to match the OpenAI Responses API pattern `^[a-zA-Z0-9_-]+$`.
+/// Replaces any invalid character (e.g. dots in MCP tool names) with underscores.
+fn sanitize_tool_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Convert a `ToolDefinition` to Responses API tool format.
 ///
 /// Applies strict-mode schema normalization (same as OpenAI Chat Completions):
@@ -461,7 +500,7 @@ fn convert_tool_definition(tool: &ToolDefinition) -> serde_json::Value {
 
     serde_json::json!({
         "type": "function",
-        "name": tool.name,
+        "name": sanitize_tool_name(&tool.name),
         "description": tool.description,
         "parameters": normalize_schema_strict(&tool.parameters),
     })
@@ -625,6 +664,7 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                                 id: state.call_id,
                                 name: state.name,
                                 arguments,
+                                reasoning: None,
                             });
                         } else {
                             // Fallback: extract directly from the item
@@ -650,6 +690,7 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                                 id: call_id,
                                 name,
                                 arguments,
+                                reasoning: None,
                             });
                         }
                     }
@@ -727,6 +768,7 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                 id: state.call_id,
                 name: state.name,
                 arguments,
+                reasoning: None,
             });
         }
     }
@@ -822,11 +864,13 @@ mod tests {
                 id: "call_1".to_string(),
                 name: "search".to_string(),
                 arguments: serde_json::json!({"query": "test"}),
+                reasoning: None,
             },
             ToolCall {
                 id: "call_2".to_string(),
                 name: "read".to_string(),
                 arguments: serde_json::json!({"path": "/tmp"}),
+                reasoning: None,
             },
         ];
         let msg =
@@ -1087,5 +1131,96 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
         assert_eq!(parsed.tool_calls[1].id, "call_2");
         assert_eq!(parsed.tool_calls[1].name, "read_file");
         assert_eq!(parsed.finish_reason, FinishReason::ToolUse);
+    }
+
+    /// Regression test: tool names with dots (e.g. MCP tools) must be sanitized
+    /// to match OpenAI's `^[a-zA-Z0-9_-]+$` pattern.
+    #[test]
+    fn test_sanitize_tool_name_replaces_dots() {
+        assert_eq!(super::sanitize_tool_name("memory_search"), "memory_search");
+        assert_eq!(
+            super::sanitize_tool_name("mcp.server.tool"),
+            "mcp_server_tool"
+        );
+        assert_eq!(super::sanitize_tool_name("tool@v2"), "tool_v2");
+        assert_eq!(super::sanitize_tool_name("my-tool"), "my-tool");
+    }
+
+    /// Regression test: convert_tool_definition sanitizes the name.
+    #[test]
+    fn test_convert_tool_definition_sanitizes_name() {
+        let tool = ToolDefinition {
+            name: "mcp.server.search".to_string(),
+            description: "Search".to_string(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        };
+        let json = super::convert_tool_definition(&tool);
+        assert_eq!(json["name"], "mcp_server_search");
+    }
+
+    /// Regression test: function_call items sanitize tool names.
+    #[test]
+    fn test_convert_message_sanitizes_tool_call_name() {
+        let tool_calls = vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "mcp.server.search".to_string(),
+            arguments: serde_json::json!({"q": "test"}),
+            reasoning: None,
+        }];
+        let msg = ChatMessage::assistant_with_tool_calls(None, tool_calls);
+        let items = super::convert_message(&msg, 0);
+        assert_eq!(items[0]["name"], "mcp_server_search");
+    }
+
+    /// Regression: sanitized tool names in API responses must be reverse-mapped
+    /// back to original names so the tool registry can look them up.
+    #[test]
+    fn test_sanitized_name_reverse_mapping() {
+        use std::collections::HashMap;
+
+        let tools = [
+            ToolDefinition {
+                name: "mcp.server.search".to_string(),
+                description: "Search".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            },
+            ToolDefinition {
+                name: "memory_search".to_string(),
+                description: "Memory".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            },
+        ];
+
+        // Build name map (same logic as complete_with_tools)
+        let name_map: HashMap<String, String> = tools
+            .iter()
+            .filter_map(|t| {
+                let sanitized = super::sanitize_tool_name(&t.name);
+                if sanitized != t.name {
+                    Some((sanitized, t.name.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Only the MCP tool should appear (its name changed)
+        assert_eq!(name_map.len(), 1);
+        assert_eq!(
+            name_map.get("mcp_server_search"),
+            Some(&"mcp.server.search".to_string())
+        );
+
+        // Simulate a tool call coming back with the sanitized name
+        let mut tc = ToolCall {
+            id: "call_1".to_string(),
+            name: "mcp_server_search".to_string(),
+            arguments: serde_json::json!({}),
+            reasoning: None,
+        };
+        if let Some(original) = name_map.get(&tc.name) {
+            tc.name = original.clone();
+        }
+        assert_eq!(tc.name, "mcp.server.search");
     }
 }

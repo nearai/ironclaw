@@ -9,15 +9,14 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::agent::task::{Task, TaskContext, TaskOutput};
-use crate::channels::web::types::SseEvent;
 use crate::config::AgentConfig;
 use crate::context::{ContextManager, JobContext, JobState};
-use crate::db::Database;
 use crate::error::{Error, JobError};
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
 use crate::safety::SafetyLayer;
+use crate::tenant::AdminScope;
 use crate::tools::{
     ApprovalContext, ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_error,
     prepare_tool_params,
@@ -53,7 +52,7 @@ struct ScheduledSubtask {
 pub struct SchedulerDeps {
     pub tools: Arc<ToolRegistry>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
-    pub store: Option<Arc<dyn Database>>,
+    pub store: Option<AdminScope>,
     pub hooks: Arc<HookRegistry>,
 }
 
@@ -65,10 +64,10 @@ pub struct Scheduler {
     safety: Arc<SafetyLayer>,
     tools: Arc<ToolRegistry>,
     extension_manager: Option<Arc<ExtensionManager>>,
-    store: Option<Arc<dyn Database>>,
+    store: Option<AdminScope>,
     hooks: Arc<HookRegistry>,
-    /// SSE broadcast sender for live job event streaming.
-    sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
+    /// SSE manager for live job event streaming.
+    sse_tx: Option<Arc<crate::channels::web::sse::SseManager>>,
     /// HTTP interceptor for trace recording/replay (propagated to workers).
     http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
     /// Running jobs (main LLM-driven jobs).
@@ -102,9 +101,9 @@ impl Scheduler {
         }
     }
 
-    /// Set the SSE broadcast sender for live job event streaming.
-    pub fn set_sse_sender(&mut self, tx: tokio::sync::broadcast::Sender<SseEvent>) {
-        self.sse_tx = Some(tx);
+    /// Set the SSE manager for live job event streaming.
+    pub fn set_sse_sender(&mut self, sse: Arc<crate::channels::web::sse::SseManager>) {
+        self.sse_tx = Some(sse);
     }
 
     /// Set the HTTP interceptor for trace recording/replay.
@@ -198,26 +197,28 @@ impl Scheduler {
             })
             .unwrap_or(self.config.max_tokens_per_job);
 
-        // Apply both metadata and token budget in one closure (Issue #813: atomic update).
-        // Use update_context_and_get to ensure atomicity: no gap where concurrent workers
-        // can modify the context between update and DB persist (Issue #807).
-        let ctx = if let Some(meta) = metadata {
+        // Apply metadata, token budget, and approval context in one closure
+        // (Issue #813: atomic update). Use update_context_and_get to ensure atomicity:
+        // no gap where concurrent workers can modify the context between update and
+        // DB persist (Issue #807).
+        let needs_update = metadata.is_some() || max_tokens > 0 || approval_context.is_some();
+        let ctx = if needs_update {
             self.context_manager
                 .update_context_and_get(job_id, |ctx| {
-                    ctx.metadata = meta;
+                    if let Some(meta) = metadata {
+                        ctx.metadata = meta;
+                    }
                     if max_tokens > 0 {
                         ctx.max_tokens = max_tokens;
                     }
-                })
-                .await?
-        } else if max_tokens > 0 {
-            self.context_manager
-                .update_context_and_get(job_id, |ctx| {
-                    ctx.max_tokens = max_tokens;
+                    if let Some(ref approval) = approval_context {
+                        ctx.approval_context = Some(approval.clone());
+                    }
                 })
                 .await?
         } else {
-            // No metadata or token budget to set; get the initial context
+            // Currently unreachable via dispatch_job() which always provides
+            // Some(approval_context), but kept as a safe fallback.
             self.context_manager.get_context(job_id).await?
         };
 
@@ -266,6 +267,20 @@ impl Scheduler {
                 return Err(JobError::MaxJobsExceeded {
                     max: self.config.max_parallel_jobs,
                 });
+            }
+
+            // Per-user concurrency check — only count jobs consuming a parallel
+            // execution slot (Pending/InProgress/Stuck), not Completed/Submitted.
+            if let Some(max_per_user) = self.config.max_jobs_per_user
+                && let Ok(ctx) = self.context_manager.get_context(job_id).await
+            {
+                let user_blocking = self
+                    .context_manager
+                    .parallel_blocking_count_for(&ctx.user_id)
+                    .await;
+                if user_blocking >= max_per_user {
+                    return Err(JobError::MaxJobsExceeded { max: max_per_user });
+                }
             }
 
             // Transition job to in_progress
@@ -781,10 +796,15 @@ mod tests {
             allow_local_tools: true,
             max_cost_per_day_cents: None,
             max_actions_per_hour: None,
+            max_cost_per_user_per_day_cents: None,
             max_tool_iterations: 10,
             auto_approve_tools: true,
             default_timezone: "UTC".to_string(),
+            max_jobs_per_user: None,
             max_tokens_per_job,
+            multi_tenant: false,
+            max_llm_concurrent_per_user: None,
+            max_jobs_concurrent_per_user: None,
         };
         let cm = Arc::new(ContextManager::new(5));
         let llm: Arc<dyn LlmProvider> = Arc::new(StubLlm);

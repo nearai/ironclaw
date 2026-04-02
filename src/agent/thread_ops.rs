@@ -16,12 +16,12 @@ use crate::agent::dispatcher::{
 };
 use crate::agent::session::{MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState};
 use crate::agent::submission::SubmissionResult;
-use crate::channels::web::util::truncate_preview;
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
 use crate::llm::{ChatMessage, ToolCall};
 use crate::tools::redact_params;
+use ironclaw_common::truncate_preview;
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
 
@@ -135,13 +135,52 @@ impl Agent {
             msg_count = 0;
         }
 
-        // Create thread with the historical ID and restore messages
+        // Create thread with the historical ID and restore messages.
+        // Read source_channel from DB so the authorization check uses the
+        // original creator's channel, not the requesting message's channel.
+        //
+        // Fail-closed policy: if the DB lookup fails or the conversation has
+        // no stored source_channel (legacy row), the thread is hydrated with
+        // source_channel = None.  `is_approval_authorized(None, _)` returns
+        // false, so approvals are denied until the conversation is backfilled
+        // with a source_channel via an explicit migration or re-creation.
+        let db_source_channel = if let Some(store) = self.store() {
+            match store.get_conversation_source_channel(thread_uuid).await {
+                Ok(sc) => {
+                    if sc.is_none() {
+                        tracing::warn!(
+                            thread_id = %thread_uuid,
+                            "Legacy thread has no stored source_channel; \
+                             cross-channel approvals will be denied (fail-closed)"
+                        );
+                    }
+                    sc
+                }
+                Err(e) => {
+                    tracing::error!(
+                        thread_id = %thread_uuid,
+                        error = %e,
+                        "Failed to read source_channel from DB; \
+                         cross-channel approvals will be denied (fail-closed)"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let effective_source_channel = db_source_channel.as_deref();
+
         let session_id = {
             let sess = session.lock().await;
             sess.id
         };
 
-        let mut thread = crate::agent::session::Thread::with_id(thread_uuid, session_id);
+        let mut thread = crate::agent::session::Thread::with_id(
+            thread_uuid,
+            session_id,
+            effective_source_channel,
+        );
         if !chat_messages.is_empty() {
             thread.restore_from_messages(chat_messages);
         }
@@ -175,6 +214,7 @@ impl Agent {
     pub(super) async fn process_user_input(
         &self,
         message: &IncomingMessage,
+        tenant: crate::tenant::TenantCtx,
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
         content: &str,
@@ -351,7 +391,7 @@ impl Agent {
 
         if let Some(intent) = self.router.route_command(&temp_message) {
             // Explicit command like /status, /job, /list - handle directly
-            return self.handle_job_or_command(intent, message).await;
+            return self.handle_job_or_command(intent, message, &tenant).await;
         }
 
         // Natural language goes through the agentic loop
@@ -462,7 +502,7 @@ impl Agent {
 
         // Run the agentic tool execution loop
         let result = self
-            .run_agentic_loop(message, session.clone(), thread_id, turn_messages)
+            .run_agentic_loop(message, tenant, session.clone(), thread_id, turn_messages)
             .await;
 
         // Re-acquire lock and check if interrupted
@@ -513,10 +553,10 @@ impl Agent {
                 };
 
                 thread.complete_turn(&response);
-                let (turn_number, tool_calls) = thread
+                let (turn_number, tool_calls, narrative) = thread
                     .turns
                     .last()
-                    .map(|t| (t.turn_number, t.tool_calls.clone()))
+                    .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                     .unwrap_or_default();
                 let _ = self
                     .channels
@@ -534,6 +574,7 @@ impl Agent {
                     &message.user_id,
                     turn_number,
                     &tool_calls,
+                    narrative.as_deref(),
                 )
                 .await;
                 self.persist_assistant_response(
@@ -634,7 +675,7 @@ impl Agent {
         user_id: &str,
     ) -> bool {
         match store
-            .ensure_conversation(thread_id, channel, user_id, None)
+            .ensure_conversation(thread_id, channel, user_id, None, Some(channel))
             .await
         {
             Ok(true) => true,
@@ -725,7 +766,9 @@ impl Agent {
     ///
     /// Stored between the user and assistant messages so that
     /// `build_turns_from_db_messages` can reconstruct the tool call history.
-    /// Content is a JSON array of tool call summaries.
+    /// Content is a JSON object: `{ "calls": [...], "narrative": "..." }`.
+    /// The `calls` array contains tool call summaries with optional `rationale`
+    /// and `tool_call_id` fields. Legacy rows may be plain JSON arrays.
     pub(super) async fn persist_tool_calls(
         &self,
         thread_id: Uuid,
@@ -733,6 +776,7 @@ impl Agent {
         user_id: &str,
         turn_number: usize,
         tool_calls: &[crate::agent::session::TurnToolCall],
+        narrative: Option<&str>,
     ) {
         if tool_calls.is_empty() {
             return;
@@ -767,11 +811,30 @@ impl Agent {
                 if let Some(ref error) = tc.error {
                     obj["error"] = serde_json::Value::String(truncate_preview(error, 200));
                 }
+                if let Some(ref rationale) = tc.rationale {
+                    obj["rationale"] = serde_json::Value::String(truncate_preview(rationale, 500));
+                }
+                if let Some(ref tool_call_id) = tc.tool_call_id {
+                    obj["tool_call_id"] =
+                        serde_json::Value::String(truncate_preview(tool_call_id, 128));
+                }
                 obj
             })
             .collect();
 
-        let content = match serde_json::to_string(&summaries) {
+        // Wrap in an object with optional narrative so it can be reconstructed.
+        // safety: no byte-index slicing here; comment describes JSON shape
+        let wrapper = if let Some(n) = narrative {
+            serde_json::json!({
+                "narrative": truncate_preview(n, 1000),
+                "calls": summaries,
+            })
+        } else {
+            serde_json::json!({
+                "calls": summaries,
+            })
+        };
+        let content = match serde_json::to_string(&wrapper) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("Failed to serialize tool calls: {}", e);
@@ -1104,9 +1167,12 @@ impl Agent {
                     && let Some(turn) = thread.last_turn_mut()
                 {
                     if is_tool_error {
-                        turn.record_tool_error(result_content.clone());
+                        turn.record_tool_error_for(&pending.tool_call_id, result_content.clone());
                     } else {
-                        turn.record_tool_result(serde_json::json!(result_content));
+                        turn.record_tool_result_for(
+                            &pending.tool_call_id,
+                            serde_json::json!(result_content),
+                        );
                     }
                 }
             }
@@ -1358,9 +1424,12 @@ impl Agent {
                         && let Some(turn) = thread.last_turn_mut()
                     {
                         if is_deferred_error {
-                            turn.record_tool_error(deferred_content.clone());
+                            turn.record_tool_error_for(&tc.id, deferred_content.clone());
                         } else {
-                            turn.record_tool_result(serde_json::json!(deferred_content));
+                            turn.record_tool_result_for(
+                                &tc.id,
+                                serde_json::json!(deferred_content),
+                            );
                         }
                     }
                 }
@@ -1444,7 +1513,13 @@ impl Agent {
 
             // Continue the agentic loop (a tool was already executed this turn)
             let result = self
-                .run_agentic_loop(message, session.clone(), thread_id, context_messages)
+                .run_agentic_loop(
+                    message,
+                    self.tenant_ctx(&message.user_id).await,
+                    session.clone(),
+                    thread_id,
+                    context_messages,
+                )
                 .await;
 
             // Handle the result
@@ -1459,10 +1534,10 @@ impl Agent {
                     let (response, suggestions) =
                         crate::agent::dispatcher::extract_suggestions(&response);
                     thread.complete_turn(&response);
-                    let (turn_number, tool_calls) = thread
+                    let (turn_number, tool_calls, narrative) = thread
                         .turns
                         .last()
-                        .map(|t| (t.turn_number, t.tool_calls.clone()))
+                        .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                         .unwrap_or_default();
                     // User message already persisted at turn start; save tool calls then assistant response
                     self.persist_tool_calls(
@@ -1471,6 +1546,7 @@ impl Agent {
                         &message.user_id,
                         turn_number,
                         &tool_calls,
+                        narrative.as_deref(),
                     )
                     .await;
                     self.persist_assistant_response(
@@ -1646,7 +1722,7 @@ impl Agent {
         };
 
         match ext_mgr
-            .configure_token(&pending.extension_name, token)
+            .configure_token(&pending.extension_name, token, &message.user_id)
             .await
         {
             Ok(result) if result.activated => {
@@ -1744,7 +1820,7 @@ impl Agent {
             .get_or_create_session(&message.user_id)
             .await;
         let mut sess = session.lock().await;
-        let thread = sess.create_thread();
+        let thread = sess.create_thread(Some(&message.channel));
         let thread_id = thread.id;
         Ok(SubmissionResult::ok_with_message(format!(
             "New thread: {}",
@@ -1816,7 +1892,20 @@ fn rebuild_chat_messages_from_db(
             "assistant" => result.push(ChatMessage::assistant(&msg.content)),
             "tool_calls" => {
                 // Try to parse the enriched JSON and rebuild tool messages.
-                if let Ok(calls) = serde_json::from_str::<Vec<serde_json::Value>>(&msg.content) {
+                // Supports two formats:
+                // - Old: plain JSON array of tool call summaries
+                // - New: wrapped object { "calls": [...], "narrative": "..." }
+                let calls: Vec<serde_json::Value> =
+                    match serde_json::from_str::<serde_json::Value>(&msg.content) {
+                        Ok(serde_json::Value::Array(arr)) => arr,
+                        Ok(serde_json::Value::Object(obj)) => obj
+                            .get("calls")
+                            .and_then(|v| v.as_array())
+                            .cloned()
+                            .unwrap_or_default(),
+                        _ => Vec::new(),
+                    };
+                {
                     if calls.is_empty() {
                         continue;
                     }
@@ -1839,6 +1928,10 @@ fn rebuild_chat_messages_from_db(
                                     .get("parameters")
                                     .cloned()
                                     .unwrap_or(serde_json::json!({})),
+                                reasoning: c
+                                    .get("rationale")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from),
                             })
                             .collect();
 
@@ -1853,7 +1946,10 @@ fn rebuild_chat_messages_from_db(
                             let name = c["name"].as_str().unwrap_or("unknown").to_string();
                             let content = if let Some(err) = c.get("error").and_then(|v| v.as_str())
                             {
-                                format!("Error: {}", err)
+                                // Both wrapped (new) and legacy (plain) errors pass
+                                // through as-is. Legacy errors are already descriptive
+                                // (e.g. "Tool 'http' failed: timeout"), so no prefix needed.
+                                err.to_string()
                             } else if let Some(res) = c.get("result").and_then(|v| v.as_str()) {
                                 res.to_string()
                             } else if let Some(preview) =
@@ -1939,11 +2035,36 @@ mod tests {
 
         assert_eq!(result[3].role, crate::llm::Role::Tool);
         assert_eq!(result[3].tool_call_id, Some("call_1".to_string()));
-        assert!(result[3].content.contains("Error: timeout"));
+        assert!(result[3].content.contains("timeout"));
 
         // final assistant
         assert_eq!(result[4].role, crate::llm::Role::Assistant);
         assert_eq!(result[4].content, "I found some results.");
+    }
+
+    #[test]
+    fn test_rebuild_chat_messages_preserves_wrapped_tool_error() {
+        let wrapped_error =
+            "<tool_output name=\"http\">\nTool 'http' failed: timeout\n</tool_output>";
+        let tool_json = serde_json::json!([
+            {
+                "name": "http",
+                "call_id": "call_1",
+                "parameters": {"url": "https://example.com"},
+                "error": wrapped_error
+            }
+        ]);
+        let messages = vec![
+            make_db_msg("user", "Fetch example"),
+            make_db_msg("tool_calls", &tool_json.to_string()),
+        ];
+
+        let result = rebuild_chat_messages_from_db(&messages);
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[2].role, crate::llm::Role::Tool);
+        assert_eq!(result[2].tool_call_id, Some("call_1".to_string()));
+        assert_eq!(result[2].content, wrapped_error);
     }
 
     #[test]
@@ -2035,7 +2156,7 @@ mod tests {
 
         let session_id = Uuid::new_v4();
         let thread_id = Uuid::new_v4();
-        let mut thread = Thread::with_id(thread_id, session_id);
+        let mut thread = Thread::with_id(thread_id, session_id, None);
 
         // Set thread to AwaitingApproval with a pending tool approval
         let pending = PendingApproval {
@@ -2103,7 +2224,7 @@ mod tests {
         use crate::agent::session::{MAX_PENDING_MESSAGES, Thread, ThreadState};
         use uuid::Uuid;
 
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
         thread.start_turn("processing something");
         assert_eq!(thread.state, ThreadState::Processing);
 
@@ -2129,7 +2250,7 @@ mod tests {
         use crate::agent::session::{Thread, ThreadState};
         use uuid::Uuid;
 
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
         thread.start_turn("processing");
 
         thread.queue_message("pending-1".to_string());
@@ -2159,7 +2280,7 @@ mod tests {
 
         let thread_id = Uuid::new_v4();
         let session_id = Uuid::new_v4();
-        let mut thread = Thread::with_id(thread_id, session_id);
+        let mut thread = Thread::with_id(thread_id, session_id, None);
         thread.start_turn("working");
         assert_eq!(thread.state, ThreadState::Processing);
 
@@ -2186,7 +2307,7 @@ mod tests {
 
         let thread_id = Uuid::new_v4();
         let session_id = Uuid::new_v4();
-        let mut thread = Thread::with_id(thread_id, session_id);
+        let mut thread = Thread::with_id(thread_id, session_id, None);
         thread.start_turn("working");
         assert_eq!(thread.state, ThreadState::Processing);
 

@@ -229,18 +229,35 @@ impl AppBuilder {
         let store = crate::secrets::create_secrets_store(crypto, handles);
 
         if let Some(ref secrets) = store {
+            // Migrate any plaintext API keys from the settings table to the
+            // encrypted secrets store. Idempotent — safe to run on every startup.
+            if let Some(ref db) = self.db {
+                crate::config::migrate_plaintext_llm_keys(
+                    db.as_ref(),
+                    secrets.as_ref(),
+                    &self.config.owner_id,
+                )
+                .await;
+            }
+
             // Inject LLM API keys from encrypted storage
             crate::config::inject_llm_keys_from_secrets(secrets.as_ref(), &self.config.owner_id)
                 .await;
 
-            // Re-resolve only the LLM config with newly available keys.
-            let store: Option<&(dyn crate::db::SettingsStore + Sync)> =
+            // Re-resolve only the LLM config with newly available keys,
+            // including keys hydrated from the secrets store.
+            let settings_store: Option<&(dyn crate::db::SettingsStore + Sync)> =
                 self.db.as_ref().map(|db| db.as_ref() as _);
             let toml_path = self.toml_path.as_deref();
             let owner_id = self.config.owner_id.clone();
             if let Err(e) = self
                 .config
-                .re_resolve_llm(store, &owner_id, toml_path)
+                .re_resolve_llm_with_secrets(
+                    settings_store,
+                    &owner_id,
+                    toml_path,
+                    Some(secrets.as_ref()),
+                )
                 .await
             {
                 tracing::warn!("Failed to re-resolve LLM config after secret injection: {e}");
@@ -312,13 +329,7 @@ impl AppBuilder {
             .create_provider(&self.config.llm.nearai.base_url, self.session.clone());
 
         // Register memory tools if database is available
-        let workspace_user_id = self
-            .config
-            .channels
-            .gateway
-            .as_ref()
-            .map(|gw| gw.user_id.as_str())
-            .unwrap_or("default");
+        let workspace_user_id = self.config.owner_id.as_str();
         let workspace = if let Some(ref db) = self.db {
             let emb_cache_config = EmbeddingCacheConfig {
                 max_entries: self.config.embeddings.cache_size,
@@ -327,7 +338,7 @@ impl AppBuilder {
                 .with_search_config(&self.config.search);
 
             if let Some(ref emb) = embeddings {
-                ws = ws.with_embeddings_cached(emb.clone(), emb_cache_config);
+                ws = ws.with_embeddings_cached(emb.clone(), emb_cache_config.clone());
             }
 
             // Wire workspace-level settings (read scopes, memory layers)
@@ -341,7 +352,30 @@ impl AppBuilder {
             }
             ws = ws.with_memory_layers(self.config.workspace.memory_layers.clone());
             let ws = Arc::new(ws);
-            tools.register_memory_tools(Arc::clone(&ws));
+
+            // Detect multi-tenant mode: when the database has registered users,
+            // each authenticated user needs their own workspace scope. Use
+            // WorkspacePool (which implements WorkspaceResolver) to create
+            // per-user workspaces on demand instead of sharing the startup
+            // workspace across all users.
+            let is_multi_tenant = db.has_any_users().await.unwrap_or(false);
+
+            if is_multi_tenant {
+                let pool = Arc::new(crate::channels::web::server::WorkspacePool::new(
+                    Arc::clone(db),
+                    embeddings.clone(),
+                    emb_cache_config,
+                    self.config.search.clone(),
+                    self.config.workspace.clone(),
+                ));
+                tools.register_memory_tools_with_resolver(pool);
+                tracing::info!(
+                    "Memory tools configured with per-user workspace resolver (multi-tenant mode)"
+                );
+            } else {
+                tools.register_memory_tools(Arc::clone(&ws));
+            }
+
             Some(ws)
         } else {
             None
@@ -865,7 +899,8 @@ impl AppBuilder {
         // Skills system
         let (skill_registry, skill_catalog) = if self.config.skills.enabled {
             let mut registry = SkillRegistry::new(self.config.skills.local_dir.clone())
-                .with_installed_dir(self.config.skills.installed_dir.clone());
+                .with_installed_dir(self.config.skills.installed_dir.clone())
+                .with_max_scan_depth(self.config.skills.max_scan_depth);
             let loaded = registry.discover_all().await;
             if !loaded.is_empty() {
                 tracing::debug!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));
@@ -883,6 +918,7 @@ impl AppBuilder {
             crate::agent::cost_guard::CostGuardConfig {
                 max_cost_per_day_cents: self.config.agent.max_cost_per_day_cents,
                 max_actions_per_hour: self.config.agent.max_actions_per_hour,
+                max_cost_per_user_per_day_cents: self.config.agent.max_cost_per_user_per_day_cents,
             },
         ));
 

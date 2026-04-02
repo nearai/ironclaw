@@ -18,21 +18,23 @@ use std::time::Duration;
 use chrono::Utc;
 use regex::Regex;
 use tokio::sync::{RwLock, mpsc};
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::agent::Scheduler;
 use crate::agent::routine::{
-    NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger, next_cron_fire,
+    NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger,
+    apply_routine_verification_result, next_cron_fire, routine_verification_fingerprint,
 };
-use crate::channels::OutgoingResponse;
+use crate::channels::{IncomingMessage, OutgoingResponse};
 use crate::config::RoutineConfig;
 use crate::context::{JobContext, JobState};
-use crate::db::Database;
 use crate::error::RoutineError;
 use crate::extensions::ExtensionManager;
 use crate::llm::{
     ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
 };
+use crate::tenant::AdminScope;
 use crate::tools::{
     ToolError, ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_message,
     prepare_tool_params,
@@ -43,6 +45,11 @@ use ironclaw_safety::SafetyLayer;
 enum EventMatcher {
     Message { routine: Routine, regex: Regex },
     System { routine: Routine },
+}
+
+struct TriggeredRoutine {
+    routine: Routine,
+    detail: String,
 }
 
 /// Distinguishes why sandbox is unavailable so error messages are accurate.
@@ -56,10 +63,48 @@ pub enum SandboxReadiness {
     DockerUnavailable,
 }
 
+/// Check whether an event-triggered routine's user/channel filters match an
+/// incoming message.
+///
+/// Returns `true` if:
+/// - The routine has an `Event` trigger (non-Event routines always return `false`)
+/// - The routine's `user_id` matches the message's user scope
+/// - The routine's channel filter (if any) matches the message channel
+///   case-insensitively
+///
+/// This is a pure function extracted from `check_event_triggers` so the
+/// filter logic can be unit-tested without async infrastructure.
+pub(crate) fn routine_matches_message(routine: &Routine, message: &IncomingMessage) -> bool {
+    // Only Event-triggered routines can match incoming messages.
+    if !matches!(routine.trigger, Trigger::Event { .. }) {
+        return false;
+    }
+
+    // User ownership filter — only fire routines scoped to this user.
+    if routine.user_id != message.user_id {
+        return false;
+    }
+
+    // Channel filter (case-insensitive, matching emit_system_event behavior)
+    if let Trigger::Event {
+        channel: Some(ch), ..
+    } = &routine.trigger
+        && !ch.eq_ignore_ascii_case(&message.channel)
+    {
+        return false;
+    }
+
+    true
+}
+
+fn trigger_uses_event_cache(trigger: &Trigger) -> bool {
+    matches!(trigger, Trigger::Event { .. } | Trigger::SystemEvent { .. })
+}
+
 /// The routine execution engine.
 pub struct RoutineEngine {
     config: RoutineConfig,
-    store: Arc<dyn Database>,
+    store: AdminScope,
     llm: Arc<dyn LlmProvider>,
     workspace: Arc<Workspace>,
     /// Sender for notifications (routed to channel manager).
@@ -76,7 +121,7 @@ pub struct RoutineEngine {
     tools: Arc<ToolRegistry>,
     /// Safety layer for tool output sanitization.
     safety: Arc<SafetyLayer>,
-    /// Sandbox readiness state for full-job dispatch.
+    /// Sandbox readiness state — only `DockerUnavailable` blocks full-job dispatch.
     sandbox_readiness: SandboxReadiness,
     /// Timestamp when this engine instance was created. Used by
     /// `sync_dispatched_runs` to distinguish orphaned runs (from a previous
@@ -88,7 +133,7 @@ impl RoutineEngine {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: RoutineConfig,
-        store: Arc<dyn Database>,
+        store: AdminScope,
         llm: Arc<dyn LlmProvider>,
         workspace: Arc<Workspace>,
         notify_tx: mpsc::Sender<OutgoingResponse>,
@@ -167,10 +212,45 @@ impl RoutineEngine {
     }
 
     /// Check incoming message against event triggers. Returns number of routines fired.
+    pub async fn check_event_triggers(&self, message: &IncomingMessage, content: &str) -> usize {
+        let triggered = self.matching_event_triggers(message, content).await;
+        let fired = triggered.len();
+        for triggered in triggered {
+            std::mem::drop(self.spawn_fire(triggered.routine, "event", Some(triggered.detail)));
+        }
+        fired
+    }
+
+    /// Fire matching event-triggered routines and wait for them to complete.
     ///
-    /// Accepts only the three fields needed for matching (user scope, channel,
-    /// message content) so callers never need to clone a full `IncomingMessage`.
-    pub async fn check_event_triggers(&self, user_id: &str, channel: &str, content: &str) -> usize {
+    /// Used by single-message REPL mode so the process does not exit before
+    /// background event-triggered routines finish.
+    pub async fn check_event_triggers_and_wait(
+        &self,
+        message: &IncomingMessage,
+        content: &str,
+    ) -> usize {
+        let triggered = self.matching_event_triggers(message, content).await;
+        let fired = triggered.len();
+        let handles: Vec<JoinHandle<()>> = triggered
+            .into_iter()
+            .map(|triggered| self.spawn_fire(triggered.routine, "event", Some(triggered.detail)))
+            .collect();
+
+        for handle in handles {
+            if let Err(e) = handle.await {
+                tracing::warn!(error = %e, "Event-triggered routine task failed");
+            }
+        }
+
+        fired
+    }
+
+    async fn matching_event_triggers(
+        &self,
+        message: &IncomingMessage,
+        content: &str,
+    ) -> Vec<TriggeredRoutine> {
         let cache = self.event_cache.read().await;
 
         // Early return if there are no message matchers at all.
@@ -178,10 +258,9 @@ impl RoutineEngine {
             .iter()
             .any(|m| matches!(m, EventMatcher::Message { .. }))
         {
-            return 0;
+            return Vec::new();
         }
-
-        let mut fired = 0;
+        let mut triggered = Vec::new();
 
         // Collect routine IDs for batch query
         let routine_ids: Vec<Uuid> = cache
@@ -193,13 +272,13 @@ impl RoutineEngine {
             .collect();
 
         if routine_ids.is_empty() {
-            return 0;
+            return Vec::new();
         }
 
         // Single batch query instead of N queries
         let concurrent_counts = match self.batch_concurrent_counts(&routine_ids).await {
             Some(counts) => counts,
-            None => return 0,
+            None => return Vec::new(),
         };
 
         for matcher in cache.iter() {
@@ -208,16 +287,24 @@ impl RoutineEngine {
                 EventMatcher::System { .. } => continue,
             };
 
-            if routine.user_id != user_id {
-                continue;
-            }
-
-            // Channel filter
-            if let Trigger::Event {
-                channel: Some(ch), ..
-            } = &routine.trigger
-                && ch != channel
-            {
+            // User ownership + channel filter (extracted for testability).
+            if !routine_matches_message(routine, message) {
+                // User mismatch is expected for multi-user setups — keep at
+                // trace to avoid one log per routine per inbound message.
+                if routine.user_id != message.user_id {
+                    tracing::trace!(
+                        routine = %routine.name,
+                        routine_user = %routine.user_id,
+                        message_user = %message.user_id,
+                        "Skipped: user scope mismatch"
+                    );
+                } else {
+                    tracing::debug!(
+                        routine = %routine.name,
+                        channel = %message.channel,
+                        "Skipped: channel mismatch"
+                    );
+                }
                 continue;
             }
 
@@ -228,14 +315,14 @@ impl RoutineEngine {
 
             // Cooldown check
             if !self.check_cooldown(routine) {
-                tracing::trace!(routine = %routine.name, "Skipped: cooldown active");
+                tracing::debug!(routine = %routine.name, "Skipped: cooldown active");
                 continue;
             }
 
             // Concurrent run check (using batch-loaded counts)
             let running_count = concurrent_counts.get(&routine.id).copied().unwrap_or(0);
             if running_count >= routine.guardrails.max_concurrent as i64 {
-                tracing::trace!(routine = %routine.name, "Skipped: max concurrent reached");
+                tracing::debug!(routine = %routine.name, "Skipped: max concurrent reached");
                 continue;
             }
 
@@ -246,11 +333,13 @@ impl RoutineEngine {
             }
 
             let detail = truncate(content, 200);
-            self.spawn_fire(routine.clone(), "event", Some(detail));
-            fired += 1;
+            triggered.push(TriggeredRoutine {
+                routine: routine.clone(),
+                detail,
+            });
         }
 
-        fired
+        triggered
     }
 
     /// Emit a structured event to system-event routines.
@@ -537,7 +626,7 @@ impl RoutineEngine {
         );
 
         // Load the routine to update consecutive_failures and send notification
-        let routine = match self.store.get_routine(run.routine_id).await {
+        let mut routine = match self.store.get_routine(run.routine_id).await {
             Ok(Some(r)) => r,
             Ok(None) => {
                 tracing::warn!(
@@ -565,6 +654,12 @@ impl RoutineEngine {
         };
 
         let now = Utc::now();
+        routine.state = apply_routine_verification_result(
+            &routine.state,
+            routine_verification_fingerprint(&routine),
+            status,
+            now,
+        );
         let next_fire = if let Trigger::Cron {
             ref schedule,
             ref timezone,
@@ -575,7 +670,7 @@ impl RoutineEngine {
             None
         };
 
-        if let Err(e) = self
+        let runtime_updated = match self
             .store
             .update_routine_runtime(
                 routine.id,
@@ -587,10 +682,25 @@ impl RoutineEngine {
             )
             .await
         {
-            tracing::error!(
-                routine = %routine.name,
-                "Failed to update routine runtime after dispatched run: {}", e
-            );
+            Ok(()) => true,
+            Err(e) => {
+                tracing::error!(
+                    routine = %routine.name,
+                    "Failed to update routine runtime after dispatched run: {}", e
+                );
+                false
+            }
+        };
+
+        if runtime_updated && trigger_uses_event_cache(&routine.trigger) {
+            update_cached_event_runtime(
+                self.event_cache.as_ref(),
+                routine.id,
+                now,
+                routine.run_count + 1,
+                new_failures,
+            )
+            .await;
         }
 
         // Persist result to the routine's conversation thread
@@ -698,12 +808,22 @@ impl RoutineEngine {
             });
         }
 
+        // Per-user workspace (same pattern as spawn_fire).
+        let routine_workspace = if routine.user_id == self.workspace.user_id() {
+            self.workspace.clone()
+        } else {
+            Arc::new(Workspace::new_with_db(
+                &routine.user_id,
+                Arc::clone(self.store.db()),
+            ))
+        };
+
         // Execute inline for manual triggers (caller wants to wait)
         let engine = EngineContext {
             config: self.config.clone(),
             store: self.store.clone(),
             llm: self.llm.clone(),
-            workspace: self.workspace.clone(),
+            workspace: routine_workspace,
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),
             scheduler: self.scheduler.clone(),
@@ -711,6 +831,7 @@ impl RoutineEngine {
             tools: self.tools.clone(),
             safety: self.safety.clone(),
             sandbox_readiness: self.sandbox_readiness,
+            event_cache: Arc::clone(&self.event_cache),
         };
 
         tokio::spawn(async move {
@@ -796,6 +917,7 @@ impl RoutineEngine {
             tools: self.tools.clone(),
             safety: self.safety.clone(),
             sandbox_readiness: self.sandbox_readiness,
+            event_cache: Arc::clone(&self.event_cache),
         };
 
         tokio::spawn(async move {
@@ -806,7 +928,12 @@ impl RoutineEngine {
     }
 
     /// Spawn a fire in a background task.
-    fn spawn_fire(&self, routine: Routine, trigger_type: &str, trigger_detail: Option<String>) {
+    fn spawn_fire(
+        &self,
+        routine: Routine,
+        trigger_type: &str,
+        trigger_detail: Option<String>,
+    ) -> JoinHandle<()> {
         let run = RoutineRun {
             id: Uuid::new_v4(),
             routine_id: routine.id,
@@ -821,11 +948,23 @@ impl RoutineEngine {
             created_at: Utc::now(),
         };
 
+        // Use per-user workspace so each routine executes in the correct
+        // user's context. Fall back to the engine-wide workspace when the
+        // routine belongs to the same user (avoids unnecessary allocation).
+        let routine_workspace = if routine.user_id == self.workspace.user_id() {
+            self.workspace.clone()
+        } else {
+            Arc::new(Workspace::new_with_db(
+                &routine.user_id,
+                Arc::clone(self.store.db()),
+            ))
+        };
+
         let engine = EngineContext {
             config: self.config.clone(),
             store: self.store.clone(),
             llm: self.llm.clone(),
-            workspace: self.workspace.clone(),
+            workspace: routine_workspace,
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),
             scheduler: self.scheduler.clone(),
@@ -833,6 +972,7 @@ impl RoutineEngine {
             tools: self.tools.clone(),
             safety: self.safety.clone(),
             sandbox_readiness: self.sandbox_readiness,
+            event_cache: Arc::clone(&self.event_cache),
         };
 
         // Record the run in DB, then spawn execution
@@ -843,7 +983,7 @@ impl RoutineEngine {
                 return;
             }
             execute_routine(engine, routine, run).await;
-        });
+        })
     }
 
     fn check_cooldown(&self, routine: &Routine) -> bool {
@@ -878,7 +1018,7 @@ impl RoutineEngine {
 /// an active state (Pending/InProgress/Stuck). Maps the final `JobState` to
 /// a `RunStatus` for the routine run.
 struct FullJobWatcher {
-    store: Arc<dyn Database>,
+    store: AdminScope,
     job_id: Uuid,
     routine_name: String,
 }
@@ -889,7 +1029,7 @@ impl FullJobWatcher {
     /// Safety ceiling: 24 hours, derived from POLL_INTERVAL.
     const MAX_POLLS: u32 = (24 * 60 * 60) / Self::POLL_INTERVAL.as_secs() as u32;
 
-    fn new(store: Arc<dyn Database>, job_id: Uuid, routine_name: String) -> Self {
+    fn new(store: AdminScope, job_id: Uuid, routine_name: String) -> Self {
         Self {
             store,
             job_id,
@@ -961,7 +1101,7 @@ impl FullJobWatcher {
 /// Shared context passed to the execution function.
 struct EngineContext {
     config: RoutineConfig,
-    store: Arc<dyn Database>,
+    store: AdminScope,
     llm: Arc<dyn LlmProvider>,
     workspace: Arc<Workspace>,
     notify_tx: mpsc::Sender<OutgoingResponse>,
@@ -971,10 +1111,11 @@ struct EngineContext {
     tools: Arc<ToolRegistry>,
     safety: Arc<SafetyLayer>,
     sandbox_readiness: SandboxReadiness,
+    event_cache: Arc<RwLock<Vec<EventMatcher>>>,
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
-async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) {
+async fn execute_routine(ctx: EngineContext, mut routine: Routine, run: RoutineRun) {
     // Increment running count (atomic: survives panics in the execution below)
     ctx.running_count.fetch_add(1, Ordering::Relaxed);
 
@@ -1032,8 +1173,15 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         tracing::error!(routine = %routine.name, "Failed to complete run record: {}", e);
     }
 
-    // Update routine runtime state
     let now = Utc::now();
+    routine.state = apply_routine_verification_result(
+        &routine.state,
+        routine_verification_fingerprint(&routine),
+        status,
+        now,
+    );
+
+    // Update routine runtime state
     let next_fire = if let Trigger::Cron {
         ref schedule,
         ref timezone,
@@ -1050,7 +1198,7 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         0
     };
 
-    if let Err(e) = ctx
+    let runtime_updated = match ctx
         .store
         .update_routine_runtime(
             routine.id,
@@ -1062,7 +1210,22 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         )
         .await
     {
-        tracing::error!(routine = %routine.name, "Failed to update runtime state: {}", e);
+        Ok(()) => true,
+        Err(e) => {
+            tracing::error!(routine = %routine.name, "Failed to update runtime state: {}", e);
+            false
+        }
+    };
+
+    if runtime_updated && trigger_uses_event_cache(&routine.trigger) {
+        update_cached_event_runtime(
+            ctx.event_cache.as_ref(),
+            routine.id,
+            now,
+            routine.run_count + 1,
+            new_failures,
+        )
+        .await;
     }
 
     // Persist routine result to its dedicated conversation thread
@@ -1111,6 +1274,27 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
     .await;
 }
 
+async fn update_cached_event_runtime(
+    event_cache: &RwLock<Vec<EventMatcher>>,
+    routine_id: Uuid,
+    last_run_at: chrono::DateTime<Utc>,
+    run_count: u64,
+    consecutive_failures: u32,
+) {
+    let mut cache = event_cache.write().await;
+    for matcher in cache.iter_mut() {
+        let routine = match matcher {
+            EventMatcher::Message { routine, .. } | EventMatcher::System { routine } => routine,
+        };
+        if routine.id == routine_id {
+            routine.last_run_at = Some(last_run_at);
+            routine.run_count = run_count;
+            routine.consecutive_failures = consecutive_failures;
+            break;
+        }
+    }
+}
+
 /// Sanitize a routine name for use in workspace paths.
 /// Only keeps alphanumeric, dash, and underscore characters; replaces everything else.
 fn sanitize_routine_name(name: &str) -> String {
@@ -1145,22 +1329,16 @@ async fn execute_full_job(
     run: &RoutineRun,
     execution: &FullJobExecutionConfig<'_>,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
-    match ctx.sandbox_readiness {
-        SandboxReadiness::Available => {}
-        SandboxReadiness::DisabledByConfig => {
-            return Err(RoutineError::JobDispatchFailed {
-                reason: "Sandboxing is disabled (SANDBOX_ENABLED=false). \
-                         Full-job routines require sandbox."
-                    .to_string(),
-            });
-        }
-        SandboxReadiness::DockerUnavailable => {
-            return Err(RoutineError::JobDispatchFailed {
-                reason: "Sandbox is enabled but Docker is not available. \
-                         Install Docker or set SANDBOX_ENABLED=false."
-                    .to_string(),
-            });
-        }
+    // Full-job routines dispatch through the scheduler (same as /job
+    // commands) — no Docker sandbox required when sandbox is disabled.
+    // However, if sandbox is *enabled* but Docker is unavailable, that's
+    // a misconfiguration we should surface.
+    if matches!(ctx.sandbox_readiness, SandboxReadiness::DockerUnavailable) {
+        return Err(RoutineError::JobDispatchFailed {
+            reason: "Sandbox is enabled but Docker is not available. \
+                     Install Docker or set SANDBOX_ENABLED=false."
+                .to_string(),
+        });
     }
 
     let scheduler = ctx
@@ -1181,11 +1359,23 @@ async fn execute_full_job(
     }
     metadata["notify_user"] = serde_json::json!(&routine.notify.user);
 
+    // Prepend execution context so the LLM knows it's already inside a
+    // routine and should execute the task directly — not set up infrastructure.
+    let contextualized_description = format!(
+        "IMPORTANT: You are executing inside routine \"{routine_name}\". \
+         The routine and its schedule are already configured. \
+         Tools and credentials are already set up. \
+         Do NOT create routines, jobs, or try to discover/install/authenticate tools. \
+         Execute the task directly.\n\n{desc}",
+        routine_name = routine.name,
+        desc = execution.description,
+    );
+
     let job_id = scheduler
         .dispatch_job(
             &routine.user_id,
             execution.title,
-            execution.description,
+            &contextualized_description,
             Some(metadata),
         )
         .await
@@ -1305,6 +1495,19 @@ async fn execute_lightweight(
     }
 }
 
+/// Sanitize a user-controlled string before interpolation into an LLM prompt.
+/// Strips newlines (which could break prompt structure) and truncates to a
+/// reasonable length to limit abuse surface.
+fn sanitize_prompt_field(value: &str) -> String {
+    const MAX_LEN: usize = 128;
+    value
+        .chars()
+        .filter(|&c| c != '\n' && c != '\r')
+        .take(MAX_LEN)
+        .map(|c| if c == '`' { '\'' } else { c })
+        .collect()
+}
+
 fn build_lightweight_prompt(
     prompt: &str,
     context_parts: &[String],
@@ -1323,14 +1526,16 @@ fn build_lightweight_prompt(
         );
 
         if let Some(channel) = notify.channel.as_deref() {
+            let sanitized = sanitize_prompt_field(channel);
             full_prompt.push_str(&format!(
-                "The configured delivery channel for this routine is `{channel}`.\n"
+                "The configured delivery channel for this routine is `{sanitized}`.\n"
             ));
         }
 
         if let Some(user) = notify.user.as_deref() {
+            let sanitized = sanitize_prompt_field(user);
             full_prompt.push_str(&format!(
-                "The configured delivery target for this routine is `{user}`.\n"
+                "The configured delivery target for this routine is `{sanitized}`.\n"
             ));
         }
 
@@ -1467,13 +1672,23 @@ async fn execute_lightweight_with_tools(
     let mut total_input_tokens = 0;
     let mut total_output_tokens = 0;
 
-    // Create a minimal job context for tool execution with unique run ID
+    // Create a minimal job context for tool execution with unique run ID.
+    // Carry the routine's notify config in metadata so the message tool can
+    // resolve channel/target — mirrors the full-job path in execute_full_job().
     let run_id = Uuid::new_v4();
+    let mut lw_metadata = serde_json::json!({
+        "owner_id": routine.user_id
+    });
+    if let Some(channel) = &routine.notify.channel {
+        lw_metadata["notify_channel"] = serde_json::json!(channel);
+    }
+    lw_metadata["notify_user"] = serde_json::json!(&routine.notify.user);
     let job_ctx = JobContext {
         job_id: run_id,
         user_id: routine.user_id.clone(),
         title: "Lightweight Routine".to_string(),
         description: routine.name.clone(),
+        metadata: lw_metadata,
         ..Default::default()
     };
     let allowed_tools =
@@ -1487,7 +1702,10 @@ async fn execute_lightweight_with_tools(
         let force_text = iteration >= max_iterations;
 
         if force_text {
-            // Final iteration: no tools, just get text response
+            // Final iteration: no tools, just get text response.
+            // Claude 4.6 rejects assistant prefill; NEAR AI rejects any non-user-ending
+            // conversation. Ensure the last message is user-role.
+            crate::util::ensure_ends_with_user_message(&mut messages);
             let request = CompletionRequest::new(messages)
                 .with_max_tokens(effective_max_tokens)
                 .with_temperature(0.3);
@@ -1766,6 +1984,13 @@ pub fn spawn_cron_ticker(
         engine.check_cron_triggers().await;
 
         let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Periodic event cache refresh so web/CLI mutations are picked up
+        // without requiring tool-path code to call refresh_event_cache().
+        // Uses wall-clock elapsed time so the refresh cadence is stable
+        // regardless of the cron tick interval configuration.
+        let refresh_interval = Duration::from_secs(60);
+        let mut last_refresh = tokio::time::Instant::now();
 
         loop {
             ticker.tick().await;
@@ -1773,7 +1998,11 @@ pub fn spawn_cron_ticker(
             // never races with FullJobWatcher instances from this process.
             engine.sync_dispatched_runs().await;
             engine.check_cron_triggers().await;
-            engine.sync_dispatched_runs().await;
+
+            if last_refresh.elapsed() >= refresh_interval {
+                engine.refresh_event_cache().await;
+                last_refresh = tokio::time::Instant::now();
+            }
         }
     })
 }
@@ -1839,7 +2068,13 @@ fn strip_html_tags(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::agent::routine::{NotifyConfig, RunStatus};
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    use crate::agent::routine::{
+        NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RunStatus, Trigger,
+    };
+    use crate::channels::IncomingMessage;
     use crate::config::RoutineConfig;
 
     #[test]
@@ -2037,6 +2272,117 @@ mod tests {
         }
     }
 
+    /// Helper to build a test routine with the given user_id and trigger.
+    fn make_routine(user_id: &str, trigger: Trigger) -> Routine {
+        Routine {
+            id: Uuid::new_v4(),
+            name: "test".to_string(),
+            description: String::new(),
+            user_id: user_id.to_string(),
+            enabled: true,
+            trigger,
+            action: RoutineAction::Lightweight {
+                prompt: String::new(),
+                context_paths: vec![],
+                max_tokens: 1000,
+                use_tools: false,
+                max_tool_rounds: 0,
+            },
+            guardrails: RoutineGuardrails::default(),
+            notify: Default::default(),
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::Value::Null,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    /// Helper to build a test IncomingMessage.
+    fn make_message(user_id: &str, channel: &str, content: &str) -> IncomingMessage {
+        IncomingMessage {
+            id: Uuid::new_v4(),
+            channel: channel.to_string(),
+            user_id: user_id.to_string(),
+            owner_id: user_id.to_string(),
+            sender_id: user_id.to_string(),
+            user_name: None,
+            content: content.to_string(),
+            thread_id: None,
+            conversation_scope_id: None,
+            received_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+            timezone: None,
+            attachments: vec![],
+            is_internal: false,
+        }
+    }
+
+    /// Regression test for issue #1051: event triggers used case-sensitive
+    /// channel comparison, so "Telegram" != "telegram" caused silent mismatch.
+    /// Tests the actual `routine_matches_message` function used in `check_event_triggers`.
+    #[test]
+    fn test_channel_filter_is_case_insensitive() {
+        let routine = make_routine(
+            "user1",
+            Trigger::Event {
+                pattern: ".*".to_string(),
+                channel: Some("Telegram".to_string()),
+            },
+        );
+        let msg = make_message("user1", "telegram", "hello");
+
+        // Case-insensitive channel match must succeed
+        assert!(super::routine_matches_message(&routine, &msg));
+
+        // Exact case must also work
+        let msg_exact = make_message("user1", "Telegram", "hello");
+        assert!(super::routine_matches_message(&routine, &msg_exact));
+
+        // Different channel must not match
+        let msg_wrong = make_message("user1", "discord", "hello");
+        assert!(!super::routine_matches_message(&routine, &msg_wrong));
+    }
+
+    /// Regression test for issue #1051: event triggers did not filter by
+    /// user_id, so routines from user A could fire on messages from user B.
+    /// Tests the actual `routine_matches_message` function used in `check_event_triggers`.
+    #[test]
+    fn test_event_trigger_requires_user_match() {
+        let routine = make_routine(
+            "alice",
+            Trigger::Event {
+                pattern: ".*".to_string(),
+                channel: None,
+            },
+        );
+
+        // Different user must not match
+        let msg_bob = make_message("bob", "telegram", "hello");
+        assert!(!super::routine_matches_message(&routine, &msg_bob));
+
+        // Same user must match
+        let msg_alice = make_message("alice", "telegram", "hello");
+        assert!(super::routine_matches_message(&routine, &msg_alice));
+    }
+
+    /// When no channel filter is set, any channel should match (given user matches).
+    #[test]
+    fn test_no_channel_filter_matches_any_channel() {
+        let routine = make_routine(
+            "user1",
+            Trigger::Event {
+                pattern: ".*".to_string(),
+                channel: None,
+            },
+        );
+
+        let msg = make_message("user1", "whatever_channel", "hello");
+        assert!(super::routine_matches_message(&routine, &msg));
+    }
+
     #[test]
     fn test_routine_tool_denylist_blocks_self_management_tools() {
         let denylisted = vec![
@@ -2141,28 +2487,26 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_readiness_disabled_by_config_error() {
+    fn test_sandbox_disabled_by_config_does_not_block_full_job() {
         use super::SandboxReadiness;
 
-        let readiness = SandboxReadiness::DisabledByConfig;
-        assert_ne!(readiness, SandboxReadiness::Available);
-
-        let err = crate::error::RoutineError::JobDispatchFailed {
-            reason: "Sandboxing is disabled (SANDBOX_ENABLED=false). \
-                     Full-job routines require sandbox."
-                .to_string(),
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("SANDBOX_ENABLED=false"));
-        assert!(msg.contains("require sandbox"));
+        // DisabledByConfig must NOT match the DockerUnavailable gate —
+        // full-job routines dispatch through the scheduler (no Docker needed).
+        assert!(!matches!(
+            SandboxReadiness::DisabledByConfig,
+            SandboxReadiness::DockerUnavailable
+        ));
     }
 
     #[test]
-    fn test_sandbox_readiness_docker_unavailable_error() {
+    fn test_sandbox_readiness_docker_unavailable_still_blocks() {
         use super::SandboxReadiness;
 
-        let readiness = SandboxReadiness::DockerUnavailable;
-        assert_ne!(readiness, SandboxReadiness::Available);
+        // DockerUnavailable should still block full-job dispatch.
+        assert!(matches!(
+            SandboxReadiness::DockerUnavailable,
+            SandboxReadiness::DockerUnavailable
+        ));
 
         let err = crate::error::RoutineError::JobDispatchFailed {
             reason: "Sandbox is enabled but Docker is not available. \
@@ -2171,7 +2515,6 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("Docker is not available"));
-        assert!(msg.contains("SANDBOX_ENABLED"));
     }
 
     /// Regression test for #1317: FullJobWatcher maps terminal job states correctly.
@@ -2300,5 +2643,32 @@ mod tests {
         let result = sanitize_summary(&s);
         assert!(result.len() <= 503);
         assert!(result.ends_with("..."));
+    }
+
+    /// Regression: lightweight routines must carry notify metadata in JobContext
+    /// so the message tool can route to the correct channel. Previously,
+    /// `..Default::default()` left metadata as null, causing messages to land
+    /// in the user's DM instead of the originating Slack channel.
+    #[test]
+    fn test_build_lightweight_prompt_preserves_notify_config() {
+        let notify = NotifyConfig {
+            channel: Some("slack-relay".to_string()),
+            user: Some("C088K6C3SQZ".to_string()),
+            on_attention: true,
+            on_failure: true,
+            on_success: false,
+        };
+
+        let prompt =
+            super::build_lightweight_prompt("Send Ping in this channel.", &[], None, &notify, true);
+
+        assert!(
+            prompt.contains("slack-relay"),
+            "prompt should mention configured delivery channel: {prompt}",
+        );
+        assert!(
+            prompt.contains("C088K6C3SQZ"),
+            "prompt should mention configured delivery target: {prompt}",
+        );
     }
 }

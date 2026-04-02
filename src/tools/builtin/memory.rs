@@ -21,6 +21,35 @@ use crate::context::JobContext;
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 use crate::workspace::{Workspace, paths};
 
+// ── WorkspaceResolver ──────────────────────────────────────────────
+
+/// Resolves a workspace for a given user ID.
+///
+/// In single-user mode, always returns the same workspace.
+/// In multi-tenant mode, creates per-user workspaces on demand.
+#[async_trait]
+pub trait WorkspaceResolver: Send + Sync {
+    async fn resolve(&self, user_id: &str) -> Arc<Workspace>;
+}
+
+/// Returns a fixed workspace regardless of user ID (single-user mode).
+pub struct FixedWorkspaceResolver {
+    workspace: Arc<Workspace>,
+}
+
+impl FixedWorkspaceResolver {
+    pub fn new(workspace: Arc<Workspace>) -> Self {
+        Self { workspace }
+    }
+}
+
+#[async_trait]
+impl WorkspaceResolver for FixedWorkspaceResolver {
+    async fn resolve(&self, _user_id: &str) -> Arc<Workspace> {
+        Arc::clone(&self.workspace)
+    }
+}
+
 /// Detect paths that are clearly local filesystem references, not workspace-memory docs.
 ///
 /// Examples:
@@ -62,13 +91,20 @@ fn map_write_err(e: crate::error::WorkspaceError) -> ToolError {
 /// The agent should call this tool before answering questions about
 /// prior work, decisions, preferences, or any historical context.
 pub struct MemorySearchTool {
-    workspace: Arc<Workspace>,
+    resolver: Arc<dyn WorkspaceResolver>,
 }
 
 impl MemorySearchTool {
-    /// Create a new memory search tool.
-    pub fn new(workspace: Arc<Workspace>) -> Self {
-        Self { workspace }
+    /// Create a new memory search tool with a workspace resolver.
+    pub fn new(resolver: Arc<dyn WorkspaceResolver>) -> Self {
+        Self { resolver }
+    }
+
+    /// Create from a fixed workspace (backward compatibility).
+    pub fn from_workspace(workspace: Arc<Workspace>) -> Self {
+        Self {
+            resolver: Arc::new(FixedWorkspaceResolver::new(workspace)),
+        }
     }
 }
 
@@ -107,7 +143,7 @@ impl Tool for MemorySearchTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -119,8 +155,8 @@ impl Tool for MemorySearchTool {
             .unwrap_or(5)
             .min(20) as usize;
 
-        let results = self
-            .workspace
+        let workspace = self.resolver.resolve(&ctx.user_id).await;
+        let results = workspace
             .search(query, limit)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Search failed: {}", e)))?;
@@ -151,13 +187,20 @@ impl Tool for MemorySearchTool {
 /// Use this to persist important information that should be remembered
 /// across sessions: decisions, preferences, facts, lessons learned.
 pub struct MemoryWriteTool {
-    workspace: Arc<Workspace>,
+    resolver: Arc<dyn WorkspaceResolver>,
 }
 
 impl MemoryWriteTool {
-    /// Create a new memory write tool.
-    pub fn new(workspace: Arc<Workspace>) -> Self {
-        Self { workspace }
+    /// Create a new memory write tool with a workspace resolver.
+    pub fn new(resolver: Arc<dyn WorkspaceResolver>) -> Self {
+        Self { resolver }
+    }
+
+    /// Create from a fixed workspace (backward compatibility).
+    pub fn from_workspace(workspace: Arc<Workspace>) -> Self {
+        Self {
+            resolver: Arc::new(FixedWorkspaceResolver::new(workspace)),
+        }
     }
 }
 
@@ -203,9 +246,26 @@ impl Tool for MemoryWriteTool {
                     "type": "boolean",
                     "description": "Skip privacy classification and write directly to the specified layer without redirect. Use when you're certain the content belongs in the target layer.",
                     "default": false
+                },
+                "metadata": {
+                    "type": "object",
+                    "description": "Optional metadata to set on the document (e.g., {\"skip_indexing\": true, \"hygiene\": {\"enabled\": true, \"retention_days\": 7}})"
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "When present, switches to patch mode: finds and replaces this exact string in the document. Works with any target including 'memory' and custom paths."
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "Replacement string (required when old_string is present)."
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "If true, replace all occurrences of old_string. Default: false.",
+                    "default": false
                 }
             },
-            "required": ["content"]
+            "required": []
         })
     }
 
@@ -216,7 +276,18 @@ impl Tool for MemoryWriteTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let content = require_str(&params, "content")?;
+        // At least one mode must be provided: content for write/append, or old_string for patch.
+        let is_patch_mode = params.get("old_string").and_then(|v| v.as_str()).is_some();
+        let has_content = params
+            .get("content")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty());
+        if !is_patch_mode && !has_content {
+            return Err(ToolError::InvalidParameters(
+                "Either 'content' (for write/append) or 'old_string'+'new_string' (for patch) is required".to_string(),
+            ));
+        }
+        let content = params.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
         let target = params
             .get("target")
@@ -231,19 +302,21 @@ impl Tool for MemoryWriteTool {
             )));
         }
 
+        let workspace = self.resolver.resolve(&ctx.user_id).await;
+
         // Bootstrap target: clear BOOTSTRAP.md to mark first-run ritual complete.
         // Handled early because it accepts empty content (unlike other targets).
         if target == "bootstrap" {
             // Write empty content to effectively disable the bootstrap injection.
             // system_prompt_for_context() skips empty files.
-            self.workspace
+            workspace
                 .write(paths::BOOTSTRAP, "")
                 .await
                 .map_err(map_write_err)?;
 
             // Also set the in-memory flag so BOOTSTRAP.md injection stops
             // immediately without waiting for a restart.
-            self.workspace.mark_bootstrap_completed();
+            workspace.mark_bootstrap_completed();
 
             let output = serde_json::json!({
                 "status": "cleared",
@@ -252,12 +325,6 @@ impl Tool for MemoryWriteTool {
             });
 
             return Ok(ToolOutput::success(output, start.elapsed()));
-        }
-
-        if content.trim().is_empty() {
-            return Err(ToolError::InvalidParameters(
-                "content cannot be empty".to_string(),
-            ));
         }
 
         let append = params
@@ -285,16 +352,95 @@ impl Tool for MemoryWriteTool {
             path => path.to_string(),
         };
 
+        // Apply metadata BEFORE the write/patch so that metadata-driven flags
+        // (skip_indexing, skip_versioning) take effect for this operation,
+        // not just subsequent ones.
+        //
+        // Merge incoming metadata with existing to avoid silently dropping
+        // previously-set keys (e.g. skip_versioning lost when hygiene is added).
+        //
+        // Skip when a layer is specified — get_or_create targets the primary
+        // scope, not the layer's scope.
+        //
+        // In patch mode, use read() instead of get_or_create() so we don't
+        // create a ghost empty document when the target doesn't exist.
+        let metadata_param = params.get("metadata").filter(|m| m.is_object());
+        if let Some(meta) = metadata_param
+            && layer.is_none()
+        {
+            let doc = if is_patch_mode {
+                // read_primary() ensures we target the same scope that patch()
+                // operates on, avoiding cross-scope metadata mutation in
+                // multi-scope mode. Returns an error if the doc doesn't exist —
+                // the patch call below will produce a clear "not found" error.
+                workspace.read_primary(&resolved_path).await.ok()
+            } else {
+                Some(
+                    workspace
+                        .get_or_create(&resolved_path)
+                        .await
+                        .map_err(map_write_err)?,
+                )
+            };
+            if let Some(doc) = doc {
+                let merged = crate::workspace::DocumentMetadata::merge(&doc.metadata, meta);
+                workspace
+                    .update_metadata(doc.id, &merged)
+                    .await
+                    .map_err(map_write_err)?;
+            }
+        }
+
+        // Patch mode: if old_string is provided, do search-and-replace instead of write/append.
+        let old_string = params.get("old_string").and_then(|v| v.as_str());
+        if let Some(old_str) = old_string {
+            if old_str.is_empty() {
+                return Err(ToolError::InvalidParameters(
+                    "old_string cannot be empty".to_string(),
+                ));
+            }
+            if layer.is_some() {
+                return Err(ToolError::InvalidParameters(
+                    "patch mode (old_string/new_string) cannot be combined with layer".to_string(),
+                ));
+            }
+            let new_str = params
+                .get("new_string")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    ToolError::InvalidParameters(
+                        "new_string is required when old_string is provided".to_string(),
+                    )
+                })?;
+            let replace_all = params
+                .get("replace_all")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let result = workspace
+                .patch(&resolved_path, old_str, new_str, replace_all)
+                .await
+                .map_err(map_write_err)?;
+
+            let output = serde_json::json!({
+                "status": "patched",
+                "path": resolved_path,
+                "replacements": result.replacements,
+                "content_length": result.document.content.len(),
+            });
+            return Ok(ToolOutput::success(output, start.elapsed()));
+        }
+
         // When a layer is specified, route through layer-aware methods for ALL targets.
         // Otherwise, use default workspace methods (which include injection scanning).
         let layer_result = if let Some(layer_name) = layer {
             let result = if append {
-                self.workspace
+                workspace
                     .append_to_layer(layer_name, &resolved_path, content, force)
                     .await
                     .map_err(map_write_err)?
             } else {
-                self.workspace
+                workspace
                     .write_to_layer(layer_name, &resolved_path, content, force)
                     .await
                     .map_err(map_write_err)?
@@ -307,31 +453,33 @@ impl Tool for MemoryWriteTool {
             match target {
                 "memory" => {
                     if append {
-                        self.workspace
+                        workspace
                             .append_memory(content)
                             .await
                             .map_err(map_write_err)?;
                     } else {
-                        self.workspace
+                        workspace
                             .write(paths::MEMORY, content)
                             .await
                             .map_err(map_write_err)?;
                     }
                 }
                 "daily_log" => {
-                    self.workspace
+                    let tz = crate::timezone::parse_timezone(&ctx.user_timezone)
+                        .unwrap_or(chrono_tz::Tz::UTC);
+                    workspace
                         .append_daily_log_tz(content, tz)
                         .await
                         .map_err(map_write_err)?;
                 }
                 _ => {
                     if append {
-                        self.workspace
+                        workspace
                             .append(&resolved_path, content)
                             .await
                             .map_err(map_write_err)?;
                     } else {
-                        self.workspace
+                        workspace
                             .write(&resolved_path, content)
                             .await
                             .map_err(map_write_err)?;
@@ -361,12 +509,12 @@ impl Tool for MemoryWriteTool {
         };
         let mut synced_docs: Vec<&str> = Vec::new();
         if normalized_path == paths::PROFILE {
-            match self.workspace.sync_profile_documents().await {
+            match workspace.sync_profile_documents().await {
                 Ok(true) => {
                     tracing::info!("profile write: synced USER.md + assistant-directives.md");
                     synced_docs.extend_from_slice(&[paths::USER, paths::ASSISTANT_DIRECTIVES]);
 
-                    self.workspace.mark_bootstrap_completed();
+                    workspace.mark_bootstrap_completed();
                     let toml_path = crate::settings::Settings::default_toml_path();
                     if let Ok(Some(mut settings)) = crate::settings::Settings::load_toml(&toml_path)
                         && !settings.profile_onboarding_completed
@@ -385,6 +533,9 @@ impl Tool for MemoryWriteTool {
                 }
             }
         }
+
+        // Metadata was already applied before the write (see above), so
+        // skip_indexing/skip_versioning took effect for this operation.
 
         let mut output = serde_json::json!({
             "status": "written",
@@ -416,13 +567,20 @@ impl Tool for MemoryWriteTool {
 ///
 /// Use this to read the full content of any file in the workspace.
 pub struct MemoryReadTool {
-    workspace: Arc<Workspace>,
+    resolver: Arc<dyn WorkspaceResolver>,
 }
 
 impl MemoryReadTool {
-    /// Create a new memory read tool.
-    pub fn new(workspace: Arc<Workspace>) -> Self {
-        Self { workspace }
+    /// Create a new memory read tool with a workspace resolver.
+    pub fn new(resolver: Arc<dyn WorkspaceResolver>) -> Self {
+        Self { resolver }
+    }
+
+    /// Create from a fixed workspace (backward compatibility).
+    pub fn from_workspace(workspace: Arc<Workspace>) -> Self {
+        Self {
+            resolver: Arc::new(FixedWorkspaceResolver::new(workspace)),
+        }
     }
 }
 
@@ -447,6 +605,15 @@ impl Tool for MemoryReadTool {
                 "path": {
                     "type": "string",
                     "description": "Path to the file (e.g., 'MEMORY.md', 'daily/2024-01-15.md', 'projects/alpha/notes.md')"
+                },
+                "version": {
+                    "type": "integer",
+                    "description": "Read a specific historical version of the document (omit for current content)"
+                },
+                "list_versions": {
+                    "type": "boolean",
+                    "description": "If true, return version history instead of file content",
+                    "default": false
                 }
             },
             "required": ["path"]
@@ -456,7 +623,7 @@ impl Tool for MemoryReadTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -470,12 +637,73 @@ impl Tool for MemoryReadTool {
             )));
         }
 
-        let doc = self
-            .workspace
+        let workspace = self.resolver.resolve(&ctx.user_id).await;
+
+        let list_versions = params
+            .get("list_versions")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let version = match params.get("version").and_then(|v| v.as_i64()) {
+            _ if list_versions && params.get("version").is_some() => {
+                return Err(ToolError::InvalidParameters(
+                    "list_versions and version are mutually exclusive".to_string(),
+                ));
+            }
+            Some(v) if v < 1 || v > i64::from(i32::MAX) => {
+                return Err(ToolError::InvalidParameters(format!(
+                    "version must be between 1 and {}, got {v}",
+                    i32::MAX
+                )));
+            }
+            Some(v) => Some(v as i32),
+            None => None,
+        };
+
+        // Read the document first (needed for document_id in all version operations)
+        let doc = workspace
             .read(path)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Read failed: {}", e)))?;
 
+        // List versions mode
+        if list_versions {
+            let versions = workspace
+                .list_versions(doc.id, 50)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(format!("List versions failed: {}", e)))?;
+
+            let output = serde_json::json!({
+                "path": doc.path,
+                "versions": versions.iter().map(|v| serde_json::json!({
+                    "version": v.version,
+                    "content_hash": v.content_hash,
+                    "created_at": v.created_at.to_rfc3339(),
+                    "changed_by": v.changed_by,
+                })).collect::<Vec<_>>(),
+                "version_count": versions.len(),
+            });
+            return Ok(ToolOutput::success(output, start.elapsed()));
+        }
+
+        // Specific version mode
+        if let Some(ver) = version {
+            let version_doc = workspace
+                .get_version(doc.id, ver)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(format!("Get version failed: {}", e)))?;
+
+            let output = serde_json::json!({
+                "path": doc.path,
+                "version": version_doc.version,
+                "content": version_doc.content,
+                "content_hash": version_doc.content_hash,
+                "created_at": version_doc.created_at.to_rfc3339(),
+                "changed_by": version_doc.changed_by,
+            });
+            return Ok(ToolOutput::success(output, start.elapsed()));
+        }
+
+        // Normal read
         let output = serde_json::json!({
             "path": doc.path,
             "content": doc.content,
@@ -495,20 +723,27 @@ impl Tool for MemoryReadTool {
 ///
 /// Returns a hierarchical view of files and directories with configurable depth.
 pub struct MemoryTreeTool {
-    workspace: Arc<Workspace>,
+    resolver: Arc<dyn WorkspaceResolver>,
 }
 
 impl MemoryTreeTool {
-    /// Create a new memory tree tool.
-    pub fn new(workspace: Arc<Workspace>) -> Self {
-        Self { workspace }
+    /// Create a new memory tree tool with a workspace resolver.
+    pub fn new(resolver: Arc<dyn WorkspaceResolver>) -> Self {
+        Self { resolver }
+    }
+
+    /// Create from a fixed workspace (backward compatibility).
+    pub fn from_workspace(workspace: Arc<Workspace>) -> Self {
+        Self {
+            resolver: Arc::new(FixedWorkspaceResolver::new(workspace)),
+        }
     }
 
     /// Recursively build tree structure.
     ///
     /// Returns a compact format where directories end with `/` and may have children.
     async fn build_tree(
-        &self,
+        workspace: &Arc<Workspace>,
         path: &str,
         current_depth: usize,
         max_depth: usize,
@@ -517,8 +752,7 @@ impl MemoryTreeTool {
             return Ok(Vec::new());
         }
 
-        let entries = self
-            .workspace
+        let entries = workspace
             .list(path)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Tree failed: {}", e)))?;
@@ -533,8 +767,13 @@ impl MemoryTreeTool {
             };
 
             if entry.is_directory && current_depth < max_depth {
-                let children =
-                    Box::pin(self.build_tree(&entry.path, current_depth + 1, max_depth)).await?;
+                let children = Box::pin(Self::build_tree(
+                    workspace,
+                    &entry.path,
+                    current_depth + 1,
+                    max_depth,
+                ))
+                .await?;
                 if children.is_empty() {
                     result.push(serde_json::Value::String(display_path));
                 } else {
@@ -584,7 +823,7 @@ impl Tool for MemoryTreeTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -596,7 +835,8 @@ impl Tool for MemoryTreeTool {
             .unwrap_or(1)
             .clamp(1, 10) as usize;
 
-        let tree = self.build_tree(path, 1, depth).await?;
+        let workspace = self.resolver.resolve(&ctx.user_id).await;
+        let tree = Self::build_tree(&workspace, path, 1, depth).await?;
 
         // Compact output: just the tree array
         Ok(ToolOutput::success(
@@ -650,7 +890,7 @@ mod tests {
         #[test]
         fn test_memory_search_schema() {
             let workspace = make_test_workspace();
-            let tool = MemorySearchTool::new(workspace);
+            let tool = MemorySearchTool::from_workspace(workspace);
 
             assert_eq!(tool.name(), "memory_search");
             assert!(!tool.requires_sanitization());
@@ -668,7 +908,7 @@ mod tests {
         #[test]
         fn test_memory_write_schema() {
             let workspace = make_test_workspace();
-            let tool = MemoryWriteTool::new(workspace);
+            let tool = MemoryWriteTool::from_workspace(workspace);
 
             assert_eq!(tool.name(), "memory_write");
 
@@ -676,12 +916,27 @@ mod tests {
             assert!(schema["properties"]["content"].is_object());
             assert!(schema["properties"]["target"].is_object());
             assert!(schema["properties"]["append"].is_object());
+
+            // Patch mode parameters
+            assert!(schema["properties"]["old_string"].is_object());
+            assert!(schema["properties"]["new_string"].is_object());
+            assert!(schema["properties"]["replace_all"].is_object());
+
+            // Metadata parameter
+            assert!(schema["properties"]["metadata"].is_object());
+
+            // Content is not required (patch mode doesn't need it)
+            let required = schema["required"].as_array().unwrap();
+            assert!(
+                !required.contains(&"content".into()),
+                "content should not be required (patch mode)"
+            );
         }
 
         #[test]
         fn test_memory_read_schema() {
             let workspace = make_test_workspace();
-            let tool = MemoryReadTool::new(workspace);
+            let tool = MemoryReadTool::from_workspace(workspace);
 
             assert_eq!(tool.name(), "memory_read");
 
@@ -693,12 +948,16 @@ mod tests {
                     .unwrap()
                     .contains(&"path".into())
             );
+
+            // Version parameters
+            assert!(schema["properties"]["version"].is_object());
+            assert!(schema["properties"]["list_versions"].is_object());
         }
 
         #[test]
         fn test_memory_tree_schema() {
             let workspace = make_test_workspace();
-            let tool = MemoryTreeTool::new(workspace);
+            let tool = MemoryTreeTool::from_workspace(workspace);
 
             assert_eq!(tool.name(), "memory_tree");
 
@@ -711,7 +970,7 @@ mod tests {
         #[tokio::test]
         async fn test_memory_write_rejects_injection_to_identity_file() {
             let workspace = make_test_workspace();
-            let tool = MemoryWriteTool::new(workspace);
+            let tool = MemoryWriteTool::from_workspace(workspace);
             let ctx = JobContext::default();
 
             let params = serde_json::json!({
@@ -731,6 +990,178 @@ mod tests {
                 }
                 other => panic!("expected NotAuthorized, got: {other:?}"),
             }
+        }
+    }
+
+    // Regression tests for per-user workspace scoping (multi-tenant mode).
+    // See: https://github.com/nearai/ironclaw/pull/1118
+    // Bug: memory tools used a single startup workspace regardless of which
+    // user was chatting. Fix: resolve workspace per-request via JobContext.user_id.
+
+    #[cfg(feature = "postgres")]
+    mod resolver_tests {
+        use super::*;
+
+        fn make_test_workspace_for_user(user_id: &str) -> Arc<Workspace> {
+            Arc::new(Workspace::new(
+                user_id,
+                deadpool_postgres::Pool::builder(deadpool_postgres::Manager::new(
+                    tokio_postgres::Config::new(),
+                    tokio_postgres::NoTls,
+                ))
+                .build()
+                .unwrap(),
+            ))
+        }
+
+        #[tokio::test]
+        async fn test_fixed_workspace_resolver_ignores_user_id() {
+            let ws = make_test_workspace_for_user("alice");
+            let resolver = FixedWorkspaceResolver::new(Arc::clone(&ws));
+
+            let ws_alice = resolver.resolve("alice").await;
+            let ws_bob = resolver.resolve("bob").await;
+
+            // Both should return the exact same Arc (pointer equality)
+            assert!(Arc::ptr_eq(&ws_alice, &ws_bob));
+            assert_eq!(ws_alice.user_id(), "alice");
+        }
+
+        /// Tracking resolver that records which user_ids were requested.
+        struct TrackingWorkspaceResolver {
+            inner: FixedWorkspaceResolver,
+            resolved_users: std::sync::Mutex<Vec<String>>,
+        }
+
+        impl TrackingWorkspaceResolver {
+            fn new(workspace: Arc<Workspace>) -> Self {
+                Self {
+                    inner: FixedWorkspaceResolver::new(workspace),
+                    resolved_users: std::sync::Mutex::new(Vec::new()),
+                }
+            }
+
+            fn resolved_users(&self) -> Vec<String> {
+                self.resolved_users.lock().unwrap().clone()
+            }
+        }
+
+        #[async_trait]
+        impl WorkspaceResolver for TrackingWorkspaceResolver {
+            async fn resolve(&self, user_id: &str) -> Arc<Workspace> {
+                self.resolved_users
+                    .lock()
+                    .unwrap()
+                    .push(user_id.to_string());
+                self.inner.resolve(user_id).await
+            }
+        }
+
+        #[tokio::test]
+        async fn test_memory_search_uses_job_context_user_id() {
+            let ws = make_test_workspace_for_user("default");
+            let tracker = Arc::new(TrackingWorkspaceResolver::new(ws));
+            let tool = MemorySearchTool::new(tracker.clone() as Arc<dyn WorkspaceResolver>);
+
+            // Execute with user_id "alice"
+            let ctx_alice = JobContext::with_user("alice", "test", "test");
+            let params = serde_json::json!({"query": "test"});
+            // The search will fail (no real DB) but we only care about resolver call
+            let _ = tool.execute(params, &ctx_alice).await;
+
+            // Execute with user_id "bob"
+            let ctx_bob = JobContext::with_user("bob", "test", "test");
+            let params = serde_json::json!({"query": "test"});
+            let _ = tool.execute(params, &ctx_bob).await;
+
+            let resolved = tracker.resolved_users();
+            assert_eq!(resolved, vec!["alice", "bob"]);
+        }
+
+        #[tokio::test]
+        async fn test_memory_write_uses_job_context_user_id() {
+            let ws = make_test_workspace_for_user("default");
+            let tracker = Arc::new(TrackingWorkspaceResolver::new(ws));
+            let tool = MemoryWriteTool::new(tracker.clone() as Arc<dyn WorkspaceResolver>);
+
+            // Execute with user_id "alice"
+            let ctx_alice = JobContext::with_user("alice", "test", "test");
+            let params = serde_json::json!({
+                "content": "remember this",
+                "target": "daily_log",
+            });
+            let _ = tool.execute(params, &ctx_alice).await;
+
+            // Execute with user_id "bob"
+            let ctx_bob = JobContext::with_user("bob", "test", "test");
+            let params = serde_json::json!({
+                "content": "remember that",
+                "target": "daily_log",
+            });
+            let _ = tool.execute(params, &ctx_bob).await;
+
+            let resolved = tracker.resolved_users();
+            assert_eq!(resolved, vec!["alice", "bob"]);
+        }
+    }
+
+    #[cfg(feature = "libsql")]
+    mod per_user_resolver_tests {
+        use super::*;
+
+        async fn make_test_db() -> Arc<dyn crate::db::Database> {
+            use crate::db::libsql::LibSqlBackend;
+            let temp_dir = tempfile::tempdir().expect("tempdir");
+            let db_path = temp_dir.path().join("resolver_test.db");
+            let backend = LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("LibSqlBackend");
+            <LibSqlBackend as crate::db::Database>::run_migrations(&backend)
+                .await
+                .expect("migrations");
+            // Leak the tempdir so it outlives the test (cleaned up on process exit).
+            std::mem::forget(temp_dir);
+            Arc::new(backend)
+        }
+
+        #[tokio::test]
+        async fn test_workspace_pool_resolver_returns_different_workspaces() {
+            let db = make_test_db().await;
+
+            let pool = crate::channels::web::server::WorkspacePool::new(
+                db,
+                None,
+                crate::workspace::EmbeddingCacheConfig::default(),
+                crate::config::WorkspaceSearchConfig::default(),
+                crate::config::WorkspaceConfig::default(),
+            );
+
+            let ws_alice = pool.resolve("alice").await;
+            let ws_bob = pool.resolve("bob").await;
+
+            // Different user IDs should get different workspaces
+            assert_eq!(ws_alice.user_id(), "alice");
+            assert_eq!(ws_bob.user_id(), "bob");
+            assert!(!Arc::ptr_eq(&ws_alice, &ws_bob));
+        }
+
+        #[tokio::test]
+        async fn test_workspace_pool_resolver_caches_workspace() {
+            let db = make_test_db().await;
+
+            let pool = crate::channels::web::server::WorkspacePool::new(
+                db,
+                None,
+                crate::workspace::EmbeddingCacheConfig::default(),
+                crate::config::WorkspaceSearchConfig::default(),
+                crate::config::WorkspaceConfig::default(),
+            );
+
+            let ws1 = pool.resolve("alice").await;
+            let ws2 = pool.resolve("alice").await;
+
+            // Same user_id should return the same cached Arc (pointer equality)
+            assert!(Arc::ptr_eq(&ws1, &ws2));
         }
     }
 }

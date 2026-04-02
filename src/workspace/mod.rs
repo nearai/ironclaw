@@ -53,8 +53,9 @@ mod search;
 
 pub use chunker::{ChunkConfig, chunk_document};
 pub use document::{
-    IDENTITY_PATHS, MemoryChunk, MemoryDocument, WorkspaceEntry, is_identity_path,
-    merge_workspace_entries, paths,
+    CONFIG_FILE_NAME, DocumentMetadata, DocumentVersion, HygieneMetadata, IDENTITY_PATHS,
+    MemoryChunk, MemoryDocument, PatchResult, VersionSummary, WorkspaceEntry, content_sha256,
+    is_config_path, is_identity_path, merge_workspace_entries, paths,
 };
 pub use embedding_cache::{CachedEmbeddingProvider, EmbeddingCacheConfig};
 pub use embeddings::{
@@ -149,6 +150,7 @@ fn reject_if_injected(path: &str, content: &str) -> Result<(), WorkspaceError> {
 ///
 /// Allows Workspace to work with either a PostgreSQL `Repository` (the original
 /// path) or any `Database` trait implementation (e.g. libSQL backend).
+#[derive(Clone)]
 enum WorkspaceStorage {
     /// PostgreSQL-backed repository (uses connection pool directly).
     #[cfg(feature = "postgres")]
@@ -365,6 +367,102 @@ impl WorkspaceStorage {
             }
         }
     }
+
+    // ==================== Metadata ====================
+
+    async fn update_document_metadata(
+        &self,
+        id: Uuid,
+        metadata: &serde_json::Value,
+    ) -> Result<(), WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => repo.update_document_metadata(id, metadata).await,
+            Self::Db(db) => db.update_document_metadata(id, metadata).await,
+        }
+    }
+
+    async fn find_config_documents(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+    ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => repo.find_config_documents(user_id, agent_id).await,
+            Self::Db(db) => db.find_config_documents(user_id, agent_id).await,
+        }
+    }
+
+    // ==================== Versioning ====================
+
+    async fn save_version(
+        &self,
+        document_id: Uuid,
+        content: &str,
+        content_hash: &str,
+        changed_by: Option<&str>,
+    ) -> Result<i32, WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => {
+                repo.save_version(document_id, content, content_hash, changed_by)
+                    .await
+            }
+            Self::Db(db) => {
+                db.save_version(document_id, content, content_hash, changed_by)
+                    .await
+            }
+        }
+    }
+
+    async fn get_version(
+        &self,
+        document_id: Uuid,
+        version: i32,
+    ) -> Result<DocumentVersion, WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => repo.get_version(document_id, version).await,
+            Self::Db(db) => db.get_version(document_id, version).await,
+        }
+    }
+
+    async fn list_versions(
+        &self,
+        document_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<VersionSummary>, WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => repo.list_versions(document_id, limit).await,
+            Self::Db(db) => db.list_versions(document_id, limit).await,
+        }
+    }
+
+    #[allow(dead_code)] // Part of WorkspaceStore trait; used by DB backends directly
+    async fn get_latest_version_number(
+        &self,
+        document_id: Uuid,
+    ) -> Result<Option<i32>, WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => repo.get_latest_version_number(document_id).await,
+            Self::Db(db) => db.get_latest_version_number(document_id).await,
+        }
+    }
+
+    async fn prune_versions(
+        &self,
+        document_id: Uuid,
+        keep_count: i32,
+    ) -> Result<u64, WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => repo.prune_versions(document_id, keep_count).await,
+            Self::Db(db) => db.prune_versions(document_id, keep_count).await,
+        }
+    }
 }
 
 /// Default template seeded into HEARTBEAT.md on first access.
@@ -576,6 +674,60 @@ impl Workspace {
         self
     }
 
+    /// Clone the workspace configuration for a different primary user scope.
+    ///
+    /// This preserves search config, embeddings, shared read scopes, memory
+    /// layers, and privacy classifier while switching the primary read/write
+    /// scope to `user_id`.
+    pub fn scoped_to_user(&self, user_id: impl Into<String>) -> Self {
+        let user_id = user_id.into();
+
+        let mut memory_layers = self.memory_layers.clone();
+        for layer in &mut memory_layers {
+            if layer.sensitivity == crate::workspace::layer::LayerSensitivity::Private
+                && layer.scope == self.user_id
+            {
+                layer.scope = user_id.clone();
+            }
+        }
+
+        let mut read_user_ids = vec![user_id.clone()];
+        for scope in &self.read_user_ids {
+            if scope != &self.user_id && !read_user_ids.contains(scope) {
+                read_user_ids.push(scope.clone());
+            }
+        }
+        for scope in crate::workspace::layer::MemoryLayer::read_scopes(&memory_layers) {
+            if !read_user_ids.contains(&scope) {
+                read_user_ids.push(scope);
+            }
+        }
+
+        let preserve_flags = user_id == self.user_id;
+        Self {
+            user_id,
+            read_user_ids,
+            agent_id: self.agent_id,
+            storage: self.storage.clone(),
+            embeddings: self.embeddings.clone(),
+            bootstrap_pending: std::sync::atomic::AtomicBool::new(if preserve_flags {
+                self.bootstrap_pending
+                    .load(std::sync::atomic::Ordering::Acquire)
+            } else {
+                false
+            }),
+            bootstrap_completed: std::sync::atomic::AtomicBool::new(if preserve_flags {
+                self.bootstrap_completed
+                    .load(std::sync::atomic::Ordering::Acquire)
+            } else {
+                false
+            }),
+            search_defaults: self.search_defaults.clone(),
+            memory_layers,
+            privacy_classifier: self.privacy_classifier.clone(),
+        }
+    }
+
     /// Get the user ID (primary scope for writes).
     pub fn user_id(&self) -> &str {
         &self.user_id
@@ -641,10 +793,211 @@ impl Workspace {
             .await
     }
 
+    /// Get or create a document at the given path.
+    ///
+    /// Creates the document with empty content if it doesn't exist.
+    /// Does not trigger reindexing or versioning.
+    pub async fn get_or_create(&self, path: &str) -> Result<MemoryDocument, WorkspaceError> {
+        let path = normalize_path(path);
+        self.storage
+            .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)
+            .await
+    }
+
+    // ==================== Metadata ====================
+
+    /// Update the metadata JSON on a document by ID (full replacement).
+    pub async fn update_metadata(
+        &self,
+        id: Uuid,
+        metadata: &serde_json::Value,
+    ) -> Result<(), WorkspaceError> {
+        self.storage.update_document_metadata(id, metadata).await
+    }
+
+    /// Prune old versions for a document, keeping only the most recent `keep_count`.
+    ///
+    /// Returns the number of versions deleted.
+    pub async fn prune_versions(
+        &self,
+        document_id: Uuid,
+        keep_count: i32,
+    ) -> Result<u64, WorkspaceError> {
+        self.storage.prune_versions(document_id, keep_count).await
+    }
+
+    /// Find all `.config` documents in this workspace scope.
+    pub async fn find_config_documents(&self) -> Result<Vec<MemoryDocument>, WorkspaceError> {
+        self.storage
+            .find_config_documents(&self.user_id, self.agent_id)
+            .await
+    }
+
+    /// Resolve effective metadata for a document path.
+    ///
+    /// Resolution chain: document's own metadata → nearest ancestor `.config` → defaults.
+    ///
+    /// Uses a single `find_config_documents` query to fetch all `.config` docs,
+    /// then finds the nearest ancestor in-memory — O(1) DB queries instead of
+    /// O(depth) serial queries walking up the directory tree.
+    pub async fn resolve_metadata(&self, path: &str) -> DocumentMetadata {
+        let path = normalize_path(path);
+
+        // 1. Document's own metadata
+        let doc_meta = self
+            .storage
+            .get_document_by_path(&self.user_id, self.agent_id, &path)
+            .await
+            .ok()
+            .map(|d| d.metadata);
+
+        // 2. Find nearest ancestor .config using a single query + in-memory match
+        let config_meta = self
+            .storage
+            .find_config_documents(&self.user_id, self.agent_id)
+            .await
+            .ok()
+            .and_then(|configs| find_nearest_config(&path, &configs));
+
+        // 3. Merge: config as base, document metadata as overlay
+        let base = config_meta.unwrap_or(serde_json::json!({}));
+        let overlay = doc_meta.unwrap_or(serde_json::json!({}));
+        let merged = DocumentMetadata::merge(&base, &overlay);
+        DocumentMetadata::from_value(&merged)
+    }
+
+    // ==================== Versioning ====================
+
+    /// List versions of a document (newest first).
+    pub async fn list_versions(
+        &self,
+        document_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<VersionSummary>, WorkspaceError> {
+        self.storage.list_versions(document_id, limit).await
+    }
+
+    /// Get a specific version of a document.
+    pub async fn get_version(
+        &self,
+        document_id: Uuid,
+        version: i32,
+    ) -> Result<DocumentVersion, WorkspaceError> {
+        self.storage.get_version(document_id, version).await
+    }
+
+    /// Save the current content as a version if it differs from the latest.
+    ///
+    /// Returns the new version number, or `None` if skipped (empty content,
+    /// identical hash, or versioning disabled via metadata).
+    ///
+    /// Accepts pre-resolved metadata to avoid redundant DB queries when the
+    /// caller (e.g., `write()`) will also pass metadata to `reindex_document()`.
+    async fn maybe_save_version(
+        &self,
+        document_id: Uuid,
+        current_content: &str,
+        metadata: &DocumentMetadata,
+        changed_by: Option<&str>,
+    ) -> Result<Option<i32>, WorkspaceError> {
+        // Don't version empty documents
+        if current_content.is_empty() {
+            return Ok(None);
+        }
+
+        // Check metadata for skip_versioning flag
+        if metadata.skip_versioning == Some(true) {
+            return Ok(None);
+        }
+
+        let hash = content_sha256(current_content);
+
+        // Check if latest version already has this hash (skip duplicate saves).
+        // Uses a single query instead of get_version + get_latest_version_number.
+        if let Ok(versions) = self.storage.list_versions(document_id, 1).await
+            && let Some(latest) = versions.first()
+            && latest.content_hash == hash
+        {
+            return Ok(None);
+        }
+
+        let version = self
+            .storage
+            .save_version(document_id, current_content, &hash, changed_by)
+            .await?;
+        Ok(Some(version))
+    }
+
+    // ==================== Patch ====================
+
+    /// Apply a search-and-replace patch to a workspace document.
+    ///
+    /// Finds `old_string` in the document and replaces it with `new_string`.
+    /// If `replace_all` is true, replaces all occurrences; otherwise only the first.
+    /// Auto-versions before applying the patch.
+    pub async fn patch(
+        &self,
+        path: &str,
+        old_string: &str,
+        new_string: &str,
+        replace_all: bool,
+    ) -> Result<PatchResult, WorkspaceError> {
+        if old_string.is_empty() {
+            return Err(WorkspaceError::PatchFailed {
+                path: path.to_string(),
+                reason: "old_string cannot be empty".to_string(),
+            });
+        }
+        let path = normalize_path(path);
+        let doc = self
+            .storage
+            .get_document_by_path(&self.user_id, self.agent_id, &path)
+            .await?;
+
+        if !doc.content.contains(old_string) {
+            return Err(WorkspaceError::PatchFailed {
+                path,
+                reason: "old_string not found in document".to_string(),
+            });
+        }
+
+        let (new_content, count) = if replace_all {
+            let count = doc.content.matches(old_string).count();
+            (doc.content.replace(old_string, new_string), count)
+        } else {
+            (doc.content.replacen(old_string, new_string, 1), 1)
+        };
+
+        // Injection scan for system prompt files
+        if is_system_prompt_file(&path) && !new_content.is_empty() {
+            reject_if_injected(&path, &new_content)?;
+        }
+
+        // Resolve metadata once — shared by versioning and indexing.
+        let metadata = self.resolve_metadata(&path).await;
+
+        // Auto-version before updating.
+        // Fail-open: versioning failures must not block writes.
+        let _ = self
+            .maybe_save_version(doc.id, &doc.content, &metadata, Some(&self.user_id))
+            .await;
+
+        self.storage.update_document(doc.id, &new_content).await?;
+        self.reindex_document_with_metadata(doc.id, Some(&metadata))
+            .await?;
+
+        let updated = self.storage.get_document_by_id(doc.id).await?;
+        Ok(PatchResult {
+            document: updated,
+            replacements: count,
+        })
+    }
+
     /// Write (create or update) a file.
     ///
     /// Creates parent directories implicitly (they're virtual in the DB).
     /// Re-indexes the document for search after writing.
+    /// Auto-versions the previous content before overwriting.
     ///
     /// # Example
     /// ```ignore
@@ -660,8 +1013,30 @@ impl Workspace {
             .storage
             .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)
             .await?;
+
+        // Short-circuit when content is unchanged: skip versioning and update,
+        // but still reindex so metadata-driven flags (e.g. skip_indexing toggled
+        // via the memory_write metadata param) take effect immediately.
+        if doc.content == content {
+            let metadata = self.resolve_metadata(&path).await;
+            let _ = self
+                .reindex_document_with_metadata(doc.id, Some(&metadata))
+                .await;
+            return Ok(doc);
+        }
+
+        // Resolve metadata once — shared by versioning and indexing.
+        let metadata = self.resolve_metadata(&path).await;
+
+        // Auto-version previous content before overwriting.
+        // Fail-open: versioning failures must not block writes.
+        let _ = self
+            .maybe_save_version(doc.id, &doc.content, &metadata, Some(&self.user_id))
+            .await;
+
         self.storage.update_document(doc.id, content).await?;
-        self.reindex_document(doc.id).await?;
+        self.reindex_document_with_metadata(doc.id, Some(&metadata))
+            .await?;
 
         // Return updated doc
         self.storage.get_document_by_id(doc.id).await
@@ -699,8 +1074,18 @@ impl Workspace {
             reject_if_injected(&path, &new_content)?;
         }
 
+        // Resolve metadata once — shared by versioning and indexing.
+        let metadata = self.resolve_metadata(&path).await;
+
+        // Auto-version previous content before appending.
+        // Fail-open: versioning failures must not block writes.
+        let _ = self
+            .maybe_save_version(doc.id, &doc.content, &metadata, Some(&self.user_id))
+            .await;
+
         self.storage.update_document(doc.id, &new_content).await?;
-        self.reindex_document(doc.id).await?;
+        self.reindex_document_with_metadata(doc.id, Some(&metadata))
+            .await?;
         Ok(())
     }
 
@@ -785,8 +1170,16 @@ impl Workspace {
             .storage
             .get_or_create_document_by_path(&scope, self.agent_id, &path)
             .await?;
+
+        // Resolve metadata once — shared by versioning and indexing.
+        let metadata = self.resolve_metadata(&path).await;
+        let _ = self
+            .maybe_save_version(doc.id, &doc.content, &metadata, Some(&self.user_id))
+            .await;
+
         self.storage.update_document(doc.id, content).await?;
-        self.reindex_document(doc.id).await?;
+        self.reindex_document_with_metadata(doc.id, Some(&metadata))
+            .await?;
         let document = self.storage.get_document_by_id(doc.id).await?;
         Ok(WriteResult {
             document,
@@ -829,8 +1222,16 @@ impl Workspace {
         } else {
             format!("{}\n\n{}", doc.content, content)
         };
+
+        // Resolve metadata once — shared by versioning and indexing.
+        let metadata = self.resolve_metadata(&path).await;
+        let _ = self
+            .maybe_save_version(doc.id, &doc.content, &metadata, Some(&self.user_id))
+            .await;
+
         self.storage.update_document(doc.id, &new_content).await?;
-        self.reindex_document(doc.id).await?;
+        self.reindex_document_with_metadata(doc.id, Some(&metadata))
+            .await?;
         let document = self.storage.get_document_by_id(doc.id).await?;
         Ok(WriteResult {
             document,
@@ -1035,8 +1436,16 @@ impl Workspace {
         } else {
             format!("{}\n\n{}", doc.content, entry)
         };
+
+        // Resolve metadata once — shared by versioning and indexing.
+        let metadata = self.resolve_metadata(paths::MEMORY).await;
+        let _ = self
+            .maybe_save_version(doc.id, &doc.content, &metadata, Some(&self.user_id))
+            .await;
+
         self.storage.update_document(doc.id, &new_content).await?;
-        self.reindex_document(doc.id).await?;
+        self.reindex_document_with_metadata(doc.id, Some(&metadata))
+            .await?;
         Ok(())
     }
 
@@ -1526,9 +1935,31 @@ impl Workspace {
     // ==================== Indexing ====================
 
     /// Re-index a document (chunk and generate embeddings).
-    async fn reindex_document(&self, document_id: Uuid) -> Result<(), WorkspaceError> {
+    ///
+    /// Accepts optional pre-resolved metadata to skip a redundant `resolve_metadata`
+    /// call when the caller already has it (e.g., the `write()` path).
+    async fn reindex_document_with_metadata(
+        &self,
+        document_id: Uuid,
+        metadata: Option<&DocumentMetadata>,
+    ) -> Result<(), WorkspaceError> {
         // Get the document
         let doc = self.storage.get_document_by_id(document_id).await?;
+
+        // Check metadata for skip_indexing flag
+        let resolved;
+        let metadata = match metadata {
+            Some(m) => m,
+            None => {
+                resolved = self.resolve_metadata(&doc.path).await;
+                &resolved
+            }
+        };
+        if metadata.skip_indexing == Some(true) {
+            // Delete any existing chunks and skip indexing
+            self.storage.delete_chunks(document_id).await?;
+            return Ok(());
+        }
 
         // Chunk the content
         let chunks = chunk_document(&doc.content, ChunkConfig::default());
@@ -1612,6 +2043,51 @@ impl Workspace {
                 tracing::debug!("Failed to seed {}: {}", path, e);
             } else {
                 count += 1;
+            }
+        }
+
+        // Seed folder-level .config documents for hygiene defaults.
+        let config_seeds: &[(&str, serde_json::Value)] = &[
+            (
+                "daily/.config",
+                serde_json::json!({
+                    "hygiene": {"enabled": true, "retention_days": 30},
+                    "skip_versioning": true
+                }),
+            ),
+            (
+                "conversations/.config",
+                serde_json::json!({
+                    "hygiene": {"enabled": true, "retention_days": 7},
+                    "skip_versioning": true
+                }),
+            ),
+        ];
+
+        for (config_path, metadata_value) in config_seeds {
+            match self.read_primary(config_path).await {
+                Ok(_) => continue, // Already exists, don't overwrite
+                Err(WorkspaceError::DocumentNotFound { .. }) => {}
+                Err(e) => {
+                    tracing::debug!("Failed to check {}: {}", config_path, e);
+                    continue;
+                }
+            }
+            // Create empty document with metadata
+            if let Ok(doc) = self
+                .storage
+                .get_or_create_document_by_path(&self.user_id, self.agent_id, config_path)
+                .await
+            {
+                if let Err(e) = self
+                    .storage
+                    .update_document_metadata(doc.id, metadata_value)
+                    .await
+                {
+                    tracing::debug!("Failed to set metadata on {}: {}", config_path, e);
+                } else {
+                    count += 1;
+                }
             }
         }
 
@@ -1764,6 +2240,33 @@ impl Workspace {
 
         Ok(count)
     }
+}
+
+/// Find the nearest ancestor `.config` document for a given path.
+///
+/// Given a pre-fetched list of all `.config` documents (from `find_config_documents`),
+/// walks up the path components to find the most specific (nearest parent) config.
+/// Returns the metadata of the matching `.config`, or `None` if no ancestor has one.
+fn find_nearest_config(path: &str, configs: &[MemoryDocument]) -> Option<serde_json::Value> {
+    // Build a set of config paths → metadata for O(1) lookup
+    let config_map: std::collections::HashMap<&str, &serde_json::Value> = configs
+        .iter()
+        .map(|doc| (doc.path.as_str(), &doc.metadata))
+        .collect();
+
+    // Walk up the path looking for the nearest ancestor .config
+    let mut current = path;
+    while let Some(slash_pos) = current.rfind('/') {
+        let parent = &current[..slash_pos];
+        let config_path = format!("{}/{CONFIG_FILE_NAME}", parent);
+        if let Some(meta) = config_map.get(config_path.as_str()) {
+            return Some((*meta).clone());
+        }
+        current = parent;
+    }
+
+    // Check root-level .config
+    config_map.get(CONFIG_FILE_NAME).map(|m| (*m).clone())
 }
 
 /// Normalize a file path (remove leading/trailing slashes, collapse //).
@@ -2114,5 +2617,245 @@ mod seed_tests {
 
         // Multi scope: is multi
         assert!(multi_count > 1);
+    }
+}
+
+#[cfg(all(test, feature = "libsql"))]
+mod versioning_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    async fn create_test_workspace() -> (Workspace, tempfile::TempDir) {
+        use crate::db::libsql::LibSqlBackend;
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("version_test.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("LibSqlBackend");
+        <LibSqlBackend as crate::db::Database>::run_migrations(&backend)
+            .await
+            .expect("migrations");
+        let db: Arc<dyn crate::db::Database> = Arc::new(backend);
+        let ws = Workspace::new_with_db("test_version", db);
+        (ws, temp_dir)
+    }
+
+    #[tokio::test]
+    async fn write_creates_version() {
+        let (ws, _dir) = create_test_workspace().await;
+        let doc = ws.write("test.md", "v1").await.unwrap();
+        ws.write("test.md", "v2").await.unwrap();
+
+        let versions = ws.list_versions(doc.id, 50).await.unwrap();
+        assert_eq!(
+            versions.len(),
+            1,
+            "should have 1 version (the pre-v2 content)"
+        );
+        assert!(versions[0].content_hash.starts_with("sha256:"));
+
+        let v = ws.get_version(doc.id, versions[0].version).await.unwrap();
+        assert_eq!(v.content, "v1");
+        assert_eq!(v.changed_by.as_deref(), Some("test_version"));
+    }
+
+    #[tokio::test]
+    async fn write_deduplicates_identical_content() {
+        let (ws, _dir) = create_test_workspace().await;
+        let doc = ws.write("test.md", "same").await.unwrap();
+        ws.write("test.md", "same").await.unwrap();
+
+        let versions = ws.list_versions(doc.id, 50).await.unwrap();
+        // First write creates the doc (empty → "same"), second write is "same" → "same"
+        // The hash check should deduplicate the second write
+        assert!(
+            versions.len() <= 1,
+            "identical writes should not create duplicate versions"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_versions_pre_append_content() {
+        let (ws, _dir) = create_test_workspace().await;
+        let doc = ws.write("test.md", "line1").await.unwrap();
+        ws.append("test.md", "line2").await.unwrap();
+
+        let versions = ws.list_versions(doc.id, 50).await.unwrap();
+        assert!(!versions.is_empty(), "append should create a version");
+
+        let v = ws.get_version(doc.id, versions[0].version).await.unwrap();
+        assert_eq!(
+            v.content, "line1",
+            "version should contain pre-append content"
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_single_replacement() {
+        let (ws, _dir) = create_test_workspace().await;
+        ws.write("test.md", "hello world hello").await.unwrap();
+        let result = ws.patch("test.md", "hello", "hi", false).await.unwrap();
+
+        assert_eq!(result.replacements, 1);
+        assert_eq!(result.document.content, "hi world hello");
+    }
+
+    #[tokio::test]
+    async fn patch_replace_all() {
+        let (ws, _dir) = create_test_workspace().await;
+        ws.write("test.md", "hello world hello").await.unwrap();
+        let result = ws.patch("test.md", "hello", "hi", true).await.unwrap();
+
+        assert_eq!(result.replacements, 2);
+        assert_eq!(result.document.content, "hi world hi");
+    }
+
+    #[tokio::test]
+    async fn patch_not_found_error() {
+        let (ws, _dir) = create_test_workspace().await;
+        ws.write("test.md", "hello").await.unwrap();
+        let err = ws.patch("test.md", "xyz", "abc", false).await;
+
+        assert!(err.is_err());
+        match err.unwrap_err() {
+            WorkspaceError::PatchFailed { path, .. } => {
+                assert_eq!(path, "test.md");
+            }
+            other => panic!("expected PatchFailed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn patch_creates_version() {
+        let (ws, _dir) = create_test_workspace().await;
+        let doc = ws.write("test.md", "original").await.unwrap();
+        ws.patch("test.md", "original", "modified", false)
+            .await
+            .unwrap();
+
+        let versions = ws.list_versions(doc.id, 50).await.unwrap();
+        assert!(!versions.is_empty(), "patch should create a version");
+        let v = ws.get_version(doc.id, versions[0].version).await.unwrap();
+        assert_eq!(
+            v.content, "original",
+            "version should contain pre-patch content"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_metadata_no_config() {
+        let (ws, _dir) = create_test_workspace().await;
+        ws.write("notes.md", "content").await.unwrap();
+
+        let meta = ws.resolve_metadata("notes.md").await;
+        assert_eq!(meta.skip_indexing, None);
+        assert_eq!(meta.skip_versioning, None);
+        assert!(meta.hygiene.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_metadata_inherits_from_folder_config() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Create folder .config
+        let config_doc = ws.write("projects/.config", "").await.unwrap();
+        ws.update_metadata(config_doc.id, &serde_json::json!({"skip_indexing": true}))
+            .await
+            .unwrap();
+
+        // File in that folder inherits
+        let meta = ws.resolve_metadata("projects/notes.md").await;
+        assert_eq!(meta.skip_indexing, Some(true));
+    }
+
+    #[tokio::test]
+    async fn resolve_metadata_document_overrides_config() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Folder says skip_indexing: true
+        let config_doc = ws.write("projects/.config", "").await.unwrap();
+        ws.update_metadata(config_doc.id, &serde_json::json!({"skip_indexing": true}))
+            .await
+            .unwrap();
+
+        // Document says skip_indexing: false (override)
+        let doc = ws.write("projects/important.md", "content").await.unwrap();
+        ws.update_metadata(doc.id, &serde_json::json!({"skip_indexing": false}))
+            .await
+            .unwrap();
+
+        let meta = ws.resolve_metadata("projects/important.md").await;
+        assert_eq!(
+            meta.skip_indexing,
+            Some(false),
+            "document metadata should override .config"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_metadata_nearest_ancestor_wins() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Root says skip_indexing: true
+        let root_config = ws.write(".config", "").await.unwrap();
+        ws.update_metadata(root_config.id, &serde_json::json!({"skip_indexing": true}))
+            .await
+            .unwrap();
+
+        // projects/ says skip_indexing: false
+        let proj_config = ws.write("projects/.config", "").await.unwrap();
+        ws.update_metadata(proj_config.id, &serde_json::json!({"skip_indexing": false}))
+            .await
+            .unwrap();
+
+        // Nearest parent (projects/.config) wins over root
+        let meta = ws.resolve_metadata("projects/alpha/notes.md").await;
+        assert_eq!(
+            meta.skip_indexing,
+            Some(false),
+            "nearest ancestor .config should win"
+        );
+    }
+
+    #[tokio::test]
+    async fn skip_versioning_via_config() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Set skip_versioning on ephemeral/ directory
+        let config_doc = ws.write("ephemeral/.config", "").await.unwrap();
+        ws.update_metadata(config_doc.id, &serde_json::json!({"skip_versioning": true}))
+            .await
+            .unwrap();
+
+        // Write multiple times — no versions should be created
+        let doc = ws.write("ephemeral/data.md", "v1").await.unwrap();
+        ws.write("ephemeral/data.md", "v2").await.unwrap();
+        ws.write("ephemeral/data.md", "v3").await.unwrap();
+
+        let versions = ws.list_versions(doc.id, 50).await.unwrap();
+        assert_eq!(
+            versions.len(),
+            0,
+            "skip_versioning should prevent version creation"
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_with_unicode() {
+        let (ws, _dir) = create_test_workspace().await;
+        ws.write("test.md", "Hello 🌍 World 🌍").await.unwrap();
+        let result = ws.patch("test.md", "🌍", "🌎", false).await.unwrap();
+
+        assert_eq!(result.replacements, 1);
+        assert_eq!(result.document.content, "Hello 🌎 World 🌍");
+    }
+
+    #[tokio::test]
+    async fn patch_empty_replacement() {
+        let (ws, _dir) = create_test_workspace().await;
+        ws.write("test.md", "hello cruel world").await.unwrap();
+        let result = ws.patch("test.md", " cruel", "", false).await.unwrap();
+
+        assert_eq!(result.document.content, "hello world");
     }
 }

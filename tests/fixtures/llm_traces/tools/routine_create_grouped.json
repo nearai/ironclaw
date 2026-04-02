@@ -57,7 +57,7 @@
     {
       "response": {
         "type": "text",
-        "content": "Created the weekday-digest routine with a grouped cron request and listed the active routines.",
+        "content": "Created the weekday-digest routine with a grouped cron request and listed the routines. It is not verified yet, so it should stay unverified until it has a successful run.",
         "input_tokens": 250,
         "output_tokens": 24
       }

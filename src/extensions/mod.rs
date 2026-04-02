@@ -2,7 +2,8 @@
 //! and activation of channels, tools, and MCP servers.
 //!
 //! Extensions are the user-facing abstraction that unifies three runtime kinds:
-//! - **Channels** (Telegram, Slack, Discord) — messaging integrations (WASM)
+//! - **Channels** (Telegram, Slack, Discord) — messaging platform connections
+//!   and conversation transports (WASM)
 //! - **Tools** — sandboxed capabilities (WASM)
 //! - **MCP servers** — external API integrations via Model Context Protocol
 //!

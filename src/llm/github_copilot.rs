@@ -107,14 +107,21 @@ impl GithubCopilotProvider {
         body: &impl Serialize,
     ) -> Result<R, LlmError> {
         let url = self.api_url();
-        // Map token exchange failures to RequestFailed (retryable) rather than
-        // AuthFailed (non-retryable), since transient network errors during
-        // exchange should be retried by RetryProvider.
+        // Distinguish permanent auth errors (non-retryable) from transient
+        // network failures (retryable) so RetryProvider handles them correctly.
         let token = self.token_manager.get_token().await.map_err(|e| {
             tracing::warn!(error = %e, "Copilot: token exchange failed");
-            LlmError::RequestFailed {
-                provider: "github_copilot".to_string(),
-                reason: format!("Token exchange failed: {e}"),
+            match &e {
+                crate::llm::github_copilot_auth::GithubCopilotAuthError::AccessDenied
+                | crate::llm::github_copilot_auth::GithubCopilotAuthError::Expired => {
+                    LlmError::AuthFailed {
+                        provider: "github_copilot".to_string(),
+                    }
+                }
+                _ => LlmError::RequestFailed {
+                    provider: "github_copilot".to_string(),
+                    reason: format!("Token exchange failed: {e}"),
+                },
             }
         })?;
 
@@ -157,54 +164,14 @@ impl GithubCopilotProvider {
             );
 
             if status.as_u16() == 401 {
-                // Invalidate the cached session token and retry once with a
-                // fresh exchange — stale tokens are the most common 401 cause.
-                tracing::warn!("Copilot: 401 Unauthorized — invalidating session token, retrying");
+                // Invalidate the cached session token so the next attempt
+                // (driven by RetryProvider) gets a fresh one. We don't retry
+                // inline to avoid nested retries with the outer RetryProvider.
+                tracing::warn!("Copilot: 401 Unauthorized — invalidating session token for retry");
                 self.token_manager.invalidate().await;
-                let fresh = self.token_manager.get_token().await.map_err(|e| {
-                    tracing::warn!(error = %e, "Copilot: re-exchange after 401 failed");
-                    LlmError::RequestFailed {
-                        provider: "github_copilot".to_string(),
-                        reason: format!("Token re-exchange after 401 failed: {e}"),
-                    }
-                })?;
-                let mut retry_req = self
-                    .client
-                    .post(&url)
-                    .bearer_auth(fresh.expose_secret())
-                    .header("Content-Type", "application/json");
-                for (key, value) in &self.extra_headers {
-                    retry_req = retry_req.header(key.as_str(), value.as_str());
-                }
-                let retry =
-                    retry_req
-                        .json(body)
-                        .send()
-                        .await
-                        .map_err(|e| LlmError::RequestFailed {
-                            provider: "github_copilot".to_string(),
-                            reason: format!("Retry after 401 failed: {e}"),
-                        })?;
-                if retry.status().is_success() {
-                    let text = retry.text().await.map_err(|e| LlmError::RequestFailed {
-                        provider: "github_copilot".to_string(),
-                        reason: format!("Failed to read retry response body: {e}"),
-                    })?;
-                    return serde_json::from_str(&text).map_err(|e| {
-                        let truncated = crate::agent::truncate_for_preview(&text, 512);
-                        LlmError::InvalidResponse {
-                            provider: "github_copilot".to_string(),
-                            reason: format!("JSON parse error: {e}. Raw: {truncated}"),
-                        }
-                    });
-                }
-                let retry_status = retry.status();
-                tracing::warn!(
-                    status = %retry_status,
-                    "Copilot: 401 retry also failed"
-                );
-                return Err(LlmError::AuthFailed {
+                return Err(LlmError::RequestFailed {
                     provider: "github_copilot".to_string(),
+                    reason: "HTTP 401 Unauthorized".to_string(),
                 });
             }
             if status.as_u16() == 429 {
@@ -264,9 +231,8 @@ impl LlmProvider for GithubCopilotProvider {
                 .choices
                 .into_iter()
                 .next()
-                .ok_or_else(|| LlmError::InvalidResponse {
+                .ok_or_else(|| LlmError::EmptyResponse {
                     provider: "github_copilot".to_string(),
-                    reason: "No choices in response".to_string(),
                 })?;
 
         let (content, _tool_calls) = extract_choice_content(&choice);
@@ -342,9 +308,8 @@ impl LlmProvider for GithubCopilotProvider {
                 .choices
                 .into_iter()
                 .next()
-                .ok_or_else(|| LlmError::InvalidResponse {
+                .ok_or_else(|| LlmError::EmptyResponse {
                     provider: "github_copilot".to_string(),
-                    reason: "No choices in response".to_string(),
                 })?;
 
         let (content, tool_calls) = extract_choice_content(&choice);
@@ -629,6 +594,7 @@ fn extract_choice_content(choice: &OpenAiChoice) -> (Option<String>, Vec<ToolCal
                     name: tc.function.name.clone(),
                     arguments: serde_json::from_str(&tc.function.arguments)
                         .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
+                    reasoning: None,
                 })
                 .collect()
         })
@@ -661,6 +627,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "test"}),
+            reasoning: None,
         }];
         let messages = vec![
             ChatMessage::user("Search"),
