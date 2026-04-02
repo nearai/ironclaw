@@ -412,6 +412,7 @@ mod tests {
             gateway: None,
             signal: None,
             tui: None,
+            matrix: None,
             wasm_channels_dir: std::env::temp_dir().join("ironclaw-test-channels"),
             wasm_channels_enabled: false,
             configured_wasm_channels: Vec::new(),

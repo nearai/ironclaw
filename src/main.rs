@@ -724,10 +724,8 @@ async fn async_main() -> anyhow::Result<()> {
         // after first login.  Only compiled in when matrix-sdk-channel is on.
         #[cfg(feature = "matrix-sdk-channel")]
         if let Some(ref store) = components.secrets_store {
-            matrix_channel = matrix_channel.with_secrets(
-                std::sync::Arc::clone(store),
-                &config.owner_id,
-            );
+            matrix_channel =
+                matrix_channel.with_secrets(std::sync::Arc::clone(store), &config.owner_id);
         }
 
         channel_names.push("matrix".to_string());

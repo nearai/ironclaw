@@ -2153,6 +2153,29 @@ impl Store {
         Ok(row.and_then(|r| r.get::<_, Option<String>>(0)))
     }
 
+    pub async fn list_external_thread_mappings(
+        &self,
+    ) -> Result<Vec<(Uuid, String, String, String)>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT id, channel, user_id, thread_id FROM conversations WHERE thread_id IS NOT NULL",
+                &[],
+            )
+            .await?;
+        let results = rows
+            .into_iter()
+            .filter_map(|r| {
+                let id: Uuid = r.get(0);
+                let channel: Option<String> = r.get(1);
+                let user_id: Option<String> = r.get(2);
+                let thread_id: String = r.get(3);
+                Some((id, channel?, user_id?, thread_id))
+            })
+            .collect();
+        Ok(results)
+    }
+
     /// Load messages for a conversation with cursor-based pagination.
     ///
     /// Returns `(messages_oldest_first, has_more)`.

@@ -739,6 +739,14 @@ impl Agent {
 
     /// Run the agent main loop.
     pub async fn run(self) -> Result<(), Error> {
+        // Seed the thread map from persisted conversations so that channel-native
+        // room/chat IDs (e.g. Matrix room IDs, Telegram chat IDs) survive restarts
+        // and route back to the correct existing conversation.
+        if let Some(db) = self.deps.store.as_ref() {
+            self.session_manager.seed_from_db(db).await;
+        }
+
+
         // Eagerly initialize engine v2 so gateway API endpoints can serve
         // data (projects, missions, threads) before the first chat message.
         if self.config.engine_v2
