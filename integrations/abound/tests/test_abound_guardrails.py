@@ -86,7 +86,20 @@ user_id = data["id"]
 user_token = data["token"]
 print(f"  User: {user_id}")
 
-time.sleep(3)
+# Wait for workspace bootstrap, then inject custom AGENTS.md
+time.sleep(5)
+
+agents_md = open(
+    os.path.join(os.path.dirname(__file__), "..", "workspace", "AGENTS.md")
+).read()
+r = requests.post(
+    f"{BASE_URL}/api/memory/write",
+    headers={"Authorization": f"Bearer {user_token}", "Content-Type": "application/json"},
+    json={"path": "AGENTS.md", "content": agents_md},
+    timeout=10,
+)
+check("inject AGENTS.md", r.status_code == 200, f"got {r.status_code}: {r.text[:200]}")
+
 client = OpenAI(api_key=user_token, base_url=f"{BASE_URL}/v1")
 print()
 

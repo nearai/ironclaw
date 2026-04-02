@@ -113,6 +113,18 @@ check("inject api key", r.status_code == 200, f"got {r.status_code}: {r.text[:20
 
 print("\n  Waiting 5s for workspace bootstrap...")
 time.sleep(5)
+
+# Inject Abound-specific AGENTS.md into user workspace
+agents_path = os.path.join(os.path.dirname(__file__), "..", "workspace", "AGENTS.md")
+if os.path.exists(agents_path):
+    agents_md = open(agents_path).read()
+    r = requests.post(
+        f"{BASE_URL}/api/memory/write",
+        headers={"Authorization": f"Bearer {user_token}", "Content-Type": "application/json"},
+        json={"path": "AGENTS.md", "content": agents_md},
+        timeout=10,
+    )
+    check("inject AGENTS.md", r.status_code == 200, f"got {r.status_code}: {r.text[:200]}")
 print()
 
 client = OpenAI(api_key=user_token, base_url=f"{BASE_URL}/v1")
