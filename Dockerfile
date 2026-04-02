@@ -71,6 +71,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /app/target/release/ironclaw /usr/local/bin/ironclaw
 COPY --from=builder /app/migrations /app/migrations
+COPY skills/ /app/skills/
 COPY integrations/ /app/integrations/
 
 # Non-root user
@@ -80,8 +81,11 @@ USER ironclaw
 EXPOSE 3000
 
 ENV RUST_LOG=ironclaw=info
-# Abound-specific env vars (SKILLS_DIR, INTEGRATION_CREDENTIALS,
-# AGENT_AUTO_APPROVE_TOOLS) should be set in the deployment platform
+# Deployment-specific env vars should be set in the deployment platform
+# (e.g. Railway), not baked into the image:
+#   SKILLS_DIR=/app/skills
+#   INTEGRATION_CREDENTIALS_DIR=/app/integrations
+#   AGENT_AUTO_APPROVE_TOOLS=true
 # (e.g. Railway), not baked into the base image.
 
 ENTRYPOINT ["ironclaw"]

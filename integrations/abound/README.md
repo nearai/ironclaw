@@ -18,14 +18,15 @@ integrations/abound/
 Set these env vars in Railway (or your deployment):
 
 ```bash
-# Points IronClaw at the Abound credential mappings
-INTEGRATION_CREDENTIALS=/app/integrations/abound/credentials.json
+# Scans for all *.json credential mappings in this directory
+INTEGRATION_CREDENTIALS_DIR=/app/integrations
 
-# Points the skill system at the Abound skill
-SKILLS_DIR=/app/integrations/abound/skills
+# Skills directory (picks up abound-api + smart-remittance + others)
+SKILLS_DIR=/app/skills
+
+# Auto-approve tool calls (no interactive approval in API-driven deployments)
+AGENT_AUTO_APPROVE_TOOLS=true
 ```
-
-The Dockerfile already sets these.
 
 ## Per-User Credential Setup
 

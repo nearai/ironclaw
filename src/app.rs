@@ -319,9 +319,23 @@ impl AppBuilder {
         tools.register_builtin_tools();
         tools.register_tool_info();
 
-        // Load integration credential mappings (e.g. integrations/abound/credentials.json)
-        if let Ok(path) = std::env::var("INTEGRATION_CREDENTIALS") {
-            tools.load_credential_mappings(std::path::Path::new(&path));
+        // Load integration credential mappings from a directory.
+        // Scans for all *.json files in the INTEGRATION_CREDENTIALS_DIR path.
+        if let Ok(dir) = std::env::var("INTEGRATION_CREDENTIALS_DIR") {
+            let dir_path = std::path::Path::new(&dir);
+            if dir_path.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(dir_path) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                            tools.load_credential_mappings(&path);
+                        }
+                    }
+                }
+            } else if dir_path.is_file() {
+                // Backward compat: also accept a single file path
+                tools.load_credential_mappings(dir_path);
+            }
         }
 
         if let Some(ref ss) = self.secrets_store {
