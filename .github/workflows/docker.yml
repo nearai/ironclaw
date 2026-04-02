@@ -1,7 +1,7 @@
 name: Docker Image
 
 on:
-  # Called by release.yml or other workflows
+  # Called by release.yml (version tags → :latest + :version)
   workflow_call:
     inputs:
       tag:
@@ -17,7 +17,6 @@ on:
         required: false
         type: string
         default: ""
-
 env:
   IMAGE_NAME: nearaidev/ironclaw
 
@@ -43,10 +42,21 @@ jobs:
       - name: Determine tags
         id: tags
         run: |
-          TAGS="${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}"
-          TAGS="${TAGS},${{ env.IMAGE_NAME }}:latest"
-          TAGS="${TAGS},${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7}"
-          # Manual override adds an extra tag
+          VERSION="${{ steps.version.outputs.version }}"
+          SHA="sha-${GITHUB_SHA::7}"
+
+          if [[ "${{ github.event_name }}" == "workflow_call" ]]; then
+            # Release: :version + :latest + :sha-xxx
+            TAGS="${{ env.IMAGE_NAME }}:${VERSION}"
+            TAGS="${TAGS},${{ env.IMAGE_NAME }}:latest"
+            TAGS="${TAGS},${{ env.IMAGE_NAME }}:${SHA}"
+          else
+            # Manual dispatch: :version + :sha-xxx (no :latest)
+            TAGS="${{ env.IMAGE_NAME }}:${VERSION}"
+            TAGS="${TAGS},${{ env.IMAGE_NAME }}:${SHA}"
+          fi
+
+          # Manual override adds an extra tag (e.g. "staging")
           if [[ -n "${{ inputs.tag }}" ]]; then
             TAGS="${TAGS},${{ env.IMAGE_NAME }}:${{ inputs.tag }}"
           fi
@@ -83,4 +93,5 @@ jobs:
             echo ""
             echo "- version: \`${{ steps.version.outputs.version }}\`"
             echo "- sha: \`${GITHUB_SHA::7}\`"
+            echo "- trigger: \`${{ github.event_name }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
