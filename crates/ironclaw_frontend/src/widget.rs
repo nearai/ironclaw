@@ -78,11 +78,10 @@ pub enum WidgetSlot {
 pub fn scope_css(css: &str, widget_id: &str) -> String {
     let prefix = format!("[data-widget=\"{}\"]", widget_id);
     let mut result = String::with_capacity(css.len() + css.len() / 4);
-    let mut chars = css.chars().peekable();
     let mut in_block = false;
     let mut current_selector = String::new();
 
-    for ch in chars {
+    for ch in css.chars() {
         match ch {
             '{' if !in_block => {
                 // Scope each comma-separated selector
