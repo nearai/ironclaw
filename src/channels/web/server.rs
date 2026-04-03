@@ -461,7 +461,9 @@ pub struct GatewayState {
     #[allow(dead_code)]
     pub oauth_sweep_shutdown: Option<tokio::sync::watch::Sender<()>>,
     /// Broadcast channel for collection write events (consumed by routine engine).
-    pub collection_write_tx: Option<tokio::sync::broadcast::Sender<crate::agent::collection_events::CollectionWriteEvent>>,
+    pub collection_write_tx: Option<
+        tokio::sync::broadcast::Sender<crate::agent::collection_events::CollectionWriteEvent>,
+    >,
     /// Skills directory for writing per-collection SKILL.md files.
     pub skills_dir: Option<std::path::PathBuf>,
 }
@@ -646,12 +648,30 @@ pub async fn start_server(
             post(engine_mission_resume_handler),
         )
         // Collections
-        .route("/api/collections", get(collections_list_handler).post(collections_register_handler))
-        .route("/api/collections/register", post(collections_register_handler))
-        .route("/api/collections/{collection}", post(collections_insert_handler))
-        .route("/api/collections/{collection}/records", get(collections_query_handler).post(collections_insert_handler))
-        .route("/api/collections/{collection}/records/{record_id}", axum::routing::put(collections_update_handler))
-        .route("/api/collections/{collection}/records/{record_id}", axum::routing::delete(collections_delete_handler))
+        .route(
+            "/api/collections",
+            get(collections_list_handler).post(collections_register_handler),
+        )
+        .route(
+            "/api/collections/register",
+            post(collections_register_handler),
+        )
+        .route(
+            "/api/collections/{collection}",
+            post(collections_insert_handler),
+        )
+        .route(
+            "/api/collections/{collection}/records",
+            get(collections_query_handler).post(collections_insert_handler),
+        )
+        .route(
+            "/api/collections/{collection}/records/{record_id}",
+            axum::routing::put(collections_update_handler),
+        )
+        .route(
+            "/api/collections/{collection}/records/{record_id}",
+            axum::routing::delete(collections_delete_handler),
+        )
         // Skills
         .route("/api/skills", get(skills_list_handler))
         .route("/api/skills/search", post(skills_search_handler))

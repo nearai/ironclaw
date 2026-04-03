@@ -322,8 +322,6 @@ pub async fn collections_insert_handler(
     // Inject _history for audit trail.
     init_history(&mut data, &req.source);
 
-
-
     match db.insert_record(&owner, &name, data).await {
         Ok(id) => {
             // Fire collection write event for SSE broadcast.
@@ -554,22 +552,22 @@ pub async fn collections_register_handler(
                 // Build workspace resolver from pool or single workspace.
                 let ws_resolver: Option<Arc<dyn crate::tools::builtin::memory::WorkspaceResolver>> =
                     if let Some(ref pool) = state.workspace_pool {
-                        Some(Arc::clone(pool) as Arc<dyn crate::tools::builtin::memory::WorkspaceResolver>)
+                        Some(Arc::clone(pool)
+                            as Arc<dyn crate::tools::builtin::memory::WorkspaceResolver>)
                     } else {
                         None
                     };
-                tool_names =
-                    crate::tools::builtin::collections::refresh_collection_tools(
-                        &schema,
-                        &db,
-                        registry,
-                        state.skills_dir.as_deref(),
-                        state.skill_registry.as_ref(),
-                        &user.user_id,
-                        state.collection_write_tx.as_ref(),
-                        ws_resolver.as_ref(),
-                    )
-                    .await;
+                tool_names = crate::tools::builtin::collections::refresh_collection_tools(
+                    &schema,
+                    &db,
+                    registry,
+                    state.skills_dir.as_deref(),
+                    state.skill_registry.as_ref(),
+                    &user.user_id,
+                    state.collection_write_tx.as_ref(),
+                    ws_resolver.as_ref(),
+                )
+                .await;
             }
 
             (

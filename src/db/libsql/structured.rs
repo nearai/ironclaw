@@ -124,13 +124,12 @@ fn build_filters(
     for filter in filters {
         let sql_field = resolve_filter_field(&filter.field)?;
 
-        let make_compare =
-            |op: &str, idx: &mut i32| -> (String, Vec<libsql::Value>) {
-                let val = json_to_libsql_value(&filter.value);
-                let clause = format!("{sql_field} {op} ?{}", *idx);
-                *idx += 1;
-                (clause, vec![val])
-            };
+        let make_compare = |op: &str, idx: &mut i32| -> (String, Vec<libsql::Value>) {
+            let val = json_to_libsql_value(&filter.value);
+            let clause = format!("{sql_field} {op} ?{}", *idx);
+            *idx += 1;
+            (clause, vec![val])
+        };
 
         match filter.op {
             structured::FilterOp::IsNull => {
@@ -240,9 +239,9 @@ async fn aggregate_in_rust(
             let group_key = record
                 .data
                 .get(group_field)
-                .and_then(|v| match v {
-                    serde_json::Value::String(s) => Some(s.clone()),
-                    other => Some(other.to_string()),
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
                 })
                 .unwrap_or_default();
             if let Some(val) = record.data.get(field).and_then(json_to_f64) {
@@ -329,7 +328,12 @@ impl StructuredStore for LibSqlBackend {
                 schema = excluded.schema,
                 description = excluded.description
             "#,
-            libsql::params![user_id, schema.collection.as_str(), schema_json, description],
+            libsql::params![
+                user_id,
+                schema.collection.as_str(),
+                schema_json,
+                description
+            ],
         )
         .await
         .map_err(|e| DatabaseError::Query(format!("register_collection: {e}")))?;
@@ -351,16 +355,17 @@ impl StructuredStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(format!("get_collection_schema: {e}")))?;
 
-        let row = rows.next().await.map_err(|e| {
-            DatabaseError::Query(format!("get_collection_schema next: {e}"))
-        })?.ok_or_else(|| DatabaseError::NotFound {
-            entity: "collection".to_string(),
-            id: collection.to_string(),
-        })?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(format!("get_collection_schema next: {e}")))?
+            .ok_or_else(|| DatabaseError::NotFound {
+                entity: "collection".to_string(),
+                id: collection.to_string(),
+            })?;
 
         let schema_str = get_text(&row, 0);
-        serde_json::from_str(&schema_str)
-            .map_err(|e| DatabaseError::Serialization(e.to_string()))
+        serde_json::from_str(&schema_str).map_err(|e| DatabaseError::Serialization(e.to_string()))
     }
 
     async fn list_collections(
@@ -765,9 +770,7 @@ impl StructuredStore for LibSqlBackend {
 
         // GROUP BY
         if let Some(group_field) = group_by {
-            sql.push_str(&format!(
-                " GROUP BY json_extract(data, '$.{group_field}')"
-            ));
+            sql.push_str(&format!(" GROUP BY json_extract(data, '$.{group_field}')"));
         }
 
         let conn = self.connect().await?;
@@ -796,9 +799,7 @@ impl StructuredStore for LibSqlBackend {
                 .next()
                 .await
                 .map_err(|e| DatabaseError::Query(format!("aggregate next: {e}")))?
-                .ok_or_else(|| {
-                    DatabaseError::Query("Aggregation returned no rows".to_string())
-                })?;
+                .ok_or_else(|| DatabaseError::Query("Aggregation returned no rows".to_string()))?;
             extract_agg_value(&row, 0, &aggregation.operation)
         }
     }
