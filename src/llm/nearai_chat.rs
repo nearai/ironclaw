@@ -485,15 +485,6 @@ impl LlmProvider for NearAiChatProvider {
 
         let response: ChatCompletionResponse = self.send_request(&request).await?;
 
-        // Resolve alias: when the API returns a different model name (e.g.
-        // "auto" → "Qwen/Qwen3.5-122B-A10B"), update active_model so
-        // subsequent calls use the resolved name for capability checks.
-        if let Some(ref resolved) = response.model
-            && *resolved != self.config.model
-        {
-            let _ = self.set_model(resolved);
-        }
-
         let choice =
             response
                 .choices
@@ -572,13 +563,6 @@ impl LlmProvider for NearAiChatProvider {
         };
 
         let response: ChatCompletionResponse = self.send_request(&request).await?;
-
-        // Resolve alias (same as complete — update active_model from response).
-        if let Some(ref resolved) = response.model
-            && *resolved != self.config.model
-        {
-            let _ = self.set_model(resolved);
-        }
 
         let choice =
             response
@@ -1040,10 +1024,6 @@ struct ChatCompletionResponse {
     #[allow(dead_code)]
     #[serde(default)]
     id: Option<String>,
-    /// The actual model that served the request. May differ from the
-    /// configured model when using aliases like `"auto"`.
-    #[serde(default)]
-    model: Option<String>,
     choices: Vec<ChatCompletionChoice>,
     #[serde(default)]
     usage: Option<ChatCompletionUsage>,
@@ -1637,30 +1617,6 @@ mod tests {
             "reasoning (alias) should NOT leak into tool-call responses"
         );
         assert_eq!(tool_calls.len(), 1);
-    }
-
-    /// Verify the response `model` field is deserialized.
-    #[test]
-    fn test_response_model_field_parsed() {
-        let response: ChatCompletionResponse = serde_json::from_value(serde_json::json!({
-            "id": "chatcmpl-test",
-            "model": "Qwen/Qwen3.5-122B-A10B",
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": "Hello"
-                },
-                "finish_reason": "stop"
-            }],
-            "usage": { "prompt_tokens": 10, "completion_tokens": 5 }
-        }))
-        .unwrap();
-
-        assert_eq!(
-            response.model.as_deref(),
-            Some("Qwen/Qwen3.5-122B-A10B"),
-            "response.model should be parsed from the API response"
-        );
     }
 
     #[tokio::test]
