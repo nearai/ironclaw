@@ -833,7 +833,7 @@ mod advanced {
         // assistant conversation and seed the greeting if empty.
         let db = rig.database();
         let conv_id = db
-            .get_or_create_assistant_conversation("default", "gateway")
+            .get_or_create_assistant_conversation("default", None, "gateway")
             .await
             .expect("create assistant conversation");
 
@@ -897,7 +897,7 @@ mod advanced {
         // 1. Seed the greeting via the DB (simulates chat_threads_handler).
         let db = rig.database();
         let conv_id = db
-            .get_or_create_assistant_conversation("default", "gateway")
+            .get_or_create_assistant_conversation("default", None, "gateway")
             .await
             .expect("create assistant conversation");
         static GREETING: &str = include_str!("../src/workspace/seeds/GREETING.md");

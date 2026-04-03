@@ -290,7 +290,7 @@ mod tests {
 
         // Pre-populate the assistant conversation with a user message.
         let conv_id = db
-            .get_or_create_assistant_conversation("alice-existing", "gateway")
+            .get_or_create_assistant_conversation("alice-existing", None, "gateway")
             .await
             .expect("create conv");
         db.add_conversation_message(conv_id, "user", "Hello!")
