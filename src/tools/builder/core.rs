@@ -122,9 +122,9 @@ fn process_builder_tool_result(
     tool_call_id: &str,
     result: &Result<String, impl std::fmt::Display>,
 ) -> (String, ChatMessage) {
-    static SAFETY: std::sync::LazyLock<crate::safety::SafetyLayer> =
+    static SAFETY: std::sync::LazyLock<ironclaw_safety::SafetyLayer> =
         std::sync::LazyLock::new(|| {
-            crate::safety::SafetyLayer::new(&crate::config::SafetyConfig {
+            ironclaw_safety::SafetyLayer::new(&crate::config::SafetyConfig {
                 max_output_length: 100_000,
                 injection_check_enabled: true,
             })

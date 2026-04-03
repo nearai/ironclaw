@@ -215,7 +215,7 @@ fn setup_tunnel_ngrok() -> Result<TunnelSettings, ChannelSetupError> {
 
 async fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> {
     // Check if cloudflared binary is on PATH
-    let cloudflared_found = crate::skills::gating::binary_exists("cloudflared");
+    let cloudflared_found = ironclaw_skills::gating::binary_exists("cloudflared");
 
     if !cloudflared_found {
         print_error("cloudflared not found in PATH.");
