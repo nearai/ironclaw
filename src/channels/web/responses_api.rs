@@ -1038,17 +1038,19 @@ async fn streaming_worker(
                         }
                     };
 
-                    // Emit the full text as a delta so streaming clients
-                    // receive it via response.output_text.delta.
-                    emit(
-                        &tx,
-                        "response.output_text.delta",
-                        &ResponseStreamEvent::OutputTextDelta {
-                            output_index: idx,
-                            content_index: 0,
-                            delta: text.clone(),
-                        },
-                    );
+                    // Only emit as a single delta if no StreamChunk events
+                    // already delivered the text incrementally.
+                    if acc.text_chunks.is_empty() {
+                        emit(
+                            &tx,
+                            "response.output_text.delta",
+                            &ResponseStreamEvent::OutputTextDelta {
+                                output_index: idx,
+                                content_index: 0,
+                                delta: text.clone(),
+                            },
+                        );
+                    }
 
                     // Finalize the output item with the complete text.
                     let item = ResponseOutputItem::Message {

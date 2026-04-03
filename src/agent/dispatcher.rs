@@ -423,7 +423,13 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         };
 
         let output = match reasoning.respond_streaming(reason_ctx, &on_token).await {
-            Ok(output) => output,
+            Ok(output) => {
+                // Yield to let spawned StreamChunk tasks flush before the
+                // Response event is sent (prevents race where Response arrives
+                // before the last StreamChunk).
+                tokio::task::yield_now().await;
+                output
+            }
             Err(crate::error::LlmError::ContextLengthExceeded { used, limit }) => {
                 tracing::warn!(
                     used,
