@@ -42,6 +42,7 @@ pub fn prefilter_skills<'a>(
     available_skills: &'a [LoadedSkill],
     max_candidates: usize,
     max_context_tokens: usize,
+    available_tool_names: &[String],
 ) -> Vec<&'a LoadedSkill> {
     if available_skills.is_empty() || message.is_empty() {
         return vec![];
@@ -52,7 +53,7 @@ pub fn prefilter_skills<'a>(
     let mut scored: Vec<ScoredSkill<'a>> = available_skills
         .iter()
         .filter_map(|skill| {
-            let score = score_skill(skill, &message_lower, message);
+            let score = score_skill(skill, &message_lower, message, available_tool_names);
             if score > 0 {
                 Some(ScoredSkill { skill, score })
             } else {
@@ -98,7 +99,23 @@ pub fn prefilter_skills<'a>(
 }
 
 /// Score a skill against a user message.
-fn score_skill(skill: &LoadedSkill, message_lower: &str, message_original: &str) -> u32 {
+fn score_skill(
+    skill: &LoadedSkill,
+    message_lower: &str,
+    message_original: &str,
+    available_tool_names: &[String],
+) -> u32 {
+    // tools_prefix gate: if set, at least one tool must match the prefix
+    if let Some(ref prefix) = skill.manifest.activation.tools_prefix {
+        let prefix_lower = prefix.to_lowercase();
+        if !available_tool_names
+            .iter()
+            .any(|name| name.to_lowercase().starts_with(&prefix_lower))
+        {
+            return 0;
+        }
+    }
+
     // Exclusion veto: if any exclude_keyword is present in the message, score 0
     if skill
         .lowercased_exclude_keywords
@@ -270,6 +287,7 @@ mod tests {
                     patterns: pattern_strings,
                     tags: tag_vec,
                     max_context_tokens: 1000,
+                    tools_prefix: None,
                 },
                 credentials: vec![],
                 metadata: None,
@@ -288,7 +306,7 @@ mod tests {
     #[test]
     fn test_empty_message_returns_nothing() {
         let skills = vec![make_skill("test", &["write"], &[], &[])];
-        let result = prefilter_skills("", &skills, 3, MAX_SKILL_CONTEXT_TOKENS);
+        let result = prefilter_skills("", &skills, 3, MAX_SKILL_CONTEXT_TOKENS, &[]);
         assert!(result.is_empty());
     }
 
@@ -300,6 +318,7 @@ mod tests {
             &skills,
             3,
             MAX_SKILL_CONTEXT_TOKENS,
+            &[],
         );
         assert!(result.is_empty());
     }
@@ -312,6 +331,7 @@ mod tests {
             &skills,
             3,
             MAX_SKILL_CONTEXT_TOKENS,
+            &[],
         );
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name(), "writing");
@@ -325,6 +345,7 @@ mod tests {
             &skills,
             3,
             MAX_SKILL_CONTEXT_TOKENS,
+            &[],
         );
         assert_eq!(result.len(), 1);
     }
@@ -337,6 +358,7 @@ mod tests {
             &skills,
             3,
             MAX_SKILL_CONTEXT_TOKENS,
+            &[],
         );
         assert_eq!(result.len(), 1);
     }
@@ -354,6 +376,7 @@ mod tests {
             &skills,
             3,
             MAX_SKILL_CONTEXT_TOKENS,
+            &[],
         );
         assert_eq!(result.len(), 1);
     }
@@ -374,6 +397,7 @@ mod tests {
             &skills,
             3,
             MAX_SKILL_CONTEXT_TOKENS,
+            &[],
         );
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name(), "writing");
@@ -386,7 +410,7 @@ mod tests {
             make_skill("b", &["test"], &[], &[]),
             make_skill("c", &["test"], &[], &[]),
         ];
-        let result = prefilter_skills("test", &skills, 2, MAX_SKILL_CONTEXT_TOKENS);
+        let result = prefilter_skills("test", &skills, 2, MAX_SKILL_CONTEXT_TOKENS, &[]);
         assert_eq!(result.len(), 2);
     }
 
@@ -398,14 +422,15 @@ mod tests {
         skill2.manifest.activation.max_context_tokens = 3000;
 
         let skills = vec![skill, skill2];
-        let result = prefilter_skills("test", &skills, 5, 4000);
+        // Budget of 4000 can only fit one 3000-token skill
+        let result = prefilter_skills("test", &skills, 5, 4000, &[]);
         assert_eq!(result.len(), 1);
     }
 
     #[test]
     fn test_invalid_regex_handled_gracefully() {
         let skills = vec![make_skill("bad", &["test"], &[], &["[invalid regex"])];
-        let result = prefilter_skills("test", &skills, 3, MAX_SKILL_CONTEXT_TOKENS);
+        let result = prefilter_skills("test", &skills, 3, MAX_SKILL_CONTEXT_TOKENS, &[]);
         assert_eq!(result.len(), 1);
     }
 
@@ -421,6 +446,7 @@ mod tests {
             &skills,
             3,
             MAX_SKILL_CONTEXT_TOKENS,
+            &[],
         );
         assert_eq!(result.len(), 1);
     }
@@ -437,6 +463,7 @@ mod tests {
             &skills,
             3,
             MAX_SKILL_CONTEXT_TOKENS,
+            &[],
         );
         assert_eq!(result.len(), 1);
     }
@@ -461,6 +488,7 @@ mod tests {
             &skills,
             3,
             MAX_SKILL_CONTEXT_TOKENS,
+            &[],
         );
         assert_eq!(result.len(), 1);
     }
@@ -475,7 +503,7 @@ mod tests {
         skill2.prompt_content = String::new();
 
         let skills = vec![skill, skill2];
-        let result = prefilter_skills("test", &skills, 5, 1);
+        let result = prefilter_skills("test", &skills, 5, 1, &[]);
         assert_eq!(result.len(), 1);
     }
 
@@ -507,6 +535,7 @@ mod tests {
             &skills,
             3,
             MAX_SKILL_CONTEXT_TOKENS,
+            &[],
         );
         assert!(
             result.is_empty(),
@@ -528,6 +557,7 @@ mod tests {
             &skills,
             3,
             MAX_SKILL_CONTEXT_TOKENS,
+            &[],
         );
         assert_eq!(
             result.len(),
@@ -550,6 +580,7 @@ mod tests {
             &skills,
             3,
             MAX_SKILL_CONTEXT_TOKENS,
+            &[],
         );
         assert!(
             result.is_empty(),
@@ -571,6 +602,7 @@ mod tests {
             &skills,
             3,
             MAX_SKILL_CONTEXT_TOKENS,
+            &[],
         );
         assert!(
             result.is_empty(),
@@ -646,6 +678,28 @@ mod tests {
         );
     }
 
+    // --- tools_prefix tests ---
+
+    #[test]
+    fn tools_prefix_gates_skill_when_no_matching_tools() {
+        let mut skill = make_skill("grace_tasks", &["tasks", "todo"], &[], &[]);
+        skill.manifest.activation.tools_prefix = Some("grace_tasks".to_string());
+
+        let no_matching_tools = vec!["andrew_tasks_add".to_string()];
+        let skills = vec![skill];
+        let selected = prefilter_skills(
+            "add to my tasks todo list",
+            &skills,
+            5,
+            4000,
+            &no_matching_tools,
+        );
+        assert!(
+            selected.is_empty(),
+            "Skill must NOT activate when no tools match prefix"
+        );
+    }
+
     #[test]
     fn test_extract_underscored_skill_name() {
         let mut skill = make_skill("my_skill", &["skill"], &[], &[]);
@@ -685,6 +739,30 @@ mod tests {
     }
 
     #[test]
+    fn tools_prefix_allows_skill_when_tools_match() {
+        let mut skill = make_skill("grace_tasks", &["tasks", "todo"], &[], &[]);
+        skill.manifest.activation.tools_prefix = Some("grace_tasks".to_string());
+
+        let matching_tools = vec![
+            "grace_tasks_add".to_string(),
+            "grace_tasks_query".to_string(),
+        ];
+        let skills = vec![skill];
+        let selected = prefilter_skills(
+            "add to my tasks todo list",
+            &skills,
+            5,
+            4000,
+            &matching_tools,
+        );
+        assert_eq!(
+            selected.len(),
+            1,
+            "Skill should activate when matching tools exist"
+        );
+    }
+
+    #[test]
     fn test_extract_unknown_slash_not_replaced() {
         let skills = vec![make_skill("github", &["github"], &[], &[])];
         let (matched, rewritten) = extract_skill_mentions("run /unknown-thing now", &skills);
@@ -709,5 +787,24 @@ mod tests {
         // The /github.com won't match because '.' breaks the name pattern
         assert!(matched.is_empty());
         assert_eq!(rewritten, "open https://github.com/repo");
+    }
+
+    #[test]
+    fn no_tools_prefix_activates_normally() {
+        let skill = make_skill("regular-skill", &["tasks", "todo"], &[], &[]);
+        // No tools_prefix set — should activate regardless of available tools
+        let skills = vec![skill];
+        let selected = prefilter_skills(
+            "add to my tasks todo list",
+            &skills,
+            5,
+            4000,
+            &[], // empty tools
+        );
+        assert_eq!(
+            selected.len(),
+            1,
+            "Skill without tools_prefix should activate normally"
+        );
     }
 }
