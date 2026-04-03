@@ -1137,8 +1137,8 @@ mod tests {
 
     #[test]
     fn test_server_name_valid_characters_accepted() {
-        // Alphanumeric, dashes, underscores, dots are all valid
-        for name in ["notion", "my-server", "my_server", "server.local", "MCP-1"] {
+        // Lowercase alphanumeric, dashes, underscores are valid
+        for name in ["notion", "my-server", "my_server", "mcp-1"] {
             let config = McpServerConfig::new(name, "https://mcp.example.com");
             assert!(
                 config.validate().is_ok(),
@@ -1188,28 +1188,41 @@ mod tests {
         assert!(config.validate().is_err());
     }
 
+    #[test]
+    fn test_server_name_dot_rejected() {
+        // Dots are rejected because server names are used as tool name
+        // prefixes and LLM providers require ^[a-zA-Z0-9_-]+$
+        let config = McpServerConfig::new("server.local", "https://mcp.example.com");
+        assert!(config.validate().is_err());
+    }
+
     #[tokio::test]
-    async fn test_load_rejects_corrupted_server_name() {
+    async fn test_load_skips_invalid_server_name() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("mcp-servers.json");
 
-        let corrupted = serde_json::json!({
-            "servers": [{
-                "name": "bad;rm -rf /",
-                "url": "https://mcp.example.com",
-                "enabled": true,
-                "headers": {}
-            }]
+        // Mix of one invalid and one valid server
+        let mixed = serde_json::json!({
+            "servers": [
+                {
+                    "name": "bad;rm -rf /",
+                    "url": "https://mcp.example.com",
+                    "enabled": true,
+                    "headers": {}
+                },
+                {
+                    "name": "good-server",
+                    "url": "https://mcp.good.com",
+                    "enabled": true,
+                    "headers": {}
+                }
+            ]
         });
-        tokio::fs::write(&path, corrupted.to_string())
-            .await
-            .unwrap();
+        tokio::fs::write(&path, mixed.to_string()).await.unwrap();
 
-        let result = load_mcp_servers_from(&path).await;
-        assert!(
-            result.is_err(),
-            "Load should reject server with dangerous name"
-        );
+        let result = load_mcp_servers_from(&path).await.unwrap();
+        assert_eq!(result.servers.len(), 1, "Should skip invalid, keep valid");
+        assert_eq!(result.servers[0].name, "good-server");
     }
 
     #[test]
