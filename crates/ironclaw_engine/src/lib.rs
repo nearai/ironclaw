@@ -44,6 +44,7 @@ pub use types::thread::{Thread, ThreadConfig, ThreadId, ThreadState, ThreadType}
 // ── Re-exports: traits ──────────────────────────────────────
 
 pub use traits::effect::{EffectExecutor, ThreadExecutionContext};
+pub use traits::embedder::Embedder;
 pub use traits::llm::{LlmBackend, LlmCallConfig, LlmOutput};
 pub use traits::store::Store;
 

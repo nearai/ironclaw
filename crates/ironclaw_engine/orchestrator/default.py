@@ -268,7 +268,7 @@ def compact_if_needed(state, config):
 # ── Skill selection and injection (self-modifiable) ────────
 
 
-def score_skill(skill, message_lower):
+def score_skill(skill, message_lower, message_embedding=None):
     """Score a skill against a user message. Returns 0 if vetoed."""
     meta = skill.get("metadata", {})
     activation = meta.get("activation", {})
@@ -298,6 +298,37 @@ def score_skill(skill, message_lower):
             tag_score += 3
     score += min(tag_score, 15)
 
+    # Semantic similarity scoring via embeddings
+    if message_embedding is not None and len(message_embedding) > 0:
+        skill_desc = meta.get("description", "")
+        if not skill_desc:
+            skill_desc = activation.get("description", "")
+        if skill_desc:
+            # Use cached embedding or compute and cache
+            skill_embedding = skill.get("_embedding")
+            if skill_embedding is None:
+                skill_embedding = __embed_text__(skill_desc)
+                skill["_embedding"] = skill_embedding
+
+            if skill_embedding and len(skill_embedding) > 0 and len(skill_embedding) == len(message_embedding):
+                # Cosine similarity
+                dot = 0.0
+                mag_a = 0.0
+                mag_b = 0.0
+                for i in range(len(message_embedding)):
+                    a = message_embedding[i]
+                    b = skill_embedding[i]
+                    dot = dot + a * b
+                    mag_a = mag_a + a * a
+                    mag_b = mag_b + b * b
+                mag_a = mag_a ** 0.5
+                mag_b = mag_b ** 0.5
+                if mag_a > 0 and mag_b > 0:
+                    similarity = dot / (mag_a * mag_b)
+                    # Scale to max 25 points (semantic alone can trigger selection)
+                    semantic_score = max(0, int(similarity * 25))
+                    score = score + semantic_score
+
     # Confidence factor for extracted skills
     source = meta.get("source", "authored")
     if source == "extracted":
@@ -310,15 +341,15 @@ def score_skill(skill, message_lower):
     return score
 
 
-def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
-    """Select relevant skills using deterministic scoring."""
+def select_skills(skills, goal, max_candidates=3, max_tokens=4000, goal_embedding=None):
+    """Select relevant skills using deterministic + semantic scoring."""
     if not skills or not goal:
         return []
 
     message_lower = goal.lower()
     scored = []
     for skill in skills:
-        s = score_skill(skill, message_lower)
+        s = score_skill(skill, message_lower, message_embedding=goal_embedding)
         if s > 0:
             scored.append((s, skill))
 
@@ -474,9 +505,14 @@ def run_loop(context, goal, actions, state, config):
                 knowledge = format_docs(docs)
                 append_system_append(working_messages, knowledge)
 
-            # Select and inject skills based on goal keywords
+            # Select and inject skills based on keywords + semantic similarity
+            goal_embedding = None
+            try:
+                goal_embedding = __embed_text__(goal)
+            except:
+                pass  # Fall back to keyword-only scoring
             all_skills = __list_skills__()
-            active_skills = select_skills(all_skills, goal, max_candidates=3, max_tokens=4000)
+            active_skills = select_skills(all_skills, goal, max_candidates=3, max_tokens=4000, goal_embedding=goal_embedding)
             if active_skills:
                 skill_text = format_skills(active_skills)
                 append_system_append(working_messages, skill_text)

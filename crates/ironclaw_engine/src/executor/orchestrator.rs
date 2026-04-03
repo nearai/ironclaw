@@ -17,6 +17,7 @@
 //! - `__retrieve_docs__` — query memory docs
 //! - `__check_budget__` — remaining tokens/time/USD
 //! - `__get_actions__` — available tool definitions
+//! - `__embed_text__` — embed text for semantic similarity
 
 use std::sync::Arc;
 
@@ -305,6 +306,7 @@ pub async fn execute_orchestrator(
     event_tx: Option<&tokio::sync::broadcast::Sender<ThreadEvent>>,
     retrieval: Option<&RetrievalEngine>,
     store: Option<&Arc<dyn Store>>,
+    embedder: Option<&Arc<dyn crate::traits::embedder::Embedder>>,
     persisted_state: &serde_json::Value,
 ) -> Result<OrchestratorResult, EngineError> {
     let mut total_tokens = TokenUsage::default();
@@ -451,6 +453,9 @@ pub async fn execute_orchestrator(
 
                     // __list_skills__(max_candidates, max_tokens)
                     "__list_skills__" => handle_list_skills(args, thread, store).await,
+
+                    // __embed_text__(text) — returns list of floats (embedding vector)
+                    "__embed_text__" => handle_embed_text(args, embedder).await,
 
                     // __record_skill_usage__(doc_id, success)
                     "__record_skill_usage__" => handle_record_skill_usage(args, store).await,
@@ -1720,6 +1725,35 @@ async fn handle_list_skills(
         .collect();
 
     ExtFunctionResult::Return(json_to_monty(&serde_json::json!(skills)))
+}
+
+/// Handle `__embed_text__(text)`.
+///
+/// Embeds a text string using the configured embedding provider.
+/// Returns a list of floats (the embedding vector), or an empty list
+/// if embeddings are not configured.
+async fn handle_embed_text(
+    args: &[MontyObject],
+    embedder: Option<&Arc<dyn crate::traits::embedder::Embedder>>,
+) -> ExtFunctionResult {
+    let Some(embedder) = embedder else {
+        return ExtFunctionResult::Return(json_to_monty(&serde_json::json!([])));
+    };
+
+    let text = args.first().map(monty_to_string).unwrap_or_default();
+    if text.is_empty() {
+        return ExtFunctionResult::Return(json_to_monty(&serde_json::json!([])));
+    }
+
+    let embedding = embedder.embed(&text).await;
+    if embedding.is_empty() {
+        return ExtFunctionResult::Return(json_to_monty(&serde_json::json!([])));
+    }
+
+    // Convert Vec<f32> to JSON array of numbers
+    let embedding_json: Vec<serde_json::Value> =
+        embedding.iter().map(|&v| serde_json::json!(v)).collect();
+    ExtFunctionResult::Return(json_to_monty(&serde_json::json!(embedding_json)))
 }
 
 /// Handle `__record_skill_usage__(doc_id, success)`.

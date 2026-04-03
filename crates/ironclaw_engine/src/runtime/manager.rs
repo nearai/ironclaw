@@ -43,6 +43,8 @@ pub struct ThreadManager {
     completed: Arc<RwLock<HashMap<ThreadId, ThreadOutcome>>>,
     /// Broadcast channel for thread events (for live status updates).
     event_tx: tokio::sync::broadcast::Sender<crate::types::event::ThreadEvent>,
+    /// Optional embedder for semantic skill matching.
+    embedder: Option<Arc<dyn crate::traits::embedder::Embedder>>,
 }
 
 impl ThreadManager {
@@ -67,7 +69,14 @@ impl ThreadManager {
             running: Arc::new(RwLock::new(HashMap::new())),
             completed: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
+            embedder: None,
         }
+    }
+
+    /// Set the embedder for semantic skill matching.
+    pub fn with_embedder(mut self, embedder: Arc<dyn crate::traits::embedder::Embedder>) -> Self {
+        self.embedder = Some(embedder);
+        self
     }
 
     /// Subscribe to thread events for live status updates.
@@ -259,11 +268,14 @@ impl ThreadManager {
         let store_for_retrieval = Arc::clone(&self.store);
         let retrieval = crate::memory::RetrievalEngine::new(store_for_retrieval);
 
-        let exec_loop = ExecutionLoop::new(thread, llm, effects, leases, policy, rx, user_id)
+        let mut exec_loop = ExecutionLoop::new(thread, llm, effects, leases, policy, rx, user_id)
             .with_capabilities(Arc::clone(&self.capabilities))
             .with_event_tx(self.event_tx.clone())
             .with_retrieval(retrieval)
             .with_store(Arc::clone(&self.store));
+        if let Some(ref embedder) = self.embedder {
+            exec_loop = exec_loop.with_embedder(Arc::clone(embedder));
+        }
 
         // Spawn background task
         let store_for_task = Arc::clone(&self.store);

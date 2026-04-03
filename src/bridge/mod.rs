@@ -6,12 +6,14 @@
 
 pub mod auth_manager;
 mod effect_adapter;
+mod embedder_adapter;
 mod llm_adapter;
 mod router;
 pub mod skill_migration;
 mod store_adapter;
 
 pub use effect_adapter::EffectBridgeAdapter;
+pub use embedder_adapter::EmbedderBridgeAdapter;
 pub use router::{
     // DTO types
     EngineMissionDetail,

@@ -652,14 +652,23 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
 
     let store_dyn: Arc<dyn Store> = store.clone();
 
-    let thread_manager = Arc::new(ThreadManager::new(
+    let mut thread_manager = ThreadManager::new(
         llm_adapter,
         effect_adapter.clone(),
         store_dyn.clone(),
         Arc::new(capabilities),
         leases,
         policy,
-    ));
+    );
+
+    // Wire embedder for semantic skill matching if embeddings are configured
+    if let Some(ref embedding_provider) = agent.deps.embeddings {
+        let embedder = Arc::new(super::EmbedderBridgeAdapter::new(Arc::clone(embedding_provider)));
+        thread_manager = thread_manager.with_embedder(embedder);
+        debug!("engine v2: embedder wired for semantic skill matching");
+    }
+
+    let thread_manager = Arc::new(thread_manager);
 
     // Migrate legacy records: pre-existing engine records deserialize without a
     // user_id field and get the serde default "legacy". Stamp the owner's identity

@@ -49,6 +49,8 @@ pub struct ExecutionLoop {
     retrieval: Option<crate::memory::RetrievalEngine>,
     /// Optional Store for runtime prompt overlay loading and skill retrieval.
     store: Option<Arc<dyn crate::traits::store::Store>>,
+    /// Optional embedder for semantic skill matching.
+    embedder: Option<Arc<dyn crate::traits::embedder::Embedder>>,
     /// Runtime platform metadata for self-awareness in system prompts.
     platform_info: Option<crate::executor::prompt::PlatformInfo>,
 }
@@ -75,6 +77,7 @@ impl ExecutionLoop {
             event_tx: None,
             retrieval: None,
             store: None,
+            embedder: None,
             platform_info: None,
         }
     }
@@ -106,6 +109,12 @@ impl ExecutionLoop {
     /// Set the Store for runtime prompt overlay loading and skill retrieval.
     pub fn with_store(mut self, store: Arc<dyn crate::traits::store::Store>) -> Self {
         self.store = Some(store);
+        self
+    }
+
+    /// Set the embedder for semantic skill matching.
+    pub fn with_embedder(mut self, embedder: Arc<dyn crate::traits::embedder::Embedder>) -> Self {
+        self.embedder = Some(embedder);
         self
     }
 
@@ -279,6 +288,7 @@ impl ExecutionLoop {
             self.event_tx.as_ref(),
             self.retrieval.as_ref(),
             self.store.as_ref(),
+            self.embedder.as_ref(),
             &checkpoint.persisted_state,
         )
         .await;

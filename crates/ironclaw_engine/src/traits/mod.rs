@@ -4,5 +4,6 @@
 //! implements them via bridge adapters over existing infrastructure.
 
 pub mod effect;
+pub mod embedder;
 pub mod llm;
 pub mod store;
