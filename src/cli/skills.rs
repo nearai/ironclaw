@@ -53,16 +53,30 @@ pub async fn run_skills_command(
     let full_config = crate::config::Config::from_env_with_toml(config_path)
         .await
         .map_err(|e| anyhow::anyhow!("{e:#}"))?;
-    let config = full_config.skills;
+    dispatch_skills_command(cmd, &full_config.skills).await
+}
 
+/// Dispatch a skills subcommand with the given config.
+///
+/// Extracted from [`run_skills_command`] so it can be tested without
+/// loading the full application configuration.
+async fn dispatch_skills_command(cmd: SkillsCommand, config: &SkillsConfig) -> anyhow::Result<()> {
     if !config.enabled {
         anyhow::bail!("Skills system is disabled (SKILLS_ENABLED=false)");
     }
 
     match cmd {
-        SkillsCommand::List { verbose, json } => cmd_list(&config, verbose, json).await,
-        SkillsCommand::Search { query, json } => cmd_search(&query, json).await,
-        SkillsCommand::Info { name, json } => cmd_info(&config, &name, json).await,
+        SkillsCommand::List { verbose, json } => cmd_list(config, verbose, json).await,
+        SkillsCommand::Search { query, json } => {
+            if !config.clawhub_enabled {
+                anyhow::bail!(
+                    "ClawHub registry is disabled (CLAWHUB_ENABLED=false). \
+                     Use 'ironclaw skills install --url <url>' for direct installs."
+                );
+            }
+            cmd_search(&query, json).await
+        }
+        SkillsCommand::Info { name, json } => cmd_info(config, &name, json).await,
     }
 }
 
@@ -123,7 +137,9 @@ async fn cmd_list(config: &SkillsConfig, verbose: bool, json: bool) -> anyhow::R
         println!("  User:      {}", config.local_dir.display());
         println!("  Installed: {}", config.installed_dir.display());
         println!();
-        println!("Use 'ironclaw skills search <query>' to find skills on ClawHub.");
+        if config.clawhub_enabled {
+            println!("Use 'ironclaw skills search <query>' to find skills on ClawHub.");
+        }
         return Ok(());
     }
 
@@ -341,6 +357,27 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn search_rejected_when_clawhub_disabled() {
+        let config = SkillsConfig {
+            clawhub_enabled: false,
+            ..SkillsConfig::default()
+        };
+        let result = dispatch_skills_command(
+            SkillsCommand::Search {
+                query: "test".into(),
+                json: false,
+            },
+            &config,
+        )
+        .await;
+        let err = result.expect_err("should reject search when ClawHub is disabled");
+        assert!(
+            err.to_string().contains("disabled"),
+            "error should mention disabled: {err}"
+        );
+    }
 
     #[test]
     fn truncate_short_string() {
