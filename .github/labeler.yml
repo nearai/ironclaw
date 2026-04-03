@@ -68,15 +68,16 @@
           - src/db/postgres.rs
           - migrations/**
 
-"DB MIGRATION":
-  - changed-files:
-      - any-glob-to-any-file:
-          - migrations/**
-
 "scope: db/libsql":
   - changed-files:
       - any-glob-to-any-file:
           - src/db/libsql_backend.rs
+          - src/db/libsql_migrations.rs
+
+"DB MIGRATION":
+  - changed-files:
+      - any-glob-to-any-file:
+          - migrations/**
           - src/db/libsql_migrations.rs
 
 "scope: safety":

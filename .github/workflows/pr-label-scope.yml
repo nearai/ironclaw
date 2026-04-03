@@ -17,7 +17,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-        run: gh label create "DB MIGRATION" --repo "$REPO" --color C62828 --description "PR adds or modifies versioned database migration scripts" --force
+        run: gh label create "DB MIGRATION" --repo "$REPO" --color C62828 --description "PR adds or modifies PostgreSQL or libSQL migration definitions" --force
 
       - uses: actions/labeler@v5
         with:

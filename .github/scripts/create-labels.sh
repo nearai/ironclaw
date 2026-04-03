@@ -63,7 +63,7 @@ create "scope: docs"          "78909C" "Documentation"
 create "scope: dependencies"  "90A4AE" "Dependency updates"
 
 echo "==> Creating coordination labels..."
-create "DB MIGRATION"         "C62828" "PR adds or modifies versioned database migration scripts"
+create "DB MIGRATION"         "C62828" "PR adds or modifies PostgreSQL or libSQL migration definitions"
 
 echo "==> Creating workflow labels..."
 create "skip-regression-check" "9E9E9E" "Acknowledged: fix without regression test"
