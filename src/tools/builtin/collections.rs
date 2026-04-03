@@ -150,8 +150,14 @@ pub fn generate_collection_tools(
 ///
 /// Errors are logged but not propagated — skill generation is best-effort and
 /// should never block collection registration.
-pub(crate) fn generate_collection_skill(schema: &CollectionSchema, skills_dir: &Path) {
-    let name = &schema.collection;
+pub(crate) fn generate_collection_skill(
+    schema: &CollectionSchema,
+    skills_dir: &Path,
+    owner_user_id: &str,
+) {
+    let scope = schema.source_scope.as_deref().unwrap_or(owner_user_id);
+    let prefixed_name = format!("{}_{}", scope, schema.collection);
+    let name = &prefixed_name;
     let raw_description = schema
         .description
         .as_deref()
@@ -227,6 +233,18 @@ pub(crate) fn generate_collection_skill(schema: &CollectionSchema, skills_dir: &
         .collect::<Vec<_>>()
         .join("\n");
 
+    // YAML-safe tools_prefix and name (quote if contains special chars)
+    let yaml_safe = |s: &str| -> String {
+        if s.contains(':') || s.contains('#') || s.contains('"') || s.contains('\'') {
+            let escaped = s.replace('"', "\\\"");
+            format!("\"{}\"", escaped)
+        } else {
+            s.to_string()
+        }
+    };
+    let name_yaml = yaml_safe(name);
+    let tools_prefix_yaml = yaml_safe(name);
+
     // Build field documentation for the skill body
     let fields_doc: String = schema
         .fields
@@ -244,7 +262,7 @@ pub(crate) fn generate_collection_skill(schema: &CollectionSchema, skills_dir: &
 
     let skill_content = format!(
         r#"---
-name: {name}
+name: {name_yaml}
 version: 0.1.0
 description: "{description}"
 activation:
@@ -255,7 +273,7 @@ activation:
     - "(?i)\\b(add|put|pick up|include|also need|another)\\b"
     - "(?i)(what('s| do| does| is)|show me|how many|on my (list|plate))"
   max_context_tokens: 800
-  tools_prefix: {name}
+  tools_prefix: {tools_prefix_yaml}
 ---
 
 # {human_name_title}
@@ -888,7 +906,7 @@ pub(crate) async fn refresh_collection_tools(
 
     // Generate per-collection skill for future session discovery (best-effort)
     if let Some(skills_dir) = skills_dir {
-        generate_collection_skill(schema, skills_dir);
+        generate_collection_skill(schema, skills_dir, user_id);
 
         // Update the router skill
         if let Ok(schemas) = db.list_collections(user_id).await {
@@ -2545,16 +2563,19 @@ mod tests {
             source_scope: None,
         };
 
-        generate_collection_skill(&schema, skills_dir);
+        generate_collection_skill(&schema, skills_dir, "test_user");
 
-        let skill_path = skills_dir.join("todo_items").join("SKILL.md");
+        let skill_path = skills_dir.join("test_user_todo_items").join("SKILL.md");
         assert!(skill_path.exists(), "SKILL.md should be created");
 
         let content = std::fs::read_to_string(&skill_path).unwrap();
 
         // Valid YAML frontmatter
         assert!(content.starts_with("---\n"), "should start with YAML frontmatter");
-        assert!(content.contains("name: todo_items"), "should contain collection name");
+        assert!(
+            content.contains("name: test_user_todo_items"),
+            "should contain prefixed collection name"
+        );
         assert!(
             content.contains("Track todo items and tasks"),
             "should contain description"
@@ -2565,9 +2586,18 @@ mod tests {
         assert!(content.contains("items"), "should have keyword from collection name");
 
         // Tool documentation
-        assert!(content.contains("todo_items_add"), "should document add tool");
-        assert!(content.contains("todo_items_query"), "should document query tool");
-        assert!(content.contains("todo_items_summary"), "should document summary tool");
+        assert!(
+            content.contains("test_user_todo_items_add"),
+            "should document add tool with prefix"
+        );
+        assert!(
+            content.contains("test_user_todo_items_query"),
+            "should document query tool with prefix"
+        );
+        assert!(
+            content.contains("test_user_todo_items_summary"),
+            "should document summary tool with prefix"
+        );
 
         // Field documentation
         assert!(content.contains("`task`"), "should document task field");
@@ -2598,14 +2628,110 @@ mod tests {
             source_scope: None,
         };
 
-        generate_collection_skill(&schema, tmp.path());
+        generate_collection_skill(&schema, tmp.path(), "test_user");
 
         let content =
-            std::fs::read_to_string(tmp.path().join("contacts").join("SKILL.md")).unwrap();
+            std::fs::read_to_string(tmp.path().join("test_user_contacts").join("SKILL.md"))
+                .unwrap();
         assert!(
             content.contains("Structured data collection"),
             "should use default description"
         );
+    }
+
+    #[cfg(test)]
+    mod skill_generation_tests {
+        use super::*;
+
+        #[test]
+        fn skill_uses_prefixed_tool_names() {
+            let schema = CollectionSchema {
+                collection: "tasks".to_string(),
+                description: Some("Task tracking".to_string()),
+                fields: {
+                    let mut f = std::collections::BTreeMap::new();
+                    f.insert(
+                        "title".to_string(),
+                        crate::db::structured::FieldDef {
+                            field_type: FieldType::Text,
+                            required: true,
+                            default: None,
+                        },
+                    );
+                    f
+                },
+                source_scope: None,
+            };
+            let tmp = tempfile::tempdir().unwrap();
+            generate_collection_skill(&schema, tmp.path(), "andrew");
+
+            let skill_path = tmp.path().join("andrew_tasks").join("SKILL.md");
+            assert!(skill_path.exists(), "Skill dir should be andrew_tasks");
+
+            let content = std::fs::read_to_string(&skill_path).unwrap();
+            assert!(
+                content.contains("name: andrew_tasks"),
+                "Skill name should be prefixed"
+            );
+            assert!(
+                content.contains("tools_prefix: andrew_tasks"),
+                "tools_prefix should be prefixed"
+            );
+            assert!(
+                content.contains("andrew_tasks_add"),
+                "Tool refs in body should be prefixed"
+            );
+        }
+
+        #[test]
+        fn skill_with_source_scope_uses_source_scope() {
+            let schema = CollectionSchema {
+                collection: "tasks".to_string(),
+                description: Some("test".to_string()),
+                fields: std::collections::BTreeMap::new(),
+                source_scope: Some("grace".to_string()),
+            };
+            let tmp = tempfile::tempdir().unwrap();
+            generate_collection_skill(&schema, tmp.path(), "andrew");
+
+            // source_scope takes precedence over owner_user_id
+            let skill_path = tmp.path().join("grace_tasks").join("SKILL.md");
+            assert!(
+                skill_path.exists(),
+                "Skill dir should use source_scope: grace_tasks"
+            );
+
+            let content = std::fs::read_to_string(&skill_path).unwrap();
+            assert!(content.contains("name: grace_tasks"));
+            assert!(content.contains("grace_tasks_add"));
+        }
+
+        #[test]
+        fn skill_yaml_sanitizes_special_chars() {
+            let schema = CollectionSchema {
+                collection: "tasks".to_string(),
+                description: Some("test".to_string()),
+                fields: std::collections::BTreeMap::new(),
+                source_scope: None,
+            };
+            let tmp = tempfile::tempdir().unwrap();
+            generate_collection_skill(&schema, tmp.path(), "user:admin");
+
+            let skill_path = tmp.path().join("user:admin_tasks").join("SKILL.md");
+            assert!(skill_path.exists());
+
+            let content = std::fs::read_to_string(&skill_path).unwrap();
+            // Name and tools_prefix with colon must be quoted
+            assert!(
+                content.contains("name: \"user:admin_tasks\""),
+                "name with special chars must be YAML-quoted. Got: {}",
+                content
+            );
+            assert!(
+                content.contains("tools_prefix: \"user:admin_tasks\""),
+                "tools_prefix with special chars must be YAML-quoted"
+            );
+        }
     }
 
     #[test]
