@@ -121,6 +121,12 @@ SEL = {
     "plan_status_badge":        ".plan-status-badge",
     "plan_title":               ".plan-title",
     "plan_summary":             ".plan-summary",
+    # Tool permissions (Settings → Tools tab)
+    "tools_tab":                "button[data-settings-subtab='tools']",
+    "tool_permission_row":      ".tool-permission-row",
+    "tool_permission_toggle":   ".tool-permission-toggle",
+    "tool_lock_icon":           ".tool-lock-icon",
+    "tool_default_badge":       ".tool-default-badge",
 }
 
 TABS = ["chat", "memory", "jobs", "routines", "settings"]

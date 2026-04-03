@@ -1064,7 +1064,7 @@ impl Agent {
         }
 
         if approved {
-            // If always, add to auto-approved set
+            // If always, add to auto-approved set and persist to settings.
             if always {
                 let mut sess = session.lock().await;
                 sess.auto_approve_tool(&pending.tool_name);
@@ -1073,6 +1073,52 @@ impl Agent {
                     pending.tool_name,
                     sess.id
                 );
+                drop(sess);
+
+                // Defense-in-depth: don't persist AlwaysAllow for tools that
+                // declare ApprovalRequirement::Always (the UI hides the
+                // "Always" button for locked tools, but a crafted client
+                // could send it).
+                let tool_ref = self.tools().get(&pending.tool_name).await;
+                let is_locked = tool_ref
+                    .as_ref()
+                    .map(|t| {
+                        matches!(
+                            t.requires_approval(&serde_json::json!({})),
+                            crate::tools::ApprovalRequirement::Always
+                        )
+                    })
+                    .unwrap_or(false);
+
+                if is_locked {
+                    tracing::warn!(
+                        tool = %pending.tool_name,
+                        "Skipping AlwaysAllow persist — tool declares ApprovalRequirement::Always"
+                    );
+                } else {
+                    // Persist AlwaysAllow to the per-user DB settings so the
+                    // preference survives process restarts. Uses the same
+                    // set_setting path as tool_permission_set and the web UI.
+                    let tenant = self.tenant_ctx(&message.user_id).await;
+                    if let Some(store) = tenant.store() {
+                        let key = format!("tool_permissions.{}", pending.tool_name);
+                        let val = serde_json::to_value(
+                            crate::tools::permissions::PermissionState::AlwaysAllow,
+                        )
+                        .unwrap_or(serde_json::Value::String("always_allow".to_string()));
+                        match store.set_setting(&key, &val).await {
+                            Ok(()) => tracing::debug!(
+                                tool = %pending.tool_name,
+                                "Persisted AlwaysAllow permission to DB settings"
+                            ),
+                            Err(e) => tracing::warn!(
+                                "process_approval: failed to persist AlwaysAllow for '{}': {}",
+                                pending.tool_name,
+                                e
+                            ),
+                        }
+                    }
+                } // else (not locked)
             }
 
             // Reset thread state to processing
@@ -2324,6 +2370,8 @@ mod tests {
         // Verify nothing was queued — the fall-through path doesn't touch the queue.
         assert!(t.pending_messages.is_empty());
     }
+
+    // Approval persistence is tested via e2e_builtin_tool_coverage integration tests.
 
     // Helper function to extract the approval message without needing a full Agent instance
     fn extract_approval_message(
