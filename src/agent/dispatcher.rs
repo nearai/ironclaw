@@ -349,10 +349,22 @@ struct ChatDelegate<'a> {
 
 impl ChatDelegate<'_> {
     fn turn_usage_summary(&self) -> TurnUsageSummary {
-        self.turn_usage
-            .lock()
-            .expect("turn usage mutex poisoned")
-            .clone()
+        self.with_turn_usage(|turn_usage| turn_usage.clone())
+    }
+
+    fn record_turn_usage(&self, usage: TokenUsage, cost_usd: rust_decimal::Decimal) {
+        self.with_turn_usage(|turn_usage| turn_usage.record_llm_call(usage, cost_usd));
+    }
+
+    fn with_turn_usage<R>(&self, f: impl FnOnce(&mut TurnUsageSummary) -> R) -> R {
+        match self.turn_usage.lock() {
+            Ok(mut turn_usage) => f(&mut turn_usage),
+            Err(poisoned) => {
+                tracing::warn!("turn usage mutex poisoned; recovering accumulated usage");
+                let mut turn_usage = poisoned.into_inner();
+                f(&mut turn_usage)
+            }
+        }
     }
 }
 
@@ -557,10 +569,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             }
         }
 
-        self.turn_usage
-            .lock()
-            .expect("turn usage mutex poisoned")
-            .record_llm_call(output.usage, call_cost);
+        self.record_turn_usage(output.usage, call_cost);
 
         Ok(output)
     }
