@@ -28,10 +28,10 @@ use crate::error::{ChannelError, Error};
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
-use crate::safety::SafetyLayer;
-use crate::skills::SkillRegistry;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
+use ironclaw_safety::SafetyLayer;
+use ironclaw_skills::SkillRegistry;
 
 /// Static greeting persisted to DB and broadcast on first launch.
 ///
@@ -157,7 +157,7 @@ pub struct AgentDeps {
     pub workspace: Option<Arc<Workspace>>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
     pub skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
-    pub skill_catalog: Option<Arc<crate::skills::catalog::SkillCatalog>>,
+    pub skill_catalog: Option<Arc<ironclaw_skills::catalog::SkillCatalog>>,
     pub skills_config: SkillsConfig,
     pub hooks: Arc<HookRegistry>,
     /// Cost enforcement guardrails (daily budget, hourly rate limits).
@@ -184,8 +184,8 @@ pub struct AgentDeps {
 /// The main agent that coordinates all components.
 pub struct Agent {
     pub(super) config: AgentConfig,
-    pub(super) deps: AgentDeps,
-    pub(super) channels: Arc<ChannelManager>,
+    pub(crate) deps: AgentDeps,
+    pub(crate) channels: Arc<ChannelManager>,
     pub(super) context_manager: Arc<ContextManager>,
     pub(super) scheduler: Arc<Scheduler>,
     pub(super) router: Router,
@@ -198,6 +198,9 @@ pub struct Agent {
     /// the engine to gateway/manual trigger entry points.
     pub(super) routine_engine_slot:
         Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>,
+    /// Engine v2 mission manager for firing learning missions (set after engine init).
+    pub(crate) mission_manager_slot:
+        Arc<tokio::sync::RwLock<Option<Arc<ironclaw_engine::MissionManager>>>>,
 }
 
 impl Agent {
@@ -269,6 +272,7 @@ impl Agent {
             hygiene_config,
             routine_config,
             routine_engine_slot: Arc::new(tokio::sync::RwLock::new(None)),
+            mission_manager_slot: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
@@ -281,8 +285,19 @@ impl Agent {
         self.routine_engine_slot = slot;
     }
 
-    async fn routine_engine(&self) -> Option<Arc<crate::agent::routine_engine::RoutineEngine>> {
+    pub(super) async fn routine_engine(
+        &self,
+    ) -> Option<Arc<crate::agent::routine_engine::RoutineEngine>> {
         self.routine_engine_slot.read().await.clone()
+    }
+
+    /// Set the engine v2 mission manager (called after engine init).
+    pub async fn set_mission_manager(&self, mgr: Arc<ironclaw_engine::MissionManager>) {
+        *self.mission_manager_slot.write().await = Some(mgr);
+    }
+
+    pub(crate) async fn mission_manager(&self) -> Option<Arc<ironclaw_engine::MissionManager>> {
+        self.mission_manager_slot.read().await.clone()
     }
 
     // Convenience accessors
@@ -296,29 +311,46 @@ impl Agent {
         self.deps.store.as_ref()
     }
 
-    pub(super) fn llm(&self) -> &Arc<dyn LlmProvider> {
+    pub(crate) fn llm(&self) -> &Arc<dyn LlmProvider> {
         &self.deps.llm
     }
 
     /// Get the cheap/fast LLM provider, falling back to the main one.
-    pub(super) fn cheap_llm(&self) -> &Arc<dyn LlmProvider> {
+    pub(crate) fn cheap_llm(&self) -> &Arc<dyn LlmProvider> {
         self.deps.cheap_llm.as_ref().unwrap_or(&self.deps.llm)
     }
 
-    pub(super) fn safety(&self) -> &Arc<SafetyLayer> {
+    pub(crate) fn safety(&self) -> &Arc<SafetyLayer> {
         &self.deps.safety
     }
 
-    pub(super) fn tools(&self) -> &Arc<ToolRegistry> {
+    pub(crate) fn tools(&self) -> &Arc<ToolRegistry> {
         &self.deps.tools
     }
 
-    pub(super) fn workspace(&self) -> Option<&Arc<Workspace>> {
+    pub(crate) fn workspace(&self) -> Option<&Arc<Workspace>> {
         self.deps.workspace.as_ref()
     }
 
-    pub(super) fn hooks(&self) -> &Arc<HookRegistry> {
+    pub(crate) fn hooks(&self) -> &Arc<HookRegistry> {
         &self.deps.hooks
+    }
+
+    /// Build platform metadata for self-awareness in system prompts.
+    pub(crate) async fn platform_info(&self) -> ironclaw_engine::PlatformInfo {
+        let active_channels = self.channels.channel_names().await;
+        let database_backend = std::env::var("DATABASE_BACKEND")
+            .ok()
+            .or_else(|| self.deps.store.as_ref().map(|_| "postgres".to_string()));
+        ironclaw_engine::PlatformInfo {
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            llm_backend: Some(self.deps.llm_backend.clone()),
+            model_name: Some(self.deps.llm.active_model_name()),
+            database_backend,
+            active_channels,
+            owner_id: Some(self.deps.owner_id.clone()),
+            repo_url: Some("https://github.com/nearai/ironclaw".to_string()),
+        }
     }
 
     pub(super) fn cost_guard(&self) -> &Arc<crate::agent::cost_guard::CostGuard> {
@@ -385,54 +417,86 @@ impl Agent {
         self.deps.skill_registry.as_ref()
     }
 
-    pub(super) fn skill_catalog(&self) -> Option<&Arc<crate::skills::catalog::SkillCatalog>> {
+    pub(super) fn skill_catalog(&self) -> Option<&Arc<ironclaw_skills::catalog::SkillCatalog>> {
         self.deps.skill_catalog.as_ref()
     }
 
     /// Select active skills for a message using deterministic prefiltering.
+    /// Select skills for a message. Returns (active skills, rewritten message).
+    ///
+    /// Skills are selected in two ways:
+    /// 1. **Explicit**: `/skill-name` in the message force-activates that skill.
+    ///    The `/skill-name` is replaced with the skill's description so the
+    ///    sentence reads naturally for the LLM.
+    /// 2. **Implicit**: keyword/pattern scoring against the message content.
     pub(super) fn select_active_skills(
         &self,
         message_content: &str,
-    ) -> Vec<crate::skills::LoadedSkill> {
-        if let Some(registry) = self.skill_registry() {
-            let guard = match registry.read() {
-                Ok(g) => g,
-                Err(e) => {
-                    tracing::error!("Skill registry lock poisoned: {}", e);
-                    return vec![];
-                }
-            };
-            let available = guard.skills();
-            let skills_cfg = &self.deps.skills_config;
-            let selected = crate::skills::prefilter_skills(
-                message_content,
-                available,
-                skills_cfg.max_active_skills,
-                skills_cfg.max_context_tokens,
-            );
-
-            if !selected.is_empty() {
-                tracing::debug!(
-                    "Selected {} skill(s) for message: {}",
-                    selected.len(),
-                    selected
-                        .iter()
-                        .map(|s| s.name())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
+    ) -> (Vec<ironclaw_skills::LoadedSkill>, String) {
+        let Some(registry) = self.skill_registry() else {
+            return (vec![], message_content.to_string());
+        };
+        let guard = match registry.read() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!("Skill registry lock poisoned: {}", e);
+                return (vec![], message_content.to_string());
             }
+        };
+        let available = guard.skills();
 
-            selected.into_iter().cloned().collect()
-        } else {
-            vec![]
+        // Phase 1: Extract explicit /skill-name mentions
+        let (explicit, rewritten) =
+            ironclaw_skills::extract_skill_mentions(message_content, available);
+
+        // Phase 2: Score-based selection on the rewritten message
+        let skills_cfg = &self.deps.skills_config;
+        let scored = ironclaw_skills::prefilter_skills(
+            &rewritten,
+            available,
+            skills_cfg.max_active_skills,
+            skills_cfg.max_context_tokens,
+        );
+
+        // Merge: explicit mentions first, then scored (dedup by name)
+        let mut selected: Vec<ironclaw_skills::LoadedSkill> =
+            explicit.into_iter().cloned().collect();
+        for skill in scored {
+            if !selected
+                .iter()
+                .any(|s| s.manifest.name == skill.manifest.name)
+            {
+                selected.push(skill.clone());
+            }
         }
+
+        if !selected.is_empty() {
+            tracing::debug!(
+                "Selected {} skill(s) for message: {}",
+                selected.len(),
+                selected
+                    .iter()
+                    .map(|s| s.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+
+        (selected, rewritten)
     }
 
     /// Run the agent main loop.
     pub async fn run(self) -> Result<(), Error> {
         // Bootstrap greeting is now handled by chat_threads_handler in server.rs
         // when the assistant conversation is first created with zero messages.
+
+        // Eagerly initialize engine v2 so gateway API endpoints can serve
+        // data (projects, missions, threads) before the first chat message.
+        if self.config.engine_v2
+            && let Err(e) = crate::bridge::init_engine(&self).await
+        {
+            tracing::debug!("engine v2: eager init failed: {e}");
+        }
 
         // Start channels
         let mut message_stream = self.channels.start_all().await?;
@@ -1067,6 +1131,56 @@ impl Agent {
             }
         }
 
+        // Engine V2 routing (Strategy C: parallel deployment)
+        if self.config.engine_v2 {
+            match &submission {
+                Submission::UserInput { content } => {
+                    return crate::bridge::handle_with_engine(self, message, content).await;
+                }
+                Submission::ApprovalResponse { approved, always } => {
+                    // If there's a pending auth, "cancel"/"no" should clear the
+                    // auth flow, not be treated as an approval response.
+                    // Route through handle_with_engine so PendingAuth is checked.
+                    if crate::bridge::has_pending_auth(&message.user_id).await {
+                        let content = &message.content;
+                        return crate::bridge::handle_with_engine(self, message, content).await;
+                    }
+                    return crate::bridge::handle_approval(self, message, *approved, *always).await;
+                }
+                Submission::ExecApproval {
+                    request_id,
+                    approved,
+                    always,
+                } => {
+                    return crate::bridge::handle_exec_approval(
+                        self,
+                        message,
+                        *request_id,
+                        *approved,
+                        *always,
+                    )
+                    .await;
+                }
+                Submission::Interrupt => {
+                    return crate::bridge::handle_interrupt(self, message).await;
+                }
+                Submission::NewThread => {
+                    return crate::bridge::handle_new_thread(self, message).await;
+                }
+                Submission::Clear => {
+                    return crate::bridge::handle_clear(self, message).await;
+                }
+                Submission::Expected { description } => {
+                    return crate::bridge::handle_expected(self, message, description).await;
+                }
+                // Undo/Redo/Resume/SwitchThread: v1-only (engine has no undo;
+                // thread switching is implicit via ConversationManager).
+                // Compact/Summarize/Suggest: orthogonal to engine (compaction is internal).
+                // Heartbeat/SystemCommand/JobStatus/JobCancel/Quit: v1 infrastructure.
+                _ => {}
+            }
+        }
+
         // Hydrate thread from DB if it's a historical thread not in memory
         if let Some(external_thread_id) = message.conversation_scope() {
             tracing::trace!(
@@ -1402,6 +1516,10 @@ impl Agent {
             Submission::Heartbeat => self.process_heartbeat().await,
             Submission::Summarize => self.process_summarize(session, thread_id).await,
             Submission::Suggest => self.process_suggest(session, thread_id).await,
+            Submission::Expected { description } => {
+                self.process_expected(session, thread_id, &description, &message.user_id)
+                    .await
+            }
             Submission::JobStatus { job_id } => {
                 self.process_job_status(&tenant, job_id.as_deref()).await
             }
@@ -1430,6 +1548,41 @@ impl Agent {
             }
             Submission::ApprovalResponse { approved, always } => {
                 self.process_approval(message, session, thread_id, None, approved, always)
+                    .await
+            }
+            Submission::Plan { sub } => {
+                use crate::agent::submission::PlanSubcommand;
+                let rewritten = match sub {
+                    PlanSubcommand::Create { description } => {
+                        format!("[PLAN MODE] Create a plan for: {description}")
+                    }
+                    PlanSubcommand::Approve { plan_ref } => {
+                        let r = plan_ref.as_deref().unwrap_or("the most recent plan");
+                        format!(
+                            "[PLAN MODE] Approve and execute plan {r}. \
+                             Create a mission from the plan content using mission_create, \
+                             then fire it with mission_fire."
+                        )
+                    }
+                    PlanSubcommand::Status { plan_ref } => {
+                        let r = plan_ref.as_deref().unwrap_or("the most recent plan");
+                        format!(
+                            "[PLAN MODE] Show status of plan {r}. \
+                             Check the associated mission's thread_history, \
+                             current_focus, and approach_history."
+                        )
+                    }
+                    PlanSubcommand::Revise { plan_ref, feedback } => {
+                        let r = plan_ref.as_deref().unwrap_or("the most recent plan");
+                        format!("[PLAN MODE] Revise plan {r} based on: {feedback}")
+                    }
+                    PlanSubcommand::List => {
+                        "[PLAN MODE] List all plans. Search memory for plan documents \
+                         and show their status."
+                            .to_string()
+                    }
+                };
+                self.process_user_input(message, tenant, session, thread_id, &rewritten)
                     .await
             }
         };

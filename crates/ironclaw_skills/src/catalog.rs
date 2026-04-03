@@ -170,7 +170,10 @@ impl SkillCatalog {
             .timeout(REQUEST_TIMEOUT)
             .user_agent(concat!("ironclaw/", env!("CARGO_PKG_VERSION")))
             .build()
-            .unwrap_or_default();
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to build HTTP client: {e}");
+                reqwest::Client::default()
+            });
 
         Self {
             registry_url,
@@ -180,19 +183,20 @@ impl SkillCatalog {
     }
 
     /// Create a catalog with a custom registry URL (for testing).
-    #[cfg(test)]
     pub fn with_url(url: &str) -> Self {
         Self::with_url_and_timeout(url, REQUEST_TIMEOUT)
     }
 
     /// Create a catalog with a custom registry URL and timeout (for testing).
-    #[cfg(test)]
     pub fn with_url_and_timeout(url: &str, timeout: Duration) -> Self {
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .user_agent(concat!("ironclaw/", env!("CARGO_PKG_VERSION")))
             .build()
-            .unwrap_or_default();
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to build HTTP client: {e}");
+                reqwest::Client::default()
+            });
 
         Self {
             registry_url: url.to_string(),

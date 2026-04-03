@@ -59,6 +59,10 @@ Multi-step operations (INSERT+INSERT, UPDATE+DELETE, read-modify-write) MUST be 
 
 `LibSqlBackend::connect()` creates a fresh connection per operation with `PRAGMA busy_timeout = 5000`. This is intentional -- no pool exists. Never hold connections open across `await` points. Satellite stores (`LibSqlSecretsStore`, `LibSqlWasmToolStore`) receive `Arc<LibSqlDatabase>` via `shared_db()` and call `.connect()` themselves -- never pass a live `Connection`.
 
+## Never Delete LLM Output Data
+
+All LLM execution data — thread messages, steps, events, tool call parameters and results — must **never** be deleted from the database. This is the most valuable data in the system. No `DELETE` statements, no `DROP`, no truncation of LLM-generated content. In-memory caches (HashMaps in `HybridStore`) may evict entries for memory pressure, but database rows are permanent. Load methods must fall back to the database on a cache miss.
+
 ## Fix the Pattern, Not the Instance
 
 When fixing a bug in one backend's SQL, always grep for the same pattern in the other. A fix to `postgres.rs` that doesn't also fix `libsql/jobs.rs` is half a fix. Same applies to satellite stores.

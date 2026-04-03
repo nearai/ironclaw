@@ -315,6 +315,15 @@ pub(crate) fn host_matches_pattern(host: &str, pattern: &str) -> bool {
         return true;
     }
 
+    // Support patterns with port: "127.0.0.1:8080" matches host "127.0.0.1"
+    // (parsed_url.host_str() strips the port, but credential specs may include it)
+    if let Some(pattern_host) = pattern.split(':').next()
+        && pattern.contains(':')
+        && pattern_host == host
+    {
+        return true;
+    }
+
     // Support wildcard: *.example.com matches sub.example.com
     if let Some(suffix) = pattern.strip_prefix("*.")
         && host.ends_with(suffix)
@@ -390,6 +399,19 @@ mod tests {
         assert!(host_matches_pattern("api.example.com", "*.example.com"));
         assert!(host_matches_pattern("sub.api.example.com", "*.example.com"));
         assert!(!host_matches_pattern("example.com", "*.example.com"));
+    }
+
+    #[test]
+    fn test_host_matches_pattern_with_port() {
+        // Pattern includes port but host_str() returns without port
+        assert!(host_matches_pattern("127.0.0.1", "127.0.0.1:8080"));
+        assert!(host_matches_pattern("localhost", "localhost:3000"));
+        assert!(host_matches_pattern(
+            "api.example.com",
+            "api.example.com:443"
+        ));
+        // Should not match different hosts
+        assert!(!host_matches_pattern("other.com", "api.example.com:443"));
     }
 
     #[test]

@@ -273,10 +273,12 @@ impl LeakDetector {
             });
         }
 
-        // Log warnings
+        // Log warn-action matches at debug level (not warn!) to avoid
+        // corrupting REPL/TUI output. These are informational — real leaks
+        // use LeakAction::Redact which modifies the content silently.
         for m in &result.matches {
             if m.action == LeakAction::Warn {
-                tracing::warn!(
+                tracing::debug!(
                     pattern = %m.pattern_name,
                     severity = %m.severity,
                     preview = %m.masked_preview,

@@ -283,7 +283,7 @@ impl Agent {
                         let violations = self.safety().check_policy(content);
                         if violations
                             .iter()
-                            .any(|rule| rule.action == crate::safety::PolicyAction::Block)
+                            .any(|rule| rule.action == ironclaw_safety::PolicyAction::Block)
                         {
                             return Ok(SubmissionResult::error("Input rejected by safety policy."));
                         }
@@ -365,7 +365,7 @@ impl Agent {
         let violations = self.safety().check_policy(content);
         if violations
             .iter()
-            .any(|rule| rule.action == crate::safety::PolicyAction::Block)
+            .any(|rule| rule.action == ironclaw_safety::PolicyAction::Block)
         {
             return Ok(SubmissionResult::error("Input rejected by safety policy."));
         }

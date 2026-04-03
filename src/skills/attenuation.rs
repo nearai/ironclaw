@@ -1,5 +1,11 @@
 //! Trust-based tool filtering (authority attenuation).
 //!
+//! **V1 only** — remove when the v1 agent (`src/agent/`) is deleted.
+//!
+//! In v2, the Python orchestrator handles skill trust via `format_skills()`
+//! and the policy engine handles tool access via capability leases. This
+//! module is only called from `src/agent/dispatcher.rs`.
+//!
 //! The core defense mechanism: the minimum trust level of any active skill
 //! determines a *tool ceiling* -- tools above the ceiling are removed from
 //! the LLM's tool list entirely. The LLM cannot be manipulated into calling
@@ -12,7 +18,7 @@
 //! | Installed present  | Read-only tools ONLY                              |
 
 use crate::llm::ToolDefinition;
-use crate::skills::{LoadedSkill, SkillTrust};
+use ironclaw_skills::{LoadedSkill, SkillTrust};
 
 /// Tools that are always safe -- read-only, no side effects.
 ///
@@ -116,7 +122,7 @@ pub fn attenuate_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::{ActivationCriteria, SkillManifest, SkillSource};
+    use ironclaw_skills::{ActivationCriteria, SkillManifest, SkillSource};
     use std::path::PathBuf;
 
     fn make_tool(name: &str) -> ToolDefinition {
@@ -134,6 +140,7 @@ mod tests {
                 version: "1.0.0".to_string(),
                 description: String::new(),
                 activation: ActivationCriteria::default(),
+                credentials: vec![],
                 metadata: None,
             },
             prompt_content: "test".to_string(),
