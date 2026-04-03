@@ -23,6 +23,7 @@ const KNOWN_CHANNELS: &[(&str, &str)] = &[
     ("discord", "discord_channel"),
     ("whatsapp", "whatsapp_channel"),
     ("feishu", "feishu_channel"),
+    ("wecom", "wecom_channel"),
 ];
 
 /// Names of known channels that can be installed.

@@ -21,7 +21,8 @@
         "channels/telegram",
         "channels/slack",
         "channels/whatsapp",
-        "channels/feishu"
+        "channels/feishu",
+        "channels/wecom"
       ],
       "shared_auth": null
     },

@@ -1,0 +1,36 @@
+{
+  "name": "wecom",
+  "display_name": "WeCom Channel",
+  "kind": "channel",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Talk to your agent through a WeCom self-built app callback channel",
+  "keywords": [
+    "messaging",
+    "chat",
+    "wecom",
+    "enterprise-wechat"
+  ],
+  "source": {
+    "dir": "channels-src/wecom",
+    "capabilities": "wecom.capabilities.json",
+    "crate_name": "wecom-channel"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "WeCom",
+    "secrets": [
+      "wecom_corp_id",
+      "wecom_corp_secret",
+      "wecom_agent_id",
+      "wecom_callback_token",
+      "wecom_callback_encoding_aes_key"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://open.work.weixin.qq.com/"
+  },
+  "tags": [
+    "messaging"
+  ]
+}

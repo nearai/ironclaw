@@ -1,0 +1,85 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "type": "channel",
+  "name": "wecom",
+  "description": "WeCom self-built app callback channel for receiving and responding to Enterprise WeChat messages",
+  "auth": {
+    "secret_name": "wecom_corp_id",
+    "display_name": "WeCom",
+    "instructions": "Create a WeCom self-built application, enable message callbacks, and collect Corp ID, Corp Secret, Agent ID, callback Token, and callback EncodingAESKey. This MVP uses HTTP callback + Agent API rather than the bot WebSocket path.",
+    "setup_url": "https://open.work.weixin.qq.com/",
+    "token_hint": "Corp ID looks like wwxxxx..., Agent ID is numeric, callback EncodingAESKey is 43 characters",
+    "env_var": "WECOM_CORP_ID"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "wecom_corp_id",
+        "prompt": "Enter your WeCom Corp ID (for example wwxxxx...)",
+        "optional": false
+      },
+      {
+        "name": "wecom_corp_secret",
+        "prompt": "Enter your WeCom self-built app Corp Secret",
+        "optional": false
+      },
+      {
+        "name": "wecom_agent_id",
+        "prompt": "Enter your WeCom Agent ID (numeric)",
+        "optional": false
+      },
+      {
+        "name": "wecom_callback_token",
+        "prompt": "Enter your WeCom callback Token",
+        "optional": false
+      },
+      {
+        "name": "wecom_callback_encoding_aes_key",
+        "prompt": "Enter your WeCom callback EncodingAESKey (43 chars)",
+        "optional": false
+      }
+    ],
+    "setup_url": "https://open.work.weixin.qq.com/",
+    "validation_endpoint": "https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid={wecom_corp_id}&corpsecret={wecom_corp_secret}"
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        { "host": "qyapi.weixin.qq.com", "path_prefix": "/cgi-bin/" }
+      ],
+      "max_response_bytes": 20971520,
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 2000
+      }
+    },
+    "secrets": {
+      "allowed_names": ["wecom_*"]
+    },
+    "channel": {
+      "allowed_paths": ["/webhook/wecom"],
+      "allow_polling": false,
+      "workspace_prefix": "channels/wecom/",
+      "callback_timeout_secs": 45,
+      "emit_rate_limit": {
+        "messages_per_minute": 100,
+        "messages_per_hour": 5000
+      },
+      "webhook": {
+        "managed_by_host": false
+      }
+    }
+  },
+  "config": {
+    "corp_id": null,
+    "corp_secret": null,
+    "agent_id": null,
+    "callback_token": null,
+    "callback_encoding_aes_key": null,
+    "api_base": "https://qyapi.weixin.qq.com",
+    "owner_id": null,
+    "dm_policy": "pairing",
+    "allow_from": []
+  }
+}

@@ -457,6 +457,16 @@ async fn inject_channel_secrets_into_config(
             ("app_secret", "feishu_app_secret"),
             ("verification_token", "feishu_verification_token"),
         ],
+        "wecom" => &[
+            ("corp_id", "wecom_corp_id"),
+            ("corp_secret", "wecom_corp_secret"),
+            ("agent_id", "wecom_agent_id"),
+            ("callback_token", "wecom_callback_token"),
+            (
+                "callback_encoding_aes_key",
+                "wecom_callback_encoding_aes_key",
+            ),
+        ],
         _ => return,
     };
 
