@@ -18,7 +18,8 @@ use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
     ApiTokenRecord, ConversationStore, Database, IdentityStore, JobStore, RoutineStore,
     SandboxStore, SettingsStore, ToolFailureStore, UserIdentityRecord, UserRecord, UserStore,
-    WorkspaceStore,
+    WorkspaceStore, structured,
+    structured::{Aggregation, CollectionSchema, Filter, Record, StructuredStore},
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
@@ -1186,5 +1187,646 @@ impl IdentityStore for PgBackend {
 
         tx.commit().await?;
         Ok(())
+    }
+}
+
+// ==================== StructuredStore ====================
+
+/// Convert a tokio_postgres Row into a structured Record.
+fn pg_row_to_record(row: &tokio_postgres::Row) -> Result<Record, DatabaseError> {
+    let id: Uuid = row.get("id");
+    let user_id: String = row.get("user_id");
+    let collection: String = row.get("collection");
+    let data: serde_json::Value = row.get("data");
+    let created_at: DateTime<Utc> = row.get("created_at");
+    let updated_at: DateTime<Utc> = row.get("updated_at");
+
+    Ok(Record {
+        id,
+        user_id,
+        collection,
+        data,
+        created_at,
+        updated_at,
+    })
+}
+
+/// Boxed dynamic SQL parameter for tokio_postgres queries.
+type PgParam = Box<dyn tokio_postgres::types::ToSql + Sync + Send>;
+
+/// Resolve a filter field name to its SQL expression.
+///
+/// Special fields:
+/// - `created_at` / `updated_at` -> use the DB column cast to text for comparison
+/// - Dot-notation (e.g. `_lineage.source`) -> nested JSONB access (`data->'_lineage'->>'source'`)
+/// - Everything else -> `data->>'field'`
+///
+/// Returns `(sql_expr, is_timestamp_column)`. When `is_timestamp_column` is true,
+/// callers should cast the filter value to timestamp for proper comparison.
+fn resolve_filter_field(field: &str) -> Result<(String, bool), DatabaseError> {
+    // DB column fields.
+    if field == "created_at" || field == "updated_at" {
+        return Ok((format!("{field}::text"), true));
+    }
+
+    // Dot-notation for nested JSONB: `parent.child` -> `data->'parent'->>'child'`.
+    if let Some((parent, child)) = field.split_once('.') {
+        // Validate both segments to prevent SQL injection.
+        validate_filter_field_segment(parent)?;
+        validate_filter_field_segment(child)?;
+        return Ok((format!("data->'{}'->>'{}'", parent, child), false));
+    }
+
+    // Regular data field.
+    structured::validate_field_name(field).map_err(|e| DatabaseError::Query(e.to_string()))?;
+    Ok((format!("data->>'{field}'"), false))
+}
+
+/// Validate a single segment of a filter field name (for dot-notation).
+///
+/// Allows system-field prefixes (starting with `_`) in addition to regular identifiers.
+fn validate_filter_field_segment(name: &str) -> Result<(), DatabaseError> {
+    if name.is_empty() || name.len() > 64 {
+        return Err(DatabaseError::Query(format!(
+            "filter field segment '{name}' must be 1-64 characters"
+        )));
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(DatabaseError::Query(format!(
+            "filter field segment '{name}' contains invalid characters"
+        )));
+    }
+    Ok(())
+}
+
+/// Build filter WHERE clauses and collect parameters for a set of filters.
+///
+/// Returns (where_clauses, params) where where_clauses is a Vec of SQL fragments
+/// and params is the collected parameter values.
+///
+/// Field names are validated to prevent SQL injection since they are interpolated
+/// directly into query strings (PostgreSQL doesn't support parameterized column names).
+fn build_filters(
+    filters: &[Filter],
+    start_idx: i32,
+) -> Result<(Vec<String>, Vec<PgParam>), DatabaseError> {
+    let mut clauses = Vec::new();
+    let mut params: Vec<PgParam> = Vec::new();
+    let mut idx = start_idx;
+
+    for filter in filters {
+        let (sql_field, _is_ts) = resolve_filter_field(&filter.field)?;
+
+        let make_compare = |op: &str, idx: &mut i32| -> (String, Vec<PgParam>) {
+            let val = json_value_to_text_string(&filter.value);
+            let clause = format!("{sql_field} {op} ${}", *idx);
+            *idx += 1;
+            (clause, vec![Box::new(val) as PgParam])
+        };
+
+        match filter.op {
+            structured::FilterOp::IsNull => {
+                clauses.push(format!("{sql_field} IS NULL"));
+            }
+            structured::FilterOp::IsNotNull => {
+                clauses.push(format!("{sql_field} IS NOT NULL"));
+            }
+            structured::FilterOp::Eq => {
+                let (clause, p) = make_compare("=", &mut idx);
+                clauses.push(clause);
+                params.extend(p);
+            }
+            structured::FilterOp::Neq => {
+                let (clause, p) = make_compare("!=", &mut idx);
+                clauses.push(clause);
+                params.extend(p);
+            }
+            structured::FilterOp::Gt => {
+                let (clause, p) = make_compare(">", &mut idx);
+                clauses.push(clause);
+                params.extend(p);
+            }
+            structured::FilterOp::Gte => {
+                let (clause, p) = make_compare(">=", &mut idx);
+                clauses.push(clause);
+                params.extend(p);
+            }
+            structured::FilterOp::Lt => {
+                let (clause, p) = make_compare("<", &mut idx);
+                clauses.push(clause);
+                params.extend(p);
+            }
+            structured::FilterOp::Lte => {
+                let (clause, p) = make_compare("<=", &mut idx);
+                clauses.push(clause);
+                params.extend(p);
+            }
+            structured::FilterOp::Between => {
+                let arr = filter.value.as_array().ok_or_else(|| {
+                    DatabaseError::Query("Between filter requires an array of [lo, hi]".to_string())
+                })?;
+                if arr.len() != 2 {
+                    return Err(DatabaseError::Query(
+                        "Between filter requires exactly 2 elements".to_string(),
+                    ));
+                }
+                clauses.push(format!("{sql_field} BETWEEN ${idx} AND ${}", idx + 1));
+                params.push(Box::new(json_value_to_text_string(&arr[0])));
+                params.push(Box::new(json_value_to_text_string(&arr[1])));
+                idx += 2;
+            }
+            structured::FilterOp::In => {
+                let arr = filter.value.as_array().ok_or_else(|| {
+                    DatabaseError::Query("In filter requires an array value".to_string())
+                })?;
+                if arr.is_empty() {
+                    clauses.push("FALSE".to_string());
+                } else {
+                    let placeholders: Vec<String> = arr
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| format!("${}", idx + i as i32))
+                        .collect();
+                    clauses.push(format!("{sql_field} IN ({})", placeholders.join(", ")));
+                    for item in arr {
+                        params.push(Box::new(json_value_to_text_string(item)));
+                    }
+                    idx += arr.len() as i32;
+                }
+            }
+        }
+    }
+
+    Ok((clauses, params))
+}
+
+/// Convert a JSON value to its text representation as it would appear from
+/// PostgreSQL's JSONB `data->>'field'` operator (which always returns text).
+fn json_value_to_text_string(value: &serde_json::Value) -> String {
+    structured::json_to_text(value)
+}
+
+#[async_trait]
+impl StructuredStore for PgBackend {
+    async fn register_collection(
+        &self,
+        user_id: &str,
+        schema: &CollectionSchema,
+    ) -> Result<(), DatabaseError> {
+        CollectionSchema::validate_name(&schema.collection)
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        schema
+            .validate_source_scope()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let schema_json = serde_json::to_value(schema)
+            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+
+        let conn = self.store.conn().await?;
+        conn.execute(
+            r#"
+            INSERT INTO structured_schemas (user_id, collection, schema, description)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (user_id, collection) DO UPDATE SET
+                schema = EXCLUDED.schema,
+                description = EXCLUDED.description
+            "#,
+            &[
+                &user_id,
+                &schema.collection.as_str(),
+                &schema_json,
+                &schema.description,
+            ],
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn get_collection_schema(
+        &self,
+        user_id: &str,
+        collection: &str,
+    ) -> Result<CollectionSchema, DatabaseError> {
+        let conn = self.store.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT schema FROM structured_schemas WHERE user_id = $1 AND collection = $2",
+                &[&user_id, &collection],
+            )
+            .await?;
+
+        let row = rows.first().ok_or_else(|| DatabaseError::NotFound {
+            entity: "collection".to_string(),
+            id: collection.to_string(),
+        })?;
+
+        let schema_json: serde_json::Value = row.get("schema");
+        serde_json::from_value(schema_json).map_err(|e| DatabaseError::Serialization(e.to_string()))
+    }
+
+    async fn list_collections(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<CollectionSchema>, DatabaseError> {
+        let conn = self.store.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT schema FROM structured_schemas WHERE user_id = $1 ORDER BY collection",
+                &[&user_id],
+            )
+            .await?;
+
+        let mut schemas = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let schema_json: serde_json::Value = row.get("schema");
+            let schema: CollectionSchema = serde_json::from_value(schema_json)
+                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+            schemas.push(schema);
+        }
+        Ok(schemas)
+    }
+
+    async fn drop_collection(&self, user_id: &str, collection: &str) -> Result<(), DatabaseError> {
+        let conn = self.store.conn().await?;
+        let n = conn
+            .execute(
+                "DELETE FROM structured_schemas WHERE user_id = $1 AND collection = $2",
+                &[&user_id, &collection],
+            )
+            .await?;
+
+        if n == 0 {
+            return Err(DatabaseError::NotFound {
+                entity: "collection".to_string(),
+                id: collection.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn insert_record(
+        &self,
+        user_id: &str,
+        collection: &str,
+        data: serde_json::Value,
+    ) -> Result<Uuid, DatabaseError> {
+        let schema = self.get_collection_schema(user_id, collection).await?;
+        let validated = schema
+            .validate_record(&data)
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let id = Uuid::new_v4();
+        let conn = self.store.conn().await?;
+        conn.execute(
+            r#"
+            INSERT INTO structured_records (id, user_id, collection, data)
+            VALUES ($1, $2, $3, $4)
+            "#,
+            &[&id, &user_id, &collection, &validated],
+        )
+        .await?;
+
+        Ok(id)
+    }
+
+    async fn get_record(&self, user_id: &str, record_id: Uuid) -> Result<Record, DatabaseError> {
+        let conn = self.store.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, user_id, collection, data, created_at, updated_at
+                FROM structured_records
+                WHERE id = $1 AND user_id = $2
+                "#,
+                &[&record_id, &user_id],
+            )
+            .await?;
+
+        let row = rows.first().ok_or_else(|| DatabaseError::NotFound {
+            entity: "record".to_string(),
+            id: record_id.to_string(),
+        })?;
+
+        pg_row_to_record(row)
+    }
+
+    async fn update_record(
+        &self,
+        user_id: &str,
+        record_id: Uuid,
+        updates: serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        let mut conn = self.store.conn().await?;
+        let tx = conn.transaction().await?;
+
+        // Lock the record row to prevent concurrent modification.
+        let rows = tx
+            .query(
+                r#"
+                SELECT id, user_id, collection, data, created_at, updated_at
+                FROM structured_records
+                WHERE id = $1 AND user_id = $2
+                FOR UPDATE
+                "#,
+                &[&record_id, &user_id],
+            )
+            .await?;
+
+        let row = rows.first().ok_or_else(|| DatabaseError::NotFound {
+            entity: "record".to_string(),
+            id: record_id.to_string(),
+        })?;
+        let existing = pg_row_to_record(row)?;
+
+        // Fetch schema (read-only, doesn't need locking).
+        let schema_rows = tx
+            .query(
+                "SELECT schema FROM structured_schemas WHERE user_id = $1 AND collection = $2",
+                &[&user_id, &existing.collection],
+            )
+            .await?;
+
+        let schema_row = schema_rows.first().ok_or_else(|| DatabaseError::NotFound {
+            entity: "collection".to_string(),
+            id: existing.collection.clone(),
+        })?;
+        let schema: structured::CollectionSchema =
+            serde_json::from_value(schema_row.get::<_, serde_json::Value>("schema"))
+                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+
+        // Validate the partial update.
+        let validated_updates = schema
+            .validate_partial(&updates)
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        // Merge updates into existing data.
+        let mut merged = existing.data.clone();
+        if let (Some(base), Some(patch)) = (merged.as_object_mut(), validated_updates.as_object()) {
+            for (k, v) in patch {
+                base.insert(k.clone(), v.clone());
+            }
+        }
+
+        let n = tx
+            .execute(
+                r#"
+                UPDATE structured_records
+                SET data = $1, updated_at = NOW()
+                WHERE id = $2 AND user_id = $3
+                "#,
+                &[&merged, &record_id, &user_id],
+            )
+            .await?;
+
+        if n == 0 {
+            return Err(DatabaseError::NotFound {
+                entity: "record".to_string(),
+                id: record_id.to_string(),
+            });
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn delete_record(&self, user_id: &str, record_id: Uuid) -> Result<(), DatabaseError> {
+        let conn = self.store.conn().await?;
+        let n = conn
+            .execute(
+                "DELETE FROM structured_records WHERE id = $1 AND user_id = $2",
+                &[&record_id, &user_id],
+            )
+            .await?;
+
+        if n == 0 {
+            return Err(DatabaseError::NotFound {
+                entity: "record".to_string(),
+                id: record_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn query_records(
+        &self,
+        user_id: &str,
+        collection: &str,
+        filters: &[Filter],
+        order_by: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Record>, DatabaseError> {
+        // Cap at 1000 for normal queries, but allow uncapped for internal
+        // callers that pass usize::MAX (e.g., aggregation fallbacks).
+        let capped_limit = if limit == usize::MAX {
+            i64::MAX
+        } else {
+            limit.min(1000) as i64
+        };
+
+        // Start building the query. Params $1 = user_id, $2 = collection.
+        let mut sql = String::from(
+            "SELECT id, user_id, collection, data, created_at, updated_at \
+             FROM structured_records WHERE user_id = $1 AND collection = $2",
+        );
+        let mut params: Vec<PgParam> = Vec::new();
+        params.push(Box::new(user_id.to_string()));
+        params.push(Box::new(collection.to_string()));
+
+        // Build filter clauses starting at $3.
+        let (filter_clauses, filter_params) = build_filters(filters, 3)?;
+        for clause in &filter_clauses {
+            sql.push_str(" AND ");
+            sql.push_str(clause);
+        }
+        params.extend(filter_params);
+
+        // ORDER BY
+        match order_by {
+            Some(field) => {
+                structured::validate_field_name(field)
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                // Top-level columns are used directly, not extracted from JSON.
+                if field == "created_at" || field == "updated_at" {
+                    sql.push_str(&format!(" ORDER BY {field}"));
+                } else {
+                    sql.push_str(&format!(" ORDER BY data->>'{field}'"));
+                }
+            }
+            None => {
+                sql.push_str(" ORDER BY created_at DESC");
+            }
+        }
+
+        // LIMIT
+        let limit_idx = params.len() as i32 + 1;
+        sql.push_str(&format!(" LIMIT ${limit_idx}"));
+        params.push(Box::new(capped_limit));
+
+        // Build reference slice for tokio_postgres.
+        let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
+            .iter()
+            .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+            .collect();
+
+        let conn = self.store.conn().await?;
+        let rows = conn.query(&sql, &param_refs).await?;
+
+        let mut records = Vec::with_capacity(rows.len());
+        for row in &rows {
+            records.push(pg_row_to_record(row)?);
+        }
+        Ok(records)
+    }
+
+    async fn aggregate(
+        &self,
+        user_id: &str,
+        collection: &str,
+        aggregation: &Aggregation,
+    ) -> Result<serde_json::Value, DatabaseError> {
+        let group_by = &aggregation.group_by;
+
+        // Validate field names to prevent SQL injection (they are interpolated
+        // directly into query strings).
+        if let Some(field) = &aggregation.field {
+            structured::validate_field_name(field)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        }
+        if let Some(group_field) = group_by {
+            structured::validate_field_name(group_field)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        }
+
+        // Build the aggregation expression.
+        let agg_expr = match aggregation.operation {
+            structured::AggOp::Count => "COUNT(*)".to_string(),
+            structured::AggOp::Sum => {
+                let field = aggregation
+                    .field
+                    .as_deref()
+                    .ok_or_else(|| DatabaseError::Query("Sum requires a field".to_string()))?;
+                format!("SUM((data->>'{field}')::numeric)")
+            }
+            structured::AggOp::Avg => {
+                let field = aggregation
+                    .field
+                    .as_deref()
+                    .ok_or_else(|| DatabaseError::Query("Avg requires a field".to_string()))?;
+                format!("AVG((data->>'{field}')::numeric)")
+            }
+            structured::AggOp::Min => {
+                let field = aggregation
+                    .field
+                    .as_deref()
+                    .ok_or_else(|| DatabaseError::Query("Min requires a field".to_string()))?;
+                format!("MIN(data->>'{field}')")
+            }
+            structured::AggOp::Max => {
+                let field = aggregation
+                    .field
+                    .as_deref()
+                    .ok_or_else(|| DatabaseError::Query("Max requires a field".to_string()))?;
+                format!("MAX(data->>'{field}')")
+            }
+        };
+
+        // Start building query. $1 = user_id, $2 = collection.
+        let mut sql = if let Some(group_field) = group_by {
+            format!(
+                "SELECT data->>'{group_field}' AS group_key, {agg_expr} AS result \
+                 FROM structured_records WHERE user_id = $1 AND collection = $2"
+            )
+        } else {
+            format!(
+                "SELECT {agg_expr} AS result \
+                 FROM structured_records WHERE user_id = $1 AND collection = $2"
+            )
+        };
+
+        let mut params: Vec<PgParam> = Vec::new();
+        params.push(Box::new(user_id.to_string()));
+        params.push(Box::new(collection.to_string()));
+
+        // Apply filters.
+        let (filter_clauses, filter_params) = build_filters(&aggregation.filters, 3)?;
+        for clause in &filter_clauses {
+            sql.push_str(" AND ");
+            sql.push_str(clause);
+        }
+        params.extend(filter_params);
+
+        // GROUP BY
+        if let Some(group_field) = group_by {
+            sql.push_str(&format!(" GROUP BY data->>'{group_field}'"));
+        }
+
+        let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
+            .iter()
+            .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+            .collect();
+
+        let conn = self.store.conn().await?;
+        let rows = conn.query(&sql, &param_refs).await?;
+
+        if group_by.is_some() {
+            // Grouped result: return an object { "group_key": result, ... }
+            let mut result_map = serde_json::Map::new();
+            for row in &rows {
+                let key: Option<String> = row.get("group_key");
+                let key_str = key.unwrap_or_else(|| "null".to_string());
+
+                // The result type depends on the aggregation operation.
+                let value = extract_agg_value(row, &aggregation.operation)?;
+                result_map.insert(key_str, value);
+            }
+            Ok(serde_json::Value::Object(result_map))
+        } else {
+            // Single result.
+            let row = rows
+                .first()
+                .ok_or_else(|| DatabaseError::Query("Aggregation returned no rows".to_string()))?;
+            extract_agg_value(row, &aggregation.operation)
+        }
+    }
+}
+
+/// Extract the aggregation result value from a PostgreSQL row.
+fn extract_agg_value(
+    row: &tokio_postgres::Row,
+    op: &structured::AggOp,
+) -> Result<serde_json::Value, DatabaseError> {
+    match op {
+        structured::AggOp::Count => {
+            let count: i64 = row.get("result");
+            Ok(serde_json::json!(count))
+        }
+        structured::AggOp::Sum | structured::AggOp::Avg => {
+            // SUM/AVG of numeric returns Option<Decimal>
+            let val: Option<Decimal> = row.get("result");
+            match val {
+                Some(d) => {
+                    use rust_decimal::prelude::ToPrimitive;
+                    let f = d.to_f64().ok_or_else(|| {
+                        DatabaseError::Query(format!("Cannot convert aggregate result {d} to f64"))
+                    })?;
+                    Ok(serde_json::json!(f))
+                }
+                None => Ok(serde_json::Value::Null),
+            }
+        }
+        structured::AggOp::Min | structured::AggOp::Max => {
+            let val: Option<String> = row.get("result");
+            match val {
+                Some(s) => {
+                    if let Ok(n) = s.parse::<f64>() {
+                        Ok(serde_json::json!(n))
+                    } else {
+                        Ok(serde_json::json!(s))
+                    }
+                }
+                None => Ok(serde_json::Value::Null),
+            }
+        }
     }
 }

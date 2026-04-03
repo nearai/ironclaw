@@ -262,8 +262,10 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         )));
 
         // Main execution loop with timeout
+        let user_id = job_ctx.user_id.clone();
+        let scopes = job_ctx.workspace_read_scopes.clone();
         let result = tokio::time::timeout(self.timeout(), async {
-            self.execution_loop(&mut rx, &reasoning, &mut reason_ctx)
+            self.execution_loop(&mut rx, &reasoning, &mut reason_ctx, &user_id, &scopes)
                 .await
         })
         .await;
@@ -315,6 +317,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         rx: &mut mpsc::Receiver<WorkerMessage>,
         reasoning: &Reasoning,
         reason_ctx: &mut ReasoningContext,
+        user_id: &str,
+        workspace_read_scopes: &[String],
     ) -> Result<(), Error> {
         let max_iterations = self
             .context_manager()
@@ -326,7 +330,10 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         let max_iterations = max_iterations.min(ironclaw_common::MAX_WORKER_ITERATIONS as usize);
 
         // Initial tool definitions for planning (will be refreshed in loop)
-        reason_ctx.available_tools = self.tools().tool_definitions().await;
+        reason_ctx.available_tools = self
+            .tools()
+            .tool_definitions_for_user(user_id, workspace_read_scopes)
+            .await;
 
         // Generate plan if planning is enabled
         let plan = if self.use_planning() {
@@ -394,6 +401,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
             recovery_state: tokio::sync::Mutex::new(AutonomousRecoveryState::default()),
             has_text_response: std::sync::atomic::AtomicBool::new(false),
+            user_id: user_id.to_string(),
+            workspace_read_scopes: workspace_read_scopes.to_vec(),
         };
 
         let config = AgenticLoopConfig {
@@ -1172,6 +1181,10 @@ struct JobDelegate<'a> {
     /// When true, an empty follow-up response is treated as job completion
     /// rather than a retry signal (prevents spurious failures in routines).
     has_text_response: std::sync::atomic::AtomicBool,
+    /// User ID for scoping tool definitions to the owning user.
+    user_id: String,
+    /// Additional workspace scopes for cross-lens tool visibility.
+    workspace_read_scopes: Vec<String>,
 }
 
 impl<'a> JobDelegate<'a> {
@@ -1375,7 +1388,11 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             reason_ctx.available_tools.clear();
         } else {
             // Refresh tool definitions so newly built tools become visible
-            reason_ctx.available_tools = self.worker.tools().tool_definitions().await;
+            reason_ctx.available_tools = self
+                .worker
+                .tools()
+                .tool_definitions_for_user(&self.user_id, &self.workspace_read_scopes)
+                .await;
         }
 
         // Claude 4.6 rejects assistant prefill; NEAR AI rejects any non-user-ending
@@ -2406,6 +2423,8 @@ mod tests {
             consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
             recovery_state: tokio::sync::Mutex::new(AutonomousRecoveryState::default()),
             has_text_response: std::sync::atomic::AtomicBool::new(false),
+            user_id: "test_user".to_string(),
+            workspace_read_scopes: Vec::new(),
         };
 
         let mut reason_ctx = ReasoningContext::new();

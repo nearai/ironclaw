@@ -84,9 +84,27 @@ impl Agent {
             None
         };
 
+        // Create a JobContext for tool execution (chat doesn't have a real job)
+        let mut job_ctx =
+            JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
+                .with_requester_id(&message.sender_id)
+                .with_workspace_read_scopes(message.workspace_read_scopes.clone());
+        job_ctx.http_interceptor = self.deps.http_interceptor.clone();
+        job_ctx.user_timezone = user_tz.name().to_string();
+        job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
+
+        // Compute tool definitions BEFORE skill selection so that tools_prefix
+        // gating can check which tools the user actually has access to.
+        let initial_tool_defs = self
+            .tools()
+            .tool_definitions_for_user(&message.user_id, &message.workspace_read_scopes)
+            .await;
+        let tool_names: Vec<String> = initial_tool_defs.iter().map(|d| d.name.clone()).collect();
+
         // Select active skills. Explicit /skill-name mentions are force-activated
         // and replaced with the skill's description in the rewritten message.
-        let (active_skills, rewritten_content) = self.select_active_skills(&message.content);
+        let (active_skills, rewritten_content) =
+            self.select_active_skills(&message.content, &tool_names);
 
         // Use the rewritten message (with /skill-name expanded) for the LLM
         let user_content = if rewritten_content != message.content {
@@ -98,6 +116,13 @@ impl Agent {
             rewritten_content
         } else {
             message.content.clone()
+        };
+
+        // Apply skill-based tool attenuation
+        let initial_tool_defs = if !active_skills.is_empty() {
+            crate::skills::attenuate_tools(&initial_tool_defs, &active_skills).tools
+        } else {
+            initial_tool_defs
         };
 
         // Build skill context block
@@ -163,22 +188,8 @@ impl Agent {
             reasoning = reasoning.with_active_skill_names(skill_names);
         }
 
-        // Create a JobContext for tool execution (chat doesn't have a real job)
-        let mut job_ctx =
-            JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
-                .with_requester_id(&message.sender_id);
-        job_ctx.http_interceptor = self.deps.http_interceptor.clone();
-        job_ctx.user_timezone = user_tz.name().to_string();
-        job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
-
         // Build system prompts once for this turn. Two variants: with tools
         // (normal iterations) and without (force_text final iteration).
-        let initial_tool_defs = self.tools().tool_definitions().await;
-        let initial_tool_defs = if !active_skills.is_empty() {
-            crate::skills::attenuate_tools(&initial_tool_defs, &active_skills).tools
-        } else {
-            initial_tool_defs
-        };
         let cached_prompt = reasoning.build_system_prompt_with_tools(&initial_tool_defs);
         let cached_prompt_no_tools = reasoning.build_system_prompt_with_tools(&[]);
 
@@ -325,8 +336,14 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
         let force_text = iteration >= self.force_text_at;
 
-        // Refresh tool definitions each iteration so newly built tools become visible
-        let tool_defs = self.agent.tools().tool_definitions().await;
+        // Refresh tool definitions each iteration so newly built tools become visible.
+        // Filter by user_id so per-user tools (e.g. collection CRUD) only appear
+        // for their owner. Scopes come from the authenticated user's token config.
+        let tool_defs = self
+            .agent
+            .tools()
+            .tool_definitions_for_user(&self.message.user_id, &self.message.workspace_read_scopes)
+            .await;
 
         // Apply trust-based tool attenuation if skills are active.
         let tool_defs = if !self.active_skills.is_empty() {

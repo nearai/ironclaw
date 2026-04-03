@@ -84,6 +84,11 @@ pub struct ActivationCriteria {
     /// Maximum context tokens this skill's prompt should consume.
     #[serde(default = "default_max_context_tokens")]
     pub max_context_tokens: usize,
+    /// If set, this skill only activates when at least one tool in the user's
+    /// tool set starts with this prefix. Used by per-collection skills to
+    /// prevent activation for users without access to the collection.
+    #[serde(default)]
+    pub tools_prefix: Option<String>,
 }
 
 impl ActivationCriteria {

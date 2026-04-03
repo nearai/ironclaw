@@ -96,6 +96,8 @@ mod tests {
             near_rpc_url: None,
             near_network: None,
             oauth_sweep_shutdown: None,
+            collection_write_tx: None,
+            skills_dir: None,
         });
 
         let addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();

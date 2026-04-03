@@ -432,6 +432,7 @@ impl Agent {
     pub(super) fn select_active_skills(
         &self,
         message_content: &str,
+        available_tool_names: &[String],
     ) -> (Vec<ironclaw_skills::LoadedSkill>, String) {
         let Some(registry) = self.skill_registry() else {
             return (vec![], message_content.to_string());
@@ -456,6 +457,7 @@ impl Agent {
             available,
             skills_cfg.max_active_skills,
             skills_cfg.max_context_tokens,
+            available_tool_names,
         );
 
         // Merge: explicit mentions first, then scored (dedup by name)

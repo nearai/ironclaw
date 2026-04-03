@@ -581,6 +581,53 @@ INSERT OR IGNORE INTO leak_detection_patterns (id, name, pattern, severity, acti
     ('550e8400-e29b-41d4-a716-446655440012', 'high_entropy_hex', '(?<![a-fA-F0-9])[a-fA-F0-9]{64}(?![a-fA-F0-9])', 'medium', 'warn', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
 
+-- ==================== Structured Collections ====================
+
+CREATE TABLE IF NOT EXISTS structured_schemas (
+    user_id     TEXT NOT NULL,
+    collection  TEXT NOT NULL,
+    schema      TEXT NOT NULL,
+    description TEXT,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (user_id, collection)
+);
+
+CREATE TABLE IF NOT EXISTS structured_records (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    collection  TEXT NOT NULL,
+    data        TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    FOREIGN KEY (user_id, collection)
+        REFERENCES structured_schemas (user_id, collection)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_structured_records_lookup
+    ON structured_records (user_id, collection, created_at);
+
+-- Trigger to auto-update updated_at on structured_schemas
+CREATE TRIGGER IF NOT EXISTS update_structured_schemas_updated_at
+    AFTER UPDATE ON structured_schemas
+    FOR EACH ROW
+    WHEN NEW.updated_at = OLD.updated_at
+    BEGIN
+        UPDATE structured_schemas SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE user_id = NEW.user_id AND collection = NEW.collection;
+    END;
+
+-- Trigger to auto-update updated_at on structured_records
+CREATE TRIGGER IF NOT EXISTS update_structured_records_updated_at
+    AFTER UPDATE ON structured_records
+    FOR EACH ROW
+    WHEN NEW.updated_at = OLD.updated_at
+    BEGIN
+        UPDATE structured_records SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE id = NEW.id;
+    END;
+
 -- ==================== User management (V14) ====================
 
 CREATE TABLE IF NOT EXISTS users (
@@ -873,6 +920,54 @@ CREATE TABLE IF NOT EXISTS user_identities (
 );
 CREATE INDEX IF NOT EXISTS idx_user_identities_user ON user_identities(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_identities_email ON user_identities(email) WHERE email IS NOT NULL;
+"#,
+    ),
+    (
+        18,
+        "structured_collections",
+        r#"
+CREATE TABLE IF NOT EXISTS structured_schemas (
+    user_id     TEXT NOT NULL,
+    collection  TEXT NOT NULL,
+    schema      TEXT NOT NULL,
+    description TEXT,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (user_id, collection)
+);
+
+CREATE TABLE IF NOT EXISTS structured_records (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    collection  TEXT NOT NULL,
+    data        TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    FOREIGN KEY (user_id, collection)
+        REFERENCES structured_schemas (user_id, collection)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_structured_records_lookup
+    ON structured_records (user_id, collection, created_at);
+
+CREATE TRIGGER IF NOT EXISTS update_structured_schemas_updated_at
+    AFTER UPDATE ON structured_schemas
+    FOR EACH ROW
+    WHEN NEW.updated_at = OLD.updated_at
+    BEGIN
+        UPDATE structured_schemas SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE user_id = NEW.user_id AND collection = NEW.collection;
+    END;
+
+CREATE TRIGGER IF NOT EXISTS update_structured_records_updated_at
+    AFTER UPDATE ON structured_records
+    FOR EACH ROW
+    WHEN NEW.updated_at = OLD.updated_at
+    BEGIN
+        UPDATE structured_records SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE id = NEW.id;
+    END;
 "#,
     ),
 ];

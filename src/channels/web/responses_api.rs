@@ -637,6 +637,7 @@ pub async fn create_response_handler(
 
     // Build the message for the agent loop.
     let msg = IncomingMessage::new("gateway", &user.user_id, &content)
+        .with_workspace_read_scopes(user.workspace_read_scopes.clone())
         .with_thread(&thread_id_str)
         .with_metadata(serde_json::json!({
             "thread_id": &thread_id_str,

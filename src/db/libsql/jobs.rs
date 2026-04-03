@@ -106,6 +106,7 @@ impl JobStore for LibSqlBackend {
                     job_id: get_text(&row, 0).parse().unwrap_or_default(),
                     state,
                     user_id: get_text(&row, 6),
+                    workspace_read_scopes: Vec::new(),
                     requester_id: None,
                     conversation_id: get_opt_text(&row, 1).and_then(|s| s.parse().ok()),
                     title: get_text(&row, 2),
