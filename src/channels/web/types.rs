@@ -492,6 +492,129 @@ impl ActionResponse {
     }
 }
 
+// --- Admin User Management ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserInfo {
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    pub status: String,
+    pub role: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_login_at: Option<String>,
+    pub created_by: Option<String>,
+    pub job_count: i64,
+    pub total_cost: String,
+    pub last_active_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserListResponse {
+    pub users: Vec<AdminUserInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserCreateResponse {
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    pub status: String,
+    pub role: String,
+    pub token: String,
+    pub created_at: String,
+    pub created_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserDetailResponse {
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    pub status: String,
+    pub role: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_login_at: Option<String>,
+    pub created_by: Option<String>,
+    pub job_count: i64,
+    pub total_cost: String,
+    pub last_active_at: Option<String>,
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserProfileResponse {
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    pub status: String,
+    pub role: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserStatusResponse {
+    pub id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserDeleteResponse {
+    pub id: String,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageEntry {
+    pub user_id: String,
+    pub model: String,
+    pub call_count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_cost: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageStatsResponse {
+    pub period: String,
+    pub since: String,
+    pub usage: Vec<AdminUsageEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageSummaryUsers {
+    pub total: usize,
+    pub active: usize,
+    pub suspended: usize,
+    pub admins: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageSummaryJobs {
+    pub total: i64,
+    pub total_cost: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageSummaryWindow {
+    pub llm_calls: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_cost: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageSummaryResponse {
+    pub users: AdminUsageSummaryUsers,
+    pub jobs: AdminUsageSummaryJobs,
+    pub usage_30d: AdminUsageSummaryWindow,
+    pub uptime_seconds: u64,
+}
+
 // --- Registry ---
 
 #[derive(Debug, Serialize)]
