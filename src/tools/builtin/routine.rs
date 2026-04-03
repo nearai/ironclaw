@@ -1178,8 +1178,22 @@ impl Tool for RoutineCreateTool {
                 dedup_window: None,
             },
             notify: NotifyConfig {
-                channel: normalized.delivery.channel.clone(),
-                user: normalized.delivery.user.clone(),
+                // Fall back to the current conversation's channel/target when
+                // the LLM omits delivery params, so routines created from
+                // e.g. a Slack channel know where to send results.
+                channel: normalized.delivery.channel.clone().or_else(|| {
+                    ctx.metadata
+                        .get("notify_channel")
+                        .and_then(|v| v.as_str())
+                        .map(ToOwned::to_owned)
+                }),
+                user: normalized.delivery.user.clone().or_else(|| {
+                    ctx.metadata
+                        .get("notify_user")
+                        .and_then(|v| v.as_str())
+                        .filter(|v| *v != "default")
+                        .map(ToOwned::to_owned)
+                }),
                 ..NotifyConfig::default()
             },
             last_run_at: None,
@@ -2611,6 +2625,28 @@ mod tests {
         assert!(
             schema_property(&schema, "source").is_object(),
             "event_emit discovery schema should keep source alias",
+        );
+    }
+
+    /// Regression: routine_create must fall back to ctx.metadata for delivery
+    /// config when the LLM omits delivery.channel/user. This verifies the
+    /// parsing layer returns None so the execute path triggers the fallback.
+    #[test]
+    fn routine_create_omitted_delivery_enables_context_fallback() {
+        let params = serde_json::json!({
+            "name": "ping-every-5",
+            "prompt": "Send Ping in this channel.",
+            "request": { "kind": "cron", "schedule": "*/5 * * * *" }
+        });
+
+        let parsed = parse_routine_create_request(&params).expect("parse");
+        assert!(
+            parsed.delivery.channel.is_none(),
+            "omitted delivery.channel should be None so execute() falls back to ctx.metadata",
+        );
+        assert!(
+            parsed.delivery.user.is_none(),
+            "omitted delivery.user should be None so execute() falls back to ctx.metadata",
         );
     }
 

@@ -407,7 +407,8 @@ fn split_message(text: &str) -> Vec<String> {
         let window = &remaining[..window_bytes];
 
         // 1. Double newline — best paragraph boundary
-        let split_at = window.rfind("\n\n")
+        let split_at = window
+            .rfind("\n\n")
             // 2. Single newline
             .or_else(|| window.rfind('\n'))
             // 3. Sentence-ending punctuation followed by space.
@@ -417,9 +418,9 @@ fn split_message(text: &str) -> Vec<String> {
             .or_else(|| {
                 let bytes = window.as_bytes();
                 // Search backwards for '. ', '! ', '? '
-                (1..bytes.len()).rev().find(|&i| {
-                    matches!(bytes[i - 1], b'.' | b'!' | b'?') && bytes[i] == b' '
-                })
+                (1..bytes.len())
+                    .rev()
+                    .find(|&i| matches!(bytes[i - 1], b'.' | b'!' | b'?') && bytes[i] == b' ')
             })
             // 4. Word boundary (last space)
             .or_else(|| window.rfind(' '))
@@ -427,7 +428,11 @@ fn split_message(text: &str) -> Vec<String> {
             .unwrap_or(window_bytes);
 
         // Avoid empty chunks (e.g. text starting with \n\n).
-        let split_at = if split_at == 0 { window_bytes } else { split_at };
+        let split_at = if split_at == 0 {
+            window_bytes
+        } else {
+            split_at
+        };
 
         // Trim whitespace at chunk boundaries for clean Telegram display.
         // Note: this drops leading/trailing spaces at split points, which is
@@ -1090,11 +1095,8 @@ fn download_telegram_file(file_id: &str) -> Result<Vec<u8>, String> {
 }
 
 // ============================================================================
-// Attachment Sending (Photo / Document)
+// Attachment Sending (Photo / Voice / Document)
 // ============================================================================
-
-/// Maximum photo size for Telegram sendPhoto (10 MB).
-const MAX_PHOTO_SIZE: usize = 10 * 1024 * 1024;
 
 /// Write a multipart/form-data text field.
 fn write_multipart_field(body: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
@@ -1138,6 +1140,95 @@ fn write_multipart_file(
     body.extend_from_slice(b"\r\n");
 }
 
+/// Image MIME types that Telegram's sendPhoto API supports.
+const PHOTO_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
+
+/// Audio MIME types that Telegram's sendVoice API supports (ogg/opus container).
+const VOICE_MIME_TYPES: &[&str] = &["audio/ogg", "audio/opus"];
+
+/// Maximum photo size for Telegram sendPhoto (10 MB).
+const MAX_PHOTO_SIZE: usize = 10 * 1024 * 1024;
+
+/// Maximum voice note size for Telegram sendVoice (50 MB).
+const MAX_VOICE_SIZE: usize = 50 * 1024 * 1024;
+
+/// Send a multipart file upload to a Telegram Bot API endpoint.
+///
+/// Shared implementation for sendPhoto, sendVoice, and sendDocument.
+/// `api_method` is the Telegram method name (e.g. "sendPhoto"),
+/// `field_name` is the multipart field (e.g. "photo", "voice", "document").
+#[allow(clippy::too_many_arguments)]
+fn send_multipart_upload(
+    api_method: &str,
+    field_name: &str,
+    chat_id: i64,
+    filename: &str,
+    mime_type: &str,
+    data: &[u8],
+    reply_to_message_id: Option<i64>,
+    message_thread_id: Option<i64>,
+) -> Result<(), String> {
+    let message_thread_id = normalize_thread_id(message_thread_id);
+
+    let boundary = format!("ironclaw-{}", channel_host::now_millis());
+    let mut body = Vec::new();
+
+    write_multipart_field(&mut body, &boundary, "chat_id", &chat_id.to_string());
+    if let Some(msg_id) = reply_to_message_id {
+        write_multipart_field(
+            &mut body,
+            &boundary,
+            "reply_to_message_id",
+            &msg_id.to_string(),
+        );
+    }
+    if let Some(thread_id) = message_thread_id {
+        write_multipart_field(
+            &mut body,
+            &boundary,
+            "message_thread_id",
+            &thread_id.to_string(),
+        );
+    }
+    write_multipart_file(&mut body, &boundary, field_name, filename, mime_type, data);
+    body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
+
+    let headers = serde_json::json!({
+        "Content-Type": format!("multipart/form-data; boundary={}", boundary)
+    });
+
+    let url = format!(
+        "https://api.telegram.org/bot{{TELEGRAM_BOT_TOKEN}}/{}",
+        api_method
+    );
+
+    let result = channel_host::http_request(
+        "POST",
+        &url,
+        &headers.to_string(),
+        Some(&body),
+        Some(60_000), // 60s timeout for file uploads
+    );
+
+    match result {
+        Ok(resp) if resp.status == 200 => {
+            channel_host::log(
+                channel_host::LogLevel::Debug,
+                &format!("Sent {} '{}' to chat {}", field_name, filename, chat_id),
+            );
+            Ok(())
+        }
+        Ok(resp) => {
+            let body_str = String::from_utf8_lossy(&resp.body);
+            Err(format!(
+                "{} failed (HTTP {}): {}",
+                api_method, resp.status, body_str
+            ))
+        }
+        Err(e) => Err(format!("{} HTTP request failed: {}", api_method, e)),
+    }
+}
+
 /// Send a photo via the Telegram Bot API (multipart upload).
 ///
 /// Falls back to `send_document()` if the photo exceeds 10 MB.
@@ -1149,8 +1240,6 @@ fn send_photo(
     reply_to_message_id: Option<i64>,
     message_thread_id: Option<i64>,
 ) -> Result<(), String> {
-    let message_thread_id = normalize_thread_id(message_thread_id);
-
     if data.len() > MAX_PHOTO_SIZE {
         channel_host::log(
             channel_host::LogLevel::Info,
@@ -1169,59 +1258,16 @@ fn send_photo(
             message_thread_id,
         );
     }
-
-    let boundary = format!("ironclaw-{}", channel_host::now_millis());
-    let mut body = Vec::new();
-
-    write_multipart_field(&mut body, &boundary, "chat_id", &chat_id.to_string());
-    if let Some(msg_id) = reply_to_message_id {
-        write_multipart_field(
-            &mut body,
-            &boundary,
-            "reply_to_message_id",
-            &msg_id.to_string(),
-        );
-    }
-    if let Some(thread_id) = message_thread_id {
-        write_multipart_field(
-            &mut body,
-            &boundary,
-            "message_thread_id",
-            &thread_id.to_string(),
-        );
-    }
-    write_multipart_file(&mut body, &boundary, "photo", filename, mime_type, data);
-    body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
-
-    let headers = serde_json::json!({
-        "Content-Type": format!("multipart/form-data; boundary={}", boundary)
-    });
-
-    let result = channel_host::http_request(
-        "POST",
-        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
-        &headers.to_string(),
-        Some(&body),
-        Some(60_000), // 60s timeout for file uploads
-    );
-
-    match result {
-        Ok(resp) if resp.status == 200 => {
-            channel_host::log(
-                channel_host::LogLevel::Debug,
-                &format!("Sent photo '{}' to chat {}", filename, chat_id),
-            );
-            Ok(())
-        }
-        Ok(resp) => {
-            let body_str = String::from_utf8_lossy(&resp.body);
-            Err(format!(
-                "sendPhoto failed (HTTP {}): {}",
-                resp.status, body_str
-            ))
-        }
-        Err(e) => Err(format!("sendPhoto HTTP request failed: {}", e)),
-    }
+    send_multipart_upload(
+        "sendPhoto",
+        "photo",
+        chat_id,
+        filename,
+        mime_type,
+        data,
+        reply_to_message_id,
+        message_thread_id,
+    )
 }
 
 /// Send a document via the Telegram Bot API (multipart upload).
@@ -1233,64 +1279,60 @@ fn send_document(
     reply_to_message_id: Option<i64>,
     message_thread_id: Option<i64>,
 ) -> Result<(), String> {
-    let message_thread_id = normalize_thread_id(message_thread_id);
-
-    let boundary = format!("ironclaw-{}", channel_host::now_millis());
-    let mut body = Vec::new();
-
-    write_multipart_field(&mut body, &boundary, "chat_id", &chat_id.to_string());
-    if let Some(msg_id) = reply_to_message_id {
-        write_multipart_field(
-            &mut body,
-            &boundary,
-            "reply_to_message_id",
-            &msg_id.to_string(),
-        );
-    }
-    if let Some(thread_id) = message_thread_id {
-        write_multipart_field(
-            &mut body,
-            &boundary,
-            "message_thread_id",
-            &thread_id.to_string(),
-        );
-    }
-    write_multipart_file(&mut body, &boundary, "document", filename, mime_type, data);
-    body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
-
-    let headers = serde_json::json!({
-        "Content-Type": format!("multipart/form-data; boundary={}", boundary)
-    });
-
-    let result = channel_host::http_request(
-        "POST",
-        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
-        &headers.to_string(),
-        Some(&body),
-        Some(60_000), // 60s timeout for file uploads
-    );
-
-    match result {
-        Ok(resp) if resp.status == 200 => {
-            channel_host::log(
-                channel_host::LogLevel::Debug,
-                &format!("Sent document '{}' to chat {}", filename, chat_id),
-            );
-            Ok(())
-        }
-        Ok(resp) => {
-            let body_str = String::from_utf8_lossy(&resp.body);
-            Err(format!(
-                "sendDocument failed (HTTP {}): {}",
-                resp.status, body_str
-            ))
-        }
-        Err(e) => Err(format!("sendDocument HTTP request failed: {}", e)),
-    }
+    send_multipart_upload(
+        "sendDocument",
+        "document",
+        chat_id,
+        filename,
+        mime_type,
+        data,
+        reply_to_message_id,
+        message_thread_id,
+    )
 }
 
-/// Image MIME types that Telegram's sendPhoto API supports.
-const PHOTO_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
+/// Send a voice note via the Telegram Bot API (multipart upload).
+///
+/// Telegram's `sendVoice` requires ogg/opus audio and displays it as an
+/// in-chat voice note with waveform and playback controls.
+/// Falls back to `send_document()` if the voice note exceeds 50 MB.
+fn send_voice(
+    chat_id: i64,
+    filename: &str,
+    mime_type: &str,
+    data: &[u8],
+    reply_to_message_id: Option<i64>,
+    message_thread_id: Option<i64>,
+) -> Result<(), String> {
+    if data.len() > MAX_VOICE_SIZE {
+        channel_host::log(
+            channel_host::LogLevel::Info,
+            &format!(
+                "Voice note {} exceeds 50MB ({}), sending as document",
+                filename,
+                data.len()
+            ),
+        );
+        return send_document(
+            chat_id,
+            filename,
+            mime_type,
+            data,
+            reply_to_message_id,
+            message_thread_id,
+        );
+    }
+    send_multipart_upload(
+        "sendVoice",
+        "voice",
+        chat_id,
+        filename,
+        mime_type,
+        data,
+        reply_to_message_id,
+        message_thread_id,
+    )
+}
 
 /// Send a full agent response (attachments + text) to a chat.
 ///
@@ -1321,7 +1363,13 @@ fn send_response(
 
     for (i, chunk) in chunks.into_iter().enumerate() {
         // Try Markdown, fall back to plain text on parse errors
-        let result = send_message(chat_id, &chunk, reply_to, Some("Markdown"), message_thread_id);
+        let result = send_message(
+            chat_id,
+            &chunk,
+            reply_to,
+            Some("Markdown"),
+            message_thread_id,
+        );
 
         let msg_id = match result {
             Ok(id) => {
@@ -1371,31 +1419,65 @@ fn send_response(
     Ok(())
 }
 
-/// Send a single attachment, choosing sendPhoto or sendDocument based on MIME type.
+/// Extract the base MIME type, stripping any parameters after `;`.
+///
+/// e.g. `"audio/ogg; codecs=opus"` → `"audio/ogg"`
+fn base_mime_type(mime: &str) -> &str {
+    mime.split(';').next().unwrap_or(mime).trim()
+}
+
+/// Attachment routing category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttachmentKind {
+    Photo,
+    Voice,
+    Document,
+}
+
+/// Classify an attachment's send method based on its MIME type.
+fn classify_attachment(mime_type: &str) -> AttachmentKind {
+    let base = base_mime_type(mime_type);
+    if PHOTO_MIME_TYPES.contains(&base) {
+        AttachmentKind::Photo
+    } else if VOICE_MIME_TYPES.contains(&base) {
+        AttachmentKind::Voice
+    } else {
+        AttachmentKind::Document
+    }
+}
+
+/// Send a single attachment, choosing sendPhoto, sendVoice, or sendDocument based on MIME type.
 fn send_attachment(
     chat_id: i64,
     attachment: &Attachment,
     reply_to_message_id: Option<i64>,
     message_thread_id: Option<i64>,
 ) -> Result<(), String> {
-    if PHOTO_MIME_TYPES.contains(&attachment.mime_type.as_str()) {
-        send_photo(
+    match classify_attachment(&attachment.mime_type) {
+        AttachmentKind::Photo => send_photo(
             chat_id,
             &attachment.filename,
             &attachment.mime_type,
             &attachment.data,
             reply_to_message_id,
             message_thread_id,
-        )
-    } else {
-        send_document(
+        ),
+        AttachmentKind::Voice => send_voice(
             chat_id,
             &attachment.filename,
             &attachment.mime_type,
             &attachment.data,
             reply_to_message_id,
             message_thread_id,
-        )
+        ),
+        AttachmentKind::Document => send_document(
+            chat_id,
+            &attachment.filename,
+            &attachment.mime_type,
+            &attachment.data,
+            reply_to_message_id,
+            message_thread_id,
+        ),
     }
 }
 
@@ -2968,5 +3050,39 @@ mod tests {
     fn test_max_download_size_constant() {
         // Verify the constant is 20 MB, matching the Slack channel limit
         assert_eq!(MAX_DOWNLOAD_SIZE_BYTES, 20 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_base_mime_type() {
+        assert_eq!(base_mime_type("audio/ogg"), "audio/ogg");
+        assert_eq!(base_mime_type("audio/ogg; codecs=opus"), "audio/ogg");
+        assert_eq!(base_mime_type("image/jpeg"), "image/jpeg");
+        assert_eq!(base_mime_type("text/plain; charset=utf-8"), "text/plain");
+        assert_eq!(base_mime_type(""), "");
+    }
+
+    #[test]
+    fn test_classify_attachment_routing() {
+        // Photos
+        assert_eq!(classify_attachment("image/jpeg"), AttachmentKind::Photo);
+        assert_eq!(classify_attachment("image/png"), AttachmentKind::Photo);
+        assert_eq!(classify_attachment("image/gif"), AttachmentKind::Photo);
+        assert_eq!(classify_attachment("image/webp"), AttachmentKind::Photo);
+
+        // Voice notes — exact and parameterized
+        assert_eq!(classify_attachment("audio/ogg"), AttachmentKind::Voice);
+        assert_eq!(classify_attachment("audio/opus"), AttachmentKind::Voice);
+        assert_eq!(
+            classify_attachment("audio/ogg; codecs=opus"),
+            AttachmentKind::Voice
+        );
+
+        // Everything else falls through to document
+        assert_eq!(
+            classify_attachment("application/pdf"),
+            AttachmentKind::Document
+        );
+        assert_eq!(classify_attachment("audio/mpeg"), AttachmentKind::Document);
+        assert_eq!(classify_attachment("video/mp4"), AttachmentKind::Document);
     }
 }

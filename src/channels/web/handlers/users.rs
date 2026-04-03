@@ -430,12 +430,29 @@ pub async fn profile_get_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
+    // Try to get avatar_url from linked OAuth identities.
+    let identities = match store.list_identities_for_user(&user.user_id).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!(user_id = %user.user_id, error = %e, "Failed to fetch identities for avatar");
+            Vec::new()
+        }
+    };
+    let avatar_url = identities.iter().find_map(|id| id.avatar_url.clone());
+    tracing::trace!(
+        user_id = %user.user_id,
+        identity_count = identities.len(),
+        avatar_url = ?avatar_url,
+        "Profile handler: fetched avatar_url from identities"
+    );
+
     Ok(Json(serde_json::json!({
         "id": record.id,
         "email": record.email,
         "display_name": record.display_name,
         "status": record.status,
         "role": record.role,
+        "avatar_url": avatar_url,
         "created_at": record.created_at.to_rfc3339(),
         "last_login_at": record.last_login_at.map(|dt| dt.to_rfc3339()),
     })))

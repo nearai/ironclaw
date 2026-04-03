@@ -14,8 +14,8 @@ fn runtime_image_declares_and_prepares_ironclaw_home() {
     let dockerfile = runtime_dockerfile();
 
     assert!(
-        dockerfile.contains("useradd -m -u 1000 -s /bin/bash ironclaw"),
-        "runtime image must create the ironclaw user with a home directory",
+        dockerfile.contains("useradd -m -d /home/ironclaw -u 1000 ironclaw"),
+        "runtime image must create the ironclaw user with the expected home directory",
     );
     assert!(
         dockerfile.contains("ENV HOME=/home/ironclaw"),

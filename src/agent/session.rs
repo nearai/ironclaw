@@ -68,8 +68,8 @@ impl Session {
     }
 
     /// Create a new thread in this session.
-    pub fn create_thread(&mut self) -> &mut Thread {
-        let thread = Thread::new(self.id);
+    pub fn create_thread(&mut self, channel: Option<&str>) -> &mut Thread {
+        let thread = Thread::new(self.id, channel);
         let thread_id = thread.id;
         self.active_thread = Some(thread_id);
         self.last_active_at = Utc::now();
@@ -87,9 +87,9 @@ impl Session {
     }
 
     /// Get or create the active thread.
-    pub fn get_or_create_thread(&mut self) -> &mut Thread {
+    pub fn get_or_create_thread(&mut self, channel: Option<&str>) -> &mut Thread {
         match self.active_thread {
-            None => self.create_thread(),
+            None => self.create_thread(channel),
             Some(id) => {
                 if self.threads.contains_key(&id) {
                     // Entry existence confirmed by contains_key above.
@@ -100,7 +100,7 @@ impl Session {
                 } else {
                     // Stale active_thread ID: create a new thread, which
                     // updates self.active_thread to the new thread's ID.
-                    self.create_thread()
+                    self.create_thread(channel)
                 }
             }
         }
@@ -225,6 +225,9 @@ pub struct Thread {
     /// Messages queued while the thread was processing a turn.
     #[serde(default, skip_serializing_if = "VecDeque::is_empty")]
     pub pending_messages: VecDeque<String>,
+    /// Channel that created this thread (for approval authorization).
+    #[serde(default)]
+    pub source_channel: Option<String>,
 }
 
 /// Maximum number of messages that can be queued while a thread is processing.
@@ -233,9 +236,34 @@ pub struct Thread {
 /// rapid follow-ups. The drain loop processes them as one newline-delimited turn.
 pub const MAX_PENDING_MESSAGES: usize = 10;
 
+/// Sentinel value for bootstrap threads that accept approvals from any channel.
+pub const BOOTSTRAP_SOURCE_CHANNEL: &str = "__bootstrap__";
+
+/// Channels that are always authorized to approve tool calls on any thread,
+/// regardless of which channel originally created the thread. These are
+/// trusted UI surfaces (the web dashboard and its gateway).
+pub const TRUSTED_APPROVAL_CHANNELS: &[&str] = &["web", "gateway"];
+
+/// Check whether an approval from `requesting_channel` is authorized for a
+/// thread whose `source_channel` is `source`.
+///
+/// Rules:
+/// - `None` (unknown origin) -> denied (fail-closed)
+/// - `Some("__bootstrap__")` -> authorized from any channel
+/// - `Some(src) == requesting` -> same channel, authorized
+/// - requesting is in `TRUSTED_APPROVAL_CHANNELS` -> always authorized
+/// - Otherwise -> denied
+pub fn is_approval_authorized(source: Option<&str>, requesting: &str) -> bool {
+    match source {
+        None => false,
+        Some(src) if src == BOOTSTRAP_SOURCE_CHANNEL => true,
+        Some(src) => src == requesting || TRUSTED_APPROVAL_CHANNELS.contains(&requesting),
+    }
+}
+
 impl Thread {
     /// Create a new thread.
-    pub fn new(session_id: Uuid) -> Self {
+    pub fn new(session_id: Uuid, source_channel: Option<&str>) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
@@ -248,11 +276,12 @@ impl Thread {
             pending_approval: None,
             pending_auth: None,
             pending_messages: VecDeque::new(),
+            source_channel: source_channel.map(String::from),
         }
     }
 
     /// Create a thread with a specific ID (for DB hydration).
-    pub fn with_id(id: Uuid, session_id: Uuid) -> Self {
+    pub fn with_id(id: Uuid, session_id: Uuid, source_channel: Option<&str>) -> Self {
         let now = Utc::now();
         Self {
             id,
@@ -265,6 +294,7 @@ impl Thread {
             pending_approval: None,
             pending_auth: None,
             pending_messages: VecDeque::new(),
+            source_channel: source_channel.map(String::from),
         }
     }
 
@@ -787,13 +817,13 @@ mod tests {
         let mut session = Session::new("user-123");
         assert!(session.active_thread.is_none());
 
-        session.create_thread();
+        session.create_thread(None);
         assert!(session.active_thread.is_some());
     }
 
     #[test]
     fn test_thread_turns() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         thread.start_turn("Hello");
         assert_eq!(thread.state, ThreadState::Processing);
@@ -806,7 +836,7 @@ mod tests {
 
     #[test]
     fn test_thread_messages() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         thread.start_turn("First message");
         thread.complete_turn("First response");
@@ -829,7 +859,7 @@ mod tests {
 
     #[test]
     fn test_restore_from_messages() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         // First add some turns
         thread.start_turn("Original message");
@@ -855,7 +885,7 @@ mod tests {
 
     #[test]
     fn test_restore_from_messages_incomplete_turn() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         // Messages with incomplete last turn (no assistant response)
         let messages = vec![
@@ -874,7 +904,7 @@ mod tests {
     #[test]
     fn test_enter_auth_mode() {
         let before = Utc::now();
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
         assert!(thread.pending_auth.is_none());
 
         thread.enter_auth_mode("telegram".to_string());
@@ -887,7 +917,7 @@ mod tests {
 
     #[test]
     fn test_take_pending_auth() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
         thread.enter_auth_mode("notion".to_string());
 
         let pending = thread.take_pending_auth();
@@ -902,7 +932,7 @@ mod tests {
 
     #[test]
     fn test_pending_auth_serialization() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
         thread.enter_auth_mode("openai".to_string());
 
         let json = serde_json::to_string(&thread).expect("should serialize");
@@ -932,7 +962,7 @@ mod tests {
     #[test]
     fn test_pending_auth_default_none() {
         // Deserialization of old data without pending_auth should default to None
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
         thread.pending_auth = None;
         let json = serde_json::to_string(&thread).expect("serialize");
 
@@ -946,7 +976,7 @@ mod tests {
     fn test_thread_with_id() {
         let specific_id = Uuid::new_v4();
         let session_id = Uuid::new_v4();
-        let thread = Thread::with_id(specific_id, session_id);
+        let thread = Thread::with_id(specific_id, session_id, None);
 
         assert_eq!(thread.id, specific_id);
         assert_eq!(thread.session_id, session_id);
@@ -958,7 +988,7 @@ mod tests {
     fn test_thread_with_id_restore_messages() {
         let thread_id = Uuid::new_v4();
         let session_id = Uuid::new_v4();
-        let mut thread = Thread::with_id(thread_id, session_id);
+        let mut thread = Thread::with_id(thread_id, session_id, None);
 
         let messages = vec![
             ChatMessage::user("Hello from DB"),
@@ -977,7 +1007,7 @@ mod tests {
 
     #[test]
     fn test_restore_from_messages_empty() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         // Add a turn first, then restore with empty vec
         thread.start_turn("hello");
@@ -993,7 +1023,7 @@ mod tests {
 
     #[test]
     fn test_restore_from_messages_only_assistant_messages() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         // Only assistant messages (no user messages to anchor turns)
         let messages = vec![
@@ -1010,7 +1040,7 @@ mod tests {
 
     #[test]
     fn test_restore_from_messages_multiple_user_messages_in_a_row() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         // Two user messages with no assistant response between them
         let messages = vec![
@@ -1037,8 +1067,8 @@ mod tests {
     fn test_thread_switch() {
         let mut session = Session::new("user-1");
 
-        let t1_id = session.create_thread().id;
-        let t2_id = session.create_thread().id;
+        let t1_id = session.create_thread(None).id;
+        let t2_id = session.create_thread(None).id;
 
         // After creating two threads, active should be the last one
         assert_eq!(session.active_thread, Some(t2_id));
@@ -1058,8 +1088,8 @@ mod tests {
     fn test_get_or_create_thread_idempotent() {
         let mut session = Session::new("user-1");
 
-        let tid1 = session.get_or_create_thread().id;
-        let tid2 = session.get_or_create_thread().id;
+        let tid1 = session.get_or_create_thread(None).id;
+        let tid2 = session.get_or_create_thread(None).id;
 
         // Should return the same thread (not create a new one each time)
         assert_eq!(tid1, tid2);
@@ -1068,7 +1098,7 @@ mod tests {
 
     #[test]
     fn test_truncate_turns() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         for i in 0..5 {
             thread.start_turn(format!("msg-{}", i));
@@ -1092,7 +1122,7 @@ mod tests {
 
     #[test]
     fn test_truncate_turns_noop_when_fewer() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         thread.start_turn("only one");
         thread.complete_turn("response");
@@ -1104,7 +1134,7 @@ mod tests {
 
     #[test]
     fn test_thread_interrupt_and_resume() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         thread.start_turn("do something");
         assert_eq!(thread.state, ThreadState::Processing);
@@ -1122,7 +1152,7 @@ mod tests {
 
     #[test]
     fn test_resume_only_from_interrupted() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         // Idle thread: resume should be a no-op
         assert_eq!(thread.state, ThreadState::Idle);
@@ -1138,7 +1168,7 @@ mod tests {
 
     #[test]
     fn test_turn_fail() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         thread.start_turn("risky operation");
         thread.fail_turn("connection timed out");
@@ -1154,7 +1184,7 @@ mod tests {
 
     #[test]
     fn test_messages_with_incomplete_last_turn() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         thread.start_turn("first");
         thread.complete_turn("first reply");
@@ -1170,7 +1200,7 @@ mod tests {
 
     #[test]
     fn test_thread_serialization_round_trip() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         thread.start_turn("hello");
         thread.complete_turn("world");
@@ -1188,7 +1218,7 @@ mod tests {
     #[test]
     fn test_session_serialization_round_trip() {
         let mut session = Session::new("user-ser");
-        session.create_thread();
+        session.create_thread(None);
         session.auto_approve_tool("echo");
 
         let json = serde_json::to_string(&session).unwrap();
@@ -1226,7 +1256,7 @@ mod tests {
 
     #[test]
     fn test_turn_number_increments() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         // Before any turns, turn_number() is 1 (1-indexed for display)
         assert_eq!(thread.turn_number(), 1);
@@ -1241,7 +1271,7 @@ mod tests {
 
     #[test]
     fn test_complete_turn_on_empty_thread() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         // Completing a turn when there are no turns should be a safe no-op
         thread.complete_turn("phantom response");
@@ -1251,7 +1281,7 @@ mod tests {
 
     #[test]
     fn test_fail_turn_on_empty_thread() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         // Failing a turn when there are no turns should be a safe no-op
         thread.fail_turn("phantom error");
@@ -1261,7 +1291,7 @@ mod tests {
 
     #[test]
     fn test_pending_approval_flow() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         let approval = PendingApproval {
             request_id: Uuid::new_v4(),
@@ -1288,7 +1318,7 @@ mod tests {
 
     #[test]
     fn test_clear_pending_approval() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         let approval = PendingApproval {
             request_id: Uuid::new_v4(),
@@ -1317,7 +1347,7 @@ mod tests {
         assert!(session.active_thread().is_none());
         assert!(session.active_thread_mut().is_none());
 
-        let tid = session.create_thread().id;
+        let tid = session.create_thread(None).id;
 
         assert!(session.active_thread().is_some());
         assert_eq!(session.active_thread().unwrap().id, tid);
@@ -1334,7 +1364,7 @@ mod tests {
 
     #[test]
     fn test_messages_includes_tool_calls() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         thread.start_turn("Search for X");
         {
@@ -1366,7 +1396,7 @@ mod tests {
 
     #[test]
     fn test_messages_multiple_tool_calls_per_turn() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         thread.start_turn("Do two things");
         {
@@ -1393,7 +1423,7 @@ mod tests {
 
     #[test]
     fn test_restore_from_messages_with_tool_calls() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         // Build a message sequence with tool calls
         let tc = ToolCall {
@@ -1425,7 +1455,7 @@ mod tests {
 
     #[test]
     fn test_restore_from_messages_with_tool_error() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         let tc = ToolCall {
             id: "call_0".to_string(),
@@ -1456,7 +1486,7 @@ mod tests {
     fn test_messages_round_trip_with_tools() {
         // Build a thread with tool calls, get messages(), restore, get messages() again
         // The two message sequences should be equivalent.
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         thread.start_turn("Do search");
         {
@@ -1469,7 +1499,7 @@ mod tests {
         let messages_original = thread.messages();
 
         // Restore into a new thread
-        let mut thread2 = Thread::new(Uuid::new_v4());
+        let mut thread2 = Thread::new(Uuid::new_v4(), None);
         thread2.restore_from_messages(messages_original.clone());
 
         let messages_restored = thread2.messages();
@@ -1491,7 +1521,7 @@ mod tests {
 
     #[test]
     fn test_restore_multi_stage_tool_calls() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         let tc1 = ToolCall {
             id: "call_a".to_string(),
@@ -1534,7 +1564,7 @@ mod tests {
 
     #[test]
     fn test_messages_truncates_large_tool_results() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         thread.start_turn("Read big file");
         {
@@ -1557,7 +1587,7 @@ mod tests {
 
     #[test]
     fn test_thread_message_queue() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         // Queue is initially empty
         assert!(thread.pending_messages.is_empty());
@@ -1593,7 +1623,7 @@ mod tests {
 
     #[test]
     fn test_thread_message_queue_serialization() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         // Empty queue should not appear in serialization (skip_serializing_if)
         let json = serde_json::to_string(&thread).unwrap();
@@ -1613,7 +1643,7 @@ mod tests {
     #[test]
     fn test_thread_message_queue_default_on_old_data() {
         // Deserialization of old data without pending_messages should default to empty
-        let thread = Thread::new(Uuid::new_v4());
+        let thread = Thread::new(Uuid::new_v4(), None);
         let json = serde_json::to_string(&thread).unwrap();
 
         // The field is absent (skip_serializing_if), simulating old data
@@ -1624,7 +1654,7 @@ mod tests {
 
     #[test]
     fn test_interrupt_clears_pending_messages() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         // Start a turn so there's something to interrupt
         thread.start_turn("initial input");
@@ -1643,7 +1673,7 @@ mod tests {
 
     #[test]
     fn test_thread_state_idle_after_full_drain() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         // Simulate a full drain cycle: start turn, queue messages, complete turn,
         // then drain all queued messages as a single merged turn (#259).
@@ -1671,7 +1701,7 @@ mod tests {
 
     #[test]
     fn test_drain_pending_messages_merges_with_newlines() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         // Empty queue returns None
         assert!(thread.drain_pending_messages().is_none());
@@ -1700,7 +1730,7 @@ mod tests {
 
     #[test]
     fn test_requeue_drained_preserves_content_at_front() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
 
         // Re-queue into empty queue
         thread.requeue_drained("failed batch".to_string());
@@ -1809,6 +1839,202 @@ mod tests {
         assert_eq!(
             turn.tool_calls[0].result.as_ref().unwrap(),
             &serde_json::json!("done")
+        );
+    }
+
+    #[test]
+    fn test_thread_new_stores_source_channel() {
+        let thread = Thread::new(Uuid::new_v4(), Some("telegram"));
+        assert_eq!(thread.source_channel.as_deref(), Some("telegram"));
+    }
+
+    #[test]
+    fn test_thread_new_none_channel() {
+        let thread = Thread::new(Uuid::new_v4(), None);
+        assert!(thread.source_channel.is_none());
+    }
+
+    #[test]
+    fn test_source_channel_serde_backcompat() {
+        // Simulate deserializing a Thread from older DB records that lack source_channel.
+        let thread = Thread::new(Uuid::new_v4(), Some("cli"));
+        let json = serde_json::to_string(&thread).unwrap();
+
+        // Remove the source_channel field to simulate an old record.
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value.as_object_mut().unwrap().remove("source_channel");
+        let old_json = serde_json::to_string(&value).unwrap();
+
+        let deserialized: Thread = serde_json::from_str(&old_json).unwrap();
+        assert!(
+            deserialized.source_channel.is_none(),
+            "missing source_channel should deserialize as None"
+        );
+    }
+
+    #[test]
+    fn test_approval_authorized_same_channel() {
+        assert!(
+            is_approval_authorized(Some("telegram"), "telegram"),
+            "same channel should be authorized"
+        );
+    }
+
+    #[test]
+    fn test_approval_authorized_different_channel_blocked() {
+        assert!(
+            !is_approval_authorized(Some("telegram"), "http"),
+            "different channel should be blocked"
+        );
+    }
+
+    #[test]
+    fn test_approval_authorized_web_always_allowed() {
+        assert!(
+            is_approval_authorized(Some("telegram"), "web"),
+            "web channel should always be authorized"
+        );
+    }
+
+    #[test]
+    fn test_approval_authorized_gateway_always_allowed() {
+        assert!(
+            is_approval_authorized(Some("telegram"), "gateway"),
+            "gateway channel should always be authorized"
+        );
+    }
+
+    #[test]
+    fn test_approval_authorized_none_denied() {
+        assert!(
+            !is_approval_authorized(None, "telegram"),
+            "None source_channel should be denied (fail-closed)"
+        );
+        assert!(
+            !is_approval_authorized(None, "web"),
+            "None source_channel should be denied even for web"
+        );
+    }
+
+    #[test]
+    fn test_approval_authorized_bootstrap_any_channel() {
+        assert!(
+            is_approval_authorized(Some(BOOTSTRAP_SOURCE_CHANNEL), "telegram"),
+            "__bootstrap__ should be authorized from any channel"
+        );
+        assert!(
+            is_approval_authorized(Some(BOOTSTRAP_SOURCE_CHANNEL), "http"),
+            "__bootstrap__ should be authorized from any channel"
+        );
+        assert!(
+            is_approval_authorized(Some(BOOTSTRAP_SOURCE_CHANNEL), "cli"),
+            "__bootstrap__ should be authorized from any channel"
+        );
+    }
+
+    #[test]
+    fn test_approval_authorized_uses_trusted_channels_constant() {
+        // Every channel in TRUSTED_APPROVAL_CHANNELS should be authorized
+        // against any source, ensuring the constant drives the logic.
+        for &trusted in TRUSTED_APPROVAL_CHANNELS {
+            assert!(
+                is_approval_authorized(Some("any-source"), trusted),
+                "TRUSTED_APPROVAL_CHANNELS entry '{}' should always be authorized",
+                trusted
+            );
+        }
+    }
+
+    #[test]
+    fn test_approval_blocks_thread_without_pending_approval() {
+        // A thread with no pending_approval should not be eligible for
+        // approval routing. This test verifies the data-level invariant
+        // that `agent_loop.rs` checks before calling is_approval_authorized.
+        let thread = Thread::new(Uuid::new_v4(), Some("telegram"));
+        assert!(
+            thread.pending_approval.is_none(),
+            "new thread should have no pending approval"
+        );
+
+        // Set up a thread WITH a pending approval to contrast
+        let mut thread_with_approval = Thread::new(Uuid::new_v4(), Some("telegram"));
+        thread_with_approval.pending_approval = Some(PendingApproval {
+            request_id: Uuid::new_v4(),
+            tool_name: "shell".to_string(),
+            parameters: serde_json::json!({"cmd": "rm -rf /"}),
+            display_parameters: serde_json::json!({"cmd": "rm -rf /"}),
+            description: "run shell command".to_string(),
+            tool_call_id: "call_1".to_string(),
+            context_messages: vec![],
+            deferred_tool_calls: vec![],
+            user_timezone: None,
+            allow_always: true,
+        });
+        assert!(
+            thread_with_approval.pending_approval.is_some(),
+            "thread with pending approval should be eligible"
+        );
+
+        // Authorization check should pass for the thread with pending approval
+        // (same channel), confirming the two checks compose correctly.
+        assert!(is_approval_authorized(
+            thread_with_approval.source_channel.as_deref(),
+            "telegram"
+        ));
+    }
+
+    #[test]
+    fn test_approval_wasm_channel_cannot_impersonate_trusted() {
+        // A WASM channel named "web" or "gateway" would bypass authorization.
+        // This test documents the invariant that WASM setup must reject these
+        // names (tested separately in wasm/setup.rs).
+        // Here we verify the authorization logic itself treats them as trusted.
+        assert!(is_approval_authorized(Some("telegram"), "web"));
+        assert!(is_approval_authorized(Some("telegram"), "gateway"));
+        // But a random WASM channel name should NOT be trusted
+        assert!(!is_approval_authorized(Some("telegram"), "my-wasm-channel"));
+    }
+
+    #[test]
+    fn test_approval_bootstrap_sentinel_not_a_normal_channel() {
+        // If a channel happens to be named __bootstrap__, it should be treated
+        // as the source (always authorized), NOT as a requesting channel with
+        // special trust. Only TRUSTED_APPROVAL_CHANNELS get that privilege.
+        assert!(
+            !is_approval_authorized(Some("telegram"), BOOTSTRAP_SOURCE_CHANNEL),
+            "__bootstrap__ as requesting channel should not have special trust"
+        );
+    }
+
+    #[test]
+    fn test_create_thread_propagates_channel() {
+        let mut session = Session::new("user-chan");
+        let tid = session.create_thread(Some("signal")).id;
+        let thread = session.threads.get(&tid).unwrap();
+        assert_eq!(thread.source_channel.as_deref(), Some("signal"));
+    }
+
+    #[test]
+    fn test_get_or_create_thread_propagates_channel() {
+        let mut session = Session::new("user-chan2");
+        // First call creates
+        let tid = session.get_or_create_thread(Some("http")).id;
+        assert_eq!(
+            session.threads.get(&tid).unwrap().source_channel.as_deref(),
+            Some("http")
+        );
+        // Second call returns existing (channel param ignored)
+        let tid2 = session.get_or_create_thread(Some("different")).id;
+        assert_eq!(tid, tid2);
+        assert_eq!(
+            session
+                .threads
+                .get(&tid2)
+                .unwrap()
+                .source_channel
+                .as_deref(),
+            Some("http"),
+            "existing thread should keep its original source_channel"
         );
     }
 }

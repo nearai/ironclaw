@@ -171,12 +171,37 @@ function initApp() {
   connectSSE();
   connectLogSSE();
   startGatewayStatusPolling();
-  // Hide the Users settings tab for non-admin users.
+  // Fetch user profile and render avatar + account menu.
   apiFetch('/api/profile').then(function(profile) {
-    if (profile && profile.role !== 'admin') {
+    if (!profile) return;
+    window._currentUser = profile;
+    // Hide admin tabs for non-admin users.
+    if (profile.role !== 'admin') {
       var usersTab = document.querySelector('[data-settings-subtab="users"]');
       if (usersTab) usersTab.style.display = 'none';
     }
+    // Render avatar.
+    var avatarImg = document.getElementById('user-avatar-img');
+    var avatarInitials = document.getElementById('user-avatar-initials');
+    var displayName = profile.display_name || profile.email || profile.id || '?';
+    if (avatarInitials) {
+      avatarInitials.textContent = displayName.charAt(0).toUpperCase();
+    }
+    if (profile.avatar_url && avatarImg) {
+      avatarImg.referrerPolicy = 'no-referrer';
+      avatarImg.onload = function() {
+        if (avatarInitials) avatarInitials.style.display = 'none';
+      };
+      avatarImg.src = profile.avatar_url;
+      avatarImg.removeAttribute('hidden');
+    }
+    // Populate dropdown.
+    var nameEl = document.getElementById('user-dropdown-name');
+    var emailEl = document.getElementById('user-dropdown-email');
+    var roleEl = document.getElementById('user-dropdown-role');
+    if (nameEl) nameEl.textContent = profile.display_name || profile.id;
+    if (emailEl) emailEl.textContent = profile.email || '';
+    if (roleEl) roleEl.textContent = profile.role;
   }).catch(function() {});
   checkTeeStatus();
   loadThreads();
@@ -227,6 +252,147 @@ function authenticate() {
 document.getElementById('token-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') authenticate();
 });
+
+// Close SSE connections on page unload to free the browser's connection pool.
+// Without this, stale SSE connections from prior page loads linger and exhaust
+// the HTTP/1.1 per-origin connection limit (6), blocking API fetch calls.
+window.addEventListener('beforeunload', () => {
+  if (eventSource) { eventSource.close(); eventSource = null; }
+  if (logEventSource) { logEventSource.close(); logEventSource = null; }
+});
+
+// Pause SSE when the browser tab is hidden (another tab is focused) and resume
+// when it becomes visible again. This frees connection slots for other tabs
+// running the gateway — without this, each tab holds 1-2 SSE connections and
+// the 3rd tab exhausts the browser's per-origin limit.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (eventSource) { eventSource.close(); eventSource = null; }
+    if (logEventSource) { logEventSource.close(); logEventSource = null; }
+  } else if (token) {
+    connectSSE();
+    if (currentTab === 'logs') connectLogSSE();
+  }
+});
+
+// --- Social login (OAuth + NEAR wallet) ---
+
+// Show the token form (used as fallback when no OAuth providers are available).
+function showTokenForm() {
+  var tokenForm = document.getElementById('auth-token-form');
+  if (tokenForm) {
+    tokenForm.style.display = '';
+    var input = document.getElementById('token-input');
+    if (input) input.focus();
+  }
+}
+
+// Discover enabled providers and show corresponding buttons.
+fetch('/auth/providers', { credentials: 'include' })
+  .then(function(r) { return r.ok ? r.json() : { providers: [] }; })
+  .then(function(data) {
+    var providers = data.providers || [];
+    if (providers.length === 0) { showTokenForm(); return; }
+    // Store NEAR network for the wallet connector.
+    if (data.near_network) window._nearNetwork = data.near_network;
+    var social = document.getElementById('auth-social');
+    if (social) social.style.display = '';
+    providers.forEach(function(p) {
+      var btn = document.getElementById('auth-' + p + '-btn');
+      if (!btn) return;
+      btn.style.display = '';
+      if (p === 'near') {
+        btn.addEventListener('click', authenticateWithNear);
+      } else {
+        btn.addEventListener('click', function() { window.location = '/auth/login/' + p; });
+      }
+    });
+    // When social providers are available, collapse the token form
+    // and show the "or use a token" divider instead.
+    var tokenForm = document.getElementById('auth-token-form');
+    var tokenDivider = document.getElementById('auth-token-divider');
+    if (tokenForm && tokenDivider) {
+      tokenForm.style.display = 'none';
+      tokenDivider.style.display = '';
+      tokenDivider.style.cursor = 'pointer';
+      tokenDivider.addEventListener('click', function() {
+        tokenForm.style.display = '';
+        tokenDivider.style.display = 'none';
+        var input = document.getElementById('token-input');
+        if (input) input.focus();
+      });
+    }
+  })
+  .catch(function() { showTokenForm(); });
+
+// NEAR wallet authentication via near-connect.
+async function authenticateWithNear() {
+  var nearBtn = document.getElementById('auth-near-btn');
+  var errEl = document.getElementById('auth-error');
+  if (nearBtn) { nearBtn.disabled = true; nearBtn.textContent = 'Connecting wallet...'; }
+  if (errEl) errEl.textContent = '';
+
+  try {
+    // 1. Get challenge nonce from the server.
+    var challengeResp = await fetch('/auth/near/challenge', { credentials: 'include' });
+    if (!challengeResp.ok) throw new Error('Failed to get challenge');
+    var challenge = await challengeResp.json();
+
+    // 2. Load near-connect dynamically if not already loaded.
+    if (!window._nearConnector) {
+      var mod = await import('https://esm.sh/@hot-labs/near-connect@0.11');
+      var network = window._nearNetwork || 'mainnet';
+      window._nearConnector = new mod.NearConnector({ network: network });
+    }
+    var connector = window._nearConnector;
+
+    // 3. Connect wallet and request signature.
+    if (nearBtn) nearBtn.textContent = 'Sign with wallet...';
+    var wallet = await connector.connect();
+    var accounts = await wallet.getAccounts();
+    if (!accounts || accounts.length === 0) throw new Error('No NEAR account found');
+
+    var accountId = accounts[0].accountId;
+
+    // Convert hex nonce to Uint8Array for signMessage.
+    var nonceBytes = new Uint8Array(challenge.nonce.match(/.{2}/g).map(function(b) { return parseInt(b, 16); }));
+
+    var signed = await wallet.signMessage({
+      message: challenge.message,
+      recipient: challenge.recipient || 'ironclaw',
+      nonce: nonceBytes,
+    });
+
+    // 4. Send signature to server for verification.
+    if (nearBtn) nearBtn.textContent = 'Verifying...';
+    var verifyResp = await fetch('/auth/near/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        account_id: accountId,
+        public_key: signed.publicKey,
+        signature: signed.signature,
+        nonce: challenge.nonce,
+      }),
+    });
+
+    if (!verifyResp.ok) {
+      var errText = await verifyResp.text();
+      throw new Error(errText || 'Verification failed');
+    }
+
+    await verifyResp.json();
+
+    // 5. Rely on the HttpOnly session cookie created by the backend.
+    token = '';
+    sessionStorage.removeItem('ironclaw_token');
+    initApp();
+  } catch (err) {
+    if (errEl) errEl.textContent = err.message || 'NEAR wallet login failed';
+    if (nearBtn) { nearBtn.disabled = false; nearBtn.textContent = 'Sign in with NEAR'; }
+  }
+}
 
 // Note: main event listener registration is at the bottom of this file (search
 // "Event Listener Registration"). Do NOT add duplicate listeners here.
@@ -396,7 +562,8 @@ function connectSSE() {
 
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
-    document.getElementById('sse-status').textContent = I18n.t('status.connected');
+    var statusEl = document.getElementById('sse-status');
+    if (statusEl) statusEl.textContent = I18n.t('status.connected');
     _reconnectAttempts = 0;
 
     // Dismiss connection-lost banner and show reconnected flash
@@ -438,7 +605,8 @@ function connectSSE() {
   eventSource.onerror = () => {
     _reconnectAttempts++;
     document.getElementById('sse-dot').classList.add('disconnected');
-    document.getElementById('sse-status').textContent = I18n.t('status.reconnecting');
+    var statusEl2 = document.getElementById('sse-status');
+    if (statusEl2) statusEl2.textContent = I18n.t('status.reconnecting');
 
     // Update existing banner with attempt count
     const existingBanner = document.getElementById('connection-banner');
@@ -613,6 +781,16 @@ function connectSSE() {
     handleAuthCompleted(data);
   });
 
+  eventSource.addEventListener('gate_required', (e) => {
+    const data = JSON.parse(e.data);
+    handleGateRequired(data);
+  });
+
+  eventSource.addEventListener('gate_resolved', (e) => {
+    const data = JSON.parse(e.data);
+    handleGateResolved(data);
+  });
+
   eventSource.addEventListener('extension_status', (e) => {
     if (currentTab === 'settings') refreshCurrentSettingsTab();
   });
@@ -677,6 +855,13 @@ function connectSSE() {
       }
     });
   }
+
+  // Plan progress checklist
+  eventSource.addEventListener('plan_update', (e) => {
+    const data = JSON.parse(e.data);
+    if (data.thread_id && !isCurrentThread(data.thread_id)) return;
+    renderPlanChecklist(data);
+  });
 }
 
 // Check if an SSE event belongs to the currently viewed thread.
@@ -991,9 +1176,14 @@ function filterSlashCommands(value) {
 }
 
 function sendApprovalAction(requestId, action) {
-  apiFetch('/api/chat/approval', {
+  apiFetch('/api/chat/gate/resolve', {
     method: 'POST',
-    body: { request_id: requestId, action: action, thread_id: currentThreadId },
+    body: {
+      request_id: requestId,
+      thread_id: currentThreadId,
+      resolution: action === 'deny' ? 'denied' : 'approved',
+      always: action === 'always',
+    },
   }).catch((err) => {
     addMessage('system', 'Failed to send approval: ' + err.message);
   });
@@ -1467,6 +1657,94 @@ function showApproval(data) {
   container.scrollTop = container.scrollHeight;
 }
 
+// --- Plan Checklist ---
+
+function renderPlanChecklist(data) {
+  const chatContainer = document.getElementById('chat-messages');
+  const planId = data.plan_id;
+
+  // Find or create the plan container
+  let container = chatContainer.querySelector('.plan-container[data-plan-id="' + CSS.escape(planId) + '"]');
+  if (!container) {
+    container = document.createElement('div');
+    container.className = 'plan-container';
+    container.setAttribute('data-plan-id', planId);
+    chatContainer.appendChild(container);
+  }
+
+  // Clear and rebuild
+  container.innerHTML = '';
+
+  // Header
+  const header = document.createElement('div');
+  header.className = 'plan-header';
+
+  const title = document.createElement('span');
+  title.className = 'plan-title';
+  title.textContent = data.title || planId;
+  header.appendChild(title);
+
+  const badge = document.createElement('span');
+  badge.className = 'plan-status-badge plan-status-' + (data.status || 'draft');
+  badge.textContent = data.status || 'draft';
+  header.appendChild(badge);
+
+  container.appendChild(header);
+
+  // Steps
+  if (data.steps && data.steps.length > 0) {
+    const stepsList = document.createElement('div');
+    stepsList.className = 'plan-steps';
+
+    let completed = 0;
+    for (const step of data.steps) {
+      const stepEl = document.createElement('div');
+      stepEl.className = 'plan-step';
+      stepEl.setAttribute('data-status', step.status || 'pending');
+
+      const icon = document.createElement('span');
+      icon.className = 'plan-step-icon';
+      if (step.status === 'completed') {
+        icon.textContent = '\u2713'; // checkmark
+        completed++;
+      } else if (step.status === 'failed') {
+        icon.textContent = '\u2717'; // X
+      } else if (step.status === 'in_progress') {
+        icon.innerHTML = '<span class="plan-spinner"></span>';
+      } else {
+        icon.textContent = '\u25CB'; // circle
+      }
+      stepEl.appendChild(icon);
+
+      const text = document.createElement('span');
+      text.className = 'plan-step-text';
+      text.textContent = step.title;
+      stepEl.appendChild(text);
+
+      if (step.result) {
+        const result = document.createElement('span');
+        result.className = 'plan-step-result';
+        result.textContent = step.result;
+        stepEl.appendChild(result);
+      }
+
+      stepsList.appendChild(stepEl);
+    }
+    container.appendChild(stepsList);
+
+    // Summary
+    const summary = document.createElement('div');
+    summary.className = 'plan-summary';
+    summary.textContent = completed + ' of ' + data.steps.length + ' steps completed';
+    if (data.mission_id) {
+      summary.textContent += ' \u00b7 Mission: ' + data.mission_id.substring(0, 8);
+    }
+    container.appendChild(summary);
+  }
+
+  chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
 function showJobCard(data) {
   const container = document.getElementById('chat-messages');
   const card = document.createElement('div');
@@ -1517,20 +1795,80 @@ function showJobCard(data) {
 // --- Auth card ---
 
 function handleAuthRequired(data) {
-  if (data.auth_url) {
-    setAuthFlowPending(true, data.instructions);
-    // OAuth flow: show the global auth prompt with an OAuth button + optional token paste field.
+  if (data.thread_id && !isCurrentThread(data.thread_id)) {
+    unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
+    debouncedLoadThreads();
+    return;
+  }
+  setAuthFlowPending(true, data.instructions);
+  if (data.auth_url || data.instructions) {
+    // Token paste flow (with optional OAuth button): show the global auth
+    // prompt card. This handles both OAuth credentials (auth_url present)
+    // and skill-based credentials (instructions present, no auth_url).
     showAuthCard(data);
   } else {
+    // Extension setup flow: fetch the extension's credential schema and show
+    // the multi-field configure modal (Extensions tab "Setup" button UI).
     if (getConfigureOverlay(data.extension_name)) return;
-    setAuthFlowPending(true, data.instructions);
-    // Setup flow: fetch the extension's credential schema and show the multi-field
-    // configure modal (the same UI used by the Extensions tab "Setup" button).
     showConfigureModal(data.extension_name);
   }
 }
 
+function parseGateResumeKind(resumeKind) {
+  if (!resumeKind || typeof resumeKind !== 'object') return null;
+  if (resumeKind.Approval) return { type: 'approval', ...resumeKind.Approval };
+  if (resumeKind.Authentication) return { type: 'authentication', ...resumeKind.Authentication };
+  if (resumeKind.External) return { type: 'external', ...resumeKind.External };
+  return null;
+}
+
+function handleGateRequired(data) {
+  const hasThread = !!data.thread_id;
+  const forCurrentThread = !hasThread || isCurrentThread(data.thread_id);
+  const resume = parseGateResumeKind(data.resume_kind);
+  if (!forCurrentThread) {
+    unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
+    debouncedLoadThreads();
+    return;
+  }
+  if (resume && resume.type === 'authentication') {
+    handleAuthRequired({
+      extension_name: resume.credential_name,
+      instructions: resume.instructions,
+      auth_url: resume.auth_url || null,
+      request_id: data.request_id,
+      thread_id: data.thread_id || currentThreadId,
+    });
+    return;
+  }
+  showApproval({
+    request_id: data.request_id,
+    tool_name: data.tool_name,
+    description: data.description,
+    parameters: data.parameters,
+    allow_always: !(resume && resume.type === 'approval' && resume.allow_always === false),
+    thread_id: data.thread_id || currentThreadId,
+  });
+}
+
+function handleGateResolved(data) {
+  const hasThread = !!data.thread_id;
+  if (hasThread && !isCurrentThread(data.thread_id)) {
+    debouncedLoadThreads();
+    return;
+  }
+  document.querySelectorAll('.approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]').forEach((el) => el.remove());
+  if (data.resolution === 'credential_provided' || data.resolution === 'cancelled') {
+    removeAuthCard(data.tool_name);
+    enableChatInput();
+  }
+}
+
 function handleAuthCompleted(data) {
+  if (data.thread_id && !isCurrentThread(data.thread_id)) {
+    debouncedLoadThreads();
+    return;
+  }
   showToast(data.message, data.success ? 'success' : 'error');
   // Dismiss only the matching extension's UI so stale prompts are cleared.
   removeAuthCard(data.extension_name);
@@ -1578,6 +1916,7 @@ function getConfigureOverlay(extensionName) {
 }
 
 function showAuthCard(data) {
+  if (data.thread_id && !isCurrentThread(data.thread_id)) return;
   // Keep a single global auth prompt so the experience is consistent across tabs.
   const existing = getAuthOverlay();
   if (existing) existing.remove();
@@ -1592,6 +1931,12 @@ function showAuthCard(data) {
   const card = document.createElement('div');
   card.className = 'auth-card auth-modal';
   card.setAttribute('data-extension-name', data.extension_name);
+  if (data.thread_id) {
+    card.setAttribute('data-thread-id', data.thread_id);
+  }
+  if (data.request_id) {
+    card.setAttribute('data-request-id', data.request_id);
+  }
 
   const header = document.createElement('div');
   header.className = 'auth-header';
@@ -1693,15 +2038,33 @@ function submitAuthToken(extensionName, tokenValue) {
 
   // Disable submit button while in flight
   const card = getAuthCard(extensionName);
+  const threadId = card ? card.getAttribute('data-thread-id') : null;
   if (card) {
     const btns = card.querySelectorAll('button');
     btns.forEach((b) => { b.disabled = true; });
   }
 
-  apiFetch('/api/chat/auth-token', {
+  const isGateResolution = !!(card && card.getAttribute('data-request-id'));
+  const requestId = card ? card.getAttribute('data-request-id') : null;
+  const request = isGateResolution ? apiFetch('/api/chat/gate/resolve', {
     method: 'POST',
-    body: { extension_name: extensionName, token: tokenValue.trim() },
-  }).then((result) => {
+    body: {
+      request_id: requestId,
+      thread_id: threadId || currentThreadId || undefined,
+      resolution: 'credential_provided',
+      token: tokenValue.trim(),
+    },
+  }) : apiFetch('/api/chat/auth-token', {
+    method: 'POST',
+    body: {
+      extension_name: extensionName,
+      token: tokenValue.trim(),
+      request_id: requestId,
+      thread_id: threadId || currentThreadId || undefined,
+    },
+  });
+
+  request.then((result) => {
     if (result.success) {
       // Close immediately for responsiveness; the authoritative success UX
       // (toast + extensions refresh) still comes from auth_completed SSE.
@@ -1716,10 +2079,25 @@ function submitAuthToken(extensionName, tokenValue) {
 }
 
 function cancelAuth(extensionName) {
-  apiFetch('/api/chat/auth-cancel', {
+  const card = getAuthCard(extensionName);
+  const threadId = card ? card.getAttribute('data-thread-id') : null;
+  const requestId = card ? card.getAttribute('data-request-id') : null;
+  const request = requestId ? apiFetch('/api/chat/gate/resolve', {
     method: 'POST',
-    body: { extension_name: extensionName },
-  }).catch(() => {});
+    body: {
+      request_id: requestId,
+      thread_id: threadId || currentThreadId || undefined,
+      resolution: 'cancelled',
+    },
+  }) : apiFetch('/api/chat/auth-cancel', {
+    method: 'POST',
+    body: {
+      extension_name: extensionName,
+      request_id: requestId,
+      thread_id: threadId || currentThreadId || undefined,
+    },
+  });
+  request.catch(() => {});
   removeAuthCard(extensionName);
   setAuthFlowPending(false);
   enableChatInput();
@@ -1801,9 +2179,24 @@ function loadHistory(before) {
       if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
         showActivityThinking('Processing...');
       }
-      // Re-render pending approval card if the thread is awaiting approval
-      if (data.pending_approval) {
-        showApproval(data.pending_approval);
+      if (data.pending_gate) {
+        handleGateRequired({
+          ...data.pending_gate,
+          thread_id: data.pending_gate.thread_id || currentThreadId,
+        });
+      } else {
+        // No pending gate for this history view. Keep a global auth overlay if
+        // it belongs to a different thread; another tab/thread may still be
+        // waiting on it.
+        const overlay = getAuthOverlay();
+        if (overlay) {
+          const overlayThreadId = overlay.getAttribute('data-thread-id');
+          if (overlayThreadId && overlayThreadId !== currentThreadId) {
+            return;
+          }
+        }
+        removeAuthCard();
+        setAuthFlowPending(false);
       }
     } else {
       // Pagination: prepend older messages
@@ -2108,8 +2501,10 @@ function switchThread(threadId) {
 function createNewThread() {
   apiFetch('/api/chat/thread/new', { method: 'POST' }).then((data) => {
     currentThreadId = data.id || null;
+    currentThreadIsReadOnly = false;
     document.getElementById('chat-messages').innerHTML = '';
     showWelcomeCard();
+    enableChatInput();
     loadThreads();
   }).catch((err) => {
     showToast('Failed to create thread: ' + err.message, 'error');
@@ -2250,8 +2645,10 @@ function switchTab(tab) {
 
   if (tab === 'memory') loadMemoryTree();
   if (tab === 'jobs') loadJobs();
+  if (tab === 'missions') loadMissions();
   if (tab === 'routines') loadRoutines();
-  if (tab === 'logs') applyLogFilters();
+  if (tab === 'logs') { connectLogSSE(); applyLogFilters(); }
+  else if (logEventSource) { logEventSource.close(); logEventSource = null; }
   if (tab === 'settings') {
     loadSettingsSubtab(currentSettingsSubtab);
   } else {
@@ -4385,6 +4782,253 @@ function deleteRoutine(id, name) {
     .catch((err) => showToast('Delete failed: ' + err.message, 'error'));
 }
 
+// ── Missions ──────────────────────────────────────────────
+
+let currentMissionId = null;
+
+function loadMissions() {
+  currentMissionId = null;
+  const detail = document.getElementById('mission-detail');
+  if (detail) detail.style.display = 'none';
+  const table = document.getElementById('missions-table');
+  if (table) table.style.display = '';
+
+  Promise.all([
+    apiFetch('/api/engine/missions/summary'),
+    apiFetch('/api/engine/missions'),
+  ]).then(([summary, listData]) => {
+    renderMissionsSummary(summary);
+    renderMissionsList(listData.missions);
+  }).catch(() => {});
+}
+
+function renderMissionsSummary(s) {
+  document.getElementById('missions-summary').innerHTML = ''
+    + summaryCard(I18n.t('missions.summary.total'), s.total, '')
+    + summaryCard(I18n.t('missions.summary.active'), s.active, 'active')
+    + summaryCard(I18n.t('missions.summary.paused'), s.paused, '')
+    + summaryCard(I18n.t('missions.summary.completed'), s.completed, 'completed')
+    + summaryCard(I18n.t('missions.summary.failed'), s.failed, 'failed');
+}
+
+function renderMissionsList(missions) {
+  const tbody = document.getElementById('missions-tbody');
+  const empty = document.getElementById('missions-empty');
+
+  if (!missions || missions.length === 0) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+
+  empty.style.display = 'none';
+  tbody.innerHTML = missions.map((m) => {
+    const statusClass = m.status === 'Active' ? 'in_progress'
+      : m.status === 'Completed' ? 'completed'
+      : m.status === 'Paused' ? 'pending'
+      : 'failed';
+
+    return '<tr class="mission-row" data-action="open-mission" data-id="' + escapeHtml(m.id) + '">'
+      + '<td>' + escapeHtml(m.name) + '</td>'
+      + '<td class="truncate">' + escapeHtml(m.goal) + '</td>'
+      + '<td>' + escapeHtml(m.cadence_type) + '</td>'
+      + '<td>' + m.thread_count + '</td>'
+      + '<td><span class="badge ' + statusClass + '">' + escapeHtml(m.status) + '</span></td>'
+      + '<td>'
+      + (m.status === 'Active' ? '<button class="btn-cancel" data-action="pause-mission" data-id="' + escapeHtml(m.id) + '">Pause</button> ' : '')
+      + (m.status === 'Paused' ? '<button class="btn-restart" data-action="resume-mission" data-id="' + escapeHtml(m.id) + '">Resume</button> ' : '')
+      + '<button class="btn-restart" data-action="fire-mission" data-id="' + escapeHtml(m.id) + '">Fire</button>'
+      + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+function openMissionDetail(id) {
+  currentMissionId = id;
+  apiFetch('/api/engine/missions/' + id).then((data) => {
+    renderMissionDetail(data.mission);
+  }).catch((err) => {
+    showToast('Failed to load mission: ' + err.message, 'error');
+  });
+}
+
+function closeMissionDetail() {
+  currentMissionId = null;
+  loadMissions();
+}
+
+function renderMissionDetail(m) {
+  const table = document.getElementById('missions-table');
+  if (table) table.style.display = 'none';
+  document.getElementById('missions-empty').style.display = 'none';
+
+  const detail = document.getElementById('mission-detail');
+  detail.style.display = 'block';
+
+  const statusClass = m.status === 'Active' ? 'in_progress'
+    : m.status === 'Completed' ? 'completed'
+    : m.status === 'Paused' ? 'pending'
+    : 'failed';
+
+  let html = '<div class="job-detail-header">'
+    + '<button class="btn-back" data-action="close-mission-detail">&larr; Back</button>'
+    + '<h2>' + escapeHtml(m.name) + '</h2>'
+    + '<span class="badge ' + statusClass + '">' + escapeHtml(m.status) + '</span>'
+    + '</div>';
+
+  // Goal — full-width markdown block
+  html += '<div class="job-description"><h3>Goal</h3>'
+    + '<div class="job-description-body">' + renderMarkdown(m.goal) + '</div></div>';
+
+  html += '<div class="job-meta-grid">'
+    + metaItem('Cadence', m.cadence_type)
+    + metaItem('Status', m.status)
+    + metaItem('Threads Today', m.threads_today + ' / ' + (m.max_threads_per_day || '∞'))
+    + metaItem('Total Threads', m.thread_count)
+    + metaItem('Created', formatDate(m.created_at))
+    + metaItem('Next Fire', m.next_fire_at ? formatDate(m.next_fire_at) : 'N/A')
+    + '</div>';
+
+  if (m.current_focus) {
+    html += '<div class="job-description"><h3>Current Focus</h3>'
+      + '<div class="job-description-body">' + renderMarkdown(m.current_focus) + '</div></div>';
+  }
+
+  if (m.success_criteria) {
+    html += '<div class="job-description"><h3>Success Criteria</h3>'
+      + '<div class="job-description-body">' + renderMarkdown(m.success_criteria) + '</div></div>';
+  }
+
+  if (m.notify_channels && m.notify_channels.length > 0) {
+    html += '<div class="job-description"><h3>Notify Channels</h3>'
+      + '<div class="job-description-body">' + m.notify_channels.map(escapeHtml).join(', ') + '</div></div>';
+  }
+
+  if (m.approach_history && m.approach_history.length > 0) {
+    html += '<div class="job-description"><h3>Approach History</h3>';
+    m.approach_history.forEach((a, i) => {
+      html += '<div class="job-description-body" style="margin-bottom:8px">'
+        + '<strong>Run ' + (i + 1) + '</strong><br>'
+        + renderMarkdown(a) + '</div>';
+    });
+    html += '</div>';
+  }
+
+  if (m.threads && m.threads.length > 0) {
+    html += '<div class="job-description"><h3>Spawned Threads</h3>'
+      + '<table class="missions-table"><thead><tr>'
+      + '<th>Goal</th><th>Type</th><th>State</th><th>Steps</th><th>Tokens</th><th>Created</th>'
+      + '</tr></thead><tbody>';
+    m.threads.forEach((t) => {
+      var tState = t.state === 'Done' || t.state === 'Completed' ? 'completed'
+        : t.state === 'Failed' ? 'failed'
+        : t.state === 'Running' ? 'in_progress'
+        : 'pending';
+      html += '<tr class="mission-row" data-action="open-engine-thread" data-id="' + escapeHtml(t.id) + '">'
+        + '<td class="truncate">' + escapeHtml(t.goal) + '</td>'
+        + '<td>' + escapeHtml(t.thread_type) + '</td>'
+        + '<td><span class="badge ' + tState + '">' + escapeHtml(t.state) + '</span></td>'
+        + '<td>' + t.step_count + '</td>'
+        + '<td>' + t.total_tokens.toLocaleString() + '</td>'
+        + '<td>' + formatDate(t.created_at) + '</td>'
+        + '</tr>';
+    });
+    html += '</tbody></table></div>';
+  }
+
+  // Action buttons
+  html += '<div style="margin-top:16px;">';
+  if (m.status === 'Active') {
+    html += '<button class="btn-cancel" data-action="pause-mission" data-id="' + escapeHtml(m.id) + '">Pause</button> ';
+  }
+  if (m.status === 'Paused') {
+    html += '<button class="btn-restart" data-action="resume-mission" data-id="' + escapeHtml(m.id) + '">Resume</button> ';
+  }
+  html += '<button class="btn-restart" data-action="fire-mission" data-id="' + escapeHtml(m.id) + '">Fire Now</button>';
+  html += '</div>';
+
+  detail.innerHTML = html;
+}
+
+function openEngineThread(threadId) {
+  apiFetch('/api/engine/threads/' + threadId).then((data) => {
+    var t = data.thread;
+    var detail = document.getElementById('mission-detail');
+
+    var stateClass = t.state === 'Done' || t.state === 'Completed' ? 'completed'
+      : t.state === 'Failed' ? 'failed'
+      : t.state === 'Running' ? 'in_progress'
+      : 'pending';
+
+    var html = '<div class="job-detail-header">'
+      + '<button class="btn-back" data-action="back-to-mission">&larr; Back to Mission</button>'
+      + '<h2>Thread: ' + escapeHtml(t.goal) + '</h2>'
+      + '<span class="badge ' + stateClass + '">' + escapeHtml(t.state) + '</span>'
+      + '</div>';
+
+    html += '<div class="job-meta-grid">'
+      + metaItem('Thread ID', t.id)
+      + metaItem('Type', t.thread_type)
+      + metaItem('Steps', t.step_count)
+      + metaItem('Tokens', t.total_tokens.toLocaleString())
+      + metaItem('Cost', t.total_cost_usd > 0 ? '$' + t.total_cost_usd.toFixed(4) : '-')
+      + metaItem('Max Iterations', t.max_iterations)
+      + metaItem('Created', formatDate(t.created_at))
+      + metaItem('Completed', t.completed_at ? formatDate(t.completed_at) : '-')
+      + '</div>';
+
+    if (t.messages && t.messages.length > 0) {
+      html += '<div class="job-description"><h3>Messages (' + t.messages.length + ')</h3>';
+      t.messages.forEach(function(msg, i) {
+        var roleClass = msg.role === 'Assistant' ? 'assistant' : msg.role === 'User' ? 'user' : 'system';
+        html += '<div class="thread-message thread-msg-' + roleClass + '">'
+          + '<div class="thread-msg-role">' + escapeHtml(msg.role) + '</div>'
+          + '<div class="thread-msg-content">' + renderMarkdown(msg.content) + '</div>'
+          + '</div>';
+      });
+      html += '</div>';
+    }
+
+    detail.innerHTML = html;
+  }).catch(function(err) {
+    showToast('Failed to load thread: ' + err.message, 'error');
+  });
+}
+
+function fireMission(id) {
+  apiFetch('/api/engine/missions/' + id + '/fire', { method: 'POST' })
+    .then((data) => {
+      if (data.fired) {
+        showToast('Mission fired — thread ' + data.thread_id, 'success');
+      } else {
+        showToast('Mission not fired (terminal or budget exhausted)', 'warning');
+      }
+      if (currentMissionId === id) openMissionDetail(id);
+      else loadMissions();
+    })
+    .catch((err) => showToast('Fire failed: ' + err.message, 'error'));
+}
+
+function pauseMission(id) {
+  apiFetch('/api/engine/missions/' + id + '/pause', { method: 'POST' })
+    .then(() => {
+      showToast('Mission paused', 'success');
+      if (currentMissionId === id) openMissionDetail(id);
+      else loadMissions();
+    })
+    .catch((err) => showToast('Pause failed: ' + err.message, 'error'));
+}
+
+function resumeMission(id) {
+  apiFetch('/api/engine/missions/' + id + '/resume', { method: 'POST' })
+    .then(() => {
+      showToast('Mission resumed', 'success');
+      if (currentMissionId === id) openMissionDetail(id);
+      else loadMissions();
+    })
+    .catch((err) => showToast('Resume failed: ' + err.message, 'error'));
+}
+
 function formatRelativeTime(isoString) {
   if (!isoString) return '-';
   const d = new Date(isoString);
@@ -4653,13 +5297,8 @@ function fetchGatewayStatus() {
   }).catch(function() {});
 }
 
-// Show/hide popover on hover
-document.getElementById('gateway-status-trigger').addEventListener('mouseenter', () => {
-  document.getElementById('gateway-popover').classList.add('visible');
-});
-document.getElementById('gateway-status-trigger').addEventListener('mouseleave', () => {
-  document.getElementById('gateway-popover').classList.remove('visible');
-});
+// Gateway popover is now inline in the user dropdown — no hover toggle needed.
+// The popover content is updated by startGatewayStatusPolling() into #gateway-popover.
 
 // --- TEE attestation ---
 
@@ -6176,6 +6815,30 @@ function formatDate(isoString) {
 // --- Event Listener Registration (CSP-safe, no inline handlers) ---
 
 document.getElementById('auth-connect-btn').addEventListener('click', () => authenticate());
+
+// User avatar dropdown toggle.
+document.getElementById('user-avatar-btn').addEventListener('click', function(e) {
+  e.stopPropagation();
+  var dd = document.getElementById('user-dropdown');
+  if (dd) dd.style.display = dd.style.display === 'none' ? '' : 'none';
+});
+// Close dropdown on click outside.
+document.addEventListener('click', function(e) {
+  var dd = document.getElementById('user-dropdown');
+  var account = document.getElementById('user-account');
+  if (dd && account && !account.contains(e.target)) {
+    dd.style.display = 'none';
+  }
+});
+// Logout handler.
+document.getElementById('user-logout-btn').addEventListener('click', function() {
+  fetch('/auth/logout', { method: 'POST', credentials: 'include' })
+    .finally(function() {
+      sessionStorage.removeItem('ironclaw_token');
+      sessionStorage.removeItem('ironclaw_oidc');
+      window.location.reload();
+    });
+});
 document.getElementById('restart-overlay').addEventListener('click', () => cancelRestart());
 document.getElementById('restart-close-btn').addEventListener('click', () => cancelRestart());
 document.getElementById('restart-cancel-btn').addEventListener('click', () => cancelRestart());
@@ -6258,6 +6921,31 @@ document.addEventListener('click', function(e) {
       break;
     case 'close-routine-detail':
       closeRoutineDetail();
+      break;
+    case 'open-mission':
+      openMissionDetail(el.dataset.id);
+      break;
+    case 'close-mission-detail':
+      closeMissionDetail();
+      break;
+    case 'fire-mission':
+      e.stopPropagation();
+      fireMission(el.dataset.id);
+      break;
+    case 'pause-mission':
+      e.stopPropagation();
+      pauseMission(el.dataset.id);
+      break;
+    case 'resume-mission':
+      e.stopPropagation();
+      resumeMission(el.dataset.id);
+      break;
+    case 'open-engine-thread':
+      openEngineThread(el.dataset.id);
+      break;
+    case 'back-to-mission':
+      if (currentMissionId) openMissionDetail(currentMissionId);
+      else closeMissionDetail();
       break;
     case 'view-run-job':
       e.preventDefault();

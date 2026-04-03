@@ -14,6 +14,7 @@
 //! - Viewing gateway logs (`logs`)
 //! - Checking system health (`status`)
 
+pub mod acp;
 mod channels;
 mod completion;
 mod config;
@@ -35,6 +36,7 @@ mod skills;
 pub mod status;
 mod tool;
 
+pub use acp::{AcpCommand, run_acp_command};
 pub use channels::{ChannelsCommand, run_channels_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
@@ -92,6 +94,14 @@ pub struct Cli {
     /// Skip first-run onboarding check
     #[arg(long, global = true)]
     pub no_onboard: bool,
+
+    /// Auto-approve tool execution (shell, file writes, HTTP, etc.)
+    ///
+    /// Skips interactive approval prompts for standard tools. Destructive
+    /// operations still require explicit approval. Other safeguards remain
+    /// active: rate limits, hooks, authentication gates.
+    #[arg(long, global = true)]
+    pub auto_approve: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -288,9 +298,17 @@ pub enum Command {
         orchestrator_url: String,
 
         /// Maximum iterations before stopping.
-        #[arg(long, default_value = "50")]
+        #[arg(long, env = "IRONCLAW_MAX_ITERATIONS", default_value = "50")]
         max_iterations: u32,
     },
+
+    /// Manage ACP (Agent Client Protocol) agents
+    #[command(
+        subcommand,
+        about = "Manage ACP agents",
+        long_about = "Add, list, remove, or test ACP-compliant coding agents.\nExample: ironclaw acp add goose --command goose --arg \"--stdio\""
+    )]
+    Acp(AcpCommand),
 
     /// Run as a Claude Code bridge inside a Docker container (internal use).
     /// Spawns the `claude` CLI and streams output back to the orchestrator.
@@ -311,6 +329,19 @@ pub enum Command {
         /// Claude model to use (e.g. "sonnet", "opus").
         #[arg(long, default_value = "sonnet")]
         model: String,
+    },
+
+    /// Run as an ACP bridge inside a Docker container (internal use).
+    /// Spawns an ACP-compliant agent and streams output back to the orchestrator.
+    #[command(hide = true)]
+    AcpBridge {
+        /// Job ID to execute.
+        #[arg(long)]
+        job_id: uuid::Uuid,
+
+        /// URL of the orchestrator's internal API.
+        #[arg(long, default_value = "http://host.docker.internal:50051")]
+        orchestrator_url: String,
     },
 }
 

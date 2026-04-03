@@ -1,14 +1,24 @@
 //! Configuration for IronClaw.
 //!
-//! Settings are loaded from env vars, the DB settings table, TOML config,
-//! and built-in defaults. Priority varies by subsystem:
+//! Settings are loaded with priority: **DB/TOML > env > default**.
 //!
-//! - **LLM settings** (backend, model, api_key, base_url): DB > env > default
-//! - **Most other settings** (agent, channels, tunnel, …): env > DB > default
+//! DB and TOML are merged into a single `Settings` struct before
+//! resolution (DB wins over TOML when both set the same field).
+//! Resolvers then check settings before env vars.
+//!
+//! For concrete (non-`Option`) fields, a settings value equal to the
+//! built-in default is treated as "unset" and falls through to env.
+//!
+//! Exceptions:
+//! - Bootstrap configs (database, secrets): env-only (DB not yet available)
+//! - Security-sensitive fields (allow_local_tools, allow_full_access,
+//!   cost limits, auth tokens): env-only
+//! - API keys: env/secrets store only
 //!
 //! `DATABASE_URL` lives in `~/.ironclaw/.env` (loaded via dotenvy early
 //! in startup).
 
+pub mod acp;
 mod agent;
 mod builder;
 mod channels;
@@ -18,6 +28,7 @@ mod heartbeat;
 pub(crate) mod helpers;
 mod hygiene;
 pub(crate) mod llm;
+pub mod oauth;
 pub mod relay;
 mod routines;
 mod safety;
@@ -48,11 +59,12 @@ pub use self::embeddings::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig};
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
 pub use self::llm::default_session_path;
+pub use self::oauth::OAuthConfig;
 pub use self::relay::RelayConfig;
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
 use self::safety::resolve_safety_config;
-pub use self::sandbox::{ClaudeCodeConfig, SandboxModeConfig};
+pub use self::sandbox::{AcpModeConfig, ClaudeCodeConfig, SandboxModeConfig};
 pub use self::search::WorkspaceSearchConfig;
 pub use self::secrets::SecretsConfig;
 pub use self::skills::SkillsConfig;
@@ -102,11 +114,14 @@ pub struct Config {
     pub routines: RoutineConfig,
     pub sandbox: SandboxModeConfig,
     pub claude_code: ClaudeCodeConfig,
+    pub acp: AcpModeConfig,
     pub skills: SkillsConfig,
     pub transcription: TranscriptionConfig,
     pub search: WorkspaceSearchConfig,
     pub workspace: WorkspaceConfig,
     pub observability: crate::observability::ObservabilityConfig,
+    /// OAuth/social login configuration (Google, GitHub, etc.).
+    pub oauth: OAuthConfig,
     /// Channel-relay integration (Slack via external relay service).
     /// Present only when both `CHANNEL_RELAY_URL` and `CHANNEL_RELAY_API_KEY` are set.
     pub relay: Option<RelayConfig>,
@@ -175,6 +190,7 @@ impl Config {
                 ..SandboxModeConfig::default()
             },
             claude_code: ClaudeCodeConfig::default(),
+            acp: AcpModeConfig::default(),
             skills: SkillsConfig {
                 enabled: true,
                 local_dir: skills_dir,
@@ -185,15 +201,16 @@ impl Config {
             search: WorkspaceSearchConfig::default(),
             workspace: WorkspaceConfig::default(),
             observability: crate::observability::ObservabilityConfig::default(),
+            oauth: OAuthConfig::default(),
             relay: None,
         }
     }
 
     /// Load configuration from environment variables and the database.
     ///
-    /// TOML is loaded first as a base, then DB values are merged on top
-    /// (DB wins over TOML). Individual subsystem resolvers then apply
-    /// their own env-vs-DB priority — see module docs for details.
+    /// Priority: DB/TOML > env > default. TOML is loaded first as a
+    /// base, then DB values are merged on top. Subsystem resolvers check
+    /// the merged settings before env vars (except bootstrap/security fields).
     pub async fn from_db(
         store: &(dyn crate::db::SettingsStore + Sync),
         user_id: &str,
@@ -203,9 +220,8 @@ impl Config {
 
     /// Load from DB with an optional TOML config file overlay.
     ///
-    /// TOML is loaded first as a base, then DB values are merged on top
-    /// (DB wins over TOML). Per-subsystem resolvers then decide whether
-    /// env vars or DB values take final precedence — see module docs.
+    /// Priority: DB/TOML > env > default. TOML is loaded as the base,
+    /// then DB values are merged on top. See module docs for exceptions.
     pub async fn from_db_with_toml(
         store: &(dyn crate::db::SettingsStore + Sync),
         user_id: &str,
@@ -366,17 +382,19 @@ impl Config {
             secrets: SecretsConfig::resolve().await?,
             builder: BuilderModeConfig::resolve(settings)?,
             heartbeat: HeartbeatConfig::resolve(settings)?,
-            hygiene: HygieneConfig::resolve()?,
-            routines: RoutineConfig::resolve()?,
+            hygiene: HygieneConfig::resolve(settings)?,
+            routines: RoutineConfig::resolve(settings)?,
             sandbox: SandboxModeConfig::resolve(settings)?,
             claude_code: ClaudeCodeConfig::resolve(settings)?,
-            skills: SkillsConfig::resolve()?,
+            acp: AcpModeConfig::resolve(settings)?,
+            skills: SkillsConfig::resolve(settings)?,
             transcription: TranscriptionConfig::resolve(settings)?,
-            search: WorkspaceSearchConfig::resolve()?,
+            search: WorkspaceSearchConfig::resolve(settings)?,
             workspace,
             observability: crate::observability::ObservabilityConfig {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
             },
+            oauth: OAuthConfig::resolve()?,
             relay: RelayConfig::from_env(),
         })
     }
