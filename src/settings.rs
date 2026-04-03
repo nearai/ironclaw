@@ -713,6 +713,26 @@ pub struct SandboxSettings {
     /// Whether ACP (Agent Client Protocol) agent mode is enabled.
     #[serde(default)]
     pub acp_enabled: bool,
+
+    /// Whether to use a persistent session container.
+    #[serde(default)]
+    pub persistent: bool,
+
+    /// Extra bind-mount volumes (e.g., `["~/.ssh:/home/sandbox/.ssh:ro"]`).
+    #[serde(default)]
+    pub extra_volumes: Vec<String>,
+
+    /// Use host networking instead of bridge.
+    #[serde(default)]
+    pub host_network: bool,
+
+    /// Run as root (UID 0) inside the container.
+    #[serde(default)]
+    pub run_as_root: bool,
+
+    /// Extra environment variables (`["KEY=value"]`) injected into containers.
+    #[serde(default)]
+    pub extra_env: Vec<String>,
 }
 
 fn default_sandbox_policy() -> String {
@@ -748,6 +768,11 @@ impl Default for SandboxSettings {
             extra_allowed_domains: Vec::new(),
             claude_code_enabled: false,
             acp_enabled: false,
+            persistent: false,
+            extra_volumes: Vec::new(),
+            host_network: false,
+            run_as_root: false,
+            extra_env: Vec::new(),
         }
     }
 }

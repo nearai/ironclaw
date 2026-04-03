@@ -30,6 +30,17 @@ pub struct SandboxConfig {
     pub auto_pull_image: bool,
     /// Port for the HTTP proxy (0 = auto-assign).
     pub proxy_port: u16,
+    /// Whether to use a persistent session container instead of ephemeral per-command containers.
+    pub persistent: bool,
+    /// Extra bind-mount volumes (e.g., `"~/.ssh:/home/sandbox/.ssh:ro"`).
+    pub extra_volumes: Vec<String>,
+    /// Use host networking instead of bridge. Gives container direct access to
+    /// host network (SSH, VPN, localhost services).
+    pub host_network: bool,
+    /// Run as root (UID 0) inside the container. Enables sudo/package install.
+    pub run_as_root: bool,
+    /// Extra environment variables (`"KEY=value"`) injected into containers.
+    pub extra_env: Vec<String>,
 }
 
 impl Default for SandboxConfig {
@@ -45,6 +56,11 @@ impl Default for SandboxConfig {
             image: "ironclaw-worker:latest".to_string(),
             auto_pull_image: true,
             proxy_port: 0,
+            persistent: false,
+            extra_volumes: Vec::new(),
+            host_network: false,
+            run_as_root: false,
+            extra_env: Vec::new(),
         }
     }
 }
@@ -229,5 +245,32 @@ mod tests {
         assert!(allowlist.contains(&"crates.io".to_string()));
         assert!(allowlist.contains(&"registry.npmjs.org".to_string()));
         assert!(allowlist.contains(&"github.com".to_string()));
+    }
+
+    #[test]
+    fn test_persistent_fields_default_to_off() {
+        let config = SandboxConfig::default();
+        assert!(!config.persistent);
+        assert!(config.extra_volumes.is_empty());
+        assert!(!config.host_network);
+        assert!(!config.run_as_root);
+        assert!(config.extra_env.is_empty());
+    }
+
+    #[test]
+    fn test_persistent_fields_can_be_set() {
+        let config = SandboxConfig {
+            persistent: true,
+            extra_volumes: vec!["~/.ssh:/home/sandbox/.ssh:ro".to_string()],
+            host_network: true,
+            run_as_root: true,
+            extra_env: vec!["KUBECONFIG=/home/sandbox/.kube/config".to_string()],
+            ..Default::default()
+        };
+        assert!(config.persistent);
+        assert_eq!(config.extra_volumes.len(), 1);
+        assert!(config.host_network);
+        assert!(config.run_as_root);
+        assert_eq!(config.extra_env.len(), 1);
     }
 }
