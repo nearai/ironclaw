@@ -259,7 +259,9 @@ impl LlmProvider for OpenAiCodexProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let body = self.build_request_body(&request.messages, None);
+        let mut messages = request.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
+        let body = self.build_request_body(&messages, None);
         let parsed = self.send_request(body).await?;
 
         Ok(CompletionResponse {
@@ -276,6 +278,9 @@ impl LlmProvider for OpenAiCodexProvider {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        let mut messages = request.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
+
         // Build a reverse map so we can translate sanitized names back to originals.
         // Only needed when sanitization actually changes a name (e.g. MCP tools with dots).
         let name_map: std::collections::HashMap<String, String> = request
@@ -291,7 +296,7 @@ impl LlmProvider for OpenAiCodexProvider {
             })
             .collect();
 
-        let body = self.build_request_body(&request.messages, Some(&request.tools));
+        let body = self.build_request_body(&messages, Some(&request.tools));
         let mut parsed = self.send_request(body).await?;
 
         // Reverse-map sanitized tool names back to originals so the caller
@@ -1222,5 +1227,60 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
             tc.name = original.clone();
         }
         assert_eq!(tc.name, "mcp.server.search");
+    }
+
+    /// Regression test for #1969: orphaned tool results must be sanitized
+    /// before building the request body, otherwise the Responses API returns
+    /// HTTP 400 because function_call_output references a non-existent call_id.
+    #[test]
+    fn test_build_request_sanitizes_orphaned_tool_results() {
+        use crate::llm::provider::sanitize_tool_messages;
+
+        // An orphaned tool result: no preceding assistant message with a
+        // matching tool_call for "call_orphan".
+        let mut messages = vec![
+            ChatMessage::system("You are helpful"),
+            ChatMessage::user("hello"),
+            ChatMessage::assistant("I'll use a tool"),
+            ChatMessage::tool_result("call_orphan", "search", "found 3 results"),
+        ];
+
+        // Before sanitization the message is Role::Tool with a tool_call_id.
+        assert_eq!(messages[3].role, Role::Tool);
+        assert_eq!(messages[3].tool_call_id, Some("call_orphan".to_string()));
+
+        sanitize_tool_messages(&mut messages);
+
+        // After sanitization it must be rewritten to a user message.
+        assert_eq!(messages[3].role, Role::User);
+        assert!(messages[3].content.contains("[Tool `search` returned:"));
+        assert!(messages[3].content.contains("found 3 results"));
+        assert!(messages[3].tool_call_id.is_none());
+        assert!(messages[3].name.is_none());
+
+        // Verify the rewritten message converts to a user input item (not
+        // a function_call_output that would cause HTTP 400).
+        let jwt = make_test_jwt("acct_test");
+        let provider = OpenAiCodexProvider::new(
+            "gpt-5.3-codex",
+            "https://chatgpt.com/backend-api/codex",
+            &jwt,
+            300,
+        )
+        .unwrap();
+
+        let body = provider.build_request_body(&messages, None);
+        let input = body["input"].as_array().unwrap();
+
+        // Should have 3 non-system items: user, assistant, rewritten-user
+        assert_eq!(input.len(), 3);
+        // The last item must be a user message, not a function_call_output
+        assert_eq!(input[2]["role"], "user");
+        assert!(
+            input[2]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("[Tool `search` returned:")
+        );
     }
 }
