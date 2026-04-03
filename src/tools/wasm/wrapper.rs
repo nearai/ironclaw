@@ -28,6 +28,7 @@ use crate::tools::wasm::error::WasmError;
 use crate::tools::wasm::host::{HostState, LogLevel};
 use crate::tools::wasm::limits::{ResourceLimits, WasmResourceLimiter};
 use crate::tools::wasm::runtime::{EPOCH_TICK_INTERVAL, PreparedModule, WasmToolRuntime};
+use crate::tools::wasm::ssrf_safe_client_builder;
 use ironclaw_safety::LeakDetector;
 
 // Generate component model bindings from the WIT file.
@@ -415,9 +416,8 @@ impl near::agent::host::Host for StoreData {
         });
 
         let result = rt.block_on(async {
-            let client = reqwest::Client::builder()
+            let client = ssrf_safe_client_builder()
                 .connect_timeout(Duration::from_secs(10))
-                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
@@ -1321,9 +1321,8 @@ async fn refresh_oauth_token(
         return false;
     }
 
-    let client = match reqwest::Client::builder()
+    let client = match ssrf_safe_client_builder()
         .timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(c) => c,
@@ -1623,84 +1622,12 @@ fn extract_host_from_url(url: &str) -> Option<String> {
     })
 }
 
-/// Resolve the URL's hostname and reject connections to private/internal IP addresses.
-/// This prevents DNS rebinding attacks where an attacker's domain resolves to an
-/// internal IP after passing the allowlist check.
 fn reject_private_ip(url: &str) -> Result<(), String> {
-    let parsed = url::Url::parse(url).map_err(|e| format!("Failed to parse URL: {e}"))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(format!("Unsupported URL scheme: {}", parsed.scheme()));
-    }
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err("URL contains userinfo (@) which is not allowed".to_string());
-    }
-
-    let host = parsed
-        .host_str()
-        .map(|h| {
-            h.strip_prefix('[')
-                .and_then(|v| v.strip_suffix(']'))
-                .unwrap_or(h)
-        })
-        .ok_or_else(|| "Failed to parse host from URL".to_string())?;
-
-    // If the host is already an IP, check it directly
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        return if is_private_ip(ip) {
-            Err(format!(
-                "HTTP request to private/internal IP {} is not allowed",
-                ip
-            ))
-        } else {
-            Ok(())
-        };
-    }
-
-    // Resolve DNS and check all addresses
-    use std::net::ToSocketAddrs;
-    // Port 0 is a placeholder; ToSocketAddrs needs host:port but the port
-    // doesn't affect which IPs the hostname resolves to.
-    let addrs: Vec<_> = format!("{}:0", host)
-        .to_socket_addrs()
-        .map_err(|e| format!("DNS resolution failed for {}: {}", host, e))?
-        .collect();
-
-    if addrs.is_empty() {
-        return Err(format!("DNS resolution returned no addresses for {}", host));
-    }
-
-    for addr in &addrs {
-        if is_private_ip(addr.ip()) {
-            return Err(format!(
-                "DNS rebinding detected: {} resolved to private IP {}",
-                host,
-                addr.ip()
-            ));
-        }
-    }
-
-    Ok(())
+    crate::tools::wasm::reject_private_ip(url)
 }
 
-/// Check if an IP address belongs to a private/internal range.
 fn is_private_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()           // 127.0.0.0/8
-            || v4.is_private()         // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-            || v4.is_link_local()      // 169.254.0.0/16
-            || v4.is_unspecified()     // 0.0.0.0
-            || v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64 // 100.64.0.0/10 (CGNAT)
-        }
-        std::net::IpAddr::V6(v6) => {
-            v6.is_loopback()           // ::1
-            || v6.is_unspecified()     // ::
-            // fc00::/7 (unique local)
-            || (v6.segments()[0] & 0xFE00) == 0xFC00
-            // fe80::/10 (link-local)
-            || (v6.segments()[0] & 0xFFC0) == 0xFE80
-        }
-    }
+    crate::tools::wasm::is_private_ip(ip)
 }
 
 fn schema_contains_container_properties(schema: &serde_json::Value) -> bool {
