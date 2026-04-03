@@ -11,26 +11,26 @@ use crate::extensions::ExtensionManager;
 use crate::llm::{LlmProvider, ToolDefinition};
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::secrets::SecretsStore;
-use crate::skills::catalog::SkillCatalog;
-use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{
     BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder, SoftwareBuilder,
 };
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
     JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
-    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool,
-    ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool,
-    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
-    ToolUpgradeTool, WriteFileTool,
+    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PlanUpdateTool, PromptQueue,
+    ReadFileTool, ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool,
+    TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool,
+    ToolSearchTool, ToolUpgradeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain};
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolDiscoverySummary, ToolDomain};
 use crate::tools::wasm::{
     Capabilities, OAuthRefreshConfig, ResourceLimits, SharedCredentialRegistry, WasmError,
     WasmStorageError, WasmToolRuntime, WasmToolStore, WasmToolWrapper,
 };
 use crate::workspace::Workspace;
+use ironclaw_skills::catalog::SkillCatalog;
+use ironclaw_skills::registry::SkillRegistry;
 
 /// Names of built-in tools that cannot be shadowed by dynamic registrations.
 /// This prevents a dynamically built or installed tool from replacing a
@@ -133,6 +133,11 @@ impl ToolRegistry {
         self.credential_registry.as_ref()
     }
 
+    /// Get a reference to the secrets store (for credential storage during auth flows).
+    pub fn secrets_store(&self) -> Option<&Arc<dyn SecretsStore + Send + Sync>> {
+        self.secrets_store.as_ref()
+    }
+
     /// Get the shared rate limiter for checking built-in tool limits.
     pub fn rate_limiter(&self) -> &RateLimiter {
         &self.rate_limiter
@@ -175,6 +180,25 @@ impl ToolRegistry {
     pub async fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         let tools = self.tools.read().await;
         tools.get(name).map(Arc::clone)
+    }
+
+    /// Resolve a caller-provided action/tool name to the registered tool id.
+    ///
+    /// The runtime is converging on `snake_case` names. Hyphenated names remain
+    /// accepted here only as a compatibility alias for older installed tools.
+    pub async fn resolve_name(&self, name: &str) -> Option<String> {
+        let tools = self.tools.read().await;
+        if tools.contains_key(name) {
+            return Some(name.to_string());
+        }
+        crate::extensions::naming::legacy_extension_alias(name)
+            .filter(|alias| tools.contains_key(alias))
+    }
+
+    pub async fn get_resolved(&self, name: &str) -> Option<(String, Arc<dyn Tool>)> {
+        let resolved = self.resolve_name(name).await?;
+        let tool = self.get(&resolved).await?;
+        Some((resolved, tool))
     }
 
     /// Check if a tool exists.
@@ -241,6 +265,7 @@ impl ToolRegistry {
         self.register_sync(Arc::new(EchoTool));
         self.register_sync(Arc::new(TimeTool));
         self.register_sync(Arc::new(JsonTool));
+        self.register_sync(Arc::new(PlanUpdateTool::new()));
 
         let mut http = HttpTool::new();
         if let (Some(cr), Some(ss)) = (&self.credential_registry, &self.secrets_store) {
@@ -523,6 +548,20 @@ impl ToolRegistry {
         tracing::debug!("Registered 7 routine management tools");
     }
 
+    /// Register plan management tools.
+    ///
+    /// The plan_update tool lets the LLM emit structured plan progress
+    /// checklist events via SSE. Works without SSE (no broadcast), but
+    /// pass the `SseManager` for real-time UI updates.
+    pub fn register_plan_tools(&self, sse: Option<Arc<crate::channels::web::sse::SseManager>>) {
+        let mut tool = PlanUpdateTool::new();
+        if let Some(sse) = sse {
+            tool = tool.with_sse(sse);
+        }
+        self.register_sync(Arc::new(tool));
+        tracing::debug!("Registered plan_update tool");
+    }
+
     /// Register message tool for sending messages to channels.
     pub async fn register_message_tools(
         &self,
@@ -674,6 +713,9 @@ impl ToolRegistry {
         if let Some(s) = reg.schema {
             wrapper = wrapper.with_schema(s);
         }
+        if let Some(summary) = reg.discovery_summary {
+            wrapper = wrapper.with_discovery_summary(summary);
+        }
         if let Some(store) = reg.secrets_store {
             wrapper = wrapper.with_secrets_store(store);
         }
@@ -748,6 +790,7 @@ impl ToolRegistry {
             limits: None,
             description: Some(&tool_with_binary.tool.description),
             schema: Some(tool_with_binary.tool.parameters_schema.clone()),
+            discovery_summary: None,
             secrets_store: self.secrets_store.clone(),
             oauth_refresh: None,
         })
@@ -791,6 +834,8 @@ pub struct WasmToolRegistration<'a> {
     pub description: Option<&'a str>,
     /// Optional parameter schema override.
     pub schema: Option<serde_json::Value>,
+    /// Optional curated discovery guidance for `tool_info(detail: "summary")`.
+    pub discovery_summary: Option<ToolDiscoverySummary>,
     /// Secrets store for credential injection at request time.
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
@@ -844,6 +889,42 @@ mod tests {
         let defs = registry.tool_definitions().await;
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "echo");
+    }
+
+    #[tokio::test]
+    async fn resolve_name_accepts_legacy_hyphen_alias() {
+        struct LegacyTool;
+
+        #[async_trait::async_trait]
+        impl Tool for LegacyTool {
+            fn name(&self) -> &str {
+                "web-search"
+            }
+
+            fn description(&self) -> &str {
+                "legacy"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(LegacyTool)).await;
+
+        assert_eq!(
+            registry.resolve_name("web_search").await.as_deref(),
+            Some("web-search")
+        );
     }
 
     #[tokio::test]

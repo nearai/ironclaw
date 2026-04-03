@@ -10,7 +10,7 @@
 //! - Tag match: 3 points (capped at 15 total)
 //! - Regex pattern match: 20 points (capped at 40 total)
 
-use crate::skills::LoadedSkill;
+use crate::types::LoadedSkill;
 
 /// Default maximum context tokens allocated to skills.
 pub const MAX_SKILL_CONTEXT_TOKENS: usize = 4000;
@@ -147,10 +147,109 @@ fn score_skill(skill: &LoadedSkill, message_lower: &str, message_original: &str)
     score
 }
 
+/// Extract explicit `/skill-name` mentions from a message.
+///
+/// Users can write `/github` or `/file-issues` anywhere in their message to
+/// force-activate a skill. Returns the matched skills and a rewritten message
+/// where each `/skill-name` is replaced with the skill's description (so the
+/// sentence still reads naturally for the LLM).
+///
+/// Example: `"fetch issues from /github"` with a skill named `github`
+/// (description "GitHub API") → rewritten to `"fetch issues from GitHub API"`,
+/// and the github skill is force-included.
+pub fn extract_skill_mentions<'a>(
+    message: &str,
+    available_skills: &'a [LoadedSkill],
+) -> (Vec<&'a LoadedSkill>, String) {
+    let mut matched = Vec::new();
+    let mut rewritten = message.to_string();
+
+    // Build a name→skill lookup (case-insensitive)
+    let skill_map: std::collections::HashMap<String, &'a LoadedSkill> = available_skills
+        .iter()
+        .map(|s| (s.manifest.name.to_lowercase(), s))
+        .collect();
+
+    // Find /word patterns that match skill names. Scan from end to avoid
+    // index shifts when replacing.
+    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+    let bytes = message.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'/' {
+            // Check that / is at start or preceded by whitespace/punctuation
+            let is_boundary = i == 0
+                || bytes[i - 1] == b' '
+                || bytes[i - 1] == b'\n'
+                || bytes[i - 1] == b'\t'
+                || bytes[i - 1] == b'"'
+                || bytes[i - 1] == b'(';
+
+            if is_boundary {
+                // Extract the name using the same character class accepted by
+                // skill validation: [a-zA-Z0-9._-]+
+                let start = i + 1;
+                let mut end = start;
+                while end < bytes.len()
+                    && (bytes[end].is_ascii_lowercase()
+                        || bytes[end].is_ascii_uppercase()
+                        || bytes[end].is_ascii_digit()
+                        || bytes[end] == b'-'
+                        || bytes[end] == b'_'
+                        || bytes[end] == b'.')
+                {
+                    end += 1;
+                }
+                if end > start {
+                    let name = &message[start..end];
+                    let lookup = name.to_lowercase();
+                    if let Some(skill) = skill_map.get(&lookup) {
+                        let replacement = if skill.manifest.description.is_empty() {
+                            // No description — just remove the slash
+                            name.replace('-', " ")
+                        } else {
+                            skill.manifest.description.clone()
+                        };
+                        replacements.push((i, end, replacement));
+                        if !matched
+                            .iter()
+                            .any(|s: &&LoadedSkill| s.manifest.name == skill.manifest.name)
+                        {
+                            matched.push(*skill);
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+
+    // Apply replacements in reverse order to preserve indices
+    for (start, end, replacement) in replacements.into_iter().rev() {
+        rewritten.replace_range(start..end, &replacement);
+    }
+
+    (matched, rewritten)
+}
+
+/// Apply confidence factor to a base score.
+///
+/// Authored skills always get factor 1.0 (no adjustment).
+/// Extracted skills get `0.5 + 0.5 * confidence`, so a skill with 0% confidence
+/// gets its score halved (not zeroed — it can still be selected when strongly
+/// keyword-matched).
+pub fn apply_confidence_factor(base_score: u32, confidence: f64, is_authored: bool) -> u32 {
+    if is_authored {
+        return base_score;
+    }
+    let factor = 0.5 + 0.5 * confidence.clamp(0.0, 1.0);
+    (base_score as f64 * factor) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::{ActivationCriteria, LoadedSkill, SkillManifest, SkillSource, SkillTrust};
+    use crate::types::{ActivationCriteria, LoadedSkill, SkillManifest, SkillSource, SkillTrust};
     use std::path::PathBuf;
 
     fn make_skill(name: &str, keywords: &[&str], tags: &[&str], patterns: &[&str]) -> LoadedSkill {
@@ -172,6 +271,7 @@ mod tests {
                     tags: tag_vec,
                     max_context_tokens: 1000,
                 },
+                credentials: vec![],
                 metadata: None,
             },
             prompt_content: "Test prompt".to_string(),
@@ -298,7 +398,6 @@ mod tests {
         skill2.manifest.activation.max_context_tokens = 3000;
 
         let skills = vec![skill, skill2];
-        // Budget of 4000 can only fit one 3000-token skill
         let result = prefilter_skills("test", &skills, 5, 4000);
         assert_eq!(result.len(), 1);
     }
@@ -394,12 +493,8 @@ mod tests {
         skill
     }
 
-    // --- exclude_keywords tests ---
-
     #[test]
     fn test_exclude_keyword_vetos_match() {
-        // Skill matches on "write" but exclude_keywords: ["route"] — message contains "route"
-        // so the skill should score 0 and be excluded.
         let skills = vec![make_skill_with_excludes(
             "writer",
             &["write"],
@@ -421,7 +516,6 @@ mod tests {
 
     #[test]
     fn test_exclude_keyword_absent_does_not_block() {
-        // Same skill, message does NOT contain the exclude keyword — should activate normally.
         let skills = vec![make_skill_with_excludes(
             "writer",
             &["write"],
@@ -444,8 +538,6 @@ mod tests {
 
     #[test]
     fn test_exclude_keyword_veto_wins_over_positive_match() {
-        // Both a keyword match AND an exclude_keyword match are present.
-        // The veto must win regardless of how high the positive score is.
         let skills = vec![make_skill_with_excludes(
             "writer",
             &["write", "draft", "compose"],
@@ -467,7 +559,6 @@ mod tests {
 
     #[test]
     fn test_exclude_keyword_case_insensitive() {
-        // exclude_keywords are pre-lowercased; the veto must fire regardless of case in the message.
         let skills = vec![make_skill_with_excludes(
             "writer",
             &["write"],
@@ -485,5 +576,138 @@ mod tests {
             result.is_empty(),
             "exclude_keyword veto should be case-insensitive"
         );
+    }
+
+    #[test]
+    fn test_apply_confidence_factor_authored() {
+        assert_eq!(apply_confidence_factor(100, 0.0, true), 100);
+        assert_eq!(apply_confidence_factor(100, 0.5, true), 100);
+        assert_eq!(apply_confidence_factor(100, 1.0, true), 100);
+    }
+
+    #[test]
+    fn test_apply_confidence_factor_extracted() {
+        // 0% confidence → factor 0.5 → score halved
+        assert_eq!(apply_confidence_factor(100, 0.0, false), 50);
+        // 50% confidence → factor 0.75 → score * 0.75
+        assert_eq!(apply_confidence_factor(100, 0.5, false), 75);
+        // 100% confidence → factor 1.0 → unchanged
+        assert_eq!(apply_confidence_factor(100, 1.0, false), 100);
+    }
+
+    #[test]
+    fn test_apply_confidence_factor_clamps() {
+        // Negative confidence clamped to 0
+        assert_eq!(apply_confidence_factor(100, -0.5, false), 50);
+        // Over 1.0 clamped to 1.0
+        assert_eq!(apply_confidence_factor(100, 1.5, false), 100);
+    }
+
+    // ── extract_skill_mentions tests ──────────────────────────
+
+    #[test]
+    fn test_extract_no_mentions() {
+        let skills = vec![make_skill("github", &["github"], &[], &[])];
+        let (matched, rewritten) = extract_skill_mentions("fetch issues from github", &skills);
+        assert!(matched.is_empty());
+        assert_eq!(rewritten, "fetch issues from github");
+    }
+
+    #[test]
+    fn test_extract_slash_mention() {
+        let skills = vec![make_skill("github", &["github"], &[], &[])];
+        let (matched, rewritten) = extract_skill_mentions("fetch issues from /github", &skills);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].manifest.name, "github");
+        assert_eq!(rewritten, "fetch issues from github skill");
+    }
+
+    #[test]
+    fn test_extract_slash_mention_with_description() {
+        let mut skill = make_skill("github", &["github"], &[], &[]);
+        skill.manifest.description = "GitHub API".to_string();
+        let skills = vec![skill];
+        let (matched, rewritten) = extract_skill_mentions("fetch issues from /github", &skills);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(rewritten, "fetch issues from GitHub API");
+    }
+
+    #[test]
+    fn test_extract_hyphenated_skill_name() {
+        let mut skill = make_skill("file-issues", &["file", "issues"], &[], &[]);
+        skill.manifest.description = "file detailed GitHub issues".to_string();
+        let skills = vec![skill];
+        let (matched, rewritten) =
+            extract_skill_mentions("please /file-issues for all found bugs", &skills);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(
+            rewritten,
+            "please file detailed GitHub issues for all found bugs"
+        );
+    }
+
+    #[test]
+    fn test_extract_underscored_skill_name() {
+        let mut skill = make_skill("my_skill", &["skill"], &[], &[]);
+        skill.manifest.description = "custom workflow".to_string();
+        let skills = vec![skill];
+        let (matched, rewritten) = extract_skill_mentions("run /my_skill on this task", &skills);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].manifest.name, "my_skill");
+        assert_eq!(rewritten, "run custom workflow on this task");
+    }
+
+    #[test]
+    fn test_extract_dotted_skill_name() {
+        let mut skill = make_skill("skill.v2", &["skill"], &[], &[]);
+        skill.manifest.description = "second generation skill".to_string();
+        let skills = vec![skill];
+        let (matched, rewritten) = extract_skill_mentions("please use /skill.v2 here", &skills);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].manifest.name, "skill.v2");
+        assert_eq!(rewritten, "please use second generation skill here");
+    }
+
+    #[test]
+    fn test_extract_multiple_mentions() {
+        let mut gh = make_skill("github", &["github"], &[], &[]);
+        gh.manifest.description = "GitHub API".to_string();
+        let mut linear = make_skill("linear", &["linear"], &[], &[]);
+        linear.manifest.description = "Linear project management".to_string();
+        let skills = vec![gh, linear];
+        let (matched, rewritten) =
+            extract_skill_mentions("sync /github issues to /linear", &skills);
+        assert_eq!(matched.len(), 2);
+        assert_eq!(
+            rewritten,
+            "sync GitHub API issues to Linear project management"
+        );
+    }
+
+    #[test]
+    fn test_extract_unknown_slash_not_replaced() {
+        let skills = vec![make_skill("github", &["github"], &[], &[])];
+        let (matched, rewritten) = extract_skill_mentions("run /unknown-thing now", &skills);
+        assert!(matched.is_empty());
+        assert_eq!(rewritten, "run /unknown-thing now");
+    }
+
+    #[test]
+    fn test_extract_slash_at_start_of_message() {
+        let mut skill = make_skill("github", &["github"], &[], &[]);
+        skill.manifest.description = "GitHub API".to_string();
+        let skills = vec![skill];
+        let (matched, rewritten) = extract_skill_mentions("/github list my repos", &skills);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(rewritten, "GitHub API list my repos");
+    }
+
+    #[test]
+    fn test_extract_url_not_matched() {
+        let skills = vec![make_skill("github", &["github"], &[], &[])];
+        let (matched, rewritten) = extract_skill_mentions("open https://github.com/repo", &skills);
+        // The /github.com won't match because '.' breaks the name pattern
+        assert!(matched.is_empty());
+        assert_eq!(rewritten, "open https://github.com/repo");
     }
 }

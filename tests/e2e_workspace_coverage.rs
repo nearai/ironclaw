@@ -8,11 +8,14 @@ mod support;
 
 #[cfg(feature = "libsql")]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
     use ironclaw::workspace::Workspace;
+
+    const TEST_USER_ID: &str = "test-user";
 
     // -----------------------------------------------------------------------
     // Test 1: write_chunk_search
@@ -38,7 +41,7 @@ mod tests {
         rig.verify_trace_expects(&trace, &responses);
 
         // Verify the document was persisted via workspace.
-        let ws = rig.workspace().expect("workspace must be available");
+        let ws = Workspace::new_with_db(TEST_USER_ID, Arc::clone(rig.database()));
         let doc = ws
             .read("context/architecture.md")
             .await
@@ -101,7 +104,7 @@ mod tests {
         rig.verify_trace_expects(&trace, &responses);
 
         // Verify all three documents were written.
-        let ws = rig.workspace().expect("workspace must be available");
+        let ws = Workspace::new_with_db(TEST_USER_ID, Arc::clone(rig.database()));
         let frontend = ws.read("context/frontend.md").await;
         let backend = ws.read("context/backend.md").await;
         let devops = ws.read("context/devops.md").await;
@@ -236,7 +239,7 @@ mod tests {
         rig.verify_trace_expects(&trace, &responses);
 
         // Verify the document has the updated content.
-        let ws = rig.workspace().expect("workspace must be available");
+        let ws = Workspace::new_with_db(TEST_USER_ID, Arc::clone(rig.database()));
         let doc = ws
             .read("context/lifecycle.md")
             .await
@@ -269,7 +272,6 @@ mod tests {
 
     #[tokio::test]
     async fn identity_in_system_prompt() {
-        const TEST_USER_ID: &str = "test-user";
         let trace = LlmTrace::from_file(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/llm_traces/workspace/identity_prompt.json"

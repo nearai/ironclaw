@@ -22,6 +22,7 @@ use crate::error::Error;
 use crate::llm::{ChatMessage, ToolCall};
 use crate::tools::redact_params;
 use ironclaw_common::truncate_preview;
+use ironclaw_safety::{PolicyAction, SafetyLayer, ValidationResult};
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
 
@@ -32,9 +33,9 @@ fn requires_preexisting_uuid_thread(channel: &str) -> bool {
 }
 
 fn validate_inbound_text_for_message(
-    safety: &crate::safety::SafetyLayer,
+    safety: &SafetyLayer,
     content: &str,
-) -> crate::safety::ValidationResult {
+) -> ValidationResult {
     safety.validate_input(content)
 }
 
@@ -60,7 +61,7 @@ impl Agent {
         let violations = self.safety().check_policy(effective_content);
         if violations
             .iter()
-            .any(|rule| rule.action == crate::safety::PolicyAction::Block)
+            .any(|rule| rule.action == PolicyAction::Block)
         {
             return Some(SubmissionResult::error("Input rejected by safety policy."));
         }
@@ -1972,7 +1973,7 @@ mod tests {
     use super::*;
     use crate::channels::{AttachmentKind, IncomingAttachment};
     use crate::config::SafetyConfig;
-    use crate::safety::SafetyLayer;
+    use ironclaw_safety::SafetyLayer;
 
     #[test]
     fn test_rebuild_chat_messages_user_assistant_only() {

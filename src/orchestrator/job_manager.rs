@@ -16,6 +16,11 @@ use crate::error::OrchestratorError;
 use crate::orchestrator::auth::{CredentialGrant, TokenStore};
 use crate::sandbox::connect_docker;
 
+/// Path to the master worker MCP config on the host.
+const WORKER_MCP_CONFIG_PATH: &str = "/opt/ironclaw/config/worker/mcp-servers.json";
+
+use ironclaw_common::MAX_WORKER_ITERATIONS;
+
 /// Which mode a sandbox container runs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobMode {
@@ -23,6 +28,8 @@ pub enum JobMode {
     Worker,
     /// Claude Code bridge that spawns the `claude` CLI directly.
     ClaudeCode,
+    /// ACP (Agent Client Protocol) bridge that spawns any ACP-compliant agent.
+    Acp,
 }
 
 impl JobMode {
@@ -30,6 +37,7 @@ impl JobMode {
         match self {
             Self::Worker => "worker",
             Self::ClaudeCode => "claude_code",
+            Self::Acp => "acp",
         }
     }
 }
@@ -38,6 +46,21 @@ impl std::fmt::Display for JobMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
     }
+}
+
+/// Parameters for creating a container job, bundled to avoid positional
+/// argument proliferation on `create_job` / `execute_sandbox`.
+#[derive(Debug, Clone, Default)]
+pub struct JobCreationParams {
+    /// Credential grants for the worker (served via `/credentials`).
+    pub credential_grants: Vec<CredentialGrant>,
+    /// Optional filter: which MCP servers to mount into the container.
+    /// `None` = full master config, `Some([])` = no MCP, `Some(["name"])` = filtered.
+    pub mcp_servers: Option<Vec<String>>,
+    /// Optional cap on worker agent loop iterations (clamped to 1..=500 server-side).
+    pub max_iterations: Option<u32>,
+    /// ACP agent definition to inject into ACP-mode containers.
+    pub acp_agent: Option<crate::config::acp::AcpAgentConfig>,
 }
 
 /// Configuration for the container job manager.
@@ -66,6 +89,13 @@ pub struct ContainerJobConfig {
     pub claude_code_memory_limit_mb: u64,
     /// Allowed tool patterns for Claude Code (passed as CLAUDE_CODE_ALLOWED_TOOLS env var).
     pub claude_code_allowed_tools: Vec<String>,
+    /// Memory limit for ACP containers.
+    pub acp_memory_limit_mb: u64,
+    /// Maximum runtime for ACP bridge sessions in seconds.
+    pub acp_timeout_secs: u64,
+    /// Whether per-job MCP server filtering is enabled.
+    /// When false, `mcp_servers` param on `create_job` is ignored.
+    pub mcp_per_job_enabled: bool,
 }
 
 impl Default for ContainerJobConfig {
@@ -81,6 +111,9 @@ impl Default for ContainerJobConfig {
             claude_code_max_turns: 50,
             claude_code_memory_limit_mb: 4096,
             claude_code_allowed_tools: crate::config::ClaudeCodeConfig::default().allowed_tools,
+            acp_memory_limit_mb: 4096,
+            acp_timeout_secs: 1800,
+            mcp_per_job_enabled: false,
         }
     }
 }
@@ -225,6 +258,28 @@ impl ContainerJobManager {
         }
     }
 
+    fn extend_acp_env(
+        &self,
+        env_vec: &mut Vec<String>,
+        acp_agent: Option<&crate::config::acp::AcpAgentConfig>,
+    ) {
+        env_vec.push(format!("ACP_TIMEOUT_SECS={}", self.config.acp_timeout_secs));
+
+        if let Some(agent) = acp_agent {
+            env_vec.push(format!("ACP_AGENT_COMMAND={}", agent.command));
+            if !agent.args.is_empty()
+                && let Ok(json) = serde_json::to_string(&agent.args)
+            {
+                env_vec.push(format!("ACP_AGENT_ARGS={}", json));
+            }
+            if !agent.env.is_empty()
+                && let Ok(json) = serde_json::to_string(&agent.env)
+            {
+                env_vec.push(format!("ACP_AGENT_ENV={}", json));
+            }
+        }
+    }
+
     /// Get or create a Docker connection.
     async fn docker(&self) -> Result<bollard::Docker, OrchestratorError> {
         {
@@ -254,12 +309,19 @@ impl ContainerJobManager {
         task: &str,
         project_dir: Option<PathBuf>,
         mode: JobMode,
-        credential_grants: Vec<CredentialGrant>,
+        params: JobCreationParams,
     ) -> Result<String, OrchestratorError> {
         // Generate auth token (stored in TokenStore, never logged)
         let token = self.token_store.create_token(job_id).await;
 
         // Store credential grants (revoked automatically when the token is revoked)
+        let JobCreationParams {
+            credential_grants,
+            mcp_servers,
+            max_iterations,
+            acp_agent,
+        } = params;
+
         self.token_store
             .store_grants(job_id, credential_grants)
             .await;
@@ -282,7 +344,15 @@ impl ContainerJobManager {
         // Run the actual container creation. On any failure, revoke the token
         // and remove the handle so we don't leak resources.
         match self
-            .create_job_inner(job_id, &token, project_dir, mode)
+            .create_job_inner(
+                job_id,
+                &token,
+                project_dir,
+                mode,
+                mcp_servers,
+                max_iterations,
+                acp_agent,
+            )
             .await
         {
             Ok(()) => Ok(token),
@@ -295,22 +365,24 @@ impl ContainerJobManager {
     }
 
     /// Inner implementation of container creation (separated for cleanup).
+    #[allow(clippy::too_many_arguments)]
     async fn create_job_inner(
         &self,
         job_id: Uuid,
         token: &str,
         project_dir: Option<PathBuf>,
         mode: JobMode,
+        mcp_servers: Option<Vec<String>>,
+        max_iterations: Option<u32>,
+        acp_agent: Option<crate::config::acp::AcpAgentConfig>,
     ) -> Result<(), OrchestratorError> {
         // Connect to Docker (reuses cached connection)
         let docker = self.docker().await?;
 
         // Build container configuration
-        let orchestrator_host = if cfg!(target_os = "linux") {
-            "172.17.0.1"
-        } else {
-            "host.docker.internal"
-        };
+        // Use host.docker.internal on all platforms — the extra_hosts mapping
+        // below resolves it to the actual host IP via Docker's host-gateway.
+        let orchestrator_host = "host.docker.internal";
 
         let orchestrator_url = format!(
             "http://{}:{}",
@@ -329,6 +401,42 @@ impl ContainerJobManager {
             let canonical = validate_bind_mount_path(dir, job_id)?;
             binds.push(format!("{}:/workspace:rw", canonical.display()));
             env_vec.push("IRONCLAW_WORKSPACE=/workspace".to_string());
+        }
+
+        // Inject max_iterations if specified (only for Worker mode — ClaudeCode uses max_turns).
+        // Server-side clamp ensures the cap is enforced even if the tool parsing
+        // layer is bypassed (e.g., direct API call via the web restart handler).
+        if let Some(iters) = max_iterations
+            && mode == JobMode::Worker
+        {
+            let capped = iters.clamp(1, MAX_WORKER_ITERATIONS);
+            env_vec.push(format!("IRONCLAW_MAX_ITERATIONS={}", capped));
+        }
+
+        // Mount per-job MCP config when the feature is enabled.
+        if self.config.mcp_per_job_enabled {
+            let mcp_config_host = std::path::Path::new(WORKER_MCP_CONFIG_PATH);
+            match generate_worker_mcp_config(mcp_config_host, mcp_servers.as_deref(), job_id)
+                .await?
+            {
+                Some(config_path) => {
+                    binds.push(format!(
+                        "{}:/home/sandbox/.ironclaw/mcp-servers.json:ro",
+                        config_path.display()
+                    ));
+                    tracing::debug!(
+                        job_id = %job_id,
+                        filtered = mcp_servers.is_some(),
+                        "Mounted MCP config into container"
+                    );
+                }
+                None => {
+                    tracing::debug!(
+                        job_id = %job_id,
+                        "No MCP config to mount (master missing or empty filter list)"
+                    );
+                }
+            }
         }
 
         // Claude Code mode: auth + tool allowlist.
@@ -351,9 +459,15 @@ impl ContainerJobManager {
             }
         }
 
-        // Memory limit: Claude Code gets more memory
+        // ACP mode: inject runtime timeout plus per-job agent command/args/env.
+        if mode == JobMode::Acp {
+            self.extend_acp_env(&mut env_vec, acp_agent.as_ref());
+        }
+
+        // Memory limit per mode
         let memory_mb = match mode {
             JobMode::ClaudeCode => self.config.claude_code_memory_limit_mb,
+            JobMode::Acp => self.config.acp_memory_limit_mb,
             JobMode::Worker => self.config.memory_limit_mb,
         };
 
@@ -398,6 +512,13 @@ impl ContainerJobManager {
                 "--model".to_string(),
                 self.config.claude_code_model.clone(),
             ],
+            JobMode::Acp => vec![
+                "acp-bridge".to_string(),
+                "--job-id".to_string(),
+                job_id.to_string(),
+                "--orchestrator-url".to_string(),
+                orchestrator_url,
+            ],
         };
 
         // Add Docker labels for reaper identification and orphan detection
@@ -422,6 +543,7 @@ impl ContainerJobManager {
         let container_name = match mode {
             JobMode::Worker => format!("ironclaw-worker-{}", job_id),
             JobMode::ClaudeCode => format!("ironclaw-claude-{}", job_id),
+            JobMode::Acp => format!("ironclaw-acp-{}", job_id),
         };
         let options = CreateContainerOptions {
             name: container_name,
@@ -579,6 +701,23 @@ impl ContainerJobManager {
 
     /// Remove a completed job handle from memory (called after result is read).
     pub async fn cleanup_job(&self, job_id: Uuid) {
+        // Clean up per-job MCP config temp file if one was written.
+        // Use remove_file directly — avoids TOCTOU race with exists() check.
+        let tmp_path = std::env::temp_dir()
+            .join("ironclaw-mcp-configs")
+            .join(format!("{}.json", job_id));
+        match std::fs::remove_file(&tmp_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // No temp file — normal
+            Err(e) => {
+                tracing::warn!(
+                    job_id = %job_id,
+                    error = %e,
+                    "Failed to remove per-job MCP config temp file"
+                );
+            }
+        }
+
         self.containers.write().await.remove(&job_id);
     }
 
@@ -608,6 +747,132 @@ impl ContainerJobManager {
     /// Get a reference to the token store.
     pub fn token_store(&self) -> &TokenStore {
         &self.token_store
+    }
+}
+
+/// Generate a per-job MCP config file, optionally filtering to specific servers.
+///
+/// - `None` → mount the full master config as-is
+/// - `Some([])` → no MCP config (no mount)
+/// - `Some(["serpstat"])` → filtered config with only matching servers
+///
+/// Temp files are written to `<temp_dir>/ironclaw-mcp-configs/` and cleaned up
+/// in `cleanup_job`.
+async fn generate_worker_mcp_config(
+    master_path: &std::path::Path,
+    server_names: Option<&[String]>,
+    job_id: Uuid,
+) -> Result<Option<std::path::PathBuf>, OrchestratorError> {
+    if !tokio::fs::try_exists(master_path).await.unwrap_or(false) {
+        return Ok(None);
+    }
+
+    match server_names {
+        // No filter → use master config as-is
+        None => Ok(Some(master_path.to_path_buf())),
+
+        // Empty list → no MCP
+        Some([]) => Ok(None),
+
+        // Filter to specific servers
+        Some(names) => {
+            // Validate server names: reject path separators, null bytes, and
+            // excessively long names to prevent misuse if names are ever used
+            // in file paths or shell commands.
+            for name in names {
+                if name.len() > 128
+                    || name.contains('/')
+                    || name.contains('\\')
+                    || name.contains('\0')
+                {
+                    return Err(OrchestratorError::ContainerCreationFailed {
+                        job_id,
+                        reason: format!("invalid MCP server name: {:?}", name),
+                    });
+                }
+            }
+
+            let content = tokio::fs::read_to_string(master_path).await.map_err(|e| {
+                OrchestratorError::ContainerCreationFailed {
+                    job_id,
+                    reason: format!("failed to read master MCP config: {e}"),
+                }
+            })?;
+
+            let master: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+                OrchestratorError::ContainerCreationFailed {
+                    job_id,
+                    reason: format!("failed to parse master MCP config: {e}"),
+                }
+            })?;
+
+            let servers = master["servers"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|s| {
+                    let name_matches = s["name"]
+                        .as_str()
+                        .map(|n| names.iter().any(|req| req.eq_ignore_ascii_case(n)))
+                        .unwrap_or(false);
+                    let is_enabled = s["enabled"].as_bool().unwrap_or(true);
+                    name_matches && is_enabled
+                })
+                .collect::<Vec<_>>();
+
+            if servers.is_empty() {
+                tracing::warn!(
+                    job_id = %job_id,
+                    requested = ?names,
+                    "No matching MCP servers found in master config; skipping MCP mount"
+                );
+                return Ok(None);
+            }
+
+            let schema_version = master
+                .get("schema_version")
+                .cloned()
+                .unwrap_or(serde_json::json!(1));
+            let filtered = serde_json::json!({
+                "servers": servers,
+                "schema_version": schema_version
+            });
+
+            let tmp_dir = std::env::temp_dir().join("ironclaw-mcp-configs");
+            tokio::fs::create_dir_all(&tmp_dir).await.map_err(|e| {
+                OrchestratorError::ContainerCreationFailed {
+                    job_id,
+                    reason: format!("failed to create MCP config temp dir: {e}"),
+                }
+            })?;
+
+            // Restrict directory permissions to owner-only (0o700) to prevent
+            // other users on the host from reading filtered MCP configs.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    tokio::fs::set_permissions(&tmp_dir, std::fs::Permissions::from_mode(0o700))
+                        .await;
+            }
+
+            let tmp_path = tmp_dir.join(format!("{}.json", job_id));
+            let config_json = serde_json::to_string_pretty(&filtered).map_err(|e| {
+                OrchestratorError::ContainerCreationFailed {
+                    job_id,
+                    reason: format!("failed to serialize filtered MCP config: {e}"),
+                }
+            })?;
+            tokio::fs::write(&tmp_path, config_json)
+                .await
+                .map_err(|e| OrchestratorError::ContainerCreationFailed {
+                    job_id,
+                    reason: format!("failed to write per-job MCP config: {e}"),
+                })?;
+
+            Ok(Some(tmp_path))
+        }
     }
 }
 
@@ -704,5 +969,361 @@ mod tests {
         let handle = mgr.get_handle(job_id).await.unwrap();
         assert_eq!(handle.worker_iteration, 3);
         assert_eq!(handle.last_worker_status.as_deref(), Some("Iteration 3"));
+    }
+
+    #[test]
+    fn test_job_mode_acp_as_str() {
+        assert_eq!(JobMode::Acp.as_str(), "acp");
+    }
+
+    #[test]
+    fn test_job_mode_acp_display() {
+        assert_eq!(format!("{}", JobMode::Acp), "acp");
+    }
+
+    #[test]
+    fn test_container_job_config_acp_memory_default() {
+        let config = ContainerJobConfig::default();
+        assert_eq!(config.acp_memory_limit_mb, 4096);
+    }
+
+    #[test]
+    fn test_container_job_config_acp_timeout_default() {
+        let config = ContainerJobConfig::default();
+        assert_eq!(config.acp_timeout_secs, 1800);
+    }
+
+    #[test]
+    fn test_extend_acp_env_includes_timeout_and_agent_details() {
+        let config = ContainerJobConfig {
+            acp_timeout_secs: 45,
+            ..Default::default()
+        };
+        let manager = ContainerJobManager::new(config, TokenStore::new());
+
+        let agent = crate::config::acp::AcpAgentConfig::new(
+            "codex",
+            "codex",
+            vec!["acp".into()],
+            HashMap::from([("FOO".to_string(), "bar".to_string())]),
+        );
+        let mut env_vec = Vec::new();
+        manager.extend_acp_env(&mut env_vec, Some(&agent));
+
+        assert!(env_vec.contains(&"ACP_TIMEOUT_SECS=45".to_string()));
+        assert!(env_vec.contains(&"ACP_AGENT_COMMAND=codex".to_string()));
+        assert!(
+            env_vec
+                .iter()
+                .any(|entry| entry.starts_with("ACP_AGENT_ARGS="))
+        );
+        assert!(
+            env_vec
+                .iter()
+                .any(|entry| entry.starts_with("ACP_AGENT_ENV="))
+        );
+    }
+    // ── generate_worker_mcp_config tests ────────────────────────────
+
+    #[tokio::test]
+    async fn test_mcp_config_none_filter_returns_master_path() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), r#"{"servers":[]}"#).unwrap();
+        let result = generate_worker_mcp_config(tmp.path(), None, Uuid::new_v4()).await;
+        assert_eq!(result.unwrap(), Some(tmp.path().to_path_buf()));
+    }
+
+    #[tokio::test]
+    async fn test_mcp_config_empty_filter_returns_none() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), r#"{"servers":[]}"#).unwrap();
+        let result = generate_worker_mcp_config(tmp.path(), Some(&[]), Uuid::new_v4()).await;
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_mcp_config_missing_master_returns_none() {
+        let result = generate_worker_mcp_config(
+            std::path::Path::new("/nonexistent/mcp.json"),
+            None,
+            Uuid::new_v4(),
+        )
+        .await;
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_mcp_config_filters_to_named_servers() {
+        let job_id = Uuid::new_v4();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            r#"{"schema_version":1,"servers":[
+                {"name":"serpstat","enabled":true,"url":"http://localhost:8062"},
+                {"name":"notion","enabled":true,"url":"http://localhost:8063"},
+                {"name":"disabled","enabled":false,"url":"http://localhost:9999"}
+            ]}"#,
+        )
+        .unwrap();
+
+        let names = vec!["serpstat".to_string(), "disabled".to_string()];
+        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id).await;
+        let out_path = result.unwrap().expect("should produce a filtered config");
+
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
+        let servers = content["servers"].as_array().unwrap();
+
+        // "disabled" should be excluded because enabled=false
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0]["name"], "serpstat");
+        assert_eq!(content["schema_version"], 1);
+
+        // cleanup
+        let _ = std::fs::remove_file(&out_path);
+    }
+
+    #[tokio::test]
+    async fn test_mcp_config_no_match_returns_none() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            r#"{"servers":[{"name":"serpstat","enabled":true}]}"#,
+        )
+        .unwrap();
+
+        let names = vec!["nonexistent".to_string()];
+        let result = generate_worker_mcp_config(tmp.path(), Some(&names), Uuid::new_v4()).await;
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_mcp_config_case_insensitive_match() {
+        let job_id = Uuid::new_v4();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            r#"{"servers":[{"name":"Serpstat","enabled":true}]}"#,
+        )
+        .unwrap();
+
+        let names = vec!["serpstat".to_string()];
+        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id).await;
+        let out_path = result.unwrap().expect("case-insensitive match should work");
+        let _ = std::fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn test_max_iterations_env_var_injected() {
+        // Verify the IRONCLAW_MAX_ITERATIONS env var name matches what the
+        // worker CLI reads via clap's `env` attribute.
+        let config = ContainerJobConfig::default();
+        let mgr = ContainerJobManager::new(config, TokenStore::new());
+        // We can't test actual container creation without Docker, but we can
+        // verify the env var name matches the clap definition.
+        // The clap definition uses: #[arg(long, env = "IRONCLAW_MAX_ITERATIONS")]
+        // The create_job_inner injects: format!("IRONCLAW_MAX_ITERATIONS={}", iters)
+        // This test ensures the constant isn't accidentally changed in either place.
+        let env_var_in_job = "IRONCLAW_MAX_ITERATIONS";
+        let source = include_str!("../cli/mod.rs");
+        assert!(
+            source.contains(&format!("env = \"{}\"", env_var_in_job)),
+            "cli/mod.rs must have env = \"IRONCLAW_MAX_ITERATIONS\" on the max_iterations arg"
+        );
+        drop(mgr);
+    }
+
+    #[test]
+    fn test_max_iterations_not_injected_for_claude_code() {
+        // ClaudeCode mode uses its own `max_turns`, not IRONCLAW_MAX_ITERATIONS.
+        // Verify the gate in create_job_inner only injects for Worker mode.
+        let source = include_str!("job_manager.rs");
+        assert!(
+            source.contains("mode == JobMode::Worker"),
+            "create_job_inner must gate IRONCLAW_MAX_ITERATIONS on JobMode::Worker \
+             (ClaudeCode has its own max_turns)"
+        );
+    }
+
+    #[test]
+    fn test_server_side_max_iterations_clamp() {
+        // Verify the server-side clamp uses the same constant as worker/job.rs
+        let source = include_str!("job_manager.rs");
+        assert!(
+            source.contains("iters.clamp(1, MAX_WORKER_ITERATIONS)"),
+            "create_job_inner must clamp max_iterations server-side using MAX_WORKER_ITERATIONS"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_server_name_validation_rejects_path_separators() {
+        let job_id = Uuid::new_v4();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            r#"{"servers":[{"name":"test","enabled":true}]}"#,
+        )
+        .unwrap();
+
+        // Path separator should be rejected
+        let names = vec!["../../etc/passwd".to_string()];
+        assert!(
+            generate_worker_mcp_config(tmp.path(), Some(&names), job_id)
+                .await
+                .is_err()
+        );
+
+        // Null byte should be rejected
+        let names = vec!["test\0evil".to_string()];
+        assert!(
+            generate_worker_mcp_config(tmp.path(), Some(&names), job_id)
+                .await
+                .is_err()
+        );
+
+        // Excessively long name should be rejected
+        let names = vec!["a".repeat(129)];
+        assert!(
+            generate_worker_mcp_config(tmp.path(), Some(&names), job_id)
+                .await
+                .is_err()
+        );
+
+        // Valid name should pass
+        let names = vec!["test".to_string()];
+        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id).await;
+        assert!(result.is_ok());
+    }
+
+    // ── Regression tests (CI-required) ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_filtered_config_contains_only_requested_server() {
+        let job_id = Uuid::new_v4();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            r#"{"schema_version":2,"servers":[
+                {"name":"serpstat","enabled":true,"url":"http://localhost:8062"},
+                {"name":"notion","enabled":true,"url":"http://localhost:8063"},
+                {"name":"archon","enabled":true,"url":"http://localhost:8064"}
+            ]}"#,
+        )
+        .unwrap();
+
+        let names = vec!["serpstat".to_string()];
+        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id).await;
+        let out_path = result.unwrap().expect("should produce a filtered config");
+
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
+        let servers = content["servers"].as_array().unwrap();
+
+        assert_eq!(servers.len(), 1, "only serpstat should be present");
+        assert_eq!(servers[0]["name"], "serpstat");
+        assert!(
+            !servers.iter().any(|s| s["name"] == "notion"),
+            "notion must not leak into filtered config"
+        );
+        assert!(
+            !servers.iter().any(|s| s["name"] == "archon"),
+            "archon must not leak into filtered config"
+        );
+        assert_eq!(
+            content["schema_version"], 2,
+            "schema_version must be preserved"
+        );
+
+        let _ = std::fs::remove_file(&out_path);
+    }
+
+    #[tokio::test]
+    async fn test_feature_flag_disabled_skips_mcp_filtering() {
+        // When MCP_PER_JOB_ENABLED is false (the default), the mcp_servers
+        // parameter should be ignored and no filtered config should be created.
+        let config = ContainerJobConfig::default();
+        assert!(
+            !config.mcp_per_job_enabled,
+            "mcp_per_job_enabled must default to false"
+        );
+
+        // Verify the gate in create_job_inner: the mcp_per_job_enabled field
+        // controls whether generate_worker_mcp_config is called at all.
+        let source = include_str!("job_manager.rs");
+        assert!(
+            source.contains("if self.config.mcp_per_job_enabled"),
+            "create_job_inner must gate MCP filtering on config.mcp_per_job_enabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_temp_file_cleanup_removes_per_job_config() {
+        let job_id = Uuid::new_v4();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            r#"{"servers":[{"name":"serpstat","enabled":true}]}"#,
+        )
+        .unwrap();
+
+        let names = vec!["serpstat".to_string()];
+        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id).await;
+        let out_path = result.unwrap().expect("should produce a filtered config");
+        assert!(
+            out_path.exists(),
+            "temp config file should exist after creation"
+        );
+
+        // Simulate what cleanup_job does
+        let expected_path = std::env::temp_dir()
+            .join("ironclaw-mcp-configs")
+            .join(format!("{}.json", job_id));
+        assert_eq!(
+            out_path, expected_path,
+            "temp path must match cleanup expectation"
+        );
+        std::fs::remove_file(&out_path).unwrap();
+        assert!(!out_path.exists(), "temp file should be gone after cleanup");
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_job_is_idempotent() {
+        let config = ContainerJobConfig::default();
+        let mgr = ContainerJobManager::new(config, TokenStore::new());
+        let job_id = Uuid::new_v4();
+
+        // cleanup_job should not panic or error when called for a job
+        // that has no temp file and no container handle.
+        mgr.cleanup_job(job_id).await;
+        // Second call should also be fine (idempotent).
+        mgr.cleanup_job(job_id).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_temp_dir_has_restrictive_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let job_id = Uuid::new_v4();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            r#"{"servers":[{"name":"test","enabled":true}]}"#,
+        )
+        .unwrap();
+
+        let names = vec!["test".to_string()];
+        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id).await;
+        let out_path = result.unwrap().expect("should produce a filtered config");
+
+        let dir_path = out_path.parent().unwrap();
+        let mode = std::fs::metadata(dir_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "ironclaw-mcp-configs dir must be 0700, got {:o}",
+            mode
+        );
+
+        let _ = std::fs::remove_file(&out_path);
     }
 }
