@@ -127,7 +127,7 @@ impl Tool for ToolInfoTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
         let name = require_str(&params, "name")?;
@@ -139,9 +139,12 @@ impl Tool for ToolInfoTool {
             )
         })?;
 
-        let tool = registry.get(name).await.ok_or_else(|| {
-            ToolError::InvalidParameters(format!("No tool named '{name}' is registered"))
-        })?;
+        let tool = registry
+            .get_for_user(name, &ctx.user_id, &ctx.workspace_read_scopes)
+            .await
+            .ok_or_else(|| {
+                ToolError::InvalidParameters(format!("No tool named '{name}' is registered"))
+            })?;
 
         let schema = tool.discovery_schema();
         let param_names = schema_param_names(&schema);

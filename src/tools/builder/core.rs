@@ -859,6 +859,7 @@ Create alongside the .wasm file to grant capabilities:
         params: &serde_json::Value,
         _project_dir: &Path,
     ) -> Result<ToolOutput, ToolError> {
+        // Builder operates outside multi-tenant context — no scope check needed.
         let tool =
             self.tools.get(tool_name).await.ok_or_else(|| {
                 ToolError::ExecutionFailed(format!("Tool not found: {}", tool_name))

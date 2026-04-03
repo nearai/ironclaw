@@ -131,6 +131,14 @@ pub struct JobContext {
     pub state: JobState,
     /// User ID that owns this job (for workspace scoping).
     pub user_id: String,
+    /// Additional user IDs whose tools this job may read/execute.
+    ///
+    /// Populated from `AuthenticatedUser::workspace_read_scopes` at dispatch time.
+    /// The execution gate in `execute_tool_with_safety` passes this to
+    /// `ToolRegistry::get_for_user` so that cross-lens tools are accessible
+    /// only to users whose token grants the corresponding scope.
+    #[serde(default)]
+    pub workspace_read_scopes: Vec<String>,
     /// Channel-specific requester/actor ID, when different from the owner scope.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requester_id: Option<String>,
@@ -224,6 +232,7 @@ impl JobContext {
             job_id: Uuid::new_v4(),
             state: JobState::Pending,
             user_id: user_id.into(),
+            workspace_read_scopes: Vec::new(),
             requester_id: None,
             conversation_id: None,
             title: title.into(),
@@ -254,6 +263,15 @@ impl JobContext {
     /// Set the user timezone on this context.
     pub fn with_timezone(mut self, tz: impl Into<String>) -> Self {
         self.user_timezone = tz.into();
+        self
+    }
+
+    /// Set additional workspace read scopes for this job.
+    ///
+    /// Passed to `ToolRegistry::get_for_user` so cross-lens tools owned by
+    /// other users are accessible when the caller's token grants the scope.
+    pub fn with_workspace_read_scopes(mut self, scopes: Vec<String>) -> Self {
+        self.workspace_read_scopes = scopes;
         self
     }
 

@@ -31,7 +31,7 @@ pub async fn execute_tool_with_safety(
         .into());
     }
     let tool = tools
-        .get(tool_name)
+        .get_for_user(tool_name, &job_ctx.user_id, &job_ctx.workspace_read_scopes)
         .await
         .ok_or_else(|| crate::error::ToolError::NotFound {
             name: tool_name.to_string(),
