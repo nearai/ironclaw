@@ -17,6 +17,9 @@ on:
         required: false
         type: string
         default: ""
+  # Daily staging build from the staging branch
+  schedule:
+    - cron: '0 6 * * *'
 
 env:
   IMAGE_NAME: nearaidev/ironclaw
@@ -33,6 +36,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'staging' || '' }}
 
       - name: Extract version from Cargo.toml
         id: version
@@ -54,6 +59,12 @@ jobs:
             TAGS="${TAGS},${{ env.IMAGE_NAME }}:${SHA}"
             WORKER_TAGS="${{ env.WORKER_IMAGE_NAME }}:${VERSION}"
             WORKER_TAGS="${WORKER_TAGS},${{ env.WORKER_IMAGE_NAME }}:latest"
+            WORKER_TAGS="${WORKER_TAGS},${{ env.WORKER_IMAGE_NAME }}:${SHA}"
+          elif [[ "${{ github.event_name }}" == "schedule" ]]; then
+            # Daily staging: :staging + :sha-xxx
+            TAGS="${{ env.IMAGE_NAME }}:staging"
+            TAGS="${TAGS},${{ env.IMAGE_NAME }}:${SHA}"
+            WORKER_TAGS="${{ env.WORKER_IMAGE_NAME }}:staging"
             WORKER_TAGS="${WORKER_TAGS},${{ env.WORKER_IMAGE_NAME }}:${SHA}"
           else
             # Manual dispatch: :sha-xxx only
