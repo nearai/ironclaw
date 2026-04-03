@@ -17,15 +17,15 @@ use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::{LlmProvider, RecordingLlm, SessionManager};
-use crate::safety::SafetyLayer;
 use crate::secrets::SecretsStore;
-use crate::skills::SkillRegistry;
-use crate::skills::catalog::SkillCatalog;
 use crate::tools::ToolRegistry;
 use crate::tools::mcp::{McpProcessManager, McpSessionManager};
 use crate::tools::wasm::SharedCredentialRegistry;
 use crate::tools::wasm::WasmToolRuntime;
 use crate::workspace::{EmbeddingCacheConfig, EmbeddingProvider, Workspace};
+use ironclaw_safety::SafetyLayer;
+use ironclaw_skills::SkillRegistry;
+use ironclaw_skills::catalog::SkillCatalog;
 
 /// Fully initialized application components, ready for channel wiring
 /// and agent construction.
@@ -299,6 +299,7 @@ impl AppBuilder {
             Option<Arc<dyn EmbeddingProvider>>,
             Option<Arc<Workspace>>,
             Option<Arc<dyn crate::tools::SoftwareBuilder>>,
+            Arc<SharedCredentialRegistry>,
         ),
         anyhow::Error,
     > {
@@ -353,28 +354,23 @@ impl AppBuilder {
             ws = ws.with_memory_layers(self.config.workspace.memory_layers.clone());
             let ws = Arc::new(ws);
 
-            // Detect multi-tenant mode: when the database has registered users,
-            // each authenticated user needs their own workspace scope. Use
-            // WorkspacePool (which implements WorkspaceResolver) to create
-            // per-user workspaces on demand instead of sharing the startup
-            // workspace across all users.
+            // Memory tools must resolve by `ctx.user_id`, not a fixed startup
+            // workspace. Even outside authenticated multi-tenant mode, some
+            // channels and test harnesses route non-owner users through
+            // per-user tenant workspaces seeded on demand.
             let is_multi_tenant = db.has_any_users().await.unwrap_or(false);
-
-            if is_multi_tenant {
-                let pool = Arc::new(crate::channels::web::server::WorkspacePool::new(
-                    Arc::clone(db),
-                    embeddings.clone(),
-                    emb_cache_config,
-                    self.config.search.clone(),
-                    self.config.workspace.clone(),
-                ));
-                tools.register_memory_tools_with_resolver(pool);
-                tracing::info!(
-                    "Memory tools configured with per-user workspace resolver (multi-tenant mode)"
-                );
-            } else {
-                tools.register_memory_tools(Arc::clone(&ws));
-            }
+            let pool = Arc::new(crate::channels::web::server::WorkspacePool::new(
+                Arc::clone(db),
+                embeddings.clone(),
+                emb_cache_config,
+                self.config.search.clone(),
+                self.config.workspace.clone(),
+            ));
+            tools.register_memory_tools_with_resolver(pool);
+            tracing::info!(
+                multi_tenant = is_multi_tenant,
+                "Memory tools configured with per-user workspace resolver"
+            );
 
             Some(ws)
         } else {
@@ -437,7 +433,14 @@ impl AppBuilder {
             None
         };
 
-        Ok((safety, tools, embeddings, workspace, builder))
+        Ok((
+            safety,
+            tools,
+            embeddings,
+            workspace,
+            builder,
+            credential_registry,
+        ))
     }
 
     /// Phase 5: Load WASM tools, MCP servers, and create extension manager.
@@ -775,6 +778,31 @@ impl AppBuilder {
             Some(manager)
         };
 
+        // Validate ACP agent configs at startup (lightweight — no connections, just config check).
+        {
+            let acp_agents = if let Some(ref d) = self.db {
+                crate::config::acp::load_acp_agents_from_db(d.as_ref(), &self.config.owner_id).await
+            } else {
+                crate::config::acp::load_acp_agents().await
+            };
+            match acp_agents {
+                Ok(file) => {
+                    let enabled: Vec<_> = file.enabled_agents().collect();
+                    if !enabled.is_empty() {
+                        let names: Vec<&str> = enabled.iter().map(|a| a.name.as_str()).collect();
+                        tracing::info!(
+                            "ACP agents configured: {} ({} enabled)",
+                            names.join(", "),
+                            enabled.len()
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("No ACP agents configured ({})", e);
+                }
+            }
+        }
+
         // register_builder_tool() already calls register_dev_tools() internally,
         // so only register them here when the builder didn't already do it.
         let builder_registered_dev_tools = self.config.builder.enabled
@@ -818,7 +846,8 @@ impl AppBuilder {
         } else {
             self.init_llm().await?
         };
-        let (safety, tools, embeddings, workspace, builder) = self.init_tools(&llm).await?;
+        let (safety, tools, embeddings, workspace, builder, credential_registry) =
+            self.init_tools(&llm).await?;
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
@@ -899,13 +928,19 @@ impl AppBuilder {
         let (skill_registry, skill_catalog) = if self.config.skills.enabled {
             let mut registry = SkillRegistry::new(self.config.skills.local_dir.clone())
                 .with_installed_dir(self.config.skills.installed_dir.clone())
+                .with_bundled_content(crate::skills::bundled::load_bundled_skills())
                 .with_max_scan_depth(self.config.skills.max_scan_depth);
             let loaded = registry.discover_all().await;
             if !loaded.is_empty() {
                 tracing::debug!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));
             }
+
+            // Register credential mappings from skill frontmatter into the
+            // shared registry so the HTTP tool can auto-inject credentials.
+            crate::skills::register_skill_credentials(registry.skills(), &credential_registry);
+
             let registry = Arc::new(std::sync::RwLock::new(registry));
-            let catalog = crate::skills::catalog::shared_catalog();
+            let catalog = ironclaw_skills::catalog::shared_catalog();
             tools.register_skill_tools(Arc::clone(&registry), Arc::clone(&catalog));
             (Some(registry), Some(catalog))
         } else {

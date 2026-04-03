@@ -353,6 +353,8 @@ pub enum StatusUpdate {
         output_tokens: u64,
         cost_usd: String,
     },
+    /// Skills activated for this conversation turn.
+    SkillActivated { skill_names: Vec<String> },
 }
 
 /// Shared chat-style approval prompt formatting used by non-web channels.

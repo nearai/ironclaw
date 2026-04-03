@@ -21,6 +21,12 @@ CANNED_RESPONSES = [
     (re.compile(r"html.?test|injection.?test", re.IGNORECASE),
      'Here is some content: <script>alert("xss")</script> and <img src=x onerror="alert(1)">'
      ' and <iframe src="javascript:alert(2)"></iframe> end of content.'),
+    # For tool intent nudge test: first response expresses intent without tool call
+    (re.compile(r"search intent", re.IGNORECASE),
+     "Let me search for that information now."),
+    # After nudge message, summarize the tool result
+    (re.compile(r"You expressed intent", re.IGNORECASE),
+     "I found the information you requested."),
 ]
 DEFAULT_RESPONSE = "I understand your request."
 
@@ -164,7 +170,82 @@ TOOL_CALL_PATTERNS = [
         "routine_list",
         lambda _: {},
     ),
+    (
+        re.compile(r"list.*issues.*(?:nearai|ironclaw)|github.*issues", re.IGNORECASE),
+        "http",
+        lambda _: {
+            "method": "GET",
+            "url": f"{_github_api_url}/repos/nearai/ironclaw/issues?per_page=5",
+        },
+    ),
+    # For max iterations test: always returns a tool call, never FINAL
+    (
+        re.compile(r"loop forever", re.IGNORECASE),
+        "echo",
+        lambda _: {"message": "iteration continues"},
+    ),
+    # For google drive API test
+    (
+        re.compile(r"list.*(?:google|drive).*files|show.*drive", re.IGNORECASE),
+        "http",
+        lambda _: {
+            "method": "GET",
+            "url": f"{_github_api_url}/drive/v3/files",
+        },
+    ),
+    # Plan mode: create a plan → calls plan_update tool with draft checklist
+    (
+        re.compile(r"\[PLAN MODE\].*create.*plan", re.IGNORECASE),
+        "plan_update",
+        lambda _: {
+            "plan_id": "test-plan-001",
+            "title": "Test Execution Plan",
+            "status": "draft",
+            "steps": [
+                {"title": "Analyze requirements", "status": "pending"},
+                {"title": "Implement changes", "status": "pending"},
+                {"title": "Run verification", "status": "pending"},
+            ],
+        },
+    ),
+    # Plan mode: approve → calls plan_update with executing status
+    (
+        re.compile(r"\[PLAN MODE\].*approve", re.IGNORECASE),
+        "plan_update",
+        lambda _: {
+            "plan_id": "test-plan-001",
+            "title": "Test Execution Plan",
+            "status": "executing",
+            "steps": [
+                {"title": "Analyze requirements", "status": "in_progress"},
+                {"title": "Implement changes", "status": "pending"},
+                {"title": "Run verification", "status": "pending"},
+            ],
+            "mission_id": "00000000-0000-0000-0000-000000000001",
+        },
+    ),
+    # Plan mode: status → calls plan_update to refresh UI
+    (
+        re.compile(r"\[PLAN MODE\].*(?:status|show status)", re.IGNORECASE),
+        "plan_update",
+        lambda _: {
+            "plan_id": "test-plan-001",
+            "title": "Test Execution Plan",
+            "status": "executing",
+            "steps": [
+                {"title": "Analyze requirements", "status": "completed", "result": "No issues found"},
+                {"title": "Implement changes", "status": "in_progress"},
+                {"title": "Run verification", "status": "pending"},
+            ],
+            "mission_id": "00000000-0000-0000-0000-000000000001",
+        },
+    ),
 ]
+
+
+# Runtime-configurable mock API URL for github tool call tests.
+# Set via POST /__mock/set_github_api_url with {"url": "http://..."}
+_github_api_url: str = "https://api.github.com"
 
 
 def _new_oauth_state() -> dict:
@@ -834,6 +915,18 @@ def main():
     app.router.add_post("/oauth/refresh", oauth_refresh)
     app.router.add_get("/__mock/oauth/state", oauth_state_handler)
     app.router.add_post("/__mock/oauth/reset", oauth_reset)
+
+    async def set_github_api_url(request: web.Request) -> web.Response:
+        global _github_api_url
+        body = await request.json()
+        _github_api_url = body["url"]
+        return web.json_response({"ok": True, "url": _github_api_url})
+
+    async def get_github_api_url(request: web.Request) -> web.Response:
+        return web.json_response({"url": _github_api_url})
+
+    app.router.add_post("/__mock/set_github_api_url", set_github_api_url)
+    app.router.add_get("/__mock/github_api_url", get_github_api_url)
     # Mock MCP server endpoints
     app.router.add_post("/mcp", mcp_endpoint)
     app.router.add_post("/mcp-400", mcp_endpoint_400)

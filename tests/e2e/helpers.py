@@ -112,6 +112,15 @@ SEL = {
     "routines_tbody":           "#routines-tbody",
     "routine_row":              "#routines-tbody .routine-row",
     "routines_empty":           "#routines-empty",
+    # Plan mode
+    "plan_container":           ".plan-container",
+    "plan_steps":               ".plan-step",
+    "plan_step_completed":      '.plan-step[data-status="completed"]',
+    "plan_step_pending":        '.plan-step[data-status="pending"]',
+    "plan_step_running":        '.plan-step[data-status="in_progress"]',
+    "plan_status_badge":        ".plan-status-badge",
+    "plan_title":               ".plan-title",
+    "plan_summary":             ".plan-summary",
 }
 
 TABS = ["chat", "memory", "jobs", "routines", "settings"]

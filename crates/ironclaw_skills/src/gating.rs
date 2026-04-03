@@ -3,7 +3,7 @@
 //! Checks that a skill's declared requirements (binaries, environment variables,
 //! config files) are satisfied before the skill is loaded.
 
-use crate::skills::GatingRequirements;
+use crate::types::GatingRequirements;
 
 /// Result of a gating check.
 #[derive(Debug)]
@@ -75,7 +75,7 @@ pub fn check_requirements_sync(requirements: &GatingRequirements) -> GatingResul
 }
 
 /// Check if a binary exists on PATH using `std::process::Command`.
-pub(crate) fn binary_exists(name: &str) -> bool {
+pub fn binary_exists(name: &str) -> bool {
     #[cfg(unix)]
     {
         std::process::Command::new("which")
@@ -133,7 +133,6 @@ mod tests {
 
     #[test]
     fn test_present_env_var_passes() {
-        // PATH is always set on both Unix and Windows
         let req = GatingRequirements {
             env: vec!["PATH".to_string()],
             ..Default::default()

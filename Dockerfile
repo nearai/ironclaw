@@ -3,8 +3,9 @@
 # Uses cargo-chef for dependency caching — only rebuilds deps when
 # Cargo.toml/Cargo.lock change, not on every source edit.
 #
-# Alpine-based build + runtime for a minimal image size.
-# Statically links against musl; no glibc or libssl needed at runtime.
+# Debian-based build + runtime. The bundled libSQL/SQLite C code has
+# threading issues when statically linked against musl (segfault on
+# database reopen), so we use glibc.
 #
 # Build:
 #   docker build --platform linux/amd64 -t ironclaw:latest .
@@ -13,10 +14,9 @@
 #   docker run --env-file .env -p 3000:3000 ironclaw:latest
 
 # Stage 1: Install cargo-chef
-FROM rust:1.92-alpine AS chef
+FROM rust:1.92-bookworm AS chef
 
-RUN apk add --no-cache musl-dev pkgconfig cmake gcc g++ make perl \
-    && rustup target add wasm32-wasip2 \
+RUN rustup target add wasm32-wasip2 \
     && cargo install cargo-chef@0.1.77 wasm-tools@1.246.1
 
 WORKDIR /app
@@ -67,15 +67,17 @@ COPY providers.json providers.json
 RUN cargo build --profile dist --bin ironclaw
 
 # Stage 5: Minimal runtime
-FROM alpine:3.21
+FROM debian:bookworm-slim
 
-RUN apk add --no-cache ca-certificates
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw
 COPY --from=builder /app/migrations /app/migrations
 
 # Non-root user
-RUN adduser -D -u 1000 ironclaw
+RUN adduser --disabled-password --uid 1000 ironclaw
 USER ironclaw
 
 EXPOSE 3000

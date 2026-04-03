@@ -74,6 +74,36 @@ def _latest_mtime(path: Path) -> float:
     return latest
 
 
+def _cargo_target_dir() -> Path:
+    """Resolve the actual cargo target directory.
+
+    Checks (in order):
+    1. CARGO_TARGET_DIR env var
+    2. build.target-dir in ~/.cargo/config.toml
+    3. Falls back to {ROOT}/target
+    """
+    env_target = os.environ.get("CARGO_TARGET_DIR")
+    if env_target:
+        return Path(env_target)
+
+    # Check ~/.cargo/config.toml for build.target-dir
+    cargo_config = Path.home() / ".cargo" / "config.toml"
+    if cargo_config.exists():
+        try:
+            for line in cargo_config.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("target-dir"):
+                    # Parse: target-dir = "/path/to/dir"
+                    _, _, value = line.partition("=")
+                    value = value.strip().strip('"').strip("'")
+                    if value:
+                        return Path(value)
+        except Exception:
+            pass
+
+    return ROOT / "target"
+
+
 def _binary_needs_rebuild(binary: Path) -> bool:
     """Rebuild when the binary is missing or older than embedded sources."""
     if not binary.exists():
@@ -87,6 +117,7 @@ def _binary_needs_rebuild(binary: Path) -> bool:
         ROOT / "providers.json",
         ROOT / "src",
         ROOT / "channels-src",
+        ROOT / "crates",
     ]
     return any(_latest_mtime(path) > binary_mtime for path in inputs)
 
@@ -149,7 +180,8 @@ def _forward_coverage_env(env: dict[str, str]) -> None:
 @pytest.fixture(scope="session")
 def ironclaw_binary():
     """Ensure ironclaw binary is built. Returns the binary path."""
-    binary = ROOT / "target" / "debug" / "ironclaw"
+    target_dir = _cargo_target_dir()
+    binary = target_dir / "debug" / "ironclaw"
     if _binary_needs_rebuild(binary):
         print("Building ironclaw (this may take a while)...")
         subprocess.run(
@@ -158,7 +190,10 @@ def ironclaw_binary():
             check=True,
             timeout=600,
         )
-    assert binary.exists(), f"Binary not found at {binary}"
+    assert binary.exists(), (
+        f"Binary not found at {binary}. "
+        f"Cargo target dir resolved to: {target_dir}"
+    )
     return str(binary)
 
 

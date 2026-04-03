@@ -29,13 +29,13 @@ mod tests {
     use ironclaw::extensions::ExtensionManager;
     use ironclaw::hooks::HookRegistry;
     use ironclaw::llm::LlmProvider;
-    use ironclaw::safety::SafetyLayer;
     use ironclaw::secrets::{InMemorySecretsStore, SecretsCrypto, SecretsStore};
     use ironclaw::tools::builtin::routine::RoutineUpdateTool;
     use ironclaw::tools::mcp::{McpProcessManager, McpSessionManager};
     use ironclaw::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRegistry};
     use ironclaw::workspace::Workspace;
     use ironclaw::workspace::hygiene::HygieneConfig;
+    use ironclaw_safety::SafetyLayer;
 
     use crate::support::trace_llm::{LlmTrace, TraceLlm, TraceResponse, TraceStep, TraceToolCall};
 
@@ -989,8 +989,7 @@ mod tests {
 
         let hygiene_config = HygieneConfig {
             enabled: false,
-            daily_retention_days: 30,
-            conversation_retention_days: 7,
+            version_keep_count: 50,
             cadence_hours: 24,
             state_dir: _tmp.path().to_path_buf(),
         };
@@ -1036,8 +1035,7 @@ mod tests {
 
         let hygiene_config = HygieneConfig {
             enabled: false,
-            daily_retention_days: 30,
-            conversation_retention_days: 7,
+            version_keep_count: 50,
             cadence_hours: 24,
             state_dir: _tmp.path().to_path_buf(),
         };

@@ -35,9 +35,18 @@
         <h1 data-i18n="auth.title">IronClaw</h1>
         <p class="auth-tagline" data-i18n="auth.tagline">Secure AI Assistant</p>
       </div>
-      <div class="auth-form">
+      <div id="auth-social" style="display:none">
+        <div class="auth-social-buttons">
+          <button id="auth-google-btn" class="auth-social-btn" style="display:none" data-i18n="auth.social.google">Sign in with Google</button>
+          <button id="auth-github-btn" class="auth-social-btn" style="display:none" data-i18n="auth.social.github">Sign in with GitHub</button>
+          <button id="auth-apple-btn" class="auth-social-btn" style="display:none" data-i18n="auth.social.apple">Sign in with Apple</button>
+          <button id="auth-near-btn" class="auth-social-btn" style="display:none" data-i18n="auth.social.near">Sign in with NEAR</button>
+        </div>
+        <div class="auth-divider" id="auth-token-divider" style="display:none"><span data-i18n="auth.social.tokenDivider">or use a token</span></div>
+      </div>
+      <div class="auth-form" id="auth-token-form" style="display:none">
         <label for="token-input" data-i18n="auth.tokenLabel">Gateway Token</label>
-        <input type="password" id="token-input" data-i18n="auth.tokenPlaceholder" data-i18n-attr="placeholder" placeholder="Paste your auth token" autofocus>
+        <input type="password" id="token-input" data-i18n="auth.tokenPlaceholder" data-i18n-attr="placeholder" placeholder="Paste your auth token">
         <button id="auth-connect-btn" data-i18n="auth.connect">Connect</button>
       </div>
       <div id="auth-error"></div>
@@ -147,6 +156,7 @@
       <button class="active" data-tab="chat" data-i18n="tab.chat">Chat</button>
       <button data-tab="memory" data-i18n="tab.memory">Memory</button>
       <button data-tab="jobs" data-i18n="tab.jobs">Jobs</button>
+      <button data-tab="missions" data-i18n="tab.missions">Missions</button>
       <button data-tab="routines" data-i18n="tab.routines">Routines</button>
       <button data-tab="settings" data-i18n="tab.settings">Settings</button>
       <div class="spacer"></div>
@@ -181,10 +191,23 @@
         <span id="tee-shield-label" data-i18n="status.teeVerified">TEE Verified</span>
         <div class="tee-popover" id="tee-popover"></div>
       </div>
-      <div class="status" id="gateway-status-trigger">
-        <div class="dot" id="sse-dot"></div>
-        <span id="sse-status" data-i18n="status.connected">Connected</span>
-        <div class="gateway-popover" id="gateway-popover"></div>
+      <div class="user-account" id="user-account">
+        <button class="user-avatar-btn" id="user-avatar-btn" title="Account" aria-label="Account menu" data-i18n="auth.accountMenu" data-i18n-attr="aria-label">
+          <span id="user-avatar-initials" class="user-avatar-initials">?</span>
+          <img id="user-avatar-img" class="user-avatar-img" alt="" referrerpolicy="no-referrer" hidden>
+          <div class="user-avatar-dot" id="sse-dot"></div>
+        </button>
+        <div class="user-dropdown" id="user-dropdown" style="display:none">
+          <div class="user-dropdown-header">
+            <div class="user-dropdown-name" id="user-dropdown-name"></div>
+            <div class="user-dropdown-email" id="user-dropdown-email"></div>
+            <div class="user-dropdown-role" id="user-dropdown-role"></div>
+          </div>
+          <div class="user-dropdown-divider"></div>
+          <div class="user-dropdown-gateway" id="gateway-popover"></div>
+          <div class="user-dropdown-divider"></div>
+          <button class="user-dropdown-item user-dropdown-logout" id="user-logout-btn" data-i18n="auth.signOut">Sign out</button>
+        </div>
       </div>
       <button class="restart-btn" id="restart-btn" data-i18n="status.restartTooltip"
         data-i18n-attr="title" title="Gracefully restart the process" style="display: none;">
@@ -308,6 +331,30 @@
     </div>
 
     <!-- Routines Tab -->
+    <!-- Missions Tab -->
+    <div class="tab-panel" id="tab-missions">
+      <div class="missions-container">
+        <div class="missions-summary" id="missions-summary"></div>
+        <table class="missions-table" id="missions-table">
+          <thead>
+            <tr>
+              <th data-i18n="missions.name">Name</th>
+              <th data-i18n="missions.goal">Goal</th>
+              <th data-i18n="missions.cadence">Cadence</th>
+              <th data-i18n="missions.threads">Threads</th>
+              <th data-i18n="missions.status">Status</th>
+              <th data-i18n="missions.actions">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="missions-tbody"></tbody>
+        </table>
+        <div class="empty-state" id="missions-empty" style="display:none">
+          <span data-i18n="missions.noConfigured">No missions found. Ask the assistant to create one.</span>
+        </div>
+        <div class="mission-detail" id="mission-detail" style="display:none"></div>
+      </div>
+    </div>
+
     <div class="tab-panel" id="tab-routines">
       <div class="routines-container">
         <div class="routines-summary" id="routines-summary"></div>
