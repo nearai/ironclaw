@@ -148,6 +148,16 @@ impl PairingStore {
         db.list_pending_pairings(&channel).await
     }
 
+    /// Read paired external IDs for compatibility with legacy allow-list-based
+    /// channel admission while WASM channels migrate to `resolve_identity`.
+    pub async fn read_allow_from(&self, channel: &str) -> Result<Vec<String>, DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let Some(ref db) = self.db else {
+            return Ok(Vec::new());
+        };
+        db.read_allow_from(&channel).await
+    }
+
     /// Remove a channel identity (unlink). Evicts from cache.
     pub async fn remove(&self, channel: &str, external_id: &str) -> Result<(), DatabaseError> {
         let channel = crate::pairing::normalize_channel_name(channel);

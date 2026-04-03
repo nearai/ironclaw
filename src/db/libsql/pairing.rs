@@ -52,6 +52,37 @@ impl ChannelPairingStore for LibSqlBackend {
         }
     }
 
+    async fn read_allow_from(&self, channel: &str) -> Result<Vec<String>, DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT ci.external_id
+                 FROM channel_identities ci
+                 JOIN users u ON u.id = ci.owner_id
+                 WHERE ci.channel = ?1
+                   AND u.status = 'active'
+                 ORDER BY ci.external_id ASC",
+                params![channel],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut result = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            result.push(
+                row.get(0)
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?,
+            );
+        }
+
+        Ok(result)
+    }
+
     async fn upsert_pairing_request(
         &self,
         channel: &str,
@@ -624,5 +655,46 @@ mod tests {
         let row = rows.next().await.unwrap().expect("channel identity row");
         let stored_channel: String = row.get(0).unwrap();
         assert_eq!(stored_channel, "telegram");
+    }
+
+    #[tokio::test]
+    async fn test_read_allow_from_returns_only_active_paired_external_ids() {
+        let (db, _dir) = setup_db().await;
+
+        for (id, status) in [("active-owner", "active"), ("inactive-owner", "suspended")] {
+            db.get_or_create_user(UserRecord {
+                id: id.to_string(),
+                role: "member".to_string(),
+                display_name: id.to_string(),
+                status: status.to_string(),
+                email: None,
+                last_login_at: None,
+                created_by: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .unwrap();
+        }
+
+        let active_req = db
+            .upsert_pairing_request("telegram", "active-user", None)
+            .await
+            .unwrap();
+        let inactive_req = db
+            .upsert_pairing_request("telegram", "inactive-user", None)
+            .await
+            .unwrap();
+
+        db.approve_pairing("telegram", &active_req.code, "active-owner")
+            .await
+            .unwrap();
+        db.approve_pairing("telegram", &inactive_req.code, "inactive-owner")
+            .await
+            .unwrap();
+
+        let allowed = db.read_allow_from("TeLeGrAm").await.unwrap();
+        assert_eq!(allowed, vec!["active-user".to_string()]);
     }
 }

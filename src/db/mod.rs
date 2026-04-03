@@ -1067,6 +1067,10 @@ pub trait ChannelPairingStore: Send + Sync {
         external_id: &str,
     ) -> Result<Option<crate::ownership::Identity>, DatabaseError>;
 
+    /// Read paired external IDs for a channel, for compatibility with legacy
+    /// allow-list-based WASM channel admission.
+    async fn read_allow_from(&self, channel: &str) -> Result<Vec<String>, DatabaseError>;
+
     /// Create or refresh a pending pairing request for `(channel, external_id)`.
     /// Returns existing non-expired pending request if one exists; creates new one otherwise.
     async fn upsert_pairing_request(

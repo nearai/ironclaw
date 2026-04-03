@@ -217,8 +217,8 @@ interface channel-host {
         external-id: string,
     ) -> result<option<string>, string>;
 
-    /// Read the allowFrom list (for merging with config allowFrom).
-    /// Deprecated: returns empty list; use pairing-resolve-identity instead.
+    /// Read paired external IDs for compatibility with legacy allowFrom-based
+    /// admission checks. New channels should prefer pairing-resolve-identity.
     pairing-read-allow-from: func(channel: string) -> result<list<string>, string>;
 }
 

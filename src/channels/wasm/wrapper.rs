@@ -672,10 +672,18 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         }
     }
 
-    fn pairing_read_allow_from(&mut self, _channel: String) -> Result<Vec<String>, String> {
-        // Deprecated: allowFrom list is now managed by the DB-backed identity store.
-        // WASM modules should use pairing-resolve-identity instead.
-        Ok(Vec::new())
+    fn pairing_read_allow_from(&mut self, channel: String) -> Result<Vec<String>, String> {
+        let store = self.pairing_store.clone();
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| "pairing host callback requires a Tokio runtime".to_string())?;
+        if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+            return Err("pairing host callback requires a multi-thread Tokio runtime".to_string());
+        }
+        let result: Result<Vec<String>, crate::error::DatabaseError> =
+            tokio::task::block_in_place(move || {
+                handle.block_on(async move { store.read_allow_from(&channel).await })
+            });
+        result.map_err(|e| e.to_string())
     }
 }
 

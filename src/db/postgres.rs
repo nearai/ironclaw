@@ -1116,6 +1116,29 @@ impl ChannelPairingStore for PgBackend {
         }))
     }
 
+    async fn read_allow_from(&self, channel: &str) -> Result<Vec<String>, DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let rows = client
+            .query(
+                "SELECT ci.external_id
+                 FROM channel_identities ci
+                 JOIN users u ON u.id = ci.owner_id
+                 WHERE ci.channel = $1
+                   AND u.status = 'active'
+                 ORDER BY ci.external_id ASC",
+                &[&channel],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(rows.into_iter().map(|row| row.get(0)).collect())
+    }
+
     async fn upsert_pairing_request(
         &self,
         channel: &str,
