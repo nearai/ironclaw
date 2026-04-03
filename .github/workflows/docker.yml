@@ -107,8 +107,6 @@ jobs:
           file: Dockerfile.worker
           push: true
           tags: ${{ steps.tags.outputs.worker_tags }}
-          build-args: |
-            IRONCLAW_IMAGE=${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.sha_tag }}
           platforms: linux/amd64
           cache-from: type=gha,scope=worker
           cache-to: type=gha,mode=max,scope=worker
