@@ -93,6 +93,13 @@ pub struct IncomingMessage {
     pub timezone: Option<String>,
     /// File or media attachments on this message.
     pub attachments: Vec<IncomingAttachment>,
+    /// Additional workspace scopes this user can read from.
+    ///
+    /// Populated from the authenticated user's token config (e.g.
+    /// `GATEWAY_USER_TOKENS` per-token `workspace_read_scopes`). Passed
+    /// through to `JobContext` so tool definitions and execution are
+    /// scoped correctly for cross-lens access.
+    pub workspace_read_scopes: Vec<String>,
     /// Internal-only flag: message was generated inside the process (e.g. job
     /// monitor) and must bypass the normal user-input pipeline. This field is
     /// not settable via metadata, so external channels cannot spoof it.
@@ -121,6 +128,7 @@ impl IncomingMessage {
             metadata: serde_json::Value::Null,
             timezone: None,
             attachments: Vec::new(),
+            workspace_read_scopes: Vec::new(),
             is_internal: false,
         }
     }
@@ -172,6 +180,12 @@ impl IncomingMessage {
     /// Set attachments.
     pub fn with_attachments(mut self, attachments: Vec<IncomingAttachment>) -> Self {
         self.attachments = attachments;
+        self
+    }
+
+    /// Set the workspace read scopes for cross-lens access.
+    pub fn with_workspace_read_scopes(mut self, scopes: Vec<String>) -> Self {
+        self.workspace_read_scopes = scopes;
         self
     }
 

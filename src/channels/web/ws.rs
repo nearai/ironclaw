@@ -122,13 +122,21 @@ pub async fn handle_ws_connection(
 
     // Receiver task: read client frames and route to agent
     let user_id = user.user_id;
+    let ws_scopes = user.workspace_read_scopes;
     while let Some(Ok(frame)) = ws_stream.next().await {
         match frame {
             Message::Text(text) => {
                 let parsed: Result<WsClientMessage, _> = serde_json::from_str(&text);
                 match parsed {
                     Ok(client_msg) => {
-                        handle_client_message(client_msg, &state, &user_id, &direct_tx).await;
+                        handle_client_message(
+                            client_msg,
+                            &state,
+                            &user_id,
+                            &ws_scopes,
+                            &direct_tx,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         let _ = direct_tx
@@ -157,6 +165,7 @@ async fn handle_client_message(
     msg: WsClientMessage,
     state: &GatewayState,
     user_id: &str,
+    workspace_read_scopes: &[String],
     direct_tx: &mpsc::Sender<WsServerMessage>,
 ) {
     match msg {
@@ -166,7 +175,8 @@ async fn handle_client_message(
             timezone,
             images,
         } => {
-            let mut incoming = IncomingMessage::new("gateway", user_id, &content);
+            let mut incoming = IncomingMessage::new("gateway", user_id, &content)
+                .with_workspace_read_scopes(workspace_read_scopes.to_vec());
             if let Some(ref tz) = timezone {
                 incoming = incoming.with_timezone(tz);
             }
@@ -249,7 +259,8 @@ async fn handle_client_message(
                 }
             };
 
-            let mut msg = IncomingMessage::new("gateway", user_id, content);
+            let mut msg = IncomingMessage::new("gateway", user_id, content)
+                .with_workspace_read_scopes(workspace_read_scopes.to_vec());
             if let Some(ref tid) = thread_id {
                 msg = msg.with_thread(tid);
             }
@@ -366,7 +377,7 @@ mod tests {
         let (direct_tx, mut direct_rx) = mpsc::channel(16);
         let state = make_test_state(None).await;
 
-        handle_client_message(WsClientMessage::Ping, &state, "user1", &direct_tx).await;
+        handle_client_message(WsClientMessage::Ping, &state, "user1", &[], &direct_tx).await;
 
         let response = direct_rx.recv().await.unwrap();
         assert!(matches!(response, WsServerMessage::Pong));
@@ -388,6 +399,7 @@ mod tests {
             },
             &state,
             "user1",
+            &[],
             &direct_tx,
         )
         .await;
@@ -414,6 +426,7 @@ mod tests {
             },
             &state,
             "user1",
+            &[],
             &direct_tx,
         )
         .await;
@@ -442,6 +455,7 @@ mod tests {
             },
             &state,
             "user1",
+            &[],
             &direct_tx,
         )
         .await;
@@ -466,6 +480,7 @@ mod tests {
             },
             &state,
             "user1",
+            &[],
             &direct_tx,
         )
         .await;
@@ -492,6 +507,7 @@ mod tests {
             },
             &state,
             "user1",
+            &[],
             &direct_tx,
         )
         .await;

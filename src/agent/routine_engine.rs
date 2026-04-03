@@ -1844,9 +1844,12 @@ async fn execute_lightweight_with_tools(
             );
         } else {
             // Tool-enabled iteration
+            // TODO: routines don't have access to per-token workspace_read_scopes.
+            // Cross-scope tool visibility for routines requires storing scopes on
+            // the Routine struct or looking them up from the auth config at fire time.
             let tool_defs = ctx
                 .tools
-                .tool_definitions_for_user(&routine.user_id, &[])
+                .tool_definitions_for_user(&routine.user_id, &job_ctx.workspace_read_scopes)
                 .await
                 .into_iter()
                 .filter(|tool| allowed_tools.contains(&tool.name))
@@ -2435,6 +2438,7 @@ mod tests {
             metadata: serde_json::Value::Null,
             timezone: None,
             attachments: vec![],
+            workspace_read_scopes: vec![],
             is_internal: false,
         }
     }

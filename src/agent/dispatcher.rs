@@ -166,7 +166,8 @@ impl Agent {
         // Create a JobContext for tool execution (chat doesn't have a real job)
         let mut job_ctx =
             JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
-                .with_requester_id(&message.sender_id);
+                .with_requester_id(&message.sender_id)
+                .with_workspace_read_scopes(message.workspace_read_scopes.clone());
         job_ctx.http_interceptor = self.deps.http_interceptor.clone();
         job_ctx.user_timezone = user_tz.name().to_string();
         job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
@@ -175,7 +176,7 @@ impl Agent {
         // (normal iterations) and without (force_text final iteration).
         let initial_tool_defs = self
             .tools()
-            .tool_definitions_for_user(&message.user_id, &[])
+            .tool_definitions_for_user(&message.user_id, &message.workspace_read_scopes)
             .await;
         let initial_tool_defs = if !active_skills.is_empty() {
             crate::skills::attenuate_tools(&initial_tool_defs, &active_skills).tools
@@ -330,11 +331,14 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
         // Refresh tool definitions each iteration so newly built tools become visible.
         // Filter by user_id so per-user tools (e.g. collection CRUD) only appear
-        // for their owner.
+        // for their owner. Scopes come from the authenticated user's token config.
         let tool_defs = self
             .agent
             .tools()
-            .tool_definitions_for_user(&self.message.user_id, &[])
+            .tool_definitions_for_user(
+                &self.message.user_id,
+                &self.message.workspace_read_scopes,
+            )
             .await;
 
         // Apply trust-based tool attenuation if skills are active.
