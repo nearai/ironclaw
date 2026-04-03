@@ -272,79 +272,16 @@ impl AcpBridgeRuntime {
 
                 // Follow-up loop: poll for prompts, send additional prompt() calls.
                 // Exits when: orchestrator sends done, or agent process exits.
-                let mut child_exit_rx = child_exit_rx;
-                loop {
-                    match client_for_followup.poll_prompt().await {
-                        Ok(Some(follow_up)) => {
-                            if follow_up.done {
-                                tracing::info!(job_id = %job_id, "Orchestrator signaled done");
-                                break;
-                            }
-                            tracing::info!(job_id = %job_id, "Got follow-up prompt");
-
-                            let follow_result = conn
-                                .prompt(acp::PromptRequest::new(
-                                    session_id.clone(),
-                                    vec![follow_up.content.into()],
-                                ))
-                                .await;
-
-                            match follow_result {
-                                Ok(resp) => {
-                                    let payload = stop_reason_to_result(
-                                        &resp.stop_reason,
-                                        &session_id.to_string(),
-                                    );
-                                    client_for_followup.post_event(&payload).await;
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        job_id = %job_id,
-                                        "Follow-up prompt failed: {}", e
-                                    );
-                                    client_for_followup
-                                        .post_event(&JobEventPayload {
-                                            event_type: "status".to_string(),
-                                            data: json!({
-                                                "message": format!("Follow-up failed: {}", e),
-                                            }),
-                                        })
-                                        .await;
-                                }
-                            }
-                        }
-                        Ok(None) => {
-                            // No prompt available — wait, but also watch for agent exit.
-                            tokio::select! {
-                                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
-                                exit_code = &mut child_exit_rx => {
-                                    let code = exit_code.ok().flatten();
-                                    tracing::info!(
-                                        job_id = %job_id,
-                                        exit_code = ?code,
-                                        "ACP agent process exited, ending follow-up loop"
-                                    );
-                                    break;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(job_id = %job_id, "Prompt polling error: {}", e);
-                            tokio::select! {
-                                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
-                                exit_code = &mut child_exit_rx => {
-                                    let code = exit_code.ok().flatten();
-                                    tracing::info!(
-                                        job_id = %job_id,
-                                        exit_code = ?code,
-                                        "ACP agent process exited, ending follow-up loop"
-                                    );
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
+                let prompt_sender = ConnPromptSender { conn: &conn };
+                run_follow_up_loop(
+                    &client_for_followup,
+                    &prompt_sender,
+                    &client_for_acp,
+                    &session_id,
+                    child_exit_rx,
+                    job_id,
+                )
+                .await?;
 
                 Ok::<(), WorkerError>(())
             })
@@ -371,6 +308,28 @@ impl AcpEventSink for Arc<WorkerHttpClient> {
     async fn emit_event(&self, payload: &JobEventPayload) {
         self.post_event(payload).await;
     }
+}
+
+/// Source of follow-up prompts from the orchestrator.
+pub(crate) trait FollowUpPromptSource {
+    fn poll_prompt(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Option<crate::worker::api::PromptResponse>, WorkerError>>;
+}
+
+impl FollowUpPromptSource for Arc<WorkerHttpClient> {
+    async fn poll_prompt(&self) -> Result<Option<crate::worker::api::PromptResponse>, WorkerError> {
+        WorkerHttpClient::poll_prompt(self).await
+    }
+}
+
+/// Sends a follow-up prompt to the ACP agent.
+trait AcpPromptSender {
+    fn send_prompt(
+        &self,
+        session_id: acp::SessionId,
+        content: String,
+    ) -> impl std::future::Future<Output = acp::Result<acp::PromptResponse>>;
 }
 
 /// IronClaw's implementation of the ACP Client trait.
@@ -418,6 +377,93 @@ pub(crate) fn ironclaw_init_request() -> acp::InitializeRequest {
     acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_info(
         acp::Implementation::new("ironclaw", env!("CARGO_PKG_VERSION")).title("IronClaw"),
     )
+}
+
+// ==================== Follow-up loop ====================
+
+/// Wrapper that implements `AcpPromptSender` for an ACP `ClientSideConnection`.
+struct ConnPromptSender<'a, C: acp::Agent> {
+    conn: &'a C,
+}
+
+impl<C: acp::Agent + 'static> AcpPromptSender for ConnPromptSender<'_, C> {
+    async fn send_prompt(
+        &self,
+        session_id: acp::SessionId,
+        content: String,
+    ) -> acp::Result<acp::PromptResponse> {
+        self.conn
+            .prompt(acp::PromptRequest::new(session_id, vec![content.into()]))
+            .await
+    }
+}
+
+/// Run the follow-up prompt loop.
+///
+/// Polls for follow-up prompts from the orchestrator, sends them to the ACP
+/// agent, and translates results into events. Returns `Err` if any follow-up
+/// prompt fails, so the caller can report `success: false`.
+async fn run_follow_up_loop(
+    prompt_source: &impl FollowUpPromptSource,
+    agent: &impl AcpPromptSender,
+    sink: &impl AcpEventSink,
+    session_id: &acp::SessionId,
+    mut child_exit_rx: tokio::sync::oneshot::Receiver<Option<i32>>,
+    job_id: Uuid,
+) -> Result<(), WorkerError> {
+    let session_id_str = session_id.to_string();
+    loop {
+        let backoff = match prompt_source.poll_prompt().await {
+            Ok(Some(follow_up)) => {
+                if follow_up.done {
+                    tracing::debug!(job_id = %job_id, "Orchestrator signaled done");
+                    break;
+                }
+                tracing::debug!(job_id = %job_id, "Got follow-up prompt");
+
+                let follow_result = agent
+                    .send_prompt(session_id.clone(), follow_up.content)
+                    .await;
+
+                match follow_result {
+                    Ok(resp) => {
+                        let payload = stop_reason_to_result(&resp.stop_reason, &session_id_str);
+                        sink.emit_event(&payload).await;
+                    }
+                    Err(e) => {
+                        let msg = format!("Follow-up prompt failed: {e}");
+                        tracing::error!(job_id = %job_id, "{}", msg);
+                        sink.emit_event(&JobEventPayload {
+                            event_type: "status".to_string(),
+                            data: json!({ "message": msg }),
+                        })
+                        .await;
+                        return Err(WorkerError::ExecutionFailed { reason: msg });
+                    }
+                }
+                continue;
+            }
+            Ok(None) => Duration::from_secs(2),
+            Err(e) => {
+                tracing::warn!(job_id = %job_id, "Prompt polling error: {}", e);
+                Duration::from_secs(5)
+            }
+        };
+
+        tokio::select! {
+            _ = tokio::time::sleep(backoff) => {}
+            exit_code = &mut child_exit_rx => {
+                let code = exit_code.ok().flatten();
+                tracing::debug!(
+                    job_id = %job_id,
+                    exit_code = ?code,
+                    "ACP agent process exited, ending follow-up loop"
+                );
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 // ==================== Event translation ====================
@@ -625,5 +671,203 @@ mod tests {
         let s = "café";
         assert_eq!(truncate(s, 3), "caf"); // doesn't split the é
         assert_eq!(truncate(s, 5), "café"); // includes full char
+    }
+
+    // ==================== Follow-up loop stubs & tests ====================
+
+    use crate::worker::api::PromptResponse;
+    use std::sync::Mutex;
+
+    /// Stub event sink that collects emitted events for assertion.
+    struct CollectingSink {
+        events: Mutex<Vec<JobEventPayload>>,
+    }
+
+    impl CollectingSink {
+        fn new() -> Self {
+            Self {
+                events: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn events(&self) -> Vec<JobEventPayload> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl AcpEventSink for CollectingSink {
+        async fn emit_event(&self, payload: &JobEventPayload) {
+            self.events.lock().unwrap().push(payload.clone());
+        }
+    }
+
+    /// Stub prompt source that yields a sequence of responses then returns None.
+    struct StubPromptSource {
+        responses: Mutex<Vec<Result<Option<PromptResponse>, WorkerError>>>,
+    }
+
+    impl StubPromptSource {
+        fn new(mut responses: Vec<Result<Option<PromptResponse>, WorkerError>>) -> Self {
+            responses.reverse(); // so we can pop (FIFO)
+            Self {
+                responses: Mutex::new(responses),
+            }
+        }
+    }
+
+    impl FollowUpPromptSource for StubPromptSource {
+        async fn poll_prompt(&self) -> Result<Option<PromptResponse>, WorkerError> {
+            self.responses.lock().unwrap().pop().unwrap_or(Ok(None))
+        }
+    }
+
+    /// Stub ACP prompt sender that returns pre-configured results.
+    struct StubAcpPromptSender {
+        results: Mutex<Vec<acp::Result<acp::PromptResponse>>>,
+    }
+
+    impl StubAcpPromptSender {
+        fn new(mut results: Vec<acp::Result<acp::PromptResponse>>) -> Self {
+            results.reverse(); // so we can pop (FIFO)
+            Self {
+                results: Mutex::new(results),
+            }
+        }
+    }
+
+    impl AcpPromptSender for StubAcpPromptSender {
+        async fn send_prompt(
+            &self,
+            _session_id: acp::SessionId,
+            _content: String,
+        ) -> acp::Result<acp::PromptResponse> {
+            self.results
+                .lock()
+                .unwrap()
+                .pop()
+                .unwrap_or(Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)))
+        }
+    }
+
+    /// Regression test for #1915: follow-up prompt failure must return Err
+    /// so that run() reports success: false.
+    #[tokio::test]
+    async fn follow_up_prompt_failure_returns_error() {
+        let sink = CollectingSink::new();
+
+        let prompt_source = StubPromptSource::new(vec![Ok(Some(PromptResponse {
+            content: "follow up".to_string(),
+            done: false,
+        }))]);
+
+        let agent = StubAcpPromptSender::new(vec![Err(acp::Error::internal_error())]);
+
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let session_id = acp::SessionId::new("test-session");
+
+        let result =
+            run_follow_up_loop(&prompt_source, &agent, &sink, &session_id, rx, Uuid::nil()).await;
+
+        assert!(
+            result.is_err(),
+            "Follow-up prompt failure must propagate as Err"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, WorkerError::ExecutionFailed { .. }),
+            "Error must be ExecutionFailed, got: {err}"
+        );
+
+        // Status event should still have been posted before the error
+        let events = sink.events();
+        assert!(
+            events.iter().any(|e| e.event_type == "status"
+                && e.data["message"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("Follow-up prompt failed")),
+            "Should post status event before returning error"
+        );
+    }
+
+    /// Verify that a successful follow-up followed by orchestrator "done"
+    /// signal returns Ok.
+    #[tokio::test]
+    async fn follow_up_prompt_success_then_done_returns_ok() {
+        let sink = CollectingSink::new();
+
+        let prompt_source = StubPromptSource::new(vec![
+            Ok(Some(PromptResponse {
+                content: "do more work".to_string(),
+                done: false,
+            })),
+            Ok(Some(PromptResponse {
+                content: String::new(),
+                done: true,
+            })),
+        ]);
+
+        let agent =
+            StubAcpPromptSender::new(vec![Ok(acp::PromptResponse::new(acp::StopReason::EndTurn))]);
+
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let session_id = acp::SessionId::new("test-session");
+
+        let result =
+            run_follow_up_loop(&prompt_source, &agent, &sink, &session_id, rx, Uuid::nil()).await;
+
+        assert!(
+            result.is_ok(),
+            "Successful follow-up then done should be Ok"
+        );
+
+        let events = sink.events();
+        assert!(
+            events.iter().any(|e| e.event_type == "result"),
+            "Should emit result event for successful prompt"
+        );
+    }
+
+    /// Verify the loop recovers from a transient polling error and
+    /// processes the next prompt successfully.
+    #[tokio::test(start_paused = true)]
+    async fn follow_up_loop_recovers_from_transient_poll_error() {
+        let sink = CollectingSink::new();
+
+        // First poll returns an error, second returns a real prompt, third signals done.
+        let prompt_source = StubPromptSource::new(vec![
+            Err(WorkerError::ConnectionFailed {
+                url: "http://test".to_string(),
+                reason: "transient".to_string(),
+            }),
+            Ok(Some(PromptResponse {
+                content: "do work".to_string(),
+                done: false,
+            })),
+            Ok(Some(PromptResponse {
+                content: String::new(),
+                done: true,
+            })),
+        ]);
+
+        let agent =
+            StubAcpPromptSender::new(vec![Ok(acp::PromptResponse::new(acp::StopReason::EndTurn))]);
+
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let session_id = acp::SessionId::new("test-session");
+
+        let result =
+            run_follow_up_loop(&prompt_source, &agent, &sink, &session_id, rx, Uuid::nil()).await;
+
+        assert!(
+            result.is_ok(),
+            "Loop should recover from transient poll error"
+        );
+
+        let events = sink.events();
+        assert!(
+            events.iter().any(|e| e.event_type == "result"),
+            "Should emit result event after recovery"
+        );
     }
 }
