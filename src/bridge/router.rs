@@ -2434,6 +2434,8 @@ async fn forward_event_to_channel(
                     channel_name,
                     StatusUpdate::ToolStarted {
                         name: display_name.clone(),
+                        detail: params_summary.clone(),
+                        call_id: None,
                     },
                     metadata,
                 )
@@ -2446,6 +2448,7 @@ async fn forward_event_to_channel(
                         success: true,
                         error: None,
                         parameters: Some(format!("{duration_ms}ms")),
+                        call_id: None,
                     },
                     metadata,
                 )
@@ -2463,6 +2466,8 @@ async fn forward_event_to_channel(
                     channel_name,
                     StatusUpdate::ToolStarted {
                         name: display_name.clone(),
+                        detail: params_summary.clone(),
+                        call_id: None,
                     },
                     metadata,
                 )
@@ -2475,6 +2480,7 @@ async fn forward_event_to_channel(
                         success: false,
                         error: Some(error.clone()),
                         parameters: None,
+                        call_id: None,
                     },
                     metadata,
                 )
@@ -2565,6 +2571,7 @@ fn thread_event_to_app_events(
             vec![
                 AppEvent::ToolStarted {
                     name: display_name.clone(),
+                    detail: params_summary.clone(),
                     thread_id: Some(thread_id.into()),
                 },
                 AppEvent::ToolCompleted {
@@ -2586,6 +2593,7 @@ fn thread_event_to_app_events(
             vec![
                 AppEvent::ToolStarted {
                     name: display_name.clone(),
+                    detail: params_summary.clone(),
                     thread_id: Some(thread_id.into()),
                 },
                 AppEvent::ToolCompleted {

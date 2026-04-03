@@ -1104,9 +1104,11 @@ impl Agent {
                 .channels
                 .send_status(
                     &message.channel,
-                    StatusUpdate::ToolStarted {
-                        name: pending.tool_name.clone(),
-                    },
+                    StatusUpdate::tool_started_with_id(
+                        pending.tool_name.clone(),
+                        &pending.parameters,
+                        Some(pending.tool_call_id.clone()),
+                    ),
                     &message.metadata,
                 )
                 .await;
@@ -1122,6 +1124,7 @@ impl Agent {
                     &message.channel,
                     StatusUpdate::tool_completed(
                         pending.tool_name.clone(),
+                        Some(pending.tool_call_id.clone()),
                         &tool_result,
                         &pending.display_parameters,
                         tool_ref.as_deref(),
@@ -1140,6 +1143,7 @@ impl Agent {
                         StatusUpdate::ToolResult {
                             name: pending.tool_name.clone(),
                             preview: output.clone(),
+                            call_id: Some(pending.tool_call_id.clone()),
                         },
                         &message.metadata,
                     )
@@ -1268,9 +1272,11 @@ impl Agent {
                         .channels
                         .send_status(
                             &message.channel,
-                            StatusUpdate::ToolStarted {
-                                name: tc.name.clone(),
-                            },
+                            StatusUpdate::tool_started_with_id(
+                                tc.name.clone(),
+                                &tc.arguments,
+                                Some(tc.id.clone()),
+                            ),
                             &message.metadata,
                         )
                         .await;
@@ -1286,6 +1292,7 @@ impl Agent {
                             &message.channel,
                             StatusUpdate::tool_completed(
                                 tc.name.clone(),
+                                Some(tc.id.clone()),
                                 &result,
                                 &tc.arguments,
                                 deferred_tool.as_deref(),
@@ -1315,9 +1322,11 @@ impl Agent {
                         let _ = channels
                             .send_status(
                                 &channel,
-                                StatusUpdate::ToolStarted {
-                                    name: tc.name.clone(),
-                                },
+                                StatusUpdate::tool_started_with_id(
+                                    tc.name.clone(),
+                                    &tc.arguments,
+                                    Some(tc.id.clone()),
+                                ),
                                 &metadata,
                             )
                             .await;
@@ -1337,6 +1346,7 @@ impl Agent {
                                 &channel,
                                 StatusUpdate::tool_completed(
                                     tc.name.clone(),
+                                    Some(tc.id.clone()),
                                     &result,
                                     &tc.arguments,
                                     par_tool.as_deref(),
@@ -1401,6 +1411,7 @@ impl Agent {
                             StatusUpdate::ToolResult {
                                 name: tc.name.clone(),
                                 preview: output.clone(),
+                                call_id: Some(tc.id.clone()),
                             },
                             &message.metadata,
                         )

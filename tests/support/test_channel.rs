@@ -167,7 +167,7 @@ impl TestChannel {
         self.captured_status_events()
             .iter()
             .filter_map(|s| match s {
-                StatusUpdate::ToolStarted { name } => Some(name.clone()),
+                StatusUpdate::ToolStarted { name, .. } => Some(name.clone()),
                 _ => None,
             })
             .collect()
@@ -189,7 +189,9 @@ impl TestChannel {
         self.captured_status_events()
             .iter()
             .filter_map(|s| match s {
-                StatusUpdate::ToolResult { name, preview } => Some((name.clone(), preview.clone())),
+                StatusUpdate::ToolResult { name, preview, .. } => {
+                    Some((name.clone(), preview.clone()))
+                }
                 _ => None,
             })
             .collect()
@@ -337,7 +339,7 @@ impl Channel for TestChannel {
     ) -> Result<(), ChannelError> {
         // Capture timing before pushing to events.
         match &status {
-            StatusUpdate::ToolStarted { name } => {
+            StatusUpdate::ToolStarted { name, .. } => {
                 self.tool_start_times
                     .lock()
                     .await

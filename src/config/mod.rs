@@ -52,7 +52,7 @@ pub use self::agent::AgentConfig;
 pub use self::builder::BuilderModeConfig;
 pub use self::channels::{
     ChannelsConfig, CliConfig, DEFAULT_GATEWAY_PORT, GatewayConfig, GatewayOidcConfig, HttpConfig,
-    SignalConfig,
+    SignalConfig, TuiChannelConfig,
 };
 pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsql_path};
 pub use self::embeddings::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig};
@@ -161,6 +161,7 @@ impl Config {
                 http: None,
                 gateway: None,
                 signal: None,
+                tui: None,
                 wasm_channels_dir: std::env::temp_dir().join("ironclaw-test-channels"),
                 wasm_channels_enabled: false,
                 wasm_channel_owner_ids: HashMap::new(),

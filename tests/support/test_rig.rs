@@ -314,6 +314,7 @@ impl TestRig {
                     success: false,
                     error,
                     parameters,
+                    ..
                 } = status
                 {
                     let detail = format!(
@@ -357,6 +358,7 @@ impl TestRig {
                 success: false,
                 error,
                 parameters,
+                ..
             } = status
             {
                 let detail = format!(

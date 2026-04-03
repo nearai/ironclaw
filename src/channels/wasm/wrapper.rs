@@ -3720,7 +3720,7 @@ fn status_to_wit(
             message: msg.clone(),
             metadata_json,
         },
-        StatusUpdate::ToolStarted { name } => wit_channel::StatusUpdate {
+        StatusUpdate::ToolStarted { name, .. } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::ToolStarted,
             message: format!("Tool started: {}", name),
             metadata_json,
@@ -3734,7 +3734,7 @@ fn status_to_wit(
             ),
             metadata_json,
         },
-        StatusUpdate::ToolResult { name, preview } => wit_channel::StatusUpdate {
+        StatusUpdate::ToolResult { name, preview, .. } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::ToolResult,
             message: format!(
                 "Tool result: {}\n{}",
@@ -3829,10 +3829,19 @@ fn status_to_wit(
             },
             metadata_json,
         },
-        // Suggestions, turn cost, and skill activation are web-gateway-only; skip for WASM channels
+        // Suggestions and richer UI/runtime telemetry are handled by the web/TUI surfaces.
         StatusUpdate::Suggestions { .. }
         | StatusUpdate::TurnCost { .. }
-        | StatusUpdate::SkillActivated { .. } => return None,
+        | StatusUpdate::SkillActivated { .. }
+        | StatusUpdate::JobStatus { .. }
+        | StatusUpdate::JobResult { .. }
+        | StatusUpdate::RoutineUpdate { .. }
+        | StatusUpdate::ContextPressure { .. }
+        | StatusUpdate::SandboxStatus { .. }
+        | StatusUpdate::SecretsStatus { .. }
+        | StatusUpdate::CostGuard { .. }
+        | StatusUpdate::ThreadList { .. }
+        | StatusUpdate::ConversationHistory { .. } => return None,
         StatusUpdate::ReasoningUpdate {
             narrative,
             decisions,
@@ -4711,6 +4720,8 @@ mod tests {
             .send_status(
                 crate::channels::StatusUpdate::ToolStarted {
                     name: "http_request".into(),
+                    detail: None,
+                    call_id: None,
                 },
                 &metadata,
             )
@@ -5026,6 +5037,8 @@ mod tests {
         let wit = status_to_wit(
             &crate::channels::StatusUpdate::ToolStarted {
                 name: "http_request".to_string(),
+                detail: None,
+                call_id: None,
             },
             &metadata,
         )
@@ -5049,6 +5062,7 @@ mod tests {
                 success: true,
                 error: None,
                 parameters: None,
+                call_id: None,
             },
             &metadata,
         )
@@ -5072,6 +5086,7 @@ mod tests {
                 success: false,
                 error: Some("connection refused".to_string()),
                 parameters: None,
+                call_id: None,
             },
             &metadata,
         )
@@ -5093,6 +5108,7 @@ mod tests {
             &crate::channels::StatusUpdate::ToolResult {
                 name: "http_request".to_string(),
                 preview: "{".to_string() + "\"temperature\": 22}",
+                call_id: None,
             },
             &metadata,
         )
@@ -5115,6 +5131,7 @@ mod tests {
             &crate::channels::StatusUpdate::ToolResult {
                 name: "big_tool".to_string(),
                 preview: long_preview,
+                call_id: None,
             },
             &metadata,
         )

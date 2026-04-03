@@ -342,8 +342,12 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Initialize tracing with a reloadable EnvFilter so the gateway can switch
     // log levels at runtime without restarting.
-    let log_level_handle =
-        ironclaw::channels::web::log_layer::init_tracing(Arc::clone(&log_broadcaster));
+    let suppress_stderr =
+        config.channels.tui.is_some() && cli.message.is_none() && cfg!(feature = "tui");
+    let log_level_handle = ironclaw::channels::web::log_layer::init_tracing(
+        Arc::clone(&log_broadcaster),
+        suppress_stderr,
+    );
 
     tracing::debug!("Starting IronClaw...");
     tracing::debug!("Loaded configuration for agent: {}", config.agent.name);
@@ -409,13 +413,80 @@ async fn async_main() -> anyhow::Result<()> {
         Arc<WasmChannelRouter>,
     )> = None;
 
-    // Create CLI channel
+    // Create CLI channel (REPL or TUI — mutually exclusive, both claim stdin)
+    let tui_mode = config.channels.tui.is_some();
+
+    #[cfg(feature = "tui")]
+    if tui_mode && cli.message.is_none() {
+        let tool_names = components.tools.list().await;
+        let tool_categories = ironclaw::channels::tui::group_tools_by_prefix(tool_names);
+
+        let skill_categories = if let Some(ref registry) = components.skill_registry {
+            let registry = registry.read().unwrap_or_else(|e| e.into_inner());
+            let skill_data: Vec<(String, Vec<String>)> = registry
+                .skills()
+                .iter()
+                .map(|s| (s.manifest.name.clone(), s.manifest.activation.tags.clone()))
+                .collect();
+            ironclaw::channels::tui::group_skills_by_tag(&skill_data)
+        } else {
+            Vec::new()
+        };
+
+        let workspace_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::new());
+        let workspace_path = workspace_root.display().to_string();
+        let layout = if let Some(ref tui_config) = config.channels.tui {
+            ironclaw::channels::tui::resolve_tui_layout(tui_config, &workspace_root)
+        } else {
+            ironclaw_tui::TuiLayout::default()
+        };
+
+        let (memory_count, identity_files) = if let Some(ref ws) = components.workspace {
+            let count = ws.list_all().await.map(|docs| docs.len()).unwrap_or(0);
+            let identity_names = ["AGENTS.md", "SOUL.md", "USER.md", "IDENTITY.md"];
+            let mut found = Vec::new();
+            for name in &identity_names {
+                if ws.read(name).await.is_ok() {
+                    found.push((*name).to_string());
+                }
+            }
+            (count, found)
+        } else {
+            (0, Vec::new())
+        };
+
+        let tui_channel = ironclaw::channels::TuiChannel::new(
+            config.owner_id.clone(),
+            env!("CARGO_PKG_VERSION"),
+            components.llm.model_name(),
+        )
+        .with_layout(layout)
+        .with_log_broadcaster(Arc::clone(&log_broadcaster))
+        .with_tools(tool_categories)
+        .with_skills(skill_categories)
+        .with_workspace_path(workspace_path)
+        .with_memory_count(memory_count)
+        .with_identity_files(identity_files);
+
+        channels.add(Box::new(tui_channel)).await;
+        channel_names.push("tui".to_string());
+        tracing::debug!("TUI mode enabled");
+    }
+
+    #[cfg(not(feature = "tui"))]
+    if tui_mode {
+        tracing::warn!(
+            "CLI_MODE=tui requested but the 'tui' feature is not enabled. Falling back to REPL."
+        );
+    }
+
+    let use_repl = !tui_mode || cfg!(not(feature = "tui"));
     let repl_channel = if let Some(ref msg) = cli.message {
         Some(ReplChannel::with_message_for_user(
             config.owner_id.clone(),
             msg.clone(),
         ))
-    } else if config.channels.cli.enabled {
+    } else if use_repl && config.channels.cli.enabled {
         let repl = ReplChannel::with_user_id(config.owner_id.clone());
         repl.suppress_banner();
         Some(repl)
