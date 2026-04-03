@@ -307,10 +307,7 @@ impl Agent {
                 pending,
                 turn_usage,
             }),
-            Err(error) => Ok(AgenticLoopResult::Failed {
-                error: error.into(),
-                turn_usage,
-            }),
+            Err(error) => Ok(AgenticLoopResult::Failed { error, turn_usage }),
         }
     }
 

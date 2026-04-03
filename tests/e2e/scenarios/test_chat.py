@@ -132,25 +132,35 @@ async def test_turn_cost_event_does_not_render_message_badge(page):
         """
         () => {
           const before = document.querySelectorAll('.turn-cost-badge').length;
-          if (typeof eventSource !== 'undefined' && eventSource && eventSource.dispatchEvent) {
-            eventSource.dispatchEvent(new MessageEvent('turn_cost', {
-              data: JSON.stringify({
-                thread_id: currentThreadId || 'thread-turn-cost-test',
-                input_tokens: 632101,
-                output_tokens: 0,
-                cost_usd: '$1.6296',
-              }),
-            }));
+          const hasEventSource =
+            typeof eventSource !== 'undefined' && !!eventSource && !!eventSource.dispatchEvent;
+          if (!hasEventSource) {
+            return {
+              before,
+              after: document.querySelectorAll('.turn-cost-badge').length,
+              text: document.querySelector('#chat-messages .message.assistant:last-child')?.textContent || '',
+              hasEventSource,
+            };
           }
+          eventSource.dispatchEvent(new MessageEvent('turn_cost', {
+            data: JSON.stringify({
+              thread_id: currentThreadId || 'thread-turn-cost-test',
+              input_tokens: 632101,
+              output_tokens: 0,
+              cost_usd: '$1.6296',
+            }),
+          }));
           return {
             before,
             after: document.querySelectorAll('.turn-cost-badge').length,
             text: document.querySelector('#chat-messages .message.assistant:last-child')?.textContent || '',
+            hasEventSource,
           };
         }
         """
     )
 
+    assert badge_count["hasEventSource"] is True
     assert badge_count["before"] == 0
     assert badge_count["after"] == 0
     assert "632,101 tokens" not in badge_count["text"]
