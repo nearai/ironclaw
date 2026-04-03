@@ -1,6 +1,5 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use ironclaw::config::SafetyConfig;
-use ironclaw_safety::{SafetyLayer, Validator};
+use ironclaw_safety::{SafetyConfig, SafetyLayer, Validator};
 
 fn bench_safety_layer_pipeline(c: &mut Criterion) {
     let mut group = c.benchmark_group("safety_pipeline");
