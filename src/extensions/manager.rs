@@ -1694,7 +1694,7 @@ impl ExtensionManager {
         match kind {
             ExtensionKind::McpServer => {
                 let server = self
-                    .get_mcp_server(name, user_id)
+                    .get_mcp_server(&name, user_id)
                     .await
                     .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
                 if crate::tools::mcp::config::is_derived_nearai_mcp_server(&server) {
