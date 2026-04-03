@@ -586,6 +586,7 @@ impl LlmProvider for NearAiChatProvider {
         let mut events = stream.eventsource();
 
         let mut full_content = String::new();
+        let mut reasoning_buf = String::new();
         let mut finish_reason = FinishReason::Unknown;
         let mut input_tokens: u32 = 0;
         let mut output_tokens: u32 = 0;
@@ -615,15 +616,16 @@ impl LlmProvider for NearAiChatProvider {
                                 full_content.push_str(content);
                             }
                         }
-                        // Some models put content in reasoning_content
-                        if full_content.is_empty() {
-                            if let Some(reasoning) =
-                                delta.get("reasoning_content").and_then(|v| v.as_str())
-                            {
-                                if !reasoning.is_empty() {
-                                    on_token(reasoning.to_string());
-                                    full_content.push_str(reasoning);
-                                }
+                        // Thinking models: buffer reasoning tokens but don't
+                        // stream them (they're chain-of-thought, stripped later).
+                        // Only used as fallback content if no content deltas arrive.
+                        if let Some(reasoning) = delta
+                            .get("reasoning")
+                            .or_else(|| delta.get("reasoning_content"))
+                            .and_then(|v| v.as_str())
+                        {
+                            if !reasoning.is_empty() {
+                                reasoning_buf.push_str(reasoning);
                             }
                         }
                     }
@@ -652,8 +654,15 @@ impl LlmProvider for NearAiChatProvider {
             }
         }
 
+        // Fall back to reasoning content if no content deltas arrived
+        let final_content = if full_content.is_empty() && !reasoning_buf.is_empty() {
+            reasoning_buf
+        } else {
+            full_content
+        };
+
         Ok(CompletionResponse {
-            content: full_content,
+            content: final_content,
             finish_reason,
             input_tokens,
             output_tokens,
@@ -848,6 +857,7 @@ impl LlmProvider for NearAiChatProvider {
         let mut events = stream.eventsource();
 
         let mut full_content = String::new();
+        let mut reasoning_buf = String::new();
         let mut finish_reason = FinishReason::Unknown;
         let mut input_tokens: u32 = 0;
         let mut output_tokens: u32 = 0;
@@ -881,15 +891,14 @@ impl LlmProvider for NearAiChatProvider {
                                 full_content.push_str(content);
                             }
                         }
-                        // Reasoning content fallback
-                        if full_content.is_empty() {
-                            if let Some(reasoning) =
-                                delta.get("reasoning_content").and_then(|v| v.as_str())
-                            {
-                                if !reasoning.is_empty() {
-                                    on_token(reasoning.to_string());
-                                    full_content.push_str(reasoning);
-                                }
+                        // Buffer reasoning tokens (don't stream — chain-of-thought)
+                        if let Some(reasoning) = delta
+                            .get("reasoning")
+                            .or_else(|| delta.get("reasoning_content"))
+                            .and_then(|v| v.as_str())
+                        {
+                            if !reasoning.is_empty() {
+                                reasoning_buf.push_str(reasoning);
                             }
                         }
                         // Buffer tool call deltas (don't stream these)
@@ -956,11 +965,15 @@ impl LlmProvider for NearAiChatProvider {
             .collect();
         tool_calls.sort_by_key(|tc| tc.id.clone());
 
-        let content = if full_content.is_empty() {
-            None
-        } else {
-            Some(full_content)
-        };
+        // Fall back to reasoning if no content (thinking models)
+        let content =
+            if full_content.is_empty() && !reasoning_buf.is_empty() && tool_calls.is_empty() {
+                Some(reasoning_buf)
+            } else if full_content.is_empty() {
+                None
+            } else {
+                Some(full_content)
+            };
 
         Ok(ToolCompletionResponse {
             content,
