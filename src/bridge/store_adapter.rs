@@ -635,15 +635,15 @@ fn is_protected_orchestrator_doc(doc: &MemoryDoc) -> bool {
 /// (3 failures trigger auto-rollback). Runtime sandbox (Monty) handles all
 /// security enforcement — no blocklist here.
 fn validate_orchestrator_content(doc: &MemoryDoc) -> Result<(), EngineError> {
-    if doc.title.starts_with("orchestrator:") && doc.title != ORCHESTRATOR_FAILURES_TITLE {
-        if let Err(reason) = ironclaw_engine::executor::validate_python_syntax(&doc.content) {
-            return Err(EngineError::InvalidInput {
-                reason: format!(
-                    "orchestrator patch '{}' has invalid Python: {reason}",
-                    doc.title
-                ),
-            });
-        }
+    if doc.title.starts_with("orchestrator:") && doc.title != ORCHESTRATOR_FAILURES_TITLE
+        && let Err(reason) = ironclaw_engine::executor::validate_python_syntax(&doc.content)
+    {
+        return Err(EngineError::InvalidInput {
+            reason: format!(
+                "orchestrator patch '{}' has invalid Python: {reason}",
+                doc.title
+            ),
+        });
     }
     Ok(())
 }
