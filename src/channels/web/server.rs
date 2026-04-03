@@ -357,6 +357,14 @@ impl crate::tools::builtin::memory::WorkspaceResolver for WorkspacePool {
 
         let ws = Arc::new(self.build_workspace(user_id));
         cache.insert(user_id.to_string(), Arc::clone(&ws));
+        drop(cache);
+
+        // Match the seeded workspace behavior used by the prompt-side lookup so
+        // v1 memory tools and the v1 system prompt see the same per-user scope.
+        if let Err(e) = ws.seed_if_empty().await {
+            tracing::warn!(user_id = user_id, "Failed to seed workspace: {}", e);
+        }
+
         tracing::debug!(user_id = user_id, "Created per-user workspace");
         ws
     }
@@ -1903,7 +1911,11 @@ async fn chat_auth_token_handler(
                     match ss.create(&user.user_id, params).await {
                         Ok(_) => {
                             clear_auth_mode(&state, &user.user_id).await;
-                            crate::bridge::clear_engine_pending_auth(&user.user_id).await;
+                            crate::bridge::clear_engine_pending_auth(
+                                &user.user_id,
+                                req.thread_id.as_deref(),
+                            )
+                            .await;
                             state.sse.broadcast_for_user(
                                 &user.user_id,
                                 AppEvent::AuthCompleted {
@@ -1970,7 +1982,7 @@ async fn chat_auth_cancel_handler(
 
     clear_auth_mode(&state, &user.user_id).await;
     // Also clear engine v2 pending auth so the next message isn't consumed as a token.
-    crate::bridge::clear_engine_pending_auth(&user.user_id).await;
+    crate::bridge::clear_engine_pending_auth(&user.user_id, req.thread_id.as_deref()).await;
     Ok(Json(ActionResponse::ok("Auth cancelled")))
 }
 
@@ -3286,6 +3298,27 @@ mod tests {
     fn test_build_turns_from_db_messages_empty() {
         let turns = build_turns_from_db_messages(&[]);
         assert!(turns.is_empty());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn workspace_pool_resolve_seeds_new_user_workspace() {
+        let (db, _dir) = crate::testing::test_db().await;
+        let pool = WorkspacePool::new(
+            db,
+            None,
+            crate::workspace::EmbeddingCacheConfig::default(),
+            crate::config::WorkspaceSearchConfig::default(),
+            crate::config::WorkspaceConfig::default(),
+        );
+
+        let ws = crate::tools::builtin::memory::WorkspaceResolver::resolve(&pool, "alice").await;
+
+        let readme = ws.read(crate::workspace::paths::README).await.unwrap();
+        let identity = ws.read(crate::workspace::paths::IDENTITY).await.unwrap();
+
+        assert!(!readme.content.trim().is_empty());
+        assert!(!identity.content.trim().is_empty());
     }
 
     #[test]

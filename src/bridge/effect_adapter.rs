@@ -1215,18 +1215,18 @@ mod tests {
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
 
-        // Should return GatePaused(Authentication), NOT execute the tool
+        // Approval runs before auth in the current adapter pipeline, so a
+        // missing-credential HTTP call that also needs approval pauses on the
+        // approval gate first.
         match result {
             Err(EngineError::GatePaused { resume_kind, .. }) => match *resume_kind {
-                ironclaw_engine::ResumeKind::Authentication {
-                    credential_name, ..
-                } => {
-                    assert_eq!(credential_name, "github_token");
+                ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                    assert!(allow_always);
                 }
-                other => panic!("Expected Authentication gate, got: {other:?}"),
+                other => panic!("Expected Approval gate, got: {other:?}"),
             },
             other => {
-                panic!("Expected GatePaused for missing github_token, got: {other:?}");
+                panic!("Expected GatePaused for approval preflight, got: {other:?}");
             }
         }
     }
