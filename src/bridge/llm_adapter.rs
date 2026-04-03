@@ -386,6 +386,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn complete_without_tools_rewrites_orphaned_action_results_before_provider_call() {
+        let state = Arc::new(CapturingProviderState::default());
+        let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
+            state: state.clone(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+        let messages = vec![
+            ThreadMessage::user("Find the docs"),
+            ThreadMessage::assistant("I checked a tool earlier."),
+            ThreadMessage::action_result("call_missing", "search", "result payload"),
+        ];
+
+        let output = adapter
+            .complete(&messages, &[], &LlmCallConfig::default())
+            .await
+            .unwrap();
+
+        match output.response {
+            LlmResponse::Text(ref text) => assert_eq!(text, "ok"),
+            other => panic!("expected text response, got {other:?}"),
+        }
+
+        let completion_requests = state.completion_requests.lock().await;
+        let sent = completion_requests.last().unwrap();
+
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent[2].role, Role::User);
+        assert_eq!(sent[2].content, "[Tool `search` returned: result payload]");
+        assert!(sent[2].tool_call_id.is_none());
+        assert!(sent[2].name.is_none());
+    }
+
+    #[tokio::test]
     async fn complete_with_tools_preserves_matched_action_results() {
         let state = Arc::new(CapturingProviderState::default());
         let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
