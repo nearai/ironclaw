@@ -412,6 +412,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         let metadata = self.message.metadata.clone();
         let channel = self.message.channel.clone();
         let on_token = move |token: String| {
+            tracing::debug!(len = token.len(), "on_token callback fired");
             let channels = Arc::clone(&channels);
             let channel = channel.clone();
             let metadata = metadata.clone();

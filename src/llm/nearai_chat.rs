@@ -784,6 +784,7 @@ impl LlmProvider for NearAiChatProvider {
         req: ToolCompletionRequest,
         on_token: &(dyn Fn(String) + Send + Sync),
     ) -> Result<ToolCompletionResponse, LlmError> {
+        tracing::info!("NearAI: complete_with_tools_streaming called");
         let model = req.model.unwrap_or_else(|| self.active_model_name());
         let mut raw_messages = req.messages;
         crate::llm::provider::sanitize_tool_messages(&mut raw_messages);
