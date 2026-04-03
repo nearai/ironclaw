@@ -284,7 +284,7 @@ impl Agent {
                         let violations = self.safety().check_policy(content);
                         if violations
                             .iter()
-                            .any(|rule| rule.action == crate::safety::PolicyAction::Block)
+                            .any(|rule| rule.action == ironclaw_safety::PolicyAction::Block)
                         {
                             return Ok(SubmissionResult::error("Input rejected by safety policy."));
                         }
@@ -366,7 +366,7 @@ impl Agent {
         let violations = self.safety().check_policy(content);
         if violations
             .iter()
-            .any(|rule| rule.action == crate::safety::PolicyAction::Block)
+            .any(|rule| rule.action == ironclaw_safety::PolicyAction::Block)
         {
             return Ok(SubmissionResult::error("Input rejected by safety policy."));
         }
@@ -606,7 +606,10 @@ impl Agent {
 
                 Ok(SubmissionResult::response(response))
             }
-            Ok(AgenticLoopResult::NeedApproval { pending }) => {
+            Ok(AgenticLoopResult::NeedApproval {
+                pending,
+                turn_usage,
+            }) => {
                 // Store pending approval in thread and update state
                 let request_id = pending.request_id;
                 let tool_name = pending.tool_name.clone();
@@ -614,6 +617,8 @@ impl Agent {
                 let parameters = pending.display_parameters.clone();
                 let allow_always = pending.allow_always;
                 thread.await_approval(*pending);
+                self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
+                    .await;
                 let _ = self
                     .channels
                     .send_status(
@@ -635,6 +640,12 @@ impl Agent {
                     parameters,
                     allow_always,
                 })
+            }
+            Ok(AgenticLoopResult::Failed { error, turn_usage }) => {
+                self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
+                    .await;
+                thread.fail_turn(error.to_string());
+                Ok(SubmissionResult::error(error.to_string()))
             }
             Err(e) => {
                 thread.fail_turn(e.to_string());
@@ -1563,6 +1574,7 @@ impl Agent {
                 }
                 Ok(AgenticLoopResult::NeedApproval {
                     pending: new_pending,
+                    turn_usage,
                 }) => {
                     let request_id = new_pending.request_id;
                     let tool_name = new_pending.tool_name.clone();
@@ -1570,6 +1582,8 @@ impl Agent {
                     let parameters = new_pending.display_parameters.clone();
                     let allow_always = new_pending.allow_always;
                     thread.await_approval(*new_pending);
+                    self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
+                        .await;
                     let _ = self
                         .channels
                         .send_status(
@@ -1591,6 +1605,12 @@ impl Agent {
                         parameters,
                         allow_always,
                     })
+                }
+                Ok(AgenticLoopResult::Failed { error, turn_usage }) => {
+                    self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
+                        .await;
+                    thread.fail_turn(error.to_string());
+                    Ok(SubmissionResult::error(error.to_string()))
                 }
                 Err(e) => {
                     thread.fail_turn(e.to_string());

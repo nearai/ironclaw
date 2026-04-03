@@ -86,7 +86,7 @@ use deadpool_postgres::Pool;
 use uuid::Uuid;
 
 use crate::error::WorkspaceError;
-use crate::safety::{Sanitizer, Severity};
+use ironclaw_safety::{Sanitizer, Severity};
 
 /// Files injected into the system prompt. Writes to these are scanned for
 /// prompt injection patterns and rejected if high-severity matches are found.

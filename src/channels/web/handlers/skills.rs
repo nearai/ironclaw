@@ -161,7 +161,8 @@ pub async fn skills_install_handler(
             .as_deref()
             .filter(|s| !s.is_empty())
             .unwrap_or(&req.name);
-        let url = crate::skills::catalog::skill_download_url(catalog.registry_url(), download_key);
+        let url =
+            ironclaw_skills::catalog::skill_download_url(catalog.registry_url(), download_key);
         crate::tools::builtin::skill_tools::fetch_skill_content(&url)
             .await
             .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?
@@ -180,8 +181,8 @@ pub async fn skills_install_handler(
             )
         })?;
 
-        let normalized = crate::skills::normalize_line_endings(&content);
-        let parsed = crate::skills::parser::parse_skill_md(&normalized)
+        let normalized = ironclaw_skills::normalize_line_endings(&content);
+        let parsed = ironclaw_skills::parser::parse_skill_md(&normalized)
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
         let skill_name = parsed.manifest.name.clone();
 
@@ -196,9 +197,9 @@ pub async fn skills_install_handler(
     };
 
     // Perform async I/O (write to disk, load) with no lock held.
-    let normalized = crate::skills::normalize_line_endings(&content);
+    let normalized = ironclaw_skills::normalize_line_endings(&content);
     let (skill_name, loaded_skill) =
-        crate::skills::registry::SkillRegistry::prepare_install_to_disk(
+        ironclaw_skills::registry::SkillRegistry::prepare_install_to_disk(
             &user_dir,
             &skill_name_from_parse,
             &normalized,
@@ -262,7 +263,7 @@ pub async fn skills_remove_handler(
     };
 
     // Delete files from disk (async I/O, no lock held)
-    crate::skills::registry::SkillRegistry::delete_skill_files(&skill_path)
+    ironclaw_skills::registry::SkillRegistry::delete_skill_files(&skill_path)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

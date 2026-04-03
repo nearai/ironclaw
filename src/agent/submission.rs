@@ -41,6 +41,12 @@ impl SubmissionParser {
         if lower == "/suggest" {
             return Submission::Suggest;
         }
+        if lower.starts_with("/expected ") {
+            let description = trimmed["/expected ".len()..].trim().to_string();
+            if !description.is_empty() {
+                return Submission::Expected { description };
+            }
+        }
         if lower == "/thread new" || lower == "/new" {
             return Submission::NewThread;
         }
@@ -198,6 +204,66 @@ impl SubmissionParser {
             _ => {}
         }
 
+        // Plan commands
+        if lower == "/plan" || lower == "/plan list" {
+            return Submission::Plan {
+                sub: PlanSubcommand::List,
+            };
+        }
+        if let Some(rest) = lower.strip_prefix("/plan ") {
+            let rest = rest.trim();
+            if rest == "list" {
+                return Submission::Plan {
+                    sub: PlanSubcommand::List,
+                };
+            }
+            if let Some(after) = rest.strip_prefix("approve") {
+                let plan_ref = after.trim();
+                return Submission::Plan {
+                    sub: PlanSubcommand::Approve {
+                        plan_ref: if plan_ref.is_empty() {
+                            None
+                        } else {
+                            Some(plan_ref.to_string())
+                        },
+                    },
+                };
+            }
+            if let Some(after) = rest.strip_prefix("status") {
+                let plan_ref = after.trim();
+                return Submission::Plan {
+                    sub: PlanSubcommand::Status {
+                        plan_ref: if plan_ref.is_empty() {
+                            None
+                        } else {
+                            Some(plan_ref.to_string())
+                        },
+                    },
+                };
+            }
+            if let Some(after) = rest.strip_prefix("revise") {
+                let after = after.trim();
+                // Try to split: first word is plan_ref, rest is feedback
+                let (plan_ref, feedback) = if let Some((first, rest)) = after.split_once(' ') {
+                    (Some(first.to_string()), rest.trim().to_string())
+                } else {
+                    (None, after.to_string())
+                };
+                if !feedback.is_empty() {
+                    return Submission::Plan {
+                        sub: PlanSubcommand::Revise { plan_ref, feedback },
+                    };
+                }
+            }
+            // Default: treat as plan creation
+            let description = trimmed["/plan ".len()..].trim().to_string();
+            if !description.is_empty() {
+                return Submission::Plan {
+                    sub: PlanSubcommand::Create { description },
+                };
+            }
+        }
+
         // Default: user input
         Submission::UserInput {
             content: content.to_string(),
@@ -271,6 +337,13 @@ pub enum Submission {
     /// Suggest next steps based on the current thread.
     Suggest,
 
+    /// User-provided expected behavior for the last interaction.
+    /// Fires into the self-improvement pipeline with conversation context.
+    Expected {
+        /// What the user expected to happen.
+        description: String,
+    },
+
     /// Check job status. No job_id shows all jobs; with job_id shows a specific job.
     JobStatus {
         /// Optional job ID (UUID or short prefix). If None, shows all jobs.
@@ -294,6 +367,32 @@ pub enum Submission {
         /// Arguments to the command.
         args: Vec<String>,
     },
+
+    /// Plan mode command (/plan).
+    /// All subcommands are rewritten to UserInput with [PLAN MODE] prefix
+    /// to activate the plan-mode skill.
+    Plan {
+        /// The plan subcommand.
+        sub: PlanSubcommand,
+    },
+}
+
+/// Subcommands for the /plan command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PlanSubcommand {
+    /// Create a new plan: /plan <description>
+    Create { description: String },
+    /// Approve and execute a plan: /plan approve [ref]
+    Approve { plan_ref: Option<String> },
+    /// Check plan status: /plan status [ref]
+    Status { plan_ref: Option<String> },
+    /// Revise a plan with feedback: /plan revise [ref] <feedback>
+    Revise {
+        plan_ref: Option<String>,
+        feedback: String,
+    },
+    /// List all plans: /plan list
+    List,
 }
 
 impl Submission {
@@ -866,5 +965,21 @@ mod tests {
         ));
         assert!(matches!(SubmissionParser::parse("/QUIT"), Submission::Quit));
         assert!(matches!(SubmissionParser::parse("/Exit"), Submission::Quit));
+    }
+
+    #[test]
+    fn test_parser_expected() {
+        let submission =
+            SubmissionParser::parse("/expected should have logged in via GitHub OAuth");
+        assert!(
+            matches!(submission, Submission::Expected { description } if description == "should have logged in via GitHub OAuth")
+        );
+    }
+
+    #[test]
+    fn test_parser_expected_empty_is_user_input() {
+        // "/expected " with no description should fall through to user input
+        let submission = SubmissionParser::parse("/expected ");
+        assert!(matches!(submission, Submission::UserInput { .. }));
     }
 }

@@ -280,6 +280,7 @@ async fn handle_client_message(
                                     instructions: Some(result.message),
                                     auth_url: None,
                                     setup_url: None,
+                                    thread_id: None,
                                 },
                             );
                         } else {
@@ -290,6 +291,7 @@ async fn handle_client_message(
                                     extension_name,
                                     success: true,
                                     message: result.message,
+                                    thread_id: None,
                                 },
                             );
                         }
@@ -304,6 +306,7 @@ async fn handle_client_message(
                                     instructions: Some(msg.clone()),
                                     auth_url: None,
                                     setup_url: None,
+                                    thread_id: None,
                                 },
                             );
                         }

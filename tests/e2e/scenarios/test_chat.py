@@ -119,7 +119,14 @@ async def test_copy_from_chat_forces_plain_text(page):
 
 async def test_turn_cost_event_does_not_render_message_badge(page):
     """Usage SSE events should not append token/cost footers to chat messages."""
-    await page.evaluate("addMessage('assistant', 'No footer please')")
+    await page.evaluate(
+        """
+        () => {
+          currentThreadId = 'thread-turn-cost-test';
+          addMessage('assistant', 'No footer please');
+        }
+        """
+    )
 
     badge_count = await page.evaluate(
         """
@@ -128,7 +135,7 @@ async def test_turn_cost_event_does_not_render_message_badge(page):
           if (typeof eventSource !== 'undefined' && eventSource && eventSource.dispatchEvent) {
             eventSource.dispatchEvent(new MessageEvent('turn_cost', {
               data: JSON.stringify({
-                thread_id: null,
+                thread_id: currentThreadId || 'thread-turn-cost-test',
                 input_tokens: 632101,
                 output_tokens: 0,
                 cost_usd: '$1.6296',
