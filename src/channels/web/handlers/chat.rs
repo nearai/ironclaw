@@ -197,12 +197,16 @@ pub async fn chat_approval_handler(
 pub async fn chat_auth_token_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Json(req): Json<AuthTokenRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Extension manager not available".to_string(),
     ))?;
+    let auth_workspace_id =
+        resolve_auth_event_workspace_scope(&state, &user, workspace_query.workspace.as_deref())
+            .await?;
 
     match ext_mgr
         .configure_token(&req.extension_name, &req.token, &user.user_id)
@@ -216,8 +220,9 @@ pub async fn chat_auth_token_handler(
             resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
 
             if result.verification.is_some() {
-                state.sse.broadcast_for_user(
+                state.sse.broadcast_for_user_in_workspace(
                     &user.user_id,
+                    auth_workspace_id.as_deref(),
                     AppEvent::AuthRequired {
                         extension_name: req.extension_name.clone(),
                         instructions: Some(result.message),
@@ -228,8 +233,9 @@ pub async fn chat_auth_token_handler(
             } else {
                 clear_auth_mode(&state, &user.user_id).await;
 
-                state.sse.broadcast_for_user(
+                state.sse.broadcast_for_user_in_workspace(
                     &user.user_id,
+                    auth_workspace_id.as_deref(),
                     AppEvent::AuthCompleted {
                         extension_name: req.extension_name.clone(),
                         success: true,
@@ -243,8 +249,9 @@ pub async fn chat_auth_token_handler(
         Err(e) => {
             let msg = e.to_string();
             if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
-                state.sse.broadcast_for_user(
+                state.sse.broadcast_for_user_in_workspace(
                     &user.user_id,
+                    auth_workspace_id.as_deref(),
                     AppEvent::AuthRequired {
                         extension_name: req.extension_name.clone(),
                         instructions: Some(msg.clone()),
@@ -279,6 +286,32 @@ pub async fn clear_auth_mode(state: &GatewayState, user_id: &str) {
             thread.pending_auth = None;
         }
     }
+}
+
+async fn active_auth_workspace_scope(state: &GatewayState, user_id: &str) -> Option<String> {
+    let session_manager = state.session_manager.as_ref()?;
+    let session = session_manager.get_or_create_session(user_id).await;
+    let sess = session.lock().await;
+    let thread_id = sess.active_thread?;
+    sess.threads
+        .get(&thread_id)
+        .and_then(|thread| thread.pending_auth.as_ref())
+        .and_then(|pending| pending.workspace_id.clone())
+}
+
+async fn resolve_auth_event_workspace_scope(
+    state: &GatewayState,
+    user: &crate::channels::web::auth::UserIdentity,
+    requested_workspace: Option<&str>,
+) -> Result<Option<String>, (StatusCode, String)> {
+    let requested_workspace_id = resolve_requested_workspace_id(state, user, requested_workspace)
+        .await?
+        .map(|id| id.to_string());
+    if requested_workspace_id.is_some() {
+        return Ok(requested_workspace_id);
+    }
+
+    Ok(active_auth_workspace_scope(state, &user.user_id).await)
 }
 
 pub async fn chat_events_handler(
@@ -396,12 +429,12 @@ pub async fn chat_history_handler(
         let owned = store
             .conversation_belongs_to_user(thread_id, &identity.user_id, workspace_id)
             .await
-            .unwrap_or(false);
+            .map_err(|e| {
+                tracing::error!(thread_id = %thread_id, error = %e, "DB error during thread ownership check");
+                (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string())
+            })?;
         if !owned {
-            let sess = session.lock().await;
-            if !sess.threads.contains_key(&thread_id) {
-                return Err((StatusCode::NOT_FOUND, "Thread not found".to_string()));
-            }
+            return Err((StatusCode::NOT_FOUND, "Thread not found".to_string()));
         }
     }
 

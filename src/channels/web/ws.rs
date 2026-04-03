@@ -307,8 +307,9 @@ async fn handle_client_message(
                 {
                     Ok(result) => {
                         if result.verification.is_some() {
-                            state.sse.broadcast_for_user(
+                            state.sse.broadcast_for_user_in_workspace(
                                 user_id,
+                                workspace_id,
                                 crate::channels::web::types::AppEvent::AuthRequired {
                                     extension_name: extension_name.clone(),
                                     instructions: Some(result.message),
@@ -318,8 +319,9 @@ async fn handle_client_message(
                             );
                         } else {
                             crate::channels::web::server::clear_auth_mode(state, user_id).await;
-                            state.sse.broadcast_for_user(
+                            state.sse.broadcast_for_user_in_workspace(
                                 user_id,
+                                workspace_id,
                                 crate::channels::web::types::AppEvent::AuthCompleted {
                                     extension_name,
                                     success: true,
@@ -331,8 +333,9 @@ async fn handle_client_message(
                     Err(e) => {
                         let msg = format!("Auth failed: {}", e);
                         if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
-                            state.sse.broadcast_for_user(
+                            state.sse.broadcast_for_user_in_workspace(
                                 user_id,
+                                workspace_id,
                                 crate::channels::web::types::AppEvent::AuthRequired {
                                     extension_name: extension_name.clone(),
                                     instructions: Some(msg.clone()),
@@ -366,6 +369,8 @@ async fn handle_client_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::Arc;
 
     #[test]
     fn test_ws_connection_tracker() {
@@ -541,8 +546,75 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_handle_client_auth_token_broadcasts_workspace_scoped_auth_completed() {
+        use tokio::time::{Duration, timeout};
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
+
+        let channel_name = "scoped-ws-channel";
+        std::fs::write(
+            wasm_channels_dir
+                .path()
+                .join(format!("{channel_name}.wasm")),
+            b"\0asm fake",
+        )
+        .expect("write fake wasm");
+        let caps = serde_json::json!({
+            "type": "channel",
+            "name": channel_name,
+            "setup": {
+                "required_secrets": [
+                    {"name": "BOT_TOKEN", "prompt": "Enter bot token"}
+                ]
+            }
+        });
+        std::fs::write(
+            wasm_channels_dir
+                .path()
+                .join(format!("{channel_name}.capabilities.json")),
+            serde_json::to_string(&caps).expect("serialize caps"),
+        )
+        .expect("write capabilities");
+
+        let state = make_test_state_with_extension_manager(None, Some(ext_mgr)).await;
+        let (direct_tx, _direct_rx) = mpsc::channel(16);
+        let mut receiver = state.sse.sender().subscribe();
+
+        handle_client_message(
+            WsClientMessage::AuthToken {
+                extension_name: channel_name.to_string(),
+                token: "secret".to_string(),
+            },
+            &state,
+            "user1",
+            Some("workspace-123"),
+            &direct_tx,
+        )
+        .await;
+
+        let scoped = timeout(Duration::from_millis(250), receiver.recv())
+            .await
+            .expect("workspace-scoped auth event")
+            .expect("broadcast event");
+        assert_eq!(scoped.user_id.as_deref(), Some("user1"));
+        assert_eq!(scoped.workspace_id.as_deref(), Some("workspace-123"));
+        assert!(matches!(
+            scoped.event,
+            crate::channels::web::types::AppEvent::AuthCompleted { .. }
+        ));
+    }
+
     /// Helper to create a GatewayState for testing.
     async fn make_test_state(msg_tx: Option<mpsc::Sender<IncomingMessage>>) -> GatewayState {
+        make_test_state_with_extension_manager(msg_tx, None).await
+    }
+
+    async fn make_test_state_with_extension_manager(
+        msg_tx: Option<mpsc::Sender<IncomingMessage>>,
+        extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
+    ) -> GatewayState {
         use crate::channels::web::sse::SseManager;
 
         GatewayState {
@@ -553,7 +625,7 @@ mod tests {
             session_manager: None,
             log_broadcaster: None,
             log_level_handle: None,
-            extension_manager: None,
+            extension_manager,
             tool_registry: None,
             store: None,
             job_manager: None,
@@ -576,5 +648,43 @@ mod tests {
             secrets_store: None,
             db_auth: None,
         }
+    }
+
+    fn test_secrets_store() -> Arc<dyn crate::secrets::SecretsStore + Send + Sync> {
+        Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+            crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                "test-key-at-least-32-chars-long!!".to_string(),
+            ))
+            .expect("crypto"),
+        )))
+    }
+
+    fn test_ext_mgr(
+        secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
+    ) -> (
+        Arc<crate::extensions::ExtensionManager>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let tool_registry = Arc::new(crate::tools::ToolRegistry::new());
+        let mcp_sm = Arc::new(crate::tools::mcp::session::McpSessionManager::new());
+        let mcp_pm = Arc::new(crate::tools::mcp::process::McpProcessManager::new());
+        let wasm_tools_dir = tempfile::tempdir().expect("temp wasm tools dir");
+        let wasm_channels_dir = tempfile::tempdir().expect("temp wasm channels dir");
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            mcp_sm,
+            mcp_pm,
+            secrets,
+            tool_registry,
+            None,
+            None,
+            wasm_tools_dir.path().to_path_buf(),
+            wasm_channels_dir.path().to_path_buf(),
+            None,
+            "test".to_string(),
+            None,
+            vec![],
+        ));
+        (ext_mgr, wasm_tools_dir, wasm_channels_dir)
     }
 }

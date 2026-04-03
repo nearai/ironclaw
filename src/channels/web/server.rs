@@ -993,6 +993,8 @@ async fn oauth_callback_handler(
         }
     };
 
+    let auth_workspace_id = active_auth_workspace_scope(&state, &flow.user_id).await;
+
     // Check flow expiry (5 minutes, matching TCP listener timeout)
     if flow.created_at.elapsed() > oauth_defaults::OAUTH_FLOW_EXPIRY {
         tracing::warn!(
@@ -1001,8 +1003,9 @@ async fn oauth_callback_handler(
         );
         // Notify UI so auth card can show error instead of staying stuck
         if let Some(ref sse) = flow.sse_manager {
-            sse.broadcast_for_user(
+            sse.broadcast_for_user_in_workspace(
                 &flow.user_id,
+                auth_workspace_id.as_deref(),
                 AppEvent::AuthCompleted {
                     extension_name: flow.extension_name.clone(),
                     success: false,
@@ -1178,8 +1181,9 @@ async fn oauth_callback_handler(
 
     // Broadcast event to notify the web UI
     if let Some(ref sse) = flow.sse_manager {
-        sse.broadcast_for_user(
+        sse.broadcast_for_user_in_workspace(
             &flow.user_id,
+            auth_workspace_id.as_deref(),
             AppEvent::AuthCompleted {
                 extension_name: flow.extension_name,
                 success,
@@ -1721,12 +1725,16 @@ async fn chat_approval_handler(
 async fn chat_auth_token_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Json(req): Json<AuthTokenRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Extension manager not available".to_string(),
     ))?;
+    let auth_workspace_id =
+        resolve_auth_event_workspace_scope(&state, &user, workspace_query.workspace.as_deref())
+            .await?;
 
     match ext_mgr
         .configure_token(&req.extension_name, &req.token, &user.user_id)
@@ -1744,8 +1752,9 @@ async fn chat_auth_token_handler(
             resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
 
             if result.verification.is_some() {
-                state.sse.broadcast_for_user(
+                state.sse.broadcast_for_user_in_workspace(
                     &user.user_id,
+                    auth_workspace_id.as_deref(),
                     AppEvent::AuthRequired {
                         extension_name: req.extension_name.clone(),
                         instructions: Some(result.message),
@@ -1757,8 +1766,9 @@ async fn chat_auth_token_handler(
                 // Clear auth mode on the active thread
                 clear_auth_mode(&state, &user.user_id).await;
 
-                state.sse.broadcast_for_user(
+                state.sse.broadcast_for_user_in_workspace(
                     &user.user_id,
+                    auth_workspace_id.as_deref(),
                     AppEvent::AuthCompleted {
                         extension_name: req.extension_name.clone(),
                         success: true,
@@ -1766,8 +1776,9 @@ async fn chat_auth_token_handler(
                     },
                 );
             } else {
-                state.sse.broadcast_for_user(
+                state.sse.broadcast_for_user_in_workspace(
                     &user.user_id,
+                    auth_workspace_id.as_deref(),
                     AppEvent::AuthCompleted {
                         extension_name: req.extension_name.clone(),
                         success: false,
@@ -1782,8 +1793,9 @@ async fn chat_auth_token_handler(
             let msg = e.to_string();
             // Re-emit auth_required for retry on validation errors
             if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
-                state.sse.broadcast_for_user(
+                state.sse.broadcast_for_user_in_workspace(
                     &user.user_id,
+                    auth_workspace_id.as_deref(),
                     AppEvent::AuthRequired {
                         extension_name: req.extension_name.clone(),
                         instructions: Some(msg.clone()),
@@ -1818,6 +1830,32 @@ pub async fn clear_auth_mode(state: &GatewayState, user_id: &str) {
             thread.pending_auth = None;
         }
     }
+}
+
+async fn active_auth_workspace_scope(state: &GatewayState, user_id: &str) -> Option<String> {
+    let session_manager = state.session_manager.as_ref()?;
+    let session = session_manager.get_or_create_session(user_id).await;
+    let sess = session.lock().await;
+    let thread_id = sess.active_thread?;
+    sess.threads
+        .get(&thread_id)
+        .and_then(|thread| thread.pending_auth.as_ref())
+        .and_then(|pending| pending.workspace_id.clone())
+}
+
+async fn resolve_auth_event_workspace_scope(
+    state: &GatewayState,
+    user: &UserIdentity,
+    requested_workspace: Option<&str>,
+) -> Result<Option<String>, (StatusCode, String)> {
+    let requested_workspace_id = resolve_requested_workspace_id(state, user, requested_workspace)
+        .await?
+        .map(|id| id.to_string());
+    if requested_workspace_id.is_some() {
+        return Ok(requested_workspace_id);
+    }
+
+    Ok(active_auth_workspace_scope(state, &user.user_id).await)
 }
 
 async fn chat_events_handler(
@@ -1962,7 +2000,7 @@ async fn chat_history_handler(
                 tracing::error!(thread_id = %thread_id, error = %e, "DB error during thread ownership check");
                 (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string())
             })?;
-        if !owned && !sess.threads.contains_key(&thread_id) {
+        if !owned {
             return Err((StatusCode::NOT_FOUND, "Thread not found".to_string()));
         }
     }
@@ -2770,6 +2808,7 @@ async fn extensions_setup_submit_handler(
         StatusCode::NOT_IMPLEMENTED,
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
+    let auth_workspace_id = active_auth_workspace_scope(&state, &user.user_id).await;
 
     // Clear auth mode regardless of outcome so the next user message goes
     // through to the LLM instead of being intercepted as a token.
@@ -2795,8 +2834,9 @@ async fn extensions_setup_submit_handler(
             if result.verification.is_none() {
                 // Broadcast auth_completed so the chat UI can dismiss any in-progress
                 // auth card or setup modal that was triggered by tool_auth/tool_activate.
-                state.sse.broadcast_for_user(
+                state.sse.broadcast_for_user_in_workspace(
                     &user.user_id,
+                    auth_workspace_id.as_deref(),
                     AppEvent::AuthCompleted {
                         extension_name: name.clone(),
                         success: result.activated,
@@ -3159,13 +3199,16 @@ mod tests {
     // --- OAuth callback handler tests ---
 
     /// Build a minimal `GatewayState` for testing the OAuth callback handler.
-    fn test_gateway_state(ext_mgr: Option<Arc<ExtensionManager>>) -> Arc<GatewayState> {
+    fn test_gateway_state(
+        ext_mgr: Option<Arc<ExtensionManager>>,
+        session_manager: Option<Arc<SessionManager>>,
+    ) -> Arc<GatewayState> {
         Arc::new(GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
             sse: Arc::new(SseManager::new()),
             workspace: None,
             workspace_pool: None,
-            session_manager: None,
+            session_manager,
             log_broadcaster: None,
             log_level_handle: None,
             extension_manager: ext_mgr,
@@ -3389,7 +3432,7 @@ mod tests {
         )
         .expect("write capabilities");
 
-        let state = test_gateway_state(Some(ext_mgr));
+        let state = test_gateway_state(Some(ext_mgr), None);
         let app = Router::new()
             .route(
                 "/api/extensions/{name}/setup",
@@ -3473,7 +3516,7 @@ mod tests {
             .set_test_telegram_pending_verification("iclaw-7qk2m9", Some("test_hot_bot"))
             .await;
 
-        let state = test_gateway_state(Some(ext_mgr));
+        let state = test_gateway_state(Some(ext_mgr), None);
         let mut receiver = state.sse.sender().subscribe();
         let app = Router::new()
             .route(
@@ -3535,6 +3578,87 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_chat_auth_token_handler_broadcasts_workspace_scoped_auth_required() {
+        use axum::body::Body;
+        use tokio::time::{Duration, timeout};
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
+
+        std::fs::write(
+            wasm_channels_dir.path().join("telegram.wasm"),
+            b"\0asm fake",
+        )
+        .expect("write fake telegram wasm");
+        let caps = serde_json::json!({
+            "type": "channel",
+            "name": "telegram",
+            "setup": {
+                "required_secrets": [
+                    {
+                        "name": "telegram_bot_token",
+                        "prompt": "Enter your Telegram Bot API token (from @BotFather)"
+                    }
+                ]
+            }
+        });
+        std::fs::write(
+            wasm_channels_dir.path().join("telegram.capabilities.json"),
+            serde_json::to_string(&caps).expect("serialize telegram caps"),
+        )
+        .expect("write telegram caps");
+
+        ext_mgr
+            .set_test_telegram_pending_verification("iclaw-7qk2m9", Some("test_hot_bot"))
+            .await;
+
+        let session_manager = Arc::new(SessionManager::new());
+        let state = test_gateway_state(Some(ext_mgr), Some(Arc::clone(&session_manager)));
+        let session = session_manager.get_or_create_session("test").await;
+        {
+            let mut sess = session.lock().await;
+            let thread = sess.create_thread(Some("gateway"));
+            thread.enter_auth_mode("telegram".to_string(), Some("workspace-123".to_string()));
+        }
+
+        let mut receiver = state.sse.sender().subscribe();
+
+        let app = Router::new()
+            .route("/api/chat/auth-token", post(chat_auth_token_handler))
+            .with_state(state);
+
+        let req_body = serde_json::json!({
+            "extension_name": "telegram",
+            "token": "123456789:ABCdefGhI"
+        });
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/chat/auth-token")
+            .header("content-type", "application/json")
+            .body(Body::from(req_body.to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let scoped = timeout(Duration::from_millis(250), receiver.recv())
+            .await
+            .expect("workspace-scoped auth event")
+            .expect("broadcast event");
+        assert_eq!(scoped.user_id.as_deref(), Some("test"));
+        assert_eq!(scoped.workspace_id.as_deref(), Some("workspace-123"));
+        assert!(matches!(scoped.event, AppEvent::AuthRequired { .. }));
+    }
+
     fn expired_flow_created_at() -> Option<std::time::Instant> {
         std::time::Instant::now()
             .checked_sub(oauth_defaults::OAUTH_FLOW_EXPIRY + std::time::Duration::from_secs(1))
@@ -3544,7 +3668,7 @@ mod tests {
     async fn test_csp_header_present_on_responses() {
         use std::net::SocketAddr;
 
-        let state = test_gateway_state(None);
+        let state = test_gateway_state(None, None);
 
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let auth = CombinedAuthState::from(crate::channels::web::auth::MultiAuthState::single(
@@ -3599,7 +3723,7 @@ mod tests {
         use axum::body::Body;
         use tower::ServiceExt;
 
-        let state = test_gateway_state(None);
+        let state = test_gateway_state(None, None);
         let app = test_oauth_router(state);
 
         let req = axum::http::Request::builder()
@@ -3624,7 +3748,7 @@ mod tests {
         use axum::body::Body;
         use tower::ServiceExt;
 
-        let state = test_gateway_state(None);
+        let state = test_gateway_state(None, None);
         let app = test_oauth_router(state);
 
         let req = axum::http::Request::builder()
@@ -3659,7 +3783,7 @@ mod tests {
             )));
         let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets);
 
-        let state = test_gateway_state(Some(ext_mgr));
+        let state = test_gateway_state(Some(ext_mgr), None);
         let app = test_oauth_router(state);
 
         let req = axum::http::Request::builder()
@@ -3728,7 +3852,7 @@ mod tests {
             .await
             .insert("expired_state".to_string(), flow);
 
-        let state = test_gateway_state(Some(ext_mgr));
+        let state = test_gateway_state(Some(ext_mgr), None);
         let app = test_oauth_router(state);
 
         let req = axum::http::Request::builder()
@@ -3799,7 +3923,7 @@ mod tests {
             .await
             .insert("expired_state".to_string(), flow);
 
-        let state = test_gateway_state(Some(ext_mgr));
+        let state = test_gateway_state(Some(ext_mgr), None);
         let app = test_oauth_router(state);
 
         let req = axum::http::Request::builder()
@@ -3832,7 +3956,7 @@ mod tests {
         use tower::ServiceExt;
 
         // No extension manager set → graceful error
-        let state = test_gateway_state(None);
+        let state = test_gateway_state(None, None);
         let app = test_oauth_router(state);
 
         let req = axum::http::Request::builder()
@@ -3905,7 +4029,7 @@ mod tests {
             .await
             .insert("test_nonce".to_string(), flow);
 
-        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let state = test_gateway_state(Some(ext_mgr.clone()), None);
         let app = test_oauth_router(state);
 
         // Send callback with instance prefix: "myinstance:test_nonce"
@@ -3993,7 +4117,7 @@ mod tests {
             .await
             .insert("test_nonce".to_string(), flow);
 
-        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let state = test_gateway_state(Some(ext_mgr.clone()), None);
         let app = test_oauth_router(state);
         let versioned_state =
             crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", Some("myinstance"));
@@ -4076,7 +4200,7 @@ mod tests {
             .await
             .insert("test_nonce".to_string(), flow);
 
-        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let state = test_gateway_state(Some(ext_mgr.clone()), None);
         let app = test_oauth_router(state);
         let versioned_state =
             crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", None);
@@ -4140,7 +4264,7 @@ mod tests {
             .await
             .insert("test_nonce".to_string(), flow);
 
-        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let state = test_gateway_state(Some(ext_mgr.clone()), None);
         let app = test_oauth_router(state);
         let versioned_state =
             crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", Some("myinstance"));
@@ -4240,7 +4364,7 @@ mod tests {
             .await
             .insert("test_nonce".to_string(), flow);
 
-        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let state = test_gateway_state(Some(ext_mgr.clone()), None);
         let app = test_oauth_router(state);
         let versioned_state =
             crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", None);
@@ -4358,7 +4482,7 @@ mod tests {
 
         let secrets = test_secrets_store();
         let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets);
-        let state = test_gateway_state(Some(ext_mgr));
+        let state = test_gateway_state(Some(ext_mgr), None);
         let app = test_relay_oauth_router(state);
 
         // Callback without state param should be rejected
@@ -4402,7 +4526,7 @@ mod tests {
             .expect("store nonce");
 
         let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets);
-        let state = test_gateway_state(Some(ext_mgr));
+        let state = test_gateway_state(Some(ext_mgr), None);
         let app = test_relay_oauth_router(state);
 
         // Callback with wrong state param
@@ -4447,7 +4571,7 @@ mod tests {
             .expect("store nonce");
 
         let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets.clone());
-        let state = test_gateway_state(Some(ext_mgr));
+        let state = test_gateway_state(Some(ext_mgr), None);
         let app = test_relay_oauth_router(state);
 
         // Callback with correct state param — will pass CSRF check

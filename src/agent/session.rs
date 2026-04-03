@@ -152,6 +152,9 @@ pub struct PendingAuth {
     /// When this auth mode was entered. Used for TTL expiry.
     #[serde(default = "Utc::now")]
     pub created_at: DateTime<Utc>,
+    /// Workspace scope of the thread when auth mode was entered.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 impl PendingAuth {
@@ -407,10 +410,11 @@ impl Thread {
 
     /// Enter auth mode: next user message will be routed directly to
     /// the credential store, bypassing the normal pipeline entirely.
-    pub fn enter_auth_mode(&mut self, extension_name: String) {
+    pub fn enter_auth_mode(&mut self, extension_name: String, workspace_id: Option<String>) {
         self.pending_auth = Some(PendingAuth {
             extension_name,
             created_at: Utc::now(),
+            workspace_id,
         });
         self.updated_at = Utc::now();
     }
@@ -910,10 +914,11 @@ mod tests {
         let mut thread = Thread::new(Uuid::new_v4(), None);
         assert!(thread.pending_auth.is_none());
 
-        thread.enter_auth_mode("telegram".to_string());
+        thread.enter_auth_mode("telegram".to_string(), Some("workspace-123".to_string()));
         assert!(thread.pending_auth.is_some());
         let pending = thread.pending_auth.as_ref().unwrap();
         assert_eq!(pending.extension_name, "telegram");
+        assert_eq!(pending.workspace_id.as_deref(), Some("workspace-123"));
         assert!(pending.created_at >= before);
         assert!(!pending.is_expired());
     }
@@ -921,12 +926,13 @@ mod tests {
     #[test]
     fn test_take_pending_auth() {
         let mut thread = Thread::new(Uuid::new_v4(), None);
-        thread.enter_auth_mode("notion".to_string());
+        thread.enter_auth_mode("notion".to_string(), None);
 
         let pending = thread.take_pending_auth();
         assert!(pending.is_some());
         let pending = pending.unwrap();
         assert_eq!(pending.extension_name, "notion");
+        assert!(pending.workspace_id.is_none());
         assert!(!pending.is_expired());
         // Should be cleared after take
         assert!(thread.pending_auth.is_none());
@@ -936,7 +942,7 @@ mod tests {
     #[test]
     fn test_pending_auth_serialization() {
         let mut thread = Thread::new(Uuid::new_v4(), None);
-        thread.enter_auth_mode("openai".to_string());
+        thread.enter_auth_mode("openai".to_string(), Some("workspace-123".to_string()));
 
         let json = serde_json::to_string(&thread).expect("should serialize");
         assert!(json.contains("pending_auth"));
@@ -947,6 +953,7 @@ mod tests {
         assert!(restored.pending_auth.is_some());
         let pending = restored.pending_auth.unwrap();
         assert_eq!(pending.extension_name, "openai");
+        assert_eq!(pending.workspace_id.as_deref(), Some("workspace-123"));
         assert!(!pending.is_expired());
     }
 
@@ -955,6 +962,7 @@ mod tests {
         let mut pending = PendingAuth {
             extension_name: "test".to_string(),
             created_at: Utc::now(),
+            workspace_id: None,
         };
         assert!(!pending.is_expired());
         // Backdate beyond the TTL

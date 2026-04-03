@@ -2,3 +2,4 @@
 
 mod multi_tenant;
 mod no_silent_drop;
+mod routing_scope;

@@ -1686,7 +1686,7 @@ impl Agent {
         {
             let mut sess = session.lock().await;
             if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                thread.enter_auth_mode(ext_name.clone());
+                thread.enter_auth_mode(ext_name.clone(), message.workspace_id.clone());
                 thread.complete_turn(&instructions);
                 // User message already persisted at turn start; save auth instructions
                 self.persist_assistant_response(
@@ -1769,7 +1769,10 @@ impl Agent {
                 {
                     let mut sess = session.lock().await;
                     if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        thread.enter_auth_mode(pending.extension_name.clone());
+                        thread.enter_auth_mode(
+                            pending.extension_name.clone(),
+                            pending.workspace_id.clone(),
+                        );
                     }
                 }
                 let _ = self
@@ -1794,7 +1797,10 @@ impl Agent {
                     {
                         let mut sess = session.lock().await;
                         if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                            thread.enter_auth_mode(pending.extension_name.clone());
+                            thread.enter_auth_mode(
+                                pending.extension_name.clone(),
+                                pending.workspace_id.clone(),
+                            );
                         }
                     }
                     let _ = self

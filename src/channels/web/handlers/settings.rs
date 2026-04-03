@@ -158,9 +158,8 @@ pub async fn settings_set_handler(
 
     // Guard: cannot remove a custom provider that is currently active.
     if key == "llm_custom_providers" {
-        if scope.is_none() {
-            guard_active_provider_not_removed(store, &user.user_id, &body.value).await?;
-        }
+        guard_active_provider_not_removed(store.as_ref(), &user.user_id, scope, &body.value)
+            .await?;
         validate_custom_providers(&body.value)?;
     }
 
@@ -240,18 +239,41 @@ fn validate_custom_providers(value: &serde_json::Value) -> Result<(), StatusCode
 
 /// Returns `Err(409)` if the active `llm_backend` is a custom provider that
 /// would be removed by the incoming update to `llm_custom_providers`.
-async fn guard_active_provider_not_removed(
-    store: &Arc<dyn crate::db::Database>,
+async fn get_setting_for_scope(
+    store: &dyn crate::db::Database,
     user_id: &str,
+    scope: Option<Uuid>,
+    key: &str,
+) -> Result<Option<serde_json::Value>, StatusCode> {
+    match scope {
+        Some(workspace_id) => store.get_setting_for_workspace(workspace_id, key).await,
+        None => store.get_setting(user_id, key).await,
+    }
+    .map_err(|e| {
+        tracing::error!(
+            user_id = %user_id,
+            workspace_id = ?scope,
+            key = %key,
+            "Failed to load setting: {}",
+            e
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
+async fn guard_active_provider_not_removed(
+    store: &dyn crate::db::Database,
+    user_id: &str,
+    scope: Option<Uuid>,
     new_value: &serde_json::Value,
 ) -> Result<(), StatusCode> {
     // Get the currently active backend.
-    let active_backend = match store.get_setting(user_id, "llm_backend").await {
-        Ok(Some(v)) => match v.as_str() {
+    let active_backend = match get_setting_for_scope(store, user_id, scope, "llm_backend").await? {
+        Some(v) => match v.as_str() {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => return Ok(()),
         },
-        _ => return Ok(()),
+        None => return Ok(()),
     };
 
     // Parse the incoming provider list.
@@ -261,10 +283,11 @@ async fn guard_active_provider_not_removed(
     };
 
     // Check whether the active backend exists in the OLD custom providers list.
-    let old_providers_value = match store.get_setting(user_id, "llm_custom_providers").await {
-        Ok(Some(v)) => v,
-        _ => return Ok(()),
-    };
+    let old_providers_value =
+        match get_setting_for_scope(store, user_id, scope, "llm_custom_providers").await? {
+            Some(v) => v,
+            None => return Ok(()),
+        };
     let old_providers = match old_providers_value.as_array() {
         Some(arr) => arr,
         None => return Ok(()),
@@ -306,9 +329,14 @@ pub async fn settings_delete_handler(
 
     // Guard: deleting llm_custom_providers is equivalent to setting it to [].
     // Reject if the active backend is a custom provider that would be removed.
-    if key == "llm_custom_providers" && scope.is_none() {
-        guard_active_provider_not_removed(store, &user.user_id, &serde_json::Value::Array(vec![]))
-            .await?;
+    if key == "llm_custom_providers" {
+        guard_active_provider_not_removed(
+            store.as_ref(),
+            &user.user_id,
+            scope,
+            &serde_json::Value::Array(vec![]),
+        )
+        .await?;
     }
 
     match scope {
@@ -660,7 +688,11 @@ async fn annotate_secret_key_presence(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    use chrono::Utc;
     use uuid::Uuid;
+
+    use crate::db::{Database, SettingsStore, UserRecord, UserStore, WorkspaceMgmtStore};
 
     #[test]
     fn test_mask_settings_api_keys_builtin_overrides() {
@@ -764,6 +796,46 @@ mod tests {
             secrets_store: Some(secrets),
             db_auth: None,
         }
+    }
+
+    fn test_user(id: &str) -> UserRecord {
+        let now = Utc::now();
+        UserRecord {
+            id: id.to_string(),
+            email: Some(format!("{id}@example.com")),
+            display_name: id.to_string(),
+            status: "active".to_string(),
+            role: "admin".to_string(),
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            created_by: None,
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    async fn test_settings_store() -> (
+        Arc<crate::db::libsql::LibSqlBackend>,
+        crate::db::WorkspaceRecord,
+    ) {
+        let store = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_memory()
+                .await
+                .unwrap(),
+        );
+        store.run_migrations().await.unwrap();
+        store.create_user(&test_user("alice")).await.unwrap();
+        let workspace = store
+            .create_workspace(
+                "Team Space",
+                "team-space",
+                "",
+                "alice",
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        (store, workspace)
     }
 
     #[tokio::test]
@@ -880,6 +952,65 @@ mod tests {
                 .is_err(),
             "workspace-scoped secrets should not be written to the caller scope"
         );
+    }
+
+    #[tokio::test]
+    async fn test_guard_active_provider_not_removed_for_workspace_updates() {
+        let (store, workspace) = test_settings_store().await;
+        store
+            .set_setting_for_workspace(workspace.id, "llm_backend", &serde_json::json!("my-llm"))
+            .await
+            .unwrap();
+        store
+            .set_setting_for_workspace(
+                workspace.id,
+                "llm_custom_providers",
+                &serde_json::json!([
+                    { "id": "my-llm", "adapter": "open_ai_completions" },
+                    { "id": "backup", "adapter": "open_ai_completions" }
+                ]),
+            )
+            .await
+            .unwrap();
+
+        let db: Arc<dyn Database> = store.clone();
+        let err = guard_active_provider_not_removed(
+            db.as_ref(),
+            "alice",
+            Some(workspace.id),
+            &serde_json::json!([{ "id": "backup", "adapter": "open_ai_completions" }]),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_guard_active_provider_not_removed_for_workspace_deletes() {
+        let (store, workspace) = test_settings_store().await;
+        store
+            .set_setting_for_workspace(workspace.id, "llm_backend", &serde_json::json!("my-llm"))
+            .await
+            .unwrap();
+        store
+            .set_setting_for_workspace(
+                workspace.id,
+                "llm_custom_providers",
+                &serde_json::json!([{ "id": "my-llm", "adapter": "open_ai_completions" }]),
+            )
+            .await
+            .unwrap();
+
+        let db: Arc<dyn Database> = store.clone();
+        let err = guard_active_provider_not_removed(
+            db.as_ref(),
+            "alice",
+            Some(workspace.id),
+            &serde_json::Value::Array(vec![]),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, StatusCode::CONFLICT);
     }
 
     #[tokio::test]

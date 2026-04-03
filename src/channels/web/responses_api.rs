@@ -727,15 +727,32 @@ pub async fn create_response_handler(
     let model = req.model.clone();
     let stream = req.stream.unwrap_or(false);
     let user_id = user.user_id.clone();
+    let event_workspace_id = msg.workspace_id.clone();
 
     if stream {
-        handle_streaming(state, msg, resp_id, model, thread_id_str, user_id)
-            .await
-            .map(IntoResponse::into_response)
+        handle_streaming(
+            state,
+            msg,
+            resp_id,
+            model,
+            thread_id_str,
+            user_id,
+            event_workspace_id,
+        )
+        .await
+        .map(IntoResponse::into_response)
     } else {
-        handle_non_streaming(state, msg, resp_id, model, thread_id_str, &user_id)
-            .await
-            .map(IntoResponse::into_response)
+        handle_non_streaming(
+            state,
+            msg,
+            resp_id,
+            model,
+            thread_id_str,
+            &user_id,
+            event_workspace_id,
+        )
+        .await
+        .map(IntoResponse::into_response)
     }
 }
 
@@ -746,11 +763,12 @@ async fn handle_non_streaming(
     model: String,
     thread_id: String,
     user_id: &str,
+    workspace_id: Option<String>,
 ) -> Result<Json<ResponseObject>, ApiError> {
     // Subscribe BEFORE sending so we don't miss events.
     let mut event_stream = state
         .sse
-        .subscribe_raw(Some(user_id.to_string()))
+        .subscribe_raw_scoped(Some(user_id.to_string()), workspace_id)
         .ok_or_else(|| {
             api_error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -790,14 +808,18 @@ async fn handle_streaming(
     model: String,
     thread_id: String,
     user_id: String,
+    workspace_id: Option<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>> + Send>, ApiError> {
-    let event_stream = state.sse.subscribe_raw(Some(user_id)).ok_or_else(|| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Too many concurrent connections",
-            "server_error",
-        )
-    })?;
+    let event_stream = state
+        .sse
+        .subscribe_raw_scoped(Some(user_id), workspace_id)
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Too many concurrent connections",
+                "server_error",
+            )
+        })?;
 
     send_to_agent(&state, msg).await?;
 

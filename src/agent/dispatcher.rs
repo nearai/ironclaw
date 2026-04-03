@@ -937,7 +937,10 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         {
                             let mut sess = self.session.lock().await;
                             if let Some(thread) = sess.threads.get_mut(&self.thread_id) {
-                                thread.enter_auth_mode(ext_name.clone());
+                                thread.enter_auth_mode(
+                                    ext_name.clone(),
+                                    self.message.workspace_id.clone(),
+                                );
                             }
                         }
                         let _ = self

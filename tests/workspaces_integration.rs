@@ -97,6 +97,23 @@ async fn start_workspace_server(
     addr
 }
 
+async fn start_workspace_server_with_state(
+    store: Arc<LibSqlBackend>,
+    session_manager: Arc<SessionManager>,
+    msg_tx: Option<tokio::sync::mpsc::Sender<IncomingMessage>>,
+) -> (
+    SocketAddr,
+    Arc<ironclaw::channels::web::server::GatewayState>,
+) {
+    let mut builder = TestGatewayBuilder::new()
+        .store(store.clone())
+        .session_manager(session_manager);
+    if let Some(tx) = msg_tx {
+        builder = builder.msg_tx(tx);
+    }
+    builder.start_multi(workspace_auth()).await.unwrap()
+}
+
 #[tokio::test]
 async fn workspace_membership_endpoints_enforce_membership_and_admin_updates() {
     let store = setup_store().await;
@@ -166,6 +183,65 @@ async fn workspace_membership_endpoints_enforce_membership_and_admin_updates() {
             .iter()
             .any(|member| member["user_id"] == BOB_USER_ID)
     );
+}
+
+#[tokio::test]
+async fn workspace_chat_history_rejects_active_thread_from_wrong_workspace() {
+    let store = setup_store().await;
+    store
+        .create_workspace("Alpha", "alpha", "", ALICE_USER_ID, &json!({}))
+        .await
+        .unwrap();
+    store
+        .create_workspace("Beta", "beta", "", ALICE_USER_ID, &json!({}))
+        .await
+        .unwrap();
+
+    let session_manager = Arc::new(SessionManager::new());
+    let (addr, _state) =
+        start_workspace_server_with_state(store, Arc::clone(&session_manager), None).await;
+    let client = reqwest::Client::new();
+
+    let create_thread = client
+        .post(format!("http://{addr}/api/chat/thread/new?workspace=alpha"))
+        .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_thread.status(), 200);
+    let thread: serde_json::Value = create_thread.json().await.unwrap();
+    let thread_id = thread["id"].as_str().unwrap().to_string();
+    let thread_uuid = Uuid::parse_str(&thread_id).unwrap();
+
+    let session = session_manager.get_or_create_session(ALICE_USER_ID).await;
+    {
+        let mut sess = session.lock().await;
+        let thread = sess.threads.get_mut(&thread_uuid).expect("active thread");
+        thread.start_turn("workspace-only prompt");
+        thread.complete_turn("workspace-only response");
+    }
+
+    let visible = client
+        .get(format!(
+            "http://{addr}/api/chat/history?thread_id={thread_id}&workspace=alpha"
+        ))
+        .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(visible.status(), 200);
+    let visible_history: serde_json::Value = visible.json().await.unwrap();
+    assert_eq!(visible_history["turns"].as_array().unwrap().len(), 1);
+
+    let hidden = client
+        .get(format!(
+            "http://{addr}/api/chat/history?thread_id={thread_id}&workspace=beta"
+        ))
+        .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hidden.status(), 404);
 }
 
 #[tokio::test]
