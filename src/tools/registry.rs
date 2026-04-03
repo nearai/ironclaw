@@ -98,7 +98,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "image_generate",
     "image_edit",
     "image_analyze",
-    "tool_info",
+    // Permission tools
     "tool_permission_set",
     // Aliases (web_fetch is an alias for http in some contexts)
     "web_fetch",
