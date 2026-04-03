@@ -42,6 +42,7 @@ use crate::types::project::ProjectId;
 use crate::types::shared_owner_id;
 use crate::types::step::{StepId, TokenUsage};
 use crate::types::thread::{Thread, ThreadState};
+use ironclaw_common::ValidTimezone;
 
 use super::scripting::{execute_code, json_to_monty, monty_to_json, monty_to_string};
 
@@ -71,13 +72,13 @@ fn thread_source_channel(thread: &Thread) -> Option<String> {
         .map(String::from)
 }
 
-/// Extract user_timezone from thread metadata (set by ConversationManager).
-fn thread_user_timezone(thread: &Thread) -> Option<String> {
+/// Extract and validate user_timezone from thread metadata (set by bridge router).
+fn thread_user_timezone(thread: &Thread) -> Option<ValidTimezone> {
     thread
         .metadata
         .get("user_timezone")
         .and_then(|v| v.as_str())
-        .map(String::from)
+        .and_then(ValidTimezone::parse)
 }
 
 fn normalize_pause_outcome(

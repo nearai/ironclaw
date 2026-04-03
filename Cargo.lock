@@ -3755,6 +3755,7 @@ dependencies = [
 name = "ironclaw_common"
 version = "0.1.0"
 dependencies = [
+ "chrono-tz",
  "serde",
  "serde_json",
 ]
@@ -3767,6 +3768,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "cron",
+ "ironclaw_common",
  "ironclaw_skills",
  "monty",
  "pretty_assertions",

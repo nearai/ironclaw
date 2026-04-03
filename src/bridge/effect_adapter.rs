@@ -184,12 +184,13 @@ impl EffectBridgeAdapter {
                     .or_else(|| params.get("_args").and_then(|a| a.get(2)))
                     .and_then(|v| v.as_str())
                     .unwrap_or("manual");
-                // Use explicit timezone param, fall back to user's channel timezone
+                // Use explicit timezone param, fall back to user's channel timezone.
+                // ValidTimezone::parse filters empty/invalid strings.
                 let timezone = params
                     .get("timezone")
                     .and_then(|v| v.as_str())
-                    .map(String::from)
-                    .or_else(|| context.user_timezone.clone());
+                    .and_then(ironclaw_engine::ValidTimezone::parse)
+                    .or(context.user_timezone.clone());
                 // notify_channels: explicit array, or default to current channel
                 let notify_channels =
                     if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array()) {
@@ -335,8 +336,8 @@ impl EffectBridgeAdapter {
                             let tz = params
                                 .get("timezone")
                                 .and_then(|v| v.as_str())
-                                .map(String::from)
-                                .or_else(|| context.user_timezone.clone());
+                                .and_then(ironclaw_engine::ValidTimezone::parse)
+                                .or(context.user_timezone.clone());
                             updates.cadence = Some(parse_cadence(cadence, tz));
                         }
                         if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array())
@@ -789,7 +790,7 @@ impl EffectExecutor for EffectBridgeAdapter {
 /// from `ThreadExecutionContext::user_timezone`.
 fn parse_cadence(
     s: &str,
-    timezone: Option<String>,
+    timezone: Option<ironclaw_engine::ValidTimezone>,
 ) -> ironclaw_engine::types::mission::MissionCadence {
     use ironclaw_engine::types::mission::MissionCadence;
     let trimmed = s.trim().to_lowercase();

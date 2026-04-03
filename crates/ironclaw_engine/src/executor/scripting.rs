@@ -35,6 +35,7 @@ use crate::types::event::EventKind;
 use crate::types::message::{MessageRole, ThreadMessage};
 use crate::types::step::{ActionResult, LlmResponse, TokenUsage};
 use crate::types::thread::Thread;
+use ironclaw_common::ValidTimezone;
 
 // ── Configuration ───────────────────────────────────────────
 
@@ -226,14 +227,16 @@ fn build_context_inputs(
     names.push("previous_results".into());
     values.push(MontyObject::dict(result_pairs));
 
-    // `user_timezone` — IANA timezone string from the user's channel (e.g. "America/New_York")
+    // `user_timezone` — validated IANA timezone from the user's channel (e.g. "America/New_York")
     let tz = thread
         .metadata
         .get("user_timezone")
         .and_then(|v| v.as_str())
-        .unwrap_or("UTC");
+        .and_then(ValidTimezone::parse)
+        .map(|vtz| vtz.name().to_string())
+        .unwrap_or_else(|| "UTC".into());
     names.push("user_timezone".into());
-    values.push(MontyObject::String(tz.into()));
+    values.push(MontyObject::String(tz));
 
     (names, values)
 }

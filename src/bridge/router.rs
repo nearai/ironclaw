@@ -192,7 +192,7 @@ async fn execute_pending_gate_action(
             .metadata
             .get("user_timezone")
             .and_then(|v| v.as_str())
-            .map(String::from),
+            .and_then(ironclaw_engine::ValidTimezone::parse),
     };
 
     state.effect_adapter.reset_call_count();
@@ -1953,10 +1953,15 @@ async fn handle_with_engine_inner(
 
     // Store user timezone in thread metadata so tools (mission_create) and
     // CodeAct scripts can access it without the LLM having to ask.
-    if let Some(ref tz) = message.timezone {
+    // Only store if the timezone is a valid IANA name.
+    if let Some(vtz) = message
+        .timezone
+        .as_deref()
+        .and_then(ironclaw_engine::ValidTimezone::parse)
+    {
         state
             .thread_manager
-            .set_thread_metadata(thread_id, "user_timezone", tz)
+            .set_thread_metadata(thread_id, "user_timezone", vtz.name())
             .await;
     }
 

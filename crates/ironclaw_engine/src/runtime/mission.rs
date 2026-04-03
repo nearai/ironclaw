@@ -109,7 +109,7 @@ impl MissionManager {
             ref timezone,
         } = mission.cadence
         {
-            mission.next_fire_at = next_cron_fire(expression, timezone.as_deref())?;
+            mission.next_fire_at = next_cron_fire(expression, timezone.as_ref())?;
         }
         mission.notify_channels = notify_channels;
         let id = mission.id;
@@ -233,7 +233,7 @@ impl MissionManager {
                 ref timezone,
             } = mission.cadence
         {
-            mission.next_fire_at = next_cron_fire(expression, timezone.as_deref())?;
+            mission.next_fire_at = next_cron_fire(expression, timezone.as_ref())?;
             self.store.save_mission(&mission).await?;
         }
         let mut active = self.active.write().await;
@@ -327,7 +327,7 @@ impl MissionManager {
             ref timezone,
         } = updated.cadence
         {
-            updated.next_fire_at = next_cron_fire(expression, timezone.as_deref())?;
+            updated.next_fire_at = next_cron_fire(expression, timezone.as_ref())?;
         }
         self.store.save_mission(&updated).await?;
 
@@ -2821,8 +2821,8 @@ mod tests {
             "next_fire_at should be set after firing"
         );
         assert!(
-            mission.next_fire_at.unwrap() > chrono::Utc::now() - chrono::Duration::seconds(5),
-            "next_fire_at should be advanced after firing"
+            mission.next_fire_at.unwrap() > chrono::Utc::now(),
+            "next_fire_at should be strictly in the future after firing"
         );
     }
 

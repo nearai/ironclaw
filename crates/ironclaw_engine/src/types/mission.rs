@@ -16,6 +16,8 @@ use crate::types::thread::ThreadId;
 
 use super::{OwnerId, default_user_id};
 
+pub use ironclaw_common::ValidTimezone;
+
 /// Strongly-typed mission identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MissionId(pub Uuid);
@@ -61,7 +63,7 @@ pub enum MissionCadence {
     /// Spawn on a cron schedule (e.g., "0 */6 * * *" for every 6 hours).
     Cron {
         expression: String,
-        timezone: Option<String>,
+        timezone: Option<ValidTimezone>,
     },
     /// Spawn in response to a channel message matching a pattern.
     OnEvent { event_pattern: String },
@@ -204,19 +206,19 @@ fn normalize_cron_expression(expression: &str) -> String {
 /// Parse a cron expression and compute the next fire time from now.
 ///
 /// Accepts standard 5-field, 6-field, or 7-field cron expressions (auto-normalized).
-/// When `timezone` is provided and parseable, the schedule is evaluated in that
+/// When a [`ValidTimezone`] is provided, the schedule is evaluated in that
 /// timezone and the result is converted back to UTC. Otherwise UTC is used.
 pub fn next_cron_fire(
     expression: &str,
-    timezone: Option<&str>,
+    timezone: Option<&ValidTimezone>,
 ) -> Result<Option<DateTime<Utc>>, EngineError> {
     let normalized = normalize_cron_expression(expression);
     let schedule = cron::Schedule::from_str(&normalized).map_err(|e| EngineError::Store {
         reason: format!("invalid cron expression '{expression}': {e}"),
     })?;
-    if let Some(tz) = timezone.and_then(|s| s.parse::<chrono_tz::Tz>().ok()) {
+    if let Some(vtz) = timezone {
         Ok(schedule
-            .upcoming(tz)
+            .upcoming(vtz.tz())
             .next()
             .map(|dt| dt.with_timezone(&Utc)))
     } else {
