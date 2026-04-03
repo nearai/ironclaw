@@ -20,7 +20,7 @@ use crate::runtime::manager::ThreadManager;
 use crate::runtime::messaging::ThreadOutcome;
 use crate::traits::store::Store;
 use crate::types::error::EngineError;
-use crate::types::memory::{DocId, MemoryDoc};
+use crate::types::memory::{DocId, DocType, MemoryDoc};
 use crate::types::mission::{Mission, MissionCadence, MissionId, MissionStatus};
 use crate::types::project::ProjectId;
 use crate::types::shared_owner_id;
@@ -1366,16 +1366,22 @@ async fn process_skill_repair_output(
             reason: format!("invalid skill-repair output: {e}"),
         })?;
 
-    let allowed_doc_ids = allowed_skill_doc_ids(mission);
-    if allowed_doc_ids.is_empty() {
+    let Some(triggered_skill) = triggered_skill_provenance(mission, repair.doc_id) else {
         return Err(EngineError::Skill {
-            reason: "skill-repair requires an active skill trigger payload".into(),
+            reason: if has_skill_trigger_payload(mission) {
+                format!(
+                    "skill-repair attempted to modify untriggered skill {}",
+                    repair.doc_id.0
+                )
+            } else {
+                "skill-repair requires an active skill trigger payload".into()
+            },
         });
-    }
-    if !allowed_doc_ids.contains(&repair.doc_id) {
+    };
+    if repair.updated_content.trim().is_empty() {
         return Err(EngineError::Skill {
             reason: format!(
-                "skill-repair attempted to modify untriggered skill {}",
+                "skill-repair produced empty updated_content for skill {}",
                 repair.doc_id.0
             ),
         });
@@ -1388,11 +1394,28 @@ async fn process_skill_repair_output(
             .ok_or_else(|| EngineError::Skill {
                 reason: format!("skill doc not found: {}", repair.doc_id.0),
             })?;
-    let existing_meta: V2SkillMetadata = serde_json::from_value(existing.metadata.clone())
-        .map_err(|e| EngineError::Skill {
+    if existing.project_id != mission.project_id {
+        return Err(EngineError::Skill {
+            reason: format!(
+                "skill-repair attempted to modify skill {} outside mission project",
+                repair.doc_id.0
+            ),
+        });
+    }
+    if existing.doc_type != DocType::Skill {
+        return Err(EngineError::Skill {
+            reason: format!(
+                "skill-repair attempted to modify non-skill doc {} ({:?})",
+                repair.doc_id.0, existing.doc_type
+            ),
+        });
+    }
+    serde_json::from_value::<V2SkillMetadata>(existing.metadata.clone()).map_err(|e| {
+        EngineError::Skill {
             reason: format!("invalid skill metadata for {}: {e}", repair.doc_id.0),
-        })?;
-    let from_version = existing_meta.version;
+        }
+    })?;
+    let from_version = triggered_skill.version;
     let source_thread_id = mission
         .last_trigger_payload
         .as_ref()
@@ -1410,7 +1433,7 @@ async fn process_skill_repair_output(
         .update_skill(
             repair.doc_id,
             repair.updated_content,
-            Some(from_version),
+            Some(triggered_skill.version),
             move |meta| {
                 if let Some(description) = repair.description {
                     meta.description = description;
@@ -1438,24 +1461,23 @@ async fn process_skill_repair_output(
         .await
 }
 
-fn allowed_skill_doc_ids(mission: &Mission) -> HashSet<DocId> {
+fn has_skill_trigger_payload(mission: &Mission) -> bool {
     mission
         .last_trigger_payload
         .as_ref()
         .and_then(|payload| payload.get("active_skills"))
         .and_then(|value| value.as_array())
-        .map(|skills| {
-            skills
-                .iter()
-                .filter_map(|skill| {
-                    skill
-                        .get("doc_id")
-                        .cloned()
-                        .and_then(|value| serde_json::from_value::<DocId>(value).ok())
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+        .is_some_and(|skills| !skills.is_empty())
+}
+
+fn triggered_skill_provenance(mission: &Mission, doc_id: DocId) -> Option<ActiveSkillProvenance> {
+    mission
+        .last_trigger_payload
+        .as_ref()
+        .and_then(|payload| payload.get("active_skills"))
+        .cloned()
+        .and_then(|value| serde_json::from_value::<Vec<ActiveSkillProvenance>>(value).ok())
+        .and_then(|skills| skills.into_iter().find(|skill| skill.doc_id == doc_id))
 }
 
 fn collect_error_messages(thread: &Thread) -> Vec<String> {
@@ -3301,5 +3323,118 @@ mod tests {
         );
         assert_eq!(meta.revisions.len(), 1);
         assert_eq!(meta.revisions[0].content, "Original skill content");
+    }
+
+    #[tokio::test]
+    async fn process_skill_repair_output_rejects_stale_trigger_version() {
+        let store = Arc::new(TestStore::new());
+        let project_id = ProjectId::new();
+        let mut skill_doc = make_skill_doc(project_id, "alice", "github-pr-workflow");
+        let skill_doc_id = skill_doc.id;
+        skill_doc.content = "Skill content already updated to v2".to_string();
+        let mut meta: V2SkillMetadata = serde_json::from_value(skill_doc.metadata.clone()).unwrap();
+        meta.version = 2;
+        meta.parent_version = Some(1);
+        skill_doc.metadata = serde_json::to_value(&meta).unwrap();
+        store.save_memory_doc(&skill_doc).await.unwrap();
+
+        let mut mission = Mission::new(
+            project_id,
+            "alice",
+            "skill-repair",
+            SKILL_REPAIR_GOAL,
+            MissionCadence::Manual,
+        );
+        mission.metadata = serde_json::json!({"skill_repair": true});
+        mission.last_trigger_payload = Some(serde_json::json!({
+            "source_thread_id": "thread-123",
+            "active_skills": [{
+                "doc_id": skill_doc_id,
+                "name": "github-pr-workflow",
+                "version": 1,
+                "snippet_names": [],
+                "force_activated": false
+            }]
+        }));
+
+        let response = serde_json::json!({
+            "doc_id": skill_doc_id,
+            "repair_type": "missing_verification",
+            "summary": "Stale repair output.",
+            "updated_content": "1. Run the stale command\n2. Verify it"
+        })
+        .to_string();
+
+        let err =
+            process_skill_repair_output(&(store.clone() as Arc<dyn Store>), &mission, &response)
+                .await
+                .unwrap_err();
+        match err {
+            EngineError::Skill { reason } => assert!(
+                reason.contains("version conflict"),
+                "expected version conflict, got: {reason}"
+            ),
+            other => panic!("expected skill error, got: {other:?}"),
+        }
+
+        let updated = store.load_memory_doc(skill_doc_id).await.unwrap().unwrap();
+        let updated_meta: V2SkillMetadata = serde_json::from_value(updated.metadata).unwrap();
+        assert_eq!(updated.content, "Skill content already updated to v2");
+        assert_eq!(updated_meta.version, 2);
+        assert!(updated_meta.repairs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_skill_repair_output_rejects_empty_content() {
+        let store = Arc::new(TestStore::new());
+        let project_id = ProjectId::new();
+        let skill_doc = make_skill_doc(project_id, "alice", "github-pr-workflow");
+        let skill_doc_id = skill_doc.id;
+        store.save_memory_doc(&skill_doc).await.unwrap();
+
+        let mut mission = Mission::new(
+            project_id,
+            "alice",
+            "skill-repair",
+            SKILL_REPAIR_GOAL,
+            MissionCadence::Manual,
+        );
+        mission.metadata = serde_json::json!({"skill_repair": true});
+        mission.last_trigger_payload = Some(serde_json::json!({
+            "source_thread_id": "thread-123",
+            "active_skills": [{
+                "doc_id": skill_doc_id,
+                "name": "github-pr-workflow",
+                "version": 1,
+                "snippet_names": [],
+                "force_activated": false
+            }]
+        }));
+
+        let response = serde_json::json!({
+            "doc_id": skill_doc_id,
+            "repair_type": "missing_verification",
+            "summary": "This should be rejected.",
+            "updated_content": "   "
+        })
+        .to_string();
+
+        let err =
+            process_skill_repair_output(&(store.clone() as Arc<dyn Store>), &mission, &response)
+                .await
+                .unwrap_err();
+        match err {
+            EngineError::Skill { reason } => assert!(
+                reason.contains("empty updated_content"),
+                "expected empty-content validation, got: {reason}"
+            ),
+            other => panic!("expected skill error, got: {other:?}"),
+        }
+
+        let updated = store.load_memory_doc(skill_doc_id).await.unwrap().unwrap();
+        let updated_meta: V2SkillMetadata = serde_json::from_value(updated.metadata).unwrap();
+        assert_eq!(updated.content, "Original skill content");
+        assert_eq!(updated_meta.version, 1);
+        assert!(updated_meta.repairs.is_empty());
     }
 }
