@@ -29,7 +29,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -82,13 +82,21 @@ impl From<ContainerOutput> for ExecOutput {
 }
 
 /// Main sandbox manager.
+/// State for a persistent session container.
+#[derive(Clone)]
+struct SessionContainer {
+    id: String,
+    /// Host path mounted at `/workspace` inside the container.
+    base_cwd: PathBuf,
+}
+
 pub struct SandboxManager {
     config: SandboxConfig,
     proxy: Arc<RwLock<Option<HttpProxy>>>,
     docker: Arc<RwLock<Option<Docker>>>,
     initialized: std::sync::atomic::AtomicBool,
-    /// Container ID for persistent session mode. `None` when not yet created.
-    session_container: Arc<RwLock<Option<String>>>,
+    /// Container ID and base workspace path for persistent session mode.
+    session_container: Arc<RwLock<Option<SessionContainer>>>,
 }
 
 impl SandboxManager {
@@ -185,12 +193,12 @@ impl SandboxManager {
     /// Shutdown the sandbox (stop proxy, remove session container, clean up).
     pub async fn shutdown(&self) {
         // Remove persistent session container if one was created.
-        if let Some(container_id) = self.session_container.write().await.take()
+        if let Some(session) = self.session_container.write().await.take()
             && let Some(docker) = self.docker.read().await.as_ref()
         {
-            let _ = Self::force_remove_container(docker, &container_id).await;
+            let _ = Self::force_remove_container(docker, &session.id).await;
             tracing::info!(
-                container = &container_id[..container_id.len().min(12)],
+                container = &session.id[..session.id.len().min(12)],
                 "Removed persistent session container"
             );
         }
@@ -453,16 +461,16 @@ impl SandboxManager {
         &self,
         cwd: &Path,
         env: HashMap<String, String>,
-    ) -> Result<String> {
+    ) -> Result<SessionContainer> {
         let docker = self.require_docker().await?;
 
         // Fast path: read-lock to check existing container.
         {
             let guard = self.session_container.read().await;
-            if let Some(id) = guard.as_ref()
-                && Self::is_container_running(&docker, id).await
+            if let Some(session) = guard.as_ref()
+                && Self::is_container_running(&docker, &session.id).await
             {
-                return Ok(id.clone());
+                return Ok(session.clone());
             }
         }
 
@@ -470,16 +478,16 @@ impl SandboxManager {
         let mut guard = self.session_container.write().await;
 
         // Double-check: another task may have recreated while we waited for the lock.
-        if let Some(id) = guard.as_ref() {
-            if Self::is_container_running(&docker, id).await {
-                return Ok(id.clone());
+        if let Some(session) = guard.as_ref() {
+            if Self::is_container_running(&docker, &session.id).await {
+                return Ok(session.clone());
             }
 
             tracing::warn!(
-                container = &id[..id.len().min(12)],
+                container = &session.id[..session.id.len().min(12)],
                 "Persistent session container died; state will be lost. Recreating."
             );
-            let _ = Self::force_remove_container(&docker, id).await;
+            let _ = Self::force_remove_container(&docker, &session.id).await;
         }
 
         // Create a new session container.
@@ -506,8 +514,12 @@ impl SandboxManager {
             "Created persistent session container"
         );
 
-        *guard = Some(container_id.clone());
-        Ok(container_id)
+        let session = SessionContainer {
+            id: container_id,
+            base_cwd: cwd.to_path_buf(),
+        };
+        *guard = Some(session.clone());
+        Ok(session)
     }
 
     /// Check whether a container is still running via the Docker API.
@@ -541,12 +553,20 @@ impl SandboxManager {
         cwd: &Path,
         env: HashMap<String, String>,
     ) -> Result<ExecOutput> {
-        let container_id = self.ensure_session_container(cwd, env).await?;
+        let env_vec: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let session = self.ensure_session_container(cwd, env).await?;
         let runner = self.make_runner().await?;
         let limits = self.resource_limits();
 
+        // Map host cwd to container path. The container mounts base_cwd at /workspace,
+        // so a host path like /home/user/project/src becomes /workspace/src.
+        let working_dir = cwd
+            .strip_prefix(&session.base_cwd)
+            .map(|rel| format!("/workspace/{}", rel.display()))
+            .unwrap_or_else(|_| "/workspace".to_string());
+
         let container_output = runner
-            .exec_in_container(&container_id, command, "/workspace", &limits)
+            .exec_in_container(&session.id, command, &working_dir, &limits, &env_vec)
             .await?;
         Ok(container_output.into())
     }
@@ -893,5 +913,49 @@ mod tests {
         assert!(manager.config.host_network);
         assert!(manager.config.run_as_root);
         assert_eq!(manager.config.extra_env, vec!["FOO=bar"]);
+    }
+
+    #[test]
+    fn working_dir_mapping_subdirectory() {
+        let base = PathBuf::from("/home/user/project");
+        let cwd = PathBuf::from("/home/user/project/src/lib");
+        let working_dir = cwd
+            .strip_prefix(&base)
+            .map(|rel| format!("/workspace/{}", rel.display()))
+            .unwrap_or_else(|_| "/workspace".to_string());
+        assert_eq!(working_dir, "/workspace/src/lib");
+    }
+
+    #[test]
+    fn working_dir_mapping_exact_match() {
+        let base = PathBuf::from("/home/user/project");
+        let cwd = PathBuf::from("/home/user/project");
+        let working_dir = cwd
+            .strip_prefix(&base)
+            .map(|rel| format!("/workspace/{}", rel.display()))
+            .unwrap_or_else(|_| "/workspace".to_string());
+        assert_eq!(working_dir, "/workspace/");
+    }
+
+    #[test]
+    fn working_dir_mapping_outside_base() {
+        let base = PathBuf::from("/home/user/project");
+        let cwd = PathBuf::from("/tmp/other");
+        let working_dir = cwd
+            .strip_prefix(&base)
+            .map(|rel| format!("/workspace/{}", rel.display()))
+            .unwrap_or_else(|_| "/workspace".to_string());
+        assert_eq!(working_dir, "/workspace");
+    }
+
+    #[test]
+    fn session_container_clone() {
+        let session = super::SessionContainer {
+            id: "abc123".to_string(),
+            base_cwd: PathBuf::from("/home/user/project"),
+        };
+        let cloned = session.clone();
+        assert_eq!(cloned.id, "abc123");
+        assert_eq!(cloned.base_cwd, PathBuf::from("/home/user/project"));
     }
 }

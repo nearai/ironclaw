@@ -399,14 +399,12 @@ impl ClaudeCodeConfig {
 /// Docker does not expand `~` in bind-mount paths, so we do it at config
 /// parse time. Only the host portion (before the first `:`) is expanded.
 fn expand_tilde(spec: &str, home: &str) -> String {
-    if !spec.starts_with('~') {
+    if !(spec.starts_with("~/") || spec == "~") {
         return spec.to_string();
     }
-    if let Some(colon) = spec.find(':') {
-        let host_path = &spec[..colon];
-        let rest = &spec[colon..];
+    if let Some((host_path, rest)) = spec.split_once(':') {
         let expanded = host_path.replacen('~', home, 1);
-        format!("{expanded}{rest}")
+        format!("{expanded}:{rest}")
     } else {
         spec.replacen('~', home, 1)
     }
@@ -945,5 +943,11 @@ mod tests {
         assert!(cfg.persistent);
         assert!(cfg.host_network);
         assert!(cfg.run_as_root);
+    }
+
+    #[test]
+    fn expand_tilde_ignores_tilde_user_syntax() {
+        let spec = "~otheruser/.ssh:/data:ro";
+        assert_eq!(expand_tilde(spec, "/home/me"), spec);
     }
 }

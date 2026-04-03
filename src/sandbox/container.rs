@@ -348,8 +348,11 @@ impl ContainerRunner {
         command: &str,
         working_dir: &str,
         limits: &ResourceLimits,
+        env: &[String],
     ) -> Result<ContainerOutput> {
         let start_time = std::time::Instant::now();
+
+        let env_refs: Vec<&str> = env.iter().map(String::as_str).collect();
 
         let exec = self
             .docker
@@ -360,6 +363,11 @@ impl ContainerRunner {
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),
                     working_dir: Some(working_dir),
+                    env: if env_refs.is_empty() {
+                        None
+                    } else {
+                        Some(env_refs)
+                    },
                     ..Default::default()
                 },
             )
@@ -440,11 +448,10 @@ impl ContainerRunner {
         let cap_drop = vec!["ALL".to_string()];
         let mut cap_add = vec!["CHOWN".to_string()];
         if config.run_as_root {
-            cap_add.extend([
-                "NET_RAW".to_string(),
-                "NET_ADMIN".to_string(),
-                "SYS_CHROOT".to_string(),
-            ]);
+            cap_add.push("SYS_CHROOT".to_string());
+            if config.host_network {
+                cap_add.extend(["NET_RAW".to_string(), "NET_ADMIN".to_string()]);
+            }
         }
         (cap_drop, cap_add)
     }
@@ -863,6 +870,32 @@ mod tests {
             msg.contains("cannot resolve Dockerfile path"),
             "expected path resolution error, got: {msg}"
         );
+    }
+
+    #[test]
+    fn capabilities_restrict_net_to_host_network() {
+        use crate::sandbox::SandboxConfig;
+
+        // root + bridge: no NET_RAW/NET_ADMIN
+        let config = SandboxConfig {
+            run_as_root: true,
+            host_network: false,
+            ..Default::default()
+        };
+        let (_, cap_add) = ContainerRunner::build_capabilities(&config);
+        assert!(cap_add.contains(&"SYS_CHROOT".to_string()));
+        assert!(!cap_add.contains(&"NET_RAW".to_string()));
+        assert!(!cap_add.contains(&"NET_ADMIN".to_string()));
+
+        // root + host: NET_RAW/NET_ADMIN added
+        let config = SandboxConfig {
+            run_as_root: true,
+            host_network: true,
+            ..Default::default()
+        };
+        let (_, cap_add) = ContainerRunner::build_capabilities(&config);
+        assert!(cap_add.contains(&"NET_RAW".to_string()));
+        assert!(cap_add.contains(&"NET_ADMIN".to_string()));
     }
 
     #[tokio::test]
