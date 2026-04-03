@@ -700,3 +700,169 @@ async fn drop_tool_removes_tools_from_registry() {
     let removed = result.result["tools_removed"].as_array().unwrap();
     assert_eq!(removed.len(), 5, "should have removed 5 tools");
 }
+
+// ==================== Startup Bootstrap ====================
+
+/// Regression test: collections registered in a prior session must have their
+/// per-collection tools restored at startup via `initialize_collection_tools_for_users`.
+///
+/// This test simulates the restart scenario:
+/// 1. Register collections in the database (simulating a prior session)
+/// 2. Create a fresh, empty ToolRegistry (simulating a restart)
+/// 3. Call `initialize_collection_tools_for_users` (the startup bootstrap)
+/// 4. Verify per-collection tools are present in the registry
+///
+/// Without the startup bootstrap, per-collection tools are lost on restart
+/// because only management tools (collections_list, etc.) are registered as
+/// built-ins — per-collection tools are dynamically generated.
+#[tokio::test]
+async fn startup_bootstrap_restores_collection_tools() {
+    use ironclaw::tools::builtin::collections::initialize_collection_tools_for_users;
+
+    let (db, _dir) = setup().await;
+
+    // --- Simulate prior session: register collections in the database ---
+    let nanny = nanny_schema();
+    let grocery = grocery_schema();
+    db.register_collection("andrew", &nanny)
+        .await
+        .expect("register nanny for andrew");
+    db.register_collection("grace", &grocery)
+        .await
+        .expect("register grocery for grace");
+
+    // --- Simulate restart: fresh registry with no collection tools ---
+    let registry = Arc::new(ToolRegistry::new());
+    registry.register_builtin_tools();
+
+    // Verify no collection tools exist yet
+    assert!(
+        !registry.has("andrew_nanny_shifts_query").await,
+        "andrew's nanny_shifts_query should NOT exist before bootstrap"
+    );
+    assert!(
+        !registry.has("grace_grocery_items_add").await,
+        "grace's grocery_items_add should NOT exist before bootstrap"
+    );
+
+    // --- Startup bootstrap ---
+    let user_ids = vec!["andrew".to_string(), "grace".to_string()];
+    initialize_collection_tools_for_users(
+        &user_ids,
+        &db,
+        &registry,
+        None, // skills_dir
+        None, // skill_registry
+        None, // collection_write_tx
+        None, // workspace_resolver
+    )
+    .await;
+
+    // --- Verify tools are restored ---
+    // Andrew's nanny_shifts tools
+    assert!(
+        registry.has("andrew_nanny_shifts_add").await,
+        "andrew_nanny_shifts_add should exist after bootstrap"
+    );
+    assert!(
+        registry.has("andrew_nanny_shifts_query").await,
+        "andrew_nanny_shifts_query should exist after bootstrap"
+    );
+    assert!(
+        registry.has("andrew_nanny_shifts_update").await,
+        "andrew_nanny_shifts_update should exist after bootstrap"
+    );
+    assert!(
+        registry.has("andrew_nanny_shifts_delete").await,
+        "andrew_nanny_shifts_delete should exist after bootstrap"
+    );
+    assert!(
+        registry.has("andrew_nanny_shifts_summary").await,
+        "andrew_nanny_shifts_summary should exist after bootstrap"
+    );
+
+    // Grace's grocery_items tools
+    assert!(
+        registry.has("grace_grocery_items_add").await,
+        "grace_grocery_items_add should exist after bootstrap"
+    );
+    assert!(
+        registry.has("grace_grocery_items_query").await,
+        "grace_grocery_items_query should exist after bootstrap"
+    );
+    assert!(
+        registry.has("grace_grocery_items_update").await,
+        "grace_grocery_items_update should exist after bootstrap"
+    );
+    assert!(
+        registry.has("grace_grocery_items_delete").await,
+        "grace_grocery_items_delete should exist after bootstrap"
+    );
+    assert!(
+        registry.has("grace_grocery_items_summary").await,
+        "grace_grocery_items_summary should exist after bootstrap"
+    );
+
+    // Cross-user isolation: andrew should NOT see grace's tools in filtered view
+    let andrew_defs = registry.tool_definitions_for_user("andrew", &[]).await;
+    assert!(
+        andrew_defs.iter().all(|d| !d.name.starts_with("grace_")),
+        "andrew should NOT see grace's tools after bootstrap"
+    );
+    let grace_defs = registry.tool_definitions_for_user("grace", &[]).await;
+    assert!(
+        grace_defs.iter().all(|d| !d.name.starts_with("andrew_")),
+        "grace should NOT see andrew's tools after bootstrap"
+    );
+}
+
+/// Regression test: bootstrap with a user who has no collections should not
+/// error — it should be a no-op.
+#[tokio::test]
+async fn startup_bootstrap_skips_users_without_collections() {
+    use ironclaw::tools::builtin::collections::initialize_collection_tools_for_users;
+
+    let (db, _dir) = setup().await;
+
+    // Register one collection for andrew only
+    let nanny = nanny_schema();
+    db.register_collection("andrew", &nanny)
+        .await
+        .expect("register nanny for andrew");
+
+    let registry = Arc::new(ToolRegistry::new());
+    let _builtin_count_before = registry.tool_definitions().await.len();
+
+    // Bootstrap for both andrew and a nonexistent user
+    let user_ids = vec![
+        "andrew".to_string(),
+        "nonexistent_user".to_string(),
+    ];
+    initialize_collection_tools_for_users(
+        &user_ids,
+        &db,
+        &registry,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    // Andrew's tools should exist
+    assert!(
+        registry.has("andrew_nanny_shifts_query").await,
+        "andrew_nanny_shifts_query should exist"
+    );
+
+    // No tools should be created for the nonexistent user
+    let all_defs = registry.tool_definitions().await;
+    let nonexistent_tools: Vec<_> = all_defs
+        .iter()
+        .filter(|d| d.name.starts_with("nonexistent_user_"))
+        .collect();
+    assert!(
+        nonexistent_tools.is_empty(),
+        "no tools should be created for nonexistent user"
+    );
+}

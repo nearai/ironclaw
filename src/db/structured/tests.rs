@@ -1104,9 +1104,7 @@ fn alter_add_field_with_empty_enum_rejected() {
     let alt = Alteration {
         operation: AlterOperation::AddField,
         field: "status".to_string(),
-        field_type: Some(FieldType::Enum {
-            values: Vec::new(),
-        }),
+        field_type: Some(FieldType::Enum { values: Vec::new() }),
         required: None,
         default: None,
         value: None,
@@ -1172,7 +1170,9 @@ fn alter_remove_enum_value_from_non_enum_field() {
 fn init_history_on_empty_record() {
     let mut data = serde_json::json!({});
     init_history(&mut data, "test");
-    let history = data["_history"].as_array().expect("_history should be array");
+    let history = data["_history"]
+        .as_array()
+        .expect("_history should be array");
     assert_eq!(history.len(), 1);
     assert_eq!(history[0]["op"], "insert");
     assert_eq!(history[0]["source"], "test");
@@ -1479,11 +1479,7 @@ fn append_history_caps_at_max_entries() {
     data["_history"] = serde_json::Value::Array(history);
 
     // Append one more — should trigger truncation
-    append_history(
-        &mut data,
-        &serde_json::json!({"x": 999}),
-        "test",
-    );
+    append_history(&mut data, &serde_json::json!({"x": 999}), "test");
 
     let history = data["_history"].as_array().unwrap();
     assert_eq!(history.len(), super::MAX_HISTORY_ENTRIES);

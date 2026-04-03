@@ -18,8 +18,7 @@ use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
     ApiTokenRecord, ConversationStore, Database, IdentityStore, JobStore, RoutineStore,
     SandboxStore, SettingsStore, ToolFailureStore, UserIdentityRecord, UserRecord, UserStore,
-    WorkspaceStore,
-    structured,
+    WorkspaceStore, structured,
     structured::{Aggregation, CollectionSchema, Filter, Record, StructuredStore},
 };
 use crate::error::{DatabaseError, WorkspaceError};
@@ -1235,10 +1234,7 @@ fn resolve_filter_field(field: &str) -> Result<(String, bool), DatabaseError> {
         // Validate both segments to prevent SQL injection.
         validate_filter_field_segment(parent)?;
         validate_filter_field_segment(child)?;
-        return Ok((
-            format!("data->'{}'->>'{}'", parent, child),
-            false,
-        ));
+        return Ok((format!("data->'{}'->>'{}'", parent, child), false));
     }
 
     // Regular data field.

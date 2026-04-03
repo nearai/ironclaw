@@ -2536,6 +2536,7 @@ mod tests {
     ///
     /// Uses a UUID v4 suffix so each call returns a globally unique string
     /// even across concurrent test workers.
+    #[cfg(feature = "postgres")]
     pub(crate) fn unique_id(prefix: &str) -> String {
         format!("{}_{}", prefix, uuid::Uuid::new_v4().simple())
     }
@@ -2957,10 +2958,7 @@ mod tests {
 
             // Bootstrap should generate tools for both collections.
             let tool_names = crate::tools::builtin::collections::bootstrap_collection_tools(
-                &db,
-                &registry,
-                &user_id,
-                None, // skills_dir
+                &db, &registry, &user_id, None, // skills_dir
                 None, // skill_registry
                 None, // collection_write_tx
                 None, // workspace_resolver
@@ -3279,13 +3277,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            let result = resolve_collection_scope(
-                db.as_ref(),
-                &alice,
-                std::slice::from_ref(&shared),
-                &inv,
-            )
-            .await;
+            let result =
+                resolve_collection_scope(db.as_ref(), &alice, std::slice::from_ref(&shared), &inv)
+                    .await;
             assert_eq!(result, Some(alice.clone()), "should prefer own scope");
         }
 
@@ -3299,13 +3293,9 @@ mod tests {
 
             // In upstream, cross-scope resolution is not supported.
             // Scopes are ignored, so alice cannot see shared's collections.
-            let result = resolve_collection_scope(
-                db.as_ref(),
-                &alice,
-                std::slice::from_ref(&shared),
-                &inv,
-            )
-            .await;
+            let result =
+                resolve_collection_scope(db.as_ref(), &alice, std::slice::from_ref(&shared), &inv)
+                    .await;
             assert_eq!(
                 result, None,
                 "should not resolve to other scopes in upstream"
@@ -3321,13 +3311,9 @@ mod tests {
             let inv = super::unique_id("inventory");
             setup_db_with_collection(&db, &carol, &inv).await;
 
-            let result = resolve_collection_scope(
-                db.as_ref(),
-                &alice,
-                std::slice::from_ref(&shared),
-                &inv,
-            )
-            .await;
+            let result =
+                resolve_collection_scope(db.as_ref(), &alice, std::slice::from_ref(&shared), &inv)
+                    .await;
             assert_eq!(
                 result, None,
                 "should return None when no scope has the collection"
@@ -3735,11 +3721,7 @@ mod tests {
 
             // Insert a record directly into household.
             let record_id = db
-                .insert_record(
-                    &household,
-                    &tasks,
-                    serde_json::json!({"item": "buy milk"}),
-                )
+                .insert_record(&household, &tasks, serde_json::json!({"item": "buy milk"}))
                 .await
                 .unwrap();
 
@@ -3784,11 +3766,7 @@ mod tests {
                 .unwrap();
 
             let record_id = db
-                .insert_record(
-                    &household,
-                    &tasks,
-                    serde_json::json!({"item": "buy milk"}),
-                )
+                .insert_record(&household, &tasks, serde_json::json!({"item": "buy milk"}))
                 .await
                 .unwrap();
 
@@ -4139,13 +4117,9 @@ mod tests {
             )
             .await
             .unwrap();
-            db.insert_record(
-                &family,
-                &tasks,
-                serde_json::json!({"item": "family task"}),
-            )
-            .await
-            .unwrap();
+            db.insert_record(&family, &tasks, serde_json::json!({"item": "family task"}))
+                .await
+                .unwrap();
 
             // Each scope should see only its own data.
             for (scope, expected_item) in &[
@@ -4467,10 +4441,7 @@ mod cross_scope_libsql_tests {
             .await
             .map(|r| r.len())
             .unwrap_or(0);
-        assert_eq!(
-            andrew_count, 0,
-            "Record must NOT be in Andrew's partition"
-        );
+        assert_eq!(andrew_count, 0, "Record must NOT be in Andrew's partition");
     }
 
     #[tokio::test]
@@ -4491,10 +4462,7 @@ mod cross_scope_libsql_tests {
         // Andrew queries — should see Grace's data
         let mut ctx = JobContext::with_user("andrew", "test", "test");
         ctx.workspace_read_scopes = vec!["grace".to_string()];
-        let result = tool
-            .execute(serde_json::json!({}), &ctx)
-            .await
-            .unwrap();
+        let result = tool.execute(serde_json::json!({}), &ctx).await.unwrap();
         let count = result.result["count"].as_u64().unwrap_or(0);
         assert!(
             count >= 1,
@@ -4531,10 +4499,7 @@ mod cross_scope_libsql_tests {
 
         // Household with NO scopes — should only see own
         let ctx = JobContext::with_user("household", "test", "test");
-        let result = tool
-            .execute(serde_json::json!({}), &ctx)
-            .await
-            .unwrap();
+        let result = tool.execute(serde_json::json!({}), &ctx).await.unwrap();
         let collections = result.result["collections"].as_array().unwrap();
         assert_eq!(
             collections.len(),
@@ -4574,10 +4539,7 @@ mod cross_scope_libsql_tests {
         // Andrew with grace scope — should see both own and grace's collections
         let mut ctx = JobContext::with_user("andrew", "test", "test");
         ctx.workspace_read_scopes = vec!["grace".to_string()];
-        let result = tool
-            .execute(serde_json::json!({}), &ctx)
-            .await
-            .unwrap();
+        let result = tool.execute(serde_json::json!({}), &ctx).await.unwrap();
         let collections = result.result["collections"].as_array().unwrap();
         assert_eq!(
             collections.len(),
@@ -4639,9 +4601,6 @@ mod cross_scope_libsql_tests {
             .await
             .map(|r| r.len())
             .unwrap_or(0);
-        assert_eq!(
-            andrew_count, 0,
-            "Record must NOT be in andrew's partition"
-        );
+        assert_eq!(andrew_count, 0, "Record must NOT be in andrew's partition");
     }
 }

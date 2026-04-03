@@ -129,14 +129,8 @@ pub async fn handle_ws_connection(
                 let parsed: Result<WsClientMessage, _> = serde_json::from_str(&text);
                 match parsed {
                     Ok(client_msg) => {
-                        handle_client_message(
-                            client_msg,
-                            &state,
-                            &user_id,
-                            &ws_scopes,
-                            &direct_tx,
-                        )
-                        .await;
+                        handle_client_message(client_msg, &state, &user_id, &ws_scopes, &direct_tx)
+                            .await;
                     }
                     Err(e) => {
                         let _ = direct_tx
