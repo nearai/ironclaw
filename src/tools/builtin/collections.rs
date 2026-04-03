@@ -1016,8 +1016,13 @@ impl Tool for CollectionListTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        // List collections for the caller's own scope.
-        let user_ids = vec![ctx.user_id.clone()];
+        // List collections for the caller's own scope plus any workspace_read_scopes.
+        let mut user_ids = vec![ctx.user_id.clone()];
+        for scope in &ctx.workspace_read_scopes {
+            if scope != &ctx.user_id && !user_ids.contains(scope) {
+                user_ids.push(scope.clone());
+            }
+        }
 
         let mut all_collections: Vec<serde_json::Value> = Vec::new();
         for uid in &user_ids {
