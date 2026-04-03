@@ -537,8 +537,8 @@ async fn async_main() -> anyhow::Result<()> {
     let webhook_server: Option<Arc<tokio::sync::Mutex<WebhookServer>>> = if !webhook_routes
         .is_empty()
     {
-        let addr =
-            webhook_server_addr.unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 8080)));
+        let addr = webhook_server_addr
+            .unwrap_or_else(|| std::net::SocketAddr::from(([127, 0, 0, 1], 8080)));
         if addr.ip().is_unspecified() {
             tracing::warn!(
                 "Webhook server is binding to {} — it will be reachable from all network interfaces. \
@@ -688,7 +688,7 @@ async fn async_main() -> anyhow::Result<()> {
                     {
                         tracing::warn!("Failed to bootstrap admin user: {}", e);
                     } else {
-                        tracing::info!(
+                        tracing::debug!(
                             user_id = config.owner_id,
                             "Bootstrapped admin user from gateway config"
                         );
@@ -741,24 +741,37 @@ async fn async_main() -> anyhow::Result<()> {
         }
 
         // Persist auto-generated auth token so it survives restarts.
-        // Write to the "default" settings namespace, which is the namespace
-        // Config::from_db() reads from — NOT the gateway channel's user_id.
+        // Gateway auth is env-only, so write to bootstrap `.env` rather than DB
+        // settings and opportunistically remove any legacy DB copy.
         if gw_config.auth_token.is_none() {
             let token_to_persist = gw.auth_token().to_string();
+            tokio::spawn(async move {
+                if let Err(e) = ironclaw::bootstrap::upsert_bootstrap_var(
+                    "GATEWAY_AUTH_TOKEN",
+                    &token_to_persist,
+                ) {
+                    tracing::warn!("Failed to persist auto-generated gateway auth token: {e}");
+                } else {
+                    tracing::debug!("Persisted auto-generated gateway auth token to bootstrap env");
+                }
+            });
+
             if let Some(ref db) = components.db {
                 let db = db.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = db
-                        .set_setting(
-                            "default",
-                            "channels.gateway_auth_token",
-                            &serde_json::Value::String(token_to_persist),
-                        )
+                    match db
+                        .delete_setting("default", "channels.gateway_auth_token")
                         .await
                     {
-                        tracing::warn!("Failed to persist auto-generated gateway auth token: {e}");
-                    } else {
-                        tracing::debug!("Persisted auto-generated gateway auth token to settings");
+                        Ok(true) => {
+                            tracing::debug!("Removed legacy gateway auth token from DB settings");
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to remove legacy gateway auth token from DB settings: {e}"
+                            );
+                        }
                     }
                 });
             }

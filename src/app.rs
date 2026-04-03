@@ -367,7 +367,7 @@ impl AppBuilder {
                 self.config.workspace.clone(),
             ));
             tools.register_memory_tools_with_resolver(pool);
-            tracing::info!(
+            tracing::debug!(
                 multi_tenant = is_multi_tenant,
                 "Memory tools configured with per-user workspace resolver"
             );
