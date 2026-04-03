@@ -1376,6 +1376,26 @@ mod tests {
     }
 
     #[test]
+    fn accumulator_turn_cost_populates_usage() {
+        let mut acc = ResponseAccumulator::new("resp_test".to_string(), "m".to_string());
+        assert!(!acc.process(AppEvent::TurnCost {
+            input_tokens: 12,
+            output_tokens: 3,
+            cost_usd: "$0.0180".to_string(),
+            thread_id: Some("t".to_string()),
+        }));
+        assert!(acc.process(AppEvent::Response {
+            content: "Done".to_string(),
+            thread_id: "t".to_string(),
+        }));
+
+        let resp = acc.finish();
+        assert_eq!(resp.usage.input_tokens, 12);
+        assert_eq!(resp.usage.output_tokens, 3);
+        assert_eq!(resp.usage.total_tokens, 15);
+    }
+
+    #[test]
     fn accumulator_error_marks_failed() {
         let mut acc = ResponseAccumulator::new("resp_test".to_string(), "m".to_string());
         assert!(acc.process(AppEvent::Error {

@@ -12,7 +12,8 @@ use uuid::Uuid;
 use crate::agent::Agent;
 use crate::agent::compaction::ContextCompactor;
 use crate::agent::dispatcher::{
-    AgenticLoopResult, check_auth_required, execute_chat_tool_standalone, parse_auth_result,
+    AgenticLoopResult, TurnUsageSummary, check_auth_required, execute_chat_tool_standalone,
+    parse_auth_result,
 };
 use crate::agent::session::{MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState};
 use crate::agent::submission::SubmissionResult;
@@ -526,7 +527,10 @@ impl Agent {
 
         // Complete, fail, or request approval
         match result {
-            Ok(AgenticLoopResult::Response(response)) => {
+            Ok(AgenticLoopResult::Response {
+                text: response,
+                turn_usage,
+            }) => {
                 // Extract <suggestions> from response text before user sees it
                 let (response, suggestions) =
                     crate::agent::dispatcher::extract_suggestions(&response);
@@ -597,32 +601,8 @@ impl Agent {
                         .await;
                 }
 
-                // Emit per-turn cost summary
-                {
-                    let usage = self.cost_guard().model_usage().await;
-                    let (total_in, total_out, total_cost) =
-                        usage
-                            .values()
-                            .fold((0u64, 0u64, rust_decimal::Decimal::ZERO), |acc, m| {
-                                (
-                                    acc.0 + m.input_tokens,
-                                    acc.1 + m.output_tokens,
-                                    acc.2 + m.cost,
-                                )
-                            });
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::TurnCost {
-                                input_tokens: total_in,
-                                output_tokens: total_out,
-                                cost_usd: format!("${:.4}", total_cost),
-                            },
-                            &message.metadata,
-                        )
-                        .await;
-                }
+                self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
+                    .await;
 
                 Ok(SubmissionResult::response(response))
             }
@@ -1530,7 +1510,10 @@ impl Agent {
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
             match result {
-                Ok(AgenticLoopResult::Response(response)) => {
+                Ok(AgenticLoopResult::Response {
+                    text: response,
+                    turn_usage,
+                }) => {
                     let (response, suggestions) =
                         crate::agent::dispatcher::extract_suggestions(&response);
                     thread.complete_turn(&response);
@@ -1574,6 +1557,8 @@ impl Agent {
                             )
                             .await;
                     }
+                    self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
+                        .await;
                     Ok(SubmissionResult::response(response))
                 }
                 Ok(AgenticLoopResult::NeedApproval {
@@ -1690,6 +1675,32 @@ impl Agent {
                     setup_url: auth_data.setup_url,
                 },
                 &message.metadata,
+            )
+            .await;
+    }
+
+    async fn send_turn_cost_status(
+        &self,
+        channel: &str,
+        metadata: &serde_json::Value,
+        turn_usage: &TurnUsageSummary,
+    ) {
+        let total_tokens =
+            u64::from(turn_usage.usage.input_tokens) + u64::from(turn_usage.usage.output_tokens);
+        if total_tokens == 0 && turn_usage.cost_usd.is_zero() {
+            return;
+        }
+
+        let _ = self
+            .channels
+            .send_status(
+                channel,
+                StatusUpdate::TurnCost {
+                    input_tokens: u64::from(turn_usage.usage.input_tokens),
+                    output_tokens: u64::from(turn_usage.usage.output_tokens),
+                    cost_usd: format!("${:.4}", turn_usage.cost_usd),
+                },
+                metadata,
             )
             .await;
     }

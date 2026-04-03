@@ -321,10 +321,6 @@ impl Agent {
         &self.deps.hooks
     }
 
-    pub(super) fn cost_guard(&self) -> &Arc<crate::agent::cost_guard::CostGuard> {
-        &self.deps.cost_guard
-    }
-
     /// Build a tenant-scoped execution context for the given user.
     ///
     /// This is the standard entry point for per-user operations. The returned

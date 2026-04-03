@@ -19,18 +19,43 @@ use async_trait::async_trait;
 use crate::agent::agentic_loop::{
     AgenticLoopConfig, LoopDelegate, LoopOutcome, LoopSignal, TextAction,
 };
-use crate::llm::{ChatMessage, Reasoning, ReasoningContext};
+use crate::llm::{ChatMessage, Reasoning, ReasoningContext, TokenUsage};
 use crate::tools::redact_params;
 
 /// Result of the agentic loop execution.
 pub(super) enum AgenticLoopResult {
     /// Completed with a response.
-    Response(String),
+    Response {
+        text: String,
+        turn_usage: TurnUsageSummary,
+    },
     /// A tool requires approval before continuing.
     NeedApproval {
         /// The pending approval request to store.
         pending: Box<PendingApproval>,
     },
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct TurnUsageSummary {
+    pub usage: TokenUsage,
+    pub cost_usd: rust_decimal::Decimal,
+}
+
+impl TurnUsageSummary {
+    fn record_llm_call(&mut self, usage: TokenUsage, cost_usd: rust_decimal::Decimal) {
+        self.usage.input_tokens = self.usage.input_tokens.saturating_add(usage.input_tokens);
+        self.usage.output_tokens = self.usage.output_tokens.saturating_add(usage.output_tokens);
+        self.usage.cache_read_input_tokens = self
+            .usage
+            .cache_read_input_tokens
+            .saturating_add(usage.cache_read_input_tokens);
+        self.usage.cache_creation_input_tokens = self
+            .usage
+            .cache_creation_input_tokens
+            .saturating_add(usage.cache_creation_input_tokens);
+        self.cost_usd += cost_usd;
+    }
 }
 
 impl Agent {
@@ -180,6 +205,7 @@ impl Agent {
             nudge_at,
             force_text_at,
             user_tz,
+            turn_usage: std::sync::Mutex::new(TurnUsageSummary::default()),
         };
 
         let mut reason_ctx = ReasoningContext::new()
@@ -207,8 +233,10 @@ impl Agent {
         )
         .await?;
 
+        let turn_usage = delegate.turn_usage_summary();
+
         match outcome {
-            LoopOutcome::Response(text) => Ok(AgenticLoopResult::Response(text)),
+            LoopOutcome::Response(text) => Ok(AgenticLoopResult::Response { text, turn_usage }),
             LoopOutcome::Stopped => Err(crate::error::JobError::ContextError {
                 id: thread_id,
                 reason: "Interrupted".to_string(),
@@ -258,6 +286,16 @@ struct ChatDelegate<'a> {
     nudge_at: usize,
     force_text_at: usize,
     user_tz: chrono_tz::Tz,
+    turn_usage: std::sync::Mutex<TurnUsageSummary>,
+}
+
+impl ChatDelegate<'_> {
+    fn turn_usage_summary(&self) -> TurnUsageSummary {
+        self.turn_usage
+            .lock()
+            .expect("turn usage mutex poisoned")
+            .clone()
+    }
 }
 
 #[async_trait]
@@ -460,6 +498,11 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 tracing::warn!("Failed to persist LLM call to DB: {}", e);
             }
         }
+
+        self.turn_usage
+            .lock()
+            .expect("turn usage mutex poisoned")
+            .record_llm_call(output.usage, call_cost);
 
         Ok(output)
     }
@@ -1344,6 +1387,48 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: 0,
                 output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    struct FixedUsageTextProvider;
+
+    #[async_trait]
+    impl LlmProvider for FixedUsageTextProvider {
+        fn model_name(&self) -> &str {
+            "fixed-usage"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::new(1, 3), Decimal::new(2, 3))
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            Ok(CompletionResponse {
+                content: "done".to_string(),
+                input_tokens: 12,
+                output_tokens: 3,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
+            Ok(ToolCompletionResponse {
+                content: Some("done".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 12,
+                output_tokens: 3,
                 finish_reason: FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
@@ -2457,11 +2542,54 @@ mod tests {
 
         // Verify we got a text response.
         match inner.unwrap() {
-            super::AgenticLoopResult::Response(text) => {
+            super::AgenticLoopResult::Response { text, .. } => {
                 assert!(!text.is_empty(), "Expected non-empty forced text response");
             }
             super::AgenticLoopResult::NeedApproval { .. } => {
                 panic!("Expected text response, got NeedApproval");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatcher_response_usage_is_per_turn_not_cumulative() {
+        use crate::agent::session::Session;
+        use crate::channels::IncomingMessage;
+        use crate::llm::ChatMessage;
+        use tokio::sync::Mutex;
+
+        let agent = make_test_agent_with_llm(Arc::new(FixedUsageTextProvider), 3);
+        let session = Arc::new(Mutex::new(Session::new("test-user")));
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread(Some("test")).id
+        };
+        let tenant = agent.tenant_ctx("test-user").await;
+
+        for prompt in ["first turn", "second turn"] {
+            let message = IncomingMessage::new("test", "test-user", prompt);
+            let initial_messages = vec![ChatMessage::user(prompt)];
+            let result = agent
+                .run_agentic_loop(
+                    &message,
+                    tenant.clone(),
+                    session.clone(),
+                    thread_id,
+                    initial_messages,
+                )
+                .await
+                .expect("dispatcher run should succeed");
+
+            match result {
+                super::AgenticLoopResult::Response { text, turn_usage } => {
+                    assert_eq!(text, "done");
+                    assert_eq!(turn_usage.usage.input_tokens, 12);
+                    assert_eq!(turn_usage.usage.output_tokens, 3);
+                    assert_eq!(turn_usage.cost_usd, Decimal::new(18, 3));
+                }
+                super::AgenticLoopResult::NeedApproval { .. } => {
+                    panic!("expected a text response");
+                }
             }
         }
     }
