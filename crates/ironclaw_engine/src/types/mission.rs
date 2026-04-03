@@ -4,10 +4,13 @@
 //! threads to make progress. Missions can run on a schedule (cron),
 //! in response to events, or be triggered manually.
 
+use std::str::FromStr;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::types::error::EngineError;
 use crate::types::project::ProjectId;
 use crate::types::thread::ThreadId;
 
@@ -180,5 +183,43 @@ impl Mission {
             self.status,
             MissionStatus::Completed | MissionStatus::Failed
         )
+    }
+}
+
+/// Normalize a cron expression to the 7-field format expected by the `cron` crate.
+///
+/// - 5-field (standard) -> prepend `0` (seconds) and append `*` (year)
+/// - 6-field -> append `*` (year)
+/// - 7-field -> pass through unchanged
+fn normalize_cron_expression(expression: &str) -> String {
+    let trimmed = expression.trim();
+    let fields: Vec<&str> = trimmed.split_whitespace().collect();
+    match fields.len() {
+        5 => format!("0 {} *", fields.join(" ")),
+        6 => format!("{} *", fields.join(" ")),
+        _ => trimmed.to_string(),
+    }
+}
+
+/// Parse a cron expression and compute the next fire time from now.
+///
+/// Accepts standard 5-field, 6-field, or 7-field cron expressions (auto-normalized).
+/// When `timezone` is provided and parseable, the schedule is evaluated in that
+/// timezone and the result is converted back to UTC. Otherwise UTC is used.
+pub fn next_cron_fire(
+    expression: &str,
+    timezone: Option<&str>,
+) -> Result<Option<DateTime<Utc>>, EngineError> {
+    let normalized = normalize_cron_expression(expression);
+    let schedule = cron::Schedule::from_str(&normalized).map_err(|e| EngineError::Store {
+        reason: format!("invalid cron expression '{expression}': {e}"),
+    })?;
+    if let Some(tz) = timezone.and_then(|s| s.parse::<chrono_tz::Tz>().ok()) {
+        Ok(schedule
+            .upcoming(tz)
+            .next()
+            .map(|dt| dt.with_timezone(&Utc)))
+    } else {
+        Ok(schedule.upcoming(Utc).next())
     }
 }

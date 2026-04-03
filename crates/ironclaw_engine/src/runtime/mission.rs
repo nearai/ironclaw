@@ -15,7 +15,7 @@ use crate::runtime::messaging::ThreadOutcome;
 use crate::traits::store::Store;
 use crate::types::error::EngineError;
 use crate::types::memory::MemoryDoc;
-use crate::types::mission::{Mission, MissionCadence, MissionId, MissionStatus};
+use crate::types::mission::{Mission, MissionCadence, MissionId, MissionStatus, next_cron_fire};
 use crate::types::project::ProjectId;
 use crate::types::shared_owner_id;
 use crate::types::thread::{ThreadConfig, ThreadId, ThreadType};
@@ -104,6 +104,13 @@ impl MissionManager {
         notify_channels: Vec<String>,
     ) -> Result<MissionId, EngineError> {
         let mut mission = Mission::new(project_id, user_id, name, goal, cadence);
+        if let MissionCadence::Cron {
+            ref expression,
+            ref timezone,
+        } = mission.cadence
+        {
+            mission.next_fire_at = next_cron_fire(expression, timezone.as_deref())?;
+        }
         mission.notify_channels = notify_channels;
         let id = mission.id;
         self.store.save_mission(&mission).await?;
@@ -219,6 +226,16 @@ impl MissionManager {
         self.store
             .update_mission_status(id, MissionStatus::Active)
             .await?;
+        // Recompute next_fire_at for cron missions so the ticker picks them up
+        if let Some(mut mission) = self.store.load_mission(id).await?
+            && let MissionCadence::Cron {
+                ref expression,
+                ref timezone,
+            } = mission.cadence
+        {
+            mission.next_fire_at = next_cron_fire(expression, timezone.as_deref())?;
+            self.store.save_mission(&mission).await?;
+        }
         let mut active = self.active.write().await;
         if !active.contains(&id) {
             active.push(id);
@@ -304,6 +321,14 @@ impl MissionManager {
         updated.record_thread(thread_id);
         updated.threads_today += 1;
         updated.last_trigger_payload = trigger_payload;
+        // Advance next_fire_at for cron missions so the ticker schedules the next cycle
+        if let MissionCadence::Cron {
+            ref expression,
+            ref timezone,
+        } = updated.cadence
+        {
+            updated.next_fire_at = next_cron_fire(expression, timezone.as_deref())?;
+        }
         self.store.save_mission(&updated).await?;
 
         debug!(mission_id = %id, thread_id = %thread_id, "mission fired");
@@ -1765,7 +1790,7 @@ mod tests {
         let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
         let project_id = ProjectId::new();
 
-        // Create a cron mission with next_fire_at in the past
+        // Create a cron mission — create_mission now computes next_fire_at
         let id = mgr
             .create_mission(
                 project_id,
@@ -1781,7 +1806,14 @@ mod tests {
             .await
             .unwrap();
 
-        // Set next_fire_at to the past so tick() will fire it
+        // Verify next_fire_at was populated by create_mission
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            mission.next_fire_at.is_some(),
+            "create_mission should compute next_fire_at for cron cadence"
+        );
+
+        // Move next_fire_at to the past so tick() will fire it
         {
             let mut missions = store.missions.write().await;
             if let Some(mission) = missions.get_mut(&id) {
@@ -2688,6 +2720,155 @@ mod tests {
         assert_eq!(
             self_imp_count, 1,
             "should not duplicate self-improvement mission"
+        );
+    }
+
+    // ── Cron scheduling tests (#1944) ─────────────────────────
+
+    #[tokio::test]
+    async fn create_cron_mission_sets_next_fire_at() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "cron test",
+                "periodic goal",
+                MissionCadence::Cron {
+                    expression: "0 */6 * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            mission.next_fire_at.is_some(),
+            "cron mission should have next_fire_at computed on creation"
+        );
+        assert!(
+            mission.next_fire_at.unwrap() > chrono::Utc::now(),
+            "next_fire_at should be in the future"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_manual_mission_has_no_next_fire_at() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "manual test",
+                "goal",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            mission.next_fire_at.is_none(),
+            "manual mission should not have next_fire_at"
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_mission_advances_next_fire_at() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "cron advance",
+                "periodic goal",
+                MissionCadence::Cron {
+                    expression: "* * * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        // Move next_fire_at to the past so tick fires it
+        {
+            let mut missions = store.missions.write().await;
+            if let Some(mission) = missions.get_mut(&id) {
+                mission.next_fire_at = Some(chrono::Utc::now() - chrono::Duration::seconds(60));
+            }
+        }
+
+        let spawned = mgr.tick("test-user").await.unwrap();
+        assert_eq!(spawned.len(), 1);
+
+        // After firing, next_fire_at should be advanced to the future
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            mission.next_fire_at.is_some(),
+            "next_fire_at should be set after firing"
+        );
+        assert!(
+            mission.next_fire_at.unwrap() > chrono::Utc::now() - chrono::Duration::seconds(5),
+            "next_fire_at should be advanced after firing"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_cron_mission_recomputes_next_fire_at() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "cron resume",
+                "periodic goal",
+                MissionCadence::Cron {
+                    expression: "0 */6 * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        // Pause the mission — this clears it from active list
+        mgr.pause_mission(id, "test-user").await.unwrap();
+
+        // Manually set next_fire_at to a stale past value
+        {
+            let mut missions = store.missions.write().await;
+            if let Some(mission) = missions.get_mut(&id) {
+                mission.next_fire_at = Some(chrono::Utc::now() - chrono::Duration::hours(24));
+            }
+        }
+
+        // Resume — should recompute next_fire_at
+        mgr.resume_mission(id, "test-user").await.unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            mission.next_fire_at.is_some(),
+            "resume should recompute next_fire_at for cron missions"
+        );
+        assert!(
+            mission.next_fire_at.unwrap() > chrono::Utc::now(),
+            "recomputed next_fire_at should be in the future"
         );
     }
 }
