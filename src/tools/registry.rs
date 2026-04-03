@@ -213,13 +213,11 @@ impl ToolRegistry {
         read_scopes: &[String],
     ) -> Option<Arc<dyn Tool>> {
         let tools = self.tools.read().await;
-        tools.get(name).and_then(|tool| {
-            match tool.owner_user_id() {
-                None => Some(Arc::clone(tool)),
-                Some(owner) if owner == user_id => Some(Arc::clone(tool)),
-                Some(owner) if read_scopes.iter().any(|s| s == owner) => Some(Arc::clone(tool)),
-                _ => None,
-            }
+        tools.get(name).and_then(|tool| match tool.owner_user_id() {
+            None => Some(Arc::clone(tool)),
+            Some(owner) if owner == user_id => Some(Arc::clone(tool)),
+            Some(owner) if read_scopes.iter().any(|s| s == owner) => Some(Arc::clone(tool)),
+            _ => None,
         })
     }
 
@@ -1288,27 +1286,34 @@ mod tests {
     #[tokio::test]
     async fn scope_filter_includes_own_tools() {
         let registry = ToolRegistry::new();
-        registry.register(FakeTool::owned("andrew_tool", "andrew")).await;
-        registry.register(FakeTool::owned("grace_tool", "grace")).await;
-
-        let defs = registry
-            .tool_definitions_for_user("andrew", &[])
+        registry
+            .register(FakeTool::owned("andrew_tool", "andrew"))
             .await;
+        registry
+            .register(FakeTool::owned("grace_tool", "grace"))
+            .await;
+
+        let defs = registry.tool_definitions_for_user("andrew", &[]).await;
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"andrew_tool"), "should see own tool");
-        assert!(!names.contains(&"grace_tool"), "should not see grace's tool");
+        assert!(
+            !names.contains(&"grace_tool"),
+            "should not see grace's tool"
+        );
     }
 
     #[tokio::test]
     async fn scope_filter_includes_scoped_tools() {
         let registry = ToolRegistry::new();
-        registry.register(FakeTool::owned("andrew_tool", "andrew")).await;
-        registry.register(FakeTool::owned("grace_tool", "grace")).await;
+        registry
+            .register(FakeTool::owned("andrew_tool", "andrew"))
+            .await;
+        registry
+            .register(FakeTool::owned("grace_tool", "grace"))
+            .await;
 
         let scopes = vec!["grace".to_string()];
-        let defs = registry
-            .tool_definitions_for_user("andrew", &scopes)
-            .await;
+        let defs = registry.tool_definitions_for_user("andrew", &scopes).await;
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"andrew_tool"), "should see own tool");
         assert!(names.contains(&"grace_tool"), "should see scoped tool");
@@ -1317,35 +1322,43 @@ mod tests {
     #[tokio::test]
     async fn scope_filter_excludes_unscoped_tools() {
         let registry = ToolRegistry::new();
-        registry.register(FakeTool::owned("andrew_tool", "andrew")).await;
-        registry.register(FakeTool::owned("grace_tool", "grace")).await;
+        registry
+            .register(FakeTool::owned("andrew_tool", "andrew"))
+            .await;
+        registry
+            .register(FakeTool::owned("grace_tool", "grace"))
+            .await;
         registry
             .register(FakeTool::owned("household_tool", "household"))
             .await;
 
         // Andrew has grace scope but not household
         let scopes = vec!["grace".to_string()];
-        let defs = registry
-            .tool_definitions_for_user("andrew", &scopes)
-            .await;
+        let defs = registry.tool_definitions_for_user("andrew", &scopes).await;
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"andrew_tool"));
         assert!(names.contains(&"grace_tool"));
-        assert!(!names.contains(&"household_tool"), "household not in scopes");
+        assert!(
+            !names.contains(&"household_tool"),
+            "household not in scopes"
+        );
     }
 
     #[tokio::test]
     async fn scope_filter_always_includes_builtins() {
         let registry = ToolRegistry::new();
         registry.register(FakeTool::builtin("builtin_tool")).await;
-        registry.register(FakeTool::owned("andrew_tool", "andrew")).await;
+        registry
+            .register(FakeTool::owned("andrew_tool", "andrew"))
+            .await;
 
         // No scopes — builtins should always appear
-        let defs = registry
-            .tool_definitions_for_user("grace", &[])
-            .await;
+        let defs = registry.tool_definitions_for_user("grace", &[]).await;
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-        assert!(names.contains(&"builtin_tool"), "builtins are always visible");
+        assert!(
+            names.contains(&"builtin_tool"),
+            "builtins are always visible"
+        );
         assert!(
             !names.contains(&"andrew_tool"),
             "other user's tools are hidden"
@@ -1355,22 +1368,27 @@ mod tests {
     #[tokio::test]
     async fn scope_filter_deduplicates_self_in_scopes() {
         let registry = ToolRegistry::new();
-        registry.register(FakeTool::owned("andrew_tool", "andrew")).await;
+        registry
+            .register(FakeTool::owned("andrew_tool", "andrew"))
+            .await;
 
         // Self appears in scopes — should not produce duplicates
         let scopes = vec!["andrew".to_string()];
-        let defs = registry
-            .tool_definitions_for_user("andrew", &scopes)
-            .await;
+        let defs = registry.tool_definitions_for_user("andrew", &scopes).await;
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         let count = names.iter().filter(|&&n| n == "andrew_tool").count();
-        assert_eq!(count, 1, "tool should appear exactly once despite self-scope");
+        assert_eq!(
+            count, 1,
+            "tool should appear exactly once despite self-scope"
+        );
     }
 
     #[tokio::test]
     async fn get_for_user_returns_own_tool() {
         let registry = ToolRegistry::new();
-        registry.register(FakeTool::owned("andrew_tool", "andrew")).await;
+        registry
+            .register(FakeTool::owned("andrew_tool", "andrew"))
+            .await;
 
         let tool = registry.get_for_user("andrew_tool", "andrew", &[]).await;
         assert!(tool.is_some(), "should find own tool");
@@ -1379,19 +1397,21 @@ mod tests {
     #[tokio::test]
     async fn get_for_user_returns_scoped_tool() {
         let registry = ToolRegistry::new();
-        registry.register(FakeTool::owned("grace_tool", "grace")).await;
+        registry
+            .register(FakeTool::owned("grace_tool", "grace"))
+            .await;
 
         let scopes = vec!["grace".to_string()];
-        let tool = registry
-            .get_for_user("grace_tool", "andrew", &scopes)
-            .await;
+        let tool = registry.get_for_user("grace_tool", "andrew", &scopes).await;
         assert!(tool.is_some(), "should find scoped tool");
     }
 
     #[tokio::test]
     async fn get_for_user_blocks_unscoped_tool() {
         let registry = ToolRegistry::new();
-        registry.register(FakeTool::owned("grace_tool", "grace")).await;
+        registry
+            .register(FakeTool::owned("grace_tool", "grace"))
+            .await;
 
         let tool = registry.get_for_user("grace_tool", "andrew", &[]).await;
         assert!(tool.is_none(), "should not find tool without scope");
@@ -1404,5 +1424,111 @@ mod tests {
 
         let tool = registry.get_for_user("builtin_tool", "anyone", &[]).await;
         assert!(tool.is_some(), "builtins are always accessible");
+    }
+
+    // --- comprehensive cross-scope integration tests ---
+
+    #[tokio::test]
+    async fn cross_scope_full_visibility_with_scopes() {
+        let registry = ToolRegistry::new();
+        // Andrew's tools
+        registry
+            .register(FakeTool::owned("andrew_tasks_add", "andrew"))
+            .await;
+        registry
+            .register(FakeTool::owned("andrew_tasks_query", "andrew"))
+            .await;
+        // Grace's tools
+        registry
+            .register(FakeTool::owned("grace_tasks_add", "grace"))
+            .await;
+        registry
+            .register(FakeTool::owned("grace_tasks_query", "grace"))
+            .await;
+        // Household tools
+        registry
+            .register(FakeTool::owned("household_chores_add", "household"))
+            .await;
+        // Builtins
+        registry.register(FakeTool::builtin("memory_search")).await;
+
+        // Andrew with grace+household scopes sees everything
+        let scopes = vec!["grace".to_string(), "household".to_string()];
+        let defs = registry.tool_definitions_for_user("andrew", &scopes).await;
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"andrew_tasks_add"));
+        assert!(names.contains(&"andrew_tasks_query"));
+        assert!(names.contains(&"grace_tasks_add"));
+        assert!(names.contains(&"grace_tasks_query"));
+        assert!(names.contains(&"household_chores_add"));
+        assert!(names.contains(&"memory_search"));
+
+        // Household with NO scopes sees only own + builtins
+        let defs_h = registry
+            .tool_definitions_for_user("household", &[])
+            .await;
+        let names_h: Vec<&str> = defs_h.iter().map(|d| d.name.as_str()).collect();
+        assert!(names_h.contains(&"household_chores_add"));
+        assert!(names_h.contains(&"memory_search"));
+        assert!(
+            !names_h.contains(&"andrew_tasks_add"),
+            "household must NOT see andrew's tools"
+        );
+        assert!(
+            !names_h.contains(&"grace_tasks_add"),
+            "household must NOT see grace's tools"
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_gate_comprehensive() {
+        let registry = ToolRegistry::new();
+        registry
+            .register(FakeTool::owned("grace_diary_query", "grace"))
+            .await;
+        registry.register(FakeTool::builtin("echo")).await;
+
+        // Andrew WITHOUT grace scope — blocked
+        assert!(
+            registry
+                .get_for_user("grace_diary_query", "andrew", &[])
+                .await
+                .is_none(),
+            "Must block tool when scope is missing"
+        );
+
+        // Andrew WITH grace scope — allowed
+        let scopes = vec!["grace".to_string()];
+        assert!(
+            registry
+                .get_for_user("grace_diary_query", "andrew", &scopes)
+                .await
+                .is_some(),
+            "Must allow tool when scope is present"
+        );
+
+        // Grace herself — always allowed (she's the owner)
+        assert!(
+            registry
+                .get_for_user("grace_diary_query", "grace", &[])
+                .await
+                .is_some(),
+            "Owner must always access own tool"
+        );
+
+        // Builtin — always allowed for anyone
+        assert!(
+            registry
+                .get_for_user("echo", "random_user", &[])
+                .await
+                .is_some(),
+            "Builtins must be accessible to everyone"
+        );
+
+        // Non-existent tool — None
+        assert!(registry
+            .get_for_user("nonexistent", "andrew", &scopes)
+            .await
+            .is_none());
     }
 }

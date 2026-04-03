@@ -807,4 +807,101 @@ mod tests {
             "Skill without tools_prefix should activate normally"
         );
     }
+
+    // --- cross-scope skill leakage prevention tests ---
+
+    #[test]
+    fn skill_with_tools_prefix_does_not_leak_to_unscoped_user() {
+        // Grace's collection skill with tools_prefix
+        let mut skill = make_skill("grace_tasks", &["tasks", "todo", "grace"], &[], &[]);
+        skill.manifest.activation.tools_prefix = Some("grace_tasks".to_string());
+
+        // Household has no grace_tasks tools — skill must NOT activate
+        let household_tools = vec!["household_childcare_add".to_string()];
+        let household_skills = vec![skill.clone()];
+        let selected = prefilter_skills(
+            "show me tasks",
+            &household_skills,
+            5,
+            4000,
+            &household_tools,
+        );
+        assert!(
+            selected.is_empty(),
+            "Collection skill must NOT leak to user without matching tools"
+        );
+
+        // Andrew has grace_tasks tools — skill SHOULD activate
+        let andrew_tools = vec![
+            "andrew_tasks_add".to_string(),
+            "grace_tasks_add".to_string(),
+            "grace_tasks_query".to_string(),
+        ];
+        let andrew_skills = vec![skill];
+        let selected =
+            prefilter_skills("show me tasks", &andrew_skills, 5, 4000, &andrew_tools);
+        assert_eq!(
+            selected.len(),
+            1,
+            "Collection skill should activate for user with matching tools"
+        );
+    }
+
+    #[test]
+    fn multiple_prefixed_skills_only_matching_activate() {
+        // Two collection skills with different prefixes
+        let mut grace_skill =
+            make_skill("grace_tasks", &["tasks", "todo"], &[], &[]);
+        grace_skill.manifest.activation.tools_prefix =
+            Some("grace_tasks".to_string());
+
+        let mut household_skill =
+            make_skill("household_chores", &["chores", "cleaning"], &[], &[]);
+        household_skill.manifest.activation.tools_prefix =
+            Some("household_chores".to_string());
+
+        let skills = vec![grace_skill, household_skill];
+
+        // User with only grace_tasks tools — only grace skill should activate
+        let tools = vec![
+            "grace_tasks_add".to_string(),
+            "grace_tasks_query".to_string(),
+        ];
+        let selected =
+            prefilter_skills("show me tasks and chores", &skills, 5, 8000, &tools);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name(), "grace_tasks");
+
+        // User with both tools — both skills should activate
+        let tools_both = vec![
+            "grace_tasks_add".to_string(),
+            "household_chores_add".to_string(),
+        ];
+        let selected = prefilter_skills(
+            "show me tasks and chores",
+            &skills,
+            5,
+            8000,
+            &tools_both,
+        );
+        assert_eq!(selected.len(), 2);
+    }
+
+    #[test]
+    fn tools_prefix_is_case_insensitive() {
+        let mut skill = make_skill("Grace_Tasks", &["tasks"], &[], &[]);
+        skill.manifest.activation.tools_prefix =
+            Some("Grace_Tasks".to_string());
+
+        // Lowercase tools should still match (prefix comparison is lowercase)
+        let tools = vec!["grace_tasks_add".to_string()];
+        let skills = vec![skill];
+        let selected =
+            prefilter_skills("show me tasks", &skills, 5, 4000, &tools);
+        assert_eq!(
+            selected.len(),
+            1,
+            "tools_prefix matching should be case-insensitive"
+        );
+    }
 }

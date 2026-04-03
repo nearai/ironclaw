@@ -4252,3 +4252,270 @@ mod owner_scope_tests {
         );
     }
 }
+
+/// Cross-scope integration tests using file-backed libsql (no postgres dependency).
+///
+/// These tests validate:
+/// - Write targeting: cross-scope writes land in the owner's partition
+/// - Query reads: cross-scope queries read from the owner's partition
+/// - collections_list scoping: unscoped users cannot see other users' collections
+///
+/// Uses `tempfile` + `LibSqlBackend::new_local` because libsql `:memory:` databases
+/// are connection-local — migrations and queries would operate on separate databases.
+#[cfg(all(test, feature = "libsql"))]
+mod cross_scope_libsql_tests {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use crate::context::JobContext;
+    use crate::db::Database;
+    use crate::db::libsql::LibSqlBackend;
+    use crate::db::structured::{CollectionSchema, FieldDef, FieldType};
+    use crate::tools::builtin::collections::{
+        CollectionAddTool, CollectionListTool, CollectionQueryTool,
+    };
+    use crate::tools::tool::Tool;
+
+    fn test_schema(name: &str) -> CollectionSchema {
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "item".to_string(),
+            FieldDef {
+                field_type: FieldType::Text,
+                required: true,
+                default: None,
+            },
+        );
+        CollectionSchema {
+            collection: name.to_string(),
+            description: Some("test collection".to_string()),
+            fields,
+            source_scope: None,
+        }
+    }
+
+    async fn make_db() -> (Arc<dyn Database>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+        // Return the TempDir to keep it alive for the test's duration
+        (Arc::new(backend), dir)
+    }
+
+    #[tokio::test]
+    async fn cross_scope_add_writes_to_owner_partition() {
+        let (db, _dir) = make_db().await;
+
+        let schema = test_schema("grocery");
+        db.register_collection("grace", &schema).await.unwrap();
+
+        // Create the add tool owned by grace
+        let tool = CollectionAddTool::new(schema, Arc::clone(&db), None, "grace");
+
+        // Verify owner_scope returns "grace"
+        assert_eq!(tool.owner_scope(), "grace");
+
+        // Andrew calls the tool
+        let mut ctx = JobContext::with_user("andrew", "test", "test");
+        ctx.workspace_read_scopes = vec!["grace".to_string()];
+        let result = tool
+            .execute(serde_json::json!({"item": "milk"}), &ctx)
+            .await;
+        assert!(result.is_ok(), "Cross-scope add should succeed");
+
+        // Record should be in GRACE's partition
+        let grace_records = db
+            .query_records("grace", "grocery", &[], None, 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            grace_records.len(),
+            1,
+            "Record should be in Grace's partition"
+        );
+
+        // Record should NOT be in Andrew's partition
+        let andrew_count = db
+            .query_records("andrew", "grocery", &[], None, 100)
+            .await
+            .map(|r| r.len())
+            .unwrap_or(0);
+        assert_eq!(
+            andrew_count, 0,
+            "Record must NOT be in Andrew's partition"
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_scope_query_reads_from_owner_partition() {
+        let (db, _dir) = make_db().await;
+
+        let schema = test_schema("grocery");
+        db.register_collection("grace", &schema).await.unwrap();
+
+        // Insert a record directly into Grace's partition
+        db.insert_record("grace", "grocery", serde_json::json!({"item": "eggs"}))
+            .await
+            .unwrap();
+
+        // Create query tool owned by grace
+        let tool = CollectionQueryTool::new(schema, Arc::clone(&db), "grace");
+
+        // Andrew queries — should see Grace's data
+        let mut ctx = JobContext::with_user("andrew", "test", "test");
+        ctx.workspace_read_scopes = vec!["grace".to_string()];
+        let result = tool
+            .execute(serde_json::json!({}), &ctx)
+            .await
+            .unwrap();
+        let count = result.result["count"].as_u64().unwrap_or(0);
+        assert!(
+            count >= 1,
+            "Cross-scope query should return Grace's records, got {}",
+            count
+        );
+    }
+
+    #[tokio::test]
+    async fn collections_list_does_not_leak_unscoped() {
+        let (db, _dir) = make_db().await;
+
+        let diary_schema = CollectionSchema {
+            collection: "diary".to_string(),
+            description: Some("Grace's private diary".to_string()),
+            fields: BTreeMap::new(),
+            source_scope: None,
+        };
+        db.register_collection("grace", &diary_schema)
+            .await
+            .unwrap();
+
+        let chores_schema = CollectionSchema {
+            collection: "chores".to_string(),
+            description: Some("Household chores".to_string()),
+            fields: BTreeMap::new(),
+            source_scope: None,
+        };
+        db.register_collection("household", &chores_schema)
+            .await
+            .unwrap();
+
+        let tool = CollectionListTool::new(Arc::clone(&db));
+
+        // Household with NO scopes — should only see own
+        let ctx = JobContext::with_user("household", "test", "test");
+        let result = tool
+            .execute(serde_json::json!({}), &ctx)
+            .await
+            .unwrap();
+        let collections = result.result["collections"].as_array().unwrap();
+        assert_eq!(
+            collections.len(),
+            1,
+            "Household should see only own collections"
+        );
+        assert_eq!(collections[0]["collection"], "chores");
+
+        // Verify Grace's diary is NOT visible
+        assert!(
+            !collections.iter().any(|c| c["collection"] == "diary"),
+            "Grace's private collection must NOT be visible to household"
+        );
+    }
+
+    #[tokio::test]
+    async fn collections_list_includes_scoped_collections() {
+        let (db, _dir) = make_db().await;
+
+        let diary_schema = CollectionSchema {
+            collection: "diary".to_string(),
+            description: Some("Grace's diary".to_string()),
+            fields: BTreeMap::new(),
+            source_scope: None,
+        };
+        db.register_collection("grace", &diary_schema)
+            .await
+            .unwrap();
+
+        let tasks_schema = test_schema("tasks");
+        db.register_collection("andrew", &tasks_schema)
+            .await
+            .unwrap();
+
+        let tool = CollectionListTool::new(Arc::clone(&db));
+
+        // Andrew with grace scope — should see both own and grace's collections
+        let mut ctx = JobContext::with_user("andrew", "test", "test");
+        ctx.workspace_read_scopes = vec!["grace".to_string()];
+        let result = tool
+            .execute(serde_json::json!({}), &ctx)
+            .await
+            .unwrap();
+        let collections = result.result["collections"].as_array().unwrap();
+        assert_eq!(
+            collections.len(),
+            2,
+            "Andrew should see own + grace's collections"
+        );
+
+        let names: Vec<&str> = collections
+            .iter()
+            .map(|c| c["collection"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"tasks"), "should see own tasks");
+        assert!(
+            names.contains(&"diary"),
+            "should see grace's diary via scope"
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_scope_add_with_source_scope_targets_source() {
+        let (db, _dir) = make_db().await;
+
+        // Register collection under household (the source)
+        let schema = test_schema("chores");
+        db.register_collection("household", &schema).await.unwrap();
+
+        // Create schema with source_scope pointing at household
+        let mut scoped_schema = test_schema("chores");
+        scoped_schema.source_scope = Some("household".to_string());
+
+        // Tool owned by andrew but source_scope is household
+        let tool = CollectionAddTool::new(scoped_schema, Arc::clone(&db), None, "andrew");
+        assert_eq!(
+            tool.owner_scope(),
+            "household",
+            "source_scope should take precedence"
+        );
+
+        let ctx = JobContext::with_user("andrew", "test", "test");
+        let result = tool
+            .execute(serde_json::json!({"item": "vacuum"}), &ctx)
+            .await;
+        assert!(result.is_ok(), "Scoped add should succeed");
+
+        // Record should be in household's partition
+        let household_records = db
+            .query_records("household", "chores", &[], None, 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            household_records.len(),
+            1,
+            "Record should land in household's partition"
+        );
+
+        // Andrew's partition should be empty
+        let andrew_count = db
+            .query_records("andrew", "chores", &[], None, 100)
+            .await
+            .map(|r| r.len())
+            .unwrap_or(0);
+        assert_eq!(
+            andrew_count, 0,
+            "Record must NOT be in andrew's partition"
+        );
+    }
+}
