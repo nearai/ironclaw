@@ -847,6 +847,31 @@ pub struct SettingsExportResponse {
     pub settings: std::collections::HashMap<String, serde_json::Value>,
 }
 
+// --- Tool Permissions ---
+
+/// Single tool entry returned by `GET /api/settings/tools`.
+#[derive(Debug, Serialize)]
+pub struct ToolPermissionEntry {
+    pub name: String,
+    pub description: String,
+    pub current_state: String,
+    pub default_state: String,
+    pub locked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locked_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ToolPermissionsResponse {
+    pub tools: Vec<ToolPermissionEntry>,
+}
+
+/// Body for `PUT /api/settings/tools/:name`.
+#[derive(Debug, Deserialize)]
+pub struct UpdateToolPermissionRequest {
+    pub state: String,
+}
+
 // --- Health ---
 
 #[derive(Debug, Serialize)]

@@ -19,8 +19,8 @@ use crate::tools::builtin::{
     JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
     MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PlanUpdateTool, PromptQueue,
     ReadFileTool, ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool,
-    TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool,
-    ToolSearchTool, ToolUpgradeTool, WriteFileTool,
+    TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolPermissionSetTool,
+    ToolRemoveTool, ToolSearchTool, ToolUpgradeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolDiscoverySummary, ToolDomain};
@@ -78,6 +78,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "image_edit",
     "image_analyze",
     "tool_info",
+    "tool_permission_set",
 ];
 
 /// Registry of available tools.
@@ -144,8 +145,16 @@ impl ToolRegistry {
     }
 
     /// Register a tool. Rejects dynamic tools that try to shadow a protected built-in name.
+    /// Also rejects tool names containing `.` which conflicts with settings path parsing.
     pub async fn register(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
+        if name.contains('.') {
+            tracing::warn!(
+                tool = %name,
+                "Rejecting tool registration: name contains '.' which conflicts with settings path parsing"
+            );
+            return;
+        }
         if PROTECTED_TOOL_NAMES.contains(&name.as_str())
             && self.builtin_names.read().await.contains(&name)
         {
@@ -160,8 +169,16 @@ impl ToolRegistry {
     }
 
     /// Register a tool (sync version for startup, marks as built-in).
+    /// Also rejects tool names containing `.` which conflicts with settings path parsing.
     pub fn register_sync(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
+        if name.contains('.') {
+            tracing::warn!(
+                tool = %name,
+                "Rejecting tool registration: name contains '.' which conflicts with settings path parsing"
+            );
+            return;
+        }
         if let Ok(mut tools) = self.tools.try_write() {
             tools.insert(name.clone(), tool);
             if let Ok(mut builtins) = self.builtin_names.try_write() {
@@ -490,6 +507,38 @@ impl ToolRegistry {
         self.register_sync(Arc::new(ToolUpgradeTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ExtensionInfoTool::new(manager)));
         tracing::debug!("Registered 8 extension management tools");
+    }
+
+    /// Register the permission management tool (`tool_permission_set`).
+    ///
+    /// This tool allows users or the LLM to view and modify tool permissions,
+    /// subject to approval.
+    pub fn register_permission_tools(
+        self: &Arc<Self>,
+        settings_store: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
+    ) {
+        self.register_sync(Arc::new(ToolPermissionSetTool::new(
+            Arc::clone(self),
+            settings_store.clone(),
+        )));
+        tracing::debug!("Registered tool_permission_set");
+    }
+
+    /// Upgrade `tool_list` to include built-in tool listings and per-user permission states.
+    ///
+    /// Call this after `register_extension_tools()` and after the registry itself
+    /// is behind an `Arc`.
+    pub fn upgrade_tool_list(
+        self: &Arc<Self>,
+        manager: Arc<ExtensionManager>,
+        settings_store: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
+    ) {
+        let mut list_tool = ToolListTool::new(manager).with_registry(Arc::clone(self));
+        if let Some(store) = settings_store {
+            list_tool = list_tool.with_settings_store(store);
+        }
+        self.register_sync(Arc::new(list_tool));
+        tracing::debug!("Upgraded tool_list with builtin registry support");
     }
 
     /// Register skill management tools (list, search, install, remove).
