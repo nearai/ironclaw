@@ -495,6 +495,87 @@ FINAL(str(result))
     );
 }
 
+/// Verify selected skill provenance is persisted onto the thread for learning flows.
+#[tokio::test]
+async fn skill_codeact_persists_active_skill_provenance() {
+    let project_id = ProjectId::new();
+    let skill_doc = make_github_skill_doc(project_id);
+    let skill_doc_id = skill_doc.id;
+
+    let python_code = r#"
+result = await http(method="GET", url="https://api.github.com/repos/test-org/test-repo/issues?state=open&per_page=5")
+FINAL(str(result))
+"#;
+    let llm = ScriptedLlm::new(vec![LlmOutput {
+        response: LlmResponse::Code {
+            code: python_code.to_string(),
+            content: None,
+        },
+        usage: TokenUsage::default(),
+    }]);
+
+    let mut canned = HashMap::new();
+    canned.insert(
+        "api.github.com/repos/test-org/test-repo/issues".to_string(),
+        canned_github_issues(),
+    );
+    let effects = HttpMockEffects::new(canned);
+    let store = TestStore::new();
+    store.save_memory_doc(&skill_doc).await.unwrap();
+
+    let mut caps = CapabilityRegistry::new();
+    caps.register(Capability {
+        name: "tools".into(),
+        description: "Available tools".into(),
+        actions: vec![ActionDef {
+            name: "http".into(),
+            description: "Make HTTP requests".into(),
+            parameters_schema: serde_json::json!({"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
+            effects: vec![EffectType::ReadExternal],
+            requires_approval: false,
+        }],
+        knowledge: vec![],
+        policies: vec![],
+    });
+
+    let mgr = ThreadManager::new(
+        llm,
+        effects,
+        store.clone() as Arc<dyn Store>,
+        Arc::new(caps),
+        Arc::new(LeaseManager::new()),
+        Arc::new(PolicyEngine::new()),
+    );
+
+    let tid = mgr
+        .spawn_thread(
+            "show me open github issues for test-org/test-repo",
+            ThreadType::Foreground,
+            project_id,
+            ThreadConfig::default(),
+            None,
+            "test-user",
+        )
+        .await
+        .expect("spawn_thread");
+
+    let outcome = mgr.join_thread(tid).await.expect("join_thread");
+    assert!(
+        matches!(outcome, ThreadOutcome::Completed { .. }),
+        "expected Completed, got: {outcome:?}"
+    );
+
+    let thread = store.load_thread(tid).await.unwrap().unwrap();
+    let active_skills = thread.active_skills();
+    let github_skill = active_skills
+        .iter()
+        .find(|skill| skill.doc_id == skill_doc_id)
+        .unwrap_or_else(|| panic!("expected github skill provenance in {active_skills:?}"));
+    assert_eq!(github_skill.name, "github");
+    assert_eq!(github_skill.version, 1);
+    assert_eq!(github_skill.snippet_names, vec!["list_github_issues"]);
+}
+
 /// Verify that non-matching goals don't activate skills (negative case).
 #[tokio::test]
 async fn non_matching_goal_skips_skill_codeact() {

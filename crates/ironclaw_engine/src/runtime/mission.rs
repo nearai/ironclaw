@@ -1642,11 +1642,29 @@ fn infer_skill_repair_hints(
         )
         .collect::<Vec<_>>();
 
-    if lower_signals.iter().any(|message| {
-        ["auth", "login", "token", "credential", "permission denied"]
-            .iter()
-            .any(|needle| message.contains(needle))
-    }) {
+    let recoverable_auth_failures = thread
+        .events
+        .iter()
+        .filter_map(|event| {
+            if let crate::types::event::EventKind::ActionFailed { error, .. } = &event.kind
+                && is_recoverable_auth_failure_text(error)
+            {
+                Some(error.to_lowercase())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if lower_signals
+        .iter()
+        .chain(recoverable_auth_failures.iter())
+        .any(|message| {
+            ["auth", "login", "token", "credential", "permission denied"]
+                .iter()
+                .any(|needle| message.contains(needle))
+        })
+    {
         push_hint(SkillRepairType::MissingPrerequisite);
     }
 
@@ -3201,6 +3219,46 @@ mod tests {
                 .iter()
                 .any(|hint| hint.as_str() == Some("missing_prerequisite")),
             "repair hints should include missing_prerequisite: {payload}"
+        );
+    }
+
+    #[test]
+    fn build_skill_gap_payload_preserves_recoverable_auth_prerequisite_hints() {
+        let project_id = ProjectId::new();
+        let mut thread = Thread::new(
+            "repair a github workflow",
+            ThreadType::Foreground,
+            project_id,
+            "alice",
+            ThreadConfig::default(),
+        );
+        thread.state = ThreadState::Done;
+        thread
+            .set_active_skills(&[ActiveSkillProvenance {
+                doc_id: DocId::new(),
+                name: "github-pr-workflow".to_string(),
+                version: 3,
+                snippet_names: vec![],
+                force_activated: false,
+            }])
+            .unwrap();
+        thread.add_event(crate::types::event::EventKind::ActionFailed {
+            step_id: StepId::new(),
+            action_name: "shell".to_string(),
+            call_id: "call_1".to_string(),
+            error: "authentication required for credential github".to_string(),
+            params_summary: None,
+        });
+
+        let trace = crate::executor::trace::build_trace(&thread);
+        let payload = build_skill_gap_payload(&thread, &trace, &thread.active_skills()).unwrap();
+        let hints = payload["repair_hints"].as_array().unwrap();
+
+        assert!(
+            hints
+                .iter()
+                .any(|hint| hint.as_str() == Some("missing_prerequisite")),
+            "recoverable auth failures should still produce missing_prerequisite: {payload}"
         );
     }
 
