@@ -46,7 +46,12 @@ fn default_input_schema() -> serde_json::Value {
 }
 
 /// Annotations for an MCP tool that provide hints about its behavior.
+///
+/// The MCP specification uses camelCase for annotation field names
+/// (e.g. `destructiveHint`, `readOnlyHint`). The `rename_all` attribute
+/// ensures correct deserialization from spec-compliant servers.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct McpToolAnnotations {
     /// Hint that this tool performs destructive operations that cannot be undone.
     /// Tools with this hint set to true should require user approval before execution.
@@ -606,6 +611,32 @@ mod tests {
             annotations: None,
         };
         assert!(!tool.requires_approval());
+    }
+
+    #[test]
+    fn test_annotations_deserialize_camel_case_from_mcp_spec() {
+        // MCP spec uses camelCase for annotation fields (destructiveHint, readOnlyHint, etc.).
+        // Without #[serde(rename_all = "camelCase")] on McpToolAnnotations, serde silently
+        // defaults all fields to false and destructive tools bypass approval.
+        let json = serde_json::json!({
+            "name": "pods_delete",
+            "description": "Delete a pod",
+            "inputSchema": {"type": "object"},
+            "annotations": {
+                "destructiveHint": true,
+                "readOnlyHint": false,
+                "sideEffectsHint": true
+            }
+        });
+        let tool: McpTool = serde_json::from_value(json).expect("deserialize");
+        assert!(
+            tool.requires_approval(),
+            "tools with destructiveHint: true must require approval"
+        );
+        let ann = tool.annotations.unwrap();
+        assert!(ann.destructive_hint);
+        assert!(!ann.read_only_hint);
+        assert!(ann.side_effects_hint);
     }
 
     #[test]

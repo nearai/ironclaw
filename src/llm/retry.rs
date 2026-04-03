@@ -48,6 +48,7 @@ pub(crate) fn is_retryable(err: &LlmError) -> bool {
         LlmError::RequestFailed { .. }
             | LlmError::RateLimited { .. }
             | LlmError::InvalidResponse { .. }
+            | LlmError::EmptyResponse { .. }
             | LlmError::SessionRenewalFailed { .. }
             | LlmError::Http(_)
             | LlmError::Io(_)

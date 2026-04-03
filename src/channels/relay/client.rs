@@ -123,7 +123,7 @@ impl RelayClient {
     /// for validating the callback — no URLs.
     pub async fn initiate_oauth(&self, state_nonce: Option<&str>) -> Result<String, RelayError> {
         let url = format!("{}/oauth/slack/auth", self.base_url);
-        tracing::debug!(relay_url = %url, "RelayClient::initiate_oauth: sending request");
+        tracing::trace!(relay_url = %url, "RelayClient::initiate_oauth: sending request");
         let mut query: Vec<(&str, &str)> = vec![];
         if let Some(nonce) = state_nonce {
             query.push(("state_nonce", nonce));
@@ -143,7 +143,7 @@ impl RelayClient {
                 );
                 RelayError::Network(e.to_string())
             })?;
-        tracing::debug!(
+        tracing::trace!(
             relay_url = %url,
             status = %resp.status(),
             "RelayClient::initiate_oauth: received response"
@@ -239,7 +239,7 @@ impl RelayClient {
         body: serde_json::Value,
     ) -> Result<serde_json::Value, RelayError> {
         let url = format!("{}/proxy/{}/{}", self.base_url, provider, method);
-        tracing::debug!(
+        tracing::trace!(
             relay_url = %url,
             provider = %provider,
             method = %method,
@@ -277,9 +277,30 @@ impl RelayClient {
             });
         }
 
-        resp.json()
+        let json: serde_json::Value = resp
+            .json()
             .await
-            .map_err(|e| RelayError::Protocol(e.to_string()))
+            .map_err(|e| RelayError::Protocol(e.to_string()))?;
+
+        // Slack API always returns HTTP 200 but signals errors via {"ok": false}.
+        // Surface these as relay errors so callers get actionable feedback.
+        if json.get("ok") == Some(&serde_json::Value::Bool(false)) {
+            let slack_error = json
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            tracing::warn!(
+                relay_url = %url,
+                slack_error = %slack_error,
+                "RelayClient::proxy_provider: Slack API returned ok=false"
+            );
+            return Err(RelayError::Api {
+                status: 200,
+                message: format!("Slack API error: {slack_error}"),
+            });
+        }
+
+        Ok(json)
     }
 
     /// Fetch the per-instance callback signing secret from channel-relay.
@@ -289,7 +310,7 @@ impl RelayClient {
     /// extension manager so subsequent calls to `relay_signing_secret()` use it.
     pub async fn get_signing_secret(&self, team_id: &str) -> Result<Vec<u8>, RelayError> {
         let url = format!("{}/relay/signing-secret", self.base_url);
-        tracing::debug!(
+        tracing::trace!(
             relay_url = %url,
             "RelayClient::get_signing_secret: fetching signing secret"
         );
@@ -323,7 +344,7 @@ impl RelayClient {
                 message: body,
             });
         }
-        tracing::debug!(
+        tracing::trace!(
             relay_url = %url,
             "RelayClient::get_signing_secret: received successful response"
         );

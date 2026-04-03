@@ -16,8 +16,9 @@ use crate::agent::routine::{Routine, RoutineRun, RunStatus};
 use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
-    ConversationStore, Database, JobStore, RoutineStore, SandboxStore, SettingsStore,
-    ToolFailureStore, WorkspaceStore,
+    ApiTokenRecord, ConversationStore, Database, IdentityStore, JobStore, RoutineStore,
+    SandboxStore, SettingsStore, ToolFailureStore, UserIdentityRecord, UserRecord, UserStore,
+    WorkspaceStore,
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
@@ -25,7 +26,8 @@ use crate::history::{
     LlmCallRecord, SandboxJobRecord, SandboxJobSummary, SettingRow, Store,
 };
 use crate::workspace::{
-    MemoryChunk, MemoryDocument, Repository, SearchConfig, SearchResult, WorkspaceEntry,
+    DocumentVersion, MemoryChunk, MemoryDocument, Repository, SearchConfig, SearchResult,
+    VersionSummary, WorkspaceEntry,
 };
 
 /// PostgreSQL database backend.
@@ -93,15 +95,40 @@ impl ConversationStore for PgBackend {
             .await
     }
 
+    async fn add_conversation_message_if_empty(
+        &self,
+        conversation_id: Uuid,
+        role: &str,
+        content: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        let id = Uuid::new_v4();
+        let result = conn
+            .execute(
+                "INSERT INTO conversation_messages (id, conversation_id, role, content) \
+                 SELECT $1, $2, $3, $4 \
+                 WHERE NOT EXISTS ( \
+                     SELECT 1 FROM conversation_messages WHERE conversation_id = $2 \
+                 )",
+                &[&id, &conversation_id, &role, &content],
+            )
+            .await?;
+        if result > 0 {
+            self.store.touch_conversation(conversation_id).await?;
+        }
+        Ok(result > 0)
+    }
+
     async fn ensure_conversation(
         &self,
         id: Uuid,
         channel: &str,
         user_id: &str,
         thread_id: Option<&str>,
+        source_channel: Option<&str>,
     ) -> Result<bool, DatabaseError> {
         self.store
-            .ensure_conversation(id, channel, user_id, thread_id)
+            .ensure_conversation(id, channel, user_id, thread_id, source_channel)
             .await
     }
 
@@ -134,6 +161,16 @@ impl ConversationStore for PgBackend {
     ) -> Result<Uuid, DatabaseError> {
         self.store
             .get_or_create_routine_conversation(routine_id, routine_name, user_id)
+            .await
+    }
+
+    async fn find_routine_conversation(
+        &self,
+        routine_id: Uuid,
+        user_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        self.store
+            .find_routine_conversation(routine_id, user_id)
             .await
     }
 
@@ -210,6 +247,15 @@ impl ConversationStore for PgBackend {
     ) -> Result<bool, DatabaseError> {
         self.store
             .conversation_belongs_to_user(conversation_id, user_id)
+            .await
+    }
+
+    async fn get_conversation_source_channel(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<Option<String>, DatabaseError> {
+        self.store
+            .get_conversation_source_channel(conversation_id)
             .await
     }
 }
@@ -784,5 +830,361 @@ impl WorkspaceStore for PgBackend {
         self.repo
             .list_directory_multi(user_ids, agent_id, directory)
             .await
+    }
+
+    // ==================== Metadata ====================
+
+    async fn update_document_metadata(
+        &self,
+        id: Uuid,
+        metadata: &serde_json::Value,
+    ) -> Result<(), WorkspaceError> {
+        self.repo.update_document_metadata(id, metadata).await
+    }
+
+    async fn find_config_documents(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+    ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
+        self.repo.find_config_documents(user_id, agent_id).await
+    }
+
+    // ==================== Versioning ====================
+
+    async fn save_version(
+        &self,
+        document_id: Uuid,
+        content: &str,
+        content_hash: &str,
+        changed_by: Option<&str>,
+    ) -> Result<i32, WorkspaceError> {
+        self.repo
+            .save_version(document_id, content, content_hash, changed_by)
+            .await
+    }
+
+    async fn get_version(
+        &self,
+        document_id: Uuid,
+        version: i32,
+    ) -> Result<DocumentVersion, WorkspaceError> {
+        self.repo.get_version(document_id, version).await
+    }
+
+    async fn list_versions(
+        &self,
+        document_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<VersionSummary>, WorkspaceError> {
+        self.repo.list_versions(document_id, limit).await
+    }
+
+    async fn get_latest_version_number(
+        &self,
+        document_id: Uuid,
+    ) -> Result<Option<i32>, WorkspaceError> {
+        self.repo.get_latest_version_number(document_id).await
+    }
+
+    async fn prune_versions(
+        &self,
+        document_id: Uuid,
+        keep_count: i32,
+    ) -> Result<u64, WorkspaceError> {
+        self.repo.prune_versions(document_id, keep_count).await
+    }
+}
+
+// ==================== UserStore ====================
+
+#[async_trait]
+impl UserStore for PgBackend {
+    async fn create_user(&self, user: &UserRecord) -> Result<(), DatabaseError> {
+        self.store.create_user(user).await
+    }
+
+    async fn get_user(&self, id: &str) -> Result<Option<UserRecord>, DatabaseError> {
+        self.store.get_user(id).await
+    }
+
+    async fn get_user_by_email(&self, email: &str) -> Result<Option<UserRecord>, DatabaseError> {
+        self.store.get_user_by_email(email).await
+    }
+
+    async fn list_users(&self, status: Option<&str>) -> Result<Vec<UserRecord>, DatabaseError> {
+        self.store.list_users(status).await
+    }
+
+    async fn update_user_status(&self, id: &str, status: &str) -> Result<(), DatabaseError> {
+        self.store.update_user_status(id, status).await
+    }
+
+    async fn update_user_role(&self, id: &str, role: &str) -> Result<(), DatabaseError> {
+        self.store.update_user_role(id, role).await
+    }
+
+    async fn update_user_profile(
+        &self,
+        id: &str,
+        display_name: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .update_user_profile(id, display_name, metadata)
+            .await
+    }
+
+    async fn record_login(&self, id: &str) -> Result<(), DatabaseError> {
+        self.store.record_login(id).await
+    }
+
+    async fn create_api_token(
+        &self,
+        user_id: &str,
+        name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<ApiTokenRecord, DatabaseError> {
+        self.store
+            .create_api_token(user_id, name, token_hash, token_prefix, expires_at)
+            .await
+    }
+
+    async fn list_api_tokens(&self, user_id: &str) -> Result<Vec<ApiTokenRecord>, DatabaseError> {
+        self.store.list_api_tokens(user_id).await
+    }
+
+    async fn revoke_api_token(&self, token_id: Uuid, user_id: &str) -> Result<bool, DatabaseError> {
+        self.store.revoke_api_token(token_id, user_id).await
+    }
+
+    async fn authenticate_token(
+        &self,
+        token_hash: &[u8; 32],
+    ) -> Result<Option<(ApiTokenRecord, UserRecord)>, DatabaseError> {
+        self.store.authenticate_token(token_hash).await
+    }
+
+    async fn record_token_usage(&self, token_id: Uuid) -> Result<(), DatabaseError> {
+        self.store.record_token_usage(token_id).await
+    }
+
+    async fn has_any_users(&self) -> Result<bool, DatabaseError> {
+        self.store.has_any_users().await
+    }
+
+    async fn delete_user(&self, id: &str) -> Result<bool, DatabaseError> {
+        self.store.delete_user(id).await
+    }
+
+    async fn user_usage_stats(
+        &self,
+        user_id: Option<&str>,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<crate::db::UserUsageStats>, DatabaseError> {
+        self.store.user_usage_stats(user_id, since).await
+    }
+
+    async fn user_summary_stats(
+        &self,
+        user_id: Option<&str>,
+    ) -> Result<Vec<crate::db::UserSummaryStats>, DatabaseError> {
+        self.store.user_summary_stats(user_id).await
+    }
+
+    async fn create_user_with_token(
+        &self,
+        user: &UserRecord,
+        token_name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<ApiTokenRecord, DatabaseError> {
+        self.store
+            .create_user_with_token(user, token_name, token_hash, token_prefix, expires_at)
+            .await
+    }
+}
+
+// ==================== IdentityStore ====================
+
+fn row_to_identity(row: &tokio_postgres::Row) -> UserIdentityRecord {
+    UserIdentityRecord {
+        id: row.get("id"),
+        user_id: row.get("user_id"),
+        provider: row.get("provider"),
+        provider_user_id: row.get("provider_user_id"),
+        email: row.get("email"),
+        email_verified: row.get("email_verified"),
+        display_name: row.get("display_name"),
+        avatar_url: row.get("avatar_url"),
+        raw_profile: row.get("raw_profile"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+#[async_trait]
+impl IdentityStore for PgBackend {
+    async fn get_identity_by_provider(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+    ) -> Result<Option<UserIdentityRecord>, DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        let row = conn
+            .query_opt(
+                "SELECT id, user_id, provider, provider_user_id, email, email_verified, \
+                 display_name, avatar_url, raw_profile, created_at, updated_at \
+                 FROM user_identities WHERE provider = $1 AND provider_user_id = $2",
+                &[&provider, &provider_user_id],
+            )
+            .await?;
+        Ok(row.as_ref().map(row_to_identity))
+    }
+
+    async fn list_identities_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<UserIdentityRecord>, DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        let rows = conn
+            .query(
+                "SELECT id, user_id, provider, provider_user_id, email, email_verified, \
+                 display_name, avatar_url, raw_profile, created_at, updated_at \
+                 FROM user_identities WHERE user_id = $1 ORDER BY created_at",
+                &[&user_id],
+            )
+            .await?;
+        Ok(rows.iter().map(row_to_identity).collect())
+    }
+
+    async fn create_identity(&self, identity: &UserIdentityRecord) -> Result<(), DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        conn.execute(
+            "INSERT INTO user_identities \
+             (id, user_id, provider, provider_user_id, email, email_verified, \
+              display_name, avatar_url, raw_profile, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            &[
+                &identity.id,
+                &identity.user_id,
+                &identity.provider,
+                &identity.provider_user_id,
+                &identity.email,
+                &identity.email_verified,
+                &identity.display_name,
+                &identity.avatar_url,
+                &identity.raw_profile,
+                &identity.created_at,
+                &identity.updated_at,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn update_identity_profile(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+        display_name: Option<&str>,
+        avatar_url: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        conn.execute(
+            "UPDATE user_identities SET display_name = COALESCE($3, display_name), \
+             avatar_url = COALESCE($4, avatar_url), updated_at = NOW() \
+             WHERE provider = $1 AND provider_user_id = $2",
+            &[&provider, &provider_user_id, &display_name, &avatar_url],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn find_identity_by_verified_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<UserIdentityRecord>, DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        let row = conn
+            .query_opt(
+                "SELECT id, user_id, provider, provider_user_id, email, email_verified, \
+                 display_name, avatar_url, raw_profile, created_at, updated_at \
+                 FROM user_identities WHERE LOWER(email) = LOWER($1) AND email_verified = true LIMIT 1",
+                &[&email],
+            )
+            .await?;
+        Ok(row.as_ref().map(row_to_identity))
+    }
+
+    async fn create_user_with_identity(
+        &self,
+        user: &UserRecord,
+        identity: &UserIdentityRecord,
+    ) -> Result<(), DatabaseError> {
+        let mut conn = self.store.pool().get().await?;
+        let tx = conn.transaction().await?;
+
+        tx.execute(
+            "INSERT INTO users (id, email, display_name, status, role, created_at, \
+             updated_at, last_login_at, created_by, metadata) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            &[
+                &user.id,
+                &user.email,
+                &user.display_name,
+                &user.status,
+                &user.role,
+                &user.created_at,
+                &user.updated_at,
+                &user.last_login_at,
+                &user.created_by,
+                &user.metadata,
+            ],
+        )
+        .await?;
+
+        tx.execute(
+            "INSERT INTO user_identities \
+             (id, user_id, provider, provider_user_id, email, email_verified, \
+              display_name, avatar_url, raw_profile, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            &[
+                &identity.id,
+                &identity.user_id,
+                &identity.provider,
+                &identity.provider_user_id,
+                &identity.email,
+                &identity.email_verified,
+                &identity.display_name,
+                &identity.avatar_url,
+                &identity.raw_profile,
+                &identity.created_at,
+                &identity.updated_at,
+            ],
+        )
+        .await?;
+
+        // Atomically promote to admin if this is the only user in the table.
+        // Under READ COMMITTED, two concurrent transactions could both see
+        // COUNT(*)=1 (each sees its own uncommitted insert). Use an advisory
+        // lock to serialize the first-user election across transactions.
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtext('first_user_admin_election'))",
+            &[],
+        )
+        .await?;
+        tx.execute(
+            "UPDATE users SET role = 'admin' \
+             WHERE id = $1 AND (SELECT COUNT(*) FROM users) = 1",
+            &[&user.id],
+        )
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
     }
 }

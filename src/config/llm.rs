@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Once;
 
 use secrecy::SecretString;
 
@@ -9,6 +10,8 @@ use crate::llm::config::*;
 use crate::llm::registry::{ProviderProtocol, ProviderRegistry};
 use crate::llm::session::SessionConfig;
 use crate::settings::Settings;
+
+static LOG_LLM_BACKEND_RESOLUTION: Once = Once::new();
 
 impl LlmConfig {
     /// Create a test-friendly config without reading env vars.
@@ -46,28 +49,53 @@ impl LlmConfig {
         }
     }
 
-    /// Resolve a model name from env var -> settings.selected_model -> hardcoded default.
+    /// Resolve a model name from settings.selected_model -> env var -> hardcoded default.
     fn resolve_model(
         env_var: &str,
         settings: &Settings,
         default: &str,
     ) -> Result<String, ConfigError> {
-        Ok(optional_env(env_var)?
-            .or_else(|| settings.selected_model.clone())
-            .unwrap_or_else(|| default.to_string()))
+        if let Some(model) = settings.selected_model.clone() {
+            Ok(model)
+        } else if let Some(model) = optional_env(env_var)? {
+            Ok(model)
+        } else {
+            Ok(default.to_string())
+        }
     }
 
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
         let registry = ProviderRegistry::load();
 
-        // Determine backend: env var > settings > default ("nearai")
-        let backend = if let Some(b) = optional_env("LLM_BACKEND")? {
-            b
-        } else if let Some(ref b) = settings.llm_backend {
-            b.clone()
+        // Determine backend: db settings > env var > default ("nearai")
+        let (backend, backend_source) = if let Some(ref b) = settings.llm_backend {
+            (b.clone(), "db:llm_backend")
+        } else if let Some(b) = optional_env("LLM_BACKEND")? {
+            (b, "env:LLM_BACKEND")
         } else {
-            "nearai".to_string()
+            ("nearai".to_string(), "default")
         };
+        LOG_LLM_BACKEND_RESOLUTION.call_once(|| {
+            tracing::debug!(
+                backend = %backend,
+                source = %backend_source,
+                db_llm_backend = ?settings.llm_backend,
+                custom_providers_count = settings.llm_custom_providers.len(),
+                "Resolving LLM backend"
+            );
+        });
+        // Warn operators when a DB-persisted value silently overrides LLM_BACKEND.
+        if backend_source == "db:llm_backend"
+            && let Ok(env_val) = std::env::var("LLM_BACKEND")
+            && !env_val.is_empty()
+        {
+            tracing::warn!(
+                db_value = %backend,
+                env_value = %env_val,
+                "LLM_BACKEND env var is set but DB setting takes priority. \
+                 Unset llm_backend in the DB (via settings UI) to use the env var."
+            );
+        }
 
         // Validate the backend is known
         let backend_lower = backend.to_lowercase();
@@ -80,10 +108,17 @@ impl LlmConfig {
             || backend_lower == "openai-codex"
             || backend_lower == "codex";
 
+        // Check custom providers defined
+        let custom_provider = settings
+            .llm_custom_providers
+            .iter()
+            .find(|p| p.id.to_lowercase() == backend_lower);
+
         if !is_nearai
             && !is_bedrock
             && !is_gemini_oauth
             && !is_openai_codex
+            && custom_provider.is_none()
             && registry.find(&backend_lower).is_none()
         {
             tracing::warn!(
@@ -104,21 +139,37 @@ impl LlmConfig {
         };
 
         // Always resolve NEAR AI config (used for embeddings even when not the primary backend)
-        let nearai_api_key = optional_env("NEARAI_API_KEY")?.map(SecretString::from);
+        // Priority: DB (builtin_overrides) > env > default
+        let nearai_override = settings.llm_builtin_overrides.get("nearai");
+        let nearai_api_key = if let Some(key) = nearai_override.and_then(|o| o.api_key.as_ref()) {
+            Some(SecretString::from(key.clone()))
+        } else {
+            optional_env("NEARAI_API_KEY")?.map(SecretString::from)
+        };
+        // Model priority: selected_model (DB) > builtin_overrides (DB) > env > default
+        let nearai_model = if let Some(model) = settings.selected_model.clone() {
+            model
+        } else if let Some(model) = nearai_override.and_then(|o| o.model.clone()) {
+            model
+        } else if let Some(model) = optional_env("NEARAI_MODEL")? {
+            model
+        } else {
+            crate::llm::DEFAULT_MODEL.to_string()
+        };
+        let nearai_base_url = if let Some(url) = nearai_override.and_then(|o| o.base_url.clone()) {
+            url
+        } else if let Some(url) = optional_env("NEARAI_BASE_URL")? {
+            url
+        } else if nearai_api_key.is_some() {
+            "https://cloud-api.near.ai".to_string()
+        } else {
+            "https://private.near.ai".to_string()
+        };
+        validate_base_url(&nearai_base_url, "NEARAI_BASE_URL")?;
         let nearai = NearAiConfig {
-            model: Self::resolve_model("NEARAI_MODEL", settings, crate::llm::DEFAULT_MODEL)?,
+            model: nearai_model,
             cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
-            base_url: {
-                let url = optional_env("NEARAI_BASE_URL")?.unwrap_or_else(|| {
-                    if nearai_api_key.is_some() {
-                        "https://cloud-api.near.ai".to_string()
-                    } else {
-                        "https://private.near.ai".to_string()
-                    }
-                });
-                validate_base_url(&url, "NEARAI_BASE_URL")?;
-                url
-            },
+            base_url: nearai_base_url,
             api_key: nearai_api_key,
             fallback_model: optional_env("NEARAI_FALLBACK_MODEL")?,
             max_retries: parse_optional_env("NEARAI_MAX_RETRIES", 3)?,
@@ -141,6 +192,8 @@ impl LlmConfig {
         // Resolve registry provider config (for non-NearAI, non-Bedrock, non-Gemini, non-Codex backends)
         let provider = if is_nearai || is_bedrock || is_gemini_oauth || is_openai_codex {
             None
+        } else if let Some(custom) = custom_provider {
+            Some(Self::resolve_custom_provider(custom, settings)?)
         } else {
             Some(Self::resolve_registry_provider(
                 &backend_lower,
@@ -150,20 +203,27 @@ impl LlmConfig {
         };
 
         let bedrock = if is_bedrock {
-            let explicit_region =
-                optional_env("BEDROCK_REGION")?.or_else(|| settings.bedrock_region.clone());
+            let explicit_region = settings
+                .bedrock_region
+                .clone()
+                .or(optional_env("BEDROCK_REGION")?);
             if explicit_region.is_none() {
                 tracing::info!("BEDROCK_REGION not set, defaulting to us-east-1");
             }
             let region = explicit_region.unwrap_or_else(|| "us-east-1".to_string());
-            let model = optional_env("BEDROCK_MODEL")?
-                .or_else(|| settings.selected_model.clone())
+            let model = settings
+                .selected_model
+                .clone()
+                .or(optional_env("BEDROCK_MODEL")?)
                 .ok_or_else(|| ConfigError::MissingRequired {
                     key: "BEDROCK_MODEL".to_string(),
-                    hint: "Set BEDROCK_MODEL when LLM_BACKEND=bedrock".to_string(),
+                    hint: "Set BEDROCK_MODEL or selected_model when LLM_BACKEND=bedrock"
+                        .to_string(),
                 })?;
-            let cross_region = optional_env("BEDROCK_CROSS_REGION")?
-                .or_else(|| settings.bedrock_cross_region.clone());
+            let cross_region = settings
+                .bedrock_cross_region
+                .clone()
+                .or(optional_env("BEDROCK_CROSS_REGION")?);
             if let Some(ref cr) = cross_region
                 && !matches!(cr.as_str(), "us" | "eu" | "apac" | "global")
             {
@@ -175,7 +235,10 @@ impl LlmConfig {
                     ),
                 });
             }
-            let profile = optional_env("AWS_PROFILE")?.or_else(|| settings.bedrock_profile.clone());
+            let profile = settings
+                .bedrock_profile
+                .clone()
+                .or(optional_env("AWS_PROFILE")?);
             Some(BedrockConfig {
                 region,
                 model,
@@ -188,10 +251,12 @@ impl LlmConfig {
 
         // Resolve OpenAI Codex config
         let openai_codex = if is_openai_codex {
-            // Model: OPENAI_CODEX_MODEL > OPENAI_MODEL > settings.selected_model > default
-            let model = optional_env("OPENAI_CODEX_MODEL")?
+            // Model: settings.selected_model > OPENAI_CODEX_MODEL > OPENAI_MODEL > default
+            let model = settings
+                .selected_model
+                .clone()
+                .or(optional_env("OPENAI_CODEX_MODEL")?)
                 .or(optional_env("OPENAI_MODEL")?)
-                .or_else(|| settings.selected_model.clone())
                 .unwrap_or_else(|| "gpt-5.3-codex".to_string());
             let auth_endpoint = optional_env("OPENAI_CODEX_AUTH_URL")?
                 .unwrap_or_else(|| "https://auth.openai.com".to_string());
@@ -264,6 +329,65 @@ impl LlmConfig {
             request_timeout_secs,
             cheap_model,
             smart_routing_cascade,
+        })
+    }
+
+    /// Resolve a `RegistryProviderConfig` from a user-defined custom provider.
+    fn resolve_custom_provider(
+        custom: &crate::settings::CustomLlmProviderSettings,
+        settings: &Settings,
+    ) -> Result<RegistryProviderConfig, ConfigError> {
+        tracing::info!(
+            id = %custom.id,
+            adapter = %custom.adapter,
+            base_url = ?custom.base_url,
+            "Resolving custom LLM provider"
+        );
+        let protocol = match custom.adapter.as_str() {
+            "anthropic" => ProviderProtocol::Anthropic,
+            "ollama" => ProviderProtocol::Ollama,
+            _ => ProviderProtocol::OpenAiCompletions,
+        };
+
+        let api_key = custom
+            .api_key
+            .as_ref()
+            .filter(|k| !k.is_empty())
+            .map(|k| SecretString::from(k.clone()));
+
+        let base_url = custom.base_url.clone().unwrap_or_default();
+        if base_url.is_empty() {
+            tracing::warn!(id = %custom.id, "Custom provider has no base_url configured — requests will fail");
+        } else {
+            validate_base_url(
+                &base_url,
+                &format!("custom provider '{}' base_url", custom.id),
+            )?;
+        }
+
+        let model = settings
+            .selected_model
+            .clone()
+            .or(optional_env("LLM_MODEL")?)
+            .or_else(|| custom.default_model.clone())
+            .unwrap_or_default();
+        if model.is_empty() {
+            tracing::warn!(id = %custom.id, "Custom provider has no model configured — requests may fail");
+        }
+
+        Ok(RegistryProviderConfig {
+            protocol,
+            provider_id: custom.id.clone(),
+            api_key,
+            base_url,
+            model,
+            extra_headers: Vec::new(),
+            oauth_token: None,
+            is_codex_chatgpt: false,
+            refresh_token: None,
+            auth_path: None,
+            cache_retention: CacheRetention::default(),
+            unsupported_params: Vec::new(),
         })
     }
 
@@ -344,8 +468,16 @@ impl LlmConfig {
             }
             Some(creds.token)
         } else if let Some(env_var) = api_key_env {
-            // Resolve API key from env (including secrets store overlay)
-            optional_env(env_var)?.map(SecretString::from)
+            // Resolve API key: settings override (DB) > env var (including secrets store overlay)
+            if let Some(key) = settings
+                .llm_builtin_overrides
+                .get(backend)
+                .and_then(|o| o.api_key.as_ref())
+            {
+                Some(SecretString::from(key.clone()))
+            } else {
+                optional_env(env_var)?.map(SecretString::from)
+            }
         } else {
             None
         };
@@ -361,18 +493,23 @@ impl LlmConfig {
             }
         }
 
-        // Resolve base URL: codex override > env var > settings (backward compat) > registry default
+        // Resolve base URL: codex override > builtin_overrides (DB) > legacy settings (DB) > env var > registry default
         let is_codex_chatgpt = codex_base_url_override.is_some();
+        let env_base_url = if let Some(env_var) = base_url_env {
+            optional_env(env_var)?
+        } else {
+            None
+        };
         let base_url = codex_base_url_override
             .or_else(|| {
-                if let Some(env_var) = base_url_env {
-                    optional_env(env_var).ok().flatten()
-                } else {
-                    None
-                }
+                // DB settings: per-provider base_url override
+                settings
+                    .llm_builtin_overrides
+                    .get(backend)
+                    .and_then(|o| o.base_url.clone())
             })
             .or_else(|| {
-                // Backward compat: check legacy settings fields
+                // DB settings: legacy settings fields
                 match backend {
                     "ollama" => settings.ollama_base_url.clone(),
                     "openai_compatible" | "openrouter" => {
@@ -381,6 +518,7 @@ impl LlmConfig {
                     _ => None,
                 }
             })
+            .or(env_base_url)
             .or_else(|| default_base_url.map(String::from))
             .unwrap_or_default();
 
@@ -400,8 +538,18 @@ impl LlmConfig {
             validate_base_url(&base_url, field)?;
         }
 
-        // Resolve model
-        let model = Self::resolve_model(model_env, settings, default_model)?;
+        // Resolve model: selected_model (DB) > per-provider override (DB) > env var > registry default
+        let model = settings
+            .selected_model
+            .clone()
+            .or_else(|| {
+                settings
+                    .llm_builtin_overrides
+                    .get(backend)
+                    .and_then(|o| o.model.clone())
+            })
+            .or(optional_env(model_env)?)
+            .unwrap_or_else(|| default_model.to_string());
 
         // Resolve extra headers
         let extra_headers = if let Some(env_var) = extra_headers_env {
@@ -573,7 +721,7 @@ mod tests {
     }
 
     #[test]
-    fn openai_compatible_llm_model_env_overrides_selected_model() {
+    fn openai_compatible_selected_model_overrides_env() {
         let _guard = lock_env();
         clear_openai_compatible_env();
         // SAFETY: Under ENV_MUTEX.
@@ -591,7 +739,10 @@ mod tests {
         let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("provider config should be present");
 
-        assert_eq!(provider.model, "openai/gpt-5-codex");
+        assert_eq!(
+            provider.model, "openai/gpt-5.1-codex",
+            "DB selected_model should take priority over LLM_MODEL env var"
+        );
 
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -714,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn ollama_model_env_overrides_selected_model() {
+    fn ollama_selected_model_overrides_env() {
         let _guard = lock_env();
         clear_ollama_env();
         // SAFETY: Under ENV_MUTEX.
@@ -731,7 +882,10 @@ mod tests {
         let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("provider config should be present");
 
-        assert_eq!(provider.model, "mistral:latest");
+        assert_eq!(
+            provider.model, "llama3.2",
+            "DB selected_model should take priority over OLLAMA_MODEL env var"
+        );
 
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -994,28 +1148,31 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
-        let provider = cfg.provider.expect("should have provider config");
-        assert_eq!(
-            provider.base_url, "http://localhost:8000/v1",
-            "env var should take priority over settings"
-        );
-
-        // Now without env var, settings should win over registry default
-        unsafe {
-            std::env::remove_var("LLM_BASE_URL");
-        }
-
+        // DB settings should take priority over env var
         let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("should have provider config");
         assert_eq!(
             provider.base_url, "http://localhost:9000/v1",
-            "settings should take priority over registry default"
+            "DB settings should take priority over env var"
+        );
+
+        // Without DB settings, env var should win over registry default
+        let settings_no_base = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings_no_base).expect("resolve should succeed");
+        let provider = cfg.provider.expect("should have provider config");
+        assert_eq!(
+            provider.base_url, "http://localhost:8000/v1",
+            "env var should take priority over registry default when DB has no base_url"
         );
 
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("LLM_BASE_URL");
         }
     }
 
@@ -1240,6 +1397,81 @@ mod tests {
         }
     }
 
+    // ── Custom provider tests ───────────────────────────────────────
+
+    #[test]
+    fn custom_provider_resolves_when_backend_matches_id() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("LLM_MODEL");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("myprovider".to_string()),
+            llm_custom_providers: vec![crate::settings::CustomLlmProviderSettings {
+                id: "myprovider".to_string(),
+                name: "My Provider".to_string(),
+                adapter: "open_ai_completions".to_string(),
+                base_url: Some("http://localhost:9090/v1".to_string()),
+                default_model: Some("my-model".to_string()),
+                api_key: Some("sk-test".to_string()),
+                builtin: false,
+            }],
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(cfg.backend, "myprovider");
+        let provider = cfg.provider.expect("provider config should be present");
+        assert_eq!(provider.provider_id, "myprovider");
+        assert_eq!(provider.base_url, "http://localhost:9090/v1");
+        assert_eq!(provider.model, "my-model");
+        assert_eq!(
+            provider.protocol,
+            crate::llm::registry::ProviderProtocol::OpenAiCompletions
+        );
+    }
+
+    #[test]
+    fn db_llm_backend_takes_priority_over_env_var() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX. RAII guard removes LLM_BACKEND on drop so
+        // a panicking assertion cannot leak the env var to other tests.
+        struct RemoveOnDrop(&'static str);
+        impl Drop for RemoveOnDrop {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var(self.0) };
+            }
+        }
+        let _cleanup = RemoveOnDrop("LLM_BACKEND");
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "nearai");
+            std::env::remove_var("LLM_MODEL");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("myprovider".to_string()),
+            llm_custom_providers: vec![crate::settings::CustomLlmProviderSettings {
+                id: "myprovider".to_string(),
+                name: "My Provider".to_string(),
+                adapter: "open_ai_completions".to_string(),
+                base_url: Some("http://localhost:9090/v1".to_string()),
+                default_model: Some("my-model".to_string()),
+                api_key: None,
+                builtin: false,
+            }],
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(
+            cfg.backend, "myprovider",
+            "DB setting should override LLM_BACKEND env var"
+        );
+    }
+
     // ── OpenAI Codex tests ──────────────────────────────────────────
 
     /// Clear all openai-codex-related env vars.
@@ -1250,6 +1482,38 @@ mod tests {
             std::env::remove_var("OPENAI_CODEX_MODEL");
             std::env::remove_var("OPENAI_MODEL");
         }
+    }
+
+    #[test]
+    fn builtin_override_model_used_when_no_selected_model() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("GROQ_MODEL");
+        }
+
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "groq".to_string(),
+            crate::settings::LlmBuiltinOverride {
+                api_key: None,
+                model: Some("llama-3.1-8b-instant".to_string()),
+                base_url: None,
+            },
+        );
+        let settings = Settings {
+            llm_backend: Some("groq".to_string()),
+            llm_builtin_overrides: overrides,
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("provider config should be present");
+        assert_eq!(
+            provider.model, "llama-3.1-8b-instant",
+            "builtin override model should be used when selected_model is unset"
+        );
     }
 
     #[test]
@@ -1269,6 +1533,39 @@ mod tests {
         assert!(
             cfg.provider.is_none(),
             "codex should not use registry provider"
+        );
+    }
+
+    #[test]
+    fn selected_model_takes_priority_over_builtin_override_model() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("GROQ_MODEL");
+        }
+
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "groq".to_string(),
+            crate::settings::LlmBuiltinOverride {
+                api_key: None,
+                model: Some("llama-3.1-8b-instant".to_string()),
+                base_url: None,
+            },
+        );
+        let settings = Settings {
+            llm_backend: Some("groq".to_string()),
+            selected_model: Some("llama-3.3-70b-versatile".to_string()),
+            llm_builtin_overrides: overrides,
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("provider config should be present");
+        assert_eq!(
+            provider.model, "llama-3.3-70b-versatile",
+            "selected_model (/model command) must take priority over builtin override"
         );
     }
 
@@ -1294,6 +1591,44 @@ mod tests {
         unsafe {
             std::env::remove_var("OPENAI_CODEX_MODEL");
         }
+    }
+
+    #[test]
+    fn builtin_override_api_key_used_when_no_env_var() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("GROQ_API_KEY");
+            std::env::remove_var("GROQ_MODEL");
+        }
+
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "groq".to_string(),
+            crate::settings::LlmBuiltinOverride {
+                api_key: Some("gsk_test_key".to_string()),
+                model: Some("llama-3.3-70b-versatile".to_string()),
+                base_url: None,
+            },
+        );
+        let settings = Settings {
+            llm_backend: Some("groq".to_string()),
+            llm_builtin_overrides: overrides,
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("provider config should be present");
+        use secrecy::ExposeSecret as _;
+        let key = provider
+            .api_key
+            .expect("api_key should be set from builtin override");
+        assert_eq!(
+            key.expose_secret(),
+            "gsk_test_key",
+            "builtin override api_key should be used when env var is absent"
+        );
     }
 
     #[test]
@@ -1392,6 +1727,437 @@ mod tests {
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("OPENAI_CODEX_AUTH_URL");
+        }
+    }
+
+    // ── DB > ENV priority tests ─────────────────────────────────────
+
+    #[test]
+    fn builtin_override_api_key_wins_over_env_var() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::set_var("GROQ_API_KEY", "gsk_from_env");
+            std::env::remove_var("GROQ_MODEL");
+        }
+
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "groq".to_string(),
+            crate::settings::LlmBuiltinOverride {
+                api_key: Some("gsk_from_db".to_string()),
+                model: None,
+                base_url: None,
+            },
+        );
+        let settings = Settings {
+            llm_backend: Some("groq".to_string()),
+            llm_builtin_overrides: overrides,
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("provider config should be present");
+        use secrecy::ExposeSecret as _;
+        assert_eq!(
+            provider
+                .api_key
+                .as_ref()
+                .map(|k| k.expose_secret().to_string()),
+            Some("gsk_from_db".to_string()),
+            "DB builtin_override api_key must take priority over GROQ_API_KEY env var"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("GROQ_API_KEY");
+        }
+    }
+
+    #[test]
+    fn builtin_override_model_wins_over_env_var() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::set_var("GROQ_MODEL", "model-from-env");
+        }
+
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "groq".to_string(),
+            crate::settings::LlmBuiltinOverride {
+                api_key: None,
+                model: Some("model-from-db".to_string()),
+                base_url: None,
+            },
+        );
+        let settings = Settings {
+            llm_backend: Some("groq".to_string()),
+            llm_builtin_overrides: overrides,
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("provider config should be present");
+        assert_eq!(
+            provider.model, "model-from-db",
+            "DB builtin_override model must take priority over GROQ_MODEL env var"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("GROQ_MODEL");
+        }
+    }
+
+    #[test]
+    fn custom_provider_selected_model_wins_over_env() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::set_var("LLM_MODEL", "model-from-env");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("myprovider".to_string()),
+            selected_model: Some("model-from-db".to_string()),
+            llm_custom_providers: vec![crate::settings::CustomLlmProviderSettings {
+                id: "myprovider".to_string(),
+                name: "My Provider".to_string(),
+                adapter: "open_ai_completions".to_string(),
+                base_url: Some("http://localhost:9090/v1".to_string()),
+                default_model: Some("default-model".to_string()),
+                api_key: None,
+                builtin: false,
+            }],
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("provider config should be present");
+        assert_eq!(
+            provider.model, "model-from-db",
+            "DB selected_model must take priority over LLM_MODEL env var for custom providers"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_MODEL");
+        }
+    }
+
+    #[test]
+    fn openai_codex_selected_model_wins_over_env() {
+        let _guard = lock_env();
+        clear_openai_codex_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("OPENAI_CODEX_MODEL", "codex-from-env");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_codex".to_string()),
+            selected_model: Some("codex-from-db".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let codex = cfg.openai_codex.expect("codex config should be present");
+        assert_eq!(
+            codex.model, "codex-from-db",
+            "DB selected_model must take priority over OPENAI_CODEX_MODEL env var"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("OPENAI_CODEX_MODEL");
+        }
+    }
+
+    #[test]
+    fn nearai_selected_model_wins_over_env() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::set_var("NEARAI_MODEL", "nearai-from-env");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("nearai".to_string()),
+            selected_model: Some("nearai-from-db".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(
+            cfg.nearai.model, "nearai-from-db",
+            "DB selected_model must take priority over NEARAI_MODEL env var"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("NEARAI_MODEL");
+        }
+    }
+
+    #[test]
+    fn nearai_override_model_wins_over_env() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::set_var("NEARAI_MODEL", "model-from-env");
+        }
+
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "nearai".to_string(),
+            crate::settings::LlmBuiltinOverride {
+                api_key: None,
+                model: Some("model-from-db-override".to_string()),
+                base_url: None,
+            },
+        );
+        let settings = Settings {
+            llm_backend: Some("nearai".to_string()),
+            llm_builtin_overrides: overrides,
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(
+            cfg.nearai.model, "model-from-db-override",
+            "DB builtin_overrides model must take priority over NEARAI_MODEL env var"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("NEARAI_MODEL");
+        }
+    }
+
+    #[test]
+    fn nearai_selected_model_wins_over_override_model() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("NEARAI_MODEL");
+        }
+
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "nearai".to_string(),
+            crate::settings::LlmBuiltinOverride {
+                api_key: None,
+                model: Some("model-from-override".to_string()),
+                base_url: None,
+            },
+        );
+        let settings = Settings {
+            llm_backend: Some("nearai".to_string()),
+            selected_model: Some("model-from-selected".to_string()),
+            llm_builtin_overrides: overrides,
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(
+            cfg.nearai.model, "model-from-selected",
+            "selected_model must take priority over builtin_overrides model"
+        );
+    }
+
+    #[test]
+    fn nearai_override_base_url_wins_over_env() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::set_var("NEARAI_BASE_URL", "http://localhost:9001");
+            std::env::remove_var("NEARAI_API_KEY");
+        }
+
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "nearai".to_string(),
+            crate::settings::LlmBuiltinOverride {
+                api_key: None,
+                model: None,
+                base_url: Some("http://localhost:9002".to_string()),
+            },
+        );
+        let settings = Settings {
+            llm_backend: Some("nearai".to_string()),
+            llm_builtin_overrides: overrides,
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(
+            cfg.nearai.base_url, "http://localhost:9002",
+            "DB builtin_overrides base_url must take priority over NEARAI_BASE_URL env var"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("NEARAI_BASE_URL");
+        }
+    }
+
+    #[test]
+    fn nearai_env_base_url_used_when_no_override() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::set_var("NEARAI_BASE_URL", "http://localhost:9001");
+            std::env::remove_var("NEARAI_API_KEY");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("nearai".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(
+            cfg.nearai.base_url, "http://localhost:9001",
+            "NEARAI_BASE_URL env var should be used when no DB override exists"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("NEARAI_BASE_URL");
+        }
+    }
+
+    #[test]
+    fn nearai_override_api_key_wins_over_env() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::set_var("NEARAI_API_KEY", "key-from-env");
+        }
+
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "nearai".to_string(),
+            crate::settings::LlmBuiltinOverride {
+                api_key: Some("key-from-db".to_string()),
+                model: None,
+                base_url: None,
+            },
+        );
+        let settings = Settings {
+            llm_backend: Some("nearai".to_string()),
+            llm_builtin_overrides: overrides,
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        use secrecy::ExposeSecret as _;
+        assert_eq!(
+            cfg.nearai
+                .api_key
+                .as_ref()
+                .map(|k| k.expose_secret().to_string()),
+            Some("key-from-db".to_string()),
+            "DB builtin_overrides api_key must take priority over NEARAI_API_KEY env var"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("NEARAI_API_KEY");
+        }
+    }
+
+    #[test]
+    fn nearai_base_url_auto_selects_when_no_override_or_env() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("NEARAI_BASE_URL");
+            std::env::remove_var("NEARAI_API_KEY");
+        }
+
+        // No API key → should default to private.near.ai
+        let settings = Settings {
+            llm_backend: Some("nearai".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(
+            cfg.nearai.base_url, "https://private.near.ai",
+            "Without API key, should default to private.near.ai"
+        );
+
+        // With API key → should default to cloud-api.near.ai
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "nearai".to_string(),
+            crate::settings::LlmBuiltinOverride {
+                api_key: Some("some-key".to_string()),
+                model: None,
+                base_url: None,
+            },
+        );
+        let settings_with_key = Settings {
+            llm_backend: Some("nearai".to_string()),
+            llm_builtin_overrides: overrides,
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings_with_key).expect("resolve should succeed");
+        assert_eq!(
+            cfg.nearai.base_url, "https://cloud-api.near.ai",
+            "With API key, should default to cloud-api.near.ai"
+        );
+    }
+
+    #[test]
+    fn registry_provider_override_base_url_wins_over_env() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::set_var("GROQ_BASE_URL", "http://localhost:9003");
+            std::env::remove_var("GROQ_API_KEY");
+            std::env::remove_var("GROQ_MODEL");
+        }
+
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "groq".to_string(),
+            crate::settings::LlmBuiltinOverride {
+                api_key: None,
+                model: None,
+                base_url: Some("http://localhost:9004".to_string()),
+            },
+        );
+        let settings = Settings {
+            llm_backend: Some("groq".to_string()),
+            llm_builtin_overrides: overrides,
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("provider config should be present");
+        assert_eq!(
+            provider.base_url, "http://localhost:9004",
+            "DB builtin_overrides base_url must take priority over GROQ_BASE_URL env var"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("GROQ_BASE_URL");
         }
     }
 }

@@ -62,9 +62,9 @@ pub use provider::{
     ToolDefinition, ToolResult, generate_tool_call_id,
 };
 pub use reasoning::{
-    ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, SILENT_REPLY_TOKEN,
-    TOOL_INTENT_NUDGE, TRUNCATED_TOOL_CALL_NOTICE, TokenUsage, ToolSelection, is_silent_reply,
-    llm_signals_tool_intent,
+    ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, ResponseAnomaly,
+    ResponseMetadata, SILENT_REPLY_TOKEN, TOOL_INTENT_NUDGE, TRUNCATED_TOOL_CALL_NOTICE,
+    TokenUsage, ToolSelection, is_silent_reply, llm_signals_tool_intent,
 };
 pub use recording::RecordingLlm;
 pub use registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};

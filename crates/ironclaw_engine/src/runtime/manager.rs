@@ -17,7 +17,7 @@ use crate::traits::effect::EffectExecutor;
 use crate::traits::llm::LlmBackend;
 use crate::traits::store::Store;
 use crate::types::error::EngineError;
-use crate::types::message::ThreadMessage;
+use crate::types::message::{MessageRole, ThreadMessage};
 use crate::types::project::ProjectId;
 use crate::types::thread::{Thread, ThreadConfig, ThreadId, ThreadState, ThreadType};
 
@@ -117,15 +117,12 @@ impl ThreadManager {
         user_id: impl Into<String>,
         initial_messages: Vec<crate::types::message::ThreadMessage>,
     ) -> Result<ThreadId, EngineError> {
-        let mut thread = Thread::new(goal, thread_type, project_id, config);
+        let user_id = user_id.into();
+        let mut thread = Thread::new(goal, thread_type, project_id, &user_id, config);
         if let Some(pid) = parent_id {
             thread = thread.with_parent(pid);
         }
         let thread_id = thread.id;
-        let user_id = user_id.into();
-        if let Some(metadata) = thread.metadata.as_object_mut() {
-            metadata.insert("user_id".into(), serde_json::Value::String(user_id.clone()));
-        }
 
         // Register in tree
         if let Some(pid) = parent_id {
@@ -146,7 +143,7 @@ impl ThreadManager {
                     None,
                     None,
                 )
-                .await;
+                .await?;
             self.store.save_lease(&lease).await?;
             thread.capability_leases.push(lease.id);
         }
@@ -172,6 +169,7 @@ impl ThreadManager {
         user_id: impl Into<String>,
         injected_message: Option<ThreadMessage>,
         approval_event: Option<(String, bool)>,
+        resolved_call_id: Option<String>,
     ) -> Result<(), EngineError> {
         if self.is_running(thread_id).await {
             return Err(EngineError::Thread(
@@ -184,6 +182,15 @@ impl ThreadManager {
             .load_thread(thread_id)
             .await?
             .ok_or(EngineError::ThreadNotFound(thread_id))?;
+
+        // Tenant isolation: verify the requesting user owns this thread.
+        let uid: String = user_id.into();
+        if !thread.is_owned_by(&uid) {
+            return Err(EngineError::AccessDenied {
+                user_id: uid,
+                entity: format!("thread {thread_id}"),
+            });
+        }
 
         if !matches!(
             thread.state,
@@ -208,12 +215,27 @@ impl ThreadManager {
             thread.updated_at = chrono::Utc::now();
         }
 
+        if let Some(ref call_id) = resolved_call_id {
+            thread
+                .messages
+                .retain(|existing| !is_resolved_call_message(existing, call_id));
+        }
+
         if let Some(message) = injected_message {
             thread.add_message(message);
         }
 
+        // Waiting threads paused on approval/auth should resume from the
+        // newly injected context rather than replaying the old checkpointed
+        // interrupt. Suspended threads keep their checkpoint for restart.
+        if thread.state == crate::types::thread::ThreadState::Waiting
+            && let Some(metadata) = thread.metadata.as_object_mut()
+        {
+            metadata.remove("runtime_checkpoint");
+        }
+
         self.store.save_thread(&thread).await?;
-        self.start_thread(thread, user_id.into(), true).await?;
+        self.start_thread(thread, uid, true).await?;
         Ok(())
     }
 
@@ -265,7 +287,7 @@ impl ThreadManager {
                     .thread
                     .transition_to(crate::types::thread::ThreadState::Done, None)
             {
-                tracing::warn!(thread_id = %thread_id, "failed to transition to Done: {e}");
+                tracing::debug!(thread_id = %thread_id, "failed to transition to Done: {e}");
             }
 
             // Write trace file if enabled
@@ -275,7 +297,7 @@ impl ThreadManager {
             }
 
             if let Err(e) = store_for_task.append_events(&exec.thread.events).await {
-                tracing::warn!(
+                tracing::debug!(
                     thread_id = %thread_id,
                     "failed to persist thread events: {e}"
                 );
@@ -283,7 +305,7 @@ impl ThreadManager {
 
             // Save final thread state to store
             if let Err(e) = store_for_task.save_thread(&exec.thread).await {
-                tracing::warn!(
+                tracing::debug!(
                     thread_id = %thread_id,
                     "failed to save final thread state: {e}"
                 );
@@ -316,7 +338,27 @@ impl ThreadManager {
     }
 
     /// Send a stop signal to a running thread.
-    pub async fn stop_thread(&self, thread_id: ThreadId) -> Result<(), EngineError> {
+    pub async fn stop_thread(&self, thread_id: ThreadId, user_id: &str) -> Result<(), EngineError> {
+        // Validate ownership before allowing stop.
+        if let Some(thread) = self.store.load_thread(thread_id).await?
+            && !thread.is_owned_by(user_id)
+        {
+            return Err(EngineError::AccessDenied {
+                user_id: user_id.to_string(),
+                entity: format!("thread {thread_id}"),
+            });
+        }
+        let running = self.running.read().await;
+        if let Some(rt) = running.get(&thread_id) {
+            let _ = rt.signal_tx.send(ThreadSignal::Stop).await;
+            Ok(())
+        } else {
+            Err(EngineError::ThreadNotFound(thread_id))
+        }
+    }
+
+    /// Send a stop signal without ownership check (system operations).
+    pub async fn stop_thread_system(&self, thread_id: ThreadId) -> Result<(), EngineError> {
         let running = self.running.read().await;
         if let Some(rt) = running.get(&thread_id) {
             let _ = rt.signal_tx.send(ThreadSignal::Stop).await;
@@ -330,6 +372,34 @@ impl ThreadManager {
     pub async fn inject_message(
         &self,
         thread_id: ThreadId,
+        user_id: &str,
+        message: ThreadMessage,
+    ) -> Result<(), EngineError> {
+        // Validate ownership before allowing injection.
+        if let Some(thread) = self.store.load_thread(thread_id).await?
+            && !thread.is_owned_by(user_id)
+        {
+            return Err(EngineError::AccessDenied {
+                user_id: user_id.to_string(),
+                entity: format!("thread {thread_id}"),
+            });
+        }
+        let running = self.running.read().await;
+        if let Some(rt) = running.get(&thread_id) {
+            let _ = rt
+                .signal_tx
+                .send(ThreadSignal::InjectMessage(message))
+                .await;
+            Ok(())
+        } else {
+            Err(EngineError::ThreadNotFound(thread_id))
+        }
+    }
+
+    /// Inject a message without ownership check (system operations).
+    pub async fn inject_message_system(
+        &self,
+        thread_id: ThreadId,
         message: ThreadMessage,
     ) -> Result<(), EngineError> {
         let running = self.running.read().await;
@@ -341,6 +411,19 @@ impl ThreadManager {
             Ok(())
         } else {
             Err(EngineError::ThreadNotFound(thread_id))
+        }
+    }
+
+    /// Set a metadata key on a thread (best-effort, for tagging).
+    pub async fn set_thread_metadata(&self, thread_id: ThreadId, key: &str, value: &str) {
+        if let Ok(Some(mut thread)) = self.store.load_thread(thread_id).await {
+            if let Some(obj) = thread.metadata.as_object_mut() {
+                obj.insert(
+                    key.to_string(),
+                    serde_json::Value::String(value.to_string()),
+                );
+            }
+            let _ = self.store.save_thread(&thread).await;
         }
     }
 
@@ -365,15 +448,19 @@ impl ThreadManager {
         };
 
         match rt {
-            Some(rt) => match rt.handle.await {
-                Ok(result) => result,
-                Err(e) => {
-                    error!(thread_id = %thread_id, "thread task panicked: {e}");
-                    Ok(ThreadOutcome::Failed {
-                        error: format!("thread task panicked: {e}"),
-                    })
-                }
-            },
+            Some(rt) => {
+                let result = match rt.handle.await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        error!(thread_id = %thread_id, "thread task panicked: {e}");
+                        Ok(ThreadOutcome::Failed {
+                            error: format!("thread task panicked: {e}"),
+                        })
+                    }
+                };
+                self.completed.write().await.remove(&thread_id);
+                result
+            }
             None => Err(EngineError::ThreadNotFound(thread_id)),
         }
     }
@@ -409,7 +496,8 @@ impl ThreadManager {
         &self,
         project_id: ProjectId,
     ) -> Result<Vec<ThreadId>, EngineError> {
-        let threads = self.store.list_threads(project_id).await?;
+        // System operation: resume all suspended research threads regardless of user.
+        let threads = self.store.list_all_threads(project_id).await?;
         let mut resumed = Vec::new();
 
         for thread in threads {
@@ -422,16 +510,11 @@ impl ThreadManager {
             if thread.metadata.get("runtime_checkpoint").is_none() {
                 continue;
             }
-            let Some(user_id) = thread
-                .metadata
-                .get("user_id")
-                .and_then(|value| value.as_str())
-                .filter(|user_id| !user_id.is_empty())
-            else {
+            if thread.user_id.is_empty() {
                 continue;
-            };
+            }
 
-            self.resume_thread(thread.id, user_id.to_string(), None, None)
+            self.resume_thread(thread.id, thread.user_id.clone(), None, None, None)
                 .await?;
             resumed.push(thread.id);
         }
@@ -449,7 +532,8 @@ impl ThreadManager {
     ) -> Result<Vec<ThreadId>, EngineError> {
         const PENDING_APPROVAL_METADATA_KEY: &str = "pending_approval";
         const RUNTIME_CHECKPOINT_METADATA_KEY: &str = "runtime_checkpoint";
-        let threads = self.store.list_threads(project_id).await?;
+        // System operation: recover all non-terminal threads regardless of user.
+        let threads = self.store.list_all_threads(project_id).await?;
         let mut recovered = Vec::new();
 
         for mut thread in threads {
@@ -496,6 +580,20 @@ impl ThreadManager {
 
         Ok(recovered)
     }
+}
+
+fn is_resolved_call_message(message: &ThreadMessage, call_id: &str) -> bool {
+    if message.role == MessageRole::ActionResult
+        && message.action_call_id.as_deref() == Some(call_id)
+    {
+        return true;
+    }
+
+    message.role == MessageRole::Assistant
+        && message
+            .action_calls
+            .as_ref()
+            .is_some_and(|calls| calls.iter().any(|call| call.id == call_id))
 }
 
 #[cfg(test)]
@@ -603,7 +701,24 @@ mod tests {
         async fn load_thread(&self, id: ThreadId) -> Result<Option<Thread>, EngineError> {
             Ok(self.threads.read().await.get(&id).cloned())
         }
-        async fn list_threads(&self, project_id: ProjectId) -> Result<Vec<Thread>, EngineError> {
+        async fn list_threads(
+            &self,
+            project_id: ProjectId,
+            user_id: &str,
+        ) -> Result<Vec<Thread>, EngineError> {
+            Ok(self
+                .threads
+                .read()
+                .await
+                .values()
+                .filter(|thread| thread.project_id == project_id && thread.user_id == user_id)
+                .cloned()
+                .collect())
+        }
+        async fn list_all_threads(
+            &self,
+            project_id: ProjectId,
+        ) -> Result<Vec<Thread>, EngineError> {
             Ok(self
                 .threads
                 .read()
@@ -657,7 +772,11 @@ mod tests {
         async fn load_memory_doc(&self, _: DocId) -> Result<Option<MemoryDoc>, EngineError> {
             Ok(None)
         }
-        async fn list_memory_docs(&self, _: ProjectId) -> Result<Vec<MemoryDoc>, EngineError> {
+        async fn list_memory_docs(
+            &self,
+            _: ProjectId,
+            _: &str,
+        ) -> Result<Vec<MemoryDoc>, EngineError> {
             Ok(vec![])
         }
         async fn save_lease(&self, _: &CapabilityLease) -> Result<(), EngineError> {
@@ -691,6 +810,7 @@ mod tests {
         async fn list_missions(
             &self,
             _: ProjectId,
+            _: &str,
         ) -> Result<Vec<crate::types::mission::Mission>, EngineError> {
             Ok(vec![])
         }
@@ -814,7 +934,7 @@ mod tests {
 
         // Give it a moment to start, then stop
         tokio::time::sleep(Duration::from_millis(10)).await;
-        let _ = mgr.stop_thread(tid).await;
+        let _ = mgr.stop_thread(tid, "test-user").await;
 
         let outcome = mgr.join_thread(tid).await.unwrap();
         assert!(matches!(
@@ -865,6 +985,7 @@ mod tests {
             "running",
             ThreadType::Foreground,
             project,
+            "test-user",
             ThreadConfig::default(),
         );
         running.transition_to(ThreadState::Running, None).unwrap();
@@ -874,6 +995,7 @@ mod tests {
             "done",
             ThreadType::Foreground,
             project,
+            "test-user",
             ThreadConfig::default(),
         );
         completed
@@ -900,6 +1022,7 @@ mod tests {
             "awaiting approval",
             ThreadType::Foreground,
             project,
+            "test-user",
             ThreadConfig::default(),
         );
         waiting.transition_to(ThreadState::Running, None).unwrap();
@@ -932,6 +1055,7 @@ mod tests {
             "resume me",
             ThreadType::Foreground,
             project,
+            "test-user",
             ThreadConfig::default(),
         );
         running.transition_to(ThreadState::Running, None).unwrap();
@@ -962,6 +1086,7 @@ mod tests {
             "background research",
             ThreadType::Research,
             project,
+            "test-user",
             ThreadConfig::default(),
         );
         research.transition_to(ThreadState::Running, None).unwrap();

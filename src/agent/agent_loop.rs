@@ -35,11 +35,6 @@ use ironclaw_skills::SkillRegistry;
 
 /// Static greeting persisted to DB and broadcast on first launch.
 ///
-/// Sent before the LLM is involved so the user sees something immediately.
-/// The conversational onboarding (profile building, channel setup) happens
-/// organically in the subsequent turns driven by BOOTSTRAP.md.
-const BOOTSTRAP_GREETING: &str = include_str!("../workspace/seeds/GREETING.md");
-
 /// Collapse a tool output string into a single-line preview for display.
 pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
     let collapsed: String = output
@@ -377,13 +372,25 @@ impl Agent {
             .map(|db| crate::tenant::TenantScope::new(user_id, Arc::clone(db)));
 
         // Reuse the owner workspace if user matches, otherwise create per-user.
+        // Per-user workspaces are seeded on first creation so they get identity
+        // files and BOOTSTRAP.md (which triggers the onboarding greeting).
         let workspace = match &self.deps.workspace {
             Some(ws) if ws.user_id() == user_id => Some(Arc::clone(ws)),
-            _ => self
-                .deps
-                .store
-                .as_ref()
-                .map(|db| Arc::new(Workspace::new_with_db(user_id, Arc::clone(db)))),
+            _ => {
+                if let Some(db) = self.deps.store.as_ref() {
+                    let ws = Arc::new(Workspace::new_with_db(user_id, Arc::clone(db)));
+                    if let Err(e) = ws.seed_if_empty().await {
+                        tracing::warn!(
+                            user_id = user_id,
+                            "Failed to seed per-user workspace: {}",
+                            e
+                        );
+                    }
+                    Some(ws)
+                } else {
+                    None
+                }
+            }
         };
 
         crate::tenant::TenantCtx::new(
@@ -480,35 +487,12 @@ impl Agent {
 
     /// Run the agent main loop.
     pub async fn run(self) -> Result<(), Error> {
-        // Proactive bootstrap: persist the static greeting to DB *before*
-        // starting channels so the first web client sees it via history.
-        let bootstrap_thread_id = if self
-            .workspace()
-            .is_some_and(|ws| ws.take_bootstrap_pending())
-        {
-            tracing::debug!(
-                "Fresh workspace detected — persisting static bootstrap greeting to DB"
-            );
-            if let Some(store) = self.store() {
-                let thread_id = store
-                    .get_or_create_assistant_conversation("default", "gateway")
-                    .await
-                    .ok();
-                if let Some(id) = thread_id {
-                    self.persist_assistant_response(id, "gateway", "default", BOOTSTRAP_GREETING)
-                        .await;
-                }
-                thread_id
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        // Bootstrap greeting is now handled by chat_threads_handler in server.rs
+        // when the assistant conversation is first created with zero messages.
 
         // Eagerly initialize engine v2 so gateway API endpoints can serve
         // data (projects, missions, threads) before the first chat message.
-        if crate::bridge::is_engine_v2_enabled()
+        if self.config.engine_v2
             && let Err(e) = crate::bridge::init_engine(&self).await
         {
             tracing::debug!("engine v2: eager init failed: {e}");
@@ -888,26 +872,6 @@ impl Agent {
         // broadcast the greeting via SSE for any clients already connected.
         // The greeting was already persisted to DB before start_all(), so
         // clients that connect after this point will see it via history.
-        if let Some(id) = bootstrap_thread_id {
-            // Use get_or_create_session (not resolve_thread) to avoid creating
-            // an orphan thread. Then insert the DB-sourced thread directly.
-            let session = self.session_manager.get_or_create_session("default").await;
-            {
-                use crate::agent::session::Thread;
-                let mut sess = session.lock().await;
-                let thread = Thread::with_id(id, sess.id);
-                sess.active_thread = Some(id);
-                sess.threads.entry(id).or_insert(thread);
-            }
-            self.session_manager
-                .register_thread("default", "gateway", id, session)
-                .await;
-
-            let mut out = OutgoingResponse::text(BOOTSTRAP_GREETING.to_string());
-            out.thread_id = Some(id.to_string());
-            let _ = self.channels.broadcast("gateway", "default", out).await;
-        }
-
         // Main message loop
         tracing::debug!("Agent {} ready and listening", self.config.name);
 
@@ -1168,7 +1132,7 @@ impl Agent {
         }
 
         // Engine V2 routing (Strategy C: parallel deployment)
-        if crate::bridge::is_engine_v2_enabled() {
+        if self.config.engine_v2 {
             match &submission {
                 Submission::UserInput { content } => {
                     return crate::bridge::handle_with_engine(self, message, content).await;
@@ -1206,9 +1170,12 @@ impl Agent {
                 Submission::Clear => {
                     return crate::bridge::handle_clear(self, message).await;
                 }
+                Submission::Expected { description } => {
+                    return crate::bridge::handle_expected(self, message, description).await;
+                }
                 // Undo/Redo/Resume/SwitchThread: v1-only (engine has no undo;
                 // thread switching is implicit via ConversationManager).
-                // Compact/Summarize/Suggest: orthogonal to engine (use workspace/LLM directly).
+                // Compact/Summarize/Suggest: orthogonal to engine (compaction is internal).
                 // Heartbeat/SystemCommand/JobStatus/JobCancel/Quit: v1 infrastructure.
                 _ => {}
             }
@@ -1247,7 +1214,37 @@ impl Agent {
                 .get_or_create_session(&message.user_id)
                 .await;
             let mut sess = session.lock().await;
-            if sess.threads.contains_key(&target_thread_id) {
+            if let Some(thread) = sess.threads.get(&target_thread_id) {
+                // Verify the thread actually has a pending approval before
+                // allowing approval-shaped messages to target it. Without this
+                // check, an attacker could use approval messages to hijack any
+                // thread by UUID.
+                if thread.pending_approval.is_none() {
+                    tracing::warn!(
+                        %target_thread_id,
+                        approval_channel = %message.channel,
+                        "Blocked approval for thread with no pending approval"
+                    );
+                    drop(sess);
+                    return Ok(Some("Error: no pending approval on this thread".into()));
+                }
+
+                let authorized = crate::agent::session::is_approval_authorized(
+                    thread.source_channel.as_deref(),
+                    &message.channel,
+                );
+                if !authorized {
+                    tracing::warn!(
+                        %target_thread_id,
+                        source_channel = ?thread.source_channel,
+                        approval_channel = %message.channel,
+                        "Blocked cross-channel approval attempt"
+                    );
+                    drop(sess);
+                    return Ok(Some(
+                        "Error: approval not authorized for this channel".into(),
+                    ));
+                }
                 sess.active_thread = Some(target_thread_id);
                 sess.last_active_at = chrono::Utc::now();
                 drop(sess);

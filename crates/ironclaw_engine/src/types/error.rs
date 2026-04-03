@@ -35,6 +35,9 @@ pub enum EngineError {
     #[error("project not found: {0}")]
     ProjectNotFound(ProjectId),
 
+    #[error("lease not found: {lease_id}")]
+    LeaseNotFound { lease_id: String },
+
     #[error("lease expired for capability: {capability_name}")]
     LeaseExpired { capability_name: String },
 
@@ -59,19 +62,17 @@ pub enum EngineError {
     #[error("skill error: {reason}")]
     Skill { reason: String },
 
-    #[error("authentication required for credential '{credential_name}'")]
-    NeedAuthentication {
-        credential_name: String,
-        action_name: String,
-        call_id: String,
-        parameters: serde_json::Value,
-    },
+    #[error("access denied: user '{user_id}' cannot access {entity}")]
+    AccessDenied { user_id: String, entity: String },
 
-    #[error("approval required for action '{action_name}'")]
-    NeedApproval {
+    #[error("gate paused: {gate_name} requires {action_name}")]
+    GatePaused {
+        gate_name: String,
         action_name: String,
         call_id: String,
-        parameters: serde_json::Value,
+        parameters: Box<serde_json::Value>,
+        resume_kind: Box<crate::gate::ResumeKind>,
+        resume_output: Option<Box<serde_json::Value>>,
     },
 }
 

@@ -10,16 +10,30 @@ activation:
     - going with
     - settled on
     - picked
+    - landed on
+    - went with
+    - finalized
+    - agreed on
+    - opted for
+    - concluded
+    - confirmed
     - final answer
     - made the call
     - ruling
     - verdict
     - record decision
+  exclude_keywords:
+    - undecided
+    - considering
+    - thinking about
+    - tentative
+    - maybe
   patterns:
-    - "(?i)(we|I) (decided|chose|went with|picked|settled on)"
+    - "(?i)(we|I|team) (decided|chose|went with|picked|settled on|landed on|opted for)"
     - "(?i)let's go with"
     - "(?i)the (decision|call|verdict) is"
     - "(?i)record (this|that) decision"
+    - "(?i)(instead of|replaced|switched to|migrated to)"
   tags:
     - commitments
     - decision-making

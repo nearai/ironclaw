@@ -15,6 +15,45 @@ use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 
+fn db_error(context: &str, e: impl std::fmt::Display) -> (StatusCode, String) {
+    tracing::error!(%e, context, "Database error in jobs handler");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Internal database error".to_string(),
+    )
+}
+
+async fn resolve_sandbox_restart_mode(
+    store: &dyn crate::db::Database,
+    stored_mode: &str,
+    user_id: &str,
+) -> Result<
+    (
+        crate::orchestrator::job_manager::JobMode,
+        Option<crate::config::acp::AcpAgentConfig>,
+    ),
+    crate::config::acp::AcpConfigError,
+> {
+    if stored_mode == "claude_code" {
+        return Ok((crate::orchestrator::job_manager::JobMode::ClaudeCode, None));
+    }
+
+    if let Some(agent_name) = stored_mode.strip_prefix("acp:") {
+        let agent =
+            crate::config::acp::get_enabled_acp_agent_for_user(Some(store), user_id, agent_name)
+                .await?;
+        return Ok((crate::orchestrator::job_manager::JobMode::Acp, Some(agent)));
+    }
+
+    if stored_mode == "acp" {
+        return Err(crate::config::acp::AcpConfigError::InvalidConfig {
+            reason: "legacy ACP jobs without an agent name cannot be restarted".to_string(),
+        });
+    }
+
+    Ok((crate::orchestrator::job_manager::JobMode::Worker, None))
+}
+
 pub async fn jobs_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -190,7 +229,9 @@ pub async fn jobs_detail_handler(
             }
 
             let mode = store.get_sandbox_job_mode(job.id).await.ok().flatten();
-            let is_claude_code = mode.as_deref() == Some("claude_code");
+            let supports_prompts = mode
+                .as_deref()
+                .is_some_and(|m| m == "claude_code" || m.starts_with("acp"));
 
             return Ok(Json(JobDetailResponse {
                 id: job.id,
@@ -207,16 +248,13 @@ pub async fn jobs_detail_handler(
                 job_mode: mode.filter(|m| m != "worker"),
                 transitions,
                 can_restart: state.job_manager.is_some(),
-                can_prompt: is_claude_code && state.prompt_queue.is_some(),
+                can_prompt: supports_prompts && state.prompt_queue.is_some(),
                 job_kind: Some("sandbox".to_string()),
             }));
         }
         Ok(None) => {}
         Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            ));
+            return Err(db_error("jobs_handler", e));
         }
     }
 
@@ -230,6 +268,18 @@ pub async fn jobs_detail_handler(
                 let end = ctx.completed_at.unwrap_or_else(chrono::Utc::now);
                 (end - start).num_seconds().max(0) as u64
             });
+
+            // Build transitions from the job's state transition history.
+            let transitions: Vec<TransitionInfo> = ctx
+                .transitions
+                .iter()
+                .map(|t| TransitionInfo {
+                    from: t.from.to_string(),
+                    to: t.to.to_string(),
+                    timestamp: t.timestamp.to_rfc3339(),
+                    reason: t.reason.clone(),
+                })
+                .collect();
 
             // Only show prompt bar for jobs that have a running worker (Pending/InProgress).
             // Stuck jobs have no active worker loop, so messages would be silently dropped.
@@ -250,17 +300,14 @@ pub async fn jobs_detail_handler(
                 project_dir: None,
                 browse_url: None,
                 job_mode: None,
-                transitions: Vec::new(),
+                transitions,
                 can_restart: state.scheduler.is_some(),
                 can_prompt: is_promptable && state.scheduler.is_some(),
                 job_kind: Some("agent".to_string()),
             }))
         }
         Ok(None) => Err((StatusCode::NOT_FOUND, "Job not found".to_string())),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )),
+        Err(e) => Err(db_error("jobs_handler", e)),
     }
 }
 
@@ -304,10 +351,7 @@ pub async fn jobs_cancel_handler(
             }
             Ok(None) => {}
             Err(e) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Database error: {}", e),
-                ));
+                return Err(db_error("jobs_handler", e));
             }
         }
     }
@@ -350,10 +394,7 @@ pub async fn jobs_cancel_handler(
             }
             Ok(None) => {}
             Err(e) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Database error: {}", e),
-                ));
+                return Err(db_error("jobs_handler", e));
             }
         }
     }
@@ -405,6 +446,16 @@ pub async fn jobs_restart_handler(
             let new_job_id = Uuid::new_v4();
             let now = chrono::Utc::now();
 
+            let stored_mode = store
+                .get_sandbox_job_mode(old_job_id)
+                .await
+                .map_err(|e| db_error("jobs_restart_handler", e))?
+                .unwrap_or_default();
+
+            let (mode, acp_agent) =
+                resolve_sandbox_restart_mode(store.as_ref(), &stored_mode, &old_job.user_id)
+                    .await
+                    .map_err(|e| (StatusCode::CONFLICT, format!("Cannot restart job: {}", e)))?;
             let record = crate::history::SandboxJobRecord {
                 id: new_job_id,
                 task: task.clone(),
@@ -421,14 +472,25 @@ pub async fn jobs_restart_handler(
             store
                 .save_sandbox_job(&record)
                 .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                .map_err(|e| db_error("jobs_restart_handler", e))?;
 
-            let mode = match store.get_sandbox_job_mode(old_job_id).await {
-                Ok(Some(m)) if m == "claude_code" => {
-                    crate::orchestrator::job_manager::JobMode::ClaudeCode
-                }
-                _ => crate::orchestrator::job_manager::JobMode::Worker,
-            };
+            if mode != crate::orchestrator::job_manager::JobMode::Worker {
+                let mode_str = if mode == crate::orchestrator::job_manager::JobMode::Acp {
+                    format!(
+                        "acp:{}",
+                        acp_agent
+                            .as_ref()
+                            .map(|agent| agent.name.as_str())
+                            .unwrap_or_default()
+                    )
+                } else {
+                    mode.as_str().to_string()
+                };
+                store
+                    .update_sandbox_job_mode(new_job_id, &mode_str)
+                    .await
+                    .map_err(|e| db_error("jobs_restart_handler", e))?;
+            }
 
             let credential_grants: Vec<crate::orchestrator::auth::CredentialGrant> =
                 serde_json::from_str(&old_job.credential_grants_json).unwrap_or_else(|e| {
@@ -442,26 +504,44 @@ pub async fn jobs_restart_handler(
                 });
 
             let project_dir = std::path::PathBuf::from(&old_job.project_dir);
-            let _token = jm
+            let create_result = jm
                 .create_job(
                     new_job_id,
                     &task,
                     Some(project_dir),
                     mode,
-                    credential_grants,
+                    crate::orchestrator::job_manager::JobCreationParams {
+                        credential_grants,
+                        acp_agent,
+                        ..Default::default()
+                    },
                 )
-                .await
-                .map_err(|e| {
-                    (
+                .await;
+            let _token = match create_result {
+                Ok(token) => token,
+                Err(e) => {
+                    let error_text = e.to_string();
+                    let _ = store
+                        .update_sandbox_job_status(
+                            new_job_id,
+                            "failed",
+                            Some(false),
+                            Some(error_text.as_str()),
+                            None,
+                            Some(chrono::Utc::now()),
+                        )
+                        .await;
+                    return Err((
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Failed to create container: {}", e),
-                    )
-                })?;
+                        format!("Failed to create container: {}", error_text),
+                    ));
+                }
+            };
 
             store
                 .update_sandbox_job_status(new_job_id, "running", None, None, Some(now), None)
                 .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                .map_err(|e| db_error("jobs_restart_handler", e))?;
 
             return Ok(Json(serde_json::json!({
                 "status": "restarted",
@@ -471,10 +551,7 @@ pub async fn jobs_restart_handler(
         }
         Ok(None) => {}
         Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            ));
+            return Err(db_error("jobs_restart_handler", e));
         }
     }
 
@@ -530,10 +607,7 @@ pub async fn jobs_restart_handler(
             })))
         }
         Ok(None) => Err((StatusCode::NOT_FOUND, "Job not found".to_string())),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )),
+        Err(e) => Err(db_error("jobs_handler", e)),
     }
 }
 
@@ -573,12 +647,15 @@ pub async fn jobs_prompt_handler(
             return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
         }
 
-        // It's a sandbox job. Check if Claude Code mode.
+        // It's a sandbox job. Check if Claude Code or ACP mode (both support follow-up prompts).
         let mode = s.get_sandbox_job_mode(job_id).await.ok().flatten();
-        if mode.as_deref() == Some("claude_code") {
+        if mode
+            .as_deref()
+            .is_some_and(|m| m == "claude_code" || m.starts_with("acp"))
+        {
             let prompt_queue = state.prompt_queue.as_ref().ok_or((
                 StatusCode::NOT_IMPLEMENTED,
-                "Claude Code not configured".to_string(),
+                "Follow-up prompts are not configured".to_string(),
             ))?;
             let prompt = crate::orchestrator::api::PendingPrompt { content, done };
             {
@@ -609,10 +686,7 @@ pub async fn jobs_prompt_handler(
                 return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
             }
             Err(e) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Database error: {}", e),
-                ));
+                return Err(db_error("jobs_handler", e));
             }
         }
     }
@@ -656,28 +730,28 @@ pub async fn jobs_events_handler(
         .parse()
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
-    // Verify ownership before returning events.
-    match store.get_sandbox_job(job_id).await {
-        Ok(Some(job)) => {
-            if job.user_id != user.user_id {
-                return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+    // Verify ownership before returning events (check both sandbox and agent jobs).
+    let is_owner = match store.get_sandbox_job(job_id).await {
+        Ok(Some(job)) => job.user_id == user.user_id,
+        Ok(None) => {
+            // Fall back to agent job ownership check.
+            match store.get_job(job_id).await {
+                Ok(Some(ctx)) => ctx.user_id == user.user_id,
+                _ => false,
             }
         }
-        Ok(None) => {
-            return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
-        }
         Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            ));
+            return Err(db_error("jobs_events_handler", e));
         }
+    };
+    if !is_owner {
+        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
     }
 
     let events = store
         .list_job_events(job_id, None)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| db_error("jobs_events_handler", e))?;
 
     let events_json: Vec<serde_json::Value> = events
         .into_iter()
@@ -822,4 +896,72 @@ pub async fn job_files_read_handler(
         path: path.to_string(),
         content,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn sandbox_restart_mode_uses_original_job_owner_scope() {
+        let (db, _tmp) = crate::testing::test_db().await;
+
+        let mut agents = crate::config::acp::AcpAgentsFile::default();
+        agents.upsert(crate::config::acp::AcpAgentConfig::new(
+            "codex",
+            "codex",
+            vec!["acp".into()],
+            std::collections::HashMap::new(),
+        ));
+        crate::config::acp::save_acp_agents_for_user(Some(db.as_ref()), "owner-123", &agents)
+            .await
+            .unwrap();
+
+        let (mode, agent) = resolve_sandbox_restart_mode(db.as_ref(), "acp:codex", "owner-123")
+            .await
+            .unwrap();
+
+        assert_eq!(mode, crate::orchestrator::job_manager::JobMode::Acp);
+        assert_eq!(
+            agent.as_ref().map(|agent| agent.name.as_str()),
+            Some("codex")
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn sandbox_restart_mode_rejects_disabled_acp_agent() {
+        let (db, _tmp) = crate::testing::test_db().await;
+
+        let mut agents = crate::config::acp::AcpAgentsFile::default();
+        let mut agent = crate::config::acp::AcpAgentConfig::new(
+            "codex",
+            "codex",
+            vec!["acp".into()],
+            std::collections::HashMap::new(),
+        );
+        agent.enabled = false;
+        agents.upsert(agent);
+        crate::config::acp::save_acp_agents_for_user(Some(db.as_ref()), "owner-123", &agents)
+            .await
+            .unwrap();
+
+        let err = resolve_sandbox_restart_mode(db.as_ref(), "acp:codex", "owner-123")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::config::acp::AcpConfigError::AgentDisabled { .. }
+        ));
+    }
+
+    #[test]
+    fn test_db_error_does_not_leak_details() {
+        let (status, body) = db_error("test_context", "relation \"jobs\" does not exist");
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body, "Internal database error");
+        assert!(!body.contains("relation"));
+        assert!(!body.contains("does not exist"));
+    }
 }

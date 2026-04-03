@@ -1,0 +1,49 @@
+{
+  "model_name": "v2-multi-tool-chain",
+  "expects": {
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "echo"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_v2_echo_chain",
+            "name": "echo",
+            "arguments": {
+              "message": "chain step 1"
+            }
+          }
+        ],
+        "input_tokens": 100,
+        "output_tokens": 25
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_v2_time_chain",
+            "name": "time",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 150,
+        "output_tokens": 20
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "I ran the echo tool (returned 'chain step 1') and then checked the time. Both tools succeeded.",
+        "input_tokens": 200,
+        "output_tokens": 30
+      }
+    }
+  ]
+}

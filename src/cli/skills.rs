@@ -69,7 +69,8 @@ pub async fn run_skills_command(
 /// Discover skills from all configured directories.
 async fn discover_skills(config: &SkillsConfig) -> SkillRegistry {
     let mut registry = SkillRegistry::new(config.local_dir.clone())
-        .with_installed_dir(config.installed_dir.clone());
+        .with_installed_dir(config.installed_dir.clone())
+        .with_max_scan_depth(config.max_scan_depth);
     registry.discover_all().await;
     registry
 }
@@ -79,6 +80,7 @@ fn format_source(source: &SkillSource) -> &str {
     match source {
         SkillSource::Workspace(_) => "workspace",
         SkillSource::User(_) => "user",
+        SkillSource::Installed(_) => "installed",
         SkillSource::Bundled(_) => "bundled",
     }
 }
@@ -309,8 +311,13 @@ async fn cmd_info(config: &SkillsConfig, name: &str, json: bool) -> anyhow::Resu
     }
     println!("  Max tokens:  {}", act.max_context_tokens);
 
+    if let Some(reqs) = skill
+        .manifest
+        .metadata
+        .as_ref()
+        .and_then(|m| m.openclaw.as_ref())
+        .map(|o| &o.requires)
     {
-        let reqs = &skill.manifest.requires;
         if !reqs.bins.is_empty() {
             println!("  Requires bins:    {}", reqs.bins.join(", "));
         }

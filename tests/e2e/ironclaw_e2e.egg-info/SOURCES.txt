@@ -19,6 +19,7 @@ scenarios/test_oauth_url_parameters.py
 scenarios/test_owner_scope.py
 scenarios/test_pairing.py
 scenarios/test_routine_event_batch.py
+scenarios/test_routine_full_job.py
 scenarios/test_routine_oauth_credential_injection.py
 scenarios/test_skill_oauth_flow.py
 scenarios/test_skills.py

@@ -337,6 +337,23 @@ impl TokenUsage {
     }
 }
 
+/// Structured anomaly classification for LLM responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseAnomaly {
+    /// Tool mode was requested, but the provider returned no usable tool calls
+    /// and no recoverable text content.
+    EmptyToolCompletion,
+    /// Text mode returned no usable content after cleaning/truncation.
+    EmptyTextResponse,
+}
+
+/// Metadata attached to `RespondOutput` so callers can react to malformed
+/// provider behavior without inferring it from fallback strings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResponseMetadata {
+    pub anomaly: Option<ResponseAnomaly>,
+}
+
 /// Result of a response with potential tool calls.
 ///
 /// Used by the agent loop to handle tool execution before returning a final response.
@@ -359,6 +376,7 @@ pub struct RespondOutput {
     pub result: RespondResult,
     pub usage: TokenUsage,
     pub finish_reason: FinishReason,
+    pub metadata: ResponseMetadata,
 }
 
 /// Reasoning engine for the agent.
@@ -763,12 +781,11 @@ Respond in JSON format:
                     },
                     usage,
                     finish_reason: response.finish_reason,
+                    metadata: ResponseMetadata::default(),
                 });
             }
 
-            let content = response
-                .content
-                .unwrap_or_else(|| "I'm not sure how to respond to that.".to_string());
+            let content = response.content.unwrap_or_default();
 
             // Some models (e.g. GLM-4.7) emit tool calls as XML tags in content
             // instead of using the structured tool_calls field. Try to recover
@@ -791,6 +808,7 @@ Respond in JSON format:
                     },
                     usage,
                     finish_reason: response.finish_reason,
+                    metadata: ResponseMetadata::default(),
                 });
             }
 
@@ -804,11 +822,18 @@ Respond in JSON format:
             // Pre-truncate at tool tags to preserve text before the tag.
             let pre_truncated = truncate_at_tool_tags(&content);
             let cleaned = clean_response(&pre_truncated);
-            let final_text = if cleaned.trim().is_empty() {
+            let metadata = if cleaned.trim().is_empty() {
                 tracing::warn!(
                     "LLM response was empty after cleaning (original len={}), using fallback",
                     content.len()
                 );
+                ResponseMetadata {
+                    anomaly: Some(ResponseAnomaly::EmptyToolCompletion),
+                }
+            } else {
+                ResponseMetadata::default()
+            };
+            let final_text = if metadata.anomaly.is_some() {
                 "I'm not sure how to respond to that.".to_string()
             } else {
                 cleaned
@@ -817,6 +842,7 @@ Respond in JSON format:
                 result: RespondResult::Text(final_text),
                 usage,
                 finish_reason: response.finish_reason,
+                metadata,
             })
         } else {
             // No tools, use simple completion
@@ -831,11 +857,18 @@ Respond in JSON format:
             let response = self.llm.complete(request).await?;
             let pre_truncated = truncate_at_tool_tags(&response.content);
             let cleaned = clean_response(&pre_truncated);
-            let final_text = if cleaned.trim().is_empty() {
+            let metadata = if cleaned.trim().is_empty() {
                 tracing::warn!(
                     "LLM response was empty after cleaning (original len={}), using fallback",
                     response.content.len()
                 );
+                ResponseMetadata {
+                    anomaly: Some(ResponseAnomaly::EmptyTextResponse),
+                }
+            } else {
+                ResponseMetadata::default()
+            };
+            let final_text = if metadata.anomaly.is_some() {
                 "I'm not sure how to respond to that.".to_string()
             } else {
                 cleaned
@@ -849,6 +882,7 @@ Respond in JSON format:
                     cache_creation_input_tokens: response.cache_creation_input_tokens,
                 },
                 finish_reason: response.finish_reason,
+                metadata,
             })
         }
     }
@@ -1036,9 +1070,12 @@ Example:
 
         let mut section = "\n\n## Extensions\n\
          You can search, install, and activate extensions to add new capabilities:\n\
-         - **Channels** (Telegram, Slack, Discord) — messaging integrations. \
-         When users ask about connecting a messaging platform, search for it as a channel.\n\
-         - **Tools** �� sandboxed functions that extend your abilities.\n\
+         - **Channels** (Telegram, Slack, Discord) — connect messaging platforms so users can \
+         talk to you there. When users ask about connecting a messaging platform, search for it \
+         as a channel. Channels are not separate send-message tools; use normal assistant output \
+         to reply in the current conversation, and use the `message` tool only for proactive, \
+         background, or cross-channel outbound sends.\n\
+         - **Tools** — sandboxed functions that extend your abilities.\n\
          - **MCP servers** — external API integrations via the Model Context Protocol.\n\n\
          Use `tool_search` to find extensions by name. Refer to them by their kind \
          (channel, tool, or server) — not as \"MCP server\" generically."
@@ -1090,15 +1127,20 @@ Example:
 
         let message_tool_hint = "\
 \n\n## Proactive Messaging\n\
+For ordinary replies in the current conversation, respond normally without calling `message`.\n\
 Send messages via Signal, Telegram, Slack, or other connected channels:\n\
 - `content` (required): the message text\n\
 - `attachments` (optional): array of file paths to send\n\
 - `channel` (optional): which channel to use (signal, telegram, slack, etc.)\n\
 - `target` (optional): who to send to (phone number, group ID, etc.)\n\
-\nOmit both `channel` and `target` to send to the current conversation.\n\
+\nOmit both `channel` and `target` for a proactive follow-up in the current conversation.\n\
+Target formats:\n\
+- Signal: E.164 phone number (`+1234567890`) or group ID\n\
+- Telegram: username or chat ID\n\
+- Slack: channel name (`#general`) or user ID\n\
 Examples (tool calls use JSON format):\n\
-- Reply here: {\"content\": \"Hi!\"}\n\
-- Send file here: {\"content\": \"Here's the file\", \"attachments\": [\"/path/to/file.txt\"]}\n\
+- Proactive follow-up here: {\"content\": \"Hi again!\"}\n\
+- Send file here proactively: {\"content\": \"Here's the file\", \"attachments\": [\"/path/to/file.txt\"]}\n\
 - Message a different user: {\"channel\": \"signal\", \"target\": \"+1234567890\", \"content\": \"Hi!\"}\n\
 - Message a different group: {\"channel\": \"signal\", \"target\": \"group:abc123\", \"content\": \"Hi!\"}";
 
@@ -1146,7 +1188,9 @@ Examples (tool calls use JSON format):\n\
 
         format!(
             "\n\n## Current Conversation\n\
-             This is who you're talking to (omit 'target' to send here):\n{}",
+             This is who you're talking to in the active conversation. Use normal assistant \
+             output to reply here; only use the `message` tool for proactive, background, or \
+             cross-channel outbound sends:\n{}",
             lines.join("\n")
         )
     }
@@ -1417,9 +1461,18 @@ fn overlaps_code_region(start: usize, end: usize, regions: &[CodeRegion]) -> boo
 }
 
 /// Return the byte bounds of the line containing `pos`, excluding the trailing newline.
+///
+/// `pos` is clamped to `text.len()` and adjusted to the nearest char boundary,
+/// so callers need not guarantee that `pos` falls on a boundary.
 fn line_bounds(text: &str, pos: usize) -> (usize, usize) {
-    let start = text[..pos].rfind('\n').map_or(0, |idx| idx + 1);
-    let end = text[pos..].find('\n').map_or(text.len(), |idx| pos + idx);
+    let pos = pos.min(text.len());
+    // Walk backward to find a valid char boundary (at most 3 bytes for UTF-8).
+    let mut safe = pos;
+    while safe > 0 && !text.is_char_boundary(safe) {
+        safe -= 1;
+    }
+    let start = text[..safe].rfind('\n').map_or(0, |idx| idx + 1);
+    let end = text[safe..].find('\n').map_or(text.len(), |idx| safe + idx);
     (start, end)
 }
 
@@ -2343,6 +2396,51 @@ That's my plan."#;
         assert_eq!(regions[0].end, text.len());
     }
 
+    // ---- line_bounds UTF-8 safety (issue #1669) ----
+
+    #[test]
+    fn test_line_bounds_ascii() {
+        let text = "hello\nworld\n";
+        assert_eq!(line_bounds(text, 0), (0, 5));
+        assert_eq!(line_bounds(text, 6), (6, 11));
+    }
+
+    #[test]
+    fn test_line_bounds_at_text_len() {
+        let text = "abc";
+        assert_eq!(line_bounds(text, 3), (0, 3));
+    }
+
+    #[test]
+    fn test_line_bounds_mid_multibyte_char() {
+        // '🔥' is 4 bytes (F0 9F 94 A5). Passing pos=1 lands inside the char.
+        // line_bounds must not panic — it should snap to a valid boundary.
+        let text = "🔥\n<tool_call>";
+        // All mid-char positions should snap back to byte 0 (start of '🔥'),
+        // so line bounds cover the first line: "🔥" = bytes 0..4.
+        assert_eq!(line_bounds(text, 1), (0, 4)); // would panic before fix
+        assert_eq!(line_bounds(text, 2), (0, 4));
+        assert_eq!(line_bounds(text, 3), (0, 4));
+    }
+
+    #[test]
+    fn test_line_bounds_emoji_before_newline() {
+        // 'Result: 🔥\n<tool_call>' — end.saturating_sub(1) from the \n position
+        // should not panic even with multi-byte chars on the same line.
+        let text = "Result: 🔥\n<tool_call>";
+        let newline_pos = text.find('\n').unwrap();
+        // saturating_sub(1) lands inside '🔥' (byte 11 → 10, but char ends at 12).
+        // Snaps back to byte 8 (start of '🔥'), line covers "Result: 🔥" = bytes 0..12.
+        assert_eq!(line_bounds(text, newline_pos.saturating_sub(1)), (0, 12));
+    }
+
+    #[test]
+    fn test_line_bounds_pos_beyond_len() {
+        let text = "abc";
+        // pos > text.len() should be clamped, not panic
+        assert_eq!(line_bounds(text, 100), (0, 3));
+    }
+
     // ---- recover_tool_calls_from_content tests ----
 
     fn make_tools(names: &[&str]) -> Vec<ToolDefinition> {
@@ -2491,6 +2589,54 @@ That's my plan."#;
             prompt.contains("echo: Echoes input"),
             "Prompt with tools should list the echo tool"
         );
+    }
+
+    #[test]
+    fn test_extensions_section_clarifies_channels_are_not_send_tools() {
+        let reasoning = make_test_reasoning();
+        let tool_defs = vec![ToolDefinition {
+            name: "tool_search".to_string(),
+            description: "Search extensions".to_string(),
+            parameters: serde_json::json!({}),
+        }];
+
+        let section = reasoning.build_extensions_section_for_tools(&tool_defs);
+        assert!(section.contains("connect messaging platforms so users can talk to you there"));
+        assert!(section.contains("Channels are not separate send-message tools"));
+        assert!(
+            section.contains("use normal assistant output to reply in the current conversation")
+        );
+        assert!(section.contains(
+            "`message` tool only for proactive, background, or cross-channel outbound sends"
+        ));
+    }
+
+    #[test]
+    fn test_channel_section_separates_normal_replies_from_message_tool() {
+        let reasoning = make_test_reasoning().with_channel("telegram");
+
+        let section = reasoning.build_channel_section();
+        assert!(section.contains("respond normally without calling `message`"));
+        assert!(section.contains("proactive follow-up in the current conversation"));
+        assert!(section.contains("Target formats:"));
+        assert!(section.contains("Signal: E.164 phone number"));
+        assert!(section.contains("Telegram: username or chat ID"));
+        assert!(section.contains("Slack: channel name"));
+        assert!(section.contains("Proactive follow-up here"));
+    }
+
+    #[test]
+    fn test_current_conversation_section_does_not_imply_message_tool_for_replies() {
+        let reasoning = make_test_reasoning()
+            .with_channel("telegram")
+            .with_conversation_data("User", "telegram-user");
+
+        let section = reasoning.build_conversation_section();
+        assert!(section.contains("Use normal assistant output to reply here"));
+        assert!(section.contains(
+            "only use the `message` tool for proactive, background, or cross-channel outbound sends"
+        ));
+        assert!(!section.contains("omit 'target' to send here"));
     }
 
     // ---- plan/evaluate bypass clean_response (Bug #564-2) ----
@@ -3088,9 +3234,104 @@ That's my plan."#;
         context.force_text = true;
 
         let output = reasoning.respond_with_tools(&context).await.unwrap();
+        let metadata = output.metadata;
         match output.result {
             RespondResult::Text(text) => {
                 assert_eq!(text, "I'm not sure how to respond to that.");
+                assert_eq!(metadata.anomaly, Some(ResponseAnomaly::EmptyTextResponse));
+            }
+            RespondResult::ToolCalls { .. } => {
+                panic!("Expected fallback text, not tool calls");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_respond_with_tools_flags_empty_tool_completion() {
+        use crate::testing::StubLlm;
+        let llm = Arc::new(StubLlm::new(""));
+        let reasoning = Reasoning::new(llm);
+
+        let context = ReasoningContext::new()
+            .with_message(ChatMessage::user("list tools"))
+            .with_tools(vec![ToolDefinition {
+                name: "tool_list".to_string(),
+                description: "Lists tools".to_string(),
+                parameters: serde_json::json!({}),
+            }]);
+
+        let output = reasoning.respond_with_tools(&context).await.unwrap();
+        let metadata = output.metadata;
+        match output.result {
+            RespondResult::Text(text) => {
+                assert_eq!(text, "I'm not sure how to respond to that.");
+                assert_eq!(metadata.anomaly, Some(ResponseAnomaly::EmptyToolCompletion));
+            }
+            RespondResult::ToolCalls { .. } => {
+                panic!("Expected fallback text, not tool calls");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_respond_with_tools_flags_empty_tool_completion_when_content_is_none() {
+        use crate::llm::{
+            FinishReason, LlmProvider, ToolCompletionRequest, ToolCompletionResponse,
+        };
+        use async_trait::async_trait;
+        use rust_decimal::Decimal;
+
+        struct NoneContentToolLlm;
+
+        #[async_trait]
+        impl LlmProvider for NoneContentToolLlm {
+            fn model_name(&self) -> &str {
+                "none-content-tool-llm"
+            }
+
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+
+            async fn complete(
+                &self,
+                _request: crate::llm::CompletionRequest,
+            ) -> Result<crate::llm::CompletionResponse, crate::llm::LlmError> {
+                unreachable!("tool-mode test should not call complete()")
+            }
+
+            async fn complete_with_tools(
+                &self,
+                _request: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, crate::llm::LlmError> {
+                Ok(ToolCompletionResponse {
+                    content: None,
+                    tool_calls: Vec::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+        }
+
+        let reasoning = Reasoning::new(Arc::new(NoneContentToolLlm));
+
+        let context = ReasoningContext::new()
+            .with_message(ChatMessage::user("list tools"))
+            .with_tools(vec![ToolDefinition {
+                name: "tool_list".to_string(),
+                description: "Lists tools".to_string(),
+                parameters: serde_json::json!({}),
+            }]);
+
+        let output = reasoning.respond_with_tools(&context).await.unwrap();
+        let metadata = output.metadata;
+        match output.result {
+            RespondResult::Text(text) => {
+                assert_eq!(text, "I'm not sure how to respond to that.");
+                assert_eq!(metadata.anomaly, Some(ResponseAnomaly::EmptyToolCompletion));
             }
             RespondResult::ToolCalls { .. } => {
                 panic!("Expected fallback text, not tool calls");

@@ -229,18 +229,35 @@ impl AppBuilder {
         let store = crate::secrets::create_secrets_store(crypto, handles);
 
         if let Some(ref secrets) = store {
+            // Migrate any plaintext API keys from the settings table to the
+            // encrypted secrets store. Idempotent — safe to run on every startup.
+            if let Some(ref db) = self.db {
+                crate::config::migrate_plaintext_llm_keys(
+                    db.as_ref(),
+                    secrets.as_ref(),
+                    &self.config.owner_id,
+                )
+                .await;
+            }
+
             // Inject LLM API keys from encrypted storage
             crate::config::inject_llm_keys_from_secrets(secrets.as_ref(), &self.config.owner_id)
                 .await;
 
-            // Re-resolve only the LLM config with newly available keys.
-            let store: Option<&(dyn crate::db::SettingsStore + Sync)> =
+            // Re-resolve only the LLM config with newly available keys,
+            // including keys hydrated from the secrets store.
+            let settings_store: Option<&(dyn crate::db::SettingsStore + Sync)> =
                 self.db.as_ref().map(|db| db.as_ref() as _);
             let toml_path = self.toml_path.as_deref();
             let owner_id = self.config.owner_id.clone();
             if let Err(e) = self
                 .config
-                .re_resolve_llm(store, &owner_id, toml_path)
+                .re_resolve_llm_with_secrets(
+                    settings_store,
+                    &owner_id,
+                    toml_path,
+                    Some(secrets.as_ref()),
+                )
                 .await
             {
                 tracing::warn!("Failed to re-resolve LLM config after secret injection: {e}");
@@ -337,33 +354,23 @@ impl AppBuilder {
             ws = ws.with_memory_layers(self.config.workspace.memory_layers.clone());
             let ws = Arc::new(ws);
 
-            // Detect multi-tenant mode: when GATEWAY_USER_TOKENS is configured,
-            // each authenticated user needs their own workspace scope. Use
-            // WorkspacePool (which implements WorkspaceResolver) to create
-            // per-user workspaces on demand instead of sharing the startup
-            // workspace across all users.
-            let is_multi_tenant = self
-                .config
-                .channels
-                .gateway
-                .as_ref()
-                .is_some_and(|gw| gw.user_tokens.is_some());
-
-            if is_multi_tenant {
-                let pool = Arc::new(crate::channels::web::server::WorkspacePool::new(
-                    Arc::clone(db),
-                    embeddings.clone(),
-                    emb_cache_config,
-                    self.config.search.clone(),
-                    self.config.workspace.clone(),
-                ));
-                tools.register_memory_tools_with_resolver(pool);
-                tracing::info!(
-                    "Memory tools configured with per-user workspace resolver (multi-tenant mode)"
-                );
-            } else {
-                tools.register_memory_tools(Arc::clone(&ws));
-            }
+            // Memory tools must resolve by `ctx.user_id`, not a fixed startup
+            // workspace. Even outside authenticated multi-tenant mode, some
+            // channels and test harnesses route non-owner users through
+            // per-user tenant workspaces seeded on demand.
+            let is_multi_tenant = db.has_any_users().await.unwrap_or(false);
+            let pool = Arc::new(crate::channels::web::server::WorkspacePool::new(
+                Arc::clone(db),
+                embeddings.clone(),
+                emb_cache_config,
+                self.config.search.clone(),
+                self.config.workspace.clone(),
+            ));
+            tools.register_memory_tools_with_resolver(pool);
+            tracing::debug!(
+                multi_tenant = is_multi_tenant,
+                "Memory tools configured with per-user workspace resolver"
+            );
 
             Some(ws)
         } else {
@@ -747,6 +754,31 @@ impl AppBuilder {
             Some(manager)
         };
 
+        // Validate ACP agent configs at startup (lightweight — no connections, just config check).
+        {
+            let acp_agents = if let Some(ref d) = self.db {
+                crate::config::acp::load_acp_agents_from_db(d.as_ref(), &self.config.owner_id).await
+            } else {
+                crate::config::acp::load_acp_agents().await
+            };
+            match acp_agents {
+                Ok(file) => {
+                    let enabled: Vec<_> = file.enabled_agents().collect();
+                    if !enabled.is_empty() {
+                        let names: Vec<&str> = enabled.iter().map(|a| a.name.as_str()).collect();
+                        tracing::info!(
+                            "ACP agents configured: {} ({} enabled)",
+                            names.join(", "),
+                            enabled.len()
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("No ACP agents configured ({})", e);
+                }
+            }
+        }
+
         // register_builder_tool() already calls register_dev_tools() internally,
         // so only register them here when the builder didn't already do it.
         let builder_registered_dev_tools = self.config.builder.enabled
@@ -872,7 +904,8 @@ impl AppBuilder {
         let (skill_registry, skill_catalog) = if self.config.skills.enabled {
             let mut registry = SkillRegistry::new(self.config.skills.local_dir.clone())
                 .with_installed_dir(self.config.skills.installed_dir.clone())
-                .with_bundled_content(crate::skills::bundled::load_bundled_skills());
+                .with_bundled_content(crate::skills::bundled::load_bundled_skills())
+                .with_max_scan_depth(self.config.skills.max_scan_depth);
             let loaded = registry.discover_all().await;
             if !loaded.is_empty() {
                 tracing::debug!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));

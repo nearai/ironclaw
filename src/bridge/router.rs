@@ -1,6 +1,5 @@
 //! Engine v2 router — handles user messages via the engine when enabled.
 
-use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use tokio::sync::RwLock;
@@ -12,6 +11,7 @@ use ironclaw_engine::{
 };
 
 use ironclaw_common::AppEvent;
+use ironclaw_engine::types::{is_shared_owner, shared_owner_id};
 
 use crate::agent::Agent;
 use crate::bridge::auth_manager::AuthManager;
@@ -19,9 +19,15 @@ use crate::bridge::effect_adapter::EffectBridgeAdapter;
 use crate::bridge::llm_adapter::LlmBridgeAdapter;
 use crate::bridge::store_adapter::HybridStore;
 use crate::channels::web::sse::SseManager;
-use crate::channels::{IncomingMessage, StatusUpdate};
+use crate::channels::{IncomingMessage, OutgoingResponse, StatusUpdate};
 use crate::db::Database;
 use crate::error::Error;
+use crate::extensions::naming::legacy_extension_alias;
+use crate::gate::pending::{PendingGate, PendingGateKey};
+
+#[cfg(test)]
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 /// Check if the engine v2 is enabled via `ENGINE_V2=true` environment variable.
 pub fn is_engine_v2_enabled() -> bool {
@@ -38,38 +44,267 @@ fn engine_err(context: &str, e: impl std::fmt::Display) -> Error {
     })
 }
 
-/// Pending approval info stored between the NeedApproval outcome and the user's response.
-#[derive(Clone)]
-struct PendingApproval {
-    request_id: String,
-    action_name: String,
-    thread_id: ironclaw_engine::ThreadId,
-    conversation_id: ironclaw_engine::ConversationId,
-    call_id: String,
-    description: String,
-    parameters: serde_json::Value,
+fn gate_display_parameters(pending: &PendingGate) -> serde_json::Value {
+    pending
+        .display_parameters
+        .clone()
+        .unwrap_or_else(|| pending.parameters.clone())
 }
 
-#[derive(Debug, Clone)]
-pub struct PendingApprovalView {
-    pub request_id: String,
-    pub tool_name: String,
-    pub description: String,
-    pub parameters: String,
+fn resumed_action_result_message(
+    action_name: &str,
+    output: &serde_json::Value,
+) -> ironclaw_engine::ThreadMessage {
+    let rendered = serde_json::to_string_pretty(output).unwrap_or_else(|_| output.to_string());
+    ironclaw_engine::ThreadMessage::user(format!(
+        "The pending action '{action_name}' has already been executed.\n\
+         Do not call it again unless the user explicitly asks.\n\
+         Continue from this result:\n{rendered}"
+    ))
 }
 
-/// Pending credential auth: the next user message is treated as a token value.
-#[derive(Clone)]
-struct PendingAuth {
-    credential_name: String,
-    /// The original user message to retry after token is stored.
-    original_message: String,
-    user_id: String,
-    channel: String,
-    metadata: serde_json::Value,
-    /// Engine thread that is waiting for the credential.
-    /// Used to stop the thread on cancel.
-    engine_thread_id: Option<ironclaw_engine::ThreadId>,
+async fn insert_and_notify_pending_gate(
+    agent: &Agent,
+    state: &EngineState,
+    message: &IncomingMessage,
+    pending: PendingGate,
+) -> Result<Option<String>, Error> {
+    let display_parameters = gate_display_parameters(&pending);
+
+    state
+        .pending_gates
+        .insert(pending.clone())
+        .await
+        .map_err(|e| engine_err("pending gate insert", e))?;
+
+    if let Some(ref sse) = state.sse {
+        sse.broadcast_for_user(
+            &message.user_id,
+            AppEvent::GateRequired {
+                request_id: pending.request_id.to_string(),
+                gate_name: pending.gate_name.clone(),
+                tool_name: pending.action_name.clone(),
+                description: pending.description.clone(),
+                parameters: serde_json::to_string_pretty(&display_parameters)
+                    .unwrap_or_else(|_| display_parameters.to_string()),
+                resume_kind: serde_json::to_value(&pending.resume_kind).unwrap_or_default(),
+                thread_id: Some(pending.thread_id.to_string()),
+            },
+        );
+    }
+
+    match &pending.resume_kind {
+        ironclaw_engine::ResumeKind::Approval { allow_always } => {
+            let _ = agent
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::ApprovalNeeded {
+                        request_id: pending.request_id.to_string(),
+                        tool_name: pending.action_name.clone(),
+                        description: pending.description.clone(),
+                        parameters: display_parameters,
+                        allow_always: *allow_always,
+                    },
+                    &message.metadata,
+                )
+                .await;
+
+            Ok(Some(format!(
+                "Tool '{}' requires approval. Reply 'yes' to approve, 'no' to deny.",
+                pending.action_name
+            )))
+        }
+        ironclaw_engine::ResumeKind::Authentication {
+            credential_name,
+            instructions,
+            auth_url,
+        } => {
+            let _ = agent
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::AuthRequired {
+                        extension_name: credential_name.clone(),
+                        instructions: Some(instructions.clone()),
+                        auth_url: auth_url.clone(),
+                        setup_url: None,
+                    },
+                    &message.metadata,
+                )
+                .await;
+
+            Ok(Some(format!(
+                "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
+                credential_name
+            )))
+        }
+        ironclaw_engine::ResumeKind::External { callback_id } => {
+            tracing::debug!(
+                gate = %pending.gate_name,
+                callback = %callback_id,
+                "GatePaused(External)"
+            );
+            Ok(Some(format!(
+                "Waiting for external confirmation (gate: {})...",
+                pending.gate_name
+            )))
+        }
+    }
+}
+
+async fn execute_pending_gate_action(
+    agent: &Agent,
+    state: &EngineState,
+    message: &IncomingMessage,
+    pending: &PendingGate,
+    approval_already_granted: bool,
+    approval_event: Option<(String, bool)>,
+) -> Result<Option<String>, Error> {
+    let thread = state
+        .store
+        .load_thread(pending.thread_id)
+        .await
+        .map_err(|e| engine_err("load thread", e))?
+        .ok_or_else(|| engine_err("load thread", "thread not found"))?;
+
+    let lease = state
+        .thread_manager
+        .leases
+        .find_lease_for_action(pending.thread_id, &pending.action_name)
+        .await
+        .ok_or_else(|| {
+            engine_err(
+                "resume lease",
+                format!("no active lease covers action '{}'", pending.action_name),
+            )
+        })?;
+
+    let exec_ctx = ironclaw_engine::ThreadExecutionContext {
+        thread_id: pending.thread_id,
+        thread_type: thread.thread_type,
+        project_id: thread.project_id,
+        user_id: thread.user_id.clone(),
+        step_id: ironclaw_engine::StepId::new(),
+        current_call_id: Some(pending.call_id.clone()),
+        source_channel: Some(pending.source_channel.clone()),
+    };
+
+    state.effect_adapter.reset_call_count();
+    match state
+        .effect_adapter
+        .execute_resolved_pending_action(
+            &pending.action_name,
+            pending.parameters.clone(),
+            &lease,
+            &exec_ctx,
+            approval_already_granted,
+        )
+        .await
+    {
+        Ok(result) => {
+            state
+                .thread_manager
+                .resume_thread(
+                    pending.thread_id,
+                    message.user_id.clone(),
+                    Some(resumed_action_result_message(
+                        &pending.action_name,
+                        &result.output,
+                    )),
+                    approval_event,
+                    Some(pending.call_id.clone()),
+                )
+                .await
+                .map_err(|e| engine_err("resume error", e))?;
+            await_thread_outcome(
+                agent,
+                state,
+                message,
+                pending.conversation_id,
+                pending.thread_id,
+            )
+            .await
+        }
+        Err(ironclaw_engine::EngineError::GatePaused {
+            gate_name,
+            action_name,
+            call_id,
+            parameters,
+            resume_kind,
+            resume_output,
+        }) => {
+            let display_parameters = state
+                .effect_adapter
+                .tools()
+                .get(&action_name)
+                .await
+                .map(|tool| crate::tools::redact_params(&parameters, tool.sensitive_params()));
+            let pending_gate = PendingGate {
+                request_id: uuid::Uuid::new_v4(),
+                gate_name,
+                user_id: message.user_id.clone(),
+                thread_id: pending.thread_id,
+                conversation_id: pending.conversation_id,
+                source_channel: message.channel.clone(),
+                action_name: action_name.clone(),
+                call_id,
+                parameters: *parameters,
+                display_parameters,
+                description: format!(
+                    "Tool '{}' requires {}.",
+                    action_name,
+                    resume_kind.kind_name()
+                ),
+                resume_kind: *resume_kind,
+                created_at: chrono::Utc::now(),
+                expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+                original_message: None,
+                resume_output: resume_output.map(|value| *value),
+            };
+            insert_and_notify_pending_gate(agent, state, message, pending_gate).await
+        }
+        Err(e) => Err(engine_err("execute pending gate action", e)),
+    }
+}
+
+/// Resolve the default project for a user, creating one if needed.
+///
+/// In multi-user deployments each user gets their own project so threads,
+/// missions, and memory docs are isolated. The owner's project (passed as
+/// `fallback`) is used when the user IS the owner, avoiding an extra store
+/// lookup in the common single-user case.
+async fn resolve_user_project(
+    store: &Arc<dyn Store>,
+    user_id: &str,
+    fallback: ironclaw_engine::ProjectId,
+) -> Result<ironclaw_engine::ProjectId, Error> {
+    // Fast path: check if fallback project belongs to this user
+    if let Ok(Some(project)) = store.load_project(fallback).await
+        && project.is_owned_by(user_id)
+    {
+        return Ok(fallback);
+    }
+
+    // Look for an existing default project owned by this user
+    let projects = store
+        .list_projects(user_id)
+        .await
+        .map_err(|e| engine_err("project lookup", e))?;
+
+    if let Some(project) = projects.iter().find(|p| p.name == "default") {
+        return Ok(project.id);
+    }
+
+    // Create a new default project for this user
+    let project = ironclaw_engine::Project::new(user_id, "default", "Default project");
+    let pid = project.id;
+    store
+        .save_project(&project)
+        .await
+        .map_err(|e| engine_err("create project", e))?;
+    debug!(user_id, project_id = %pid, "created default project for user");
+    Ok(pid)
 }
 
 /// Persistent engine state that lives across messages.
@@ -79,10 +314,8 @@ struct EngineState {
     effect_adapter: Arc<EffectBridgeAdapter>,
     store: Arc<dyn Store>,
     default_project_id: ironclaw_engine::ProjectId,
-    /// Per-user pending approvals (keyed by user_id).
-    pending_approvals: RwLock<HashMap<String, PendingApproval>>,
-    /// Per-user pending credential auth (keyed by user_id).
-    pending_auth: RwLock<HashMap<String, PendingAuth>>,
+    /// Unified pending gate store — keyed by (user_id, thread_id).
+    pending_gates: Arc<crate::gate::store::PendingGateStore>,
     /// SSE manager for broadcasting AppEvents to the web gateway.
     sse: Option<Arc<SseManager>>,
     /// V1 database for writing conversation messages (gateway reads from here).
@@ -96,12 +329,126 @@ struct EngineState {
 /// Global engine state, initialized on first use.
 static ENGINE_STATE: OnceLock<RwLock<Option<EngineState>>> = OnceLock::new();
 
-const PENDING_APPROVAL_METADATA_KEY: &str = "pending_approval";
-
-enum PendingApprovalResolution {
+enum PendingGateResolution {
     None,
-    Resolved(PendingApproval),
+    Resolved(Box<PendingGate>),
     Ambiguous,
+}
+
+fn parse_engine_thread_id(scope: Option<&str>) -> Option<ironclaw_engine::ThreadId> {
+    scope
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        .map(ironclaw_engine::ThreadId)
+}
+
+fn parse_scope_uuid(scope: Option<&str>) -> Option<uuid::Uuid> {
+    scope.and_then(|s| uuid::Uuid::parse_str(s).ok())
+}
+
+async fn reconcile_pending_gate_state(
+    store: &Arc<dyn Store>,
+    pending_gates: &crate::gate::store::PendingGateStore,
+) -> Result<(), Error> {
+    let restored_gates = pending_gates.list_all().await;
+    let gate_keys: HashSet<_> = restored_gates.iter().map(PendingGate::key).collect();
+
+    for gate in &restored_gates {
+        let thread = store
+            .load_thread(gate.thread_id)
+            .await
+            .map_err(|e| engine_err("load thread", e))?;
+        let Some(thread) = thread else {
+            let _ = pending_gates.discard(&gate.key()).await;
+            continue;
+        };
+
+        if thread.state != ironclaw_engine::ThreadState::Waiting
+            || !thread.is_owned_by(&gate.user_id)
+        {
+            let _ = pending_gates.discard(&gate.key()).await;
+        }
+    }
+
+    let projects = store
+        .list_all_projects()
+        .await
+        .map_err(|e| engine_err("list all projects", e))?;
+    for project in projects {
+        let threads = store
+            .list_all_threads(project.id)
+            .await
+            .map_err(|e| engine_err("list all threads", e))?;
+        for mut thread in threads {
+            if thread.state != ironclaw_engine::ThreadState::Waiting {
+                continue;
+            }
+            let key = PendingGateKey {
+                user_id: thread.user_id.clone(),
+                thread_id: thread.id,
+            };
+            if gate_keys.contains(&key) {
+                continue;
+            }
+
+            if let Err(e) = thread.transition_to(
+                ironclaw_engine::ThreadState::Failed,
+                Some("pending gate missing during recovery".into()),
+            ) {
+                debug!(thread_id = %thread.id, error = %e, "failed to reconcile waiting thread");
+                continue;
+            }
+            store
+                .save_thread(&thread)
+                .await
+                .map_err(|e| engine_err("save reconciled thread", e))?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn fail_orphaned_waiting_thread_if_needed(
+    state: &EngineState,
+    user_id: &str,
+    thread_id: ironclaw_engine::ThreadId,
+) -> Result<bool, Error> {
+    if state
+        .pending_gates
+        .peek(&PendingGateKey {
+            user_id: user_id.to_string(),
+            thread_id,
+        })
+        .await
+        .is_some()
+    {
+        return Ok(false);
+    }
+
+    let Some(mut thread) = state
+        .store
+        .load_thread(thread_id)
+        .await
+        .map_err(|e| engine_err("load thread", e))?
+    else {
+        return Ok(false);
+    };
+
+    if !thread.is_owned_by(user_id) || thread.state != ironclaw_engine::ThreadState::Waiting {
+        return Ok(false);
+    }
+
+    thread
+        .transition_to(
+            ironclaw_engine::ThreadState::Failed,
+            Some("pending gate missing before resume".into()),
+        )
+        .map_err(|e| engine_err("reconcile waiting thread", e))?;
+    state
+        .store
+        .save_thread(&thread)
+        .await
+        .map_err(|e| engine_err("save reconciled thread", e))?;
+    Ok(true)
 }
 
 /// Get or initialize the engine state using the agent's dependencies.
@@ -135,27 +482,14 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         agent.hooks().clone(),
     ));
 
-    // Wire auth_required callback: emits SSE event when a credential is missing.
-    // Best-effort — if no frontend is connected, the event is silently dropped.
-    if let Some(sse) = agent.deps.sse_tx.clone() {
-        let sse_for_auth = sse;
-        effect_adapter
-            .set_auth_required_callback(Arc::new(Box::new(move |credential_name, action_name| {
-                let event = ironclaw_common::AppEvent::AuthRequired {
-                    extension_name: credential_name.to_string(),
-                    instructions: Some(format!(
-                        "Tool '{}' needs the '{}' credential. Please authenticate to continue.",
-                        action_name, credential_name
-                    )),
-                    auth_url: None,
-                    setup_url: None,
-                };
-                sse_for_auth.broadcast(event);
-            })))
-            .await;
-    }
-
     // Build centralized auth manager for pre-flight credential checks.
+    let has_secrets = agent.tools().secrets_store().is_some();
+    let has_cred_reg = agent.tools().credential_registry().is_some();
+    debug!(
+        has_secrets_store = has_secrets,
+        has_credential_registry = has_cred_reg,
+        "engine v2: auth manager init check"
+    );
     let auth_manager = if let Some(ss) = agent.tools().secrets_store().cloned() {
         let mgr = Arc::new(AuthManager::new(
             ss,
@@ -163,8 +497,10 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
             agent.deps.extension_manager.clone(),
         ));
         effect_adapter.set_auth_manager(Arc::clone(&mgr)).await;
+        debug!("engine v2: auth manager set on effect adapter");
         Some(mgr)
     } else {
+        debug!("engine v2: no secrets store — auth manager NOT created");
         None
     };
 
@@ -214,13 +550,14 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         actions: vec![
             ironclaw_engine::ActionDef {
                 name: "mission_create".into(),
-                description: "Create a new mission (routine). Use when the user wants to set up a recurring task, scheduled check, or periodic routine.".into(),
+                description: "Create a new mission (routine). Use when the user wants to set up a recurring task, scheduled check, or periodic routine. Results are delivered to the current channel by default.".into(),
                 parameters_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "name": {"type": "string", "description": "Short name for the mission/routine"},
                         "goal": {"type": "string", "description": "What this mission should accomplish each run"},
-                        "cadence": {"type": "string", "description": "How often to run: 'hourly', '30m', '6h', 'daily', 'manual'"}
+                        "cadence": {"type": "string", "description": "How often to run: 'hourly', '30m', '6h', 'daily', 'manual'"},
+                        "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl']). Defaults to current channel."}
                     },
                     "required": ["name", "goal"]
                 }),
@@ -274,6 +611,25 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                 requires_approval: false,
             },
             ironclaw_engine::ActionDef {
+                name: "mission_update".into(),
+                description: "Update a mission/routine. Change name, goal, cadence, notification channels, daily budget, or success criteria.".into(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Mission/routine ID to update"},
+                        "name": {"type": "string", "description": "New name"},
+                        "goal": {"type": "string", "description": "New goal"},
+                        "cadence": {"type": "string", "description": "New cadence: 'hourly', '30m', '6h', 'daily', 'manual'"},
+                        "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl'])"},
+                        "max_threads_per_day": {"type": "integer", "description": "Max threads per day (0 = unlimited)"},
+                        "success_criteria": {"type": "string", "description": "Criteria for declaring mission complete"}
+                    },
+                    "required": ["id"]
+                }),
+                effects: vec![],
+                requires_approval: false,
+            },
+            ironclaw_engine::ActionDef {
                 name: "mission_delete".into(),
                 description: "Delete a mission or routine permanently.".into(),
                 parameters_schema: serde_json::json!({
@@ -305,9 +661,15 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         policy,
     ));
 
+    // Migrate legacy records: pre-existing engine records deserialize without a
+    // user_id field and get the serde default "legacy". Stamp the owner's identity
+    // onto them so user-scoped queries find them after upgrade.
+    let owner_id = &agent.deps.owner_id;
+    migrate_legacy_user_ids(&store_dyn, owner_id).await;
+
     // Reuse the persisted default project when available.
     let project_id = match store
-        .list_projects()
+        .list_projects(owner_id)
         .await
         .map_err(|e| engine_err("store error", e))?
         .into_iter()
@@ -315,7 +677,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     {
         Some(project) => project.id,
         None => {
-            let project = Project::new("default", "Default project for engine v2");
+            let project = Project::new(owner_id, "default", "Default project for engine v2");
             let project_id = project.id;
             store
                 .save_project(&project)
@@ -356,8 +718,38 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     mission_manager.start_cron_ticker(agent.deps.owner_id.clone());
     mission_manager.start_event_listener(agent.deps.owner_id.clone());
 
-    // Ensure all learning missions exist for this project
-    if let Err(e) = mission_manager.ensure_learning_missions(project_id).await {
+    // Subscribe to mission outcome notifications and route results to channels.
+    {
+        let mut notification_rx = mission_manager.subscribe_notifications();
+        let channels = Arc::clone(&agent.channels);
+        let sse_ref = agent.deps.sse_tx.clone();
+        let db_ref = agent.deps.store.clone();
+        tokio::spawn(async move {
+            loop {
+                match notification_rx.recv().await {
+                    Ok(notif) => {
+                        handle_mission_notification(
+                            &notif,
+                            &channels,
+                            sse_ref.as_ref(),
+                            db_ref.as_ref(),
+                        )
+                        .await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        debug!("mission notification receiver lagged by {n}");
+                    }
+                }
+            }
+        });
+    }
+
+    // Ensure per-user learning missions exist for the owner
+    if let Err(e) = mission_manager
+        .ensure_learning_missions(project_id, owner_id)
+        .await
+    {
         debug!("engine v2: failed to create learning missions: {e}");
     }
 
@@ -399,14 +791,23 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         .set_mission_manager(Arc::clone(&mission_manager))
         .await;
 
+    let pending_gates = Arc::new(crate::gate::store::PendingGateStore::new(Some(Arc::new(
+        crate::gate::persistence::FileGatePersistence::with_default_path(),
+    ))));
+    if let Err(e) = pending_gates.restore_from_persistence().await {
+        debug!("engine v2: failed to restore pending gates: {e}");
+    }
+    if let Err(e) = reconcile_pending_gate_state(&store_dyn, &pending_gates).await {
+        debug!("engine v2: pending gate reconciliation failed: {e}");
+    }
+
     *guard = Some(EngineState {
         thread_manager,
         conversation_manager,
         effect_adapter,
         store: store.clone(),
         default_project_id: project_id,
-        pending_approvals: RwLock::new(HashMap::new()),
-        pending_auth: RwLock::new(HashMap::new()),
+        pending_gates,
         sse: agent.deps.sse_tx.clone(),
         db: agent.deps.store.clone(),
         secrets_store: agent.tools().secrets_store().cloned(),
@@ -416,201 +817,41 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     Ok(())
 }
 
-async fn persist_pending_approval(
-    store: &Arc<dyn Store>,
-    pending: &PendingApproval,
-) -> Result<(), Error> {
-    let mut thread = store
-        .load_thread(pending.thread_id)
-        .await
-        .map_err(|e| engine_err("store error", e))?
-        .ok_or_else(|| engine_err("thread not found", pending.thread_id))?;
-
-    let metadata = thread
-        .metadata
-        .as_object_mut()
-        .ok_or_else(|| engine_err("thread metadata", "must be an object"))?;
-    metadata.insert(
-        PENDING_APPROVAL_METADATA_KEY.into(),
-        serde_json::json!({
-            "request_id": pending.request_id,
-            "action_name": pending.action_name,
-            "thread_id": pending.thread_id.to_string(),
-            "conversation_id": pending.conversation_id.to_string(),
-            "call_id": pending.call_id,
-            "description": pending.description,
-            "parameters": pending.parameters,
-        }),
-    );
-    thread.updated_at = chrono::Utc::now();
-    store
-        .save_thread(&thread)
-        .await
-        .map_err(|e| engine_err("store error", e))
-}
-
-async fn load_pending_approval_from_thread(
-    store: &Arc<dyn Store>,
-    conversation_id: ironclaw_engine::ConversationId,
-    thread_id: ironclaw_engine::ThreadId,
-) -> Result<Option<PendingApproval>, Error> {
-    let Some(thread) = store
-        .load_thread(thread_id)
-        .await
-        .map_err(|e| engine_err("store error", e))?
-    else {
-        return Ok(None);
-    };
-
-    if thread.state != ironclaw_engine::ThreadState::Waiting {
-        return Ok(None);
-    }
-
-    let Some(pending) = thread
-        .metadata
-        .get(PENDING_APPROVAL_METADATA_KEY)
-        .and_then(|value| value.as_object())
-    else {
-        return Ok(None);
-    };
-
-    let Some(request_id) = pending.get("request_id").and_then(|value| value.as_str()) else {
-        return Ok(None);
-    };
-    let Some(action_name) = pending.get("action_name").and_then(|value| value.as_str()) else {
-        return Ok(None);
-    };
-    let Some(call_id) = pending.get("call_id").and_then(|value| value.as_str()) else {
-        return Ok(None);
-    };
-
-    let description = pending
-        .get("description")
-        .and_then(|value| value.as_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("Tool '{}' requires approval to execute.", action_name));
-    let parameters = pending
-        .get("parameters")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-
-    Ok(Some(PendingApproval {
-        request_id: request_id.to_string(),
-        action_name: action_name.to_string(),
-        thread_id,
-        conversation_id,
-        call_id: call_id.to_string(),
-        description,
-        parameters,
-    }))
-}
-
-async fn clear_pending_approval_metadata(
-    store: &Arc<dyn Store>,
-    thread_id: ironclaw_engine::ThreadId,
-) -> Result<(), Error> {
-    let Some(mut thread) = store
-        .load_thread(thread_id)
-        .await
-        .map_err(|e| engine_err("store error", e))?
-    else {
-        return Ok(());
-    };
-
-    if let Some(metadata) = thread.metadata.as_object_mut() {
-        metadata.remove(PENDING_APPROVAL_METADATA_KEY);
-        thread.updated_at = chrono::Utc::now();
-        store
-            .save_thread(&thread)
-            .await
-            .map_err(|e| engine_err("store error", e))?;
-    }
-
-    Ok(())
-}
-
-async fn resolve_pending_approval_for_thread(
-    store: &Arc<dyn Store>,
-    pending_approvals: &RwLock<HashMap<String, PendingApproval>>,
+async fn resolve_pending_gate_for_user(
+    pending_gates: &crate::gate::store::PendingGateStore,
     user_id: &str,
     thread_id_hint: Option<&str>,
-) -> Result<PendingApprovalResolution, Error> {
-    let hinted_thread_id = thread_id_hint.and_then(|id| uuid::Uuid::parse_str(id).ok());
-
-    if let Some(cached) = pending_approvals.read().await.get(user_id).cloned() {
-        let hint_matches = hinted_thread_id
-            .map(|id| cached.thread_id.0 == id)
-            .unwrap_or(true);
-        if hint_matches {
-            if let Some(pending) =
-                load_pending_approval_from_thread(store, cached.conversation_id, cached.thread_id)
-                    .await?
-            {
-                return Ok(PendingApprovalResolution::Resolved(pending));
-            }
-
-            let mut approvals = pending_approvals.write().await;
-            if approvals
-                .get(user_id)
-                .is_some_and(|pending| pending.thread_id == cached.thread_id)
-            {
-                approvals.remove(user_id);
-            }
-        }
-    }
-
-    let conversations = store
-        .list_conversations(user_id)
+) -> PendingGateResolution {
+    let hinted_uuid = parse_scope_uuid(thread_id_hint);
+    let candidates: Vec<_> = pending_gates
+        .list_for_user(user_id)
         .await
-        .map_err(|e| engine_err("store error", e))?;
+        .into_iter()
+        .filter(|gate| {
+            hinted_uuid
+                .is_none_or(|hint| gate.thread_id.0 == hint || gate.conversation_id.0 == hint)
+        })
+        .collect();
 
-    let mut candidates = Vec::new();
-    for conversation in conversations {
-        for thread_id in conversation.active_threads {
-            if hinted_thread_id.is_some_and(|hint| thread_id.0 != hint) {
-                continue;
-            }
-
-            let Some(thread) = store
-                .load_thread(thread_id)
-                .await
-                .map_err(|e| engine_err("store error", e))?
-            else {
-                continue;
-            };
-
-            let Some(pending) =
-                load_pending_approval_from_thread(store, conversation.id, thread_id).await?
-            else {
-                continue;
-            };
-
-            candidates.push((thread.updated_at, pending));
-        }
+    match candidates.len() {
+        0 => PendingGateResolution::None,
+        1 => PendingGateResolution::Resolved(Box::new(
+            candidates.into_iter().next().unwrap(), // safety: len==1 guarantees Some
+        )),
+        _ if hinted_uuid.is_some() => PendingGateResolution::Resolved(Box::new(
+            candidates
+                .into_iter()
+                .max_by_key(|gate| gate.created_at)
+                .unwrap(), // safety: len>=2 guarantees Some
+        )),
+        _ => PendingGateResolution::Ambiguous,
     }
-
-    if hinted_thread_id.is_none() && candidates.len() > 1 {
-        return Ok(PendingApprovalResolution::Ambiguous);
-    }
-
-    candidates.sort_by_key(|(updated_at, _)| *updated_at);
-    let resolved = candidates.pop().map(|(_, pending)| pending);
-    if let Some(ref pending) = resolved {
-        pending_approvals
-            .write()
-            .await
-            .insert(user_id.to_string(), pending.clone());
-    }
-    Ok(match resolved {
-        Some(pending) => PendingApprovalResolution::Resolved(pending),
-        None => PendingApprovalResolution::None,
-    })
 }
 
-pub async fn pending_approval_for_user_thread(
+pub async fn get_engine_pending_gate(
     user_id: &str,
     thread_id: Option<&str>,
-) -> Result<Option<PendingApprovalView>, Error> {
+) -> Result<Option<crate::gate::pending::PendingGateView>, Error> {
     let Some(lock) = ENGINE_STATE.get() else {
         return Ok(None);
     };
@@ -619,23 +860,98 @@ pub async fn pending_approval_for_user_thread(
         return Ok(None);
     };
 
-    match resolve_pending_approval_for_thread(
-        &state.store,
-        &state.pending_approvals,
-        user_id,
-        thread_id,
-    )
-    .await?
-    {
-        PendingApprovalResolution::Resolved(pending) => Ok(Some(PendingApprovalView {
-            request_id: pending.request_id,
-            tool_name: pending.action_name,
-            description: pending.description,
-            parameters: serde_json::to_string_pretty(&pending.parameters)
-                .unwrap_or_else(|_| pending.parameters.to_string()),
-        })),
-        PendingApprovalResolution::None | PendingApprovalResolution::Ambiguous => Ok(None),
+    match resolve_pending_gate_for_user(&state.pending_gates, user_id, thread_id).await {
+        PendingGateResolution::Resolved(gate) => Ok(Some(
+            crate::gate::pending::PendingGateView::from(gate.as_ref()),
+        )),
+        PendingGateResolution::None | PendingGateResolution::Ambiguous => Ok(None),
     }
+}
+
+pub async fn resolve_engine_auth_callback(
+    user_id: &str,
+    credential_name: &str,
+) -> Result<bool, Error> {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return Ok(false);
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return Ok(false);
+    };
+
+    let mut matching: Vec<_> = state
+        .pending_gates
+        .list_for_user(user_id)
+        .await
+        .into_iter()
+        .filter(|gate| {
+            matches!(
+                &gate.resume_kind,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: gate_credential,
+                    ..
+                } if gate_credential == credential_name
+            )
+        })
+        .collect();
+
+    if matching.is_empty() {
+        return Ok(false);
+    }
+
+    matching.sort_by_key(|gate| gate.created_at);
+    let pending = matching.pop().unwrap(); // safety: is_empty() checked above
+    if pending.resume_output.is_none() {
+        tracing::warn!(
+            user_id = %user_id,
+            credential_name = %credential_name,
+            thread_id = %pending.thread_id,
+            "OAuth callback matched a pending auth gate without resume_output; leaving thread waiting"
+        );
+        return Ok(false);
+    }
+
+    let key = pending.key();
+    if let Err(e) = state.pending_gates.discard(&key).await {
+        tracing::debug!(
+            user_id = %user_id,
+            credential_name = %credential_name,
+            error = %e,
+            "Pending auth gate disappeared before OAuth callback resume"
+        );
+        return Ok(false);
+    }
+
+    if let Some(ref sse) = state.sse {
+        sse.broadcast_for_user(
+            user_id,
+            AppEvent::GateResolved {
+                request_id: pending.request_id.to_string(),
+                gate_name: pending.gate_name.clone(),
+                tool_name: pending.action_name.clone(),
+                resolution: "external_callback".into(),
+                message: "OAuth callback received. Resuming execution.".into(),
+                thread_id: Some(pending.thread_id.to_string()),
+            },
+        );
+    }
+
+    state
+        .thread_manager
+        .resume_thread(
+            pending.thread_id,
+            user_id.to_string(),
+            pending.resume_output.as_ref().map(|resume_output| {
+                resumed_action_result_message(&pending.action_name, resume_output)
+            }),
+            None,
+            Some(pending.call_id.clone()),
+        )
+        .await
+        .map_err(|e| engine_err("resume oauth callback", e))?;
+
+    Ok(true)
 }
 
 /// Handle an approval response (yes/no/always) for engine v2.
@@ -660,27 +976,45 @@ pub async fn handle_approval(
     // Don't pass the v1 thread_id as a hint — the v1 session uses different
     // UUIDs from the engine.  The user_id alone is sufficient for single-user
     // deployments; ambiguity resolution kicks in for multi-user.
-    let pending = match resolve_pending_approval_for_thread(
-        &state.store,
-        &state.pending_approvals,
-        &message.user_id,
-        None,
-    )
-    .await?
+    let pending = match resolve_pending_gate_for_user(&state.pending_gates, &message.user_id, None)
+        .await
     {
-        PendingApprovalResolution::Resolved(p) => p,
-        PendingApprovalResolution::None => {
+        PendingGateResolution::Resolved(p) => p,
+        PendingGateResolution::None => {
             debug!(user_id = %message.user_id, "engine v2: no pending approval for user, ignoring");
             return Ok(Some("No pending approval for this thread.".into()));
         }
-        PendingApprovalResolution::Ambiguous => {
+        PendingGateResolution::Ambiguous => {
             return Ok(Some(
-                "Multiple pending approvals are waiting. Approve from the original thread or retry with that thread selected.".into(),
+                "Multiple pending gates are waiting. Resolve from the original thread or retry with that thread selected.".into(),
             ));
         }
     };
 
-    process_resolved_approval(agent, state, message, pending, approved, always).await
+    if !matches!(
+        pending.resume_kind,
+        ironclaw_engine::ResumeKind::Approval { .. }
+    ) {
+        return Ok(Some(
+            "The selected pending gate is not an approval request.".into(),
+        ));
+    }
+
+    let request_id = pending.request_id;
+    let thread_id = pending.thread_id;
+    drop(guard);
+    resolve_gate(
+        agent,
+        message,
+        thread_id,
+        request_id,
+        if approved {
+            ironclaw_engine::GateResolution::Approved { always }
+        } else {
+            ironclaw_engine::GateResolution::Denied { reason: None }
+        },
+    )
+    .await
 }
 
 /// Handle an `ExecApproval` submission (web gateway JSON approval with explicit request_id).
@@ -701,125 +1035,387 @@ pub async fn handle_exec_approval(
         .as_ref()
         .ok_or_else(|| engine_err("init", "engine state is empty"))?;
 
-    let request_id_str = request_id.to_string();
+    if let Some(thread_id) = parse_engine_thread_id(message.conversation_scope())
+        && let Some(gate) = state
+            .pending_gates
+            .peek(&crate::gate::pending::PendingGateKey {
+                user_id: message.user_id.clone(),
+                thread_id,
+            })
+            .await
+        && gate.request_id == request_id.to_string()
+        && matches!(
+            gate.resume_kind,
+            ironclaw_engine::ResumeKind::Approval { .. }
+        )
+    {
+        drop(guard);
+        return resolve_gate(
+            agent,
+            message,
+            thread_id,
+            request_id,
+            if approved {
+                ironclaw_engine::GateResolution::Approved { always }
+            } else {
+                ironclaw_engine::GateResolution::Denied { reason: None }
+            },
+        )
+        .await;
+    }
 
-    // First try the in-memory cache (keyed by user_id, but we match on request_id).
-    let cached = state
-        .pending_approvals
-        .read()
+    let pending = state
+        .pending_gates
+        .list_for_user(&message.user_id)
         .await
-        .get(&message.user_id)
-        .filter(|p| p.request_id == request_id_str)
-        .cloned();
+        .into_iter()
+        .find(|gate| {
+            matches!(
+                gate.resume_kind,
+                ironclaw_engine::ResumeKind::Approval { .. }
+            ) && gate.request_id == request_id
+        });
+    drop(guard);
 
-    if let Some(pending) = cached {
-        return process_resolved_approval(agent, state, message, pending, approved, always).await;
-    }
-
-    // Fall back to scanning thread metadata for this user's conversations.
-    // Don't use v1 thread_id as hint (different UUID space from engine).
-    let resolution = resolve_pending_approval_for_thread(
-        &state.store,
-        &state.pending_approvals,
-        &message.user_id,
-        None,
-    )
-    .await?;
-
-    match resolution {
-        PendingApprovalResolution::Resolved(pending) if pending.request_id == request_id_str => {
-            process_resolved_approval(agent, state, message, pending, approved, always).await
-        }
-        _ => {
-            debug!(
-                user_id = %message.user_id,
-                request_id = %request_id,
-                "engine v2: no matching pending approval for request_id"
-            );
-            Ok(Some("No matching pending approval found.".into()))
-        }
-    }
-}
-
-/// Shared logic for processing a resolved pending approval.
-async fn process_resolved_approval(
-    agent: &Agent,
-    state: &EngineState,
-    message: &IncomingMessage,
-    pending: PendingApproval,
-    approved: bool,
-    always: bool,
-) -> Result<Option<String>, Error> {
-    if !approved {
-        let _ = agent
-            .channels
-            .send_status(
-                &message.channel,
-                StatusUpdate::Status("Tool call denied.".into()),
-                &message.metadata,
-            )
-            .await;
+    if let Some(pending) = pending {
+        return resolve_gate(
+            agent,
+            message,
+            pending.thread_id,
+            request_id,
+            if approved {
+                ironclaw_engine::GateResolution::Approved { always }
+            } else {
+                ironclaw_engine::GateResolution::Denied { reason: None }
+            },
+        )
+        .await;
     }
 
     debug!(
-        tool = %pending.action_name,
-        always,
-        approved,
-        "engine v2: tool approval received"
+        user_id = %message.user_id,
+        request_id = %request_id,
+        "engine v2: no matching pending approval for request_id"
     );
+    Ok(Some("No matching pending approval found.".into()))
+}
 
-    if approved && always {
-        let registry_name = pending.action_name.replace('_', "-");
-        state
-            .effect_adapter
-            .auto_approve_tool(&pending.action_name)
-            .await;
-        state.effect_adapter.auto_approve_tool(&registry_name).await;
-        debug!(
-            tool = %pending.action_name,
-            "engine v2: tool auto-approved for session"
-        );
-    }
+/// Resolve a unified pending gate.
+///
+/// This is the single entry point for resolving gates stored in the
+/// [`PendingGateStore`]. It atomically verifies request_id, channel
+/// authorization, and expiry before resuming or stopping the thread.
+///
+/// Replaces the separate approval and auth resolution paths for new
+/// code paths using the unified gate abstraction.
+pub async fn resolve_gate(
+    agent: &Agent,
+    message: &IncomingMessage,
+    thread_id: ironclaw_engine::ThreadId,
+    request_id: uuid::Uuid,
+    resolution: ironclaw_engine::GateResolution,
+) -> Result<Option<String>, Error> {
+    init_engine(agent).await?;
 
-    let _ = agent
-        .channels
-        .send_status(
-            &message.channel,
-            StatusUpdate::Thinking("Resuming pending thread...".into()),
-            &message.metadata,
-        )
-        .await;
+    let lock = ENGINE_STATE
+        .get()
+        .ok_or_else(|| engine_err("init", "engine state not initialized"))?;
+    let guard = lock.read().await;
+    let state = guard
+        .as_ref()
+        .ok_or_else(|| engine_err("init", "engine state is empty"))?;
 
-    let resume_message = if approved {
-        ironclaw_engine::ThreadMessage::user(format!(
-            "User approved action '{}'. Continue from the pending step and reuse the approved action if still needed.",
-            pending.action_name
-        ))
-    } else {
-        ironclaw_engine::ThreadMessage::user(format!(
-            "User denied action '{}'. Do not execute it; choose an alternative approach.",
-            pending.action_name
-        ))
+    let key = crate::gate::pending::PendingGateKey {
+        user_id: message.user_id.clone(),
+        thread_id,
     };
 
-    state.effect_adapter.reset_call_count();
-    state
-        .thread_manager
-        .resume_thread(
-            pending.thread_id,
-            message.user_id.clone(),
-            Some(resume_message),
-            Some((pending.call_id.clone(), approved)),
-        )
+    let pending = state
+        .pending_gates
+        .take_verified(&key, request_id, &message.channel)
         .await
-        .map_err(|e| engine_err("resume error", e))?;
-    clear_pending_approval_metadata(&state.store, pending.thread_id).await?;
-    let mut approvals = state.pending_approvals.write().await;
-    if approvals
-        .get(&message.user_id)
-        .is_some_and(|cached| cached.thread_id == pending.thread_id)
-    {
-        approvals.remove(&message.user_id);
+        .map_err(|e| {
+            use crate::gate::store::GateStoreError;
+            match e {
+                GateStoreError::ChannelMismatch { expected, actual } => engine_err(
+                    "authorization",
+                    format!("Channel '{actual}' cannot resolve gates from channel '{expected}'"),
+                ),
+                GateStoreError::RequestIdMismatch => {
+                    engine_err("stale", "Approval request is stale or already resolved")
+                }
+                GateStoreError::Expired => engine_err("expired", "Approval request has expired"),
+                other => engine_err("gate", other),
+            }
+        })?;
+
+    match resolution {
+        ironclaw_engine::GateResolution::Approved { always } => {
+            if let Some(ref sse) = state.sse {
+                sse.broadcast_for_user(
+                    &message.user_id,
+                    AppEvent::GateResolved {
+                        request_id: pending.request_id.to_string(),
+                        gate_name: pending.gate_name.clone(),
+                        tool_name: pending.action_name.clone(),
+                        resolution: if always {
+                            "approved_always"
+                        } else {
+                            "approved"
+                        }
+                        .into(),
+                        message: "Gate approved. Resuming execution.".into(),
+                        thread_id: Some(pending.thread_id.to_string()),
+                    },
+                );
+            }
+            if always {
+                state
+                    .effect_adapter
+                    .auto_approve_tool(&pending.action_name)
+                    .await;
+                if let Some(registry_name) = legacy_extension_alias(&pending.action_name) {
+                    state.effect_adapter.auto_approve_tool(&registry_name).await;
+                }
+            }
+            let result = execute_pending_gate_action(
+                agent,
+                state,
+                message,
+                &pending,
+                true,
+                Some((pending.call_id.clone(), true)),
+            )
+            .await;
+
+            if always && result.is_err() {
+                state
+                    .effect_adapter
+                    .revoke_auto_approve(&pending.action_name)
+                    .await;
+                if let Some(registry_name) = legacy_extension_alias(&pending.action_name) {
+                    state
+                        .effect_adapter
+                        .revoke_auto_approve(&registry_name)
+                        .await;
+                }
+            }
+            return result;
+        }
+
+        ironclaw_engine::GateResolution::Denied { reason } => {
+            if let Some(ref sse) = state.sse {
+                sse.broadcast_for_user(
+                    &message.user_id,
+                    AppEvent::GateResolved {
+                        request_id: pending.request_id.to_string(),
+                        gate_name: pending.gate_name.clone(),
+                        tool_name: pending.action_name.clone(),
+                        resolution: "denied".into(),
+                        message: "Gate denied.".into(),
+                        thread_id: Some(pending.thread_id.to_string()),
+                    },
+                );
+            }
+            let _ = agent
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::Status("Tool call denied.".into()),
+                    &message.metadata,
+                )
+                .await;
+
+            let deny_msg = ironclaw_engine::ThreadMessage::user(format!(
+                "User denied action '{}'. Do not execute it; choose an alternative approach.{}",
+                pending.action_name,
+                reason
+                    .as_deref()
+                    .map(|r| format!(" Reason: {r}"))
+                    .unwrap_or_default()
+            ));
+
+            state.effect_adapter.reset_call_count();
+            state
+                .thread_manager
+                .resume_thread(
+                    pending.thread_id,
+                    message.user_id.clone(),
+                    Some(deny_msg),
+                    Some((pending.call_id.clone(), false)),
+                    None,
+                )
+                .await
+                .map_err(|e| engine_err("resume error", e))?;
+        }
+
+        ironclaw_engine::GateResolution::Cancelled => {
+            if let Some(ref sse) = state.sse {
+                sse.broadcast_for_user(
+                    &message.user_id,
+                    AppEvent::GateResolved {
+                        request_id: pending.request_id.to_string(),
+                        gate_name: pending.gate_name.clone(),
+                        tool_name: pending.action_name.clone(),
+                        resolution: "cancelled".into(),
+                        message: "Gate cancelled.".into(),
+                        thread_id: Some(pending.thread_id.to_string()),
+                    },
+                );
+            }
+            // Stop the thread entirely (fix: 49b4c398 — cancel during auth
+            // was misrouted to approval handler)
+            if let Err(e) = state
+                .thread_manager
+                .stop_thread(pending.thread_id, &message.user_id)
+                .await
+            {
+                tracing::debug!(error = %e, "Failed to stop thread on cancel");
+            }
+            return Ok(Some("Cancelled.".into()));
+        }
+
+        ironclaw_engine::GateResolution::CredentialProvided { token } => {
+            // Store credential then RESUME (not retry) — preserves thread work
+            if let ironclaw_engine::ResumeKind::Authentication {
+                ref credential_name,
+                ..
+            } = pending.resume_kind
+            {
+                if let Some(ref sse) = state.sse {
+                    sse.broadcast_for_user(
+                        &message.user_id,
+                        AppEvent::GateResolved {
+                            request_id: pending.request_id.to_string(),
+                            gate_name: pending.gate_name.clone(),
+                            tool_name: pending.action_name.clone(),
+                            resolution: "credential_provided".into(),
+                            message: "Credential received. Resuming execution.".into(),
+                            thread_id: Some(pending.thread_id.to_string()),
+                        },
+                    );
+                }
+                if let Some(ref ss) = state.secrets_store {
+                    let params = crate::secrets::CreateSecretParams::new(credential_name, &token);
+                    ss.create(&message.user_id, params)
+                        .await
+                        .map_err(|e| engine_err("secrets", e))?;
+
+                    let _ = agent
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::AuthCompleted {
+                                extension_name: credential_name.clone(),
+                                success: true,
+                                message: format!(
+                                    "Credential '{}' stored. Resuming...",
+                                    credential_name
+                                ),
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+
+                    if let Some(ref sse) = state.sse {
+                        sse.broadcast_for_user(
+                            &message.user_id,
+                            AppEvent::AuthCompleted {
+                                extension_name: credential_name.clone(),
+                                success: true,
+                                message: format!(
+                                    "Credential '{}' stored. Resuming...",
+                                    credential_name
+                                ),
+                                thread_id: Some(pending.thread_id.to_string()),
+                            },
+                        );
+                    }
+                }
+
+                if pending.action_name == "authentication_fallback"
+                    && let Some(retry_content) = pending.original_message.clone()
+                {
+                    let retry_msg = IncomingMessage {
+                        content: retry_content.clone(),
+                        channel: pending.source_channel.clone(),
+                        user_id: pending.user_id.clone(),
+                        metadata: message.metadata.clone(),
+                        ..message.clone()
+                    };
+                    drop(guard);
+                    return Box::pin(handle_with_engine_inner(
+                        agent,
+                        &retry_msg,
+                        &retry_content,
+                        1,
+                    ))
+                    .await;
+                }
+
+                if let Some(resume_output) = pending.resume_output.clone() {
+                    state
+                        .thread_manager
+                        .resume_thread(
+                            pending.thread_id,
+                            message.user_id.clone(),
+                            Some(resumed_action_result_message(
+                                &pending.action_name,
+                                &resume_output,
+                            )),
+                            None,
+                            Some(pending.call_id.clone()),
+                        )
+                        .await
+                        .map_err(|e| engine_err("resume error", e))?;
+                } else {
+                    return execute_pending_gate_action(
+                        agent, state, message, &pending, false, None,
+                    )
+                    .await;
+                }
+            } else {
+                return Err(engine_err(
+                    "resolution mismatch",
+                    "CredentialProvided sent for non-authentication gate",
+                ));
+            }
+        }
+
+        ironclaw_engine::GateResolution::ExternalCallback { .. } => {
+            if let Some(ref sse) = state.sse {
+                sse.broadcast_for_user(
+                    &message.user_id,
+                    AppEvent::GateResolved {
+                        request_id: pending.request_id.to_string(),
+                        gate_name: pending.gate_name.clone(),
+                        tool_name: pending.action_name.clone(),
+                        resolution: "external_callback".into(),
+                        message: "External callback received. Resuming execution.".into(),
+                        thread_id: Some(pending.thread_id.to_string()),
+                    },
+                );
+            }
+            if let Some(resume_output) = pending.resume_output.clone() {
+                state
+                    .thread_manager
+                    .resume_thread(
+                        pending.thread_id,
+                        message.user_id.clone(),
+                        Some(resumed_action_result_message(
+                            &pending.action_name,
+                            &resume_output,
+                        )),
+                        None,
+                        Some(pending.call_id.clone()),
+                    )
+                    .await
+                    .map_err(|e| engine_err("resume error", e))?;
+            } else {
+                return execute_pending_gate_action(agent, state, message, &pending, false, None)
+                    .await;
+            }
+        }
     }
 
     await_thread_outcome(
@@ -862,7 +1458,11 @@ pub async fn handle_interrupt(
     let mut stopped = 0u32;
     for tid in &active_threads {
         if state.thread_manager.is_running(*tid).await {
-            if let Err(e) = state.thread_manager.stop_thread(*tid).await {
+            if let Err(e) = state
+                .thread_manager
+                .stop_thread(*tid, &message.user_id)
+                .await
+            {
                 debug!(thread_id = %tid, error = %e, "engine v2: failed to stop thread");
             } else {
                 stopped += 1;
@@ -896,6 +1496,167 @@ pub async fn handle_clear(
     Ok(Some("Conversation cleared.".into()))
 }
 
+/// Handle `/expected <description>` — collect context from the engine thread
+/// and fire the expected-behavior learning mission.
+///
+/// In v2, conversation history lives in engine threads (not v1 sessions).
+/// This handler finds the most recent thread for the user's conversation,
+/// extracts the last N messages, and fires the system event.
+pub async fn handle_expected(
+    agent: &Agent,
+    message: &IncomingMessage,
+    description: &str,
+) -> Result<Option<String>, Error> {
+    init_engine(agent).await?;
+
+    let lock = ENGINE_STATE
+        .get()
+        .ok_or_else(|| engine_err("init", "engine state not initialized"))?;
+    let guard = lock.read().await;
+    let state = guard
+        .as_ref()
+        .ok_or_else(|| engine_err("init", "engine state is empty"))?;
+
+    // Find the conversation for this channel+user
+    let scope = message.conversation_scope();
+    let channel_key = match scope {
+        Some(tid) => format!("{}:{}", message.channel, tid),
+        None => message.channel.clone(),
+    };
+
+    let conv_id = state
+        .conversation_manager
+        .get_or_create_conversation(&channel_key, &message.user_id)
+        .await
+        .map_err(|e| engine_err("conversation error", e))?;
+
+    let conv = state.conversation_manager.get_conversation(conv_id).await;
+
+    // Find the most recent thread in this conversation (active or completed)
+    let recent_thread = find_most_recent_thread(state, &conv, &message.user_id).await;
+
+    let Some(thread) = recent_thread else {
+        return Ok(Some(
+            "No conversation history to attach feedback to.".into(),
+        ));
+    };
+
+    // Extract recent messages (last 10) as context for the learning mission
+    let start = thread.messages.len().saturating_sub(10);
+    let recent_messages: Vec<serde_json::Value> = thread.messages[start..]
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "role": m.role,
+                "content_preview": m.content.chars().take(500).collect::<String>(),
+                "action_name": m.action_name,
+            })
+        })
+        .collect();
+
+    // Extract tool call events for richer context
+    let tool_events: Vec<serde_json::Value> = thread
+        .events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            ironclaw_engine::EventKind::ActionExecuted {
+                action_name,
+                params_summary,
+                ..
+            } => Some(serde_json::json!({
+                "tool": action_name,
+                "params": params_summary,
+                "success": true,
+            })),
+            ironclaw_engine::EventKind::ActionFailed {
+                action_name, error, ..
+            } => Some(serde_json::json!({
+                "tool": action_name,
+                "error": error,
+                "success": false,
+            })),
+            _ => None,
+        })
+        .collect();
+
+    let payload = serde_json::json!({
+        "expected_behavior": description,
+        "thread_id": thread.id.to_string(),
+        "goal": thread.goal,
+        "recent_messages": recent_messages,
+        "tool_events": tool_events,
+        "step_count": thread.step_count,
+        "thread_state": thread.state,
+    });
+
+    // Fire the expected-behavior learning mission
+    let mgr = state.effect_adapter.mission_manager().await;
+    let fired = if let Some(mgr) = mgr {
+        match mgr
+            .fire_on_system_event(
+                "user_feedback",
+                "expected_behavior",
+                &message.user_id,
+                Some(payload),
+            )
+            .await
+        {
+            Ok(ids) => ids.len(),
+            Err(e) => {
+                debug!("failed to fire expected-behavior mission: {e}");
+                0
+            }
+        }
+    } else {
+        0
+    };
+
+    if fired > 0 {
+        Ok(Some(format!(
+            "Feedback captured. Fired {fired} self-improvement thread(s) to investigate."
+        )))
+    } else {
+        Ok(Some(
+            "Feedback noted but no self-improvement missions are configured to handle it. \
+             The engine will use this context in future learning cycles."
+                .into(),
+        ))
+    }
+}
+
+/// Find the most recent thread in a conversation (checks active threads first,
+/// then falls back to the last completed thread visible in conversation entries).
+async fn find_most_recent_thread(
+    state: &EngineState,
+    conv: &Option<ironclaw_engine::ConversationSurface>,
+    user_id: &str,
+) -> Option<ironclaw_engine::Thread> {
+    let conv = conv.as_ref()?;
+
+    // Try active threads first (most recent interaction)
+    for tid in conv.active_threads.iter().rev() {
+        if let Ok(Some(thread)) = state.store.load_thread(*tid).await
+            && thread.is_owned_by(user_id)
+        {
+            return Some(thread);
+        }
+    }
+
+    // Fall back to the most recent thread referenced in entries
+    for entry in conv.entries.iter().rev() {
+        let Some(tid) = entry.origin_thread_id else {
+            continue;
+        };
+        if let Ok(Some(thread)) = state.store.load_thread(tid).await
+            && thread.is_owned_by(user_id)
+        {
+            return Some(thread);
+        }
+    }
+
+    None
+}
+
 /// Stop all active threads and clear conversation entries.
 async fn clear_engine_conversation(agent: &Agent, message: &IncomingMessage) -> Result<(), Error> {
     init_engine(agent).await?;
@@ -918,24 +1679,27 @@ async fn clear_engine_conversation(agent: &Agent, message: &IncomingMessage) -> 
     if let Some(conv) = state.conversation_manager.get_conversation(conv_id).await {
         for tid in &conv.active_threads {
             if state.thread_manager.is_running(*tid).await {
-                let _ = state.thread_manager.stop_thread(*tid).await;
+                let _ = state
+                    .thread_manager
+                    .stop_thread(*tid, &message.user_id)
+                    .await;
             }
+            let _ = state
+                .pending_gates
+                .discard(&PendingGateKey {
+                    user_id: message.user_id.clone(),
+                    thread_id: *tid,
+                })
+                .await;
         }
     }
 
     // Clear the conversation entries and active thread list
     state
         .conversation_manager
-        .clear_conversation(conv_id)
+        .clear_conversation(conv_id, &message.user_id)
         .await
         .map_err(|e| engine_err("clear conversation error", e))?;
-
-    // Also clear any pending approvals for this user
-    state
-        .pending_approvals
-        .write()
-        .await
-        .remove(&message.user_id);
 
     debug!(
         user_id = %message.user_id,
@@ -946,10 +1710,6 @@ async fn clear_engine_conversation(agent: &Agent, message: &IncomingMessage) -> 
     Ok(())
 }
 
-/// Check if a user has a pending auth flow (PendingAuth in the engine state).
-///
-/// Used by the agent loop to route "cancel"/"no" through `handle_with_engine`
-/// instead of `handle_approval` when the user is in auth mode.
 pub async fn has_pending_auth(user_id: &str) -> bool {
     let Some(lock) = ENGINE_STATE.get() else {
         return false;
@@ -960,7 +1720,98 @@ pub async fn has_pending_auth(user_id: &str) -> bool {
     let Some(state) = guard.as_ref() else {
         return false;
     };
-    state.pending_auth.read().await.contains_key(user_id)
+    state
+        .pending_gates
+        .list_for_user(user_id)
+        .await
+        .into_iter()
+        .any(|gate| {
+            matches!(
+                gate.resume_kind,
+                ironclaw_engine::ResumeKind::Authentication { .. }
+            )
+        })
+}
+
+/// Get pending auth info for a user (credential name + instructions).
+///
+/// Used by the history endpoint to include auth state in the response,
+/// so SSE reconnects can re-show the auth card.
+pub async fn get_engine_pending_auth(
+    user_id: &str,
+    thread_id: Option<&str>,
+) -> Option<(Option<String>, String, Option<String>)> {
+    let lock = ENGINE_STATE.get()?;
+    let guard = lock.read().await;
+    let state = guard.as_ref()?;
+    match resolve_pending_gate_for_user(&state.pending_gates, user_id, thread_id).await {
+        PendingGateResolution::Resolved(gate) => {
+            if let ironclaw_engine::ResumeKind::Authentication {
+                credential_name,
+                instructions,
+                ..
+            } = gate.resume_kind
+            {
+                let instructions = if instructions.is_empty() {
+                    state
+                        .auth_manager
+                        .as_ref()
+                        .and_then(|mgr| mgr.get_setup_instructions(&credential_name))
+                } else {
+                    Some(instructions)
+                };
+                Some((
+                    Some(gate.request_id.to_string()),
+                    credential_name,
+                    instructions,
+                ))
+            } else {
+                None
+            }
+        }
+        PendingGateResolution::None | PendingGateResolution::Ambiguous => None,
+    }
+}
+
+/// Clear pending auth state for a user in the v2 engine.
+///
+/// Called from the gateway's `/api/chat/auth-token` and `/api/chat/auth-cancel`
+/// endpoints to ensure pending authentication gates are cleared when the
+/// frontend handles auth directly (not through the chat message path).
+pub async fn clear_engine_pending_auth(user_id: &str, thread_id: Option<&str>) {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return;
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return;
+    };
+
+    if let Some(thread_id) = thread_id {
+        match resolve_pending_gate_for_user(&state.pending_gates, user_id, Some(thread_id)).await {
+            PendingGateResolution::Resolved(gate)
+                if matches!(
+                    gate.resume_kind,
+                    ironclaw_engine::ResumeKind::Authentication { .. }
+                ) =>
+            {
+                let _ = state.pending_gates.discard(&gate.key()).await;
+            }
+            PendingGateResolution::Resolved(_)
+            | PendingGateResolution::None
+            | PendingGateResolution::Ambiguous => {}
+        }
+        return;
+    }
+
+    for gate in state.pending_gates.list_for_user(user_id).await {
+        if matches!(
+            gate.resume_kind,
+            ironclaw_engine::ResumeKind::Authentication { .. }
+        ) {
+            let _ = state.pending_gates.discard(&gate.key()).await;
+        }
+    }
 }
 
 /// Handle a user message through the engine v2 pipeline.
@@ -969,6 +1820,24 @@ pub async fn handle_with_engine(
     message: &IncomingMessage,
     content: &str,
 ) -> Result<Option<String>, Error> {
+    handle_with_engine_inner(agent, message, content, 0).await
+}
+
+/// Maximum depth for auth-retry recursion (credential stored → retry original message).
+const MAX_AUTH_RETRY_DEPTH: u8 = 2;
+
+async fn handle_with_engine_inner(
+    agent: &Agent,
+    message: &IncomingMessage,
+    content: &str,
+    depth: u8,
+) -> Result<Option<String>, Error> {
+    if depth > MAX_AUTH_RETRY_DEPTH {
+        return Ok(Some(
+            "Credential stored, but too many auth retries. Please resend your message.".into(),
+        ));
+    }
+
     // Ensure engine is initialized
     init_engine(agent).await?;
 
@@ -986,87 +1855,44 @@ pub async fn handle_with_engine(
         "engine v2: handling message"
     );
 
-    // Check for pending auth — if the user is responding to an auth prompt,
-    // treat the message as a token value and store it as a secret.
+    let thread_scope = message.conversation_scope();
+    let scoped_thread_id = parse_engine_thread_id(thread_scope);
+
+    if let PendingGateResolution::Resolved(gate) =
+        resolve_pending_gate_for_user(&state.pending_gates, &message.user_id, thread_scope).await
+        && matches!(
+            gate.resume_kind,
+            ironclaw_engine::ResumeKind::Authentication { .. }
+        )
     {
-        let pending = state.pending_auth.write().await.remove(&message.user_id);
-        if let Some(pending) = pending {
-            let token = content.trim().to_string();
-            if token.is_empty() || token.eq_ignore_ascii_case("cancel") {
-                // Stop the waiting engine thread so it doesn't leak.
-                if let Some(engine_tid) = pending.engine_thread_id {
-                    let _ = state.thread_manager.stop_thread(engine_tid).await;
-                }
-                let response = "Authentication cancelled.".to_string();
-                // Write to v1 DB so the history API shows the response.
-                if let Some(ref db) = state.db {
-                    let scope = message.conversation_scope();
-                    let v1_conv_id = if let Some(tid) = scope
-                        && let Ok(uuid) = uuid::Uuid::parse_str(tid)
-                    {
-                        Some(uuid)
-                    } else {
-                        db.get_or_create_assistant_conversation(&message.user_id, &message.channel)
-                            .await
-                            .ok()
-                    };
-                    if let Some(cid) = v1_conv_id {
-                        let _ = db
-                            .add_conversation_message(cid, "assistant", &response)
-                            .await;
-                    }
-                }
-                return Ok(Some(response));
-            }
-
-            if let Some(ref ss) = state.secrets_store {
-                let params =
-                    crate::secrets::CreateSecretParams::new(&pending.credential_name, &token);
-                match ss.create(&message.user_id, params).await {
-                    Ok(_) => {
-                        let _ = agent
-                            .channels
-                            .send_status(
-                                &message.channel,
-                                StatusUpdate::AuthCompleted {
-                                    extension_name: pending.credential_name.clone(),
-                                    success: true,
-                                    message: format!(
-                                        "Credential '{}' stored. Retrying your request...",
-                                        pending.credential_name
-                                    ),
-                                },
-                                &message.metadata,
-                            )
-                            .await;
-
-                        // Retry the original request — drop the read guard first,
-                        // then re-enter handle_with_engine with the original message.
-                        let retry_msg = IncomingMessage {
-                            content: pending.original_message.clone(),
-                            channel: pending.channel,
-                            user_id: pending.user_id,
-                            metadata: pending.metadata,
-                            ..message.clone()
-                        };
-                        let retry_content = pending.original_message;
-                        drop(guard);
-                        return Box::pin(handle_with_engine(agent, &retry_msg, &retry_content))
-                            .await;
-                    }
-                    Err(e) => {
-                        return Ok(Some(format!(
-                            "Failed to store credential '{}': {}",
-                            pending.credential_name, e
-                        )));
-                    }
-                }
+        let request_id = gate.request_id;
+        let resolution =
+            if content.trim().is_empty() || content.trim().eq_ignore_ascii_case("cancel") {
+                ironclaw_engine::GateResolution::Cancelled
             } else {
-                return Ok(Some(
-                    "No secrets store available. Cannot store credentials.".into(),
-                ));
-            }
-        }
+                ironclaw_engine::GateResolution::CredentialProvided {
+                    token: content.trim().to_string(),
+                }
+            };
+        drop(guard);
+        return resolve_gate(agent, message, gate.thread_id, request_id, resolution).await;
+    }
+
+    if matches!(
+        resolve_pending_gate_for_user(&state.pending_gates, &message.user_id, thread_scope).await,
+        PendingGateResolution::Ambiguous
+    ) {
+        return Ok(Some(
+            "Multiple authentication prompts are waiting. Reply from the original thread.".into(),
+        ));
+    }
+
+    if let Some(thread_id) = scoped_thread_id
+        && fail_orphaned_waiting_thread_if_needed(state, &message.user_id, thread_id).await?
+    {
+        return Ok(Some(
+            "This thread was waiting on approval or authentication, but that pending state was lost. The thread has been marked failed; resend your request.".into(),
+        ));
     }
 
     // Send "Thinking..." status to the channel
@@ -1100,13 +1926,17 @@ pub async fn handle_with_engine(
         .await
         .map_err(|e| engine_err("conversation error", e))?;
 
+    // Resolve per-user project (creates if needed).
+    let project_id =
+        resolve_user_project(&state.store, &message.user_id, state.default_project_id).await?;
+
     // Handle the message — spawns a new thread or injects into active one
     let thread_id = state
         .conversation_manager
         .handle_user_message(
             conv_id,
             content,
-            state.default_project_id,
+            project_id,
             &message.user_id,
             ThreadConfig::default(),
         )
@@ -1122,7 +1952,13 @@ pub async fn handle_with_engine(
         {
             // Ensure the v1 conversation exists for this thread
             let _ = db
-                .ensure_conversation(uuid, &message.channel, &message.user_id, Some(tid))
+                .ensure_conversation(
+                    uuid,
+                    &message.channel,
+                    &message.user_id,
+                    Some(tid),
+                    Some(&message.channel),
+                )
                 .await;
             Some(uuid)
         } else {
@@ -1202,8 +2038,7 @@ async fn await_thread_outcome(
         .map_err(|e| engine_err("conversation error", e))?;
 
     // Helper: write the outcome response to the v1 DB so the history API
-    // shows it correctly (not just for Completed, but for ALL outcomes that
-    // produce a response, including NeedApproval and NeedAuthentication).
+    // shows it correctly for all outcomes that produce a response.
     let write_v1_response = |db: &Arc<dyn crate::db::Database>, text: &str| {
         let db = Arc::clone(db);
         let scope = message.conversation_scope().map(String::from);
@@ -1255,7 +2090,8 @@ async fn await_thread_outcome(
                     "text-based auth fallback triggered — pre-flight gate did not catch this"
                 );
 
-                // Extract credential name from the response text
+                // Extract credential name from the response text and validate
+                // it against the expected pattern (alphanumeric + underscores).
                 let cred_name = text
                     .split("credential_name")
                     .nth(1)
@@ -1263,6 +2099,12 @@ async fn await_thread_outcome(
                         // Handle both JSON ("credential_name":"foo") and prose
                         s.split(&['"', '\'', '`'][..])
                             .find(|seg| !seg.is_empty() && !seg.contains(':') && !seg.contains(' '))
+                    })
+                    .filter(|name| {
+                        // Reject names that don't look like valid credential identifiers
+                        !name.is_empty()
+                            && name.len() <= 64
+                            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                     })
                     .unwrap_or("unknown")
                     .to_string();
@@ -1274,18 +2116,31 @@ async fn await_thread_outcome(
                     .and_then(|mgr| mgr.get_setup_instructions(&cred_name))
                     .unwrap_or_else(|| format!("Provide your {} token", cred_name));
 
-                // Store pending auth for this user
-                state.pending_auth.write().await.insert(
-                    message.user_id.clone(),
-                    PendingAuth {
+                let pending = PendingGate {
+                    request_id: uuid::Uuid::new_v4(),
+                    gate_name: "authentication".into(),
+                    user_id: message.user_id.clone(),
+                    thread_id,
+                    conversation_id: conv_id,
+                    source_channel: message.channel.clone(),
+                    action_name: "authentication_fallback".into(),
+                    call_id: format!("fallback-auth-{thread_id}"),
+                    parameters: serde_json::json!({ "credential_name": cred_name }),
+                    display_parameters: None,
+                    description: format!("Authentication required for '{}'.", cred_name),
+                    resume_kind: ironclaw_engine::ResumeKind::Authentication {
                         credential_name: cred_name.clone(),
-                        original_message: message.content.clone(),
-                        user_id: message.user_id.clone(),
-                        channel: message.channel.clone(),
-                        metadata: message.metadata.clone(),
-                        engine_thread_id: None, // Completed path — thread already finished
+                        instructions: setup_hint.clone(),
+                        auth_url: None,
                     },
-                );
+                    created_at: chrono::Utc::now(),
+                    expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+                    original_message: Some(message.content.clone()),
+                    resume_output: None,
+                };
+                if let Err(e) = state.pending_gates.insert(pending).await {
+                    tracing::debug!(error = %e, "failed to store fallback auth gate");
+                }
 
                 // Show auth prompt via channel
                 let _ = agent
@@ -1294,13 +2149,26 @@ async fn await_thread_outcome(
                         &message.channel,
                         StatusUpdate::AuthRequired {
                             extension_name: cred_name.clone(),
-                            instructions: Some(setup_hint),
+                            instructions: Some(setup_hint.clone()),
                             auth_url: None,
                             setup_url: None,
                         },
                         &message.metadata,
                     )
                     .await;
+
+                if let Some(ref sse) = state.sse {
+                    sse.broadcast_for_user(
+                        &message.user_id,
+                        AppEvent::AuthRequired {
+                            extension_name: cred_name.clone(),
+                            instructions: Some(setup_hint.clone()),
+                            auth_url: None,
+                            setup_url: None,
+                            thread_id: Some(thread_id.to_string()),
+                        },
+                    );
+                }
 
                 return Ok(Some(format!(
                     "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
@@ -1315,92 +2183,127 @@ async fn await_thread_outcome(
             "Reached maximum iterations without completing.".into(),
         )),
         ThreadOutcome::Failed { error } => Ok(Some(format!("Error: {error}"))),
-        ThreadOutcome::NeedApproval {
+        ThreadOutcome::GatePaused {
+            gate_name,
             action_name,
             call_id,
             parameters,
+            resume_kind,
+            resume_output,
         } => {
-            let request_id = uuid::Uuid::new_v4().to_string();
-            let description = format!("Tool '{}' requires approval to execute.", action_name);
-            let pending = PendingApproval {
-                request_id: request_id.clone(),
-                action_name: action_name.clone(),
+            use crate::gate::pending::PendingGate;
+
+            // Redact sensitive params before storing/broadcasting
+            let redacted_params =
+                if let Some(tool) = state.effect_adapter.tools().get(&action_name).await {
+                    crate::tools::redact_params(&parameters, tool.sensitive_params())
+                } else {
+                    parameters.clone()
+                };
+
+            // Store in unified PendingGateStore (keyed by user_id + thread_id)
+            let pending = PendingGate {
+                request_id: uuid::Uuid::new_v4(),
+                gate_name: gate_name.clone(),
+                user_id: message.user_id.clone(),
                 thread_id,
                 conversation_id: conv_id,
+                source_channel: message.channel.clone(),
+                action_name: action_name.clone(),
                 call_id,
-                description: description.clone(),
-                parameters: parameters.clone(),
+                parameters,
+                display_parameters: Some(redacted_params.clone()),
+                description: format!(
+                    "Tool '{}' requires {} (gate: {gate_name})",
+                    action_name,
+                    resume_kind.kind_name()
+                ),
+                resume_kind: resume_kind.clone(),
+                created_at: chrono::Utc::now(),
+                expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+                original_message: None,
+                resume_output,
             };
-            state
-                .pending_approvals
-                .write()
-                .await
-                .insert(message.user_id.clone(), pending.clone());
-            persist_pending_approval(&state.store, &pending).await?;
 
-            // Send approval request to channel (matches v1 ApprovalNeeded format)
-            let _ = agent
-                .channels
-                .send_status(
-                    &message.channel,
-                    StatusUpdate::ApprovalNeeded {
-                        request_id,
-                        tool_name: action_name.clone(),
-                        description,
-                        parameters,
-                        allow_always: true,
-                    },
-                    &message.metadata,
-                )
-                .await;
+            if let Err(e) = state.pending_gates.insert(pending.clone()).await {
+                tracing::debug!(
+                    gate = %gate_name,
+                    error = %e,
+                    "failed to store pending gate (may be duplicate)"
+                );
+            }
 
-            Ok(Some(format!(
-                "Tool '{}' requires approval. Reply 'yes' to approve, 'always' to auto-approve future uses of this tool, or 'no' to deny.",
-                action_name
-            )))
-        }
-        ThreadOutcome::NeedAuthentication {
-            credential_name, ..
-        } => {
-            // Look up setup instructions from the skill's credential spec.
-            // Look up setup instructions via AuthManager (or fall back to default).
-            let setup_hint = state
-                .auth_manager
-                .as_ref()
-                .and_then(|mgr| mgr.get_setup_instructions(&credential_name))
-                .unwrap_or_else(|| format!("Provide your {} token", credential_name));
+            // Send appropriate StatusUpdate via channel
+            match &resume_kind {
+                ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                    let _ = agent
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::ApprovalNeeded {
+                                request_id: pending.request_id.to_string(),
+                                tool_name: action_name.clone(),
+                                description: pending.description.clone(),
+                                parameters: redacted_params,
+                                allow_always: *allow_always,
+                            },
+                            &message.metadata,
+                        )
+                        .await;
 
-            // Enter the guided auth flow — next user message is treated as a token.
-            state.pending_auth.write().await.insert(
-                message.user_id.clone(),
-                PendingAuth {
-                    credential_name: credential_name.clone(),
-                    original_message: message.content.clone(),
-                    user_id: message.user_id.clone(),
-                    channel: message.channel.clone(),
-                    metadata: message.metadata.clone(),
-                    engine_thread_id: Some(thread_id),
-                },
-            );
+                    Ok(Some(format!(
+                        "Tool '{}' requires approval. Reply 'yes' to approve, 'no' to deny.",
+                        action_name
+                    )))
+                }
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name,
+                    instructions,
+                    auth_url,
+                } => {
+                    let _ = agent
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::AuthRequired {
+                                extension_name: credential_name.clone(),
+                                instructions: Some(instructions.clone()),
+                                auth_url: auth_url.clone(),
+                                setup_url: None,
+                            },
+                            &message.metadata,
+                        )
+                        .await;
 
-            let _ = agent
-                .channels
-                .send_status(
-                    &message.channel,
-                    StatusUpdate::AuthRequired {
-                        extension_name: credential_name.clone(),
-                        instructions: Some(setup_hint),
-                        auth_url: None,
-                        setup_url: None,
-                    },
-                    &message.metadata,
-                )
-                .await;
+                    if let Some(ref sse) = state.sse {
+                        sse.broadcast_for_user(
+                            &message.user_id,
+                            AppEvent::AuthRequired {
+                                extension_name: credential_name.clone(),
+                                instructions: Some(instructions.clone()),
+                                auth_url: auth_url.clone(),
+                                setup_url: None,
+                                thread_id: Some(thread_id.to_string()),
+                            },
+                        );
+                    }
 
-            Ok(Some(format!(
-                "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
-                credential_name
-            )))
+                    Ok(Some(format!(
+                        "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
+                        credential_name
+                    )))
+                }
+                ironclaw_engine::ResumeKind::External { callback_id } => {
+                    tracing::debug!(
+                        gate = %gate_name,
+                        callback = %callback_id,
+                        "GatePaused(External)"
+                    );
+                    Ok(Some(format!(
+                        "Waiting for external confirmation (gate: {gate_name})..."
+                    )))
+                }
+            }
         }
     };
 
@@ -1413,6 +2316,91 @@ async fn await_thread_outcome(
     }
 
     result
+}
+
+// ── Shared event display helpers ────────────────────────────
+
+/// Format an action name with optional parameter summary for display.
+/// e.g., `"http(https://api.github.com/...)"` or just `"web_search"`.
+fn format_action_display_name(action_name: &str, params_summary: &Option<String>) -> String {
+    match params_summary {
+        Some(summary) => format!("{}({})", action_name, summary),
+        None => action_name.to_string(),
+    }
+}
+
+/// Interpret a MessageAdded event into a human-readable status message.
+/// Returns `None` for events that don't need UI surfacing.
+fn interpret_message_event(role: &str, content_preview: &str) -> Option<&'static str> {
+    if role == "User" && content_preview.starts_with("[stdout]") {
+        Some("Code executed")
+    } else if role == "User" && content_preview.starts_with("[code ") {
+        Some("Code executed (no output)")
+    } else if role == "User"
+        && (content_preview.contains("Error") || content_preview.starts_with("Traceback"))
+    {
+        Some("Code error — retrying...")
+    } else if role == "Assistant" {
+        Some("Executing code...")
+    } else {
+        None
+    }
+}
+
+/// Deliver a mission thread outcome to the mission's notify_channels.
+async fn handle_mission_notification(
+    notif: &ironclaw_engine::MissionNotification,
+    channels: &std::sync::Arc<crate::channels::ChannelManager>,
+    sse: Option<&Arc<SseManager>>,
+    db: Option<&Arc<dyn Database>>,
+) {
+    let Some(ref text) = notif.response else {
+        return;
+    };
+
+    let full_text = format!("**[{}]** {text}", notif.mission_name);
+
+    for channel_name in &notif.notify_channels {
+        // Send via channel broadcast (proactive, no incoming message required)
+        if let Err(e) = channels
+            .broadcast(
+                channel_name,
+                &notif.user_id,
+                OutgoingResponse::text(&full_text),
+            )
+            .await
+        {
+            debug!(
+                channel = %channel_name,
+                mission = %notif.mission_name,
+                "failed to broadcast mission result: {e}"
+            );
+        }
+    }
+
+    // Also write to SSE for the web gateway
+    if let Some(sse) = sse {
+        sse.broadcast_for_user(
+            &notif.user_id,
+            AppEvent::Response {
+                content: full_text.clone(),
+                thread_id: notif.thread_id.to_string(),
+            },
+        );
+    }
+
+    // Write to v1 DB so the history API shows the mission result.
+    // Use the "assistant" conversation for the user on the first notify channel.
+    if let Some(db) = db
+        && let Some(channel_name) = notif.notify_channels.first()
+        && let Ok(conv_id) = db
+            .get_or_create_assistant_conversation(&notif.user_id, channel_name)
+            .await
+    {
+        let _ = db
+            .add_conversation_message(conv_id, "assistant", &full_text)
+            .await;
+    }
 }
 
 /// Forward an engine ThreadEvent to the channel as a StatusUpdate.
@@ -1440,12 +2428,7 @@ async fn forward_event_to_channel(
             params_summary,
             ..
         } => {
-            // Format tool name with params summary: "http(https://api.github.com/...)"
-            let display_name = match params_summary {
-                Some(summary) => format!("{}({})", action_name, summary),
-                None => action_name.clone(),
-            };
-
+            let display_name = format_action_display_name(action_name, params_summary);
             let _ = channels
                 .send_status(
                     channel_name,
@@ -1474,11 +2457,7 @@ async fn forward_event_to_channel(
             params_summary,
             ..
         } => {
-            let display_name = match params_summary {
-                Some(summary) => format!("{}({})", action_name, summary),
-                None => action_name.clone(),
-            };
-
+            let display_name = format_action_display_name(action_name, params_summary);
             let _ = channels
                 .send_status(
                     channel_name,
@@ -1540,23 +2519,9 @@ async fn forward_event_to_channel(
             role,
             content_preview,
         } => {
-            // Surface code execution and tool results as thinking status
-            let msg = if role == "User" && content_preview.starts_with("[stdout]") {
-                Some("Code executed".to_string())
-            } else if role == "User" && content_preview.starts_with("[code ") {
-                Some("Code executed (no output)".to_string())
-            } else if role == "User"
-                && (content_preview.contains("Error") || content_preview.starts_with("Traceback"))
-            {
-                Some("Code error — retrying...".to_string())
-            } else if role == "Assistant" {
-                Some("Executing code...".to_string())
-            } else {
-                None
-            };
-            if let Some(text) = msg {
+            if let Some(text) = interpret_message_event(role, content_preview) {
                 let _ = channels
-                    .send_status(channel_name, StatusUpdate::Thinking(text), metadata)
+                    .send_status(channel_name, StatusUpdate::Thinking(text.into()), metadata)
                     .await;
             }
         }
@@ -1596,10 +2561,7 @@ fn thread_event_to_app_events(
             params_summary,
             ..
         } => {
-            let display_name = match params_summary {
-                Some(s) => format!("{}({})", action_name, s),
-                None => action_name.clone(),
-            };
+            let display_name = format_action_display_name(action_name, params_summary);
             vec![
                 AppEvent::ToolStarted {
                     name: display_name.clone(),
@@ -1620,10 +2582,7 @@ fn thread_event_to_app_events(
             params_summary,
             ..
         } => {
-            let display_name = match params_summary {
-                Some(s) => format!("{}({})", action_name, s),
-                None => action_name.clone(),
-            };
+            let display_name = format_action_display_name(action_name, params_summary);
             vec![
                 AppEvent::ToolStarted {
                     name: display_name.clone(),
@@ -1648,27 +2607,13 @@ fn thread_event_to_app_events(
         EventKind::MessageAdded {
             role,
             content_preview,
-        } => {
-            let msg = if role == "User" && content_preview.starts_with("[stdout]") {
-                Some("Code executed")
-            } else if role == "User" && content_preview.starts_with("[code ") {
-                Some("Code executed (no output)")
-            } else if role == "User"
-                && (content_preview.contains("Error") || content_preview.starts_with("Traceback"))
-            {
-                Some("Code error — retrying...")
-            } else if role == "Assistant" {
-                Some("Executing code...")
-            } else {
-                None
-            };
-            msg.map(|text| AppEvent::Thinking {
+        } => interpret_message_event(role, content_preview)
+            .map(|text| AppEvent::Thinking {
                 message: text.into(),
                 thread_id: Some(thread_id.into()),
             })
             .into_iter()
-            .collect()
-        }
+            .collect(),
         EventKind::StateChanged { from, to, reason } => {
             vec![AppEvent::ThreadStateChanged {
                 thread_id: thread_id.into(),
@@ -1767,6 +2712,7 @@ pub struct EngineMissionDetail {
     pub info: EngineMissionInfo,
     pub cadence: serde_json::Value,
     pub approach_history: Vec<String>,
+    pub notify_channels: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub success_criteria: Option<String>,
     pub threads_today: u32,
@@ -1805,7 +2751,10 @@ fn thread_to_info(t: &ironclaw_engine::Thread) -> EngineThreadInfo {
 }
 
 /// List engine threads, optionally filtered by project.
-pub async fn list_engine_threads(project_id: Option<&str>) -> Result<Vec<EngineThreadInfo>, Error> {
+pub async fn list_engine_threads(
+    project_id: Option<&str>,
+    user_id: &str,
+) -> Result<Vec<EngineThreadInfo>, Error> {
     let Some(lock) = ENGINE_STATE.get() else {
         return Ok(Vec::new());
     };
@@ -1824,7 +2773,7 @@ pub async fn list_engine_threads(project_id: Option<&str>) -> Result<Vec<EngineT
 
     let threads = state
         .store
-        .list_threads(pid)
+        .list_threads(pid, user_id)
         .await
         .map_err(|e| engine_err("list threads", e))?;
 
@@ -1832,7 +2781,10 @@ pub async fn list_engine_threads(project_id: Option<&str>) -> Result<Vec<EngineT
 }
 
 /// Get a single engine thread by ID.
-pub async fn get_engine_thread(thread_id: &str) -> Result<Option<EngineThreadDetail>, Error> {
+pub async fn get_engine_thread(
+    thread_id: &str,
+    user_id: &str,
+) -> Result<Option<EngineThreadDetail>, Error> {
     let Some(lock) = ENGINE_STATE.get() else {
         return Ok(None);
     };
@@ -1852,6 +2804,11 @@ pub async fn get_engine_thread(thread_id: &str) -> Result<Option<EngineThreadDet
     else {
         return Ok(None);
     };
+
+    // Ownership check: only return thread if it belongs to the requesting user
+    if !thread.is_owned_by(user_id) {
+        return Ok(None);
+    }
 
     let messages: Vec<serde_json::Value> = thread
         .messages
@@ -1875,7 +2832,10 @@ pub async fn get_engine_thread(thread_id: &str) -> Result<Option<EngineThreadDet
 }
 
 /// List steps for a thread.
-pub async fn list_engine_thread_steps(thread_id: &str) -> Result<Vec<EngineStepInfo>, Error> {
+pub async fn list_engine_thread_steps(
+    thread_id: &str,
+    user_id: &str,
+) -> Result<Vec<EngineStepInfo>, Error> {
     let Some(lock) = ENGINE_STATE.get() else {
         return Ok(Vec::new());
     };
@@ -1885,6 +2845,21 @@ pub async fn list_engine_thread_steps(thread_id: &str) -> Result<Vec<EngineStepI
     };
 
     let tid = uuid::Uuid::parse_str(thread_id).map_err(|e| engine_err("parse thread_id", e))?;
+
+    // Validate thread ownership before returning steps.
+    if let Some(thread) = state
+        .store
+        .load_thread(ironclaw_engine::ThreadId(tid))
+        .await
+        .map_err(|e| engine_err("load thread", e))?
+    {
+        if !thread.is_owned_by(user_id) {
+            return Ok(Vec::new());
+        }
+    } else {
+        return Ok(Vec::new());
+    }
+
     let steps = state
         .store
         .load_steps(ironclaw_engine::ThreadId(tid))
@@ -1908,7 +2883,10 @@ pub async fn list_engine_thread_steps(thread_id: &str) -> Result<Vec<EngineStepI
 }
 
 /// List events for a thread as raw JSON values.
-pub async fn list_engine_thread_events(thread_id: &str) -> Result<Vec<serde_json::Value>, Error> {
+pub async fn list_engine_thread_events(
+    thread_id: &str,
+    user_id: &str,
+) -> Result<Vec<serde_json::Value>, Error> {
     let Some(lock) = ENGINE_STATE.get() else {
         return Ok(Vec::new());
     };
@@ -1918,6 +2896,21 @@ pub async fn list_engine_thread_events(thread_id: &str) -> Result<Vec<serde_json
     };
 
     let tid = uuid::Uuid::parse_str(thread_id).map_err(|e| engine_err("parse thread_id", e))?;
+
+    // Validate thread ownership before returning events.
+    if let Some(thread) = state
+        .store
+        .load_thread(ironclaw_engine::ThreadId(tid))
+        .await
+        .map_err(|e| engine_err("load thread", e))?
+    {
+        if !thread.is_owned_by(user_id) {
+            return Ok(Vec::new());
+        }
+    } else {
+        return Ok(Vec::new());
+    }
+
     let events = state
         .store
         .load_events(ironclaw_engine::ThreadId(tid))
@@ -1931,7 +2924,7 @@ pub async fn list_engine_thread_events(thread_id: &str) -> Result<Vec<serde_json
 }
 
 /// List all projects.
-pub async fn list_engine_projects() -> Result<Vec<EngineProjectInfo>, Error> {
+pub async fn list_engine_projects(user_id: &str) -> Result<Vec<EngineProjectInfo>, Error> {
     let Some(lock) = ENGINE_STATE.get() else {
         return Ok(Vec::new());
     };
@@ -1942,7 +2935,7 @@ pub async fn list_engine_projects() -> Result<Vec<EngineProjectInfo>, Error> {
 
     let projects = state
         .store
-        .list_projects()
+        .list_projects(user_id)
         .await
         .map_err(|e| engine_err("list projects", e))?;
 
@@ -1958,7 +2951,10 @@ pub async fn list_engine_projects() -> Result<Vec<EngineProjectInfo>, Error> {
 }
 
 /// Get a single project by ID.
-pub async fn get_engine_project(project_id: &str) -> Result<Option<EngineProjectInfo>, Error> {
+pub async fn get_engine_project(
+    project_id: &str,
+    user_id: &str,
+) -> Result<Option<EngineProjectInfo>, Error> {
     let Some(lock) = ENGINE_STATE.get() else {
         return Ok(None);
     };
@@ -1974,17 +2970,20 @@ pub async fn get_engine_project(project_id: &str) -> Result<Option<EngineProject
         .await
         .map_err(|e| engine_err("load project", e))?;
 
-    Ok(project.map(|p| EngineProjectInfo {
-        id: p.id.to_string(),
-        name: p.name,
-        description: p.description,
-        created_at: p.created_at.to_rfc3339(),
-    }))
+    Ok(project
+        .filter(|p| p.is_owned_by(user_id))
+        .map(|p| EngineProjectInfo {
+            id: p.id.to_string(),
+            name: p.name,
+            description: p.description,
+            created_at: p.created_at.to_rfc3339(),
+        }))
 }
 
 /// List missions, optionally filtered by project.
 pub async fn list_engine_missions(
     project_id: Option<&str>,
+    user_id: &str,
 ) -> Result<Vec<EngineMissionInfo>, Error> {
     let Some(lock) = ENGINE_STATE.get() else {
         return Ok(Vec::new());
@@ -2004,7 +3003,7 @@ pub async fn list_engine_missions(
 
     let missions = state
         .store
-        .list_missions(pid)
+        .list_missions_with_shared(pid, user_id)
         .await
         .map_err(|e| engine_err("list missions", e))?;
 
@@ -2025,7 +3024,10 @@ pub async fn list_engine_missions(
 }
 
 /// Get a single mission by ID.
-pub async fn get_engine_mission(mission_id: &str) -> Result<Option<EngineMissionDetail>, Error> {
+pub async fn get_engine_mission(
+    mission_id: &str,
+    user_id: &str,
+) -> Result<Option<EngineMissionDetail>, Error> {
     let Some(lock) = ENGINE_STATE.get() else {
         return Ok(None);
     };
@@ -2044,6 +3046,11 @@ pub async fn get_engine_mission(mission_id: &str) -> Result<Option<EngineMission
     let Some(m) = mission else {
         return Ok(None);
     };
+
+    // Ownership check: allow access to user's own missions and shared missions.
+    if m.user_id != user_id && !is_shared_owner(&m.user_id) {
+        return Ok(None);
+    }
 
     let cadence_json = serde_json::to_value(&m.cadence).unwrap_or(serde_json::Value::Null);
 
@@ -2069,6 +3076,7 @@ pub async fn get_engine_mission(mission_id: &str) -> Result<Option<EngineMission
         },
         cadence: cadence_json,
         approach_history: m.approach_history.clone(),
+        notify_channels: m.notify_channels.clone(),
         success_criteria: m.success_criteria.clone(),
         threads_today: m.threads_today,
         max_threads_per_day: m.max_threads_per_day,
@@ -2103,7 +3111,14 @@ pub async fn fire_engine_mission(mission_id: &str, user_id: &str) -> Result<Opti
 }
 
 /// Pause a mission.
-pub async fn pause_engine_mission(mission_id: &str) -> Result<(), Error> {
+///
+/// For shared missions, the caller must be an admin (pass `is_admin=true`).
+/// For user missions, ownership is enforced by the engine.
+pub async fn pause_engine_mission(
+    mission_id: &str,
+    user_id: &str,
+    is_admin: bool,
+) -> Result<(), Error> {
     let Some(lock) = ENGINE_STATE.get() else {
         return Err(engine_err("not initialized", "engine v2 is not running"));
     };
@@ -2113,18 +3128,28 @@ pub async fn pause_engine_mission(mission_id: &str) -> Result<(), Error> {
     };
 
     let mid = uuid::Uuid::parse_str(mission_id).map_err(|e| engine_err("parse mission_id", e))?;
-    state
+    let mgr = state
         .effect_adapter
         .mission_manager()
         .await
-        .ok_or_else(|| engine_err("mission", "mission manager not available"))?
-        .pause_mission(ironclaw_engine::MissionId(mid))
+        .ok_or_else(|| engine_err("mission", "mission manager not available"))?;
+
+    // Shared missions require admin role; pass the shared owner id to satisfy engine check.
+    let effective_user_id = resolve_mission_user_id(&state.store, mid, user_id, is_admin).await?;
+    mgr.pause_mission(ironclaw_engine::MissionId(mid), &effective_user_id)
         .await
         .map_err(|e| engine_err("pause mission", e))
 }
 
 /// Resume a paused mission.
-pub async fn resume_engine_mission(mission_id: &str) -> Result<(), Error> {
+///
+/// For shared missions, the caller must be an admin (pass `is_admin=true`).
+/// For user missions, ownership is enforced by the engine.
+pub async fn resume_engine_mission(
+    mission_id: &str,
+    user_id: &str,
+    is_admin: bool,
+) -> Result<(), Error> {
     let Some(lock) = ENGINE_STATE.get() else {
         return Err(engine_err("not initialized", "engine v2 is not running"));
     };
@@ -2134,20 +3159,118 @@ pub async fn resume_engine_mission(mission_id: &str) -> Result<(), Error> {
     };
 
     let mid = uuid::Uuid::parse_str(mission_id).map_err(|e| engine_err("parse mission_id", e))?;
-    state
+    let mgr = state
         .effect_adapter
         .mission_manager()
         .await
-        .ok_or_else(|| engine_err("mission", "mission manager not available"))?
-        .resume_mission(ironclaw_engine::MissionId(mid))
+        .ok_or_else(|| engine_err("mission", "mission manager not available"))?;
+
+    let effective_user_id = resolve_mission_user_id(&state.store, mid, user_id, is_admin).await?;
+    mgr.resume_mission(ironclaw_engine::MissionId(mid), &effective_user_id)
         .await
         .map_err(|e| engine_err("resume mission", e))
+}
+
+/// Reset the global engine state so a fresh engine can be initialized.
+///
+/// Used by the test rig to isolate engine v2 tests — each test gets a clean
+/// engine state instead of inheriting the prior test's `OnceLock` singleton.
+#[cfg(feature = "libsql")]
+pub async fn reset_engine_state() {
+    if let Some(lock) = ENGINE_STATE.get() {
+        *lock.write().await = None;
+    }
+}
+
+/// Resolve the effective user_id for mission management operations.
+///
+/// If the mission is shared-owned, requires admin role and returns the shared owner id
+/// so the engine ownership check passes. Otherwise returns the caller's user_id.
+async fn resolve_mission_user_id(
+    store: &Arc<dyn ironclaw_engine::Store>,
+    mid: uuid::Uuid,
+    user_id: &str,
+    is_admin: bool,
+) -> Result<String, Error> {
+    if let Ok(Some(mission)) = store.load_mission(ironclaw_engine::MissionId(mid)).await
+        && is_shared_owner(&mission.user_id)
+    {
+        if !is_admin {
+            return Err(engine_err(
+                "forbidden",
+                "shared missions can only be managed by admins",
+            ));
+        }
+        return Ok(shared_owner_id().to_string());
+    }
+    Ok(user_id.to_string())
+}
+
+// ── Legacy migration ────────────────────────────────────────────
+
+/// One-time migration: stamp the owner's user_id onto any engine records that
+/// deserialized with the serde default `"legacy"` (pre-multi-tenancy data).
+///
+/// Runs at engine init before user-scoped queries. After migration, records
+/// are findable by the owner's identity and the "legacy" sentinel disappears.
+async fn migrate_legacy_user_ids(store: &Arc<dyn ironclaw_engine::Store>, owner_id: &str) {
+    // Projects
+    if let Ok(legacy) = store.list_projects("legacy").await {
+        for mut project in legacy {
+            project.user_id = owner_id.to_string();
+            project.updated_at = chrono::Utc::now();
+            let _ = store.save_project(&project).await;
+        }
+    }
+
+    // We need a project_id to query threads/missions/docs. Use list_projects
+    // with the now-migrated owner_id, or fall back to "legacy" in case save failed.
+    let all_projects: Vec<ironclaw_engine::Project> =
+        store.list_projects(owner_id).await.unwrap_or_default();
+
+    for project in &all_projects {
+        let pid = project.id;
+
+        // Threads
+        if let Ok(legacy) = store.list_all_threads(pid).await {
+            for mut thread in legacy.into_iter().filter(|t| t.user_id == "legacy") {
+                thread.user_id = owner_id.to_string();
+                thread.updated_at = chrono::Utc::now();
+                let _ = store.save_thread(&thread).await;
+            }
+        }
+
+        // Missions
+        if let Ok(legacy) = store.list_all_missions(pid).await {
+            for mut mission in legacy.into_iter().filter(|m| m.user_id == "legacy") {
+                // System learning missions keep "system"; only stamp truly orphaned ones.
+                mission.user_id = owner_id.to_string();
+                mission.updated_at = chrono::Utc::now();
+                let _ = store.save_mission(&mission).await;
+            }
+        }
+
+        // Memory docs (use list_memory_docs directly since "legacy" is the user_id)
+        if let Ok(legacy) = store.list_memory_docs(pid, "legacy").await {
+            for mut doc in legacy {
+                doc.user_id = owner_id.to_string();
+                doc.updated_at = chrono::Utc::now();
+                let _ = store.save_memory_doc(&doc).await;
+            }
+        }
+    }
+
+    debug!("engine v2: legacy user_id migration complete for owner {owner_id}");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::LazyLock;
+    use tokio::sync::Mutex as TokioMutex;
     use tokio::sync::RwLock as TokioRwLock;
+
+    static ENGINE_STATE_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
 
     struct TestStore {
         conversations: TokioRwLock<Vec<ironclaw_engine::ConversationSurface>>,
@@ -2181,6 +3304,7 @@ mod tests {
         async fn list_threads(
             &self,
             _project_id: ironclaw_engine::ProjectId,
+            _user_id: &str,
         ) -> Result<Vec<ironclaw_engine::Thread>, ironclaw_engine::EngineError> {
             Ok(self.threads.read().await.values().cloned().collect())
         }
@@ -2228,6 +3352,12 @@ mod tests {
             Ok(None)
         }
         async fn list_projects(
+            &self,
+            _user_id: &str,
+        ) -> Result<Vec<ironclaw_engine::Project>, ironclaw_engine::EngineError> {
+            Ok(vec![])
+        }
+        async fn list_all_projects(
             &self,
         ) -> Result<Vec<ironclaw_engine::Project>, ironclaw_engine::EngineError> {
             Ok(vec![])
@@ -2283,6 +3413,7 @@ mod tests {
         async fn list_memory_docs(
             &self,
             _: ironclaw_engine::ProjectId,
+            _user_id: &str,
         ) -> Result<Vec<ironclaw_engine::MemoryDoc>, ironclaw_engine::EngineError> {
             Ok(vec![])
         }
@@ -2320,6 +3451,7 @@ mod tests {
         async fn list_missions(
             &self,
             _: ironclaw_engine::ProjectId,
+            _user_id: &str,
         ) -> Result<Vec<ironclaw_engine::Mission>, ironclaw_engine::EngineError> {
             Ok(vec![])
         }
@@ -2332,197 +3464,389 @@ mod tests {
         }
     }
 
-    /// Per-user approval storage: two users' approvals don't collide.
-    #[tokio::test]
-    async fn pending_approvals_are_per_user() {
-        let approvals: RwLock<HashMap<String, PendingApproval>> = RwLock::new(HashMap::new());
-
-        // User A stores an approval
-        approvals.write().await.insert(
-            "alice".into(),
-            PendingApproval {
-                request_id: "req-a".into(),
-                action_name: "shell".into(),
-                thread_id: ironclaw_engine::ThreadId::new(),
-                conversation_id: ironclaw_engine::ConversationId::new(),
-                call_id: "call-a".into(),
-                description: "desc".into(),
-                parameters: serde_json::json!({}),
-            },
-        );
-
-        // User B stores a different approval
-        approvals.write().await.insert(
-            "bob".into(),
-            PendingApproval {
-                request_id: "req-b".into(),
-                action_name: "web_fetch".into(),
-                thread_id: ironclaw_engine::ThreadId::new(),
-                conversation_id: ironclaw_engine::ConversationId::new(),
-                call_id: "call-b".into(),
-                description: "desc".into(),
-                parameters: serde_json::json!({}),
-            },
-        );
-
-        // Taking Alice's approval doesn't affect Bob's
-        let alice_approval = approvals.write().await.remove("alice");
-        assert_eq!(alice_approval.unwrap().action_name, "shell");
-
-        let bob_approval = approvals.write().await.remove("bob");
-        assert_eq!(bob_approval.unwrap().action_name, "web_fetch");
+    fn sample_pending_gate(
+        user_id: &str,
+        thread_id: ironclaw_engine::ThreadId,
+        resume_kind: ironclaw_engine::ResumeKind,
+    ) -> PendingGate {
+        PendingGate {
+            request_id: uuid::Uuid::new_v4(),
+            gate_name: resume_kind.kind_name().to_string(),
+            user_id: user_id.into(),
+            thread_id,
+            conversation_id: ironclaw_engine::ConversationId::new(),
+            source_channel: "web".into(),
+            action_name: "shell".into(),
+            call_id: format!("call-{thread_id}"),
+            parameters: serde_json::json!({"cmd": "ls"}),
+            display_parameters: None,
+            description: "pending gate".into(),
+            resume_kind,
+            created_at: chrono::Utc::now(),
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+            original_message: None,
+            resume_output: None,
+        }
     }
 
-    /// A second approval from the same user overwrites their previous one,
-    /// but doesn't affect other users.
     #[tokio::test]
-    async fn same_user_approval_overwrites() {
-        let approvals: RwLock<HashMap<String, PendingApproval>> = RwLock::new(HashMap::new());
+    async fn resolve_pending_gate_is_thread_scoped() {
+        let store = crate::gate::store::PendingGateStore::in_memory();
+        let thread_a = ironclaw_engine::ThreadId::new();
+        let thread_b = ironclaw_engine::ThreadId::new();
+        store
+            .insert(sample_pending_gate(
+                "alice",
+                thread_a,
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            ))
+            .await
+            .unwrap();
+        store
+            .insert(sample_pending_gate(
+                "alice",
+                thread_b,
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            ))
+            .await
+            .unwrap();
 
-        approvals.write().await.insert(
-            "alice".into(),
-            PendingApproval {
-                request_id: "req-1".into(),
-                action_name: "shell".into(),
-                thread_id: ironclaw_engine::ThreadId::new(),
-                conversation_id: ironclaw_engine::ConversationId::new(),
-                call_id: "call-1".into(),
-                description: "desc".into(),
-                parameters: serde_json::json!({}),
-            },
-        );
-        approvals.write().await.insert(
-            "alice".into(),
-            PendingApproval {
-                request_id: "req-2".into(),
-                action_name: "http".into(),
-                thread_id: ironclaw_engine::ThreadId::new(),
-                conversation_id: ironclaw_engine::ConversationId::new(),
-                call_id: "call-2".into(),
-                description: "desc".into(),
-                parameters: serde_json::json!({}),
-            },
-        );
+        let resolved =
+            resolve_pending_gate_for_user(&store, "alice", Some(&thread_b.to_string())).await;
 
-        let pending = approvals.write().await.remove("alice");
-        assert_eq!(pending.unwrap().action_name, "http");
+        let PendingGateResolution::Resolved(gate) = resolved else {
+            panic!("expected a thread-scoped gate");
+        };
+        assert_eq!(gate.thread_id, thread_b);
     }
 
-    /// No pending approval for an unknown user returns None.
     #[tokio::test]
-    async fn no_approval_for_unknown_user() {
-        let approvals: RwLock<HashMap<String, PendingApproval>> = RwLock::new(HashMap::new());
+    async fn resolve_pending_gate_detects_ambiguity_without_thread_hint() {
+        let store = crate::gate::store::PendingGateStore::in_memory();
+        store
+            .insert(sample_pending_gate(
+                "alice",
+                ironclaw_engine::ThreadId::new(),
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            ))
+            .await
+            .unwrap();
+        store
+            .insert(sample_pending_gate(
+                "alice",
+                ironclaw_engine::ThreadId::new(),
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            ))
+            .await
+            .unwrap();
 
-        let result = approvals.write().await.remove("nobody");
+        let resolved = resolve_pending_gate_for_user(&store, "alice", None).await;
+        assert!(matches!(resolved, PendingGateResolution::Ambiguous));
+    }
+
+    #[tokio::test]
+    async fn resolve_pending_gate_filters_by_kind() {
+        let store = crate::gate::store::PendingGateStore::in_memory();
+        let thread_id = ironclaw_engine::ThreadId::new();
+        store
+            .insert(sample_pending_gate(
+                "alice",
+                thread_id,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: "github".into(),
+                    instructions: "paste token".into(),
+                    auth_url: None,
+                },
+            ))
+            .await
+            .unwrap();
+
+        let resolved =
+            resolve_pending_gate_for_user(&store, "alice", Some(&thread_id.to_string())).await;
+
+        let PendingGateResolution::Resolved(gate) = resolved else {
+            panic!("expected an auth gate");
+        };
+        assert!(matches!(
+            gate.resume_kind,
+            ironclaw_engine::ResumeKind::Authentication { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn clear_engine_pending_auth_scopes_to_thread_when_hint_provided() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store);
+        let thread_a = ironclaw_engine::ThreadId::new();
+        let thread_b = ironclaw_engine::ThreadId::new();
+
+        state
+            .pending_gates
+            .insert(sample_pending_gate(
+                "alice",
+                thread_a,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: "github_token".into(),
+                    instructions: "paste token".into(),
+                    auth_url: None,
+                },
+            ))
+            .await
+            .unwrap();
+        state
+            .pending_gates
+            .insert(sample_pending_gate(
+                "alice",
+                thread_b,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: "linear_token".into(),
+                    instructions: "paste token".into(),
+                    auth_url: None,
+                },
+            ))
+            .await
+            .unwrap();
+
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+        *lock.write().await = Some(state);
+
+        clear_engine_pending_auth("alice", Some(&thread_a.to_string())).await;
+
+        let guard = lock.read().await;
+        let state = guard.as_ref().unwrap();
+        let remaining = state.pending_gates.list_for_user("alice").await;
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining.iter().any(|gate| gate.thread_id == thread_b));
+        drop(guard);
+        *lock.write().await = None;
+    }
+
+    #[tokio::test]
+    async fn clear_engine_pending_auth_without_hint_clears_all_auth_gates() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store);
+        let thread_a = ironclaw_engine::ThreadId::new();
+        let thread_b = ironclaw_engine::ThreadId::new();
+
+        state
+            .pending_gates
+            .insert(sample_pending_gate(
+                "alice",
+                thread_a,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: "github_token".into(),
+                    instructions: "paste token".into(),
+                    auth_url: None,
+                },
+            ))
+            .await
+            .unwrap();
+        state
+            .pending_gates
+            .insert(sample_pending_gate(
+                "alice",
+                thread_b,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: "linear_token".into(),
+                    instructions: "paste token".into(),
+                    auth_url: None,
+                },
+            ))
+            .await
+            .unwrap();
+
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+        *lock.write().await = Some(state);
+
+        clear_engine_pending_auth("alice", None).await;
+
+        let guard = lock.read().await;
+        let state = guard.as_ref().unwrap();
+        assert!(state.pending_gates.list_for_user("alice").await.is_empty());
+        drop(guard);
+        *lock.write().await = None;
+    }
+
+    // ── /expected command tests ─────────────────────────────────
+
+    /// Build a minimal EngineState backed by a TestStore for /expected tests.
+    fn make_expected_test_state(store: Arc<TestStore>) -> EngineState {
+        use ironclaw_engine::{
+            CapabilityRegistry, ConversationManager, LeaseManager, PolicyEngine, ThreadManager,
+        };
+
+        // Minimal mocks — /expected doesn't execute threads, just reads state
+        struct NoopLlm;
+        #[async_trait::async_trait]
+        impl ironclaw_engine::LlmBackend for NoopLlm {
+            async fn complete(
+                &self,
+                _: &[ironclaw_engine::ThreadMessage],
+                _: &[ironclaw_engine::ActionDef],
+                _: &ironclaw_engine::LlmCallConfig,
+            ) -> Result<ironclaw_engine::LlmOutput, ironclaw_engine::EngineError> {
+                Ok(ironclaw_engine::LlmOutput {
+                    response: ironclaw_engine::LlmResponse::Text("done".into()),
+                    usage: ironclaw_engine::TokenUsage::default(),
+                })
+            }
+            fn model_name(&self) -> &str {
+                "noop"
+            }
+        }
+
+        struct NoopEffects;
+        #[async_trait::async_trait]
+        impl ironclaw_engine::EffectExecutor for NoopEffects {
+            async fn execute_action(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: &ironclaw_engine::CapabilityLease,
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<ironclaw_engine::ActionResult, ironclaw_engine::EngineError> {
+                unreachable!()
+            }
+            async fn available_actions(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+            ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+                Ok(vec![])
+            }
+        }
+
+        let store_dyn: Arc<dyn Store> = store;
+        let effect_adapter = Arc::new(EffectBridgeAdapter::new(
+            Arc::new(crate::tools::ToolRegistry::new()),
+            Arc::new(ironclaw_safety::SafetyLayer::new(
+                &ironclaw_safety::SafetyConfig {
+                    max_output_length: 10_000,
+                    injection_check_enabled: false,
+                },
+            )),
+            Arc::new(crate::hooks::HookRegistry::default()),
+        ));
+
+        let tm = Arc::new(ThreadManager::new(
+            Arc::new(NoopLlm),
+            Arc::new(NoopEffects),
+            store_dyn.clone(),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+
+        let cm = ConversationManager::new(Arc::clone(&tm), store_dyn.clone());
+
+        EngineState {
+            thread_manager: tm,
+            conversation_manager: cm,
+            effect_adapter,
+            store: store_dyn,
+            default_project_id: ironclaw_engine::ProjectId::new(),
+            pending_gates: Arc::new(crate::gate::store::PendingGateStore::in_memory()),
+            sse: None,
+            db: None,
+            secrets_store: None,
+            auth_manager: None,
+        }
+    }
+
+    /// find_most_recent_thread returns the active thread when one exists.
+    #[tokio::test]
+    async fn find_recent_thread_returns_active() {
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store.clone());
+
+        let project_id = state.default_project_id;
+        let mut thread = ironclaw_engine::Thread::new(
+            "test goal",
+            ironclaw_engine::ThreadType::Foreground,
+            project_id,
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.add_message(ironclaw_engine::ThreadMessage::user("hello"));
+        thread.add_message(ironclaw_engine::ThreadMessage::assistant("hi there"));
+        let tid = thread.id;
+        store.save_thread(&thread).await.unwrap();
+
+        let mut conv = ironclaw_engine::ConversationSurface::new("web", "alice");
+        conv.track_thread(tid);
+        let conv_opt = Some(conv);
+
+        let result = find_most_recent_thread(&state, &conv_opt, "alice").await;
+        assert!(result.is_some(), "should find thread");
+        assert_eq!(result.unwrap().id, tid);
+    }
+
+    /// find_most_recent_thread returns None for empty conversation.
+    #[tokio::test]
+    async fn find_recent_thread_empty_conv_returns_none() {
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store);
+
+        let conv = Some(ironclaw_engine::ConversationSurface::new("web", "alice"));
+        let result = find_most_recent_thread(&state, &conv, "alice").await;
         assert!(result.is_none());
     }
 
+    /// find_most_recent_thread filters by user_id (tenant isolation).
     #[tokio::test]
-    async fn persist_and_resolve_pending_approval_from_thread_metadata() {
-        let store: Arc<dyn Store> = Arc::new(TestStore::new());
-        let thread_id = ironclaw_engine::ThreadId::new();
-        let conversation_id = ironclaw_engine::ConversationId::new();
-        let pending_approvals = RwLock::new(HashMap::new());
+    async fn find_recent_thread_filters_by_user() {
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store.clone());
 
-        let mut thread = ironclaw_engine::Thread::new(
-            "goal",
+        let project_id = state.default_project_id;
+        let thread = ironclaw_engine::Thread::new(
+            "bob's thread",
             ironclaw_engine::ThreadType::Foreground,
-            ironclaw_engine::ProjectId::new(),
+            project_id,
+            "bob", // owned by bob
             ironclaw_engine::ThreadConfig::default(),
         );
-        thread.id = thread_id;
-        thread
-            .transition_to(ironclaw_engine::ThreadState::Running, None)
-            .unwrap();
-        thread
-            .transition_to(
-                ironclaw_engine::ThreadState::Waiting,
-                Some("approval".into()),
-            )
-            .unwrap();
+        let tid = thread.id;
         store.save_thread(&thread).await.unwrap();
 
-        let mut conversation = ironclaw_engine::ConversationSurface::new("web", "user1");
-        conversation.id = conversation_id;
-        conversation.track_thread(thread_id);
-        store.save_conversation(&conversation).await.unwrap();
+        let mut conv = ironclaw_engine::ConversationSurface::new("web", "alice");
+        conv.track_thread(tid);
 
-        let pending = PendingApproval {
-            request_id: "req-123".into(),
-            action_name: "shell".into(),
-            thread_id,
-            conversation_id,
-            call_id: "call-123".into(),
-            description: "Tool 'shell' requires approval to execute.".into(),
-            parameters: serde_json::json!({"cmd": "ls"}),
-        };
-        persist_pending_approval(&store, &pending).await.unwrap();
-
-        let resolved =
-            resolve_pending_approval_for_thread(&store, &pending_approvals, "user1", None)
-                .await
-                .unwrap();
-        let PendingApprovalResolution::Resolved(resolved) = resolved else {
-            panic!("expected resolved pending approval");
-        };
-        assert_eq!(resolved.action_name, "shell");
-        assert_eq!(resolved.thread_id, thread_id);
-        assert_eq!(resolved.request_id, "req-123");
-        assert_eq!(resolved.parameters["cmd"], "ls");
-
-        clear_pending_approval_metadata(&store, thread_id)
-            .await
-            .unwrap();
-        let thread = store.load_thread(thread_id).await.unwrap().unwrap();
-        assert!(thread.metadata.get(PENDING_APPROVAL_METADATA_KEY).is_none());
+        // Alice should NOT see Bob's thread
+        let result = find_most_recent_thread(&state, &Some(conv), "alice").await;
+        assert!(result.is_none(), "alice should not see bob's thread"); // safety: test-only
     }
 
+    /// find_most_recent_thread falls back to entry-referenced threads
+    /// when no active threads exist.
     #[tokio::test]
-    async fn resolve_pending_approval_detects_ambiguity_without_thread_hint() {
-        let store: Arc<dyn Store> = Arc::new(TestStore::new());
-        let pending_approvals = RwLock::new(HashMap::new());
+    async fn find_recent_thread_falls_back_to_entries() {
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store.clone());
 
-        for call_id in ["call-1", "call-2"] {
-            let thread_id = ironclaw_engine::ThreadId::new();
-            let mut thread = ironclaw_engine::Thread::new(
-                "goal",
-                ironclaw_engine::ThreadType::Foreground,
-                ironclaw_engine::ProjectId::new(),
-                ironclaw_engine::ThreadConfig::default(),
-            );
-            thread.id = thread_id;
-            thread
-                .transition_to(ironclaw_engine::ThreadState::Running, None)
-                .unwrap();
-            thread
-                .transition_to(
-                    ironclaw_engine::ThreadState::Waiting,
-                    Some("approval".into()),
-                )
-                .unwrap();
-            store.save_thread(&thread).await.unwrap();
+        let project_id = state.default_project_id;
+        let mut thread = ironclaw_engine::Thread::new(
+            "completed goal",
+            ironclaw_engine::ThreadType::Foreground,
+            project_id,
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.add_message(ironclaw_engine::ThreadMessage::user("do something"));
+        thread.add_message(ironclaw_engine::ThreadMessage::assistant("done"));
+        let tid = thread.id;
+        store.save_thread(&thread).await.unwrap();
 
-            let mut conversation = ironclaw_engine::ConversationSurface::new("web", "user1");
-            conversation.track_thread(thread_id);
-            let conversation_id = conversation.id;
-            store.save_conversation(&conversation).await.unwrap();
+        // Conversation with no active threads, but an entry referencing the thread
+        let mut conv = ironclaw_engine::ConversationSurface::new("web", "alice");
+        conv.add_entry(ironclaw_engine::ConversationEntry::agent(tid, "done"));
+        // Thread is NOT in active_threads (it completed and was untracked)
 
-            let pending = PendingApproval {
-                request_id: format!("req-{call_id}"),
-                action_name: "shell".into(),
-                thread_id,
-                conversation_id,
-                call_id: call_id.into(),
-                description: "Tool 'shell' requires approval to execute.".into(),
-                parameters: serde_json::json!({}),
-            };
-            persist_pending_approval(&store, &pending).await.unwrap();
-        }
-
-        let resolved =
-            resolve_pending_approval_for_thread(&store, &pending_approvals, "user1", None)
-                .await
-                .unwrap();
-        assert!(matches!(resolved, PendingApprovalResolution::Ambiguous));
+        let result = find_most_recent_thread(&state, &Some(conv), "alice").await;
+        assert!(result.is_some(), "should find thread via entry fallback");
+        assert_eq!(result.unwrap().id, tid);
     }
 }

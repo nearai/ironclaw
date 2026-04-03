@@ -29,6 +29,7 @@ impl RetrievalEngine {
     pub async fn retrieve_context(
         &self,
         project_id: ProjectId,
+        user_id: &str,
         query: &str,
         max_docs: usize,
     ) -> Result<Vec<MemoryDoc>, EngineError> {
@@ -36,7 +37,11 @@ impl RetrievalEngine {
             return Ok(Vec::new());
         }
 
-        let all_docs = self.store.list_memory_docs(project_id).await?;
+        // Include both user-owned and shared system docs for context retrieval.
+        let all_docs = self
+            .store
+            .list_memory_docs_with_shared(project_id, user_id)
+            .await?;
         if all_docs.is_empty() {
             return Ok(Vec::new());
         }
@@ -129,116 +134,10 @@ fn doc_type_weight(doc_type: DocType) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::capability::{CapabilityLease, LeaseId};
-    use crate::types::event::ThreadEvent;
-    use crate::types::memory::DocId;
-    use crate::types::project::{Project, ProjectId};
-    use crate::types::step::Step;
-    use crate::types::thread::{Thread, ThreadId, ThreadState};
+    use crate::types::project::ProjectId;
 
-    /// Mock Store that returns a fixed set of memory docs.
-    struct DocStore {
-        docs: tokio::sync::Mutex<Vec<MemoryDoc>>,
-    }
-
-    impl DocStore {
-        fn new(docs: Vec<MemoryDoc>) -> Arc<Self> {
-            Arc::new(Self {
-                docs: tokio::sync::Mutex::new(docs),
-            })
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl crate::traits::store::Store for DocStore {
-        async fn save_thread(&self, _: &Thread) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_thread(&self, _: ThreadId) -> Result<Option<Thread>, EngineError> {
-            Ok(None)
-        }
-        async fn list_threads(&self, _: ProjectId) -> Result<Vec<Thread>, EngineError> {
-            Ok(vec![])
-        }
-        async fn update_thread_state(
-            &self,
-            _: ThreadId,
-            _: ThreadState,
-        ) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn save_step(&self, _: &Step) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_steps(&self, _: ThreadId) -> Result<Vec<Step>, EngineError> {
-            Ok(vec![])
-        }
-        async fn append_events(&self, _: &[ThreadEvent]) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_events(&self, _: ThreadId) -> Result<Vec<ThreadEvent>, EngineError> {
-            Ok(vec![])
-        }
-        async fn save_project(&self, _: &Project) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_project(&self, _: ProjectId) -> Result<Option<Project>, EngineError> {
-            Ok(None)
-        }
-        async fn save_memory_doc(&self, _: &MemoryDoc) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_memory_doc(&self, _: DocId) -> Result<Option<MemoryDoc>, EngineError> {
-            Ok(None)
-        }
-        async fn list_memory_docs(
-            &self,
-            project_id: ProjectId,
-        ) -> Result<Vec<MemoryDoc>, EngineError> {
-            let docs = self.docs.lock().await;
-            Ok(docs
-                .iter()
-                .filter(|d| d.project_id == project_id)
-                .cloned()
-                .collect())
-        }
-        async fn save_lease(&self, _: &CapabilityLease) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_active_leases(
-            &self,
-            _: ThreadId,
-        ) -> Result<Vec<CapabilityLease>, EngineError> {
-            Ok(vec![])
-        }
-        async fn revoke_lease(&self, _: LeaseId, _: &str) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn save_mission(
-            &self,
-            _: &crate::types::mission::Mission,
-        ) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_mission(
-            &self,
-            _: crate::types::mission::MissionId,
-        ) -> Result<Option<crate::types::mission::Mission>, EngineError> {
-            Ok(None)
-        }
-        async fn list_missions(
-            &self,
-            _: ProjectId,
-        ) -> Result<Vec<crate::types::mission::Mission>, EngineError> {
-            Ok(vec![])
-        }
-        async fn update_mission_status(
-            &self,
-            _: crate::types::mission::MissionId,
-            _: crate::types::mission::MissionStatus,
-        ) -> Result<(), EngineError> {
-            Ok(())
-        }
+    fn make_store(docs: Vec<MemoryDoc>) -> Arc<crate::tests::InMemoryStore> {
+        Arc::new(crate::tests::InMemoryStore::with_docs(docs))
     }
 
     #[test]
@@ -266,6 +165,7 @@ mod tests {
 
         let doc = MemoryDoc::new(
             ProjectId::new(),
+            "test-user",
             DocType::Lesson,
             "Lesson about web_search errors",
             "The tool was not found during execution.",
@@ -293,21 +193,24 @@ mod tests {
     #[tokio::test]
     async fn retrieve_returns_relevant_docs_by_keyword() {
         let project = ProjectId::new();
-        let store = DocStore::new(vec![
+        let store = make_store(vec![
             MemoryDoc::new(
                 project,
+                "test-user",
                 DocType::Lesson,
                 "web_search tool alias",
-                "Use web-search not web_search",
+                "Use web_search",
             ),
             MemoryDoc::new(
                 project,
+                "test-user",
                 DocType::Summary,
                 "weather query",
                 "Fetched weather data",
             ),
             MemoryDoc::new(
                 project,
+                "test-user",
                 DocType::Issue,
                 "API timeout",
                 "External API timed out",
@@ -316,7 +219,7 @@ mod tests {
         let engine = RetrievalEngine::new(store);
 
         let docs = engine
-            .retrieve_context(project, "web_search error", 5)
+            .retrieve_context(project, "test-user", "web_search error", 5)
             .await
             .unwrap();
         assert!(!docs.is_empty());
@@ -329,15 +232,17 @@ mod tests {
     async fn retrieve_respects_project_scoping() {
         let project_a = ProjectId::new();
         let project_b = ProjectId::new();
-        let store = DocStore::new(vec![
+        let store = make_store(vec![
             MemoryDoc::new(
                 project_a,
+                "test-user",
                 DocType::Lesson,
                 "Lesson for project A",
                 "Some lesson",
             ),
             MemoryDoc::new(
                 project_b,
+                "test-user",
                 DocType::Lesson,
                 "Lesson for project B",
                 "Other lesson",
@@ -346,14 +251,14 @@ mod tests {
         let engine = RetrievalEngine::new(store);
 
         let docs_a = engine
-            .retrieve_context(project_a, "lesson", 5)
+            .retrieve_context(project_a, "test-user", "lesson", 5)
             .await
             .unwrap();
         assert_eq!(docs_a.len(), 1);
         assert!(docs_a[0].title.contains("project A"));
 
         let docs_b = engine
-            .retrieve_context(project_b, "lesson", 5)
+            .retrieve_context(project_b, "test-user", "lesson", 5)
             .await
             .unwrap();
         assert_eq!(docs_b.len(), 1);
@@ -363,25 +268,46 @@ mod tests {
     #[tokio::test]
     async fn retrieve_respects_max_docs_limit() {
         let project = ProjectId::new();
-        let store = DocStore::new(vec![
-            MemoryDoc::new(project, DocType::Lesson, "Lesson 1", "Content 1"),
-            MemoryDoc::new(project, DocType::Lesson, "Lesson 2", "Content 2"),
-            MemoryDoc::new(project, DocType::Lesson, "Lesson 3", "Content 3"),
+        let store = make_store(vec![
+            MemoryDoc::new(
+                project,
+                "test-user",
+                DocType::Lesson,
+                "Lesson 1",
+                "Content 1",
+            ),
+            MemoryDoc::new(
+                project,
+                "test-user",
+                DocType::Lesson,
+                "Lesson 2",
+                "Content 2",
+            ),
+            MemoryDoc::new(
+                project,
+                "test-user",
+                DocType::Lesson,
+                "Lesson 3",
+                "Content 3",
+            ),
         ]);
         let engine = RetrievalEngine::new(store);
 
-        let docs = engine.retrieve_context(project, "lesson", 2).await.unwrap();
+        let docs = engine
+            .retrieve_context(project, "test-user", "lesson", 2)
+            .await
+            .unwrap();
         assert_eq!(docs.len(), 2);
     }
 
     #[tokio::test]
     async fn retrieve_empty_store_returns_empty() {
         let project = ProjectId::new();
-        let store = DocStore::new(vec![]);
+        let store = make_store(vec![]);
         let engine = RetrievalEngine::new(store);
 
         let docs = engine
-            .retrieve_context(project, "anything", 5)
+            .retrieve_context(project, "test-user", "anything", 5)
             .await
             .unwrap();
         assert!(docs.is_empty());
@@ -390,23 +316,28 @@ mod tests {
     #[tokio::test]
     async fn retrieve_spec_ranks_above_summary() {
         let project = ProjectId::new();
-        let store = DocStore::new(vec![
+        let store = make_store(vec![
             MemoryDoc::new(
                 project,
+                "test-user",
                 DocType::Summary,
                 "Summary of search",
                 "searched the web",
             ),
             MemoryDoc::new(
                 project,
+                "test-user",
                 DocType::Spec,
                 "Missing search tool",
-                "ALIAS: web_search -> web-search",
+                "Use web_search for the search tool",
             ),
         ]);
         let engine = RetrievalEngine::new(store);
 
-        let docs = engine.retrieve_context(project, "search", 5).await.unwrap();
+        let docs = engine
+            .retrieve_context(project, "test-user", "search", 5)
+            .await
+            .unwrap();
         assert_eq!(docs.len(), 2);
         // Spec should rank first due to higher type weight
         assert_eq!(docs[0].doc_type, DocType::Spec);

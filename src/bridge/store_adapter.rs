@@ -134,6 +134,11 @@ impl HybridStore {
         // Missions live under each project: engine/projects/{slug}/missions/{slug}/mission.json
         self.load_missions_from_projects(ws).await;
 
+        // Backfill archived threads referenced by missions but missing from the
+        // active threads map (threads archived before the fix that preserves
+        // stripped Thread objects in the active path).
+        self.backfill_archived_threads(ws).await;
+
         let projects = self.projects.read().await.len();
         let conversations = self.conversations.read().await.len();
         let threads = self.threads.read().await.len();
@@ -156,16 +161,21 @@ impl HybridStore {
         );
     }
 
-    /// Clean up terminal (Done/Failed) threads and dead leases.
+    /// Evict terminal (Done/Failed) threads from in-memory caches.
     ///
-    /// Archives terminal threads older than `min_age` as compact summaries and
-    /// deletes their full state (messages, events, steps, leases). Returns the
-    /// number of items cleaned.
+    /// Full thread data (messages, events, steps) is **always preserved on
+    /// disk** — LLM output is never deleted.  This method only removes old
+    /// terminal threads from the in-memory maps to keep RAM bounded.
+    /// `load_thread()` will lazy-reload from disk on the next access.
+    ///
+    /// Also writes a compact archive summary for human-browsable indexing
+    /// and cleans up expired/revoked leases (from memory only — lease files
+    /// stay on disk).
     pub async fn cleanup_terminal_state(&self, min_age: chrono::Duration) -> usize {
         let mut cleaned = 0;
         let now = chrono::Utc::now();
 
-        // 1. Archive terminal threads
+        // 1. Evict terminal threads from in-memory maps (disk files stay)
         let terminal: Vec<Thread> = self
             .threads
             .read()
@@ -184,38 +194,20 @@ impl HybridStore {
             .collect();
 
         for thread in &terminal {
-            // Write compact archive summary
+            // Write compact archive summary (for human-readable browsing)
             let slug = slugify(&thread.goal, &thread.id.0.to_string());
             let archive_path = format!("{THREAD_ARCHIVE_PREFIX}/{slug}.json");
             let summary = compact_thread_summary(thread);
             self.persist_json(archive_path, &summary).await;
 
-            // Delete full state files
-            self.delete_workspace_file(&thread_path(thread.id)).await;
-            self.delete_workspace_file(&event_path(thread.id)).await;
-            self.delete_workspace_file(&step_path(thread.id)).await;
-
-            // Delete associated leases
-            let lease_ids: Vec<LeaseId> = self
-                .leases
-                .read()
-                .await
-                .values()
-                .filter(|l| l.thread_id == thread.id)
-                .map(|l| l.id)
-                .collect();
-            for lid in &lease_ids {
-                self.delete_workspace_file(&lease_path(*lid)).await;
-                self.leases.write().await.remove(lid);
-            }
-
+            // Evict from in-memory maps only — disk files are never deleted.
             self.threads.write().await.remove(&thread.id);
             self.events.write().await.remove(&thread.id);
             self.steps.write().await.remove(&thread.id);
             cleaned += 1;
         }
 
-        // 2. Delete revoked/expired leases not associated with archived threads
+        // 2. Clean up revoked/expired leases from memory
         let dead_leases: Vec<LeaseId> = self
             .leases
             .read()
@@ -225,16 +217,15 @@ impl HybridStore {
             .map(|(id, _)| *id)
             .collect();
         for lid in &dead_leases {
-            self.delete_workspace_file(&lease_path(*lid)).await;
             self.leases.write().await.remove(lid);
             cleaned += 1;
         }
 
         if cleaned > 0 {
             debug!(
-                threads_archived = terminal.len(),
+                threads_evicted = terminal.len(),
                 leases_cleaned = dead_leases.len(),
-                "cleaned up terminal engine state"
+                "evicted terminal state from memory (disk preserved)"
             );
         }
 
@@ -447,18 +438,80 @@ impl HybridStore {
                     continue;
                 }
                 let mission_file = format!("{}/mission.json", mission_entry.path);
-                match ws.read(&mission_file).await {
-                    Ok(doc) => match serde_json::from_str::<Mission>(&doc.content) {
+                if let Ok(doc) = ws.read(&mission_file).await {
+                    match serde_json::from_str::<Mission>(&doc.content) {
                         Ok(mission) => {
                             self.missions.write().await.insert(mission.id, mission);
                         }
                         Err(e) => {
                             debug!(path = %mission_file, "failed to parse mission: {e}")
                         }
-                    },
-                    Err(_) => {} // mission.json might not exist in every subdir
+                    }
                 }
             }
+        }
+    }
+
+    /// Backfill threads referenced by missions but not yet in the in-memory map.
+    ///
+    /// Tries the full thread file first (active path in DB), then falls back to
+    /// archive summaries for threads that were deleted before data-retention was
+    /// fixed.
+    async fn backfill_archived_threads(&self, ws: &Workspace) {
+        // Collect thread IDs referenced by missions but missing from threads map
+        let missions = self.missions.read().await.clone();
+        let threads = self.threads.read().await;
+        let missing: Vec<ThreadId> = missions
+            .values()
+            .flat_map(|m| m.thread_history.iter().copied())
+            .filter(|tid| !threads.contains_key(tid))
+            .collect();
+        drop(threads);
+
+        if missing.is_empty() {
+            return;
+        }
+
+        let mut backfilled = 0usize;
+
+        // First pass: try loading full Thread from active path in DB
+        let mut still_missing = Vec::new();
+        for tid in &missing {
+            if let Ok(doc) = ws.read(&thread_path(*tid)).await
+                && let Ok(thread) = serde_json::from_str::<Thread>(&doc.content)
+            {
+                self.threads.write().await.insert(thread.id, thread);
+                backfilled += 1;
+            } else {
+                still_missing.push(tid.0.to_string());
+            }
+        }
+
+        // Second pass: fall back to archive summaries for legacy-deleted threads
+        if !still_missing.is_empty() {
+            let missing_set: std::collections::HashSet<String> =
+                still_missing.into_iter().collect();
+            if let Ok(archive_entries) = ws.list(THREAD_ARCHIVE_PREFIX).await {
+                for entry in archive_entries {
+                    if entry.is_directory {
+                        continue;
+                    }
+                    let Ok(doc) = ws.read(&entry.path).await else {
+                        continue;
+                    };
+                    if let Ok(summary) = serde_json::from_str::<ThreadArchiveSummary>(&doc.content)
+                        && missing_set.contains(&summary.thread_id)
+                        && let Some(thread) = thread_from_archive(&summary)
+                    {
+                        self.threads.write().await.insert(thread.id, thread);
+                        backfilled += 1;
+                    }
+                }
+            }
+        }
+
+        if backfilled > 0 {
+            debug!(backfilled, "backfilled mission threads from database");
         }
     }
 
@@ -569,6 +622,11 @@ fn doc_workspace_path(doc: &MemoryDoc) -> String {
 
 fn is_orchestrator_code_path(path: &str) -> bool {
     path.starts_with(ORCHESTRATOR_PREFIX) && path.ends_with(".py")
+}
+
+/// Check if a MemoryDoc is a protected orchestrator or prompt overlay document.
+fn is_protected_orchestrator_doc(doc: &MemoryDoc) -> bool {
+    doc.title.starts_with("orchestrator:") || doc.title.starts_with("prompt:")
 }
 
 fn project_dir(name: &str, project_id: ProjectId) -> String {
@@ -704,12 +762,14 @@ fn deserialize_knowledge_doc(content: &str) -> Option<MemoryDoc> {
     }
 
     // Find closing ---
-    let after_first = &content[3..];
-    let after_first_line = after_first.find('\n').map(|pos| &after_first[pos + 1..])?;
+    // All slice points are at ASCII boundaries (---, \n) so UTF-8 safe.
+    let after_first = content.get(3..)?;
+    let nl_pos = after_first.find('\n')?;
+    let after_first_line = after_first.get(nl_pos + 1..)?;
     let yaml_end = after_first_line.find("\n---")?;
-    let yaml_str = &after_first_line[..yaml_end];
+    let yaml_str = after_first_line.get(..yaml_end)?;
     let body_start = yaml_end + 4; // skip \n---
-    let body = after_first_line[body_start..].trim_start_matches('\n');
+    let body = after_first_line.get(body_start..)?.trim_start_matches('\n');
 
     // Parse YAML frontmatter
     let yaml: serde_json::Value = serde_yml::from_str(yaml_str).ok()?;
@@ -728,6 +788,7 @@ fn deserialize_knowledge_doc(content: &str) -> Option<MemoryDoc> {
         "Issue" => DocType::Issue,
         "Spec" => DocType::Spec,
         "Skill" => DocType::Skill,
+        "Plan" => DocType::Plan,
         _ => DocType::Note,
     };
 
@@ -770,6 +831,7 @@ fn deserialize_knowledge_doc(content: &str) -> Option<MemoryDoc> {
     Some(MemoryDoc {
         id: DocId(id),
         project_id: ProjectId(uuid::Uuid::nil()),
+        user_id: "legacy".to_string(),
         doc_type,
         title,
         content: body.to_string(),
@@ -784,7 +846,7 @@ fn deserialize_knowledge_doc(content: &str) -> Option<MemoryDoc> {
 // ── Thread archival ─────────────────────────────────────────
 
 /// Compact summary of a completed thread for archival.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct ThreadArchiveSummary {
     thread_id: String,
     goal: String,
@@ -793,6 +855,7 @@ struct ThreadArchiveSummary {
     completed_at: Option<String>,
     step_count: usize,
     total_tokens: u64,
+    #[serde(default)]
     outcome_preview: String,
 }
 
@@ -818,12 +881,53 @@ fn compact_thread_summary(thread: &Thread) -> ThreadArchiveSummary {
     }
 }
 
+/// Reconstruct a minimal Thread from an archive summary (for mission detail pages).
+fn thread_from_archive(summary: &ThreadArchiveSummary) -> Option<Thread> {
+    let id = uuid::Uuid::parse_str(&summary.thread_id).ok()?;
+    let created_at = chrono::DateTime::parse_from_rfc3339(&summary.created_at)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    let completed_at = summary
+        .completed_at
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+    let state = match summary.state.as_str() {
+        "Done" => ThreadState::Done,
+        "Failed" => ThreadState::Failed,
+        "Completed" => ThreadState::Completed,
+        _ => ThreadState::Done,
+    };
+    Some(Thread {
+        id: ThreadId(id),
+        goal: summary.goal.clone(),
+        thread_type: ironclaw_engine::ThreadType::Mission,
+        state,
+        project_id: ironclaw_engine::ProjectId(uuid::Uuid::nil()),
+        user_id: "default".to_string(),
+        parent_id: None,
+        config: ironclaw_engine::ThreadConfig::default(),
+        messages: Vec::new(),
+        internal_messages: Vec::new(),
+        events: Vec::new(),
+        capability_leases: Vec::new(),
+        metadata: serde_json::Value::Object(serde_json::Map::new()),
+        created_at,
+        updated_at: completed_at.unwrap_or(created_at),
+        completed_at,
+        step_count: summary.step_count,
+        total_tokens_used: summary.total_tokens,
+        total_cost_usd: 0.0,
+    })
+}
+
 fn truncate_for_readme(s: &str, max: usize) -> String {
     let trimmed = s.trim().replace('\n', " ");
-    if trimmed.len() <= max {
+    if trimmed.chars().count() <= max {
         trimmed
     } else {
-        format!("{}...", &trimmed[..max.min(trimmed.len())])
+        let truncated: String = trimmed.chars().take(max).collect();
+        format!("{truncated}...")
     }
 }
 
@@ -838,16 +942,32 @@ impl Store for HybridStore {
     }
 
     async fn load_thread(&self, id: ThreadId) -> Result<Option<Thread>, EngineError> {
-        Ok(self.threads.read().await.get(&id).cloned())
+        // Fast path: check in-memory cache
+        if let Some(thread) = self.threads.read().await.get(&id).cloned() {
+            return Ok(Some(thread));
+        }
+        // Slow path: reload from database (thread may have been evicted from memory)
+        if let Some(ws) = self.workspace.as_ref()
+            && let Ok(doc) = ws.read(&thread_path(id)).await
+            && let Ok(thread) = serde_json::from_str::<Thread>(&doc.content)
+        {
+            self.threads.write().await.insert(thread.id, thread.clone());
+            return Ok(Some(thread));
+        }
+        Ok(None)
     }
 
-    async fn list_threads(&self, project_id: ProjectId) -> Result<Vec<Thread>, EngineError> {
+    async fn list_threads(
+        &self,
+        project_id: ProjectId,
+        user_id: &str,
+    ) -> Result<Vec<Thread>, EngineError> {
         Ok(self
             .threads
             .read()
             .await
             .values()
-            .filter(|thread| thread.project_id == project_id)
+            .filter(|thread| thread.project_id == project_id && thread.user_id == user_id)
             .cloned()
             .collect())
     }
@@ -893,13 +1013,18 @@ impl Store for HybridStore {
     }
 
     async fn load_steps(&self, thread_id: ThreadId) -> Result<Vec<Step>, EngineError> {
-        Ok(self
-            .steps
-            .read()
-            .await
-            .get(&thread_id)
-            .cloned()
-            .unwrap_or_default())
+        if let Some(steps) = self.steps.read().await.get(&thread_id).cloned() {
+            return Ok(steps);
+        }
+        // Reload from database (may have been evicted from memory)
+        if let Some(ws) = self.workspace.as_ref()
+            && let Ok(doc) = ws.read(&step_path(thread_id)).await
+            && let Ok(steps) = serde_json::from_str::<Vec<Step>>(&doc.content)
+        {
+            self.steps.write().await.insert(thread_id, steps.clone());
+            return Ok(steps);
+        }
+        Ok(Vec::new())
     }
 
     async fn append_events(&self, events: &[ThreadEvent]) -> Result<(), EngineError> {
@@ -929,13 +1054,18 @@ impl Store for HybridStore {
     }
 
     async fn load_events(&self, thread_id: ThreadId) -> Result<Vec<ThreadEvent>, EngineError> {
-        Ok(self
-            .events
-            .read()
-            .await
-            .get(&thread_id)
-            .cloned()
-            .unwrap_or_default())
+        if let Some(events) = self.events.read().await.get(&thread_id).cloned() {
+            return Ok(events);
+        }
+        // Reload from database (may have been evicted from memory)
+        if let Some(ws) = self.workspace.as_ref()
+            && let Ok(doc) = ws.read(&event_path(thread_id)).await
+            && let Ok(events) = serde_json::from_str::<Vec<ThreadEvent>>(&doc.content)
+        {
+            self.events.write().await.insert(thread_id, events.clone());
+            return Ok(events);
+        }
+        Ok(Vec::new())
     }
 
     async fn save_project(&self, project: &Project) -> Result<(), EngineError> {
@@ -952,7 +1082,18 @@ impl Store for HybridStore {
         Ok(self.projects.read().await.get(&id).cloned())
     }
 
-    async fn list_projects(&self) -> Result<Vec<Project>, EngineError> {
+    async fn list_projects(&self, user_id: &str) -> Result<Vec<Project>, EngineError> {
+        Ok(self
+            .projects
+            .read()
+            .await
+            .values()
+            .filter(|p| p.user_id == user_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn list_all_projects(&self) -> Result<Vec<Project>, EngineError> {
         Ok(self.projects.read().await.values().cloned().collect())
     }
 
@@ -991,6 +1132,33 @@ impl Store for HybridStore {
     }
 
     async fn save_memory_doc(&self, doc: &MemoryDoc) -> Result<(), EngineError> {
+        // Defense-in-depth: block orchestrator/prompt writes when self-modify is
+        // disabled, even if the caller bypassed tool-level checks.
+        if is_protected_orchestrator_doc(doc) {
+            let allow = std::env::var("ORCHESTRATOR_SELF_MODIFY")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false);
+            if !allow {
+                // Allow system-internal writes (v0 seeding, failure tracking) but
+                // block LLM-authored patches (version > 0, non-meta titles).
+                let is_system_internal = doc.title == "orchestrator:failures"
+                    || doc
+                        .metadata
+                        .get("source")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| s == "compiled_in");
+                if !is_system_internal {
+                    return Err(EngineError::AccessDenied {
+                        user_id: doc.user_id.clone(),
+                        entity: format!(
+                            "orchestrator doc '{}' (self-modification disabled)",
+                            doc.title
+                        ),
+                    });
+                }
+            }
+        }
+
         self.docs.write().await.insert(doc.id, doc.clone());
         self.persist_doc(doc).await;
         Ok(())
@@ -1000,13 +1168,17 @@ impl Store for HybridStore {
         Ok(self.docs.read().await.get(&id).cloned())
     }
 
-    async fn list_memory_docs(&self, project_id: ProjectId) -> Result<Vec<MemoryDoc>, EngineError> {
+    async fn list_memory_docs(
+        &self,
+        project_id: ProjectId,
+        user_id: &str,
+    ) -> Result<Vec<MemoryDoc>, EngineError> {
         Ok(self
             .docs
             .read()
             .await
             .values()
-            .filter(|doc| doc.project_id == project_id)
+            .filter(|doc| doc.project_id == project_id && doc.user_id == user_id)
             .cloned()
             .collect())
     }
@@ -1062,7 +1234,33 @@ impl Store for HybridStore {
         Ok(self.missions.read().await.get(&id).cloned())
     }
 
-    async fn list_missions(&self, project_id: ProjectId) -> Result<Vec<Mission>, EngineError> {
+    async fn list_missions(
+        &self,
+        project_id: ProjectId,
+        user_id: &str,
+    ) -> Result<Vec<Mission>, EngineError> {
+        Ok(self
+            .missions
+            .read()
+            .await
+            .values()
+            .filter(|mission| mission.project_id == project_id && mission.user_id == user_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn list_all_threads(&self, project_id: ProjectId) -> Result<Vec<Thread>, EngineError> {
+        Ok(self
+            .threads
+            .read()
+            .await
+            .values()
+            .filter(|thread| thread.project_id == project_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn list_all_missions(&self, project_id: ProjectId) -> Result<Vec<Mission>, EngineError> {
         Ok(self
             .missions
             .read()

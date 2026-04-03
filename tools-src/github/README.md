@@ -1,13 +1,17 @@
 # GitHub Tool for IronClaw
 
-WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
+WASM tool for GitHub integration. It covers repositories, issues, pull requests,
+search, branches, file reads and writes, releases, and workflows.
 
 ## Features
 
-- **Repository Info** - Get repo details, list user repos
+- **Repositories** - Get repo details, list user repos, create repositories
+- **Search** - Search repositories, code, and issues/PRs
+- **Branches** - List branches and create new branches from an existing ref
 - **Issues** - List/create/get issues, list/add issue comments
 - **Pull Requests** - List/create/get PRs, review files, create reviews, list/reply review comments, merge PRs
-- **File Content** - Read files from repos
+- **File Content** - Read files and create/update/delete repository files
+- **Releases** - List releases and create new releases
 - **Workflows** - Trigger GitHub Actions, check run status
 
 ## Setup
@@ -29,6 +33,18 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
   "action": "get_repo",
   "owner": "nearai",
   "repo": "ironclaw"
+}
+```
+
+### Create Repository
+
+```json
+{
+  "action": "create_repo",
+  "name": "infra-playground",
+  "description": "Scratch repo for release automation",
+  "private": true,
+  "auto_init": true
 }
 ```
 
@@ -66,6 +82,26 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
   "repo": "ironclaw",
   "state": "open",
   "limit": 5
+}
+```
+
+### Search Code
+
+```json
+{
+  "action": "search_code",
+  "query": "repo:nearai/ironclaw tool_info",
+  "limit": 5
+}
+```
+
+### Search Issues and Pull Requests
+
+```json
+{
+  "action": "search_issues_pull_requests",
+  "query": "repo:nearai/ironclaw is:pr label:bug",
+  "limit": 10
 }
 ```
 
@@ -187,6 +223,81 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
   "repo": "ironclaw",
   "path": "README.md",
   "ref": "main"
+}
+```
+
+### Create or Update a File
+
+```json
+{
+  "action": "create_or_update_file",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "path": "docs/example.txt",
+  "message": "docs: add example",
+  "content": "Hello from IronClaw"
+}
+```
+
+When updating an existing file, include the current blob `sha`.
+
+### Delete a File
+
+```json
+{
+  "action": "delete_file",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "path": "docs/example.txt",
+  "message": "docs: remove example",
+  "sha": "0123456789abcdef0123456789abcdef01234567"
+}
+```
+
+### List Branches
+
+```json
+{
+  "action": "list_branches",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "limit": 20
+}
+```
+
+### Create Branch
+
+```json
+{
+  "action": "create_branch",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "branch": "feature/github-tool-audit",
+  "from_ref": "main"
+}
+```
+
+### List Releases
+
+```json
+{
+  "action": "list_releases",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "limit": 10
+}
+```
+
+### Create Release
+
+```json
+{
+  "action": "create_release",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "tag_name": "v1.2.3",
+  "name": "v1.2.3",
+  "generate_release_notes": true
 }
 ```
 

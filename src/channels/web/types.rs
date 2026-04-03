@@ -92,21 +92,21 @@ pub struct HistoryResponse {
     /// Cursor for the next page (ISO8601 timestamp of the oldest message returned).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oldest_timestamp: Option<String>,
-    /// Pending tool approval that needs user action (re-rendered on thread switch).
-    ///
-    /// Populated from live session state and, when engine v2 is active,
-    /// durable engine metadata so approval cards survive thread switches and restarts.
+    /// Unified pending gate state for engine v2.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pending_approval: Option<PendingApprovalInfo>,
+    pub pending_gate: Option<PendingGateInfo>,
 }
 
-/// Lightweight DTO for a pending tool approval (excludes context_messages).
+/// Lightweight DTO for unified pending gate state.
 #[derive(Debug, Serialize)]
-pub struct PendingApprovalInfo {
+pub struct PendingGateInfo {
     pub request_id: String,
+    pub thread_id: String,
+    pub gate_name: String,
     pub tool_name: String,
     pub description: String,
     pub parameters: String,
+    pub resume_kind: serde_json::Value,
 }
 
 // --- Approval ---
@@ -118,6 +118,28 @@ pub struct ApprovalRequest {
     pub action: String,
     /// Thread that owns the pending approval (so the agent loop finds the right session).
     pub thread_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "resolution", rename_all = "snake_case")]
+pub enum GateResolutionPayload {
+    Approved {
+        #[serde(default)]
+        always: bool,
+    },
+    Denied,
+    CredentialProvided {
+        token: String,
+    },
+    Cancelled,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GateResolveRequest {
+    pub request_id: String,
+    pub thread_id: Option<String>,
+    #[serde(flatten)]
+    pub resolution: GateResolutionPayload,
 }
 
 // --- App Event (re-exported from ironclaw_common) ---
@@ -566,12 +588,16 @@ pub struct SkillInstallRequest {
 pub struct AuthTokenRequest {
     pub extension_name: String,
     pub token: String,
+    pub request_id: Option<String>,
+    pub thread_id: Option<String>,
 }
 
 /// Request to cancel an in-progress auth flow.
 #[derive(Debug, Deserialize)]
 pub struct AuthCancelRequest {
     pub extension_name: String,
+    pub request_id: Option<String>,
+    pub thread_id: Option<String>,
 }
 
 // --- WebSocket ---
@@ -662,11 +688,15 @@ pub struct RoutineInfo {
     pub run_count: u64,
     pub consecutive_failures: u32,
     pub status: String,
+    pub verification_status: String,
 }
 
 impl RoutineInfo {
     /// Convert a `Routine` to the trimmed `RoutineInfo` for list display.
-    pub fn from_routine(r: &crate::agent::routine::Routine) -> Self {
+    pub fn from_routine(
+        r: &crate::agent::routine::Routine,
+        last_run_status: Option<crate::agent::routine::RunStatus>,
+    ) -> Self {
         let (trigger_type, trigger_raw, trigger_summary) = match &r.trigger {
             crate::agent::routine::Trigger::Cron { schedule, timezone } => (
                 "cron".to_string(),
@@ -710,13 +740,13 @@ impl RoutineInfo {
             crate::agent::routine::RoutineAction::FullJob { .. } => "full_job",
         };
 
-        let status = if !r.enabled {
-            "disabled"
-        } else if r.consecutive_failures > 0 {
-            "failing"
-        } else {
-            "active"
-        };
+        let verification_status = crate::agent::routine::routine_verification_status(r);
+        let status = crate::agent::routine::routine_display_status_for_verification(
+            r,
+            verification_status,
+            last_run_status,
+        )
+        .as_str();
 
         RoutineInfo {
             id: r.id,
@@ -732,6 +762,7 @@ impl RoutineInfo {
             run_count: r.run_count,
             consecutive_failures: r.consecutive_failures,
             status: status.to_string(),
+            verification_status: verification_status.as_str().to_string(),
         }
     }
 }
@@ -746,6 +777,7 @@ pub struct RoutineSummaryResponse {
     pub total: u64,
     pub enabled: u64,
     pub disabled: u64,
+    pub unverified: u64,
     pub failing: u64,
     pub runs_today: u64,
 }
@@ -767,7 +799,10 @@ pub struct RoutineDetailResponse {
     pub next_fire_at: Option<String>,
     pub run_count: u64,
     pub consecutive_failures: u32,
+    pub status: String,
+    pub verification_status: String,
     pub created_at: String,
+    pub conversation_id: Option<Uuid>,
     pub recent_runs: Vec<RoutineRunInfo>,
 }
 
@@ -886,6 +921,7 @@ pub struct EngineActionResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
 
     // ---- WsClientMessage deserialization tests ----
 
@@ -1093,6 +1129,7 @@ mod tests {
             instructions: Some("Get your token from...".to_string()),
             auth_url: None,
             setup_url: Some("https://notion.so/integrations".to_string()),
+            thread_id: Some("thread-1".to_string()),
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1101,6 +1138,7 @@ mod tests {
         assert_eq!(parsed["instructions"], "Get your token from...");
         assert!(parsed.get("auth_url").is_none());
         assert_eq!(parsed["setup_url"], "https://notion.so/integrations");
+        assert_eq!(parsed["thread_id"], "thread-1");
     }
 
     #[test]
@@ -1109,12 +1147,14 @@ mod tests {
             extension_name: "notion".to_string(),
             success: true,
             message: "notion authenticated (3 tools loaded)".to_string(),
+            thread_id: Some("thread-1".to_string()),
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["type"], "auth_completed");
         assert_eq!(parsed["extension_name"], "notion");
         assert_eq!(parsed["success"], true);
+        assert_eq!(parsed["thread_id"], "thread-1");
     }
 
     #[test]
@@ -1124,6 +1164,7 @@ mod tests {
             instructions: Some("Enter API key".to_string()),
             auth_url: None,
             setup_url: None,
+            thread_id: None,
         };
         let ws = WsServerMessage::from_app_event(&event);
         match ws {
@@ -1141,6 +1182,7 @@ mod tests {
             extension_name: "slack".to_string(),
             success: false,
             message: "Invalid token".to_string(),
+            thread_id: None,
         };
         let ws = WsServerMessage::from_app_event(&event);
         match ws {
@@ -1235,5 +1277,131 @@ mod tests {
         let json = serde_json::to_string(&info).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(parsed.get("channel").is_none());
+    }
+
+    fn make_routine_for_status_tests() -> crate::agent::routine::Routine {
+        crate::agent::routine::Routine {
+            id: Uuid::new_v4(),
+            name: "status-check".to_string(),
+            description: "routine status test".to_string(),
+            user_id: "test-user".to_string(),
+            enabled: true,
+            trigger: crate::agent::routine::Trigger::Manual,
+            action: crate::agent::routine::RoutineAction::Lightweight {
+                prompt: "Check status".to_string(),
+                context_paths: Vec::new(),
+                max_tokens: 256,
+                use_tools: false,
+                max_tool_rounds: 1,
+            },
+            guardrails: crate::agent::routine::RoutineGuardrails::default(),
+            notify: crate::agent::routine::NotifyConfig::default(),
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_routine_info_marks_new_routine_unverified() {
+        let mut routine = make_routine_for_status_tests();
+        routine.state = crate::agent::routine::reset_routine_verification_state(
+            &routine.state,
+            crate::agent::routine::routine_verification_fingerprint(&routine),
+        );
+
+        let info = RoutineInfo::from_routine(&routine, None);
+
+        assert_eq!(info.status, "unverified");
+        assert_eq!(info.verification_status, "unverified");
+    }
+
+    #[test]
+    fn test_routine_info_preserves_verified_state_for_description_only_changes() {
+        let mut routine = make_routine_for_status_tests();
+        let fingerprint = crate::agent::routine::routine_verification_fingerprint(&routine);
+        routine.state = crate::agent::routine::reset_routine_verification_state(
+            &routine.state,
+            fingerprint.clone(),
+        );
+        routine.state = crate::agent::routine::apply_routine_verification_result(
+            &routine.state,
+            fingerprint,
+            crate::agent::routine::RunStatus::Ok,
+            Utc::now(),
+        );
+        routine.description = "Updated description".to_string();
+
+        let info = RoutineInfo::from_routine(&routine, Some(crate::agent::routine::RunStatus::Ok));
+
+        assert_eq!(info.status, "active");
+        assert_eq!(info.verification_status, "verified");
+    }
+
+    #[test]
+    fn test_routine_info_surfaces_running_before_unverified() {
+        let mut routine = make_routine_for_status_tests();
+        routine.state = crate::agent::routine::reset_routine_verification_state(
+            &routine.state,
+            crate::agent::routine::routine_verification_fingerprint(&routine),
+        );
+
+        let info =
+            RoutineInfo::from_routine(&routine, Some(crate::agent::routine::RunStatus::Running));
+
+        assert_eq!(info.status, "running");
+        assert_eq!(info.verification_status, "unverified");
+    }
+
+    #[test]
+    fn test_routine_info_keeps_verified_state_when_disabled() {
+        let mut routine = make_routine_for_status_tests();
+        let fingerprint = crate::agent::routine::routine_verification_fingerprint(&routine);
+        routine.state = crate::agent::routine::reset_routine_verification_state(
+            &routine.state,
+            fingerprint.clone(),
+        );
+        routine.state = crate::agent::routine::apply_routine_verification_result(
+            &routine.state,
+            fingerprint,
+            crate::agent::routine::RunStatus::Ok,
+            Utc::now(),
+        );
+        routine.enabled = false;
+
+        let info = RoutineInfo::from_routine(&routine, Some(crate::agent::routine::RunStatus::Ok));
+
+        assert_eq!(info.status, "disabled");
+        assert_eq!(info.verification_status, "verified");
+    }
+
+    #[test]
+    fn test_routine_info_treats_legacy_run_history_as_verified() {
+        let mut routine = make_routine_for_status_tests();
+        routine.run_count = 2;
+
+        let info = RoutineInfo::from_routine(&routine, Some(crate::agent::routine::RunStatus::Ok));
+
+        assert_eq!(info.status, "active");
+        assert_eq!(info.verification_status, "verified");
+    }
+
+    #[test]
+    fn test_routine_info_keeps_unverified_state_when_disabled() {
+        let mut routine = make_routine_for_status_tests();
+        routine.state = crate::agent::routine::reset_routine_verification_state(
+            &routine.state,
+            crate::agent::routine::routine_verification_fingerprint(&routine),
+        );
+        routine.enabled = false;
+
+        let info = RoutineInfo::from_routine(&routine, None);
+
+        assert_eq!(info.status, "disabled");
+        assert_eq!(info.verification_status, "unverified");
     }
 }

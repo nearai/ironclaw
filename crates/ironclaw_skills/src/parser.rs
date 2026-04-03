@@ -45,6 +45,11 @@ pub struct ParsedSkill {
 /// You are a helpful assistant that...
 /// ```
 pub fn parse_skill_md(content: &str) -> Result<ParsedSkill, SkillParseError> {
+    // Normalize line endings before parsing to handle CRLF (callers may not
+    // have pre-normalized). This also makes `find_closing_delimiter`'s byte
+    // offset arithmetic correct since it assumes single-byte `\n` separators.
+    let content = &content.replace("\r\n", "\n").replace('\r', "\n");
+
     // Strip optional UTF-8 BOM
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
 
@@ -129,9 +134,11 @@ description: Professional writing help
 activation:
   keywords: ["write", "edit", "proofread"]
   max_context_tokens: 2000
-requires:
-  bins: ["vale"]
-  env: ["VALE_CONFIG"]
+metadata:
+  openclaw:
+    requires:
+      bins: ["vale"]
+      env: ["VALE_CONFIG"]
 ---
 
 You are a writing assistant. When the user asks to write or edit...
@@ -141,7 +148,8 @@ You are a writing assistant. When the user asks to write or edit...
         assert_eq!(result.manifest.version, "1.0.0");
         assert_eq!(result.manifest.activation.keywords.len(), 3);
         assert!(result.prompt_content.starts_with("You are a writing"));
-        assert_eq!(result.manifest.requires.bins, vec!["vale"]);
+        let openclaw = result.manifest.metadata.unwrap().openclaw.unwrap();
+        assert_eq!(openclaw.requires.bins, vec!["vale"]);
     }
 
     #[test]
@@ -203,5 +211,25 @@ Test prompt.
         let content = "\u{feff}---\nname: bom-skill\n---\n\nPrompt with BOM.\n";
         let result = parse_skill_md(content).expect("should handle BOM");
         assert_eq!(result.manifest.name, "bom-skill");
+    }
+
+    #[test]
+    fn test_crlf_line_endings_parsed_correctly() {
+        // Verify parse_skill_md handles \r\n without prior normalization
+        let content = "---\r\nname: crlf-skill\r\ndescription: CRLF test\r\nactivation:\r\n  keywords: [\"test\"]\r\n---\r\n\r\nLine one.\r\nLine two.\r\n";
+        let result = parse_skill_md(content).expect("should handle CRLF");
+        assert_eq!(result.manifest.name, "crlf-skill");
+        assert_eq!(result.manifest.description, "CRLF test");
+        assert_eq!(result.manifest.activation.keywords, vec!["test"]);
+        assert_eq!(result.prompt_content, "Line one.\nLine two.\n");
+    }
+
+    #[test]
+    fn test_mixed_line_endings_parsed_correctly() {
+        // Mix of \r\n and \n — should all normalize to \n
+        let content = "---\r\nname: mixed-endings\n---\r\n\nPrompt text.\r\n";
+        let result = parse_skill_md(content).expect("should handle mixed endings");
+        assert_eq!(result.manifest.name, "mixed-endings");
+        assert_eq!(result.prompt_content, "Prompt text.\n");
     }
 }

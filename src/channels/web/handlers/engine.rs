@@ -16,20 +16,26 @@ use crate::channels::web::types::*;
 
 pub async fn engine_threads_handler(
     State(_state): State<Arc<GatewayState>>,
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<EngineThreadListResponse>, (StatusCode, String)> {
-    let threads = crate::bridge::list_engine_threads(None)
+    let threads = crate::bridge::list_engine_threads(None, &user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            tracing::debug!("engine API error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal engine error".to_string(),
+            )
+        })?;
     Ok(Json(EngineThreadListResponse { threads }))
 }
 
 pub async fn engine_thread_detail_handler(
     State(_state): State<Arc<GatewayState>>,
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<EngineThreadDetailResponse>, (StatusCode, String)> {
-    let thread = crate::bridge::get_engine_thread(&id)
+    let thread = crate::bridge::get_engine_thread(&id, &user.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Thread not found".to_string()))?;
@@ -38,23 +44,35 @@ pub async fn engine_thread_detail_handler(
 
 pub async fn engine_thread_steps_handler(
     State(_state): State<Arc<GatewayState>>,
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<EngineStepListResponse>, (StatusCode, String)> {
-    let steps = crate::bridge::list_engine_thread_steps(&id)
+    let steps = crate::bridge::list_engine_thread_steps(&id, &user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            tracing::debug!("engine API error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal engine error".to_string(),
+            )
+        })?;
     Ok(Json(EngineStepListResponse { steps }))
 }
 
 pub async fn engine_thread_events_handler(
     State(_state): State<Arc<GatewayState>>,
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<EngineEventListResponse>, (StatusCode, String)> {
-    let events = crate::bridge::list_engine_thread_events(&id)
+    let events = crate::bridge::list_engine_thread_events(&id, &user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            tracing::debug!("engine API error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal engine error".to_string(),
+            )
+        })?;
     Ok(Json(EngineEventListResponse { events }))
 }
 
@@ -62,20 +80,26 @@ pub async fn engine_thread_events_handler(
 
 pub async fn engine_projects_handler(
     State(_state): State<Arc<GatewayState>>,
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<EngineProjectListResponse>, (StatusCode, String)> {
-    let projects = crate::bridge::list_engine_projects()
+    let projects = crate::bridge::list_engine_projects(&user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            tracing::debug!("engine API error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal engine error".to_string(),
+            )
+        })?;
     Ok(Json(EngineProjectListResponse { projects }))
 }
 
 pub async fn engine_project_detail_handler(
     State(_state): State<Arc<GatewayState>>,
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<EngineProjectDetailResponse>, (StatusCode, String)> {
-    let project = crate::bridge::get_engine_project(&id)
+    let project = crate::bridge::get_engine_project(&id, &user.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Project not found".to_string()))?;
@@ -86,21 +110,33 @@ pub async fn engine_project_detail_handler(
 
 pub async fn engine_missions_handler(
     State(_state): State<Arc<GatewayState>>,
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<EngineMissionListResponse>, (StatusCode, String)> {
-    let missions = crate::bridge::list_engine_missions(None)
+    let missions = crate::bridge::list_engine_missions(None, &user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            tracing::debug!("engine API error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal engine error".to_string(),
+            )
+        })?;
     Ok(Json(EngineMissionListResponse { missions }))
 }
 
 pub async fn engine_missions_summary_handler(
     State(_state): State<Arc<GatewayState>>,
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<EngineMissionSummaryResponse>, (StatusCode, String)> {
-    let missions = crate::bridge::list_engine_missions(None)
+    let missions = crate::bridge::list_engine_missions(None, &user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            tracing::debug!("engine API error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal engine error".to_string(),
+            )
+        })?;
 
     let total = missions.len() as u64;
     let active = missions.iter().filter(|m| m.status == "Active").count() as u64;
@@ -119,10 +155,10 @@ pub async fn engine_missions_summary_handler(
 
 pub async fn engine_mission_detail_handler(
     State(_state): State<Arc<GatewayState>>,
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<EngineMissionDetailResponse>, (StatusCode, String)> {
-    let mission = crate::bridge::get_engine_mission(&id)
+    let mission = crate::bridge::get_engine_mission(&id, &user.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Mission not found".to_string()))?;
@@ -136,7 +172,13 @@ pub async fn engine_mission_fire_handler(
 ) -> Result<Json<EngineMissionFireResponse>, (StatusCode, String)> {
     let thread_id = crate::bridge::fire_engine_mission(&id, &user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            tracing::debug!("engine API error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal engine error".to_string(),
+            )
+        })?;
     Ok(Json(EngineMissionFireResponse {
         fired: thread_id.is_some(),
         thread_id,
@@ -145,22 +187,48 @@ pub async fn engine_mission_fire_handler(
 
 pub async fn engine_mission_pause_handler(
     State(_state): State<Arc<GatewayState>>,
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<EngineActionResponse>, (StatusCode, String)> {
-    crate::bridge::pause_engine_mission(&id)
+    let is_admin = user.role == "admin";
+    crate::bridge::pause_engine_mission(&id, &user.user_id, is_admin)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            let (status, body) = if msg.contains("forbidden") {
+                (StatusCode::FORBIDDEN, "Forbidden".to_string())
+            } else {
+                tracing::debug!("engine API error: {msg}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal engine error".to_string(),
+                )
+            };
+            (status, body)
+        })?;
     Ok(Json(EngineActionResponse { ok: true }))
 }
 
 pub async fn engine_mission_resume_handler(
     State(_state): State<Arc<GatewayState>>,
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<EngineActionResponse>, (StatusCode, String)> {
-    crate::bridge::resume_engine_mission(&id)
+    let is_admin = user.role == "admin";
+    crate::bridge::resume_engine_mission(&id, &user.user_id, is_admin)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            let (status, body) = if msg.contains("forbidden") {
+                (StatusCode::FORBIDDEN, "Forbidden".to_string())
+            } else {
+                tracing::debug!("engine API error: {msg}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal engine error".to_string(),
+                )
+            };
+            (status, body)
+        })?;
     Ok(Json(EngineActionResponse { ok: true }))
 }

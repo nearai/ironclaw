@@ -165,6 +165,10 @@ async fn async_main() -> anyhow::Result<()> {
             let config = ironclaw::config::Config::from_env().await?;
             return ironclaw::cli::run_import_command(import_cmd, &config).await;
         }
+        Some(Command::Acp(acp_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_acp_command(acp_cmd.clone()).await;
+        }
         Some(Command::Worker {
             job_id,
             orchestrator_url,
@@ -187,6 +191,13 @@ async fn async_main() -> anyhow::Result<()> {
                 model,
             )
             .await;
+        }
+        Some(Command::AcpBridge {
+            job_id,
+            orchestrator_url,
+        }) => {
+            init_worker_tracing();
+            return ironclaw::worker::run_acp_bridge(*job_id, orchestrator_url).await;
         }
         Some(Command::Login { openai_codex }) => {
             init_cli_tracing();
@@ -298,6 +309,11 @@ async fn async_main() -> anyhow::Result<()> {
             cli.config.as_deref(),
         )?;
         wizard.run().await?;
+    }
+
+    // CLI flag overrides for config
+    if cli.auto_approve {
+        ironclaw::config::set_runtime_env("AGENT_AUTO_APPROVE_TOOLS", "true");
     }
 
     // Load initial config from env + disk + optional TOML (before DB is available).
@@ -449,6 +465,7 @@ async fn async_main() -> anyhow::Result<()> {
             &components.secrets_store,
             components.extension_manager.as_ref(),
             components.db.as_ref(),
+            &channel_names,
         )
         .await;
 
@@ -520,8 +537,8 @@ async fn async_main() -> anyhow::Result<()> {
     let webhook_server: Option<Arc<tokio::sync::Mutex<WebhookServer>>> = if !webhook_routes
         .is_empty()
     {
-        let addr =
-            webhook_server_addr.unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 8080)));
+        let addr = webhook_server_addr
+            .unwrap_or_else(|| std::net::SocketAddr::from(([127, 0, 0, 1], 8080)));
         if addr.ip().is_unspecified() {
             tracing::warn!(
                 "Webhook server is binding to {} — it will be reachable from all network interfaces. \
@@ -591,27 +608,7 @@ async fn async_main() -> anyhow::Result<()> {
     let mut gateway_url: Option<String> = None;
     let mut sse_manager: Option<std::sync::Arc<ironclaw::channels::web::sse::SseManager>> = None;
     if let Some(ref gw_config) = config.channels.gateway {
-        // Build multi-user auth state if user_tokens is configured, else single-user.
-        let mut gw = if let Some(ref user_tokens) = gw_config.user_tokens {
-            use ironclaw::channels::web::auth::{MultiAuthState, UserIdentity};
-            let tokens = user_tokens
-                .iter()
-                .map(|(token, cfg)| {
-                    (
-                        token.clone(),
-                        UserIdentity {
-                            user_id: cfg.user_id.clone(),
-                            workspace_read_scopes: cfg.workspace_read_scopes.clone(),
-                        },
-                    )
-                })
-                .collect();
-            let auth = MultiAuthState::multi(tokens);
-            GatewayChannel::new_multi_auth(gw_config.clone(), auth)
-        } else {
-            GatewayChannel::new(gw_config.clone())
-        };
-        gw = gw.with_owner_scope(config.owner_id.clone());
+        let mut gw = GatewayChannel::new(gw_config.clone(), config.owner_id.clone());
         gw = gw.with_llm_provider(Arc::clone(&components.llm));
         if let Some(ref ws) = components.workspace {
             gw = gw.with_workspace(Arc::clone(ws));
@@ -650,6 +647,57 @@ async fn async_main() -> anyhow::Result<()> {
         }
         if let Some(ref d) = components.db {
             gw = gw.with_store(Arc::clone(d));
+            gw = gw.with_db_auth(Arc::clone(d));
+            if let Some(ref ss) = components.secrets_store {
+                gw = gw.with_secrets_store(Arc::clone(ss));
+            }
+
+            // Bootstrap: create the first admin user from single-user config
+            // so the owner appears in the Users admin panel immediately.
+            if let Ok(false) = d.has_any_users().await {
+                let now = chrono::Utc::now();
+                let user = ironclaw::db::UserRecord {
+                    id: config.owner_id.clone(),
+                    email: None,
+                    display_name: config.owner_id.clone(),
+                    status: "active".to_string(),
+                    role: "admin".to_string(),
+                    created_at: now,
+                    updated_at: now,
+                    last_login_at: None,
+                    created_by: None,
+                    metadata: serde_json::json!({"source": "bootstrap"}),
+                };
+                // Create admin user + bootstrap token atomically.
+                let auth_token = gw.auth_token();
+                if auth_token.is_empty() {
+                    if let Err(e) = d.create_user(&user).await {
+                        tracing::warn!("Failed to bootstrap admin user: {}", e);
+                    }
+                } else {
+                    use ironclaw::channels::web::auth::hash_token;
+                    let hash = hash_token(auth_token);
+                    let prefix = if auth_token.len() >= 8 {
+                        &auth_token[..8]
+                    } else {
+                        auth_token
+                    };
+                    if let Err(e) = d
+                        .create_user_with_token(&user, "bootstrap", &hash, prefix, None)
+                        .await
+                    {
+                        tracing::warn!("Failed to bootstrap admin user: {}", e);
+                    } else {
+                        tracing::debug!(
+                            user_id = config.owner_id,
+                            "Bootstrapped admin user from gateway config"
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(ref ss) = components.secrets_store {
+            gw = gw.with_secrets_store(Arc::clone(ss));
         }
         if let Some(ref jm) = container_job_manager {
             gw = gw.with_job_manager(Arc::clone(jm));
@@ -663,6 +711,7 @@ async fn async_main() -> anyhow::Result<()> {
             gw = gw.with_skill_catalog(Arc::clone(sc));
         }
         gw = gw.with_cost_guard(Arc::clone(&components.cost_guard));
+        gw = gw.with_oauth(config.oauth.clone(), gw_config.port);
         {
             let active_model = components.llm.model_name().to_string();
             let mut enabled = channel_names.clone();
@@ -692,24 +741,37 @@ async fn async_main() -> anyhow::Result<()> {
         }
 
         // Persist auto-generated auth token so it survives restarts.
-        // Write to the "default" settings namespace, which is the namespace
-        // Config::from_db() reads from — NOT the gateway channel's user_id.
+        // Gateway auth is env-only, so write to bootstrap `.env` rather than DB
+        // settings and opportunistically remove any legacy DB copy.
         if gw_config.auth_token.is_none() {
             let token_to_persist = gw.auth_token().to_string();
+            tokio::spawn(async move {
+                if let Err(e) = ironclaw::bootstrap::upsert_bootstrap_var(
+                    "GATEWAY_AUTH_TOKEN",
+                    &token_to_persist,
+                ) {
+                    tracing::warn!("Failed to persist auto-generated gateway auth token: {e}");
+                } else {
+                    tracing::debug!("Persisted auto-generated gateway auth token to bootstrap env");
+                }
+            });
+
             if let Some(ref db) = components.db {
                 let db = db.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = db
-                        .set_setting(
-                            "default",
-                            "channels.gateway_auth_token",
-                            &serde_json::Value::String(token_to_persist),
-                        )
+                    match db
+                        .delete_setting("default", "channels.gateway_auth_token")
                         .await
                     {
-                        tracing::warn!("Failed to persist auto-generated gateway auth token: {e}");
-                    } else {
-                        tracing::debug!("Persisted auto-generated gateway auth token to settings");
+                        Ok(true) => {
+                            tracing::debug!("Removed legacy gateway auth token from DB settings");
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to remove legacy gateway auth token from DB settings: {e}"
+                            );
+                        }
                     }
                 });
             }
@@ -767,6 +829,7 @@ async fn async_main() -> anyhow::Result<()> {
             sandbox_enabled: config.sandbox.enabled,
             docker_status,
             claude_code_enabled: config.claude_code.enabled,
+            acp_enabled: config.acp.enabled,
             routines_enabled: config.routines.enabled,
             skills_enabled: config.skills.enabled,
             channels: channel_names,
@@ -791,12 +854,7 @@ async fn async_main() -> anyhow::Result<()> {
         .await;
 
     // Default user ID for extension operations (single-user mode).
-    let ext_user_id = config
-        .channels
-        .gateway
-        .as_ref()
-        .map(|g| g.user_id.clone())
-        .unwrap_or_else(|| "default".to_string());
+    let ext_user_id = config.owner_id.clone();
 
     // Wire up channel runtime for hot-activation of WASM channels.
     if let Some(ref ext_mgr) = components.extension_manager

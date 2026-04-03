@@ -52,20 +52,29 @@ async fn start_test_server() -> (
         prompt_queue: None,
         scheduler: None,
         owner_id: "test-user".to_string(),
-        default_sender_id: "test-user".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
         skill_registry: None,
         skill_catalog: None,
         chat_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(30, 60),
-        oauth_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),
+        oauth_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(20, 60),
         webhook_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
         active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+        secrets_store: None,
+        db_auth: None,
+        oauth_providers: None,
+        oauth_state_store: None,
+        oauth_base_url: None,
+        oauth_allowed_domains: Vec::new(),
+        near_nonce_store: None,
+        near_rpc_url: None,
+        near_network: None,
+        oauth_sweep_shutdown: None,
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(
@@ -73,7 +82,7 @@ async fn start_test_server() -> (
         "test-user".to_string(),
     );
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let bound_addr = start_server(addr, state.clone(), auth)
+    let bound_addr = start_server(addr, state.clone(), auth.into())
         .await
         .expect("Failed to start test server");
 

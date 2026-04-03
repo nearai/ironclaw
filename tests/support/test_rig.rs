@@ -29,6 +29,11 @@ use ironclaw::llm::recording::{HttpExchange, HttpInterceptor, ReplayingHttpInter
 // TestRig
 // ---------------------------------------------------------------------------
 
+/// Substring unique to the static bootstrap greeting (GREETING.md).
+/// Used to transparently filter per-user bootstrap greetings from the
+/// response stream so tests don't need to account for them manually.
+const BOOTSTRAP_GREETING_MARKER: &str = "always-on chief of staff";
+
 /// A running test agent with methods to inject messages and inspect results.
 pub struct TestRig {
     /// The test channel for sending messages and reading captures.
@@ -59,6 +64,11 @@ pub struct TestRig {
     /// Temp directory guard -- keeps the libSQL database file alive.
     #[cfg(feature = "libsql")]
     _temp_dir: tempfile::TempDir,
+    /// How many bootstrap greetings to keep in `wait_for_responses`.
+    /// 0 for normal tests (filter all greetings), 1 for `.with_bootstrap()`
+    /// tests (keep the startup greeting, filter per-user duplicates).
+    #[cfg(feature = "libsql")]
+    bootstrap_greetings_to_keep: usize,
 }
 
 impl TestRig {
@@ -93,9 +103,47 @@ impl TestRig {
         &self.session_manager
     }
 
-    /// Wait until at least `n` responses have been captured, or `timeout` elapses.
+    /// Wait until at least `n` non-bootstrap responses have been captured, or
+    /// `timeout` elapses.
+    ///
+    /// Per-user bootstrap greetings (fired when `tenant_ctx` creates a workspace
+    /// for a non-owner user) are transparently filtered from the response stream.
+    /// For `.with_bootstrap()` tests, the startup greeting is kept (1 allowed)
+    /// while additional per-user greetings are still filtered.
     pub async fn wait_for_responses(&self, n: usize, timeout: Duration) -> Vec<OutgoingResponse> {
-        self.channel.wait_for_responses(n, timeout).await
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut interval = Duration::from_millis(50);
+        let max_interval = Duration::from_millis(500);
+        loop {
+            let filtered = self.filter_responses(self.channel.captured_responses_async().await);
+            if filtered.len() >= n {
+                return filtered;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return filtered;
+            }
+            tokio::time::sleep(interval).await;
+            interval = (interval * 2).min(max_interval);
+        }
+    }
+
+    /// Filter bootstrap greetings from the response stream.
+    ///
+    /// Keeps up to `bootstrap_greetings_to_keep` greeting responses (0 for
+    /// normal tests, 1 for `.with_bootstrap()` tests) and drops the rest.
+    fn filter_responses(&self, responses: Vec<OutgoingResponse>) -> Vec<OutgoingResponse> {
+        let mut greetings_kept = 0usize;
+        responses
+            .into_iter()
+            .filter(|r| {
+                if r.content.contains(BOOTSTRAP_GREETING_MARKER) {
+                    greetings_kept += 1;
+                    greetings_kept <= self.bootstrap_greetings_to_keep
+                } else {
+                    true
+                }
+            })
+            .collect()
     }
 
     /// Return the names of all `ToolStarted` events captured so far.
@@ -372,6 +420,7 @@ pub struct TestRigBuilder {
     extra_tools: Vec<Arc<dyn Tool>>,
     wasm_tools: Vec<WasmToolSpec>,
     keep_bootstrap: bool,
+    engine_v2: bool,
 }
 
 impl TestRigBuilder {
@@ -389,6 +438,7 @@ impl TestRigBuilder {
             extra_tools: Vec::new(),
             wasm_tools: Vec::new(),
             keep_bootstrap: false,
+            engine_v2: false,
         }
     }
 
@@ -475,6 +525,12 @@ impl TestRigBuilder {
         self
     }
 
+    /// Route messages through the engine v2 pipeline instead of the v1 agentic loop.
+    pub fn with_engine_v2(mut self) -> Self {
+        self.engine_v2 = true;
+        self
+    }
+
     /// Add pre-recorded HTTP exchanges for the `ReplayingHttpInterceptor`.
     ///
     /// When set, all `http` tool calls will return these responses in order
@@ -508,6 +564,7 @@ impl TestRigBuilder {
             extra_tools,
             wasm_tools,
             keep_bootstrap,
+            engine_v2,
         } = self;
 
         // 1. Create temp dir + libSQL database + run migrations.
@@ -588,8 +645,15 @@ impl TestRigBuilder {
             .await
             .expect("AppBuilder::build_all() failed in test rig");
 
-        // Clear bootstrap flag so tests don't get an unexpected proactive greeting
-        // (unless the test explicitly wants to test the bootstrap flow).
+        // Clear the *owner* workspace bootstrap flag so tests don't get an
+        // unexpected proactive greeting on startup (unless the test explicitly
+        // wants to test the bootstrap flow via `.with_bootstrap()`).
+        //
+        // Per-user bootstrap greetings (fired when `tenant_ctx` creates a
+        // workspace for a non-owner user like "test-user") are allowed to
+        // happen naturally. They are transparently filtered from the response
+        // stream by `wait_for_responses` so tests don't need to account for
+        // them in response counting.
         if !keep_bootstrap && let Some(ref ws) = components.workspace {
             ws.take_bootstrap_pending();
         }
@@ -598,6 +662,12 @@ impl TestRigBuilder {
         // Force test-rig agent flags to the requested deterministic values.
         components.config.agent.auto_approve_tools = auto_approve_tools.unwrap_or(true);
         components.config.agent.allow_local_tools = true;
+        components.config.agent.engine_v2 = engine_v2;
+
+        // Reset engine v2 global state so each test gets a clean engine instance.
+        if engine_v2 {
+            ironclaw::bridge::reset_engine_state().await;
+        }
 
         let scheduler_slot: ironclaw::tools::builtin::SchedulerSlot =
             Arc::new(tokio::sync::RwLock::new(None));
@@ -650,7 +720,7 @@ impl TestRigBuilder {
                     None,
                     components.tools.clone(),
                     components.safety.clone(),
-                    ironclaw::agent::SandboxReadiness::Available, // tests don't use real Docker
+                    ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
                 ));
                 components
                     .tools
@@ -759,7 +829,7 @@ impl TestRigBuilder {
             http_interceptor,
             transcription: None,
             document_extraction: None,
-            sandbox_readiness: ironclaw::agent::SandboxReadiness::Available, // tests don't use real Docker
+            sandbox_readiness: ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: std::sync::Arc::new(ironclaw::tenant::TenantRateRegistry::new(4, 3)),
@@ -835,6 +905,7 @@ impl TestRigBuilder {
             extension_manager: ext_mgr_ref,
             session_manager: session_manager_ref,
             _temp_dir: temp_dir,
+            bootstrap_greetings_to_keep: if keep_bootstrap { 1 } else { 0 },
         }
     }
 }
@@ -888,6 +959,25 @@ pub async fn run_recorded_trace(filename: &str) {
     let trace = LlmTrace::from_file(&path)
         .unwrap_or_else(|e| panic!("failed to load trace {filename}: {e}"));
     let rig = TestRigBuilder::new()
+        .with_trace(trace.clone())
+        .build()
+        .await;
+    rig.run_and_verify_trace(&trace, Duration::from_secs(30))
+        .await;
+    rig.shutdown();
+}
+
+/// Like [`run_recorded_trace`] but routes through the engine v2 pipeline.
+#[cfg(feature = "libsql")]
+pub async fn run_recorded_trace_v2(filename: &str) {
+    let path = format!(
+        "{}/tests/fixtures/llm_traces/recorded/{filename}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let trace = LlmTrace::from_file(&path)
+        .unwrap_or_else(|e| panic!("failed to load trace {filename}: {e}"));
+    let rig = TestRigBuilder::new()
+        .with_engine_v2()
         .with_trace(trace.clone())
         .build()
         .await;

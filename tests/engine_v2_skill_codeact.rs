@@ -2,7 +2,7 @@
 //!
 //! Exercises the complete path:
 //! 1. GitHub skill selected based on thread goal keywords
-//! 2. LLM returns Python code calling `http(...)` to fetch issues
+//! 2. LLM returns Python code calling `await http(...)` to fetch issues
 //! 3. Monty VM executes the code, dispatches `http` to mock EffectExecutor
 //! 4. Mock returns canned GitHub JSON response
 //! 5. `FINAL(result)` terminates the code step
@@ -184,7 +184,11 @@ impl Store for TestStore {
     async fn load_thread(&self, id: ThreadId) -> Result<Option<Thread>, EngineError> {
         Ok(self.threads.read().await.get(&id).cloned())
     }
-    async fn list_threads(&self, pid: ProjectId) -> Result<Vec<Thread>, EngineError> {
+    async fn list_threads(
+        &self,
+        pid: ProjectId,
+        _user_id: &str,
+    ) -> Result<Vec<Thread>, EngineError> {
         Ok(self
             .threads
             .read()
@@ -247,7 +251,11 @@ impl Store for TestStore {
     async fn load_memory_doc(&self, id: DocId) -> Result<Option<MemoryDoc>, EngineError> {
         Ok(self.docs.read().await.iter().find(|d| d.id == id).cloned())
     }
-    async fn list_memory_docs(&self, pid: ProjectId) -> Result<Vec<MemoryDoc>, EngineError> {
+    async fn list_memory_docs(
+        &self,
+        pid: ProjectId,
+        _user_id: &str,
+    ) -> Result<Vec<MemoryDoc>, EngineError> {
         Ok(self
             .docs
             .read()
@@ -282,7 +290,11 @@ impl Store for TestStore {
             .find(|m| m.id == id)
             .cloned())
     }
-    async fn list_missions(&self, pid: ProjectId) -> Result<Vec<Mission>, EngineError> {
+    async fn list_missions(
+        &self,
+        pid: ProjectId,
+        _user_id: &str,
+    ) -> Result<Vec<Mission>, EngineError> {
         Ok(self
             .missions
             .read()
@@ -327,7 +339,7 @@ fn make_github_skill_doc(project_id: ProjectId) -> MemoryDoc {
         code_snippets: vec![CodeSnippet {
             name: "list_github_issues".into(),
             code: r#"def list_github_issues(owner, repo, state="open"):
-    result = http(method="GET", url=f"https://api.github.com/repos/{owner}/{repo}/issues?state={state}&per_page=10")
+    result = await http(method="GET", url=f"https://api.github.com/repos/{owner}/{repo}/issues?state={state}&per_page=10")
     return result"#
                 .into(),
             description: "List issues for a GitHub repository".into(),
@@ -344,8 +356,8 @@ Use the `http` tool to call the GitHub REST API. Credentials are injected automa
 
 ## Patterns
 
-- List issues: `http(method=\"GET\", url=\"https://api.github.com/repos/{owner}/{repo}/issues?state=open\")`
-- Create issue: `http(method=\"POST\", url=\"...issues\", body={\"title\": \"...\"})`
+- List issues: `await http(method=\"GET\", url=\"https://api.github.com/repos/{owner}/{repo}/issues?state=open\")`
+- Create issue: `await http(method=\"POST\", url=\"...issues\", body={\"title\": \"...\"})`
 
 ## Rules
 - Always use HTTPS
@@ -353,7 +365,7 @@ Use the `http` tool to call the GitHub REST API. Credentials are injected automa
 - Default to state=open for issue queries
 ";
 
-    let mut doc = MemoryDoc::new(project_id, DocType::Skill, "skill:github", prompt);
+    let mut doc = MemoryDoc::new(project_id, "system", DocType::Skill, "skill:github", prompt);
     doc.metadata = serde_json::to_value(&meta).unwrap();
     doc
 }
@@ -377,9 +389,9 @@ async fn skill_codeact_e2e_github_issues() {
     // 1. Build GitHub skill doc (stored in TestStore for Python orchestrator to find)
     let skill_doc = make_github_skill_doc(project_id);
 
-    // 2. Script the LLM: return Python code that calls http() then FINAL()
+    // 2. Script the LLM: return Python code that awaits http() then FINAL()
     let python_code = r#"
-result = http(method="GET", url="https://api.github.com/repos/test-org/test-repo/issues?state=open&per_page=5")
+result = await http(method="GET", url="https://api.github.com/repos/test-org/test-repo/issues?state=open&per_page=5")
 FINAL(str(result))
 "#;
     let llm = ScriptedLlm::new(vec![LlmOutput {
@@ -469,16 +481,15 @@ FINAL(str(result))
         "http should be called with GitHub issues URL, got: {url}"
     );
 
-    // 9. Verify skill content was injected into thread messages
-    // (Python orchestrator appends skill content via __add_message__("system_append", ...))
+    // 9. Verify skill content was injected into the internal working transcript.
     let thread = store.load_thread(tid).await.unwrap().unwrap();
     let has_skill_content = thread
-        .messages
+        .internal_messages
         .iter()
         .any(|m| m.content.contains("Active Skills") || m.content.contains("GitHub API Skill"));
     assert!(
         has_skill_content,
-        "thread messages should contain injected skill content"
+        "thread internal_messages should contain injected skill content"
     );
 }
 

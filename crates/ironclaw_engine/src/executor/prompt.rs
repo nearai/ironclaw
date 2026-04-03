@@ -106,6 +106,34 @@ pub async fn build_codeact_system_prompt(
     project_id: ProjectId,
     platform: Option<&PlatformInfo>,
 ) -> String {
+    let overlay = if let Some(store) = store {
+        load_prompt_overlay(store, project_id).await
+    } else {
+        None
+    };
+    build_codeact_system_prompt_inner(actions, overlay.as_deref(), platform)
+}
+
+/// Build the system prompt using pre-fetched memory docs.
+///
+/// When the caller already has the `list_memory_docs` result (e.g. because
+/// `load_orchestrator` fetched it), pass the docs here to avoid a duplicate
+/// Store query.
+pub fn build_codeact_system_prompt_with_docs(
+    actions: &[ActionDef],
+    system_docs: &[crate::types::memory::MemoryDoc],
+    platform: Option<&PlatformInfo>,
+) -> String {
+    let overlay = extract_prompt_overlay(system_docs);
+    build_codeact_system_prompt_inner(actions, overlay.as_deref(), platform)
+}
+
+/// Shared prompt builder used by both the async and pre-fetched-docs variants.
+fn build_codeact_system_prompt_inner(
+    actions: &[ActionDef],
+    overlay: Option<&str>,
+    platform: Option<&PlatformInfo>,
+) -> String {
     let mut prompt = String::from(CODEACT_PREAMBLE);
 
     // Inject platform identity and runtime metadata
@@ -114,11 +142,9 @@ pub async fn build_codeact_system_prompt(
     }
 
     // Append runtime prompt overlay if available
-    if let Some(store) = store
-        && let Some(overlay) = load_prompt_overlay(store, project_id).await
-    {
+    if let Some(overlay) = overlay {
         prompt.push_str("\n\n## Learned Rules (from self-improvement)\n\n");
-        prompt.push_str(&overlay);
+        prompt.push_str(overlay);
     }
 
     // Add tool documentation
@@ -143,7 +169,12 @@ pub async fn build_codeact_system_prompt(
 
 /// Load the prompt overlay from the Store, if one exists for this project.
 async fn load_prompt_overlay(store: &Arc<dyn Store>, project_id: ProjectId) -> Option<String> {
-    let docs = store.list_memory_docs(project_id).await.ok()?;
+    let docs = store.list_shared_memory_docs(project_id).await.ok()?;
+    extract_prompt_overlay(&docs)
+}
+
+/// Extract the prompt overlay from a pre-fetched list of system memory docs.
+pub fn extract_prompt_overlay(docs: &[crate::types::memory::MemoryDoc]) -> Option<String> {
     let overlay = docs.iter().find(|d| {
         d.title == PREAMBLE_OVERLAY_TITLE && d.tags.contains(&PROMPT_OVERLAY_TAG.to_string())
     })?;
@@ -163,6 +194,7 @@ async fn load_prompt_overlay(store: &Arc<dyn Store>, project_id: ProjectId) -> O
 mod tests {
     use super::*;
     use crate::types::memory::{DocId, DocType, MemoryDoc};
+    use crate::types::shared_owner_id;
 
     #[tokio::test]
     async fn prompt_without_store_uses_compiled_preamble() {
@@ -179,6 +211,7 @@ mod tests {
         let overlay = MemoryDoc {
             id: DocId::new(),
             project_id,
+            user_id: shared_owner_id().into(),
             doc_type: DocType::Note,
             title: PREAMBLE_OVERLAY_TITLE.into(),
             content: "9. Never call web_fetch — use http() instead.".into(),
@@ -206,6 +239,7 @@ mod tests {
         let overlay = MemoryDoc {
             id: DocId::new(),
             project_id,
+            user_id: shared_owner_id().into(),
             doc_type: DocType::Note,
             title: PREAMBLE_OVERLAY_TITLE.into(),
             content: huge_content,
@@ -232,6 +266,7 @@ mod tests {
         let overlay = MemoryDoc {
             id: DocId::new(),
             project_id: other_project,
+            user_id: shared_owner_id().into(),
             doc_type: DocType::Note,
             title: PREAMBLE_OVERLAY_TITLE.into(),
             content: "Should not appear".into(),

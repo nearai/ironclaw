@@ -18,7 +18,8 @@ See `src/db/CLAUDE.md` for full schema, dialect differences, and libSQL limitati
 4. Implement in `src/db/libsql/<module>.rs` (use `self.connect().await?` per operation)
 5. Add migration if needed:
    - PostgreSQL: new `migrations/VN__description.sql`
-   - libSQL: add `CREATE TABLE IF NOT EXISTS` to `libsql_migrations.rs`
+   - libSQL: add entry to `INCREMENTAL_MIGRATIONS` in `libsql_migrations.rs`
+   - **Version numbering**: always number after the highest version on `staging`/`main` — those migrations may already be in production. Check with `git ls-tree origin/staging migrations/` and staging's `INCREMENTAL_MIGRATIONS`. Never reuse or insert before an existing version.
 6. Test feature isolation:
    ```bash
    cargo check                                          # postgres (default)
@@ -57,6 +58,10 @@ Multi-step operations (INSERT+INSERT, UPDATE+DELETE, read-modify-write) MUST be 
 ## libSQL Connection Model
 
 `LibSqlBackend::connect()` creates a fresh connection per operation with `PRAGMA busy_timeout = 5000`. This is intentional -- no pool exists. Never hold connections open across `await` points. Satellite stores (`LibSqlSecretsStore`, `LibSqlWasmToolStore`) receive `Arc<LibSqlDatabase>` via `shared_db()` and call `.connect()` themselves -- never pass a live `Connection`.
+
+## Never Delete LLM Output Data
+
+All LLM execution data — thread messages, steps, events, tool call parameters and results — must **never** be deleted from the database. This is the most valuable data in the system. No `DELETE` statements, no `DROP`, no truncation of LLM-generated content. In-memory caches (HashMaps in `HybridStore`) may evict entries for memory pressure, but database rows are permanent. Load methods must fall back to the database on a cache miss.
 
 ## Fix the Pattern, Not the Instance
 

@@ -48,9 +48,7 @@ src/
 ├── capability/           # Capability management
 │   ├── registry.rs       # CapabilityRegistry — register/get/list capabilities
 │   ├── lease.rs          # LeaseManager — grant/check/consume/revoke/expire leases
-│   ├── policy.rs         # PolicyEngine — deterministic effect-level allow/deny/approve + provenance taint
-│   ├── skill_selector.rs # SkillSelector — MemoryDoc→LoadedSkill bridge, deterministic selection
-│   └── skill_tracker.rs  # SkillTracker — confidence tracking, versioned updates, rollback
+│   └── policy.rs         # PolicyEngine — deterministic effect-level allow/deny/approve + provenance taint
 ├── runtime/              # Thread lifecycle management
 │   ├── manager.rs        # ThreadManager — spawn, stop, inject messages, join threads
 │   ├── conversation.rs   # ConversationManager — routes UI messages to threads
@@ -64,11 +62,11 @@ src/
 │   ├── context.rs        # Context builder (messages + actions from leases + memory docs)
 │   ├── compaction.rs     # Context compaction when approaching model context limit
 │   ├── prompt.rs         # System prompt construction (CodeAct preamble/postamble)
-│   ├── intent.rs         # Tool intent nudge detection
 │   └── trace.rs          # Execution trace recording and retrospective analysis
 ├── memory/               # Memory document system
 │   ├── store.rs          # MemoryStore — project-scoped doc CRUD
-│   └── retrieval.rs      # RetrievalEngine — keyword-based context retrieval from project docs
+│   ├── retrieval.rs      # RetrievalEngine — keyword-based context retrieval from project docs
+│   └── skill_tracker.rs  # SkillTracker — confidence tracking, versioned updates, rollback
 └── reliability.rs        # ReliabilityTracker — per-action success rate and latency via EMA
 ```
 
@@ -92,6 +90,10 @@ Three event-driven missions fire automatically after thread completion:
 3. **Conversation insights** (`conversation-insights`) — fires every 5 completed threads in a project. Extracts user preferences, domain knowledge, and workflow patterns.
 
 Created by `MissionManager::ensure_learning_missions()` at project bootstrap.
+
+## Data Retention: Never Delete LLM Output
+
+Thread messages, steps, and events are **never deleted** from the database. This data (context fed to the model, reasoning, tool calls, results) is the most valuable information in the system. The `Store` implementation uses in-memory HashMaps as a cache backed by the database (via Workspace). "Cleanup" of terminal threads means evicting from in-memory caches to bound RAM — the database rows always stay. `load_thread()`, `load_steps()`, and `load_events()` must fall back to the database on a cache miss.
 
 ## External Trait Boundaries
 

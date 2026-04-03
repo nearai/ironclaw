@@ -439,19 +439,13 @@ class TestV2EngineAuthMainFlow:
             (t.get("response") or "") for t in r.json().get("turns", [])
         ).lower()
 
-        token_received = test_token in tokens_data.get("tokens", [])
-        response_has_data = (
-            "stored" in all_responses
-            or "retrying" in all_responses
-            or "improve" in all_responses
-            or "onboarding" in all_responses
-            or "http" in all_responses
-            or "tool returned" in all_responses
-        )
-        assert token_received or response_has_data, (
-            f"Token should be received by mock API or response should show retry.\n"
+        # The token MUST be received by the mock API — this proves the
+        # credential was stored and injected into the retry request.
+        assert test_token in tokens_data.get("tokens", []), (
+            f"Token MUST be received by mock API after auth flow.\n"
+            f"Expected: {test_token}\n"
             f"Mock API tokens: {tokens_data.get('tokens', [])}\n"
-            f"Responses: {all_responses[:800]}"
+            f"Responses: {all_responses[:500]}"
         )
 
     async def test_credential_persists_across_threads(self, v2_server, mock_api):
@@ -489,20 +483,16 @@ class TestV2EngineAuthMainFlow:
             f"Responses: {all_responses[:500]}"
         )
 
-        # The credential is stored — verify either the mock API received it
-        # or the LLM didn't attempt a tool call (answered from context).
-        # The key assertion is above: no auth prompt was shown.
+        # Verify the mock API received the token (credential injection worked)
         async with httpx.AsyncClient() as client:
             tokens_r = await client.get(f"{mock_api_url}/__mock/received-tokens")
             tokens_data = tokens_r.json()
 
-        if tokens_data.get("tokens"):
-            # Token was injected and sent to the mock API — full success
-            assert True
-        else:
-            # LLM may have answered without making a tool call (e.g., summarized
-            # from context). The important thing is: no auth prompt was shown.
-            pass
+        assert len(tokens_data.get("tokens", [])) > 0, (
+            f"Credential should be injected into follow-up request.\n"
+            f"No tokens received by mock API.\n"
+            f"Responses: {all_responses[:500]}"
+        )
 
 
 class TestV2EngineAuthEdgeCases:

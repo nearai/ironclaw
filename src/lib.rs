@@ -53,6 +53,7 @@ pub mod error;
 pub mod estimation;
 pub mod evaluation;
 pub mod extensions;
+pub mod gate;
 pub mod history;
 pub mod hooks;
 #[cfg(feature = "import")]

@@ -17,7 +17,9 @@
 pub mod auth;
 pub(crate) mod handlers;
 pub mod log_layer;
+pub mod oauth;
 pub mod openai_compat;
+pub mod responses_api;
 pub mod server;
 pub mod sse;
 pub mod types;
@@ -55,7 +57,7 @@ use ironclaw_skills::registry::SkillRegistry;
 
 use self::log_layer::{LogBroadcaster, LogLevelHandle};
 
-use self::auth::MultiAuthState;
+use self::auth::{CombinedAuthState, DbAuthenticator, MultiAuthState};
 use self::server::GatewayState;
 use self::sse::SseManager;
 use self::types::AppEvent;
@@ -64,8 +66,8 @@ use self::types::AppEvent;
 pub struct GatewayChannel {
     config: GatewayConfig,
     state: Arc<GatewayState>,
-    /// Multi-user auth state (replaces bare auth_token).
-    auth: MultiAuthState,
+    /// Combined auth state: env-var tokens + optional DB-backed tokens.
+    auth: CombinedAuthState,
 }
 
 impl GatewayChannel {
@@ -73,7 +75,7 @@ impl GatewayChannel {
     ///
     /// If no auth token is configured, generates a random one and prints it.
     /// Builds a single-user `MultiAuthState` from the config.
-    pub fn new(config: GatewayConfig) -> Self {
+    pub fn new(config: GatewayConfig, owner_id: String) -> Self {
         let auth_token = config.auth_token.clone().unwrap_or_else(|| {
             use rand::RngCore;
             use rand::rngs::OsRng;
@@ -82,64 +84,30 @@ impl GatewayChannel {
             bytes.iter().map(|b| format!("{b:02x}")).collect()
         });
 
-        let auth = MultiAuthState::single(auth_token, config.user_id.clone());
-
-        let state = Arc::new(GatewayState {
-            msg_tx: tokio::sync::RwLock::new(None),
-            sse: Arc::new(SseManager::new()),
-            workspace: None,
-            workspace_pool: None,
-            session_manager: None,
-            log_broadcaster: None,
-            log_level_handle: None,
-            extension_manager: None,
-            tool_registry: None,
-            store: None,
-            job_manager: None,
-            prompt_queue: None,
-            scheduler: None,
-            owner_id: config.user_id.clone(),
-            default_sender_id: config.user_id.clone(),
-            shutdown_tx: tokio::sync::RwLock::new(None),
-            ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
-            llm_provider: None,
-            skill_registry: None,
-            skill_catalog: None,
-            chat_rate_limiter: server::PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: server::RateLimiter::new(10, 60),
-            webhook_rate_limiter: server::RateLimiter::new(10, 60),
-            registry_entries: Vec::new(),
-            cost_guard: None,
-            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
-            startup_time: std::time::Instant::now(),
-            active_config: server::ActiveConfigSnapshot::default(),
+        let oidc_state = config.oidc.as_ref().and_then(|oidc_config| {
+            match auth::OidcState::from_config(oidc_config) {
+                Ok(state) => {
+                    tracing::info!(
+                        header = %oidc_config.header,
+                        jwks_url = %oidc_config.jwks_url,
+                        "OIDC JWT authentication enabled"
+                    );
+                    Some(state)
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to initialize OIDC auth — falling back to token-only auth");
+                    None
+                }
+            }
         });
 
-        Self {
-            config,
-            state,
-            auth,
-        }
-    }
-
-    /// Rebind the single-user auth identity to the durable owner scope while
-    /// preserving the configured gateway sender/routing identity.
-    pub fn with_owner_scope(mut self, owner_id: impl Into<String>) -> Self {
-        let owner_id = owner_id.into();
-        let single_user_token = if self.config.user_tokens.is_none() {
-            self.auth.first_token().map(ToOwned::to_owned)
-        } else {
-            None
+        let auth = CombinedAuthState {
+            env_auth: MultiAuthState::single(auth_token, owner_id.clone()),
+            db_auth: None,
+            oidc: oidc_state,
+            oidc_allowed_domains: Vec::new(),
         };
-        if let Some(token) = single_user_token {
-            self.auth = MultiAuthState::single(token, owner_id.clone());
-        }
-        self.rebuild_state(|s| s.owner_id = owner_id);
-        self
-    }
 
-    /// Create a gateway channel with a pre-built multi-user auth state.
-    pub fn new_multi_auth(config: GatewayConfig, auth: MultiAuthState) -> Self {
         let state = Arc::new(GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
             sse: Arc::new(SseManager::new()),
@@ -154,21 +122,30 @@ impl GatewayChannel {
             job_manager: None,
             prompt_queue: None,
             scheduler: None,
-            owner_id: config.user_id.clone(),
-            default_sender_id: config.user_id.clone(),
+            owner_id,
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
             llm_provider: None,
             skill_registry: None,
             skill_catalog: None,
             chat_rate_limiter: server::PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: server::RateLimiter::new(10, 60),
+            oauth_rate_limiter: server::PerUserRateLimiter::new(20, 60),
+            webhook_rate_limiter: server::RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            webhook_rate_limiter: server::RateLimiter::new(10, 60),
             active_config: server::ActiveConfigSnapshot::default(),
+            secrets_store: None,
+            db_auth: None,
+            oauth_providers: None,
+            oauth_state_store: None,
+            oauth_base_url: None,
+            oauth_allowed_domains: Vec::new(),
+            near_nonce_store: None,
+            near_rpc_url: None,
+            near_network: None,
+            oauth_sweep_shutdown: None,
         });
 
         Self {
@@ -196,20 +173,29 @@ impl GatewayChannel {
             prompt_queue: self.state.prompt_queue.clone(),
             scheduler: self.state.scheduler.clone(),
             owner_id: self.state.owner_id.clone(),
-            default_sender_id: self.state.default_sender_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: self.state.ws_tracker.clone(),
             llm_provider: self.state.llm_provider.clone(),
             skill_registry: self.state.skill_registry.clone(),
             skill_catalog: self.state.skill_catalog.clone(),
             chat_rate_limiter: server::PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: server::RateLimiter::new(10, 60),
+            oauth_rate_limiter: server::PerUserRateLimiter::new(20, 60),
             webhook_rate_limiter: server::RateLimiter::new(10, 60),
             registry_entries: self.state.registry_entries.clone(),
             cost_guard: self.state.cost_guard.clone(),
             routine_engine: Arc::clone(&self.state.routine_engine),
             startup_time: self.state.startup_time,
             active_config: self.state.active_config.clone(),
+            secrets_store: self.state.secrets_store.clone(),
+            db_auth: self.state.db_auth.clone(),
+            oauth_providers: self.state.oauth_providers.clone(),
+            oauth_state_store: self.state.oauth_state_store.clone(),
+            oauth_base_url: self.state.oauth_base_url.clone(),
+            oauth_allowed_domains: self.state.oauth_allowed_domains.clone(),
+            near_nonce_store: self.state.near_nonce_store.clone(),
+            near_rpc_url: self.state.near_rpc_url.clone(),
+            near_network: self.state.near_network.clone(),
+            oauth_sweep_shutdown: None, // sweep tasks are managed by with_oauth
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
@@ -254,6 +240,17 @@ impl GatewayChannel {
     /// Inject the database store for sandbox job persistence.
     pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
         self.rebuild_state(|s| s.store = Some(store));
+        self
+    }
+
+    /// Enable DB-backed token authentication alongside env-var tokens.
+    pub fn with_db_auth(mut self, store: Arc<dyn Database>) -> Self {
+        let authenticator = DbAuthenticator::new(store);
+        // Share the same DbAuthenticator (and its cache) between the auth
+        // middleware and GatewayState so handlers can invalidate the cache
+        // on security-critical actions (suspend, role change, token revoke).
+        self.rebuild_state(|s| s.db_auth = Some(Arc::new(authenticator.clone())));
+        self.auth.db_auth = Some(authenticator);
         self
     }
 
@@ -327,6 +324,146 @@ impl GatewayChannel {
         self
     }
 
+    /// Inject the secrets store for admin secret provisioning.
+    pub fn with_secrets_store(
+        mut self,
+        store: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
+    ) -> Self {
+        self.rebuild_state(|s| s.secrets_store = Some(store));
+        self
+    }
+
+    /// Enable OAuth social login with the given configuration.
+    ///
+    /// Creates provider instances for each configured provider, initializes
+    /// the in-memory state store, and resolves the callback base URL.
+    pub fn with_oauth(mut self, config: crate::config::OAuthConfig, gateway_port: u16) -> Self {
+        if !config.enabled {
+            return self;
+        }
+
+        use crate::channels::web::oauth::providers::{
+            AppleProvider, GitHubProvider, GoogleProvider, OAuthProvider,
+        };
+        use crate::channels::web::oauth::state_store::OAuthStateStore;
+        use std::collections::HashMap;
+
+        let mut providers: HashMap<String, Arc<dyn OAuthProvider>> = HashMap::new();
+
+        if let Some(ref google) = config.google {
+            providers.insert(
+                "google".to_string(),
+                Arc::new(GoogleProvider::new(
+                    google.client_id.clone(),
+                    google.client_secret.clone(),
+                    google.allowed_hd.clone(),
+                )),
+            );
+        }
+
+        if let Some(ref github) = config.github {
+            providers.insert(
+                "github".to_string(),
+                Arc::new(GitHubProvider::new(
+                    github.client_id.clone(),
+                    github.client_secret.clone(),
+                )),
+            );
+        }
+
+        if let Some(ref apple) = config.apple {
+            providers.insert(
+                "apple".to_string(),
+                Arc::new(AppleProvider::new(
+                    apple.client_id.clone(),
+                    apple.team_id.clone(),
+                    apple.key_id.clone(),
+                    apple.private_key_pem.clone(),
+                )),
+            );
+        }
+
+        // Apply domain restrictions to OIDC regardless of whether OAuth providers
+        // are configured — OIDC runs via reverse-proxy header, not our providers.
+        let allowed_domains = config.allowed_domains;
+        if !allowed_domains.is_empty() {
+            self.auth.oidc_allowed_domains = allowed_domains.clone();
+        }
+
+        // Shutdown signal for background sweep tasks. When the sender is dropped
+        // (e.g., gateway rebuild or process shutdown), the sweep loops exit.
+        let (shutdown_tx, _) = tokio::sync::watch::channel(());
+
+        // Set up NEAR wallet auth if configured (independent of OAuth providers).
+        let near_nonce_store = config.near.as_ref().map(|_| {
+            let store = Arc::new(crate::channels::web::oauth::near::NearNonceStore::new());
+            let sweep = Arc::clone(&store);
+            let mut shutdown_rx = shutdown_tx.subscribe();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => sweep.sweep_expired().await,
+                        _ = shutdown_rx.changed() => break,
+                    }
+                }
+            });
+            store
+        });
+        let near_rpc_url = config.near.as_ref().map(|n| n.rpc_url.clone());
+        let near_network = config.near.as_ref().map(|n| n.network.clone());
+
+        let has_near = near_nonce_store.is_some();
+
+        if providers.is_empty() && !has_near {
+            // No OAuth providers and no NEAR — still apply domain restrictions
+            // to OIDC if configured.
+            self.rebuild_state(|s| {
+                s.oauth_allowed_domains = allowed_domains;
+            });
+            if !self.auth.oidc_allowed_domains.is_empty() {
+                return self;
+            }
+            tracing::warn!("OAuth enabled but no providers configured");
+            return self;
+        }
+
+        let base_url = config
+            .base_url
+            .unwrap_or_else(|| format!("http://localhost:{gateway_port}"));
+
+        let provider_names: Vec<&str> = providers.keys().map(|s| s.as_str()).collect();
+        tracing::info!(?provider_names, "OAuth social login enabled");
+
+        let providers = Arc::new(providers);
+        let state_store = Arc::new(OAuthStateStore::new());
+
+        // Spawn a background task to sweep expired OAuth states.
+        let sweep_store = Arc::clone(&state_store);
+        let mut shutdown_rx2 = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => sweep_store.sweep_expired().await,
+                    _ = shutdown_rx2.changed() => break,
+                }
+            }
+        });
+
+        self.rebuild_state(|s| {
+            s.oauth_providers = Some(providers);
+            s.oauth_state_store = Some(state_store);
+            s.oauth_base_url = Some(base_url);
+            s.oauth_allowed_domains = allowed_domains;
+            s.near_nonce_store = near_nonce_store;
+            s.near_rpc_url = near_rpc_url;
+            s.near_network = near_network;
+            s.oauth_sweep_shutdown = Some(shutdown_tx);
+        });
+        self
+    }
+
     /// Inject the per-user workspace pool for multi-user mode.
     pub fn with_workspace_pool(mut self, pool: Arc<server::WorkspacePool>) -> Self {
         self.rebuild_state(|s| s.workspace_pool = Some(pool));
@@ -335,7 +472,7 @@ impl GatewayChannel {
 
     /// Get the first auth token (for printing to console on startup).
     pub fn auth_token(&self) -> &str {
-        self.auth.first_token().unwrap_or("")
+        self.auth.env_auth.first_token().unwrap_or("")
     }
 
     /// Get a reference to the shared gateway state (for the agent to push SSE events).
@@ -377,10 +514,10 @@ impl Channel for GatewayChannel {
         let thread_id = match &msg.thread_id {
             Some(tid) => tid.clone(),
             None => {
-                tracing::warn!(
-                    "Gateway respond with no thread_id — skipping (clients would drop it)"
-                );
-                return Ok(());
+                return Err(ChannelError::MissingRoutingTarget {
+                    name: "gateway".to_string(),
+                    reason: "respond() requires a thread_id on the incoming message".to_string(),
+                });
             }
         };
 
@@ -472,6 +609,7 @@ impl Channel for GatewayChannel {
                 instructions,
                 auth_url,
                 setup_url,
+                thread_id: None,
             },
             StatusUpdate::AuthCompleted {
                 extension_name,
@@ -481,6 +619,7 @@ impl Channel for GatewayChannel {
                 extension_name,
                 success,
                 message,
+                thread_id: None,
             },
             StatusUpdate::ImageGenerated { data_url, path } => AppEvent::ImageGenerated {
                 data_url,
@@ -538,17 +677,22 @@ impl Channel for GatewayChannel {
         user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        let event = match response.thread_id {
-            Some(thread_id) => AppEvent::Response {
+        let thread_id = match response.thread_id {
+            Some(tid) => tid,
+            None => {
+                return Err(ChannelError::MissingRoutingTarget {
+                    name: "gateway".to_string(),
+                    reason: "broadcast() requires a thread_id on the response".to_string(),
+                });
+            }
+        };
+        self.state.sse.broadcast_for_user(
+            user_id,
+            AppEvent::Response {
                 content: response.content,
                 thread_id,
             },
-            None => AppEvent::Status {
-                message: response.content,
-                thread_id: None,
-            },
-        };
-        self.state.sse.broadcast_for_user(user_id, event);
+        );
         Ok(())
     }
 

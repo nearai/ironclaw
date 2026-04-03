@@ -565,7 +565,16 @@ impl Tool for HttpTool {
             None
         };
 
-        // Credential injection from shared registry.
+        // Leak detection on outbound request BEFORE credential injection.
+        // Credentials are injected by the system, not the LLM — they are not
+        // exfiltration attempts. Scanning after injection would false-positive
+        // on the injected Authorization header values.
+        let detector = LeakDetector::new();
+        detector
+            .scan_http_request(parsed_url.as_str(), &headers_vec, body_bytes.as_deref())
+            .map_err(|e| ToolError::NotAuthorized(format!("{}", e)))?;
+
+        // Credential injection from shared registry (after leak check).
         // If a credential is registered but not yet configured, we proceed
         // without auth and check the response status — many endpoints (e.g.
         // GitHub public repo search) work without authentication.  Only if
@@ -625,12 +634,6 @@ impl Tool for HttpTool {
                 }
             }
         }
-
-        // Leak detection on outbound request (url/headers/body)
-        let detector = LeakDetector::new();
-        detector
-            .scan_http_request(parsed_url.as_str(), &headers_vec, body_bytes.as_deref())
-            .map_err(|e| ToolError::NotAuthorized(format!("{}", e)))?;
 
         // Build the interceptor request descriptor for recording/replay
         let intercept_req = crate::llm::recording::HttpExchangeRequest {
@@ -777,21 +780,21 @@ impl Tool for HttpTool {
 
         // If the server returned 401/403 and we had a missing credential,
         // surface the authentication_required error so the auth flow triggers.
-        if matches!(status, 401 | 403) {
-            if let Some(ref cred_name) = missing_credential {
-                return Err(ToolError::ExecutionFailed(
-                    serde_json::json!({
-                        "error": "authentication_required",
-                        "credential_name": cred_name,
-                        "message": format!(
-                            "Credential '{}' is not configured. \
-                             The server returned HTTP {}. Set up credentials to access this endpoint.",
-                            cred_name, status
-                        )
-                    })
-                    .to_string(),
-                ));
-            }
+        if matches!(status, 401 | 403)
+            && let Some(ref cred_name) = missing_credential
+        {
+            return Err(ToolError::ExecutionFailed(
+                serde_json::json!({
+                    "error": "authentication_required",
+                    "credential_name": cred_name,
+                    "message": format!(
+                        "Credential '{}' is not configured. \
+                         The server returned HTTP {}. Set up credentials to access this endpoint.",
+                        cred_name, status
+                    )
+                })
+                .to_string(),
+            ));
         }
 
         // Strip sensitive response headers before they reach the LLM context.

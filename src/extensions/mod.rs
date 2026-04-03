@@ -2,7 +2,8 @@
 //! and activation of channels, tools, and MCP servers.
 //!
 //! Extensions are the user-facing abstraction that unifies three runtime kinds:
-//! - **Channels** (Telegram, Slack, Discord) — messaging integrations (WASM)
+//! - **Channels** (Telegram, Slack, Discord) — messaging platform connections
+//!   and conversation transports (WASM)
 //! - **Tools** — sandboxed capabilities (WASM)
 //! - **MCP servers** — external API integrations via Model Context Protocol
 //!
@@ -18,6 +19,7 @@
 
 pub mod discovery;
 pub mod manager;
+pub mod naming;
 pub mod registry;
 
 pub use discovery::OnlineDiscovery;
@@ -39,6 +41,8 @@ pub enum ExtensionKind {
     WasmChannel,
     /// External channel via channel-relay service (Slack, etc.).
     ChannelRelay,
+    /// ACP-compliant coding agent (Goose, Codex, Gemini CLI, etc.).
+    AcpAgent,
 }
 
 impl std::fmt::Display for ExtensionKind {
@@ -48,6 +52,7 @@ impl std::fmt::Display for ExtensionKind {
             ExtensionKind::WasmTool => write!(f, "wasm_tool"),
             ExtensionKind::WasmChannel => write!(f, "wasm_channel"),
             ExtensionKind::ChannelRelay => write!(f, "channel_relay"),
+            ExtensionKind::AcpAgent => write!(f, "acp_agent"),
         }
     }
 }

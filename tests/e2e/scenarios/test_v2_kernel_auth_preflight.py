@@ -215,18 +215,22 @@ async def v2_server(ironclaw_binary, mock_llm_server, mock_api):
     }
     _forward_coverage_env(env)
 
+    # Write stderr to a temp file so we can read it on test failure
+    stderr_log = os.path.join(_HOME_TMPDIR.name, "server_stderr.log")
+    stderr_fh = open(stderr_log, "w")
+
     proc = await asyncio.create_subprocess_exec(
         ironclaw_binary, "--no-onboard",
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        stderr=stderr_fh,
         env=env,
     )
 
     base_url = f"http://127.0.0.1:{gateway_port}"
     try:
         await wait_for_ready(f"{base_url}/api/health", timeout=60)
-        yield base_url
+        yield {"url": base_url, "stderr_log": stderr_log}
     except TimeoutError:
         if proc.returncode is None:
             await _stop_process(proc, timeout=2)
@@ -295,13 +299,14 @@ class TestPreflightAuthGate:
     """Verify that the pre-flight auth gate blocks BEFORE HTTP requests are made."""
 
     async def test_preflight_blocks_before_http_request(self, v2_server, mock_api):
-        """Auth prompt appears when credentials are missing.
+        """Pre-flight gate blocks the HTTP request BEFORE it reaches the server.
 
-        Verifies the auth flow triggers (either via pre-flight gate or the
-        existing reactive 401 fallback). When the pre-flight gate works,
-        the mock API receives zero requests; with the reactive fallback,
-        it receives one (the 401). Both paths result in an auth prompt.
+        This is the core assertion for the kernel auth rework: when credentials
+        are missing, the pre-flight gate returns NeedAuthentication without
+        executing the tool. The mock API must receive ZERO requests.
         """
+        base_url = v2_server["url"]
+        stderr_log = v2_server["stderr_log"]
         mock_api_url = mock_api["url"]
 
         # Reset mock API state
@@ -309,13 +314,13 @@ class TestPreflightAuthGate:
             await client.post(f"{mock_api_url}/__mock/reset")
 
         # Create a fresh thread
-        thread_r = await api_post(v2_server, "/api/chat/thread/new", timeout=15)
+        thread_r = await api_post(base_url, "/api/chat/thread/new", timeout=15)
         assert thread_r.status_code == 200
         thread_id = thread_r.json()["id"]
 
         # Send message that triggers HTTP tool call to the mock API
         await api_post(
-            v2_server,
+            base_url,
             "/api/chat/send",
             json={
                 "content": "list issues in nearai/ironclaw github repo",
@@ -324,24 +329,31 @@ class TestPreflightAuthGate:
             timeout=30,
         )
 
-        # Wait for auth prompt — this verifies the auth flow triggers
-        # regardless of whether it's via pre-flight or reactive 401
-        await _wait_for_auth_prompt(v2_server, thread_id, timeout=60)
+        # Wait for auth prompt
+        await _wait_for_auth_prompt(base_url, thread_id, timeout=60)
 
-        # Check how many requests the mock API received.
-        # Pre-flight gate: 0 requests (blocked before execution)
-        # Reactive fallback: 1 request (401 triggers NeedAuthentication)
+        # KEY ASSERTION: The mock API must have received ZERO requests.
         async with httpx.AsyncClient() as client:
             state_r = await client.get(f"{mock_api_url}/__mock/state")
             api_state = state_r.json()
 
-        # The auth flow triggered — that's the key assertion.
-        # Log the request count for visibility into which path fired.
-        request_count = api_state["request_count"]
-        if request_count == 0:
-            print("Pre-flight gate blocked before HTTP request (optimal)")
-        else:
-            print(f"Reactive fallback: mock API received {request_count} request(s)")
+        # Dump server logs for diagnosis on failure
+        diag_lines = ""
+        if api_state["request_count"] > 0:
+            try:
+                with open(stderr_log, "r") as f:
+                    for line in f:
+                        ll = line.lower()
+                        if "pre-flight" in ll or "auth_manager" in ll or "auth manager" in ll or "credential" in ll:
+                            diag_lines += line
+            except Exception:
+                diag_lines = "(could not read stderr log)"
+
+        assert api_state["request_count"] == 0, (
+            f"Pre-flight gate must block BEFORE HTTP request is sent. "
+            f"Mock API received {api_state['request_count']} request(s). "
+            f"Relevant server logs:\n{diag_lines}"
+        )
 
     async def test_auth_then_retry_succeeds(self, v2_server, mock_api):
         """After the auth flow completes, the API receives the token.
@@ -359,11 +371,11 @@ class TestPreflightAuthGate:
 
         # Credential should already be stored from the previous test's
         # auth flow. A new request should succeed without auth prompt.
-        thread_r = await api_post(v2_server, "/api/chat/thread/new", timeout=15)
+        thread_r = await api_post(v2_server["url"],"/api/chat/thread/new", timeout=15)
         thread_id = thread_r.json()["id"]
 
         await api_post(
-            v2_server,
+            v2_server["url"],
             "/api/chat/send",
             json={
                 "content": "list issues in nearai/ironclaw github repo",
@@ -373,7 +385,7 @@ class TestPreflightAuthGate:
         )
 
         # Wait for response (should complete without auth prompt)
-        history = await _wait_for_response(v2_server, thread_id, timeout=60)
+        history = await _wait_for_response(v2_server["url"],thread_id, timeout=60)
         all_responses = " ".join(
             (t.get("response") or "") for t in history.get("turns", [])
         ).lower()
@@ -389,9 +401,9 @@ class TestPreflightAuthGate:
             state_r = await client.get(f"{mock_api_url}/__mock/state")
             api_state = state_r.json()
 
-        assert api_state["request_count"] > 0 or "issue" in all_responses or "onboarding" in all_responses, (
-            f"After auth, either the API should receive a request or the LLM "
-            f"should generate a response. API state: {api_state}, "
+        assert api_state["request_count"] > 0, (
+            f"After auth, the mock API MUST receive a request with the stored token. "
+            f"Request count: {api_state['request_count']}, "
             f"Responses: {all_responses[:300]}"
         )
 
@@ -401,11 +413,11 @@ class TestPreflightAuthGate:
         async with httpx.AsyncClient() as client:
             await client.post(f"{mock_api_url}/__mock/reset")
 
-        thread_r = await api_post(v2_server, "/api/chat/thread/new", timeout=15)
+        thread_r = await api_post(v2_server["url"],"/api/chat/thread/new", timeout=15)
         thread_id = thread_r.json()["id"]
 
         await api_post(
-            v2_server,
+            v2_server["url"],
             "/api/chat/send",
             json={
                 "content": "list issues in nearai/ironclaw github repo",
@@ -415,12 +427,21 @@ class TestPreflightAuthGate:
         )
 
         # Should complete without auth prompt
-        history = await _wait_for_response(v2_server, thread_id, timeout=60)
+        history = await _wait_for_response(v2_server["url"],thread_id, timeout=60)
         all_responses = " ".join(
             (t.get("response") or "") for t in history.get("turns", [])
         ).lower()
         assert "paste your token" not in all_responses, (
             f"Should not need auth again. Responses: {all_responses[:500]}"
+        )
+
+        # Verify token was injected into the request
+        async with httpx.AsyncClient() as client:
+            state_r = await client.get(f"{mock_api_url}/__mock/state")
+            api_state = state_r.json()
+        assert api_state["request_count"] > 0, (
+            f"Credential should be injected into follow-up request. "
+            f"Mock API received 0 requests."
         )
 
 
@@ -429,19 +450,19 @@ class TestV1AuthToolsHidden:
 
     async def test_tool_auth_not_in_engine_context(self, v2_server):
         """tool_auth and tool_activate should not appear in v2 engine actions."""
-        thread_r = await api_post(v2_server, "/api/chat/thread/new", timeout=15)
+        thread_r = await api_post(v2_server["url"],"/api/chat/thread/new", timeout=15)
         thread_id = thread_r.json()["id"]
 
         await api_post(
-            v2_server,
+            v2_server["url"],
             "/api/chat/send",
             json={"content": "hello", "thread_id": thread_id},
             timeout=30,
         )
-        await _wait_for_response(v2_server, thread_id, timeout=30)
+        await _wait_for_response(v2_server["url"],thread_id, timeout=30)
 
         # Inspect thread events for action references
-        r = await api_get(v2_server, f"/api/engine/threads/{thread_id}/steps", timeout=15)
+        r = await api_get(v2_server["url"],f"/api/engine/threads/{thread_id}/steps", timeout=15)
         if r.status_code == 200:
             steps_text = str(r.json()).lower()
             # tool_auth should never appear as an available action
@@ -457,7 +478,7 @@ class TestAuthCancellation:
         async with httpx.AsyncClient() as client:
             await client.post(f"{mock_api_url}/__mock/reset")
 
-        thread_r = await api_post(v2_server, "/api/chat/thread/new", timeout=15)
+        thread_r = await api_post(v2_server["url"],"/api/chat/thread/new", timeout=15)
         thread_id = thread_r.json()["id"]
 
         # Need a fresh credential scenario — we already stored github_token
@@ -467,13 +488,13 @@ class TestAuthCancellation:
         # Since credentials are now stored, create a minimal test that
         # verifies cancel is handled gracefully.
         await api_post(
-            v2_server,
+            v2_server["url"],
             "/api/chat/send",
             json={"content": "hello, how are you?", "thread_id": thread_id},
             timeout=30,
         )
 
-        history = await _wait_for_response(v2_server, thread_id, timeout=30)
+        history = await _wait_for_response(v2_server["url"],thread_id, timeout=30)
         last = (history["turns"][-1].get("response") or "").lower()
         # Should get a normal response (not auth prompt)
         assert "paste your token" not in last, (

@@ -131,6 +131,14 @@ impl ConversationManager {
             reason: format!("conversation {conversation_id} not found"),
         })?;
 
+        // Tenant isolation: verify the requesting user owns this conversation.
+        if conv.user_id != user_id {
+            return Err(EngineError::AccessDenied {
+                user_id: user_id.to_string(),
+                entity: format!("conversation {conversation_id}"),
+            });
+        }
+
         // Record the user entry
         conv.add_entry(ConversationEntry::user(content));
 
@@ -145,7 +153,7 @@ impl ConversationManager {
                     "injecting message into active thread"
                 );
                 self.thread_manager
-                    .inject_message(thread_id, ThreadMessage::user(content))
+                    .inject_message(thread_id, user_id, ThreadMessage::user(content))
                     .await?;
                 self.store.save_conversation(conv).await?;
                 Ok(thread_id)
@@ -157,7 +165,13 @@ impl ConversationManager {
                     "resuming suspended foreground thread"
                 );
                 self.thread_manager
-                    .resume_thread(thread_id, user_id, Some(ThreadMessage::user(content)), None)
+                    .resume_thread(
+                        thread_id,
+                        user_id,
+                        Some(ThreadMessage::user(content)),
+                        None,
+                        None,
+                    )
                     .await?;
                 conv.add_entry(ConversationEntry::system_for_thread(
                     thread_id,
@@ -183,6 +197,19 @@ impl ConversationManager {
                         history,
                     )
                     .await?;
+
+                // Store the base channel name in thread metadata so the
+                // orchestrator can populate `source_channel` in the execution
+                // context (used by mission_create to default notify_channels).
+                let base_channel = conv
+                    .channel
+                    .split(':')
+                    .next()
+                    .unwrap_or(&conv.channel)
+                    .to_string();
+                self.thread_manager
+                    .set_thread_metadata(thread_id, "source_channel", &base_channel)
+                    .await;
 
                 conv.track_thread(thread_id);
                 conv.add_entry(ConversationEntry::system_for_thread(
@@ -238,28 +265,16 @@ impl ConversationManager {
                     ));
                     conv.untrack_thread(thread_id);
                 }
-                ThreadOutcome::NeedApproval {
+                ThreadOutcome::GatePaused {
+                    gate_name,
                     action_name,
-                    call_id: _,
-                    parameters: _,
+                    ..
                 } => {
                     conv.add_entry(ConversationEntry::system_for_thread(
                         thread_id,
-                        format!("Approval needed for action: {action_name}"),
+                        format!("Gate '{gate_name}' paused execution of action: {action_name}"),
                     ));
-                    // Thread stays active — waiting for approval
-                }
-                ThreadOutcome::NeedAuthentication {
-                    credential_name,
-                    action_name: _,
-                    call_id: _,
-                    parameters: _,
-                } => {
-                    conv.add_entry(ConversationEntry::system_for_thread(
-                        thread_id,
-                        format!("Authentication required for credential: {credential_name}"),
-                    ));
-                    // Thread stays active — waiting for OAuth completion
+                    // Thread stays active — waiting for gate resolution
                 }
             }
             self.store.save_conversation(conv).await?;
@@ -274,9 +289,17 @@ impl ConversationManager {
     pub async fn clear_conversation(
         &self,
         conversation_id: ConversationId,
+        user_id: &str,
     ) -> Result<(), EngineError> {
         let mut convs = self.conversations.write().await;
         if let Some(conv) = convs.get_mut(&conversation_id) {
+            // Tenant isolation: verify ownership.
+            if conv.user_id != user_id {
+                return Err(EngineError::AccessDenied {
+                    user_id: user_id.to_string(),
+                    entity: format!("conversation {conversation_id}"),
+                });
+            }
             conv.active_threads.clear();
             conv.entries.clear();
             conv.updated_at = chrono::Utc::now();
@@ -457,6 +480,7 @@ mod tests {
         async fn list_threads(
             &self,
             project_id: ProjectId,
+            _user_id: &str,
         ) -> Result<Vec<crate::types::thread::Thread>, EngineError> {
             Ok(self
                 .threads
@@ -527,7 +551,11 @@ mod tests {
         async fn load_memory_doc(&self, _: DocId) -> Result<Option<MemoryDoc>, EngineError> {
             Ok(None)
         }
-        async fn list_memory_docs(&self, _: ProjectId) -> Result<Vec<MemoryDoc>, EngineError> {
+        async fn list_memory_docs(
+            &self,
+            _: ProjectId,
+            _: &str,
+        ) -> Result<Vec<MemoryDoc>, EngineError> {
             Ok(vec![])
         }
         async fn save_lease(&self, _: &CapabilityLease) -> Result<(), EngineError> {
@@ -561,6 +589,7 @@ mod tests {
         async fn list_missions(
             &self,
             _: ProjectId,
+            _: &str,
         ) -> Result<Vec<crate::types::mission::Mission>, EngineError> {
             Ok(vec![])
         }
@@ -655,6 +684,7 @@ mod tests {
             "resume",
             ThreadType::Foreground,
             project,
+            "user1",
             ThreadConfig::default(),
         );
         thread.transition_to(ThreadState::Running, None).unwrap();
@@ -807,7 +837,7 @@ mod tests {
         assert!(!conv.entries.is_empty());
 
         // Clear the conversation
-        cm.clear_conversation(conv_id).await.unwrap();
+        cm.clear_conversation(conv_id, "user1").await.unwrap();
 
         let conv = cm.get_conversation(conv_id).await.unwrap();
         assert!(conv.entries.is_empty());

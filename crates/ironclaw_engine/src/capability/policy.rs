@@ -104,6 +104,16 @@ impl PolicyEngine {
             );
         }
 
+        // Log denials for audit trail / incident investigation
+        if let PolicyDecision::Deny { ref reason } = decision {
+            tracing::debug!(
+                action = %action.name,
+                capability = %lease.capability_name,
+                reason,
+                "policy denied action"
+            );
+        }
+
         decision
     }
 
@@ -169,7 +179,7 @@ impl Default for PolicyEngine {
 fn rule_matches(rule: &PolicyRule, action: &ActionDef) -> bool {
     match &rule.condition {
         PolicyCondition::Always => true,
-        PolicyCondition::ActionMatches { pattern } => action.name.contains(pattern.as_str()),
+        PolicyCondition::ActionMatches { pattern } => action.name == *pattern,
         PolicyCondition::EffectTypeIs(effect) => action.effects.contains(effect),
     }
 }
@@ -194,7 +204,7 @@ fn merge_decision(current: PolicyDecision, effect: PolicyEffect, source: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::capability::LeaseId;
+    use crate::types::capability::{GrantedActions, LeaseId};
     use crate::types::thread::ThreadId;
     use chrono::Utc;
 
@@ -213,12 +223,13 @@ mod tests {
             id: LeaseId::new(),
             thread_id: ThreadId::new(),
             capability_name: "test".into(),
-            granted_actions: vec![],
+            granted_actions: GrantedActions::All,
             granted_at: Utc::now(),
             expires_at: None,
             max_uses: None,
             uses_remaining: None,
             revoked: false,
+            revoked_reason: None,
         }
     }
 
@@ -302,7 +313,7 @@ mod tests {
         let engine = PolicyEngine::new();
         let action = make_action("delete_repo", vec![EffectType::WriteExternal], false);
         let mut lease = make_lease();
-        lease.granted_actions = vec!["create_issue".into()];
+        lease.granted_actions = GrantedActions::Specific(vec!["create_issue".into()]);
         assert!(matches!(
             engine.evaluate(&action, &lease, &[]),
             PolicyDecision::Deny { .. }
@@ -360,7 +371,7 @@ mod tests {
         engine.add_global_policy(PolicyRule {
             name: "approve deletes".into(),
             condition: PolicyCondition::ActionMatches {
-                pattern: "delete".into(),
+                pattern: "delete_repo".into(),
             },
             effect: PolicyEffect::RequireApproval,
         });

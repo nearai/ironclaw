@@ -508,8 +508,8 @@ pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, Cha
         print_info("Note: Ports below 1024 may require root privileges");
     }
 
-    let host =
-        optional_input("Host", Some("default: 0.0.0.0"))?.unwrap_or_else(|| "0.0.0.0".to_string());
+    let host = optional_input("Host", Some("default: 127.0.0.1"))?
+        .unwrap_or_else(|| "127.0.0.1".to_string());
 
     // Generate a webhook secret
     if confirm("Generate a webhook secret for authentication?", true)? {

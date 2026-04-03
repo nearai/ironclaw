@@ -13,8 +13,8 @@ use super::{
 use crate::db::WorkspaceStore;
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::workspace::{
-    MemoryChunk, MemoryDocument, RankedResult, SearchConfig, SearchResult, WorkspaceEntry,
-    fuse_results,
+    DocumentVersion, MemoryChunk, MemoryDocument, RankedResult, SearchConfig, SearchResult,
+    VersionSummary, WorkspaceEntry, fuse_results,
 };
 
 use chrono::Utc;
@@ -839,6 +839,341 @@ impl WorkspaceStore for LibSqlBackend {
         }
 
         Ok(fuse_results(fts_results, vector_results, config))
+    }
+
+    // ==================== Metadata ====================
+
+    async fn update_document_metadata(
+        &self,
+        id: Uuid,
+        metadata: &serde_json::Value,
+    ) -> Result<(), WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        let now = fmt_ts(&Utc::now());
+        let meta_str =
+            serde_json::to_string(metadata).map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to serialize metadata: {e}"),
+            })?;
+        conn.execute(
+            "UPDATE memory_documents SET metadata = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id.to_string(), meta_str, now],
+        )
+        .await
+        .map_err(|e| WorkspaceError::SearchFailed {
+            reason: format!("Failed to update metadata: {e}"),
+        })?;
+        Ok(())
+    }
+
+    async fn find_config_documents(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+    ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        let agent_str = agent_id.map(|a| a.to_string());
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, user_id, agent_id, path, content,
+                       created_at, updated_at, metadata
+                FROM memory_documents
+                WHERE user_id = ?1 AND agent_id IS ?2
+                  AND (path LIKE '%/.config' OR path = '.config')
+                ORDER BY path
+                "#,
+                params![user_id, agent_str],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to find config documents: {e}"),
+            })?;
+
+        let mut docs = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to read config document row: {e}"),
+            })?
+        {
+            docs.push(row_to_memory_document(&row));
+        }
+        Ok(docs)
+    }
+
+    // ==================== Versioning ====================
+
+    async fn save_version(
+        &self,
+        document_id: Uuid,
+        content: &str,
+        content_hash: &str,
+        changed_by: Option<&str>,
+    ) -> Result<i32, WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        let id = Uuid::new_v4().to_string();
+        let doc_id = document_id.to_string();
+        let now = fmt_ts(&Utc::now());
+
+        // BEGIN IMMEDIATE acquires a write lock upfront, serializing
+        // concurrent writers so two callers cannot both read the same
+        // MAX(version) before either inserts.
+        conn.execute("BEGIN IMMEDIATE", params![])
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to start transaction: {e}"),
+            })?;
+
+        let result: Result<i32, WorkspaceError> = async {
+            let mut rows = conn
+                .query(
+                    "SELECT COALESCE(MAX(version), 0) + 1 FROM memory_document_versions WHERE document_id = ?1",
+                    params![doc_id.clone()],
+                )
+                .await
+                .map_err(|e| WorkspaceError::SearchFailed {
+                    reason: format!("Failed to get next version number: {e}"),
+                })?;
+
+            let next_version = if let Some(row) = rows
+                .next()
+                .await
+                .map_err(|e| WorkspaceError::SearchFailed {
+                    reason: format!("Failed to read version number: {e}"),
+                })? {
+                get_i64(&row, 0) as i32
+            } else {
+                1
+            };
+            drop(rows);
+
+            conn.execute(
+                r#"
+                INSERT INTO memory_document_versions
+                    (id, document_id, version, content, content_hash, created_at, changed_by)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "#,
+                params![
+                    id,
+                    doc_id,
+                    next_version as i64,
+                    content,
+                    content_hash,
+                    now,
+                    changed_by
+                ],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to save version: {e}"),
+            })?;
+
+            Ok(next_version)
+        }
+        .await;
+
+        match &result {
+            Ok(_) => {
+                conn.execute("COMMIT", params![]).await.map_err(|e| {
+                    WorkspaceError::SearchFailed {
+                        reason: format!("Failed to commit version: {e}"),
+                    }
+                })?;
+            }
+            Err(_) => {
+                let _ = conn.execute("ROLLBACK", params![]).await;
+            }
+        }
+
+        result
+    }
+
+    async fn get_version(
+        &self,
+        document_id: Uuid,
+        version: i32,
+    ) -> Result<DocumentVersion, WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, document_id, version, content, content_hash,
+                       created_at, changed_by
+                FROM memory_document_versions
+                WHERE document_id = ?1 AND version = ?2
+                "#,
+                params![document_id.to_string(), version as i64],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to get version: {e}"),
+            })?;
+
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to read version row: {e}"),
+            })?
+            .ok_or(WorkspaceError::VersionNotFound {
+                document_id,
+                version,
+            })?;
+
+        Ok(DocumentVersion {
+            id: get_text(&row, 0)
+                .parse()
+                .map_err(|e| WorkspaceError::SearchFailed {
+                    reason: format!("Invalid version UUID: {e}"),
+                })?,
+            document_id: get_text(&row, 1)
+                .parse()
+                .map_err(|e| WorkspaceError::SearchFailed {
+                    reason: format!("Invalid document UUID: {e}"),
+                })?,
+            version: get_i64(&row, 2) as i32,
+            content: get_text(&row, 3),
+            content_hash: get_text(&row, 4),
+            created_at: get_ts(&row, 5),
+            changed_by: get_opt_text(&row, 6),
+        })
+    }
+
+    async fn list_versions(
+        &self,
+        document_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<VersionSummary>, WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT version, content_hash, created_at, changed_by
+                FROM memory_document_versions
+                WHERE document_id = ?1
+                ORDER BY version DESC
+                LIMIT ?2
+                "#,
+                params![document_id.to_string(), limit],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to list versions: {e}"),
+            })?;
+
+        let mut versions = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to read version row: {e}"),
+            })?
+        {
+            versions.push(VersionSummary {
+                version: get_i64(&row, 0) as i32,
+                content_hash: get_text(&row, 1),
+                created_at: get_ts(&row, 2),
+                changed_by: get_opt_text(&row, 3),
+            });
+        }
+        Ok(versions)
+    }
+
+    async fn get_latest_version_number(
+        &self,
+        document_id: Uuid,
+    ) -> Result<Option<i32>, WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        let mut rows = conn
+            .query(
+                "SELECT MAX(version) FROM memory_document_versions WHERE document_id = ?1",
+                params![document_id.to_string()],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to get latest version number: {e}"),
+            })?;
+
+        if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to read version number: {e}"),
+            })?
+        {
+            // MAX returns NULL if no rows — libsql returns Null for the value
+            let val = row.get::<libsql::Value>(0).ok();
+            match val {
+                Some(libsql::Value::Integer(v)) => Ok(Some(v as i32)),
+                _ => Ok(None),
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn prune_versions(
+        &self,
+        document_id: Uuid,
+        keep_count: i32,
+    ) -> Result<u64, WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        let doc_id = document_id.to_string();
+        let result = conn
+            .execute(
+                r#"
+                DELETE FROM memory_document_versions
+                WHERE document_id = ?1
+                  AND version NOT IN (
+                      SELECT version FROM memory_document_versions
+                      WHERE document_id = ?1
+                      ORDER BY version DESC
+                      LIMIT ?2
+                  )
+                "#,
+                params![doc_id, keep_count as i64],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to prune versions: {e}"),
+            })?;
+        Ok(result)
     }
 }
 

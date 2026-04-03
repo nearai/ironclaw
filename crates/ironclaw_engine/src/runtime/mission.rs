@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::memory::RetrievalEngine;
 use crate::runtime::manager::ThreadManager;
@@ -17,7 +17,37 @@ use crate::types::error::EngineError;
 use crate::types::memory::MemoryDoc;
 use crate::types::mission::{Mission, MissionCadence, MissionId, MissionStatus};
 use crate::types::project::ProjectId;
+use crate::types::shared_owner_id;
 use crate::types::thread::{ThreadConfig, ThreadId, ThreadType};
+
+/// Notification emitted when a mission thread completes.
+///
+/// The bridge subscribes to these and routes the response text to
+/// the mission's `notify_channels` via `ChannelManager::broadcast()`.
+#[derive(Debug, Clone)]
+pub struct MissionNotification {
+    pub mission_id: MissionId,
+    pub mission_name: String,
+    pub thread_id: ThreadId,
+    pub user_id: String,
+    /// Channels to notify (from `Mission.notify_channels`).
+    pub notify_channels: Vec<String>,
+    /// The thread's response text (None if failed/no output).
+    pub response: Option<String>,
+    /// True if the thread failed.
+    pub is_error: bool,
+}
+
+/// Optional updates to apply to a mission via [`MissionManager::update_mission`].
+#[derive(Debug, Default)]
+pub struct MissionUpdate {
+    pub name: Option<String>,
+    pub goal: Option<String>,
+    pub cadence: Option<MissionCadence>,
+    pub notify_channels: Option<Vec<String>>,
+    pub max_threads_per_day: Option<u32>,
+    pub success_criteria: Option<String>,
+}
 
 /// Manages mission lifecycle and thread spawning.
 pub struct MissionManager {
@@ -25,20 +55,32 @@ pub struct MissionManager {
     thread_manager: Arc<ThreadManager>,
     /// Active missions indexed by ID for quick lookup.
     active: RwLock<Vec<MissionId>>,
+    /// Broadcast channel for mission outcome notifications.
+    notification_tx: tokio::sync::broadcast::Sender<MissionNotification>,
 }
 
 impl MissionManager {
     pub fn new(store: Arc<dyn Store>, thread_manager: Arc<ThreadManager>) -> Self {
+        let (notification_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
             store,
             thread_manager,
             active: RwLock::new(Vec::new()),
+            notification_tx,
         }
+    }
+
+    /// Subscribe to mission outcome notifications.
+    ///
+    /// The bridge uses this to route mission results to channels.
+    pub fn subscribe_notifications(&self) -> tokio::sync::broadcast::Receiver<MissionNotification> {
+        self.notification_tx.subscribe()
     }
 
     /// Populate the active mission index from persisted mission state.
     pub async fn bootstrap_project(&self, project_id: ProjectId) -> Result<usize, EngineError> {
-        let missions = self.store.list_missions(project_id).await?;
+        // System operation: load all missions for the project regardless of user.
+        let missions = self.store.list_all_missions(project_id).await?;
         let active_ids: Vec<MissionId> = missions
             .into_iter()
             .filter(|mission| mission.status == MissionStatus::Active)
@@ -55,11 +97,14 @@ impl MissionManager {
     pub async fn create_mission(
         &self,
         project_id: ProjectId,
+        user_id: impl Into<String>,
         name: impl Into<String>,
         goal: impl Into<String>,
         cadence: MissionCadence,
+        notify_channels: Vec<String>,
     ) -> Result<MissionId, EngineError> {
-        let mission = Mission::new(project_id, name, goal, cadence);
+        let mut mission = Mission::new(project_id, user_id, name, goal, cadence);
+        mission.notify_channels = notify_channels;
         let id = mission.id;
         self.store.save_mission(&mission).await?;
         self.active.write().await.push(id);
@@ -67,8 +112,68 @@ impl MissionManager {
         Ok(id)
     }
 
+    /// Update mutable fields on a mission. Only non-None fields are applied.
+    pub async fn update_mission(
+        &self,
+        id: MissionId,
+        user_id: &str,
+        updates: MissionUpdate,
+    ) -> Result<(), EngineError> {
+        let mut mission = self
+            .store
+            .load_mission(id)
+            .await?
+            .ok_or_else(|| EngineError::Store {
+                reason: format!("mission {id} not found"),
+            })?;
+
+        if !mission.owner_id().is_shared() && !mission.is_owned_by(user_id) {
+            return Err(EngineError::AccessDenied {
+                user_id: user_id.to_string(),
+                entity: format!("mission {id}"),
+            });
+        }
+
+        if let Some(name) = updates.name {
+            mission.name = name;
+        }
+        if let Some(goal) = updates.goal {
+            mission.goal = goal;
+        }
+        if let Some(cadence) = updates.cadence {
+            mission.cadence = cadence;
+        }
+        if let Some(channels) = updates.notify_channels {
+            mission.notify_channels = channels;
+        }
+        if let Some(max) = updates.max_threads_per_day {
+            mission.max_threads_per_day = max;
+        }
+        if let Some(criteria) = updates.success_criteria {
+            mission.success_criteria = Some(criteria);
+        }
+
+        mission.updated_at = chrono::Utc::now();
+        self.store.save_mission(&mission).await?;
+        debug!(mission_id = %id, "mission updated");
+        Ok(())
+    }
+
     /// Pause an active mission. No new threads will be spawned.
-    pub async fn pause_mission(&self, id: MissionId) -> Result<(), EngineError> {
+    ///
+    /// For shared missions, the caller (web handler) must
+    /// verify admin role before calling this. The engine only checks ownership.
+    pub async fn pause_mission(&self, id: MissionId, user_id: &str) -> Result<(), EngineError> {
+        // Validate ownership. Shared missions require admin role (checked by caller).
+        if let Some(mission) = self.store.load_mission(id).await?
+            && !mission.is_owned_by(user_id)
+            && !mission.owner_id().is_shared()
+        {
+            return Err(EngineError::AccessDenied {
+                user_id: user_id.to_string(),
+                entity: format!("mission {id}"),
+            });
+        }
         self.store
             .update_mission_status(id, MissionStatus::Paused)
             .await?;
@@ -78,7 +183,20 @@ impl MissionManager {
     }
 
     /// Resume a paused mission.
-    pub async fn resume_mission(&self, id: MissionId) -> Result<(), EngineError> {
+    ///
+    /// For shared missions, the caller (web handler) must
+    /// verify admin role before calling this. The engine only checks ownership.
+    pub async fn resume_mission(&self, id: MissionId, user_id: &str) -> Result<(), EngineError> {
+        // Validate ownership. Shared missions require admin role (checked by caller).
+        if let Some(mission) = self.store.load_mission(id).await?
+            && !mission.is_owned_by(user_id)
+            && !mission.owner_id().is_shared()
+        {
+            return Err(EngineError::AccessDenied {
+                user_id: user_id.to_string(),
+                entity: format!("mission {id}"),
+            });
+        }
         self.store
             .update_mission_status(id, MissionStatus::Active)
             .await?;
@@ -120,8 +238,18 @@ impl MissionManager {
             }
         };
 
+        // Tenant isolation: verify the requesting user owns this mission.
+        // Shared missions can be fired by any user — the spawned
+        // thread inherits the requesting user's identity, keeping artifacts user-scoped.
+        if !mission.owner_id().is_shared() && !mission.is_owned_by(user_id) {
+            return Err(EngineError::AccessDenied {
+                user_id: user_id.to_string(),
+                entity: format!("mission {id}"),
+            });
+        }
+
         if mission.is_terminal() {
-            warn!(mission_id = %id, status = ?mission.status, "cannot fire terminal mission");
+            debug!(mission_id = %id, status = ?mission.status, "cannot fire terminal mission");
             return Ok(None);
         }
 
@@ -134,7 +262,7 @@ impl MissionManager {
         // Build meta-prompt from mission state + project docs
         let retrieval = RetrievalEngine::new(Arc::clone(&self.store));
         let project_docs = retrieval
-            .retrieve_context(mission.project_id, &mission.goal, 10)
+            .retrieve_context(mission.project_id, &mission.user_id, &mission.goal, 10)
             .await
             .unwrap_or_default();
         let meta_prompt = build_meta_prompt(&mission, &project_docs, &trigger_payload);
@@ -191,7 +319,7 @@ impl MissionManager {
                 }
 
                 self.thread_manager
-                    .resume_thread(thread_id, user_id.to_string(), None, None)
+                    .resume_thread(thread_id, user_id.to_string(), None, None, None)
                     .await?;
                 self.spawn_mission_outcome_watcher(mission_id, thread_id);
                 resumed.push(thread_id);
@@ -213,7 +341,7 @@ impl MissionManager {
                         debug!(count = spawned.len(), "cron ticker spawned mission threads");
                     }
                     Err(e) => {
-                        warn!("cron ticker error: {e}");
+                        debug!("cron ticker error: {e}");
                     }
                     _ => {}
                 }
@@ -221,9 +349,16 @@ impl MissionManager {
         });
     }
 
-    /// List all missions in a project.
-    pub async fn list_missions(&self, project_id: ProjectId) -> Result<Vec<Mission>, EngineError> {
-        self.store.list_missions(project_id).await
+    /// List all missions in a project for a given user.
+    /// List missions visible to a user (own + shared).
+    pub async fn list_missions(
+        &self,
+        project_id: ProjectId,
+        user_id: &str,
+    ) -> Result<Vec<Mission>, EngineError> {
+        self.store
+            .list_missions_with_shared(project_id, user_id)
+            .await
     }
 
     /// Get a mission by ID.
@@ -250,6 +385,12 @@ impl MissionManager {
                 Some(m) if m.status == MissionStatus::Active => m,
                 _ => continue,
             };
+
+            // Only fire missions owned by this user (per-user learning missions)
+            // or globally shared missions.
+            if !mission.is_owned_by(user_id) && !mission.owner_id().is_shared() {
+                continue;
+            }
 
             let matches = match &mission.cadence {
                 MissionCadence::OnSystemEvent {
@@ -278,7 +419,7 @@ impl MissionManager {
     ///    fires `thread_completed_with_learnings`
     /// 3. **Conversation insights** — after every N threads in a conversation,
     ///    fires `conversation_insights_due`
-    pub fn start_event_listener(self: &Arc<Self>, user_id: String) {
+    pub fn start_event_listener(self: &Arc<Self>, _owner_id: String) {
         let mgr = Arc::clone(self);
         let mut rx = mgr.thread_manager.subscribe_events();
 
@@ -365,12 +506,12 @@ impl MissionManager {
                                 .fire_on_system_event(
                                     "engine",
                                     "thread_completed_with_issues",
-                                    &user_id,
+                                    &thread.user_id,
                                     Some(payload),
                                 )
                                 .await
                             {
-                                warn!("event listener: failed to fire error diagnosis: {e}");
+                                debug!("event listener: failed to fire error diagnosis: {e}");
                             }
                         }
 
@@ -423,12 +564,12 @@ impl MissionManager {
                                 .fire_on_system_event(
                                     "engine",
                                     "thread_completed_with_learnings",
-                                    &user_id,
+                                    &thread.user_id,
                                     Some(payload),
                                 )
                                 .await
                             {
-                                warn!("event listener: failed to fire skill extraction: {e}");
+                                debug!("event listener: failed to fire skill extraction: {e}");
                             }
                         }
 
@@ -440,16 +581,19 @@ impl MissionManager {
 
                         if (*count).is_multiple_of(CONVERSATION_INSIGHTS_INTERVAL) {
                             // Collect recent thread goals for context
-                            let thread_goals: Vec<String> =
-                                match mgr.store.list_threads(thread.project_id).await {
-                                    Ok(threads) => threads
-                                        .iter()
-                                        .rev()
-                                        .take(CONVERSATION_INSIGHTS_INTERVAL as usize)
-                                        .map(|t| t.goal.clone())
-                                        .collect(),
-                                    Err(_) => vec![thread.goal.clone()],
-                                };
+                            let thread_goals: Vec<String> = match mgr
+                                .store
+                                .list_threads(thread.project_id, &thread.user_id)
+                                .await
+                            {
+                                Ok(threads) => threads
+                                    .iter()
+                                    .rev()
+                                    .take(CONVERSATION_INSIGHTS_INTERVAL as usize)
+                                    .map(|t| t.goal.clone())
+                                    .collect(),
+                                Err(_) => vec![thread.goal.clone()],
+                            };
 
                             // Collect sample user messages from recent threads
                             let sample_messages: Vec<String> = thread
@@ -471,12 +615,12 @@ impl MissionManager {
                                 .fire_on_system_event(
                                     "engine",
                                     "conversation_insights_due",
-                                    &user_id,
+                                    &thread.user_id,
                                     Some(payload),
                                 )
                                 .await
                             {
-                                warn!("event listener: failed to fire conversation insights: {e}");
+                                debug!("event listener: failed to fire conversation insights: {e}");
                             }
                         }
                     }
@@ -499,9 +643,10 @@ impl MissionManager {
     pub async fn ensure_self_improvement_mission(
         &self,
         project_id: ProjectId,
+        user_id: &str,
     ) -> Result<MissionId, EngineError> {
-        // Check if one already exists
-        let missions = self.store.list_missions(project_id).await?;
+        // Check if this user already has a self-improvement mission.
+        let missions = self.store.list_missions(project_id, user_id).await?;
         if let Some(existing) = missions.iter().find(|m| is_self_improvement_mission(m)) {
             debug!(mission_id = %existing.id, "self-improvement mission already exists");
             // Make sure it's in the active list
@@ -512,9 +657,10 @@ impl MissionManager {
             return Ok(existing.id);
         }
 
-        // Create the self-improvement mission
+        // Create per-user self-improvement mission
         let mut mission = Mission::new(
             project_id,
+            user_id,
             "self-improvement",
             SELF_IMPROVEMENT_GOAL,
             MissionCadence::OnSystemEvent {
@@ -533,7 +679,7 @@ impl MissionManager {
         self.active.write().await.push(id);
 
         // Seed the fix pattern database if it doesn't exist
-        let docs = self.store.list_memory_docs(project_id).await?;
+        let docs = self.store.list_shared_memory_docs(project_id).await?;
         let has_patterns = docs.iter().any(|d| {
             d.title == FIX_PATTERN_DB_TITLE && d.tags.contains(&FIX_PATTERN_DB_TAG.to_string())
         });
@@ -541,6 +687,7 @@ impl MissionManager {
             use crate::types::memory::{DocType, MemoryDoc};
             let pattern_doc = MemoryDoc::new(
                 project_id,
+                shared_owner_id(),
                 DocType::Note,
                 FIX_PATTERN_DB_TITLE,
                 SEED_FIX_PATTERNS,
@@ -559,16 +706,22 @@ impl MissionManager {
     /// Creates (if missing) the self-improvement, skill extraction, and
     /// conversation insights missions. This is the preferred entry point —
     /// call once at project bootstrap.
-    pub async fn ensure_learning_missions(&self, project_id: ProjectId) -> Result<(), EngineError> {
+    pub async fn ensure_learning_missions(
+        &self,
+        project_id: ProjectId,
+        user_id: &str,
+    ) -> Result<(), EngineError> {
         // 0. Seed compiled-in orchestrator v0 so it's visible in workspace
         self.seed_orchestrator_v0(project_id).await?;
 
-        // 1. Error diagnosis (self-improvement) — existing
-        self.ensure_self_improvement_mission(project_id).await?;
+        // 1. Error diagnosis (self-improvement) — per-user
+        self.ensure_self_improvement_mission(project_id, user_id)
+            .await?;
 
         // 2. Skill extraction (formerly playbook extraction)
         self.ensure_mission_by_metadata(
             project_id,
+            user_id,
             "skill_extraction",
             "skill-extraction",
             SKILL_EXTRACTION_GOAL,
@@ -584,6 +737,7 @@ impl MissionManager {
         // 3. Conversation insights
         self.ensure_mission_by_metadata(
             project_id,
+            user_id,
             "conversation_insights",
             "conversation-insights",
             CONVERSATION_INSIGHTS_GOAL,
@@ -599,6 +753,7 @@ impl MissionManager {
         // 4. Expected behavior (user feedback loop)
         self.ensure_mission_by_metadata(
             project_id,
+            user_id,
             "expected_behavior",
             "expected-behavior",
             EXPECTED_BEHAVIOR_GOAL,
@@ -626,7 +781,7 @@ impl MissionManager {
         };
         use crate::types::memory::{DocType, MemoryDoc};
 
-        let docs = self.store.list_memory_docs(project_id).await?;
+        let docs = self.store.list_shared_memory_docs(project_id).await?;
         let existing_v0 = docs.iter().find(|d| {
             d.title == ORCHESTRATOR_TITLE
                 && d.tags.contains(&ORCHESTRATOR_TAG.to_string())
@@ -652,6 +807,7 @@ impl MissionManager {
         // Create v0 doc
         let mut doc = MemoryDoc::new(
             project_id,
+            shared_owner_id(),
             DocType::Note,
             ORCHESTRATOR_TITLE,
             DEFAULT_ORCHESTRATOR,
@@ -668,6 +824,7 @@ impl MissionManager {
     async fn ensure_mission_by_metadata(
         &self,
         project_id: ProjectId,
+        user_id: &str,
         metadata_key: &str,
         name: &str,
         goal: &str,
@@ -675,7 +832,8 @@ impl MissionManager {
         success_criteria: &str,
         max_per_day: u32,
     ) -> Result<MissionId, EngineError> {
-        let missions = self.store.list_missions(project_id).await?;
+        // Check if this user already has a mission with this metadata key.
+        let missions = self.store.list_missions(project_id, user_id).await?;
         if let Some(existing) = missions
             .iter()
             .find(|m| m.metadata.get(metadata_key).is_some())
@@ -687,7 +845,7 @@ impl MissionManager {
             return Ok(existing.id);
         }
 
-        let mut mission = Mission::new(project_id, name, goal, cadence);
+        let mut mission = Mission::new(project_id, user_id, name, goal, cadence);
         mission.success_criteria = Some(success_criteria.into());
         mission.metadata = serde_json::json!({metadata_key: true});
         mission.max_threads_per_day = max_per_day;
@@ -705,7 +863,7 @@ impl MissionManager {
     /// For `Cron` cadence missions, checks `next_fire_at` against current time.
     /// For `Manual` missions, this is a no-op.
     /// Returns the IDs of threads spawned.
-    pub async fn tick(&self, user_id: &str) -> Result<Vec<ThreadId>, EngineError> {
+    pub async fn tick(&self, _fallback_user_id: &str) -> Result<Vec<ThreadId>, EngineError> {
         let active_ids = self.active.read().await.clone();
         let mut spawned = Vec::new();
         let now = chrono::Utc::now();
@@ -727,7 +885,10 @@ impl MissionManager {
                 | MissionCadence::Webhook { .. } => false,
             };
 
-            if should_fire && let Some(tid) = self.fire_mission(mid, user_id, None).await? {
+            // Fire cron missions with the mission's own user_id so artifacts
+            // are scoped to the correct tenant.
+            if should_fire && let Some(tid) = self.fire_mission(mid, &mission.user_id, None).await?
+            {
                 spawned.push(tid);
             }
         }
@@ -738,17 +899,24 @@ impl MissionManager {
     fn spawn_mission_outcome_watcher(&self, mission_id: MissionId, thread_id: ThreadId) {
         let tm = Arc::clone(&self.thread_manager);
         let store = Arc::clone(&self.store);
+        let notification_tx = self.notification_tx.clone();
         tokio::spawn(async move {
             match tm.join_thread(thread_id).await {
                 Ok(outcome) => {
-                    if let Err(e) =
-                        process_mission_outcome(&store, mission_id, thread_id, &outcome).await
+                    if let Err(e) = process_mission_outcome_and_notify(
+                        &store,
+                        mission_id,
+                        thread_id,
+                        &outcome,
+                        &notification_tx,
+                    )
+                    .await
                     {
-                        warn!(mission_id = %mission_id, "failed to process outcome: {e}");
+                        debug!(mission_id = %mission_id, "failed to process outcome: {e}");
                     }
                 }
                 Err(e) => {
-                    warn!(mission_id = %mission_id, "thread join failed: {e}");
+                    debug!(mission_id = %mission_id, "thread join failed: {e}");
                 }
             }
         });
@@ -839,16 +1007,33 @@ When done, call FINAL() with your response. Include:\n\
 /// Extracts next_focus from the FINAL() response and updates the mission.
 /// For self-improvement missions (metadata contains `"self_improvement": true`),
 /// also processes prompt overlay additions and fix pattern updates.
+#[cfg(test)]
 async fn process_mission_outcome(
     store: &Arc<dyn Store>,
     mission_id: MissionId,
-    _thread_id: ThreadId,
+    thread_id: ThreadId,
     outcome: &ThreadOutcome,
+) -> Result<(), EngineError> {
+    let (notification_tx, _) = tokio::sync::broadcast::channel(1);
+    process_mission_outcome_and_notify(store, mission_id, thread_id, outcome, &notification_tx)
+        .await
+}
+
+async fn process_mission_outcome_and_notify(
+    store: &Arc<dyn Store>,
+    mission_id: MissionId,
+    thread_id: ThreadId,
+    outcome: &ThreadOutcome,
+    notification_tx: &tokio::sync::broadcast::Sender<MissionNotification>,
 ) -> Result<(), EngineError> {
     let mut mission = match store.load_mission(mission_id).await? {
         Some(m) => m,
         None => return Ok(()),
     };
+
+    // Build notification fields while processing the outcome.
+    let mut notify_response: Option<String> = None;
+    let mut is_error = false;
 
     match outcome {
         ThreadOutcome::Completed {
@@ -875,15 +1060,15 @@ async fn process_mission_outcome(
                 }
             }
 
-            // Record approach
-            let accomplishment: String = text.chars().take(200).collect();
-            mission.approach_history.push(accomplishment);
+            // Record approach (full response — LLM output is never truncated)
+            mission.approach_history.push(text.clone());
+            notify_response = Some(text.clone());
 
             // If this is a self-improvement mission, process structured output
             if is_self_improvement_mission(&mission)
                 && let Err(e) = process_self_improvement_output(store, &mission, text).await
             {
-                warn!(
+                debug!(
                     mission_id = %mission_id,
                     "failed to process self-improvement output: {e}"
                 );
@@ -892,13 +1077,32 @@ async fn process_mission_outcome(
         ThreadOutcome::Completed { response: None } => {}
         ThreadOutcome::Failed { error } => {
             mission.approach_history.push(format!("FAILED: {error}"));
+            notify_response = Some(format!("Mission failed: {error}"));
+            is_error = true;
         }
         ThreadOutcome::MaxIterations => {
             mission
                 .approach_history
                 .push("Hit max iterations without completing".into());
+            notify_response = Some("Mission thread hit max iterations without completing".into());
+            is_error = true;
         }
         _ => {}
+    }
+
+    // Emit notification if there are channels to notify.
+    if !mission.notify_channels.is_empty() && notify_response.is_some() {
+        let notification = MissionNotification {
+            mission_id,
+            mission_name: mission.name.clone(),
+            thread_id,
+            user_id: mission.user_id.clone(),
+            notify_channels: mission.notify_channels.clone(),
+            response: notify_response,
+            is_error,
+        };
+        // Best-effort: ignore send errors (no subscribers = no problem).
+        let _ = notification_tx.send(notification);
     }
 
     mission.updated_at = chrono::Utc::now();
@@ -947,10 +1151,22 @@ async fn process_self_improvement_output(
 
     let project_id = mission.project_id;
 
+    // Check if self-modification is allowed before applying prompt/orchestrator changes
+    let allow_self_modify = std::env::var("ORCHESTRATOR_SELF_MODIFY")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
     // Process prompt additions
     if let Some(additions) = json_val.get("prompt_additions").and_then(|v| v.as_array())
         && !additions.is_empty()
     {
+        if !allow_self_modify {
+            debug!(
+                "self-improvement: skipping prompt additions — ORCHESTRATOR_SELF_MODIFY is disabled"
+            );
+            return Ok(());
+        }
+
         let new_rules: Vec<String> = additions
             .iter()
             .filter_map(|v| v.as_str().map(String::from))
@@ -958,7 +1174,7 @@ async fn process_self_improvement_output(
 
         if !new_rules.is_empty() {
             // Load or create the prompt overlay doc
-            let docs = store.list_memory_docs(project_id).await?;
+            let docs = store.list_shared_memory_docs(project_id).await?;
             let existing = docs.iter().find(|d| {
                 d.title == PREAMBLE_OVERLAY_TITLE
                     && d.tags.contains(&PROMPT_OVERLAY_TAG.to_string())
@@ -967,8 +1183,14 @@ async fn process_self_improvement_output(
             let mut overlay = if let Some(doc) = existing {
                 doc.clone()
             } else {
-                MemoryDoc::new(project_id, DocType::Note, PREAMBLE_OVERLAY_TITLE, "")
-                    .with_tags(vec![PROMPT_OVERLAY_TAG.to_string()])
+                MemoryDoc::new(
+                    project_id,
+                    shared_owner_id(),
+                    DocType::Note,
+                    PREAMBLE_OVERLAY_TITLE,
+                    "",
+                )
+                .with_tags(vec![PROMPT_OVERLAY_TAG.to_string()])
             };
 
             // Append new rules
@@ -992,7 +1214,7 @@ async fn process_self_improvement_output(
     if let Some(patterns) = json_val.get("fix_patterns").and_then(|v| v.as_array())
         && !patterns.is_empty()
     {
-        let docs = store.list_memory_docs(project_id).await?;
+        let docs = store.list_shared_memory_docs(project_id).await?;
         let existing = docs.iter().find(|d| {
             d.title == FIX_PATTERN_DB_TITLE && d.tags.contains(&FIX_PATTERN_DB_TAG.to_string())
         });
@@ -1002,6 +1224,7 @@ async fn process_self_improvement_output(
         } else {
             MemoryDoc::new(
                 project_id,
+                shared_owner_id(),
                 DocType::Note,
                 FIX_PATTERN_DB_TITLE,
                 SEED_FIX_PATTERNS,
@@ -1151,7 +1374,7 @@ mod tests {
         async fn load_thread(&self, id: ThreadId) -> Result<Option<Thread>, EngineError> {
             Ok(self.threads.read().await.get(&id).cloned())
         }
-        async fn list_threads(&self, _: ProjectId) -> Result<Vec<Thread>, EngineError> {
+        async fn list_threads(&self, _: ProjectId, _: &str) -> Result<Vec<Thread>, EngineError> {
             Ok(vec![])
         }
         async fn update_thread_state(
@@ -1199,6 +1422,7 @@ mod tests {
         async fn list_memory_docs(
             &self,
             project_id: ProjectId,
+            _user_id: &str,
         ) -> Result<Vec<MemoryDoc>, EngineError> {
             Ok(self
                 .docs
@@ -1239,7 +1463,24 @@ mod tests {
         async fn load_mission(&self, id: MissionId) -> Result<Option<Mission>, EngineError> {
             Ok(self.missions.read().await.get(&id).cloned())
         }
-        async fn list_missions(&self, project_id: ProjectId) -> Result<Vec<Mission>, EngineError> {
+        async fn list_missions(
+            &self,
+            project_id: ProjectId,
+            user_id: &str,
+        ) -> Result<Vec<Mission>, EngineError> {
+            Ok(self
+                .missions
+                .read()
+                .await
+                .values()
+                .filter(|m| m.project_id == project_id && m.user_id == user_id)
+                .cloned()
+                .collect())
+        }
+        async fn list_all_missions(
+            &self,
+            project_id: ProjectId,
+        ) -> Result<Vec<Mission>, EngineError> {
             Ok(self
                 .missions
                 .read()
@@ -1358,9 +1599,11 @@ mod tests {
         let id = mgr
             .create_mission(
                 project_id,
+                "test-user",
                 "test mission",
                 "do the thing",
                 MissionCadence::Manual,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -1381,17 +1624,24 @@ mod tests {
         let project_id = ProjectId::new();
 
         let id = mgr
-            .create_mission(project_id, "pausable", "goal", MissionCadence::Manual)
+            .create_mission(
+                project_id,
+                "test-user",
+                "pausable",
+                "goal",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
             .await
             .unwrap();
 
         // Pause
-        mgr.pause_mission(id).await.unwrap();
+        mgr.pause_mission(id, "test-user").await.unwrap();
         let mission = mgr.get_mission(id).await.unwrap().unwrap();
         assert_eq!(mission.status, MissionStatus::Paused);
 
         // Resume
-        mgr.resume_mission(id).await.unwrap();
+        mgr.resume_mission(id, "test-user").await.unwrap();
         let mission = mgr.get_mission(id).await.unwrap().unwrap();
         assert_eq!(mission.status, MissionStatus::Active);
     }
@@ -1403,7 +1653,14 @@ mod tests {
         let project_id = ProjectId::new();
 
         let id = mgr
-            .create_mission(project_id, "completable", "goal", MissionCadence::Manual)
+            .create_mission(
+                project_id,
+                "test-user",
+                "completable",
+                "goal",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
             .await
             .unwrap();
 
@@ -1427,9 +1684,11 @@ mod tests {
         let id = mgr
             .create_mission(
                 project_id,
+                "test-user",
                 "fireable",
                 "build something",
                 MissionCadence::Manual,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -1460,7 +1719,14 @@ mod tests {
         let project_id = ProjectId::new();
 
         let id = mgr
-            .create_mission(project_id, "terminal", "goal", MissionCadence::Manual)
+            .create_mission(
+                project_id,
+                "test-user",
+                "terminal",
+                "goal",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
             .await
             .unwrap();
 
@@ -1484,12 +1750,14 @@ mod tests {
         let id = mgr
             .create_mission(
                 project_id,
+                "test-user",
                 "cron mission",
                 "periodic goal",
                 MissionCadence::Cron {
                     expression: "* * * * *".into(),
                     timezone: None,
                 },
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -1546,9 +1814,11 @@ mod tests {
         let id = mgr
             .create_mission(
                 project_id,
+                "test-user",
                 "Tech News",
                 "Deliver daily tech news briefing",
                 MissionCadence::Manual,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -1576,9 +1846,11 @@ mod tests {
         let id = mgr
             .create_mission(
                 project_id,
+                "test-user",
                 "Test Coverage",
                 "Increase test coverage to 80%",
                 MissionCadence::Manual,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -1610,9 +1882,11 @@ mod tests {
         let id = mgr
             .create_mission(
                 project_id,
+                "test-user",
                 "Coverage Mission",
                 "Get to 80% coverage",
                 MissionCadence::Manual,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -1646,6 +1920,7 @@ mod tests {
         // Create a mission
         let mission = Mission::new(
             project_id,
+            "test-user",
             "Coverage",
             "Increase coverage to 80%",
             MissionCadence::Manual,
@@ -1718,12 +1993,14 @@ mod tests {
         let id = mgr
             .create_mission(
                 project_id,
+                "test-user",
                 "GitHub Triage",
                 "Triage incoming issues",
                 MissionCadence::Webhook {
                     path: "github".into(),
                     secret: None,
                 },
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -1758,12 +2035,14 @@ mod tests {
         // Create an OnSystemEvent mission
         mgr.create_mission(
             project_id,
+            "test-user",
             "self-improve",
             "improve prompts",
             MissionCadence::OnSystemEvent {
                 source: "engine".into(),
                 event_type: "thread_completed_with_issues".into(),
             },
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -1789,12 +2068,14 @@ mod tests {
         // Create an OnSystemEvent mission for a different event
         mgr.create_mission(
             project_id,
+            "test-user",
             "webhook handler",
             "handle webhooks",
             MissionCadence::OnSystemEvent {
                 source: "github".into(),
                 event_type: "push".into(),
             },
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -1812,17 +2093,26 @@ mod tests {
         let mgr = make_mission_manager_with_response(Arc::clone(&store) as Arc<dyn Store>, "done");
         let project_id = ProjectId::new();
 
-        mgr.create_mission(project_id, "manual", "goal", MissionCadence::Manual)
-            .await
-            .unwrap();
         mgr.create_mission(
             project_id,
+            "test-user",
+            "manual",
+            "goal",
+            MissionCadence::Manual,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        mgr.create_mission(
+            project_id,
+            "test-user",
             "cron",
             "goal",
             MissionCadence::Cron {
                 expression: "* * * * *".into(),
                 timezone: None,
             },
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -1841,6 +2131,7 @@ mod tests {
 
         let mut mission = Mission::new(
             project_id,
+            "test-user",
             "self-improve",
             "improve prompts",
             MissionCadence::OnSystemEvent {
@@ -1852,6 +2143,9 @@ mod tests {
         let id = mission.id;
         store.save_mission(&mission).await.unwrap();
 
+        // Enable self-modification for this test so prompt additions are applied
+        unsafe { std::env::set_var("ORCHESTRATOR_SELF_MODIFY", "true") };
+
         let response = r#"{"prompt_additions": ["9. Never call web_fetch — use http() instead."], "fix_patterns": [], "level": 1}"#;
         let outcome = ThreadOutcome::Completed {
             response: Some(response.into()),
@@ -1860,8 +2154,10 @@ mod tests {
             .await
             .unwrap();
 
+        unsafe { std::env::remove_var("ORCHESTRATOR_SELF_MODIFY") };
+
         // Verify prompt overlay was saved
-        let docs = store.list_memory_docs(project_id).await.unwrap();
+        let docs = store.list_memory_docs(project_id, "system").await.unwrap();
         let overlay = docs
             .iter()
             .find(|d| d.title == crate::executor::prompt::PREAMBLE_OVERLAY_TITLE);
@@ -1876,6 +2172,7 @@ mod tests {
 
         let mut mission = Mission::new(
             project_id,
+            "test-user",
             "self-improve",
             "improve prompts",
             MissionCadence::Manual,
@@ -1892,7 +2189,7 @@ mod tests {
             .await
             .unwrap();
 
-        let docs = store.list_memory_docs(project_id).await.unwrap();
+        let docs = store.list_memory_docs(project_id, "system").await.unwrap();
         let patterns = docs.iter().find(|d| d.title == FIX_PATTERN_DB_TITLE);
         assert!(patterns.is_some(), "fix patterns should be saved");
         assert!(patterns.unwrap().content.contains("Tool xyz not found"));
@@ -1905,7 +2202,13 @@ mod tests {
         let store: Arc<dyn Store> = Arc::new(TestStore::new());
         let project_id = ProjectId::new();
 
-        let mission = Mission::new(project_id, "regular", "do stuff", MissionCadence::Manual);
+        let mission = Mission::new(
+            project_id,
+            "test-user",
+            "regular",
+            "do stuff",
+            MissionCadence::Manual,
+        );
         let id = mission.id;
         store.save_mission(&mission).await.unwrap();
 
@@ -1918,7 +2221,7 @@ mod tests {
             .await
             .unwrap();
 
-        let docs = store.list_memory_docs(project_id).await.unwrap();
+        let docs = store.list_memory_docs(project_id, "system").await.unwrap();
         assert!(docs.is_empty(), "non-SI mission should not create overlay");
     }
 
@@ -1929,7 +2232,7 @@ mod tests {
         let project_id = ProjectId::new();
 
         let id = mgr
-            .ensure_self_improvement_mission(project_id)
+            .ensure_self_improvement_mission(project_id, "test-user")
             .await
             .unwrap();
 
@@ -1941,9 +2244,10 @@ mod tests {
             MissionCadence::OnSystemEvent { .. }
         ));
         assert_eq!(mission.max_threads_per_day, 5);
+        assert_eq!(mission.user_id, "test-user");
 
         // Fix pattern database should be seeded
-        let docs = store.list_memory_docs(project_id).await.unwrap();
+        let docs = store.list_memory_docs(project_id, "system").await.unwrap();
         let patterns = docs.iter().find(|d| d.title == FIX_PATTERN_DB_TITLE);
         assert!(patterns.is_some(), "fix patterns should be seeded");
         assert!(patterns.unwrap().content.contains("NameError"));
@@ -1956,18 +2260,18 @@ mod tests {
         let project_id = ProjectId::new();
 
         let id1 = mgr
-            .ensure_self_improvement_mission(project_id)
+            .ensure_self_improvement_mission(project_id, "test-user")
             .await
             .unwrap();
         let id2 = mgr
-            .ensure_self_improvement_mission(project_id)
+            .ensure_self_improvement_mission(project_id, "test-user")
             .await
             .unwrap();
 
         assert_eq!(id1, id2, "should return the same mission ID");
 
         // Should only have one mission
-        let missions = store.list_missions(project_id).await.unwrap();
+        let missions = store.list_missions(project_id, "test-user").await.unwrap();
         assert_eq!(missions.len(), 1);
     }
 
@@ -1978,7 +2282,14 @@ mod tests {
         let project_id = ProjectId::new();
 
         let id = mgr
-            .create_mission(project_id, "budget test", "goal", MissionCadence::Manual)
+            .create_mission(
+                project_id,
+                "test-user",
+                "budget test",
+                "goal",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
             .await
             .unwrap();
 
@@ -2001,6 +2312,363 @@ mod tests {
         assert!(
             t2.is_none(),
             "second fire should be blocked by daily budget"
+        );
+    }
+
+    // ── Multi-tenancy tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn per_user_learning_missions_are_isolated() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Bootstrap learning missions for two different users
+        mgr.ensure_learning_missions(project_id, "alice")
+            .await
+            .unwrap();
+        mgr.ensure_learning_missions(project_id, "bob")
+            .await
+            .unwrap();
+
+        // Each user should see only their own missions
+        let alice_missions = store.list_missions(project_id, "alice").await.unwrap();
+        let bob_missions = store.list_missions(project_id, "bob").await.unwrap();
+
+        assert_eq!(alice_missions.len(), bob_missions.len());
+        assert!(
+            alice_missions.len() >= 3,
+            "at least 3 learning missions per user"
+        );
+
+        // No overlap in mission IDs
+        let alice_ids: std::collections::HashSet<_> = alice_missions.iter().map(|m| m.id).collect();
+        let bob_ids: std::collections::HashSet<_> = bob_missions.iter().map(|m| m.id).collect();
+        assert!(
+            alice_ids.is_disjoint(&bob_ids),
+            "alice and bob should have separate mission instances"
+        );
+
+        // Verify user_id is set correctly on all missions
+        assert!(alice_missions.iter().all(|m| m.user_id == "alice"));
+        assert!(bob_missions.iter().all(|m| m.user_id == "bob"));
+    }
+
+    #[tokio::test]
+    async fn pause_resume_does_not_cross_users() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Create a mission for alice
+        let alice_id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "alice-task",
+                "goal",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        // Create a mission for bob
+        let bob_id = mgr
+            .create_mission(
+                project_id,
+                "bob",
+                "bob-task",
+                "goal",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        // Alice pauses her own mission — should succeed
+        mgr.pause_mission(alice_id, "alice").await.unwrap();
+        let alice_mission = mgr.get_mission(alice_id).await.unwrap().unwrap();
+        assert_eq!(alice_mission.status, MissionStatus::Paused);
+
+        // Bob's mission should be unaffected
+        let bob_mission = mgr.get_mission(bob_id).await.unwrap().unwrap();
+        assert_eq!(bob_mission.status, MissionStatus::Active);
+
+        // Bob tries to resume alice's mission — should fail
+        let result = mgr.resume_mission(alice_id, "bob").await;
+        assert!(
+            result.is_err(),
+            "bob should not be able to resume alice's mission"
+        );
+        assert!(
+            matches!(result.unwrap_err(), EngineError::AccessDenied { .. }),
+            "should be AccessDenied"
+        );
+
+        // Alice resumes her own mission — should succeed
+        mgr.resume_mission(alice_id, "alice").await.unwrap();
+        let alice_mission = mgr.get_mission(alice_id).await.unwrap().unwrap();
+        assert_eq!(alice_mission.status, MissionStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn user_cannot_pause_another_users_learning_mission() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Bootstrap per-user learning missions
+        mgr.ensure_learning_missions(project_id, "alice")
+            .await
+            .unwrap();
+        mgr.ensure_learning_missions(project_id, "bob")
+            .await
+            .unwrap();
+
+        // Get alice's self-improvement mission
+        let alice_missions = store.list_missions(project_id, "alice").await.unwrap();
+        let alice_self_imp = alice_missions
+            .iter()
+            .find(|m| is_self_improvement_mission(m))
+            .expect("alice should have a self-improvement mission");
+
+        // Bob tries to pause alice's self-improvement — should fail
+        let result = mgr.pause_mission(alice_self_imp.id, "bob").await;
+        assert!(
+            matches!(result.unwrap_err(), EngineError::AccessDenied { .. }),
+            "bob cannot pause alice's learning mission"
+        );
+
+        // Alice pauses her own — should succeed
+        mgr.pause_mission(alice_self_imp.id, "alice").await.unwrap();
+        let m = mgr.get_mission(alice_self_imp.id).await.unwrap().unwrap();
+        assert_eq!(m.status, MissionStatus::Paused);
+
+        // Bob's self-improvement should still be active
+        let bob_missions = store.list_missions(project_id, "bob").await.unwrap();
+        let bob_self_imp = bob_missions
+            .iter()
+            .find(|m| is_self_improvement_mission(m))
+            .unwrap();
+        assert_eq!(bob_self_imp.status, MissionStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn system_mission_visible_to_all_via_with_shared() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Create a system mission (admin-installed shared mission)
+        let system_id = mgr
+            .create_mission(
+                project_id,
+                "system",
+                "shared-monitoring",
+                "monitor uptime",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        // Create a user mission
+        let _user_id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "alice-task",
+                "do stuff",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        // Alice's list_missions (strict) only shows her own
+        let alice_strict = store.list_missions(project_id, "alice").await.unwrap();
+        assert_eq!(alice_strict.len(), 1);
+
+        // list_missions_with_shared shows both alice's and system's
+        let alice_shared = store
+            .list_missions_with_shared(project_id, "alice")
+            .await
+            .unwrap();
+        assert_eq!(alice_shared.len(), 2);
+        assert!(alice_shared.iter().any(|m| m.id == system_id));
+
+        // Bob sees only the system mission (no personal missions)
+        let bob_shared = store
+            .list_missions_with_shared(project_id, "bob")
+            .await
+            .unwrap();
+        assert_eq!(bob_shared.len(), 1);
+        assert_eq!(bob_shared[0].id, system_id);
+    }
+
+    #[tokio::test]
+    async fn system_mission_requires_system_user_to_manage() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Create a system mission
+        let system_id = mgr
+            .create_mission(
+                project_id,
+                "system",
+                "shared-mission",
+                "shared goal",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        // Regular user cannot pause system mission
+        let result = mgr.pause_mission(system_id, "alice").await;
+        assert!(
+            matches!(result.unwrap_err(), EngineError::AccessDenied { .. }),
+            "regular user cannot manage system missions"
+        );
+
+        // System user can pause (admin path passes "system" as user_id)
+        mgr.pause_mission(system_id, "system").await.unwrap();
+        let m = mgr.get_mission(system_id).await.unwrap().unwrap();
+        assert_eq!(m.status, MissionStatus::Paused);
+
+        // System user can resume
+        mgr.resume_mission(system_id, "system").await.unwrap();
+        let m = mgr.get_mission(system_id).await.unwrap().unwrap();
+        assert_eq!(m.status, MissionStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn fire_mission_ownership_check() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Create alice's mission
+        let alice_id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "alice-only",
+                "private goal",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        // Bob cannot fire alice's mission
+        let result = mgr.fire_mission(alice_id, "bob", None).await;
+        assert!(
+            matches!(result.unwrap_err(), EngineError::AccessDenied { .. }),
+            "bob cannot fire alice's mission"
+        );
+
+        // Alice can fire her own
+        let tid = mgr.fire_mission(alice_id, "alice", None).await.unwrap();
+        assert!(tid.is_some());
+    }
+
+    #[tokio::test]
+    async fn fire_on_system_event_scoped_to_user() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Bootstrap per-user learning missions
+        mgr.ensure_learning_missions(project_id, "alice")
+            .await
+            .unwrap();
+        mgr.ensure_learning_missions(project_id, "bob")
+            .await
+            .unwrap();
+
+        // Count active missions for each user
+        let alice_missions = store.list_missions(project_id, "alice").await.unwrap();
+        let bob_missions = store.list_missions(project_id, "bob").await.unwrap();
+        let alice_self_imp = alice_missions
+            .iter()
+            .find(|m| is_self_improvement_mission(m))
+            .unwrap();
+        let bob_self_imp = bob_missions
+            .iter()
+            .find(|m| is_self_improvement_mission(m))
+            .unwrap();
+
+        // Pause bob's self-improvement
+        mgr.pause_mission(bob_self_imp.id, "bob").await.unwrap();
+
+        // Fire system event as alice — should fire alice's missions, not bob's
+        let payload = serde_json::json!({"source_thread_id": "test", "goal": "test"});
+        let spawned = mgr
+            .fire_on_system_event(
+                "engine",
+                "thread_completed_with_issues",
+                "alice",
+                Some(payload),
+            )
+            .await
+            .unwrap();
+
+        // Should have fired alice's self-improvement (active) but not bob's (paused)
+        assert!(!spawned.is_empty(), "alice's self-improvement should fire");
+
+        // Verify spawned thread belongs to alice
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        for tid in &spawned {
+            if let Some(thread) = store.load_thread(*tid).await.unwrap() {
+                assert_eq!(
+                    thread.user_id, "alice",
+                    "spawned thread should belong to alice"
+                );
+            }
+        }
+
+        // Verify bob's self-improvement is still paused and was not fired
+        let bob_m = mgr.get_mission(bob_self_imp.id).await.unwrap().unwrap();
+        assert_eq!(bob_m.status, MissionStatus::Paused);
+        assert!(
+            bob_m.thread_history.is_empty(),
+            "bob's paused mission should not have spawned threads"
+        );
+
+        // Alice's should have recorded the thread
+        let alice_m = mgr.get_mission(alice_self_imp.id).await.unwrap().unwrap();
+        assert!(
+            !alice_m.thread_history.is_empty(),
+            "alice's mission should have recorded the spawned thread"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_learning_missions_idempotent_per_user() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Call twice for the same user
+        mgr.ensure_learning_missions(project_id, "alice")
+            .await
+            .unwrap();
+        mgr.ensure_learning_missions(project_id, "alice")
+            .await
+            .unwrap();
+
+        // Should not create duplicates
+        let alice_missions = store.list_missions(project_id, "alice").await.unwrap();
+        let self_imp_count = alice_missions
+            .iter()
+            .filter(|m| is_self_improvement_mission(m))
+            .count();
+        assert_eq!(
+            self_imp_count, 1,
+            "should not duplicate self-improvement mission"
         );
     }
 }

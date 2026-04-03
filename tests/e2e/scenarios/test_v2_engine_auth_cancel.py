@@ -267,3 +267,11 @@ class TestV2EngineAuthCancel:
         history = await _wait_for_response(cancel_server, thread_id, timeout=30)
         turns = history.get("turns", [])
         assert len(turns) > 0, "Server should respond after cancel"
+        # Normal chat should work without auth prompt
+        all_responses = " ".join(
+            (t.get("response") or "") for t in turns
+        ).lower()
+        assert "paste your token" not in all_responses, (
+            f"After cancel, messages should be normal chat, not auth prompts. "
+            f"Got: {all_responses[:300]}"
+        )

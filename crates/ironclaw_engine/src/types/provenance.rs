@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::types::memory::DocId;
 
 /// The origin of a piece of data.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum Provenance {
     /// Direct user input.
     User,

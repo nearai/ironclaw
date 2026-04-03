@@ -11,6 +11,8 @@ use uuid::Uuid;
 use crate::types::project::ProjectId;
 use crate::types::thread::ThreadId;
 
+use super::{OwnerId, default_user_id};
+
 /// Strongly-typed mission identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MissionId(pub Uuid);
@@ -77,6 +79,9 @@ pub enum MissionCadence {
 pub struct Mission {
     pub id: MissionId,
     pub project_id: ProjectId,
+    /// Tenant isolation: the user who owns this mission.
+    #[serde(default = "default_user_id")]
+    pub user_id: String,
     pub name: String,
     pub goal: String,
     pub status: MissionStatus,
@@ -93,6 +98,12 @@ pub struct Mission {
     pub thread_history: Vec<ThreadId>,
     /// Optional criteria for declaring the mission complete.
     pub success_criteria: Option<String>,
+
+    // ── Notification ──
+    /// Channels to notify when a mission thread completes (e.g. "gateway", "repl").
+    /// Empty means no proactive notification (results only in approach_history).
+    #[serde(default)]
+    pub notify_channels: Vec<String>,
 
     // ── Budget ──
     /// Maximum threads per day (0 = unlimited).
@@ -115,6 +126,7 @@ pub struct Mission {
 impl Mission {
     pub fn new(
         project_id: ProjectId,
+        user_id: impl Into<String>,
         name: impl Into<String>,
         goal: impl Into<String>,
         cadence: MissionCadence,
@@ -123,6 +135,7 @@ impl Mission {
         Self {
             id: MissionId::new(),
             project_id,
+            user_id: user_id.into(),
             name: name.into(),
             goal: goal.into(),
             status: MissionStatus::Active,
@@ -131,6 +144,7 @@ impl Mission {
             approach_history: Vec::new(),
             thread_history: Vec::new(),
             success_criteria: None,
+            notify_channels: Vec::new(),
             max_threads_per_day: 10,
             threads_today: 0,
             last_trigger_payload: None,
@@ -144,6 +158,14 @@ impl Mission {
     pub fn with_success_criteria(mut self, criteria: impl Into<String>) -> Self {
         self.success_criteria = Some(criteria.into());
         self
+    }
+
+    pub fn owner_id(&self) -> OwnerId<'_> {
+        OwnerId::from_user_id(&self.user_id)
+    }
+
+    pub fn is_owned_by(&self, user_id: &str) -> bool {
+        self.owner_id().matches_user(user_id)
     }
 
     /// Record that a thread was spawned for this mission.

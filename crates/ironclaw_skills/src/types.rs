@@ -57,6 +57,8 @@ pub enum SkillSource {
     Workspace(PathBuf),
     /// User skills directory (~/.ironclaw/skills/).
     User(PathBuf),
+    /// Registry-installed skills directory (~/.ironclaw/installed_skills/).
+    Installed(PathBuf),
     /// Bundled with the application.
     Bundled(PathBuf),
 }
@@ -123,14 +125,31 @@ pub struct SkillManifest {
     /// Parsed at load time; values are never in the LLM context.
     #[serde(default)]
     pub credentials: Vec<SkillCredentialSpec>,
-    /// Gating requirements (binaries, env vars, config files, companion skills).
+    /// Optional OpenClaw metadata.
     #[serde(default)]
-    pub requires: GatingRequirements,
+    pub metadata: Option<SkillMetadata>,
 }
 
 fn default_version() -> String {
     "0.0.0".to_string()
 }
+
+/// Optional metadata section in SKILL.md frontmatter.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SkillMetadata {
+    /// OpenClaw-specific metadata.
+    #[serde(default)]
+    pub openclaw: Option<OpenClawMeta>,
+}
+
+/// OpenClaw-specific metadata.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OpenClawMeta {
+    /// Gating requirements that must be met for the skill to load.
+    #[serde(default)]
+    pub requires: GatingRequirements,
+}
+
 
 /// Requirements that must be satisfied for a skill to load.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -428,21 +447,25 @@ activation:
     }
 
     #[test]
-    fn test_parse_requires() {
+    fn test_parse_openclaw_metadata() {
         let yaml = r#"
 name: test-skill
-requires:
-  bins: ["vale"]
-  env: ["VALE_CONFIG"]
-  config: ["/etc/vale.ini"]
-  skills: ["commitment-triage", "commitment-digest"]
+metadata:
+  openclaw:
+    requires:
+      bins: ["vale"]
+      env: ["VALE_CONFIG"]
+      config: ["/etc/vale.ini"]
+      skills: ["commitment-triage", "commitment-digest"]
 "#;
         let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
-        assert_eq!(manifest.requires.bins, vec!["vale"]);
-        assert_eq!(manifest.requires.env, vec!["VALE_CONFIG"]);
-        assert_eq!(manifest.requires.config, vec!["/etc/vale.ini"]);
+        let meta = manifest.metadata.unwrap();
+        let openclaw = meta.openclaw.unwrap();
+        assert_eq!(openclaw.requires.bins, vec!["vale"]);
+        assert_eq!(openclaw.requires.env, vec!["VALE_CONFIG"]);
+        assert_eq!(openclaw.requires.config, vec!["/etc/vale.ini"]);
         assert_eq!(
-            manifest.requires.skills,
+            openclaw.requires.skills,
             vec!["commitment-triage", "commitment-digest"]
         );
     }
@@ -456,7 +479,7 @@ requires:
                 description: String::new(),
                 activation: ActivationCriteria::default(),
                 credentials: vec![],
-                requires: GatingRequirements::default(),
+                metadata: None,
             },
             prompt_content: "test prompt".to_string(),
             trust: SkillTrust::Trusted,

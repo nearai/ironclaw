@@ -86,6 +86,24 @@ If an internal error occurs (e.g., metadata serialization failure), the tool att
 Check the host logs for detailed error information.
 
 ## Advanced Usage
+### Gateway Mode
+
+The Discord channel now defaults to Discord Gateway transport for inbound message intake.
+The bundled identify payload requests intents `4609`, which expands to:
+
+- `GUILDS` (`1`)
+- `GUILD_MESSAGES` (`512`)
+- `DIRECT_MESSAGES` (`4096`)
+
+Gateway DMs now follow the same pairing policy as webhook DMs. Unpaired users receive a pairing
+instruction reply in the DM channel before the message is allowed through to the agent. If you
+want stricter access control than pairing, set `owner_id`; that lock still applies to both
+webhook and Gateway traffic.
+
+Gateway presence simply reflects a successful authenticated Gateway connection and advertises
+`online`. Pairing still controls whether DMs are allowed through to the agent, but it no longer
+changes the visible Discord status.
+
 ### Mention Polling
 
 The Discord channel can also poll configured channels for `@bot` mentions.
@@ -110,6 +128,7 @@ Example channel config:
 - `owner_id`: when set, only that Discord user can interact with the bot.
 - `dm_policy`: `open` allows all DMs; `pairing` requires approval.
 - `allow_from`: allowlist entries for DM pairing checks (`*`, user id, or username).
+- Gateway DMs respect `dm_policy` and pairing just like webhook DMs.
 
 ### Embeds
 

@@ -11,6 +11,15 @@ use crate::context::JobContext;
 use crate::extensions::{ExtensionKind, ExtensionManager};
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 
+fn activation_error_requires_auth(err: &str) -> bool {
+    let err_lower = err.to_ascii_lowercase();
+    err_lower.contains("authentication required")
+        || err_lower.contains("authentication")
+        || err_lower.contains("unauthorized")
+        || err_lower.contains("not authenticated")
+        || err.contains("401")
+}
+
 // ── tool_search ──────────────────────────────────────────────────────────
 
 pub struct ToolSearchTool {
@@ -31,8 +40,11 @@ impl Tool for ToolSearchTool {
 
     fn description(&self) -> &str {
         "Search for available extensions to add new capabilities. Extensions include \
-         channels (Telegram, Slack, Discord — for messaging), tools, and MCP servers. \
-         Use discover:true to search online if the built-in registry has no results."
+         channels (Telegram, Slack, Discord — connect messaging platforms so IronClaw can \
+         receive and reply there), tools, and MCP servers. Use `tool_install` and \
+         `tool_activate` to install and enable channels; use the `message` tool for proactive \
+         outbound sends. Use discover:true to search online if the built-in registry has no \
+         results."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -318,10 +330,7 @@ impl Tool for ToolActivateTool {
             }
             Err(activate_err) => {
                 let err_str = activate_err.to_string();
-                let needs_auth = err_str.contains("authentication")
-                    || err_str.contains("401")
-                    || err_str.contains("Unauthorized")
-                    || err_str.contains("not authenticated");
+                let needs_auth = activation_error_requires_auth(&err_str);
 
                 if !needs_auth {
                     return Err(ToolError::ExecutionFailed(err_str));
@@ -635,6 +644,17 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_search_description_clarifies_channel_setup_vs_sending() {
+        let tool = ToolSearchTool {
+            manager: test_manager_stub(),
+        };
+
+        let description = tool.description();
+        assert!(description.contains("Use `tool_install` and `tool_activate`"));
+        assert!(description.contains("use the `message` tool for proactive outbound sends"));
+    }
+
+    #[test]
     fn test_tool_install_schema() {
         use crate::tools::tool::ApprovalRequirement;
         let tool = ToolInstallTool {
@@ -681,6 +701,17 @@ mod tests {
             tool.requires_approval(&serde_json::json!({})),
             ApprovalRequirement::Never
         );
+    }
+
+    #[test]
+    fn activation_error_requires_auth_detects_auth_required_variants() {
+        assert!(activation_error_requires_auth("Authentication required"));
+        assert!(activation_error_requires_auth("not authenticated"));
+        assert!(activation_error_requires_auth("401 unauthorized"));
+        assert!(activation_error_requires_auth("Unauthorized"));
+        assert!(!activation_error_requires_auth(
+            "Activation failed: crashed"
+        ));
     }
 
     #[test]
