@@ -93,7 +93,10 @@ async def test_approve_invalid_code_returns_error(ironclaw_server):
             headers=_headers(),
             timeout=10,
         )
-    assert r.status_code >= 400, f"Expected error, got {r.status_code}: {r.text[:200]}"
+    # API returns 200 with {"success": false} for invalid codes (ActionResponse convention)
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text[:200]}"
+    body = r.json()
+    assert body.get("success") is False, f"Expected success=false, got {body}"
 
 
 async def test_pairing_requires_auth(ironclaw_server):

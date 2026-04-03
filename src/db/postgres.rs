@@ -1096,7 +1096,7 @@ impl ChannelPairingStore for PgBackend {
                 "SELECT ci.owner_id, u.role
                  FROM channel_identities ci
                  JOIN users u ON u.id = ci.owner_id
-                 WHERE ci.channel = $1 AND ci.external_id = $2
+                 WHERE LOWER(ci.channel) = LOWER($1) AND ci.external_id = $2
                    AND u.status = 'active'",
                 &[&channel, &external_id],
             )

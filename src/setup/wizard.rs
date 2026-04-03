@@ -3274,8 +3274,8 @@ impl SetupWizard {
     /// The session manager writes to disk during `ensure_authenticated()` but
     /// doesn't have a DB store attached during onboarding. This reads the
     /// session file from disk and stores it under `nearai_session_token` in the
-    /// encrypted secrets store, and also under `nearai.session_token` in the
-    /// plaintext settings table as a fallback for installs without a secrets store.
+    /// encrypted secrets store. Falls back to the plaintext settings table
+    /// only when no secrets store is available.
     ///
     /// Best-effort: silently ignores errors (no DB connection yet, no
     /// session file, etc.).
