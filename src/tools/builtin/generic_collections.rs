@@ -21,8 +21,6 @@ use crate::db::structured::{
 };
 use crate::tools::tool::{Tool, ToolError, ToolOutput, ToolRateLimitConfig, require_str};
 
-use super::collections::resolve_collection_scope;
-
 /// Check whether unified collection tool mode is enabled.
 pub fn is_unified_mode() -> bool {
     std::env::var("COLLECTION_TOOL_MODE")
@@ -94,8 +92,8 @@ impl UnifiedCollectionTool {
         }
     }
 
-    fn owner_scope<'a>(&'a self, ctx: &'a JobContext) -> &'a str {
-        self.schema.source_scope.as_deref().unwrap_or(&ctx.user_id)
+    fn owner_scope(&self) -> &str {
+        self.schema.source_scope.as_deref().unwrap_or(&self.owner_user_id)
     }
 
     // ---- Operation implementations ----
@@ -103,7 +101,7 @@ impl UnifiedCollectionTool {
     async fn execute_add(
         &self,
         params: &serde_json::Value,
-        ctx: &JobContext,
+        _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -137,14 +135,14 @@ impl UnifiedCollectionTool {
 
         let id = self
             .db
-            .insert_record(self.owner_scope(ctx), &self.schema.collection, data)
+            .insert_record(self.owner_scope(), &self.schema.collection, data)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to insert record: {e}")))?;
 
         // Fire collection write triggers.
         if let Some(tx) = &self.collection_write_tx {
             let _ = tx.send(CollectionWriteEvent {
-                user_id: self.owner_scope(ctx).to_string(),
+                user_id: self.owner_scope().to_string(),
                 collection: self.schema.collection.clone(),
                 record_id: id,
                 operation: "insert".to_string(),
@@ -165,7 +163,7 @@ impl UnifiedCollectionTool {
     async fn execute_update(
         &self,
         params: &serde_json::Value,
-        ctx: &JobContext,
+        _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -196,7 +194,7 @@ impl UnifiedCollectionTool {
         // Fetch existing record to get current _history, then append update entry.
         let existing = self
             .db
-            .get_record(self.owner_scope(ctx), record_id)
+            .get_record(self.owner_scope(), record_id)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to fetch record: {e}")))?;
 
@@ -211,7 +209,7 @@ impl UnifiedCollectionTool {
 
         self.db
             .update_record(
-                self.owner_scope(ctx),
+                self.owner_scope(),
                 record_id,
                 serde_json::Value::Object(final_updates),
             )
@@ -221,7 +219,7 @@ impl UnifiedCollectionTool {
         // Fire collection write triggers.
         if let Some(tx) = &self.collection_write_tx {
             let _ = tx.send(CollectionWriteEvent {
-                user_id: self.owner_scope(ctx).to_string(),
+                user_id: self.owner_scope().to_string(),
                 collection: self.schema.collection.clone(),
                 record_id,
                 operation: "update".to_string(),
@@ -242,7 +240,7 @@ impl UnifiedCollectionTool {
     async fn execute_delete(
         &self,
         params: &serde_json::Value,
-        ctx: &JobContext,
+        _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -251,14 +249,14 @@ impl UnifiedCollectionTool {
             .map_err(|e| ToolError::InvalidParameters(format!("Invalid record_id: {e}")))?;
 
         self.db
-            .delete_record(self.owner_scope(ctx), record_id)
+            .delete_record(self.owner_scope(), record_id)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to delete record: {e}")))?;
 
         // Fire collection write triggers.
         if let Some(tx) = &self.collection_write_tx {
             let _ = tx.send(CollectionWriteEvent {
-                user_id: self.owner_scope(ctx).to_string(),
+                user_id: self.owner_scope().to_string(),
                 collection: self.schema.collection.clone(),
                 record_id,
                 operation: "delete".to_string(),
@@ -279,7 +277,7 @@ impl UnifiedCollectionTool {
     async fn execute_query(
         &self,
         params: &serde_json::Value,
-        ctx: &JobContext,
+        _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -311,19 +309,7 @@ impl UnifiedCollectionTool {
             .unwrap_or(50)
             .min(200) as usize;
 
-        // Resolve scope
-        let owner = if self.schema.source_scope.is_some() {
-            self.owner_scope(ctx).to_string()
-        } else {
-            resolve_collection_scope(
-                self.db.as_ref(),
-                &ctx.user_id,
-                &[],
-                &self.schema.collection,
-            )
-            .await
-            .unwrap_or_else(|| ctx.user_id.clone())
-        };
+        let owner = self.owner_scope().to_string();
 
         let records = self
             .db
@@ -356,7 +342,7 @@ impl UnifiedCollectionTool {
     async fn execute_summary(
         &self,
         params: &serde_json::Value,
-        ctx: &JobContext,
+        _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -411,18 +397,7 @@ impl UnifiedCollectionTool {
             filters,
         };
 
-        let owner = if self.schema.source_scope.is_some() {
-            self.owner_scope(ctx).to_string()
-        } else {
-            resolve_collection_scope(
-                self.db.as_ref(),
-                &ctx.user_id,
-                &[],
-                &self.schema.collection,
-            )
-            .await
-            .unwrap_or_else(|| ctx.user_id.clone())
-        };
+        let owner = self.owner_scope().to_string();
 
         let result = self
             .db
@@ -1205,16 +1180,16 @@ mod tests {
         assert_eq!(grace_records[0]["data"]["name"], "yogurt");
     }
 
-    /// A unified tool created for andrew (owner_user_id="andrew") should not
-    /// leak data when executed with a JobContext for grace. The tool uses
-    /// `owner_scope(ctx)` which resolves to `ctx.user_id` when source_scope
-    /// is None, so grace's context should query grace's scope — not andrew's.
+    /// A unified tool created for andrew (owner_user_id="andrew") always operates
+    /// on andrew's data partition, regardless of the caller's JobContext.
+    /// The tool uses `owner_scope()` which resolves to `self.owner_user_id`
+    /// when source_scope is None, so the caller's context does not affect the scope.
     #[tokio::test]
-    async fn wrong_context_tool_isolation() {
+    async fn tool_always_targets_owner_partition() {
         let (db, _dir) = setup().await;
         let schema = grocery_schema();
 
-        // Register collection for andrew only — grace has NO collection.
+        // Register collection for andrew only.
         db.register_collection("andrew", &schema)
             .await
             .expect("register for andrew");
@@ -1240,19 +1215,19 @@ mod tests {
         .expect("andrew add wine");
 
         // Now execute the SAME tool with grace's context.
-        // Since source_scope is None, owner_scope(ctx) returns ctx.user_id = "grace".
-        // Grace has no collection registered, but query_records will just return
-        // empty for a non-existent collection/user pair rather than andrew's data.
+        // Since source_scope is None, owner_scope() returns owner_user_id = "andrew".
+        // The caller's ctx does not change the target partition — grace's context
+        // still reads andrew's data when operating andrew's tool.
         let grace_ctx = test_ctx("grace");
         let grace_result = tool
             .execute(json!({ "operation": "query" }), &grace_ctx)
             .await
             .expect("query with grace ctx should succeed");
 
-        // Grace must see 0 records — not andrew's 2 records.
+        // Grace sees andrew's 2 records because the tool targets the owner's partition.
         assert_eq!(
-            grace_result.result["count"], 0,
-            "grace should not see andrew's records when using andrew's tool with grace's context"
+            grace_result.result["count"], 2,
+            "tool targets owner_user_id partition regardless of caller context"
         );
     }
 }
