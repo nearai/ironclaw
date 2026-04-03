@@ -3,7 +3,7 @@
 mod event;
 mod util;
 
-pub use event::{AppEvent, ToolDecisionDto};
+pub use event::{AppEvent, PlanStepDto, ToolDecisionDto};
 pub use util::truncate_preview;
 
 /// Maximum worker agent loop iterations. Used by the orchestrator (server-side

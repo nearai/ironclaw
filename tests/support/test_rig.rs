@@ -420,6 +420,7 @@ pub struct TestRigBuilder {
     extra_tools: Vec<Arc<dyn Tool>>,
     wasm_tools: Vec<WasmToolSpec>,
     keep_bootstrap: bool,
+    engine_v2: bool,
 }
 
 impl TestRigBuilder {
@@ -437,6 +438,7 @@ impl TestRigBuilder {
             extra_tools: Vec::new(),
             wasm_tools: Vec::new(),
             keep_bootstrap: false,
+            engine_v2: false,
         }
     }
 
@@ -523,6 +525,12 @@ impl TestRigBuilder {
         self
     }
 
+    /// Route messages through the engine v2 pipeline instead of the v1 agentic loop.
+    pub fn with_engine_v2(mut self) -> Self {
+        self.engine_v2 = true;
+        self
+    }
+
     /// Add pre-recorded HTTP exchanges for the `ReplayingHttpInterceptor`.
     ///
     /// When set, all `http` tool calls will return these responses in order
@@ -556,6 +564,7 @@ impl TestRigBuilder {
             extra_tools,
             wasm_tools,
             keep_bootstrap,
+            engine_v2,
         } = self;
 
         // 1. Create temp dir + libSQL database + run migrations.
@@ -653,6 +662,12 @@ impl TestRigBuilder {
         // Force test-rig agent flags to the requested deterministic values.
         components.config.agent.auto_approve_tools = auto_approve_tools.unwrap_or(true);
         components.config.agent.allow_local_tools = true;
+        components.config.agent.engine_v2 = engine_v2;
+
+        // Reset engine v2 global state so each test gets a clean engine instance.
+        if engine_v2 {
+            ironclaw::bridge::reset_engine_state().await;
+        }
 
         let scheduler_slot: ironclaw::tools::builtin::SchedulerSlot =
             Arc::new(tokio::sync::RwLock::new(None));
@@ -716,10 +731,10 @@ impl TestRigBuilder {
             // AppBuilder did not wire them for this environment.
             if enable_skills {
                 let registry = Arc::new(std::sync::RwLock::new(
-                    ironclaw::skills::SkillRegistry::new(temp_dir.path().join("skills"))
+                    ironclaw_skills::SkillRegistry::new(temp_dir.path().join("skills"))
                         .with_installed_dir(temp_dir.path().join("installed_skills")),
                 ));
-                let catalog = ironclaw::skills::catalog::shared_catalog();
+                let catalog = ironclaw_skills::catalog::shared_catalog();
                 components
                     .tools
                     .register_skill_tools(Arc::clone(&registry), Arc::clone(&catalog));
@@ -944,6 +959,25 @@ pub async fn run_recorded_trace(filename: &str) {
     let trace = LlmTrace::from_file(&path)
         .unwrap_or_else(|e| panic!("failed to load trace {filename}: {e}"));
     let rig = TestRigBuilder::new()
+        .with_trace(trace.clone())
+        .build()
+        .await;
+    rig.run_and_verify_trace(&trace, Duration::from_secs(30))
+        .await;
+    rig.shutdown();
+}
+
+/// Like [`run_recorded_trace`] but routes through the engine v2 pipeline.
+#[cfg(feature = "libsql")]
+pub async fn run_recorded_trace_v2(filename: &str) {
+    let path = format!(
+        "{}/tests/fixtures/llm_traces/recorded/{filename}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let trace = LlmTrace::from_file(&path)
+        .unwrap_or_else(|e| panic!("failed to load trace {filename}: {e}"));
+    let rig = TestRigBuilder::new()
+        .with_engine_v2()
         .with_trace(trace.clone())
         .build()
         .await;

@@ -28,6 +28,8 @@ pub enum JobMode {
     Worker,
     /// Claude Code bridge that spawns the `claude` CLI directly.
     ClaudeCode,
+    /// ACP (Agent Client Protocol) bridge that spawns any ACP-compliant agent.
+    Acp,
 }
 
 impl JobMode {
@@ -35,6 +37,7 @@ impl JobMode {
         match self {
             Self::Worker => "worker",
             Self::ClaudeCode => "claude_code",
+            Self::Acp => "acp",
         }
     }
 }
@@ -56,6 +59,8 @@ pub struct JobCreationParams {
     pub mcp_servers: Option<Vec<String>>,
     /// Optional cap on worker agent loop iterations (clamped to 1..=500 server-side).
     pub max_iterations: Option<u32>,
+    /// ACP agent definition to inject into ACP-mode containers.
+    pub acp_agent: Option<crate::config::acp::AcpAgentConfig>,
 }
 
 /// Configuration for the container job manager.
@@ -84,6 +89,10 @@ pub struct ContainerJobConfig {
     pub claude_code_memory_limit_mb: u64,
     /// Allowed tool patterns for Claude Code (passed as CLAUDE_CODE_ALLOWED_TOOLS env var).
     pub claude_code_allowed_tools: Vec<String>,
+    /// Memory limit for ACP containers.
+    pub acp_memory_limit_mb: u64,
+    /// Maximum runtime for ACP bridge sessions in seconds.
+    pub acp_timeout_secs: u64,
     /// Whether per-job MCP server filtering is enabled.
     /// When false, `mcp_servers` param on `create_job` is ignored.
     pub mcp_per_job_enabled: bool,
@@ -102,6 +111,8 @@ impl Default for ContainerJobConfig {
             claude_code_max_turns: 50,
             claude_code_memory_limit_mb: 4096,
             claude_code_allowed_tools: crate::config::ClaudeCodeConfig::default().allowed_tools,
+            acp_memory_limit_mb: 4096,
+            acp_timeout_secs: 1800,
             mcp_per_job_enabled: false,
         }
     }
@@ -247,6 +258,28 @@ impl ContainerJobManager {
         }
     }
 
+    fn extend_acp_env(
+        &self,
+        env_vec: &mut Vec<String>,
+        acp_agent: Option<&crate::config::acp::AcpAgentConfig>,
+    ) {
+        env_vec.push(format!("ACP_TIMEOUT_SECS={}", self.config.acp_timeout_secs));
+
+        if let Some(agent) = acp_agent {
+            env_vec.push(format!("ACP_AGENT_COMMAND={}", agent.command));
+            if !agent.args.is_empty()
+                && let Ok(json) = serde_json::to_string(&agent.args)
+            {
+                env_vec.push(format!("ACP_AGENT_ARGS={}", json));
+            }
+            if !agent.env.is_empty()
+                && let Ok(json) = serde_json::to_string(&agent.env)
+            {
+                env_vec.push(format!("ACP_AGENT_ENV={}", json));
+            }
+        }
+    }
+
     /// Get or create a Docker connection.
     async fn docker(&self) -> Result<bollard::Docker, OrchestratorError> {
         {
@@ -282,8 +315,15 @@ impl ContainerJobManager {
         let token = self.token_store.create_token(job_id).await;
 
         // Store credential grants (revoked automatically when the token is revoked)
+        let JobCreationParams {
+            credential_grants,
+            mcp_servers,
+            max_iterations,
+            acp_agent,
+        } = params;
+
         self.token_store
-            .store_grants(job_id, params.credential_grants)
+            .store_grants(job_id, credential_grants)
             .await;
 
         // Record the handle
@@ -309,8 +349,9 @@ impl ContainerJobManager {
                 &token,
                 project_dir,
                 mode,
-                params.mcp_servers,
-                params.max_iterations,
+                mcp_servers,
+                max_iterations,
+                acp_agent,
             )
             .await
         {
@@ -324,6 +365,7 @@ impl ContainerJobManager {
     }
 
     /// Inner implementation of container creation (separated for cleanup).
+    #[allow(clippy::too_many_arguments)]
     async fn create_job_inner(
         &self,
         job_id: Uuid,
@@ -332,16 +374,15 @@ impl ContainerJobManager {
         mode: JobMode,
         mcp_servers: Option<Vec<String>>,
         max_iterations: Option<u32>,
+        acp_agent: Option<crate::config::acp::AcpAgentConfig>,
     ) -> Result<(), OrchestratorError> {
         // Connect to Docker (reuses cached connection)
         let docker = self.docker().await?;
 
         // Build container configuration
-        let orchestrator_host = if cfg!(target_os = "linux") {
-            "172.17.0.1"
-        } else {
-            "host.docker.internal"
-        };
+        // Use host.docker.internal on all platforms — the extra_hosts mapping
+        // below resolves it to the actual host IP via Docker's host-gateway.
+        let orchestrator_host = "host.docker.internal";
 
         let orchestrator_url = format!(
             "http://{}:{}",
@@ -418,9 +459,15 @@ impl ContainerJobManager {
             }
         }
 
-        // Memory limit: Claude Code gets more memory
+        // ACP mode: inject runtime timeout plus per-job agent command/args/env.
+        if mode == JobMode::Acp {
+            self.extend_acp_env(&mut env_vec, acp_agent.as_ref());
+        }
+
+        // Memory limit per mode
         let memory_mb = match mode {
             JobMode::ClaudeCode => self.config.claude_code_memory_limit_mb,
+            JobMode::Acp => self.config.acp_memory_limit_mb,
             JobMode::Worker => self.config.memory_limit_mb,
         };
 
@@ -465,6 +512,13 @@ impl ContainerJobManager {
                 "--model".to_string(),
                 self.config.claude_code_model.clone(),
             ],
+            JobMode::Acp => vec![
+                "acp-bridge".to_string(),
+                "--job-id".to_string(),
+                job_id.to_string(),
+                "--orchestrator-url".to_string(),
+                orchestrator_url,
+            ],
         };
 
         // Add Docker labels for reaper identification and orphan detection
@@ -489,6 +543,7 @@ impl ContainerJobManager {
         let container_name = match mode {
             JobMode::Worker => format!("ironclaw-worker-{}", job_id),
             JobMode::ClaudeCode => format!("ironclaw-claude-{}", job_id),
+            JobMode::Acp => format!("ironclaw-acp-{}", job_id),
         };
         let options = CreateContainerOptions {
             name: container_name,
@@ -916,6 +971,58 @@ mod tests {
         assert_eq!(handle.last_worker_status.as_deref(), Some("Iteration 3"));
     }
 
+    #[test]
+    fn test_job_mode_acp_as_str() {
+        assert_eq!(JobMode::Acp.as_str(), "acp");
+    }
+
+    #[test]
+    fn test_job_mode_acp_display() {
+        assert_eq!(format!("{}", JobMode::Acp), "acp");
+    }
+
+    #[test]
+    fn test_container_job_config_acp_memory_default() {
+        let config = ContainerJobConfig::default();
+        assert_eq!(config.acp_memory_limit_mb, 4096);
+    }
+
+    #[test]
+    fn test_container_job_config_acp_timeout_default() {
+        let config = ContainerJobConfig::default();
+        assert_eq!(config.acp_timeout_secs, 1800);
+    }
+
+    #[test]
+    fn test_extend_acp_env_includes_timeout_and_agent_details() {
+        let config = ContainerJobConfig {
+            acp_timeout_secs: 45,
+            ..Default::default()
+        };
+        let manager = ContainerJobManager::new(config, TokenStore::new());
+
+        let agent = crate::config::acp::AcpAgentConfig::new(
+            "codex",
+            "codex",
+            vec!["acp".into()],
+            HashMap::from([("FOO".to_string(), "bar".to_string())]),
+        );
+        let mut env_vec = Vec::new();
+        manager.extend_acp_env(&mut env_vec, Some(&agent));
+
+        assert!(env_vec.contains(&"ACP_TIMEOUT_SECS=45".to_string()));
+        assert!(env_vec.contains(&"ACP_AGENT_COMMAND=codex".to_string()));
+        assert!(
+            env_vec
+                .iter()
+                .any(|entry| entry.starts_with("ACP_AGENT_ARGS="))
+        );
+        assert!(
+            env_vec
+                .iter()
+                .any(|entry| entry.starts_with("ACP_AGENT_ENV="))
+        );
+    }
     // ── generate_worker_mcp_config tests ────────────────────────────
 
     #[tokio::test]

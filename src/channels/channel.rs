@@ -368,6 +368,8 @@ pub enum StatusUpdate {
         duration_ms: u64,
         iteration: usize,
     },
+    /// Skills activated for this conversation turn.
+    SkillActivated { skill_names: Vec<String> },
 }
 
 /// Shared chat-style approval prompt formatting used by non-web channels.

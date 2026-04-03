@@ -1035,7 +1035,10 @@ impl SetupWizard {
                 self.settings.secrets_master_key_hex = Some(key_hex.clone());
 
                 println!();
-                print_info("Master key generated and will be saved to ~/.ironclaw/.env");
+                print_info(&format!(
+                    "Master key generated and will be saved to {}",
+                    crate::bootstrap::ironclaw_env_path().display()
+                ));
                 println!();
                 println!("  SECRETS_MASTER_KEY={}", key_hex);
                 println!();
@@ -1183,7 +1186,10 @@ impl SetupWizard {
         crate::config::inject_single_var("SECRETS_MASTER_KEY", &key_hex);
         self.settings.secrets_master_key_hex = Some(key_hex);
         self.settings.secrets_master_key_source = KeySource::Env;
-        print_success("Master key stored in ~/.ironclaw/.env");
+        print_success(&format!(
+            "Master key stored in {}",
+            crate::bootstrap::ironclaw_env_path().display()
+        ));
         Ok(())
     }
 
