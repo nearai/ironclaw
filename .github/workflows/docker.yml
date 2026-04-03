@@ -1,0 +1,96 @@
+name: Docker Image
+
+on:
+  # Called by release.yml or other workflows
+  workflow_call:
+    inputs:
+      tag:
+        description: "Image tag override (leave empty for auto-detect)"
+        required: false
+        type: string
+        default: ""
+  # On-demand builds
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag override (leave empty for auto-detect)"
+        required: false
+        type: string
+        default: ""
+
+env:
+  IMAGE_NAME: nearaidev/ironclaw
+
+jobs:
+  build:
+    name: Build & Push
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+      actions: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Detected version: ${VERSION}"
+
+      - name: Determine tags
+        id: tags
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SHA="sha-${GITHUB_SHA::7}"
+
+          if [[ "${{ github.event_name }}" == "workflow_call" ]]; then
+            # Release: :version + :latest + :sha-xxx
+            TAGS="${{ env.IMAGE_NAME }}:${VERSION}"
+            TAGS="${TAGS},${{ env.IMAGE_NAME }}:latest"
+            TAGS="${TAGS},${{ env.IMAGE_NAME }}:${SHA}"
+          else
+            # Manual dispatch: :sha-xxx only
+            TAGS="${{ env.IMAGE_NAME }}:${SHA}"
+          fi
+
+          # Manual override adds an extra tag (e.g. "staging")
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            TAGS="${TAGS},${{ env.IMAGE_NAME }}:${{ inputs.tag }}"
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKER_REGISTRY_USER }}
+          password: ${{ secrets.DOCKER_REGISTRY_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          {
+            echo "## Docker Image"
+            echo ""
+            echo "**Tags pushed:**"
+            echo '```'
+            echo "${{ steps.tags.outputs.tags }}" | tr ',' '\n'
+            echo '```'
+            echo ""
+            echo "- version: \`${{ steps.version.outputs.version }}\`"
+            echo "- sha: \`${GITHUB_SHA::7}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -921,7 +922,14 @@ pub struct GeminiOauthProvider {
     http_client: Client,
     /// Latest response metadata (updated after each request).
     last_response_meta: std::sync::Mutex<GeminiResponseMeta>,
+    /// Captured thought signatures keyed by tool-call ID. Gemini 3.x models
+    /// require these echoed back on `functionCall` parts when replaying history.
+    /// Populated from responses, consumed when building the next request.
+    thought_signatures: std::sync::Mutex<HashMap<String, String>>,
 }
+
+/// Parsed Gemini response: (completion, tool_calls, thought_signatures_by_call_id).
+type GeminiParsedResponse = (CompletionResponse, Vec<ToolCall>, HashMap<String, String>);
 
 impl GeminiOauthProvider {
     pub fn new(config: GeminiOauthConfig) -> Result<Self, LlmError> {
@@ -939,6 +947,7 @@ impl GeminiOauthProvider {
             cred_manager,
             http_client,
             last_response_meta: std::sync::Mutex::new(GeminiResponseMeta::default()),
+            thought_signatures: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -1062,8 +1071,21 @@ impl GeminiOauthProvider {
 
     /// Count tokens for the given messages using the Gemini countTokens API.
     pub async fn count_tokens(&self, messages: &[ChatMessage]) -> Result<u32, LlmError> {
-        let req =
-            Self::to_gemini_request(messages, None, None, None, None, None, &self.config.model);
+        let sigs = self
+            .thought_signatures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let req = Self::to_gemini_request(
+            messages,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &self.config.model,
+            &sigs,
+        );
         let contents = req
             .get("contents")
             .cloned()
@@ -1589,6 +1611,7 @@ impl GeminiOauthProvider {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn to_gemini_request(
         messages: &[ChatMessage],
         tools: Option<&[ToolDefinition]>,
@@ -1597,6 +1620,7 @@ impl GeminiOauthProvider {
         stop_sequences: Option<&[String]>,
         tool_choice: Option<&str>,
         model: &str,
+        thought_sigs: &HashMap<String, String>,
     ) -> serde_json::Value {
         let mut contents = Vec::new();
 
@@ -1621,12 +1645,24 @@ impl GeminiOauthProvider {
                     }
                     if let Some(ref calls) = msg.tool_calls {
                         for call in calls {
-                            parts.push(serde_json::json!({
+                            let mut part = serde_json::json!({
                                 "functionCall": {
                                     "name": call.name,
                                     "args": call.arguments
                                 }
-                            }));
+                            });
+                            // Echo back the real thoughtSignature if captured from a
+                            // prior Gemini response. ensure_thought_signatures() will
+                            // fill in synthetic placeholders for any gaps.
+                            if let Some(sig) = thought_sigs.get(&call.id)
+                                && let Some(obj) = part.as_object_mut()
+                            {
+                                obj.insert(
+                                    "thoughtSignature".to_string(),
+                                    serde_json::Value::String(sig.clone()),
+                                );
+                            }
+                            parts.push(part);
                         }
                     }
                     // Fallback: if no parts at all, add empty text to avoid
@@ -1855,9 +1891,8 @@ impl GeminiOauthProvider {
         req
     }
 
-    fn from_gemini_response(
-        body: serde_json::Value,
-    ) -> Result<(CompletionResponse, Vec<ToolCall>), LlmError> {
+    /// Parsed Gemini response: (completion, tool_calls, thought_signatures_by_call_id).
+    fn from_gemini_response(body: serde_json::Value) -> Result<GeminiParsedResponse, LlmError> {
         let candidate = body
             .get("candidates")
             .and_then(|c| c.as_array())
@@ -1874,6 +1909,7 @@ impl GeminiOauthProvider {
 
         let mut text_content = String::new();
         let mut tool_calls = Vec::new();
+        let mut thought_sigs = HashMap::new();
 
         if let Some(parts) = parts {
             for part in parts {
@@ -1892,6 +1928,11 @@ impl GeminiOauthProvider {
                         .and_then(|i| i.as_str())
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                    // Capture thoughtSignature (sibling of functionCall in the part)
+                    // so it can be echoed back when replaying history.
+                    if let Some(sig) = part.get("thoughtSignature").and_then(|s| s.as_str()) {
+                        thought_sigs.insert(id.clone(), sig.to_string());
+                    }
 
                     tool_calls.push(ToolCall {
                         id,
@@ -2003,6 +2044,7 @@ impl GeminiOauthProvider {
                 cache_creation_input_tokens: 0,
             },
             tool_calls,
+            thought_sigs,
         ))
     }
 }
@@ -2041,6 +2083,11 @@ impl LlmProvider for GeminiOauthProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let sigs = self
+            .thought_signatures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let req_json = Self::to_gemini_request(
             &request.messages,
             None,
@@ -2049,9 +2096,10 @@ impl LlmProvider for GeminiOauthProvider {
             request.stop_sequences.as_deref(),
             None,
             &self.config.model,
+            &sigs,
         );
         let resp_json = self.send_request(&req_json).await?;
-        let (response, _tool_calls) = Self::from_gemini_response(resp_json)?;
+        let (response, _tool_calls, _new_sigs) = Self::from_gemini_response(resp_json)?;
         Ok(response)
     }
 
@@ -2065,6 +2113,11 @@ impl LlmProvider for GeminiOauthProvider {
             Some(request.tools.as_slice())
         };
 
+        let sigs = self
+            .thought_signatures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let req_json = Self::to_gemini_request(
             &request.messages,
             tool_defs,
@@ -2073,9 +2126,29 @@ impl LlmProvider for GeminiOauthProvider {
             request.stop_sequences.as_deref(),
             request.tool_choice.as_deref(),
             &self.config.model,
+            &sigs,
         );
         let resp_json = self.send_request(&req_json).await?;
-        let (response, tool_calls) = Self::from_gemini_response(resp_json)?;
+        let (response, tool_calls, new_sigs) = Self::from_gemini_response(resp_json)?;
+        // Store captured thought signatures, pruning stale entries to prevent
+        // unbounded growth over long-running processes. Only keep IDs that
+        // appear in the conversation history or the just-received response.
+        {
+            let mut sigs = self
+                .thought_signatures
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            sigs.extend(new_sigs);
+            let live_ids: std::collections::HashSet<&str> = request
+                .messages
+                .iter()
+                .filter_map(|m| m.tool_calls.as_ref())
+                .flatten()
+                .map(|tc| tc.id.as_str())
+                .chain(tool_calls.iter().map(|tc| tc.id.as_str()))
+                .collect();
+            sigs.retain(|id, _| live_ids.contains(id.as_str()));
+        }
 
         Ok(crate::llm::provider::ToolCompletionResponse {
             content: if response.content.is_empty() {
@@ -2218,6 +2291,7 @@ mod tests {
             None,
             None,
             "gemini-2.0-flash",
+            &HashMap::new(),
         );
 
         let decls = &req["tools"][0]["functionDeclarations"];
@@ -2240,6 +2314,7 @@ mod tests {
             None,
             None,
             "gemini-2.0-flash",
+            &HashMap::new(),
         );
 
         let contents = req["contents"].as_array().unwrap();
@@ -2265,7 +2340,7 @@ mod tests {
             }
         });
 
-        let (resp, tool_calls) = GeminiOauthProvider::from_gemini_response(body).unwrap();
+        let (resp, tool_calls, _sigs) = GeminiOauthProvider::from_gemini_response(body).unwrap();
 
         assert_eq!(resp.content, "Hello world");
         assert_eq!(resp.input_tokens, 10);
@@ -2293,7 +2368,7 @@ mod tests {
             }
         });
 
-        let (resp, tool_calls) = GeminiOauthProvider::from_gemini_response(body).unwrap();
+        let (resp, tool_calls, _sigs) = GeminiOauthProvider::from_gemini_response(body).unwrap();
 
         assert!(resp.content.is_empty());
         assert_eq!(tool_calls.len(), 1);
@@ -2313,6 +2388,7 @@ mod tests {
             None,
             None,
             "gemini-2.0-flash",
+            &HashMap::new(),
         );
 
         let gen_cfg = &req["generationConfig"];
@@ -2333,6 +2409,7 @@ mod tests {
             None,
             None,
             "gemini-3-flash-preview",
+            &HashMap::new(),
         );
 
         let thinking = &req["generationConfig"]["thinkingConfig"];
@@ -2353,6 +2430,7 @@ mod tests {
             None,
             None,
             "gemini-2.5-flash-thinking",
+            &HashMap::new(),
         );
 
         let thinking = &req["generationConfig"]["thinkingConfig"];
@@ -2376,6 +2454,7 @@ mod tests {
             Some(&stops),
             None,
             "gemini-2.5-flash",
+            &HashMap::new(),
         );
 
         let gen_cfg = &req["generationConfig"];
@@ -2403,6 +2482,7 @@ mod tests {
             None,
             Some("auto"),
             "gemini-2.0-flash",
+            &HashMap::new(),
         );
         assert_eq!(
             req_auto["toolConfig"]["functionCallingConfig"]["mode"],
@@ -2417,6 +2497,7 @@ mod tests {
             None,
             Some("required"),
             "gemini-2.0-flash",
+            &HashMap::new(),
         );
         assert_eq!(
             req_req["toolConfig"]["functionCallingConfig"]["mode"],
@@ -2431,6 +2512,7 @@ mod tests {
             None,
             Some("none"),
             "gemini-2.0-flash",
+            &HashMap::new(),
         );
         assert_eq!(
             req_none["toolConfig"]["functionCallingConfig"]["mode"],
@@ -2500,6 +2582,7 @@ mod tests {
             None,
             None,
             "gemini-1.5-flash",
+            &HashMap::new(),
         );
 
         let system_instruction = req
@@ -2613,5 +2696,134 @@ mod tests {
             .count();
 
         assert_eq!(signed_calls, 2); // safety: test-only assertion
+    }
+
+    #[test]
+    fn test_from_gemini_response_captures_thought_signature() {
+        let body = serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "thoughtSignature": "abc123sig",
+                        "functionCall": {
+                            "name": "read_file",
+                            "args": { "path": "/tmp/test.txt" }
+                        }
+                    }]
+                },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 10,
+                "candidatesTokenCount": 5
+            }
+        });
+
+        let (_resp, tool_calls, sigs) = GeminiOauthProvider::from_gemini_response(body).unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(
+            sigs.get(&tool_calls[0].id).map(|s| s.as_str()),
+            Some("abc123sig")
+        );
+    }
+
+    #[test]
+    fn test_from_gemini_response_no_thought_signature_yields_none() {
+        let body = serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "functionCall": {
+                            "name": "echo",
+                            "args": {}
+                        }
+                    }]
+                },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 5,
+                "candidatesTokenCount": 3
+            }
+        });
+
+        let (_resp, tool_calls, sigs) = GeminiOauthProvider::from_gemini_response(body).unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert!(!sigs.contains_key(&tool_calls[0].id));
+    }
+
+    #[test]
+    fn test_to_gemini_request_echoes_thought_signature_on_function_call() {
+        let messages = vec![
+            ChatMessage::user("call a tool"),
+            ChatMessage::assistant_with_tool_calls(
+                None,
+                vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "/tmp/x"}),
+                    reasoning: None,
+                }],
+            ),
+            ChatMessage::tool_result("call_1", "read_file", r#"{"output":"hello"}"#),
+        ];
+
+        let mut sigs = HashMap::new();
+        sigs.insert("call_1".to_string(), "sig_from_gemini".to_string());
+
+        let req = GeminiOauthProvider::to_gemini_request(
+            &messages,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "gemini-3-flash-preview",
+            &sigs,
+        );
+
+        let contents = req["contents"].as_array().unwrap();
+        // The model turn (index 1) should have the thoughtSignature on its functionCall part.
+        let model_turn = &contents[1];
+        assert_eq!(model_turn["role"], "model");
+        let fc_part = &model_turn["parts"][0];
+        assert!(fc_part.get("functionCall").is_some());
+        assert_eq!(fc_part["thoughtSignature"], "sig_from_gemini");
+    }
+
+    #[test]
+    fn test_to_gemini_request_omits_thought_signature_when_none() {
+        let messages = vec![
+            ChatMessage::user("call a tool"),
+            ChatMessage::assistant_with_tool_calls(
+                None,
+                vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "echo".to_string(),
+                    arguments: serde_json::json!({}),
+                    reasoning: None,
+                }],
+            ),
+            ChatMessage::tool_result("call_1", "echo", r#"{"output":"ok"}"#),
+        ];
+
+        let empty_sigs = HashMap::new();
+        let req = GeminiOauthProvider::to_gemini_request(
+            &messages,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "gemini-2.0-flash",
+            &empty_sigs,
+        );
+
+        let contents = req["contents"].as_array().unwrap();
+        let model_turn = &contents[1];
+        let fc_part = &model_turn["parts"][0];
+        assert!(fc_part.get("functionCall").is_some());
+        // No thoughtSignature should be present when there is no captured signature for this call ID.
+        assert!(fc_part.get("thoughtSignature").is_none());
     }
 }

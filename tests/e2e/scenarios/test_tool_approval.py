@@ -1,7 +1,8 @@
 """Scenario 6: Tool approval overlay UI behavior."""
 
-import pytest
-from helpers import SEL
+import asyncio
+
+from helpers import SEL, api_get, api_post
 
 
 INJECT_APPROVAL_JS = """
@@ -10,6 +11,60 @@ INJECT_APPROVAL_JS = """
     showApproval(data);
 }
 """
+
+
+async def _create_thread(base_url: str) -> str:
+    response = await api_post(base_url, "/api/chat/thread/new", timeout=15)
+    assert response.status_code == 200, response.text
+    return response.json()["id"]
+
+
+async def _send_chat_message(base_url: str, thread_id: str, content: str) -> None:
+    response = await api_post(
+        base_url,
+        "/api/chat/send",
+        json={"content": content, "thread_id": thread_id},
+        timeout=30,
+    )
+    assert response.status_code == 202, response.text
+
+
+async def _wait_for_history(
+    base_url: str,
+    thread_id: str,
+    *,
+    expect_pending: bool | None = None,
+    response_fragment: str | None = None,
+    turn_count_at_least: int | None = None,
+    timeout: float = 20.0,
+) -> dict:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        response = await api_get(
+            base_url,
+            f"/api/chat/history?thread_id={thread_id}",
+            timeout=10,
+        )
+        assert response.status_code == 200, response.text
+        history = response.json()
+        pending = history.get("pending_approval")
+        turns = history.get("turns", [])
+        latest_response = turns[-1].get("response") if turns else None
+
+        pending_ok = expect_pending is None or bool(pending) == expect_pending
+        response_ok = response_fragment is None or (
+            latest_response is not None and response_fragment in latest_response
+        )
+        turns_ok = turn_count_at_least is None or len(turns) >= turn_count_at_least
+        if pending_ok and response_ok and turns_ok:
+            return history
+
+        await asyncio.sleep(0.25)
+
+    raise AssertionError(
+        f"Timed out waiting for history state: expect_pending={expect_pending}, "
+        f"response_fragment={response_fragment!r}"
+    )
 
 
 async def test_approval_card_appears(page):
@@ -186,3 +241,73 @@ async def test_waiting_for_approval_message_no_error_prefix(page):
     assert "HTTP requests to external APIs" in msg_text, (
         f"Expected tool description in message. Got: {msg_text!r}"
     )
+
+
+async def test_chat_reply_approve_resumes_pending_tool(ironclaw_server):
+    """A plain chat reply of 'approve' should resume the pending tool call."""
+    thread_id = await _create_thread(ironclaw_server)
+
+    await _send_chat_message(ironclaw_server, thread_id, "make approval post approval-chat")
+    await _wait_for_history(ironclaw_server, thread_id, expect_pending=True)
+
+    await _send_chat_message(ironclaw_server, thread_id, "approve")
+    history = await _wait_for_history(
+        ironclaw_server,
+        thread_id,
+        expect_pending=False,
+        response_fragment="The http tool returned:",
+        turn_count_at_least=1,
+    )
+
+    assert history.get("pending_approval") is None
+    assert history["turns"][-1]["response"] is not None
+
+
+async def test_chat_reply_deny_rejects_pending_tool(ironclaw_server):
+    """A plain chat reply of 'deny' should reject the pending tool call."""
+    thread_id = await _create_thread(ironclaw_server)
+
+    await _send_chat_message(ironclaw_server, thread_id, "make approval post approval-denied")
+    await _wait_for_history(ironclaw_server, thread_id, expect_pending=True)
+
+    await _send_chat_message(ironclaw_server, thread_id, "deny")
+    history = await _wait_for_history(
+        ironclaw_server,
+        thread_id,
+        expect_pending=False,
+        response_fragment="was rejected",
+        turn_count_at_least=1,
+    )
+
+    response_text = history["turns"][-1]["response"]
+    assert response_text is not None
+    assert "Tool 'http' was rejected" in response_text
+
+
+async def test_chat_reply_always_auto_approves_next_same_tool(ironclaw_server):
+    """A plain chat reply of 'always' should auto-approve the same tool next time."""
+    thread_id = await _create_thread(ironclaw_server)
+
+    await _send_chat_message(ironclaw_server, thread_id, "make approval post approval-always-a")
+    await _wait_for_history(ironclaw_server, thread_id, expect_pending=True)
+
+    await _send_chat_message(ironclaw_server, thread_id, "always")
+    await _wait_for_history(
+        ironclaw_server,
+        thread_id,
+        expect_pending=False,
+        response_fragment="The http tool returned:",
+        turn_count_at_least=1,
+    )
+
+    await _send_chat_message(ironclaw_server, thread_id, "make approval post approval-always-b")
+    history = await _wait_for_history(
+        ironclaw_server,
+        thread_id,
+        expect_pending=False,
+        response_fragment="The http tool returned:",
+        turn_count_at_least=2,
+    )
+
+    assert history.get("pending_approval") is None
+    assert len(history["turns"]) >= 2

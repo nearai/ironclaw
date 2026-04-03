@@ -8,8 +8,8 @@ use std::path::Path;
 use clap::Subcommand;
 
 use crate::config::SkillsConfig;
-use crate::skills::catalog::SkillCatalog;
-use crate::skills::{SkillRegistry, SkillSource};
+use ironclaw_skills::catalog::SkillCatalog;
+use ironclaw_skills::{SkillRegistry, SkillSource};
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum SkillsCommand {
@@ -80,6 +80,7 @@ fn format_source(source: &SkillSource) -> &str {
     match source {
         SkillSource::Workspace(_) => "workspace",
         SkillSource::User(_) => "user",
+        SkillSource::Installed(_) => "installed",
         SkillSource::Bundled(_) => "bundled",
     }
 }

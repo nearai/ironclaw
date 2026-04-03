@@ -44,9 +44,17 @@ unused-allowed-license = "allow"
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# monty (Pydantic's embedded Python) is git-only (not on crates.io),
+# so it inherently lacks a version constraint. Allow path-dep wildcards.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+allow-git = [
+    # Monty (Pydantic's embedded Python interpreter) — not yet on crates.io.
+    # Pulls in ruff_* crates from astral-sh/ruff at a pinned revision.
+    "https://github.com/pydantic/monty.git",
+    "https://github.com/astral-sh/ruff.git",
+]

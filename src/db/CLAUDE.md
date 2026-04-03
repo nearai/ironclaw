@@ -63,7 +63,8 @@ The `Database` supertrait is composed of seven sub-traits. Leaf consumers can de
 4. Implement in `libsql/<module>.rs` (SQLite-dialect SQL, use `self.connect().await?` per operation)
 5. Add migration if needed:
    - PostgreSQL: new `migrations/VN__description.sql`
-   - libSQL: add `CREATE TABLE IF NOT EXISTS` to `libsql_migrations.rs`
+   - libSQL: add entry to `INCREMENTAL_MIGRATIONS` in `libsql_migrations.rs`
+   - **Version numbering**: always base your migration number on what is already in `staging`/`main`, not your local branch. Migrations that have reached staging may already be deployed to production. Your new migration must come *after* the highest version on staging. Check with `git ls-tree origin/staging migrations/` (PG) and grep `INCREMENTAL_MIGRATIONS` on staging (libSQL). Never reuse or insert before an existing version number.
 
 ## SQL Dialect Differences
 

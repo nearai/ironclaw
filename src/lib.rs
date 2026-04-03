@@ -42,6 +42,7 @@ pub mod agent;
 pub mod app;
 pub mod boot_screen;
 pub mod bootstrap;
+pub mod bridge;
 pub mod channels;
 pub mod cli;
 pub mod config;
@@ -53,6 +54,7 @@ pub mod estimation;
 pub mod evaluation;
 pub mod extensions;
 pub(crate) mod generated_images;
+pub mod gate;
 pub mod history;
 pub mod hooks;
 #[cfg(feature = "import")]
@@ -93,7 +95,7 @@ pub mod prelude {
     pub use crate::context::{JobContext, JobState};
     pub use crate::error::{Error, Result};
     pub use crate::llm::LlmProvider;
-    pub use crate::safety::{SanitizedOutput, Sanitizer};
     pub use crate::tools::{Tool, ToolOutput, ToolRegistry};
     pub use crate::workspace::{MemoryDocument, Workspace};
+    pub use ironclaw_safety::{SanitizedOutput, Sanitizer};
 }

@@ -39,3 +39,4 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+engine_trace_*.json
