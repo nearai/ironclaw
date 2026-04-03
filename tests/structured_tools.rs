@@ -524,8 +524,8 @@ async fn tool_definitions_for_user_filters_by_owner() {
     registry.register_builtin_tools();
 
     let total = registry.tool_definitions().await;
-    let andrew_defs = registry.tool_definitions_for_user("andrew").await;
-    let grace_defs = registry.tool_definitions_for_user("grace").await;
+    let andrew_defs = registry.tool_definitions_for_user("andrew", &[]).await;
+    let grace_defs = registry.tool_definitions_for_user("grace", &[]).await;
 
     // Both users should see the built-in tools
     let builtin_count = total.iter().filter(|d| {

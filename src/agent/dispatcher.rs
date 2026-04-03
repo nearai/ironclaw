@@ -175,7 +175,7 @@ impl Agent {
         // (normal iterations) and without (force_text final iteration).
         let initial_tool_defs = self
             .tools()
-            .tool_definitions_for_user(&message.user_id)
+            .tool_definitions_for_user(&message.user_id, &[])
             .await;
         let initial_tool_defs = if !active_skills.is_empty() {
             crate::skills::attenuate_tools(&initial_tool_defs, &active_skills).tools
@@ -334,7 +334,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         let tool_defs = self
             .agent
             .tools()
-            .tool_definitions_for_user(&self.message.user_id)
+            .tool_definitions_for_user(&self.message.user_id, &[])
             .await;
 
         // Apply trust-based tool attenuation if skills are active.
