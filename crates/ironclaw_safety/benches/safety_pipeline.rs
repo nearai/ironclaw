@@ -1,6 +1,5 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use ironclaw::config::SafetyConfig;
-use ironclaw_safety::{SafetyLayer, Validator};
+use ironclaw_safety::{SafetyConfig, SafetyLayer, Validator};
 
 fn bench_safety_layer_pipeline(c: &mut Criterion) {
     let mut group = c.benchmark_group("safety_pipeline");
@@ -61,7 +60,7 @@ fn bench_validate_tool_params(c: &mut Criterion) {
     let validator = Validator::new();
 
     let simple_params: serde_json::Value =
-        serde_json::from_str(r#"{"command": "echo hello"}"#).unwrap();
+        serde_json::from_str(r#"{"command": "echo hello"}"#).unwrap(); // safety: hardcoded JSON literal for benchmark fixture
 
     let complex_params: serde_json::Value = serde_json::from_str(
         r#"{
@@ -73,7 +72,7 @@ fn bench_validate_tool_params(c: &mut Criterion) {
         "capture_output": true
     }"#,
     )
-    .unwrap();
+    .unwrap(); // safety: hardcoded JSON literal for benchmark fixture
 
     // Deeply nested JSON to stress the recursive validation walk
     let nested_params: serde_json::Value = serde_json::from_str(
@@ -84,7 +83,7 @@ fn bench_validate_tool_params(c: &mut Criterion) {
         "env": {"KEY1": "val1", "KEY2": "val2", "KEY3": "val3", "KEY4": "val4"}
     }"#,
     )
-    .unwrap();
+    .unwrap(); // safety: hardcoded JSON literal for benchmark fixture
 
     group.bench_function("simple", |b| {
         b.iter(|| validator.validate_tool_params(black_box(&simple_params)))

@@ -14,7 +14,7 @@ Current root has 30+ items. Proposed consolidation:
 |---------|----------|-----------|
 | `channels-src/` + `tools-src/` | `extensions/channels/` + `extensions/tools/` | Unified "extensions" directory for all WASM modules |
 | `deploy/` + `docker/` + `scripts/` + `wix/` | `infra/` subdirectories | Build/deploy infrastructure grouped |
-| Everything else | Stays | `crates/`, `src/`, `tests/`, `benches/`, `fuzz/`, `migrations/`, `registry/`, `skills/`, `wit/`, `docs/` |
+| Everything else | Stays | `crates/`, `src/`, `tests/`, `fuzz/`, `migrations/`, `registry/`, `skills/`, `wit/`, `docs/` |
 
 ---
 
