@@ -849,6 +849,7 @@ async fn approval_resolution_executes_pending_call_directly() {
         step_id: ironclaw_engine::StepId::new(),
         current_call_id: Some("call_approval_1".into()),
         source_channel: None,
+        user_timezone: None,
     };
 
     let tool_result = effects
@@ -982,6 +983,7 @@ async fn auth_resolution_retries_same_pending_action_without_second_pause() {
         step_id: ironclaw_engine::StepId::new(),
         current_call_id: Some("call_auth_1".into()),
         source_channel: None,
+        user_timezone: None,
     };
 
     effects.mark_authenticated("http").await;
@@ -1087,6 +1089,7 @@ async fn approval_chains_directly_into_auth_for_install_flow() {
         step_id: ironclaw_engine::StepId::new(),
         current_call_id: Some("call_install_1".into()),
         source_channel: None,
+        user_timezone: None,
     };
 
     effects.mark_approved("tool_install").await;

@@ -71,6 +71,15 @@ fn thread_source_channel(thread: &Thread) -> Option<String> {
         .map(String::from)
 }
 
+/// Extract user_timezone from thread metadata (set by ConversationManager).
+fn thread_user_timezone(thread: &Thread) -> Option<String> {
+    thread
+        .metadata
+        .get("user_timezone")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
 fn normalize_pause_outcome(
     thread: &mut Thread,
     outcome: &ThreadOutcome,
@@ -658,6 +667,7 @@ async fn handle_execute_code_step(
         step_id: StepId::new(),
         current_call_id: None,
         source_channel: thread_source_channel(thread),
+        user_timezone: thread_user_timezone(thread),
     };
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
@@ -776,6 +786,7 @@ async fn handle_execute_action(
         step_id: StepId::new(),
         current_call_id: Some(call_id.clone()),
         source_channel: thread_source_channel(thread),
+        user_timezone: thread_user_timezone(thread),
     };
 
     // Helper: emit event only. The orchestrator owns transcript recording.
@@ -1230,6 +1241,7 @@ async fn handle_execute_actions_parallel(
             step_id,
             current_call_id: Some(pc.call_id.clone()),
             source_channel: None,
+            user_timezone: thread_user_timezone(thread),
         };
         let ps = summarize_params(&pc.name, &pc.params);
         let (result_json, event, output) = execute_single_action(
@@ -1267,6 +1279,7 @@ async fn handle_execute_actions_parallel(
                 step_id,
                 current_call_id: Some(pc_call_id.clone()),
                 source_channel: None,
+                user_timezone: thread_user_timezone(thread),
             };
             let ps = summarize_params(&pc_name, &pc_params);
 

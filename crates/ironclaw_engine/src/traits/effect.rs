@@ -25,6 +25,9 @@ pub struct ThreadExecutionContext {
     /// The channel this thread's conversation originated from (e.g. "gateway", "repl").
     /// Used by mission_create to default `notify_channels` to the current channel.
     pub source_channel: Option<String>,
+    /// IANA timezone of the user (e.g. "America/New_York").
+    /// Used by mission_create to default cron timezone, and exposed to CodeAct scripts.
+    pub user_timezone: Option<String>,
 }
 
 /// Abstraction over capability action execution.

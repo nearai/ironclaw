@@ -226,6 +226,15 @@ fn build_context_inputs(
     names.push("previous_results".into());
     values.push(MontyObject::dict(result_pairs));
 
+    // `user_timezone` — IANA timezone string from the user's channel (e.g. "America/New_York")
+    let tz = thread
+        .metadata
+        .get("user_timezone")
+        .and_then(|v| v.as_str())
+        .unwrap_or("UTC");
+    names.push("user_timezone".into());
+    values.push(MontyObject::String(tz.into()));
+
     (names, values)
 }
 
@@ -1567,6 +1576,7 @@ mod tests {
             step_id: StepId::new(),
             current_call_id: None,
             source_channel: None,
+            user_timezone: None,
         }
     }
 

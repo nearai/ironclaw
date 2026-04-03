@@ -188,6 +188,11 @@ async fn execute_pending_gate_action(
         step_id: ironclaw_engine::StepId::new(),
         current_call_id: Some(pending.call_id.clone()),
         source_channel: Some(pending.source_channel.clone()),
+        user_timezone: thread
+            .metadata
+            .get("user_timezone")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     };
 
     state.effect_adapter.reset_call_count();
@@ -1945,6 +1950,15 @@ async fn handle_with_engine_inner(
         )
         .await
         .map_err(|e| engine_err("thread error", e))?;
+
+    // Store user timezone in thread metadata so tools (mission_create) and
+    // CodeAct scripts can access it without the LLM having to ask.
+    if let Some(ref tz) = message.timezone {
+        state
+            .thread_manager
+            .set_thread_metadata(thread_id, "user_timezone", tz)
+            .await;
+    }
 
     // Dual-write to v1 database so the gateway history API shows messages.
     // Use the thread-scoped conversation (from thread_id) when available,

@@ -184,6 +184,12 @@ impl EffectBridgeAdapter {
                     .or_else(|| params.get("_args").and_then(|a| a.get(2)))
                     .and_then(|v| v.as_str())
                     .unwrap_or("manual");
+                // Use explicit timezone param, fall back to user's channel timezone
+                let timezone = params
+                    .get("timezone")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .or_else(|| context.user_timezone.clone());
                 // notify_channels: explicit array, or default to current channel
                 let notify_channels =
                     if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array()) {
@@ -201,7 +207,7 @@ impl EffectBridgeAdapter {
                         &context.user_id,
                         name,
                         goal,
-                        parse_cadence(cadence_str),
+                        parse_cadence(cadence_str, timezone),
                         notify_channels,
                     )
                     .await
@@ -326,7 +332,12 @@ impl EffectBridgeAdapter {
                             updates.goal = Some(goal.to_string());
                         }
                         if let Some(cadence) = params.get("cadence").and_then(|v| v.as_str()) {
-                            updates.cadence = Some(parse_cadence(cadence));
+                            let tz = params
+                                .get("timezone")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                                .or_else(|| context.user_timezone.clone());
+                            updates.cadence = Some(parse_cadence(cadence, tz));
                         }
                         if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array())
                         {
@@ -772,7 +783,14 @@ impl EffectExecutor for EffectBridgeAdapter {
 }
 
 /// Parse a cadence string into a MissionCadence.
-fn parse_cadence(s: &str) -> ironclaw_engine::types::mission::MissionCadence {
+///
+/// When cadence is a cron expression, `timezone` is used as the scheduling
+/// timezone. This is typically the user's channel timezone, auto-injected
+/// from `ThreadExecutionContext::user_timezone`.
+fn parse_cadence(
+    s: &str,
+    timezone: Option<String>,
+) -> ironclaw_engine::types::mission::MissionCadence {
     use ironclaw_engine::types::mission::MissionCadence;
     let trimmed = s.trim().to_lowercase();
     if trimmed == "manual" {
@@ -781,7 +799,7 @@ fn parse_cadence(s: &str) -> ironclaw_engine::types::mission::MissionCadence {
         // Looks like a cron expression
         MissionCadence::Cron {
             expression: s.trim().to_string(),
-            timezone: None,
+            timezone,
         }
     } else if trimmed.starts_with("event:") {
         MissionCadence::OnEvent {
@@ -1049,6 +1067,7 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: call_id.map(str::to_string),
             source_channel: None,
+            user_timezone: None,
         }
     }
 
@@ -1240,6 +1259,7 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
             source_channel: None,
+            user_timezone: None,
         };
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
@@ -1331,6 +1351,7 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: Some("call_123".to_string()),
             source_channel: None,
+            user_timezone: None,
         };
 
         let result = adapter

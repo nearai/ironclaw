@@ -470,6 +470,7 @@ mod tests {
             step_id: StepId::new(),
             current_call_id: None,
             source_channel: None,
+            user_timezone: None,
         }
     }
 
