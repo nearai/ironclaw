@@ -50,6 +50,7 @@ fn two_user_auth() -> MultiAuthState {
         UserIdentity {
             user_id: ALICE_USER_ID.to_string(),
             role: "admin".to_string(),
+            is_superadmin: true,
             workspace_read_scopes: Vec::new(),
         },
     );
@@ -58,6 +59,7 @@ fn two_user_auth() -> MultiAuthState {
         UserIdentity {
             user_id: BOB_USER_ID.to_string(),
             role: "admin".to_string(),
+            is_superadmin: true,
             workspace_read_scopes: vec!["shared".to_string()],
         },
     );
@@ -604,6 +606,7 @@ async fn start_owner_scoped_sender_server() -> (
         UserIdentity {
             user_id: OWNER_SCOPE_ID.to_string(),
             role: "admin".to_string(),
+            is_superadmin: true,
             workspace_read_scopes: Vec::new(),
         },
     );
@@ -612,6 +615,7 @@ async fn start_owner_scoped_sender_server() -> (
         UserIdentity {
             user_id: BOB_USER_ID.to_string(),
             role: "member".to_string(),
+            is_superadmin: false,
             workspace_read_scopes: Vec::new(),
         },
     );

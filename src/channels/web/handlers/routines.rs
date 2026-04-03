@@ -15,7 +15,10 @@ use crate::agent::routine::{
     routine_display_status_for_verification, routine_verification_status,
 };
 use crate::channels::web::auth::AuthenticatedUser;
-use crate::channels::web::handlers::workspaces::{WorkspaceQuery, resolve_workspace_scope};
+use crate::channels::web::handlers::workspaces::{
+    ResolvedWorkspace, WorkspaceQuery, resolve_workspace_scope,
+};
+use crate::channels::web::permissions::{Permission, require_workspace_permission};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::db::Database;
@@ -25,12 +28,8 @@ async fn resolve_routine_scope(
     store: &Arc<dyn Database>,
     user: &crate::channels::web::auth::UserIdentity,
     query: &WorkspaceQuery,
-) -> Result<Option<uuid::Uuid>, (StatusCode, String)> {
-    Ok(
-        resolve_workspace_scope(store, user, query.workspace.as_deref())
-            .await?
-            .map(|scope| scope.workspace.id),
-    )
+) -> Result<Option<ResolvedWorkspace>, (StatusCode, String)> {
+    resolve_workspace_scope(store, user, query.workspace.as_deref()).await
 }
 
 async fn load_visible_routine(
@@ -45,9 +44,9 @@ async fn load_visible_routine(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
-    let scope_id = resolve_routine_scope(store, user, query).await?;
-    match scope_id {
-        Some(workspace_id) if routine.workspace_id == Some(workspace_id) => Ok(routine),
+    let scope = resolve_routine_scope(store, user, query).await?;
+    match scope {
+        Some(scope) if routine.workspace_id == Some(scope.workspace.id) => Ok(routine),
         None if routine.workspace_id.is_none() && routine.user_id == user.user_id => Ok(routine),
         _ => Err((StatusCode::NOT_FOUND, "Routine not found".to_string())),
     }
@@ -63,18 +62,18 @@ pub async fn routines_list_handler(
         "Database not available".to_string(),
     ))?;
 
-    let routines =
-        if let Some(workspace_id) = resolve_routine_scope(store, &user, &workspace_query).await? {
-            store
-                .list_routines_for_workspace(workspace_id)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        } else {
-            store
-                .list_routines(&user.user_id)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        };
+    let scope = resolve_routine_scope(store, &user, &workspace_query).await?;
+    let routines = if let Some(workspace_id) = scope.as_ref().map(|scope| scope.workspace.id) {
+        store
+            .list_routines_for_workspace(workspace_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else {
+        store
+            .list_routines(&user.user_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
 
     let routine_ids: Vec<Uuid> = routines.iter().map(|routine| routine.id).collect();
     let last_run_statuses = store
@@ -102,18 +101,18 @@ pub async fn routines_summary_handler(
         "Database not available".to_string(),
     ))?;
 
-    let routines =
-        if let Some(workspace_id) = resolve_routine_scope(store, &user, &workspace_query).await? {
-            store
-                .list_routines_for_workspace(workspace_id)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        } else {
-            store
-                .list_routines(&user.user_id)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        };
+    let scope = resolve_routine_scope(store, &user, &workspace_query).await?;
+    let routines = if let Some(workspace_id) = scope.as_ref().map(|scope| scope.workspace.id) {
+        store
+            .list_routines_for_workspace(workspace_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else {
+        store
+            .list_routines(&user.user_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
 
     let routine_ids: Vec<Uuid> = routines.iter().map(|routine| routine.id).collect();
     let last_run_statuses = store
@@ -263,6 +262,8 @@ pub async fn routines_trigger_handler(
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
+    let scope = resolve_routine_scope(store, &user, &workspace_query).await?;
+    require_workspace_permission(&user, scope.as_ref(), Permission::WorkspaceWrite)?;
     let _routine = load_visible_routine(store, &user, &workspace_query, routine_id).await?;
 
     let run_id = engine
@@ -297,6 +298,8 @@ pub async fn routines_toggle_handler(
     let routine_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
 
+    let scope = resolve_routine_scope(store, &user, &workspace_query).await?;
+    require_workspace_permission(&user, scope.as_ref(), Permission::WorkspaceWrite)?;
     let mut routine = load_visible_routine(store, &user, &workspace_query, routine_id).await?;
 
     let was_enabled = routine.enabled;
@@ -356,6 +359,8 @@ pub async fn routines_delete_handler(
     let routine_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
 
+    let scope = resolve_routine_scope(store, &user, &workspace_query).await?;
+    require_workspace_permission(&user, scope.as_ref(), Permission::WorkspaceWrite)?;
     // Verify ownership before deleting.
     let _routine = load_visible_routine(store, &user, &workspace_query, routine_id).await?;
 

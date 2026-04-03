@@ -69,6 +69,8 @@ pub struct UserIdentity {
     pub user_id: String,
     /// `admin` or `member`.
     pub role: String,
+    /// System-wide privilege for cross-workspace administration.
+    pub is_superadmin: bool,
     /// Legacy compatibility scopes that can extend the personal workspace's
     /// read view during migration.
     pub workspace_read_scopes: Vec<String>,
@@ -118,6 +120,7 @@ impl MultiAuthState {
                 UserIdentity {
                     user_id,
                     role: "admin".to_string(),
+                    is_superadmin: true,
                     workspace_read_scopes: Vec::new(),
                 },
             )],
@@ -262,6 +265,7 @@ impl DbAuthenticator {
         let identity = UserIdentity {
             user_id: user_record.id.clone(),
             role: user_record.role.clone(),
+            is_superadmin: user_record.is_superadmin,
             workspace_read_scopes: Vec::new(),
         };
 
@@ -335,7 +339,7 @@ where
     }
 }
 
-/// Axum extractor that requires the authenticated user to have the `admin` role.
+/// Axum extractor that requires the authenticated user to be a superadmin.
 ///
 /// Use instead of `AuthenticatedUser` on endpoints that modify system-wide
 /// state (user management, model selection, extension/skill installation).
@@ -353,8 +357,8 @@ where
             .get::<UserIdentity>()
             .cloned()
             .ok_or((StatusCode::UNAUTHORIZED, "Not authenticated"))?;
-        if identity.role != "admin" {
-            return Err((StatusCode::FORBIDDEN, "Admin role required"));
+        if !identity.is_superadmin {
+            return Err((StatusCode::FORBIDDEN, "Superadmin required"));
         }
         Ok(AdminUser(identity))
     }
@@ -1081,6 +1085,7 @@ pub async fn auth_middleware(
                 let identity = UserIdentity {
                     user_id: sub,
                     role: "member".to_string(),
+                    is_superadmin: false,
                     workspace_read_scopes: Vec::new(),
                 };
                 request.extensions_mut().insert(identity);
@@ -1141,6 +1146,7 @@ mod tests {
             UserIdentity {
                 user_id: "alice".to_string(),
                 role: "admin".to_string(),
+                is_superadmin: true,
                 workspace_read_scopes: Vec::new(),
             },
         );
@@ -1149,6 +1155,7 @@ mod tests {
             UserIdentity {
                 user_id: "bob".to_string(),
                 role: "admin".to_string(),
+                is_superadmin: true,
                 workspace_read_scopes: Vec::new(),
             },
         );
@@ -1749,6 +1756,7 @@ mod tests {
             UserIdentity {
                 user_id: "alice".to_string(),
                 role: "admin".to_string(),
+                is_superadmin: true,
                 workspace_read_scopes: vec!["shared".to_string()],
             },
         );
@@ -1757,6 +1765,7 @@ mod tests {
             UserIdentity {
                 user_id: "bob".to_string(),
                 role: "admin".to_string(),
+                is_superadmin: true,
                 workspace_read_scopes: vec!["shared".to_string(), "alice".to_string()],
             },
         );

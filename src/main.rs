@@ -662,6 +662,7 @@ async fn async_main() -> anyhow::Result<()> {
                     display_name: config.owner_id.clone(),
                     status: "active".to_string(),
                     role: "admin".to_string(),
+                    is_superadmin: true,
                     created_at: now,
                     updated_at: now,
                     last_login_at: None,

@@ -32,20 +32,21 @@ fn row_to_workspace(row: &libsql::Row) -> Result<WorkspaceRecord, DatabaseError>
 }
 
 fn row_to_user(row: &libsql::Row, offset: i32) -> Result<UserRecord, DatabaseError> {
-    let metadata = get_json(row, offset + 9);
+    let metadata = get_json(row, offset + 10);
     Ok(UserRecord {
         id: get_text(row, offset),
         email: get_opt_text(row, offset + 1),
         display_name: get_text(row, offset + 2),
         status: get_text(row, offset + 3),
         role: get_text(row, offset + 4),
-        created_at: get_ts(row, offset + 5),
-        updated_at: get_ts(row, offset + 6),
-        last_login_at: get_opt_text(row, offset + 7)
+        is_superadmin: row.get::<i64>(offset + 5).unwrap_or(0) != 0,
+        created_at: get_ts(row, offset + 6),
+        updated_at: get_ts(row, offset + 7),
+        last_login_at: get_opt_text(row, offset + 8)
             .map(|s| super::parse_timestamp(&s))
             .transpose()
             .map_err(DatabaseError::Serialization)?,
-        created_by: get_opt_text(row, offset + 8),
+        created_by: get_opt_text(row, offset + 9),
         metadata,
     })
 }
@@ -209,6 +210,32 @@ impl WorkspaceMgmtStore for LibSqlBackend {
         Ok(memberships)
     }
 
+    async fn list_all_workspaces(&self) -> Result<Vec<WorkspaceRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, name, slug, description, status, created_at, updated_at, created_by, settings
+                FROM workspaces
+                WHERE status != 'archived'
+                ORDER BY created_at DESC
+                "#,
+                (),
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut workspaces = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            workspaces.push(row_to_workspace(&row)?);
+        }
+        Ok(workspaces)
+    }
+
     async fn update_workspace(
         &self,
         id: Uuid,
@@ -302,7 +329,7 @@ impl WorkspaceMgmtStore for LibSqlBackend {
             .query(
                 r#"
                 SELECT
-                    u.id, u.email, u.display_name, u.status, u.role, u.created_at, u.updated_at, u.last_login_at, u.created_by, u.metadata,
+                    u.id, u.email, u.display_name, u.status, u.role, u.is_superadmin, u.created_at, u.updated_at, u.last_login_at, u.created_by, u.metadata,
                     wm.workspace_id, wm.user_id, wm.role, wm.joined_at, wm.invited_by
                 FROM workspace_members wm
                 JOIN users u ON u.id = wm.user_id
@@ -323,13 +350,13 @@ impl WorkspaceMgmtStore for LibSqlBackend {
             let user = row_to_user(&row, 0)?;
             let membership = WorkspaceMemberRecord {
                 workspace_id: parse_uuid_field(
-                    &get_text(&row, 10),
+                    &get_text(&row, 11),
                     "workspace_members.workspace_id",
                 )?,
-                user_id: get_text(&row, 11),
-                role: get_text(&row, 12),
-                joined_at: get_ts(&row, 13),
-                invited_by: get_opt_text(&row, 14),
+                user_id: get_text(&row, 12),
+                role: get_text(&row, 13),
+                joined_at: get_ts(&row, 14),
+                invited_by: get_opt_text(&row, 15),
             };
             members.push((user, membership));
         }
@@ -407,6 +434,70 @@ impl WorkspaceMgmtStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(updated > 0)
+    }
+
+    async fn transfer_workspace_ownership(
+        &self,
+        workspace_id: Uuid,
+        current_owner_user_id: &str,
+        new_owner_user_id: &str,
+        invited_by: Option<&str>,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.connect().await?;
+        conn.execute("BEGIN IMMEDIATE", ())
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let result: Result<bool, DatabaseError> = async {
+            let demoted = conn
+                .execute(
+                    r#"
+                    UPDATE workspace_members
+                    SET role = 'admin'
+                    WHERE workspace_id = ?1 AND user_id = ?2 AND role = 'owner'
+                    "#,
+                    params![workspace_id.to_string(), current_owner_user_id],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            if demoted == 0 {
+                return Ok(false);
+            }
+
+            conn.execute(
+                r#"
+                INSERT INTO workspace_members (workspace_id, user_id, role, joined_at, invited_by)
+                VALUES (?1, ?2, 'owner', ?3, ?4)
+                ON CONFLICT (workspace_id, user_id) DO UPDATE SET
+                    role = 'owner',
+                    invited_by = excluded.invited_by
+                "#,
+                params![
+                    workspace_id.to_string(),
+                    new_owner_user_id,
+                    fmt_ts(&Utc::now()),
+                    opt_text(invited_by)
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+            Ok(true)
+        }
+        .await;
+
+        match &result {
+            Ok(_) => {
+                conn.execute("COMMIT", ())
+                    .await
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            }
+            Err(_) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+            }
+        }
+
+        result
     }
 
     async fn is_workspace_member(

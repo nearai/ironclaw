@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use crate::channels::IncomingMessage;
 use crate::channels::web::auth::AuthenticatedUser;
-use crate::channels::web::handlers::workspaces::{WorkspaceQuery, resolve_requested_workspace_id};
+use crate::channels::web::handlers::workspaces::{
+    WorkspaceQuery, resolve_requested_workspace_id, resolve_workspace_scope,
+};
+use crate::channels::web::permissions::{Permission, require_workspace_permission};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::channels::web::util::{
@@ -32,10 +35,16 @@ pub async fn chat_send_handler(
         ));
     }
 
-    let workspace_id =
+    let workspace_id = if let Some(store) = state.store.as_ref() {
+        let scope =
+            resolve_workspace_scope(store, &identity, workspace_query.workspace.as_deref()).await?;
+        require_workspace_permission(&identity, scope.as_ref(), Permission::WorkspaceWrite)?;
+        scope.map(|scope| scope.workspace.id.to_string())
+    } else {
         resolve_requested_workspace_id(&state, &identity, workspace_query.workspace.as_deref())
             .await?
-            .map(|id| id.to_string());
+            .map(|id| id.to_string())
+    };
     let mut msg = IncomingMessage::new("gateway", &identity.user_id, &req.content);
     if let Some(ref workspace_id) = workspace_id {
         msg.workspace_id = Some(workspace_id.clone());

@@ -747,6 +747,7 @@ async fn resolve_user(
         display_name,
         status: "active".to_string(),
         role: role.to_string(),
+        is_superadmin: false,
         created_at: now,
         updated_at: now,
         last_login_at: Some(now),

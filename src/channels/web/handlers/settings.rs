@@ -12,8 +12,9 @@ use uuid::Uuid;
 
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::handlers::workspaces::{
-    WorkspaceQuery, resolve_workspace_scope, workspace_scope_user_id,
+    ResolvedWorkspace, WorkspaceQuery, resolve_workspace_scope, workspace_scope_user_id,
 };
+use crate::channels::web::permissions::{Permission, require_workspace_permission};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::secrets::{CreateSecretParams, SecretsStore};
@@ -25,7 +26,7 @@ async fn resolve_settings_scope(
     state: &GatewayState,
     user: &crate::channels::web::auth::UserIdentity,
     query: &WorkspaceQuery,
-) -> Result<Option<Uuid>, StatusCode> {
+) -> Result<Option<ResolvedWorkspace>, StatusCode> {
     let Some(store) = state.store.as_ref() else {
         if query.workspace.is_some() {
             return Err(StatusCode::SERVICE_UNAVAILABLE);
@@ -35,7 +36,6 @@ async fn resolve_settings_scope(
 
     resolve_workspace_scope(store, user, query.workspace.as_deref())
         .await
-        .map(|scope| scope.map(|resolved| resolved.workspace.id))
         .map_err(|(status, _)| status)
 }
 
@@ -49,7 +49,8 @@ pub async fn settings_list_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let scope = resolve_settings_scope(&state, &user, &workspace_query).await?;
-    let rows = match scope {
+    let workspace_id = scope.as_ref().map(|resolved| resolved.workspace.id);
+    let rows = match workspace_id {
         Some(workspace_id) => store.list_settings_for_workspace(workspace_id).await,
         None => store.list_settings(&user.user_id).await,
     }
@@ -60,7 +61,7 @@ pub async fn settings_list_handler(
 
     // Build a map of sensitive keys so we can annotate and mask them.
     let sensitive_keys = ["llm_builtin_overrides", "llm_custom_providers"];
-    let settings_secret_scope = scope
+    let settings_secret_scope = workspace_id
         .map(workspace_scope_user_id)
         .unwrap_or_else(|| user.user_id.clone());
     let mut sensitive_map: std::collections::HashMap<String, serde_json::Value> = rows
@@ -106,7 +107,8 @@ pub async fn settings_get_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let scope = resolve_settings_scope(&state, &user, &workspace_query).await?;
-    let row = match scope {
+    let workspace_id = scope.as_ref().map(|resolved| resolved.workspace.id);
+    let row = match workspace_id {
         Some(workspace_id) => {
             store
                 .get_setting_full_for_workspace(workspace_id, &key)
@@ -121,7 +123,7 @@ pub async fn settings_get_handler(
     .ok_or(StatusCode::NOT_FOUND)?;
 
     // Mask any plaintext API keys that may exist from legacy data.
-    let settings_secret_scope = scope
+    let settings_secret_scope = workspace_id
         .map(workspace_scope_user_id)
         .unwrap_or_else(|| user.user_id.clone());
     let value = if matches!(
@@ -155,17 +157,20 @@ pub async fn settings_set_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let scope = resolve_settings_scope(&state, &user, &workspace_query).await?;
+    require_workspace_permission(&user, scope.as_ref(), Permission::WorkspaceManageSettings)
+        .map_err(|(status, _)| status)?;
+    let workspace_id = scope.as_ref().map(|resolved| resolved.workspace.id);
 
     // Guard: cannot remove a custom provider that is currently active.
     if key == "llm_custom_providers" {
-        guard_active_provider_not_removed(store.as_ref(), &user.user_id, scope, &body.value)
+        guard_active_provider_not_removed(store.as_ref(), &user.user_id, workspace_id, &body.value)
             .await?;
         validate_custom_providers(&body.value)?;
     }
 
     // Extract API keys from LLM settings and vault them in the secrets store.
     // The sanitized value has api_key fields removed (stored encrypted instead).
-    let settings_secret_scope = scope
+    let settings_secret_scope = workspace_id
         .map(workspace_scope_user_id)
         .unwrap_or_else(|| user.user_id.clone());
     let sanitized_value = match key.as_str() {
@@ -178,7 +183,7 @@ pub async fn settings_set_handler(
         _ => body.value.clone(),
     };
 
-    match scope {
+    match workspace_id {
         Some(workspace_id) => {
             store
                 .set_setting_for_workspace(workspace_id, &key, &sanitized_value)
@@ -326,6 +331,9 @@ pub async fn settings_delete_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let scope = resolve_settings_scope(&state, &user, &workspace_query).await?;
+    require_workspace_permission(&user, scope.as_ref(), Permission::WorkspaceManageSettings)
+        .map_err(|(status, _)| status)?;
+    let workspace_id = scope.as_ref().map(|resolved| resolved.workspace.id);
 
     // Guard: deleting llm_custom_providers is equivalent to setting it to [].
     // Reject if the active backend is a custom provider that would be removed.
@@ -333,13 +341,13 @@ pub async fn settings_delete_handler(
         guard_active_provider_not_removed(
             store.as_ref(),
             &user.user_id,
-            scope,
+            workspace_id,
             &serde_json::Value::Array(vec![]),
         )
         .await?;
     }
 
-    match scope {
+    match workspace_id {
         Some(workspace_id) => store.delete_setting_for_workspace(workspace_id, &key).await,
         None => store.delete_setting(&user.user_id, &key).await,
     }
@@ -814,6 +822,7 @@ mod tests {
             display_name: id.to_string(),
             status: "active".to_string(),
             role: "admin".to_string(),
+            is_superadmin: true,
             created_at: now,
             updated_at: now,
             last_login_at: None,

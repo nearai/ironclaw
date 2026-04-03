@@ -11,6 +11,7 @@ use serde::Deserialize;
 
 use crate::channels::web::auth::{AuthenticatedUser, UserIdentity};
 use crate::channels::web::handlers::workspaces::{WorkspaceQuery, resolve_workspace_scope};
+use crate::channels::web::permissions::{Permission, require_workspace_permission};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::workspace::Workspace;
@@ -163,6 +164,11 @@ pub async fn memory_write_handler(
     Query(workspace_query): Query<WorkspaceQuery>,
     Json(req): Json<MemoryWriteRequest>,
 ) -> Result<Json<MemoryWriteResponse>, (StatusCode, String)> {
+    if let Some(store) = state.store.as_ref() {
+        let scope =
+            resolve_workspace_scope(store, &user, workspace_query.workspace.as_deref()).await?;
+        require_workspace_permission(&user, scope.as_ref(), Permission::WorkspaceWrite)?;
+    }
     let workspace = resolve_workspace(&state, &user, Some(&workspace_query)).await?;
 
     // Route through layer-aware methods when a layer is specified.

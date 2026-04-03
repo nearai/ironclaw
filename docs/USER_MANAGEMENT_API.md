@@ -1,6 +1,6 @@
 # User Management API
 
-DB-backed user management for multi-tenant IronClaw deployments. Covers admin user CRUD, per-user secrets provisioning, self-service profile, API token management, and usage reporting.
+DB-backed user management for multi-tenant IronClaw deployments. Covers superadmin-only user CRUD, per-user secrets provisioning, self-service profile, API token management, and usage reporting.
 
 ## Authentication
 
@@ -12,14 +12,18 @@ DB tokens are SHA-256 hashed at rest; plaintext is returned exactly once at crea
 
 Auth is cached in a bounded LRU (1024 entries, 60s TTL). Suspending a user or revoking a token may take up to 60s to take effect.
 
-## Roles
+## Roles And System Access
 
 | Role | Scope |
 |------|-------|
-| `admin` | Full access to all endpoints |
+| `admin` | Elevated user role for compatibility and future policy; does not by itself unlock `/api/admin/*` |
 | `member` | Self-service profile + own token management only |
 
-Endpoints marked **Admin** return `403 Forbidden` for `member` role.
+Endpoints marked **Admin** require a superadmin identity. In practice that means:
+- the single-user bootstrap/env-var gateway token, or
+- a DB-backed token whose backing user has the internal `is_superadmin` flag.
+
+A plain `admin` role without superadmin status receives `403 Forbidden`.
 
 ---
 
@@ -29,7 +33,7 @@ Endpoints marked **Admin** return `403 Forbidden` for `member` role.
 
 Create a new user. Returns the user record and a one-time plaintext API token.
 
-**Auth:** Admin
+**Auth:** Superadmin
 
 **Request body:**
 
@@ -64,7 +68,7 @@ Create a new user. Returns the user record and a one-time plaintext API token.
 
 The `token` field is the plaintext API token. It is shown **only once** — store it securely.
 
-**Errors:** `400` (missing display_name, invalid role), `403` (not admin), `503` (no database)
+**Errors:** `400` (missing display_name, invalid role), `403` (superadmin required), `503` (no database)
 
 ---
 
@@ -72,7 +76,7 @@ The `token` field is the plaintext API token. It is shown **only once** — stor
 
 List all users.
 
-**Auth:** Admin
+**Auth:** Superadmin
 
 **Response:** `200 OK`
 
@@ -100,7 +104,7 @@ List all users.
 
 Get a single user by ID.
 
-**Auth:** Admin
+**Auth:** Superadmin
 
 **Response:** `200 OK`
 
@@ -119,7 +123,7 @@ Get a single user by ID.
 }
 ```
 
-**Errors:** `404` (user not found), `403` (not admin)
+**Errors:** `404` (user not found), `403` (superadmin required)
 
 ---
 
@@ -127,7 +131,7 @@ Get a single user by ID.
 
 Update a user's display name and/or metadata. Omitted fields are left unchanged.
 
-**Auth:** Admin
+**Auth:** Superadmin
 
 **Request body:**
 
@@ -146,7 +150,7 @@ Update a user's display name and/or metadata. Omitted fields are left unchanged.
 
 **Response:** `200 OK` — returns the full updated user record (same shape as GET detail, without `last_login_at`/`created_by`).
 
-**Errors:** `404` (user not found), `403` (not admin)
+**Errors:** `404` (user not found), `403` (superadmin required)
 
 ---
 
@@ -154,7 +158,7 @@ Update a user's display name and/or metadata. Omitted fields are left unchanged.
 
 Suspend a user. Suspended users cannot authenticate (DB auth checks user status).
 
-**Auth:** Admin
+**Auth:** Superadmin
 
 **Response:** `200 OK`
 
@@ -165,7 +169,7 @@ Suspend a user. Suspended users cannot authenticate (DB auth checks user status)
 }
 ```
 
-**Errors:** `404` (user not found), `403` (not admin)
+**Errors:** `404` (user not found), `403` (superadmin required)
 
 ---
 
@@ -173,7 +177,7 @@ Suspend a user. Suspended users cannot authenticate (DB auth checks user status)
 
 Re-activate a suspended user.
 
-**Auth:** Admin
+**Auth:** Superadmin
 
 **Response:** `200 OK`
 
@@ -184,7 +188,7 @@ Re-activate a suspended user.
 }
 ```
 
-**Errors:** `404` (user not found), `403` (not admin)
+**Errors:** `404` (user not found), `403` (superadmin required)
 
 ---
 
@@ -192,7 +196,7 @@ Re-activate a suspended user.
 
 Permanently delete a user and all associated data (tokens, jobs, conversations, memory, routines, settings, secrets).
 
-**Auth:** Admin
+**Auth:** Superadmin
 
 **Response:** `200 OK`
 
@@ -203,7 +207,7 @@ Permanently delete a user and all associated data (tokens, jobs, conversations, 
 }
 ```
 
-**Errors:** `404` (user not found), `403` (not admin)
+**Errors:** `404` (user not found), `403` (superadmin required)
 
 **Cascade:** Deletes from `api_tokens`, `agent_jobs`, `conversations`, `memory_documents`, `routines`, `secrets`, `settings`, `wasm_tools`, and related tables. On PostgreSQL this uses FK cascades; on libSQL it uses explicit deletes.
 
@@ -211,7 +215,7 @@ Permanently delete a user and all associated data (tokens, jobs, conversations, 
 
 ## Admin: Per-User Secrets
 
-Provision secrets on behalf of individual users. The primary use case is an application backend (acting as admin) that configures per-user credentials so each user's IronClaw agent can call back to external services.
+Provision secrets on behalf of individual users. The primary use case is an application backend (acting as superadmin) that configures per-user credentials so each user's IronClaw agent can call back to external services.
 
 Secrets are encrypted at rest with AES-256-GCM using a per-secret HKDF-derived key. Plaintext values are **never returned** by any endpoint — they can only be used by the agent's tool system at runtime.
 
@@ -219,7 +223,7 @@ Secrets are encrypted at rest with AES-256-GCM using a per-secret HKDF-derived k
 
 Create or update a secret for the specified user. If a secret with the same name already exists, it is overwritten.
 
-**Auth:** Admin
+**Auth:** Superadmin
 
 **Path parameters:**
 
@@ -254,20 +258,20 @@ Create or update a secret for the specified user. If a secret with the same name
 }
 ```
 
-**Errors:** `400` (missing value), `403` (not admin), `503` (secrets store not available)
+**Errors:** `400` (missing value), `403` (superadmin required), `503` (secrets store not available)
 
 **Example — application backend provisioning a callback token:**
 
 ```bash
-# Admin creates a user
+# Superadmin creates a user
 curl -X POST https://ironclaw.example.com/api/admin/users \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Authorization: Bearer $SUPERADMIN_TOKEN" \
   -d '{"display_name": "Alice", "role": "member"}'
 # Response includes: {"id": "alice-uuid", "token": "alice-bearer-token", ...}
 
-# Admin provisions a per-user callback secret
+# Superadmin provisions a per-user callback secret
 curl -X PUT https://ironclaw.example.com/api/admin/users/alice-uuid/secrets/app_callback_token \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Authorization: Bearer $SUPERADMIN_TOKEN" \
   -d '{"value": "per-user-jwt-for-alice", "provider": "my-app"}'
 
 # Now Alice's IronClaw agent can use the "app_callback_token" secret
@@ -280,7 +284,7 @@ curl -X PUT https://ironclaw.example.com/api/admin/users/alice-uuid/secrets/app_
 
 List a user's secrets. Returns names and providers only — **never values or hashes**.
 
-**Auth:** Admin
+**Auth:** Superadmin
 
 **Response:** `200 OK`
 
@@ -300,7 +304,7 @@ List a user's secrets. Returns names and providers only — **never values or ha
 
 Delete a specific secret for a user.
 
-**Auth:** Admin
+**Auth:** Superadmin
 
 **Response:** `200 OK`
 
@@ -312,7 +316,7 @@ Delete a specific secret for a user.
 }
 ```
 
-**Errors:** `404` (secret not found), `403` (not admin), `503` (secrets store not available)
+**Errors:** `404` (secret not found), `403` (superadmin required), `503` (secrets store not available)
 
 ---
 
@@ -322,7 +326,7 @@ Delete a specific secret for a user.
 
 Per-user LLM usage statistics aggregated from `llm_calls` via `agent_jobs.user_id`.
 
-**Auth:** Admin
+**Auth:** Superadmin
 
 **Query parameters:**
 
@@ -499,7 +503,7 @@ All error responses return a plain text body with the error message and the corr
 |------|---------|
 | `400` | Bad request (missing fields, invalid input) |
 | `401` | Missing or invalid bearer token |
-| `403` | Authenticated but insufficient role (member accessing admin endpoint) |
+| `403` | Authenticated but insufficient privileges (for example, a non-superadmin calling `/api/admin/*`) |
 | `404` | Resource not found |
 | `503` | Database or secrets store not available |
 | `500` | Internal server error |

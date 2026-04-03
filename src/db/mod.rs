@@ -322,6 +322,8 @@ pub struct UserRecord {
     pub status: String,
     /// `admin` or `member`.
     pub role: String,
+    /// System-wide privilege for cross-workspace administration.
+    pub is_superadmin: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_login_at: Option<DateTime<Utc>>,
@@ -1140,6 +1142,7 @@ pub trait WorkspaceMgmtStore: Send + Sync {
         &self,
         user_id: &str,
     ) -> Result<Vec<WorkspaceMembership>, DatabaseError>;
+    async fn list_all_workspaces(&self) -> Result<Vec<WorkspaceRecord>, DatabaseError>;
     async fn update_workspace(
         &self,
         id: Uuid,
@@ -1179,6 +1182,13 @@ pub trait WorkspaceMgmtStore: Send + Sync {
         workspace_id: Uuid,
         user_id: &str,
         role: &str,
+    ) -> Result<bool, DatabaseError>;
+    async fn transfer_workspace_ownership(
+        &self,
+        workspace_id: Uuid,
+        current_owner_user_id: &str,
+        new_owner_user_id: &str,
+        invited_by: Option<&str>,
     ) -> Result<bool, DatabaseError>;
     async fn is_workspace_member(
         &self,

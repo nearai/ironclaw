@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::handlers::workspaces::{WorkspaceQuery, resolve_workspace_scope};
+use crate::channels::web::permissions::{Permission, require_workspace_permission};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 
@@ -381,7 +382,14 @@ pub async fn jobs_cancel_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let job_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
-    let scope = resolve_job_scope(&state, &user, &workspace_query).await?;
+    let scope = if let Some(store) = state.store.as_ref() {
+        let scope =
+            resolve_workspace_scope(store, &user, workspace_query.workspace.as_deref()).await?;
+        require_workspace_permission(&user, scope.as_ref(), Permission::WorkspaceWrite)?;
+        scope.map(|scope| scope.workspace.id)
+    } else {
+        None
+    };
 
     // Try sandbox job cancellation.
     if let Some(ref store) = state.store {
@@ -480,7 +488,10 @@ pub async fn jobs_restart_handler(
     let old_job_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
-    let scope = resolve_job_scope(&state, &user, &workspace_query).await?;
+    let resolved_scope =
+        resolve_workspace_scope(store, &user, workspace_query.workspace.as_deref()).await?;
+    require_workspace_permission(&user, resolved_scope.as_ref(), Permission::WorkspaceWrite)?;
+    let scope = resolved_scope.as_ref().map(|scope| scope.workspace.id);
     // Try sandbox job restart first.
     match store.get_sandbox_job(old_job_id).await {
         Ok(Some(old_job)) => {
@@ -709,7 +720,14 @@ pub async fn jobs_prompt_handler(
         .to_string();
 
     let done = body.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
-    let scope = resolve_job_scope(&state, &user, &workspace_query).await?;
+    let scope = if let Some(store) = state.store.as_ref() {
+        let scope =
+            resolve_workspace_scope(store, &user, workspace_query.workspace.as_deref()).await?;
+        require_workspace_permission(&user, scope.as_ref(), Permission::WorkspaceWrite)?;
+        scope.map(|scope| scope.workspace.id)
+    } else {
+        None
+    };
 
     // Try sandbox job path first: verify ownership, then route to Claude Code or reject.
     if let Some(ref s) = state.store

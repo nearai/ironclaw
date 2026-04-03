@@ -92,7 +92,7 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | DELETE | `/api/routines/{id}` | Delete a routine |
 | GET | `/api/routines/{id}/runs` | List runs for a specific routine |
 
-### User Management (admin — requires `admin` role, see `docs/USER_MANAGEMENT_API.md`)
+### User Management (admin — requires superadmin identity, see `docs/USER_MANAGEMENT_API.md`)
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/admin/users` | Create a new user (returns one-time token) |

@@ -1,6 +1,8 @@
 //! Shared workspace API handlers and scope resolution helpers.
 
-use std::sync::Arc;
+use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use axum::{
     Json,
@@ -11,6 +13,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::channels::web::auth::{AuthenticatedUser, UserIdentity};
+use crate::channels::web::permissions::{Permission, Role, superadmin_workspace_role};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::db::{Database, WorkspaceMembership, WorkspaceRecord};
@@ -20,6 +23,101 @@ const WORKSPACE_ROLE_OWNER: &str = "owner";
 const WORKSPACE_ROLE_ADMIN: &str = "admin";
 const WORKSPACE_ROLE_MEMBER: &str = "member";
 const WORKSPACE_ROLE_VIEWER: &str = "viewer";
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct WorkspaceMembershipCacheKey {
+    workspace_id: Uuid,
+    user_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceMembershipCacheEntry {
+    role: Option<String>,
+    inserted_at: Instant,
+}
+
+struct WorkspaceMembershipCache {
+    entries: Mutex<lru::LruCache<WorkspaceMembershipCacheKey, WorkspaceMembershipCacheEntry>>,
+    ttl: Duration,
+}
+
+impl WorkspaceMembershipCache {
+    // SAFETY: 4096 is non-zero, so the unwrap in `new()` is infallible.
+    const MAX_ENTRIES: NonZeroUsize = match NonZeroUsize::new(4096) {
+        Some(value) => value,
+        None => unreachable!(),
+    };
+
+    fn new() -> Self {
+        let ttl_secs = std::env::var("GATEWAY_WORKSPACE_MEMBERSHIP_CACHE_TTL_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(60);
+        Self {
+            entries: Mutex::new(lru::LruCache::new(Self::MAX_ENTRIES)),
+            ttl: Duration::from_secs(ttl_secs),
+        }
+    }
+
+    fn get(&self, workspace_id: Uuid, user_id: &str) -> Option<Option<String>> {
+        let key = WorkspaceMembershipCacheKey {
+            workspace_id,
+            user_id: user_id.to_string(),
+        };
+        let mut entries = self.lock_entries();
+        if let Some(entry) = entries.get(&key)
+            && entry.inserted_at.elapsed() < self.ttl
+        {
+            return Some(entry.role.clone());
+        }
+        entries.pop(&key);
+        None
+    }
+
+    fn insert(&self, workspace_id: Uuid, user_id: &str, role: Option<String>) {
+        self.lock_entries().put(
+            WorkspaceMembershipCacheKey {
+                workspace_id,
+                user_id: user_id.to_string(),
+            },
+            WorkspaceMembershipCacheEntry {
+                role,
+                inserted_at: Instant::now(),
+            },
+        );
+    }
+
+    fn invalidate(&self, workspace_id: Uuid, user_id: &str) {
+        self.lock_entries().pop(&WorkspaceMembershipCacheKey {
+            workspace_id,
+            user_id: user_id.to_string(),
+        });
+    }
+
+    fn lock_entries(
+        &self,
+    ) -> std::sync::MutexGuard<
+        '_,
+        lru::LruCache<WorkspaceMembershipCacheKey, WorkspaceMembershipCacheEntry>,
+    > {
+        match self.entries.lock() {
+            Ok(entries) => entries,
+            Err(poisoned) => {
+                tracing::warn!("WorkspaceMembershipCache lock poisoned; recovering");
+                poisoned.into_inner()
+            }
+        }
+    }
+}
+
+fn workspace_membership_cache() -> &'static WorkspaceMembershipCache {
+    static CACHE: OnceLock<WorkspaceMembershipCache> = OnceLock::new();
+    CACHE.get_or_init(WorkspaceMembershipCache::new)
+}
+
+pub(crate) fn invalidate_workspace_membership_cache(workspace_id: Uuid, user_id: &str) {
+    workspace_membership_cache().invalidate(workspace_id, user_id);
+}
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct WorkspaceQuery {
@@ -39,18 +137,11 @@ fn workspace_role_error() -> String {
 }
 
 fn is_valid_workspace_role(role: &str) -> bool {
-    matches!(
-        role,
-        WORKSPACE_ROLE_OWNER | WORKSPACE_ROLE_ADMIN | WORKSPACE_ROLE_MEMBER | WORKSPACE_ROLE_VIEWER
-    )
+    Role::parse(role).is_ok()
 }
 
 fn workspace_role_is_owner(role: &str) -> bool {
     role == WORKSPACE_ROLE_OWNER
-}
-
-fn workspace_role_is_manager(role: &str) -> bool {
-    matches!(role, WORKSPACE_ROLE_OWNER | WORKSPACE_ROLE_ADMIN)
 }
 
 fn validate_workspace_name(name: &str) -> Result<(), (StatusCode, String)> {
@@ -96,6 +187,42 @@ pub fn workspace_scope_user_id(workspace_id: Uuid) -> String {
     format!("{WORKSPACE_SCOPE_PREFIX}{workspace_id}")
 }
 
+async fn resolve_workspace_scope_for_workspace(
+    store: &Arc<dyn Database>,
+    user: &UserIdentity,
+    workspace: WorkspaceRecord,
+) -> Result<ResolvedWorkspace, (StatusCode, String)> {
+    if workspace.status == "archived" {
+        return Err((StatusCode::GONE, "Workspace is archived".to_string()));
+    }
+
+    if user.is_superadmin {
+        return Ok(ResolvedWorkspace {
+            workspace,
+            role: superadmin_workspace_role().as_str().to_string(),
+        });
+    }
+
+    let membership_role = match workspace_membership_cache().get(workspace.id, &user.user_id) {
+        Some(cached) => cached,
+        None => {
+            let fetched = store
+                .get_member_role(workspace.id, &user.user_id)
+                .await
+                .map_err(internal_db_error)?;
+            workspace_membership_cache().insert(workspace.id, &user.user_id, fetched.clone());
+            fetched
+        }
+    };
+    let role = match membership_role {
+        Some(role) => role,
+        None => return Err((StatusCode::FORBIDDEN, "Workspace access denied".to_string())),
+    };
+    Role::parse(&role)?;
+
+    Ok(ResolvedWorkspace { workspace, role })
+}
+
 pub async fn resolve_workspace_scope(
     store: &Arc<dyn Database>,
     user: &UserIdentity,
@@ -111,21 +238,26 @@ pub async fn resolve_workspace_scope(
         .map_err(internal_db_error)?
         .ok_or((StatusCode::NOT_FOUND, "Workspace not found".to_string()))?;
 
-    if workspace.status == "archived" {
-        return Err((StatusCode::GONE, "Workspace is archived".to_string()));
-    }
-
-    let role = store
-        .get_member_role(workspace.id, &user.user_id)
+    resolve_workspace_scope_for_workspace(store, user, workspace)
         .await
-        .map_err(internal_db_error)?
-        .ok_or((StatusCode::FORBIDDEN, "Workspace access denied".to_string()))?;
+        .map(Some)
+}
 
-    Ok(Some(ResolvedWorkspace { workspace, role }))
+pub async fn resolve_workspace_scope_by_id(
+    store: &Arc<dyn Database>,
+    user: &UserIdentity,
+    workspace_id: Uuid,
+) -> Result<ResolvedWorkspace, (StatusCode, String)> {
+    let workspace = store
+        .get_workspace(workspace_id)
+        .await
+        .map_err(internal_db_error)?;
+    let workspace = workspace.ok_or((StatusCode::NOT_FOUND, "Workspace not found".to_string()))?;
+    resolve_workspace_scope_for_workspace(store, user, workspace).await
 }
 
 pub fn require_workspace_manager(role: &str) -> Result<(), (StatusCode, String)> {
-    if workspace_role_is_manager(role) {
+    if Role::parse(role)?.has_permission(Permission::WorkspaceManageMembers) {
         Ok(())
     } else {
         Err((
@@ -136,7 +268,7 @@ pub fn require_workspace_manager(role: &str) -> Result<(), (StatusCode, String)>
 }
 
 pub fn require_workspace_owner(role: &str) -> Result<(), (StatusCode, String)> {
-    if workspace_role_is_owner(role) {
+    if Role::parse(role)? >= Role::Owner {
         Ok(())
     } else {
         Err((
@@ -212,13 +344,25 @@ pub async fn workspaces_list_handler(
         "Database not available".to_string(),
     ))?;
 
-    let workspaces = store
-        .list_workspaces_for_user(&user.user_id)
-        .await
-        .map_err(internal_db_error)?
-        .into_iter()
-        .map(workspace_info_from_membership)
-        .collect();
+    let workspaces = if user.is_superadmin {
+        store
+            .list_all_workspaces()
+            .await
+            .map_err(internal_db_error)?
+            .into_iter()
+            .map(|workspace| {
+                workspace_info(workspace, superadmin_workspace_role().as_str().to_string())
+            })
+            .collect()
+    } else {
+        store
+            .list_workspaces_for_user(&user.user_id)
+            .await
+            .map_err(internal_db_error)?
+            .into_iter()
+            .map(workspace_info_from_membership)
+            .collect()
+    };
 
     Ok(Json(WorkspaceListResponse { workspaces }))
 }
@@ -305,7 +449,7 @@ pub async fn workspaces_archive_handler(
     ))?;
     let resolved = resolve_workspace_scope(store, &user, Some(&slug)).await?;
     let resolved = resolved.ok_or((StatusCode::NOT_FOUND, "Workspace not found".to_string()))?;
-    require_workspace_manager(&resolved.role)?;
+    require_workspace_owner(&resolved.role)?;
 
     let archived = store
         .archive_workspace(resolved.workspace.id)
@@ -403,6 +547,50 @@ pub async fn workspace_members_upsert_handler(
         return Err((StatusCode::NOT_FOUND, "User not found".to_string()));
     }
 
+    if workspace_role_is_owner(role) && member_user_id != user.user_id {
+        if existing_role
+            .as_deref()
+            .is_some_and(workspace_role_is_owner)
+        {
+            return Ok(StatusCode::NO_CONTENT);
+        }
+
+        let owners: Vec<String> = store
+            .list_workspace_members(resolved.workspace.id)
+            .await
+            .map_err(internal_db_error)?
+            .into_iter()
+            .filter(|(_, membership)| workspace_role_is_owner(&membership.role))
+            .map(|(owner_user, _)| owner_user.id)
+            .collect();
+        let [current_owner_id] = owners.as_slice() else {
+            return Err((
+                StatusCode::CONFLICT,
+                "Workspace ownership transfer requires exactly one current owner".to_string(),
+            ));
+        };
+
+        let transferred = store
+            .transfer_workspace_ownership(
+                resolved.workspace.id,
+                current_owner_id,
+                &member_user_id,
+                Some(&user.user_id),
+            )
+            .await
+            .map_err(internal_db_error)?;
+        if !transferred {
+            return Err((
+                StatusCode::CONFLICT,
+                "Workspace ownership transfer failed".to_string(),
+            ));
+        }
+
+        invalidate_workspace_membership_cache(resolved.workspace.id, current_owner_id);
+        invalidate_workspace_membership_cache(resolved.workspace.id, &member_user_id);
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
     store
         .add_workspace_member(
             resolved.workspace.id,
@@ -412,6 +600,7 @@ pub async fn workspace_members_upsert_handler(
         )
         .await
         .map_err(internal_db_error)?;
+    invalidate_workspace_membership_cache(resolved.workspace.id, &member_user_id);
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -456,6 +645,7 @@ pub async fn workspace_members_delete_handler(
         .await
         .map_err(internal_db_error)?;
     if deleted {
+        invalidate_workspace_membership_cache(resolved.workspace.id, &member_user_id);
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err((

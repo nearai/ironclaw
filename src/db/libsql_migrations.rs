@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS users (
     display_name TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
     role TEXT NOT NULL DEFAULT 'member',
+    is_superadmin INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     last_login_at TEXT,
@@ -679,6 +680,7 @@ CREATE TABLE IF NOT EXISTS users (
     display_name TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
     role TEXT NOT NULL DEFAULT 'member',
+    is_superadmin INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     last_login_at TEXT,
@@ -890,6 +892,7 @@ CREATE TABLE IF NOT EXISTS users (
     display_name TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
     role TEXT NOT NULL DEFAULT 'member',
+    is_superadmin INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     last_login_at TEXT,
@@ -1154,13 +1157,22 @@ CREATE INDEX IF NOT EXISTS idx_user_identities_user ON user_identities(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_identities_email ON user_identities(email) WHERE email IS NOT NULL;
 "#,
     ),
+    (
+        18,
+        "users_superadmin",
+        r#"
+ALTER TABLE users ADD COLUMN is_superadmin INTEGER NOT NULL DEFAULT 0;
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already
 /// exists (e.g. because the base SCHEMA was updated to include it).
 /// Each entry is `(version, table_name, column_name)`.
-const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] =
-    &[(15, "conversations", "source_channel")];
+const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] = &[
+    (15, "conversations", "source_channel"),
+    (18, "users", "is_superadmin"),
+];
 /// Check whether `table` already contains `column` via `pragma_table_info`.
 async fn column_exists(
     conn: &libsql::Connection,

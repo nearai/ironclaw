@@ -177,15 +177,16 @@ impl IdentityStore for LibSqlBackend {
         // Insert user
         let user_result = conn
             .execute(
-                "INSERT INTO users (id, email, display_name, status, role, created_at, \
+                "INSERT INTO users (id, email, display_name, status, role, is_superadmin, created_at, \
                  updated_at, last_login_at, created_by, metadata) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     user.id.as_str(),
                     opt_text(user.email.as_deref()),
                     user.display_name.as_str(),
                     user.status.as_str(),
                     user.role.as_str(),
+                    if user.is_superadmin { 1i64 } else { 0i64 },
                     fmt_ts(&user.created_at),
                     fmt_ts(&user.updated_at),
                     fmt_opt_ts(&user.last_login_at),
@@ -233,7 +234,7 @@ impl IdentityStore for LibSqlBackend {
         // see an empty users table and both get role=admin.
         let promote_result = conn
             .execute(
-                "UPDATE users SET role = 'admin' \
+                "UPDATE users SET role = 'admin', is_superadmin = 1 \
                  WHERE id = ?1 AND (SELECT COUNT(*) FROM users) = 1",
                 params![user.id.as_str()],
             )
@@ -277,6 +278,7 @@ mod tests {
             display_name: "Alice".to_string(),
             status: "active".to_string(),
             role: "member".to_string(),
+            is_superadmin: false,
             created_at: now,
             updated_at: now,
             last_login_at: None,
@@ -341,6 +343,7 @@ mod tests {
             display_name: "Bob".to_string(),
             status: "active".to_string(),
             role: "member".to_string(),
+            is_superadmin: false,
             created_at: now,
             updated_at: now,
             last_login_at: None,
@@ -382,6 +385,7 @@ mod tests {
             display_name: "Carol".to_string(),
             status: "active".to_string(),
             role: "member".to_string(),
+            is_superadmin: false,
             created_at: now,
             updated_at: now,
             last_login_at: None,

@@ -19,6 +19,7 @@ pub(crate) mod handlers;
 pub mod log_layer;
 pub mod oauth;
 pub mod openai_compat;
+pub mod permissions;
 pub mod responses_api;
 pub mod server;
 pub mod sse;
@@ -35,6 +36,8 @@ pub mod test_helpers;
 
 #[cfg(test)]
 mod tests;
+
+pub use self::handlers::workspaces::workspace_scope_user_id;
 
 use std::net::SocketAddr;
 use std::sync::Arc;

@@ -34,6 +34,7 @@ fn two_user_auth() -> MultiAuthState {
         UserIdentity {
             user_id: "alice".to_string(),
             role: "admin".to_string(),
+            is_superadmin: true,
             workspace_read_scopes: vec!["shared".to_string()],
         },
     );
@@ -42,6 +43,7 @@ fn two_user_auth() -> MultiAuthState {
         UserIdentity {
             user_id: "bob".to_string(),
             role: "admin".to_string(),
+            is_superadmin: true,
             workspace_read_scopes: vec!["shared".to_string(), "alice".to_string()],
         },
     );
@@ -205,6 +207,7 @@ mod workspace_pool {
         let identity = UserIdentity {
             user_id: "alice".to_string(),
             role: "admin".to_string(),
+            is_superadmin: true,
             workspace_read_scopes: vec![],
         };
         let ws = pool.get_or_create(&identity).await;
@@ -234,6 +237,7 @@ mod workspace_pool {
         let identity = UserIdentity {
             user_id: "alice".to_string(),
             role: "admin".to_string(),
+            is_superadmin: true,
             workspace_read_scopes: vec![],
         };
         let ws = pool.get_or_create(&identity).await;
@@ -258,6 +262,7 @@ mod workspace_pool {
         let identity = UserIdentity {
             user_id: "bob".to_string(),
             role: "admin".to_string(),
+            is_superadmin: true,
             workspace_read_scopes: vec!["alice".to_string(), "shared".to_string()],
         };
         let ws = pool.get_or_create(&identity).await;
@@ -285,6 +290,7 @@ mod workspace_pool {
         let identity = UserIdentity {
             user_id: "bob".to_string(),
             role: "admin".to_string(),
+            is_superadmin: true,
             workspace_read_scopes: vec!["legacy-shared".to_string()],
         };
         let workspace = ResolvedWorkspace {
@@ -328,11 +334,13 @@ mod workspace_pool {
         let alice_id = UserIdentity {
             user_id: "alice".to_string(),
             role: "admin".to_string(),
+            is_superadmin: true,
             workspace_read_scopes: vec![],
         };
         let bob_id = UserIdentity {
             user_id: "bob".to_string(),
             role: "admin".to_string(),
+            is_superadmin: true,
             workspace_read_scopes: vec![],
         };
 
@@ -365,6 +373,7 @@ mod workspace_pool {
         let identity = UserIdentity {
             user_id: "alice".to_string(),
             role: "admin".to_string(),
+            is_superadmin: true,
             workspace_read_scopes: vec!["token-scope".to_string()],
         };
         let ws = pool.get_or_create(&identity).await;
@@ -891,6 +900,7 @@ mod admin_role_enforcement {
             UserIdentity {
                 user_id: "admin-user".to_string(),
                 role: "admin".to_string(),
+                is_superadmin: true,
                 workspace_read_scopes: vec![],
             },
         );
@@ -899,6 +909,7 @@ mod admin_role_enforcement {
             UserIdentity {
                 user_id: "member-user".to_string(),
                 role: "member".to_string(),
+                is_superadmin: false,
                 workspace_read_scopes: vec![],
             },
         );
@@ -977,6 +988,7 @@ mod admin_role_enforcement {
             UserIdentity {
                 user_id: "admin-user".to_string(),
                 role: "admin".to_string(),
+                is_superadmin: true,
                 workspace_read_scopes: vec![],
             },
         );
@@ -1016,6 +1028,7 @@ mod admin_role_enforcement {
             display_name: "Admin".to_string(),
             status: "active".to_string(),
             role: "admin".to_string(),
+            is_superadmin: true,
             created_at: now,
             updated_at: now,
             last_login_at: None,
@@ -1031,6 +1044,7 @@ mod admin_role_enforcement {
             UserIdentity {
                 user_id: "admin-user".to_string(),
                 role: "admin".to_string(),
+                is_superadmin: true,
                 workspace_read_scopes: vec![],
             },
         );
@@ -1088,6 +1102,7 @@ mod db_auth_cache {
                         UserIdentity {
                             user_id: format!("user-{i}"),
                             role: "member".to_string(),
+                            is_superadmin: false,
                             workspace_read_scopes: vec![],
                         },
                         Instant::now(),

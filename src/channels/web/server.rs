@@ -76,6 +76,7 @@ use crate::channels::web::handlers::workspaces::{
     workspaces_update_handler,
 };
 use crate::channels::web::log_layer::LogBroadcaster;
+use crate::channels::web::permissions::{Permission, require_workspace_permission};
 use crate::channels::web::sse::SseManager;
 use crate::channels::web::types::*;
 use crate::channels::web::util::{build_turns_from_db_messages, truncate_preview};
@@ -1694,11 +1695,19 @@ async fn chat_send_handler(
         ));
     }
 
-    let workspace_id =
-        resolve_requested_workspace_id(&state, &user, workspace_query.workspace.as_deref()).await?;
+    let workspace_id = if let Some(store) = state.store.as_ref() {
+        let scope =
+            resolve_workspace_scope(store, &user, workspace_query.workspace.as_deref()).await?;
+        require_workspace_permission(&user, scope.as_ref(), Permission::WorkspaceWrite)?;
+        scope.map(|scope| scope.workspace.id.to_string())
+    } else {
+        resolve_requested_workspace_id(&state, &user, workspace_query.workspace.as_deref())
+            .await?
+            .map(|id| id.to_string())
+    };
     let mut msg = IncomingMessage::new("gateway", &user.user_id, &req.content);
-    if let Some(workspace_id) = workspace_id {
-        msg.workspace_id = Some(workspace_id.to_string());
+    if let Some(ref workspace_id) = workspace_id {
+        msg.workspace_id = Some(workspace_id.clone());
     }
     // Prefer timezone from JSON body, fall back to X-Timezone header
     let tz = req
@@ -1711,7 +1720,7 @@ async fn chat_send_handler(
 
     // Always include user_id in metadata so downstream SSE broadcasts can scope events.
     let mut meta = serde_json::json!({"user_id": &user.user_id});
-    if let Some(workspace_id) = workspace_id {
+    if let Some(ref workspace_id) = workspace_id {
         meta["workspace_id"] = serde_json::json!(workspace_id);
     }
     if let Some(ref thread_id) = req.thread_id {
@@ -3812,6 +3821,7 @@ mod tests {
         req.extensions_mut().insert(UserIdentity {
             user_id: "test".to_string(),
             role: "admin".to_string(),
+            is_superadmin: true,
             workspace_read_scopes: Vec::new(),
         });
 
@@ -3897,6 +3907,7 @@ mod tests {
         req.extensions_mut().insert(UserIdentity {
             user_id: "test".to_string(),
             role: "admin".to_string(),
+            is_superadmin: true,
             workspace_read_scopes: Vec::new(),
         });
 
@@ -3998,6 +4009,7 @@ mod tests {
         req.extensions_mut().insert(UserIdentity {
             user_id: "test".to_string(),
             role: "admin".to_string(),
+            is_superadmin: true,
             workspace_read_scopes: Vec::new(),
         });
 

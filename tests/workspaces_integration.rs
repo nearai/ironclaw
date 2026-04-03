@@ -7,18 +7,30 @@ use chrono::Utc;
 use ironclaw::agent::SessionManager;
 use ironclaw::channels::IncomingMessage;
 use ironclaw::channels::web::auth::{MultiAuthState, UserIdentity};
+use ironclaw::channels::web::server::{
+    ActiveConfigSnapshot, GatewayState, PerUserRateLimiter, RateLimiter, WorkspacePool,
+    start_server,
+};
+use ironclaw::channels::web::sse::SseManager;
 use ironclaw::channels::web::test_helpers::TestGatewayBuilder;
+use ironclaw::channels::web::workspace_scope_user_id;
+use ironclaw::channels::web::ws::WsConnectionTracker;
 use ironclaw::db::libsql::LibSqlBackend;
-use ironclaw::db::{ConversationStore, Database, UserRecord, UserStore, WorkspaceMgmtStore};
+use ironclaw::db::{
+    ConversationStore, Database, RoutineStore, UserRecord, UserStore, WorkspaceMgmtStore,
+    WorkspaceStore,
+};
 use serde_json::json;
 use uuid::Uuid;
 
 const ALICE_TOKEN: &str = "tok-alice-workspace";
 const BOB_TOKEN: &str = "tok-bob-workspace";
 const CHARLIE_TOKEN: &str = "tok-charlie-workspace";
+const DANA_TOKEN: &str = "tok-dana-workspace";
 const ALICE_USER_ID: &str = "alice";
 const BOB_USER_ID: &str = "bob";
 const CHARLIE_USER_ID: &str = "charlie";
+const DANA_USER_ID: &str = "dana";
 
 fn workspace_auth() -> MultiAuthState {
     let mut tokens = HashMap::new();
@@ -27,6 +39,7 @@ fn workspace_auth() -> MultiAuthState {
         UserIdentity {
             user_id: ALICE_USER_ID.to_string(),
             role: "admin".to_string(),
+            is_superadmin: true,
             workspace_read_scopes: Vec::new(),
         },
     );
@@ -35,6 +48,7 @@ fn workspace_auth() -> MultiAuthState {
         UserIdentity {
             user_id: BOB_USER_ID.to_string(),
             role: "member".to_string(),
+            is_superadmin: false,
             workspace_read_scopes: Vec::new(),
         },
     );
@@ -43,13 +57,23 @@ fn workspace_auth() -> MultiAuthState {
         UserIdentity {
             user_id: CHARLIE_USER_ID.to_string(),
             role: "member".to_string(),
+            is_superadmin: false,
+            workspace_read_scopes: Vec::new(),
+        },
+    );
+    tokens.insert(
+        DANA_TOKEN.to_string(),
+        UserIdentity {
+            user_id: DANA_USER_ID.to_string(),
+            role: "admin".to_string(),
+            is_superadmin: false,
             workspace_read_scopes: Vec::new(),
         },
     );
     MultiAuthState::multi(tokens)
 }
 
-fn test_user(id: &str, role: &str) -> UserRecord {
+fn test_user(id: &str, role: &str, is_superadmin: bool) -> UserRecord {
     let now = Utc::now();
     UserRecord {
         id: id.to_string(),
@@ -57,6 +81,7 @@ fn test_user(id: &str, role: &str) -> UserRecord {
         display_name: id.to_string(),
         status: "active".to_string(),
         role: role.to_string(),
+        is_superadmin,
         created_at: now,
         updated_at: now,
         last_login_at: None,
@@ -69,15 +94,19 @@ async fn setup_store() -> Arc<LibSqlBackend> {
     let store = Arc::new(LibSqlBackend::new_memory().await.unwrap());
     store.run_migrations().await.unwrap();
     store
-        .create_user(&test_user(ALICE_USER_ID, "admin"))
+        .create_user(&test_user(ALICE_USER_ID, "admin", true))
         .await
         .unwrap();
     store
-        .create_user(&test_user(BOB_USER_ID, "member"))
+        .create_user(&test_user(BOB_USER_ID, "member", false))
         .await
         .unwrap();
     store
-        .create_user(&test_user(CHARLIE_USER_ID, "member"))
+        .create_user(&test_user(CHARLIE_USER_ID, "member", false))
+        .await
+        .unwrap();
+    store
+        .create_user(&test_user(DANA_USER_ID, "admin", false))
         .await
         .unwrap();
     store
@@ -112,6 +141,61 @@ async fn start_workspace_server_with_state(
         builder = builder.msg_tx(tx);
     }
     builder.start_multi(workspace_auth()).await.unwrap()
+}
+
+async fn start_workspace_server_with_pool(
+    store: Arc<LibSqlBackend>,
+    msg_tx: Option<tokio::sync::mpsc::Sender<IncomingMessage>>,
+) -> SocketAddr {
+    let state = Arc::new(GatewayState {
+        msg_tx: tokio::sync::RwLock::new(msg_tx),
+        sse: Arc::new(SseManager::new()),
+        workspace: None,
+        workspace_pool: Some(Arc::new(WorkspacePool::new(
+            store.clone(),
+            None,
+            ironclaw::workspace::EmbeddingCacheConfig::default(),
+            ironclaw::config::WorkspaceSearchConfig::default(),
+            ironclaw::config::WorkspaceConfig::default(),
+        ))),
+        session_manager: Some(Arc::new(SessionManager::new())),
+        log_broadcaster: None,
+        log_level_handle: None,
+        extension_manager: None,
+        tool_registry: None,
+        store: Some(store),
+        job_manager: None,
+        prompt_queue: None,
+        owner_id: ALICE_USER_ID.to_string(),
+        shutdown_tx: tokio::sync::RwLock::new(None),
+        ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
+        llm_provider: None,
+        skill_registry: None,
+        skill_catalog: None,
+        scheduler: None,
+        chat_rate_limiter: PerUserRateLimiter::new(30, 60),
+        oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
+        webhook_rate_limiter: RateLimiter::new(10, 60),
+        registry_entries: Vec::new(),
+        cost_guard: None,
+        routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+        startup_time: std::time::Instant::now(),
+        active_config: ActiveConfigSnapshot::default(),
+        secrets_store: None,
+        db_auth: None,
+        oauth_providers: None,
+        oauth_state_store: None,
+        oauth_base_url: None,
+        oauth_allowed_domains: Vec::new(),
+        near_nonce_store: None,
+        near_rpc_url: None,
+        near_network: None,
+        oauth_sweep_shutdown: None,
+    });
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    start_server(addr, state, workspace_auth().into())
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -483,6 +567,43 @@ async fn archived_workspaces_are_hidden_from_workspace_lists() {
 }
 
 #[tokio::test]
+async fn superadmin_can_list_workspaces_without_membership() {
+    let store = setup_store().await;
+    let addr = start_workspace_server(store, None).await;
+    let client = reqwest::Client::new();
+
+    let create_resp = client
+        .post(format!("http://{addr}/api/workspaces"))
+        .header("Authorization", format!("Bearer {DANA_TOKEN}"))
+        .json(&json!({
+            "name": "Dana Space",
+            "slug": "dana-space",
+            "description": "",
+            "settings": {}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), 200);
+
+    let superadmin_list = client
+        .get(format!("http://{addr}/api/workspaces"))
+        .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(superadmin_list.status(), 200);
+    let superadmin_json: serde_json::Value = superadmin_list.json().await.unwrap();
+    let workspaces = superadmin_json["workspaces"].as_array().unwrap();
+    assert!(
+        workspaces
+            .iter()
+            .any(|workspace| workspace["slug"] == "dana-space"),
+        "superadmin should see workspaces without direct membership"
+    );
+}
+
+#[tokio::test]
 async fn workspace_scoped_chat_send_sets_workspace_id_on_forwarded_message() {
     let store = setup_store().await;
     let workspace = store
@@ -490,7 +611,7 @@ async fn workspace_scoped_chat_send_sets_workspace_id_on_forwarded_message() {
         .await
         .unwrap();
     store
-        .add_workspace_member(workspace.id, BOB_USER_ID, "member", Some(ALICE_USER_ID))
+        .add_workspace_member(workspace.id, BOB_USER_ID, "admin", Some(ALICE_USER_ID))
         .await
         .unwrap();
 
@@ -523,6 +644,351 @@ async fn workspace_scoped_chat_send_sets_workspace_id_on_forwarded_message() {
 }
 
 #[tokio::test]
+async fn workspace_role_matrix_enforces_chat_settings_and_archive_permissions() {
+    let store = setup_store().await;
+    let workspace = store
+        .create_workspace("Role Matrix", "role-matrix", "", ALICE_USER_ID, &json!({}))
+        .await
+        .unwrap();
+    store
+        .add_workspace_member(workspace.id, BOB_USER_ID, "viewer", Some(ALICE_USER_ID))
+        .await
+        .unwrap();
+    store
+        .add_workspace_member(workspace.id, CHARLIE_USER_ID, "member", Some(ALICE_USER_ID))
+        .await
+        .unwrap();
+    store
+        .add_workspace_member(workspace.id, DANA_USER_ID, "admin", Some(ALICE_USER_ID))
+        .await
+        .unwrap();
+
+    let (agent_tx, mut agent_rx) = tokio::sync::mpsc::channel(8);
+    let addr = start_workspace_server(store, Some(agent_tx)).await;
+    let client = reqwest::Client::new();
+
+    let viewer_read = client
+        .get(format!("http://{addr}/api/workspaces/role-matrix"))
+        .header("Authorization", format!("Bearer {BOB_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(viewer_read.status(), 200);
+
+    let viewer_chat = client
+        .post(format!("http://{addr}/api/chat/send?workspace=role-matrix"))
+        .header("Authorization", format!("Bearer {BOB_TOKEN}"))
+        .json(&json!({ "content": "viewer mutation" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(viewer_chat.status(), 403);
+
+    let member_chat = client
+        .post(format!("http://{addr}/api/chat/send?workspace=role-matrix"))
+        .header("Authorization", format!("Bearer {CHARLIE_TOKEN}"))
+        .json(&json!({ "content": "member mutation" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(member_chat.status(), 202);
+    let forwarded = tokio::time::timeout(Duration::from_secs(2), agent_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(forwarded.content, "member mutation");
+    assert_eq!(
+        forwarded.workspace_id.as_deref(),
+        Some(workspace.id.to_string().as_str())
+    );
+
+    let viewer_setting = client
+        .put(format!(
+            "http://{addr}/api/settings/theme?workspace=role-matrix"
+        ))
+        .header("Authorization", format!("Bearer {BOB_TOKEN}"))
+        .json(&json!({ "value": "viewer-write" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(viewer_setting.status(), 403);
+
+    let member_setting = client
+        .put(format!(
+            "http://{addr}/api/settings/theme?workspace=role-matrix"
+        ))
+        .header("Authorization", format!("Bearer {CHARLIE_TOKEN}"))
+        .json(&json!({ "value": "member-write" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(member_setting.status(), 403);
+
+    let admin_setting = client
+        .put(format!(
+            "http://{addr}/api/settings/theme?workspace=role-matrix"
+        ))
+        .header("Authorization", format!("Bearer {DANA_TOKEN}"))
+        .json(&json!({ "value": "admin-write" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin_setting.status(), 204);
+
+    let admin_archive = client
+        .post(format!("http://{addr}/api/workspaces/role-matrix/archive"))
+        .header("Authorization", format!("Bearer {DANA_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin_archive.status(), 403);
+
+    let owner_archive = client
+        .post(format!("http://{addr}/api/workspaces/role-matrix/archive"))
+        .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(owner_archive.status(), 204);
+}
+
+#[tokio::test]
+async fn workspace_role_changes_take_effect_immediately() {
+    let store = setup_store().await;
+    let workspace = store
+        .create_workspace(
+            "Immediate Roles",
+            "immediate-roles",
+            "",
+            ALICE_USER_ID,
+            &json!({}),
+        )
+        .await
+        .unwrap();
+    store
+        .add_workspace_member(workspace.id, BOB_USER_ID, "viewer", Some(ALICE_USER_ID))
+        .await
+        .unwrap();
+
+    let (agent_tx, mut agent_rx) = tokio::sync::mpsc::channel(8);
+    let addr = start_workspace_server(store, Some(agent_tx)).await;
+    let client = reqwest::Client::new();
+
+    let viewer_chat = client
+        .post(format!(
+            "http://{addr}/api/chat/send?workspace=immediate-roles"
+        ))
+        .header("Authorization", format!("Bearer {BOB_TOKEN}"))
+        .json(&json!({ "content": "blocked as viewer" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(viewer_chat.status(), 403);
+
+    let promote_member = client
+        .put(format!(
+            "http://{addr}/api/workspaces/immediate-roles/members/{BOB_USER_ID}"
+        ))
+        .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+        .json(&json!({ "role": "member" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(promote_member.status(), 204);
+
+    let member_chat = client
+        .post(format!(
+            "http://{addr}/api/chat/send?workspace=immediate-roles"
+        ))
+        .header("Authorization", format!("Bearer {BOB_TOKEN}"))
+        .json(&json!({ "content": "allowed as member" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(member_chat.status(), 202);
+
+    let forwarded = tokio::time::timeout(Duration::from_secs(2), agent_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(forwarded.content, "allowed as member");
+    assert_eq!(
+        forwarded.workspace_id.as_deref(),
+        Some(workspace.id.to_string().as_str())
+    );
+}
+
+#[tokio::test]
+async fn viewer_cannot_write_workspace_memory_but_can_read() {
+    let store = setup_store().await;
+    let workspace = store
+        .create_workspace(
+            "Memory Scope",
+            "memory-scope",
+            "",
+            ALICE_USER_ID,
+            &json!({}),
+        )
+        .await
+        .unwrap();
+    store
+        .add_workspace_member(workspace.id, BOB_USER_ID, "viewer", Some(ALICE_USER_ID))
+        .await
+        .unwrap();
+    store
+        .add_workspace_member(workspace.id, CHARLIE_USER_ID, "member", Some(ALICE_USER_ID))
+        .await
+        .unwrap();
+
+    let scoped_user_id = workspace_scope_user_id(workspace.id);
+    let doc = store
+        .get_or_create_document_by_path(&scoped_user_id, None, "notes.md")
+        .await
+        .unwrap();
+    store.update_document(doc.id, "seeded").await.unwrap();
+
+    let addr = start_workspace_server_with_pool(store, None).await;
+    let client = reqwest::Client::new();
+
+    let read_resp = client
+        .get(format!(
+            "http://{addr}/api/memory/read?workspace=memory-scope&path=notes.md"
+        ))
+        .header("Authorization", format!("Bearer {BOB_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read_resp.status(), 200);
+    let read_json: serde_json::Value = read_resp.json().await.unwrap();
+    assert_eq!(read_json["content"], "seeded");
+
+    let viewer_write = client
+        .post(format!(
+            "http://{addr}/api/memory/write?workspace=memory-scope"
+        ))
+        .header("Authorization", format!("Bearer {BOB_TOKEN}"))
+        .json(&json!({ "path": "notes.md", "content": "viewer", "append": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(viewer_write.status(), 403);
+
+    let member_write = client
+        .post(format!(
+            "http://{addr}/api/memory/write?workspace=memory-scope"
+        ))
+        .header("Authorization", format!("Bearer {CHARLIE_TOKEN}"))
+        .json(&json!({ "path": "notes.md", "content": "member", "append": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(member_write.status(), 200);
+}
+
+#[tokio::test]
+async fn viewer_cannot_toggle_workspace_routines() {
+    let store = setup_store().await;
+    let workspace = store
+        .create_workspace(
+            "Routine Scope",
+            "routine-scope",
+            "",
+            ALICE_USER_ID,
+            &json!({}),
+        )
+        .await
+        .unwrap();
+    store
+        .add_workspace_member(workspace.id, BOB_USER_ID, "viewer", Some(ALICE_USER_ID))
+        .await
+        .unwrap();
+    store
+        .add_workspace_member(workspace.id, CHARLIE_USER_ID, "member", Some(ALICE_USER_ID))
+        .await
+        .unwrap();
+
+    let now = Utc::now();
+    let routine = ironclaw::agent::routine::Routine {
+        id: Uuid::new_v4(),
+        name: "workspace-routine".to_string(),
+        description: "viewer should not mutate".to_string(),
+        user_id: ALICE_USER_ID.to_string(),
+        workspace_id: Some(workspace.id),
+        enabled: true,
+        trigger: ironclaw::agent::routine::Trigger::Manual,
+        action: ironclaw::agent::routine::RoutineAction::Lightweight {
+            prompt: "hello".to_string(),
+            context_paths: Vec::new(),
+            max_tokens: 256,
+            use_tools: false,
+            max_tool_rounds: 1,
+        },
+        guardrails: ironclaw::agent::routine::RoutineGuardrails {
+            cooldown: Duration::from_secs(0),
+            max_concurrent: 1,
+            dedup_window: None,
+        },
+        notify: ironclaw::agent::routine::NotifyConfig::default(),
+        last_run_at: None,
+        next_fire_at: None,
+        run_count: 0,
+        consecutive_failures: 0,
+        state: json!({}),
+        created_at: now,
+        updated_at: now,
+    };
+    store.create_routine(&routine).await.unwrap();
+
+    let addr = start_workspace_server(store, None).await;
+    let client = reqwest::Client::new();
+
+    let viewer_toggle = client
+        .post(format!(
+            "http://{addr}/api/routines/{}/toggle?workspace=routine-scope",
+            routine.id
+        ))
+        .header("Authorization", format!("Bearer {BOB_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(viewer_toggle.status(), 403);
+
+    let member_toggle = client
+        .post(format!(
+            "http://{addr}/api/routines/{}/toggle?workspace=routine-scope",
+            routine.id
+        ))
+        .header("Authorization", format!("Bearer {CHARLIE_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(member_toggle.status(), 200);
+}
+
+#[tokio::test]
+async fn user_management_endpoints_require_superadmin() {
+    let store = setup_store().await;
+    let addr = start_workspace_server(store, None).await;
+    let client = reqwest::Client::new();
+
+    let plain_admin = client
+        .get(format!("http://{addr}/api/admin/users"))
+        .header("Authorization", format!("Bearer {DANA_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(plain_admin.status(), 403);
+
+    let superadmin = client
+        .get(format!("http://{addr}/api/admin/users"))
+        .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(superadmin.status(), 200);
+}
+
+#[tokio::test]
 async fn workspace_scoped_settings_are_separate_from_personal_settings() {
     let store = setup_store().await;
     let workspace = store
@@ -536,7 +1002,7 @@ async fn workspace_scoped_settings_are_separate_from_personal_settings() {
         .await
         .unwrap();
     store
-        .add_workspace_member(workspace.id, BOB_USER_ID, "member", Some(ALICE_USER_ID))
+        .add_workspace_member(workspace.id, BOB_USER_ID, "admin", Some(ALICE_USER_ID))
         .await
         .unwrap();
 
@@ -584,6 +1050,91 @@ async fn workspace_scoped_settings_are_separate_from_personal_settings() {
     assert_eq!(workspace_get.status(), 200);
     let workspace_json: serde_json::Value = workspace_get.json().await.unwrap();
     assert_eq!(workspace_json["value"], "workspace-light");
+}
+
+#[tokio::test]
+async fn assigning_owner_role_transfers_ownership() {
+    let store = setup_store().await;
+    let addr = start_workspace_server(store, None).await;
+    let client = reqwest::Client::new();
+
+    let create_resp = client
+        .post(format!("http://{addr}/api/workspaces"))
+        .header("Authorization", format!("Bearer {DANA_TOKEN}"))
+        .json(&json!({
+            "name": "Ownership Transfer",
+            "slug": "ownership-transfer",
+            "description": "",
+            "settings": {}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), 200);
+
+    let add_bob = client
+        .put(format!(
+            "http://{addr}/api/workspaces/ownership-transfer/members/{BOB_USER_ID}"
+        ))
+        .header("Authorization", format!("Bearer {DANA_TOKEN}"))
+        .json(&json!({ "role": "admin" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(add_bob.status(), 204);
+
+    let transfer_owner = client
+        .put(format!(
+            "http://{addr}/api/workspaces/ownership-transfer/members/{BOB_USER_ID}"
+        ))
+        .header("Authorization", format!("Bearer {DANA_TOKEN}"))
+        .json(&json!({ "role": "owner" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(transfer_owner.status(), 204);
+
+    let members_resp = client
+        .get(format!(
+            "http://{addr}/api/workspaces/ownership-transfer/members"
+        ))
+        .header("Authorization", format!("Bearer {DANA_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(members_resp.status(), 200);
+    let members_json: serde_json::Value = members_resp.json().await.unwrap();
+    let members = members_json["members"].as_array().unwrap();
+    assert!(
+        members
+            .iter()
+            .any(|member| member["user_id"] == DANA_USER_ID && member["role"] == "admin")
+    );
+    assert!(
+        members
+            .iter()
+            .any(|member| member["user_id"] == BOB_USER_ID && member["role"] == "owner")
+    );
+
+    let old_owner_archive = client
+        .post(format!(
+            "http://{addr}/api/workspaces/ownership-transfer/archive"
+        ))
+        .header("Authorization", format!("Bearer {DANA_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(old_owner_archive.status(), 403);
+
+    let new_owner_archive = client
+        .post(format!(
+            "http://{addr}/api/workspaces/ownership-transfer/archive"
+        ))
+        .header("Authorization", format!("Bearer {BOB_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(new_owner_archive.status(), 204);
 }
 
 #[tokio::test]

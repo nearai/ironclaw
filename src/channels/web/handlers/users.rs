@@ -93,6 +93,7 @@ pub async fn users_create_handler(
         display_name: display_name.clone(),
         status: "active".to_string(),
         role,
+        is_superadmin: false,
         created_at: now,
         updated_at: now,
         last_login_at: None,

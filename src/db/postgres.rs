@@ -1294,6 +1294,26 @@ impl WorkspaceMgmtStore for PgBackend {
             .collect())
     }
 
+    async fn list_all_workspaces(&self) -> Result<Vec<WorkspaceRecord>, DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get client: {e}")))?;
+        let rows = client
+            .query(
+                r#"
+                SELECT id, name, slug, description, status, created_at, updated_at, created_by, settings
+                FROM workspaces
+                WHERE status != 'archived'
+                ORDER BY created_at DESC
+                "#,
+                &[],
+            )
+            .await?;
+        Ok(rows.into_iter().map(|row| row_to_workspace(&row)).collect())
+    }
+
     async fn update_workspace(
         &self,
         id: Uuid,
@@ -1395,7 +1415,7 @@ impl WorkspaceMgmtStore for PgBackend {
             .query(
                 r#"
                 SELECT
-                    u.id, u.email, u.display_name, u.status, u.role AS user_role, u.created_at, u.updated_at,
+                    u.id, u.email, u.display_name, u.status, u.role AS user_role, u.is_superadmin, u.created_at, u.updated_at,
                     u.last_login_at, u.created_by, u.metadata,
                     wm.workspace_id, wm.user_id AS member_user_id, wm.role AS member_role, wm.joined_at, wm.invited_by
                 FROM workspace_members wm
@@ -1416,6 +1436,7 @@ impl WorkspaceMgmtStore for PgBackend {
                         display_name: row.get("display_name"),
                         status: row.get("status"),
                         role: row.get("user_role"),
+                        is_superadmin: row.get("is_superadmin"),
                         created_at: row.get("created_at"),
                         updated_at: row.get("updated_at"),
                         last_login_at: row.get("last_login_at"),
@@ -1498,6 +1519,51 @@ impl WorkspaceMgmtStore for PgBackend {
             )
             .await?;
         Ok(updated > 0)
+    }
+
+    async fn transfer_workspace_ownership(
+        &self,
+        workspace_id: Uuid,
+        current_owner_user_id: &str,
+        new_owner_user_id: &str,
+        invited_by: Option<&str>,
+    ) -> Result<bool, DatabaseError> {
+        let mut client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get client: {e}")))?;
+        let tx = client.transaction().await?;
+
+        let demoted = tx
+            .execute(
+                r#"
+                UPDATE workspace_members
+                SET role = 'admin'
+                WHERE workspace_id = $1 AND user_id = $2 AND role = 'owner'
+                "#,
+                &[&workspace_id, &current_owner_user_id],
+            )
+            .await?;
+        if demoted == 0 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
+        tx.execute(
+            r#"
+            INSERT INTO workspace_members (workspace_id, user_id, role, invited_by)
+            VALUES ($1, $2, 'owner', $3)
+            ON CONFLICT (workspace_id, user_id) DO UPDATE SET
+                role = 'owner',
+                invited_by = EXCLUDED.invited_by
+            "#,
+            &[&workspace_id, &new_owner_user_id, &invited_by],
+        )
+        .await?;
+
+        tx.commit().await?;
+        Ok(true)
     }
 
     async fn is_workspace_member(
@@ -1623,15 +1689,16 @@ impl IdentityStore for PgBackend {
         let tx = conn.transaction().await?;
 
         tx.execute(
-            "INSERT INTO users (id, email, display_name, status, role, created_at, \
+            "INSERT INTO users (id, email, display_name, status, role, is_superadmin, created_at, \
              updated_at, last_login_at, created_by, metadata) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             &[
                 &user.id,
                 &user.email,
                 &user.display_name,
                 &user.status,
                 &user.role,
+                &user.is_superadmin,
                 &user.created_at,
                 &user.updated_at,
                 &user.last_login_at,
@@ -1672,7 +1739,7 @@ impl IdentityStore for PgBackend {
         )
         .await?;
         tx.execute(
-            "UPDATE users SET role = 'admin' \
+            "UPDATE users SET role = 'admin', is_superadmin = true \
              WHERE id = $1 AND (SELECT COUNT(*) FROM users) = 1",
             &[&user.id],
         )

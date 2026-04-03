@@ -24,7 +24,10 @@ use tokio_stream::StreamExt;
 use uuid::Uuid;
 
 use crate::channels::IncomingMessage;
-use crate::channels::web::handlers::workspaces::{WorkspaceQuery, resolve_workspace_scope};
+use crate::channels::web::handlers::workspaces::{
+    WorkspaceQuery, resolve_workspace_scope, resolve_workspace_scope_by_id,
+};
+use crate::channels::web::permissions::{Permission, require_workspace_permission};
 use crate::channels::web::types::AppEvent;
 use crate::db::Database;
 
@@ -695,8 +698,25 @@ pub async fn create_response_handler(
     // Each POST gets its own unique response UUID.
     let response_uuid = Uuid::new_v4();
 
-    let requested_workspace_id =
-        resolve_requested_workspace_id(&state, &user, workspace_query.workspace.as_deref()).await?;
+    let requested_workspace_scope = if let Some(store) = state.store.as_ref() {
+        let scope = resolve_workspace_scope(store, &user, workspace_query.workspace.as_deref())
+            .await
+            .map_err(|(status, message)| api_error(status, message, "invalid_request_error"))?;
+        require_workspace_permission(&user, scope.as_ref(), Permission::WorkspaceWrite)
+            .map_err(|(status, message)| api_error(status, message, "invalid_request_error"))?;
+        scope
+    } else if workspace_query.workspace.is_some() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Database not configured",
+            "server_error",
+        ));
+    } else {
+        None
+    };
+    let requested_workspace_id = requested_workspace_scope
+        .as_ref()
+        .map(|scope| scope.workspace.id);
     let mut workspace_id = requested_workspace_id;
     if req.previous_response_id.is_some() {
         let store = state.store.as_ref().ok_or_else(|| {
@@ -716,6 +736,13 @@ pub async fn create_response_handler(
                 "Response not found",
                 "invalid_request_error",
             ));
+        }
+        if let Some(thread_workspace_id) = thread_workspace_id {
+            let thread_scope = resolve_workspace_scope_by_id(store, &user, thread_workspace_id)
+                .await
+                .map_err(|(status, message)| api_error(status, message, "invalid_request_error"))?;
+            require_workspace_permission(&user, Some(&thread_scope), Permission::WorkspaceWrite)
+                .map_err(|(status, message)| api_error(status, message, "invalid_request_error"))?;
         }
         workspace_id = thread_workspace_id;
     }

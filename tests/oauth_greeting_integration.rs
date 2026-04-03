@@ -44,6 +44,7 @@ mod tests {
                 UserIdentity {
                     user_id: user_id.to_string(),
                     role: "admin".to_string(),
+                    is_superadmin: true,
                     workspace_read_scopes: Vec::new(),
                 },
             );
