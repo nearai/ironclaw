@@ -1,23 +1,17 @@
-# Multi-stage Dockerfile for the IronClaw worker container.
+# IronClaw worker (sandbox) container.
 #
-# This image runs the ironclaw binary in worker mode inside Docker containers.
+# Runs the ironclaw binary in worker mode inside nested Docker containers.
 # The orchestrator creates instances of this image for sandboxed job execution.
+# Copies the binary from the base nearaidev/ironclaw image — no Rust compilation.
 #
 # Build:
-#   docker build -f Dockerfile.worker -t ironclaw-worker .
+#   docker build -f Dockerfile.worker --build-arg IRONCLAW_IMAGE=nearaidev/ironclaw:latest -t ironclaw-worker .
 #
 # The image includes common development tools so workers can build software,
 # run tests, and execute shell commands.
 
-FROM rust:1.92-bookworm AS builder
-
-WORKDIR /build
-COPY . .
-
-# Build only the ironclaw binary (release mode)
-RUN cargo build --release --bin ironclaw
-
-# ---
+ARG IRONCLAW_IMAGE=nearaidev/ironclaw:latest
+FROM ${IRONCLAW_IMAGE} AS ironclaw-bin
 
 FROM debian:bookworm-slim
 
@@ -52,8 +46,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
 # Install Claude Code CLI (for claude-bridge mode)
 RUN npm install -g @anthropic-ai/claude-code@latest
 
-# Copy the binary
-COPY --from=builder /build/target/release/ironclaw /usr/local/bin/ironclaw
+# Copy the binary from the base ironclaw image
+COPY --from=ironclaw-bin /usr/local/bin/ironclaw /usr/local/bin/ironclaw
 
 # Create non-root user (UID 1000 matches the orchestrator's container config)
 RUN useradd -m -u 1000 -s /bin/bash sandbox \
