@@ -700,6 +700,10 @@ pub async fn start_server(
             "/api/admin/usage",
             get(super::handlers::users::usage_stats_handler),
         )
+        .route(
+            "/api/admin/usage/summary",
+            get(super::handlers::users::usage_summary_handler),
+        )
         // User self-service profile
         .route(
             "/api/profile",
@@ -748,7 +752,13 @@ pub async fn start_server(
         .route("/i18n/index.js", get(i18n_index_handler))
         .route("/i18n/en.js", get(i18n_en_handler))
         .route("/i18n/zh-CN.js", get(i18n_zh_handler))
-        .route("/i18n-app.js", get(i18n_app_handler));
+        .route("/i18n-app.js", get(i18n_app_handler))
+        // Admin panel SPA (auth handled client-side + API layer)
+        .route("/admin", get(admin_html_handler))
+        .route("/admin/", get(admin_html_handler))
+        .route("/admin/{*path}", get(admin_html_handler))
+        .route("/admin.css", get(admin_css_handler))
+        .route("/admin.js", get(admin_js_handler));
 
     // Project file serving (behind auth to prevent unauthorized file access).
     let projects = Router::new()
@@ -951,6 +961,38 @@ async fn i18n_app_handler() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         include_str!("static/i18n-app.js"),
+    )
+}
+
+// --- Admin panel static handlers ---
+
+async fn admin_html_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/admin.html"),
+    )
+}
+
+async fn admin_css_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/admin.css"),
+    )
+}
+
+async fn admin_js_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/admin.js"),
     )
 }
 

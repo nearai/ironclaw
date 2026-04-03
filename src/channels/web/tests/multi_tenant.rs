@@ -829,8 +829,8 @@ mod auth_enforcement {
 mod admin_role_enforcement {
     use super::*;
     use crate::channels::web::handlers::users::{
-        users_activate_handler, users_detail_handler, users_list_handler, users_suspend_handler,
-        users_update_handler,
+        usage_summary_handler, users_activate_handler, users_detail_handler,
+        users_list_handler, users_suspend_handler, users_update_handler,
     };
     use axum::routing::patch;
 
@@ -866,6 +866,10 @@ mod admin_role_enforcement {
                 "/api/admin/users/{id}/activate",
                 post(users_activate_handler),
             )
+            .route(
+                "/api/admin/usage/summary",
+                get(usage_summary_handler),
+            )
             .layer(middleware::from_fn_with_state(
                 crate::channels::web::auth::CombinedAuthState::from(auth),
                 auth_middleware,
@@ -898,6 +902,7 @@ mod admin_role_enforcement {
         assert_forbidden_for_member(&app, Method::GET, "/api/admin/users/some-id").await;
         assert_forbidden_for_member(&app, Method::POST, "/api/admin/users/some-id/suspend").await;
         assert_forbidden_for_member(&app, Method::POST, "/api/admin/users/some-id/activate").await;
+        assert_forbidden_for_member(&app, Method::GET, "/api/admin/usage/summary").await;
     }
 
     #[tokio::test]
@@ -915,6 +920,18 @@ mod admin_role_enforcement {
             resp.status(),
             StatusCode::FORBIDDEN,
             "admin should not get 403"
+        );
+
+        let req = Request::builder()
+            .uri("/api/admin/usage/summary")
+            .header("Authorization", "Bearer tok-admin")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "admin should not get 403 for usage summary"
         );
     }
 }
