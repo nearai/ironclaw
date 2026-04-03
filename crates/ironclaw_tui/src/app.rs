@@ -787,7 +787,7 @@ async fn handle_event(
         TuiEvent::MouseScroll(delta) => {
             if let Some(ref mut modal) = state.tool_detail_modal {
                 if delta < 0 {
-                    modal.scroll = modal.scroll.saturating_add(delta.unsigned_abs() as u16);
+                    modal.scroll = modal.scroll.saturating_add(delta.unsigned_abs());
                 } else {
                     modal.scroll = modal.scroll.saturating_sub(delta as u16);
                 }
@@ -1451,7 +1451,7 @@ fn take_last_copied_text_for_test() -> Option<String> {
 fn copy_text_to_clipboard(text: &str) -> bool {
     #[cfg(test)]
     {
-        *LAST_COPIED_TEXT.lock().expect("copied text mutex poisoned") = Some(text.to_string());
+        *LAST_COPIED_TEXT.lock().unwrap_or_else(|e| e.into_inner()) = Some(text.to_string());
         true
     }
 
@@ -2407,26 +2407,28 @@ mod tests {
 
     #[tokio::test]
     async fn mouse_scroll_moves_thread_picker_selection() {
-        let mut state = AppState::default();
-        state.pending_thread_picker = Some(crate::widgets::ThreadPickerState {
-            threads: vec![
-                ThreadEntry {
-                    id: "thread-1".to_string(),
-                    title: Some("Bug bash".to_string()),
-                    message_count: 3,
-                    last_activity: "2026-04-03 12:00".to_string(),
-                    channel: "repl".to_string(),
-                },
-                ThreadEntry {
-                    id: "thread-2".to_string(),
-                    title: Some("Release prep".to_string()),
-                    message_count: 8,
-                    last_activity: "2026-04-03 13:00".to_string(),
-                    channel: "repl".to_string(),
-                },
-            ],
-            selected: 0,
-        });
+        let mut state = AppState {
+            pending_thread_picker: Some(crate::widgets::ThreadPickerState {
+                threads: vec![
+                    ThreadEntry {
+                        id: "thread-1".to_string(),
+                        title: Some("Bug bash".to_string()),
+                        message_count: 3,
+                        last_activity: "2026-04-03 12:00".to_string(),
+                        channel: "repl".to_string(),
+                    },
+                    ThreadEntry {
+                        id: "thread-2".to_string(),
+                        title: Some("Release prep".to_string()),
+                        message_count: 8,
+                        last_activity: "2026-04-03 13:00".to_string(),
+                        channel: "repl".to_string(),
+                    },
+                ],
+                selected: 0,
+            }),
+            ..Default::default()
+        };
 
         apply_event(&mut state, TuiEvent::MouseScroll(3)).await;
 
@@ -2450,15 +2452,17 @@ mod tests {
 
     #[tokio::test]
     async fn mouse_click_approval_option_submits_response() {
-        let mut state = AppState::default();
-        state.pending_approval = Some(ApprovalRequest {
-            request_id: "req-1".to_string(),
-            tool_name: "shell".to_string(),
-            description: "Run a command".to_string(),
-            parameters: serde_json::json!({}),
-            allow_always: false,
-            selected: 0,
-        });
+        let mut state = AppState {
+            pending_approval: Some(ApprovalRequest {
+                request_id: "req-1".to_string(),
+                tool_name: "shell".to_string(),
+                description: "Run a command".to_string(),
+                parameters: serde_json::json!({}),
+                allow_always: false,
+                selected: 0,
+            }),
+            ..Default::default()
+        };
 
         let area = ApprovalWidget::modal_area(Rect::new(0, 0, 80, 24));
         let messages = apply_event_and_take_messages(
@@ -2477,26 +2481,28 @@ mod tests {
 
     #[tokio::test]
     async fn mouse_click_thread_picker_row_resumes_thread() {
-        let mut state = AppState::default();
-        state.pending_thread_picker = Some(crate::widgets::ThreadPickerState {
-            threads: vec![
-                ThreadEntry {
-                    id: "thread-1".to_string(),
-                    title: Some("Bug bash".to_string()),
-                    message_count: 3,
-                    last_activity: "2026-04-03 12:00".to_string(),
-                    channel: "repl".to_string(),
-                },
-                ThreadEntry {
-                    id: "thread-2".to_string(),
-                    title: Some("Release prep".to_string()),
-                    message_count: 8,
-                    last_activity: "2026-04-03 13:00".to_string(),
-                    channel: "repl".to_string(),
-                },
-            ],
-            selected: 0,
-        });
+        let mut state = AppState {
+            pending_thread_picker: Some(crate::widgets::ThreadPickerState {
+                threads: vec![
+                    ThreadEntry {
+                        id: "thread-1".to_string(),
+                        title: Some("Bug bash".to_string()),
+                        message_count: 3,
+                        last_activity: "2026-04-03 12:00".to_string(),
+                        channel: "repl".to_string(),
+                    },
+                    ThreadEntry {
+                        id: "thread-2".to_string(),
+                        title: Some("Release prep".to_string()),
+                        message_count: 8,
+                        last_activity: "2026-04-03 13:00".to_string(),
+                        channel: "repl".to_string(),
+                    },
+                ],
+                selected: 0,
+            }),
+            ..Default::default()
+        };
 
         let area = ThreadPickerWidget::modal_area(Rect::new(0, 0, 80, 24), 2);
         let messages = apply_event_and_take_messages(
@@ -2515,9 +2521,11 @@ mod tests {
 
     #[tokio::test]
     async fn mouse_drag_and_release_copies_selected_text() {
-        let mut state = AppState::default();
-        state.active_tab = ActiveTab::Logs;
-        state.screen_snapshot = make_snapshot(80, 24);
+        let mut state = AppState {
+            active_tab: ActiveTab::Logs,
+            screen_snapshot: make_snapshot(80, 24),
+            ..Default::default()
+        };
         write_snapshot_text(&mut state.screen_snapshot, 1, 2, "hello world");
         take_last_copied_text_for_test();
 
@@ -2559,8 +2567,10 @@ mod tests {
 
     #[tokio::test]
     async fn up_arrow_recalls_latest_history_from_input_bar() {
-        let mut state = AppState::default();
-        state.input_history = vec!["first prompt".to_string(), "latest prompt".to_string()];
+        let mut state = AppState {
+            input_history: vec!["first prompt".to_string(), "latest prompt".to_string()],
+            ..Default::default()
+        };
         let layout = TuiLayout::default();
         let mut widgets = create_default_widgets(&layout);
 
@@ -2577,8 +2587,10 @@ mod tests {
 
     #[tokio::test]
     async fn up_arrow_inside_multiline_draft_keeps_editing_instead_of_history() {
-        let mut state = AppState::default();
-        state.input_history = vec!["latest prompt".to_string()];
+        let mut state = AppState {
+            input_history: vec!["latest prompt".to_string()],
+            ..Default::default()
+        };
         let layout = TuiLayout::default();
         let mut widgets = create_default_widgets(&layout);
         widgets.input_box.set_text("first line\nsecond line");
@@ -2599,8 +2611,10 @@ mod tests {
 
     #[tokio::test]
     async fn down_arrow_restores_draft_after_history_recall() {
-        let mut state = AppState::default();
-        state.input_history = vec!["older prompt".to_string()];
+        let mut state = AppState {
+            input_history: vec!["older prompt".to_string()],
+            ..Default::default()
+        };
         let layout = TuiLayout::default();
         let mut widgets = create_default_widgets(&layout);
         widgets.input_box.set_text("draft prompt");
@@ -2645,8 +2659,10 @@ mod tests {
 
     #[tokio::test]
     async fn enter_on_model_picker_submits_selected_model_command() {
-        let mut state = AppState::default();
-        state.model = "gpt-4o".to_string();
+        let mut state = AppState {
+            model: "gpt-4o".to_string(),
+            ..Default::default()
+        };
         state
             .model_picker
             .set_models(vec!["gpt-4o".to_string(), "gpt-5".to_string()]);
@@ -2751,8 +2767,10 @@ mod tests {
 
     #[tokio::test]
     async fn model_response_hydrates_picker_after_first_fetch() {
-        let mut state = AppState::default();
-        state.awaiting_model_list = true;
+        let mut state = AppState {
+            awaiting_model_list: true,
+            ..Default::default()
+        };
         let layout = TuiLayout::default();
         let mut widgets = create_default_widgets(&layout);
 
