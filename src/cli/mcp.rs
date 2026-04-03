@@ -125,6 +125,16 @@ pub enum McpCommand {
     },
 }
 
+/// Truncate a string to fit within `max_len` characters, appending "..." if truncated.
+/// Uses `str::floor_char_boundary` to avoid panicking on multi-byte UTF-8.
+fn truncate_description(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        return s.to_string();
+    }
+    let boundary = s.floor_char_boundary(max_len.saturating_sub(3));
+    format!("{}...", &s[..boundary])
+}
+
 fn parse_header(s: &str) -> Result<(String, String), String> {
     let pos = s
         .find(':')
@@ -537,12 +547,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
                         };
                         println!("    • {}{}", tool.name, approval);
                         if !tool.description.is_empty() {
-                            // Truncate long descriptions
-                            let desc = if tool.description.len() > 60 {
-                                format!("{}...", &tool.description[..57])
-                            } else {
-                                tool.description.clone()
-                            };
+                            let desc = truncate_description(&tool.description, 60);
                             println!("      {}", desc);
                         }
                     }
@@ -700,5 +705,61 @@ mod tests {
         let result = parse_env_var("no-equals-here");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("invalid env var format"));
+    }
+
+    #[test]
+    fn test_truncate_description_ascii_short() {
+        let desc = "A short description";
+        assert_eq!(truncate_description(desc, 60), "A short description");
+    }
+
+    #[test]
+    fn test_truncate_description_ascii_exact() {
+        let desc = "a".repeat(60);
+        assert_eq!(truncate_description(&desc, 60), desc);
+    }
+
+    #[test]
+    fn test_truncate_description_ascii_long() {
+        let desc = "a".repeat(80);
+        let result = truncate_description(&desc, 60);
+        assert!(result.ends_with("..."));
+        assert!(result.len() <= 60);
+        assert_eq!(result, format!("{}...", "a".repeat(57)));
+    }
+
+    #[test]
+    fn test_truncate_description_empty() {
+        assert_eq!(truncate_description("", 60), "");
+    }
+
+    #[test]
+    fn test_truncate_description_multibyte_cjk() {
+        // Each CJK character is 3 bytes; 25 chars = 75 bytes, exceeds 60
+        let desc = "中".repeat(25);
+        let result = truncate_description(&desc, 60);
+        assert!(result.ends_with("..."));
+        // 57 bytes / 3 bytes per char = 19 CJK chars fit
+        assert_eq!(result, format!("{}...", "中".repeat(19)));
+    }
+
+    #[test]
+    fn test_truncate_description_emoji() {
+        // Each emoji is 4 bytes; 20 emojis = 80 bytes, exceeds 60
+        let desc = "🦀".repeat(20);
+        let result = truncate_description(&desc, 60);
+        assert!(result.ends_with("..."));
+        // 57 bytes / 4 bytes per emoji = 14 emojis fit (56 bytes)
+        assert_eq!(result, format!("{}...", "🦀".repeat(14)));
+    }
+
+    #[test]
+    fn test_truncate_description_mixed_multibyte() {
+        // Mix of ASCII and multi-byte that would panic with byte slicing
+        let desc = "Tool: 这个工具用于处理中文文本数据并生成报告结果";
+        let result = truncate_description(desc, 60);
+        assert!(result.ends_with("..."));
+        // Must not panic and must be valid UTF-8
+        assert!(result.is_char_boundary(0));
     }
 }
