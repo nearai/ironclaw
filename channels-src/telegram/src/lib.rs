@@ -981,6 +981,7 @@ fn normalize_thread_id(thread_id: Option<i64>) -> Option<i64> {
 /// Returns the sent message_id on success. When `parse_mode` is set and
 /// Telegram returns a 400 "can't parse entities" error, returns
 /// `SendError::ParseEntities` so the caller can retry without formatting.
+/// Returns `SendError::TooLong` when Telegram rejects the message as too long.
 fn send_message(
     chat_id: i64,
     text: &str,
@@ -1469,53 +1470,73 @@ fn send_chunk_inner(
                 channel_host::LogLevel::Warn,
                 &format!("Markdown parse failed ({}), retrying as plain text", detail),
             );
-            send_message(chat_id, text, reply_to, None, message_thread_id)
-                .map_err(|e| format!("Plain-text retry also failed: {}", e))
+            match send_message(chat_id, text, reply_to, None, message_thread_id) {
+                Ok(id) => Ok(id),
+                // Plain-text retry might still be too long — split it.
+                Err(SendError::TooLong(_)) if depth < 3 => {
+                    split_and_send(chat_id, text, reply_to, message_thread_id, depth)
+                }
+                Err(e) => Err(format!("Plain-text retry also failed: {}", e)),
+            }
         }
         Err(SendError::TooLong(_)) if depth < 3 => {
-            channel_host::log(
-                channel_host::LogLevel::Warn,
-                &format!(
-                    "Chunk too long ({} chars), splitting in half (depth {})",
-                    text.chars().count(),
-                    depth + 1
-                ),
-            );
-            // Find a midpoint at a natural boundary.
-            let mid_char = text.chars().count() / 2;
-            // safety: mid_byte comes from char_indices(), always a char boundary.
-            let mid_byte = text
-                .char_indices()
-                .nth(mid_char)
-                .map(|(i, _)| i)
-                .unwrap_or(text.len());
-            let split_at = text[..mid_byte] // safety: mid_byte from char_indices()
-                .rfind("\n\n")
-                .or_else(|| text[..mid_byte].rfind('\n')) // safety: char boundary
-                .or_else(|| text[..mid_byte].rfind(' ')) // safety: char boundary
-                .unwrap_or(mid_byte);
-            let split_at = if split_at == 0 { mid_byte } else { split_at };
-
-            let first = text[..split_at].trim_end(); // safety: split_at from rfind (char boundary)
-            let second = text[split_at..].trim_start(); // safety: same
-
-            let first_id =
-                send_chunk_inner(chat_id, first, reply_to, message_thread_id, depth + 1)?;
-
-            if !second.is_empty() {
-                send_chunk_inner(
-                    chat_id,
-                    second,
-                    Some(first_id),
-                    message_thread_id,
-                    depth + 1,
-                )?;
-            }
-
-            Ok(first_id)
+            split_and_send(chat_id, text, reply_to, message_thread_id, depth)
         }
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Split text in half at a natural boundary and send each part recursively.
+///
+/// Returns the message_id of the **last** sent chunk so callers can
+/// continue the reply thread correctly.
+fn split_and_send(
+    chat_id: i64,
+    text: &str,
+    reply_to: Option<i64>,
+    message_thread_id: Option<i64>,
+    depth: u8,
+) -> Result<i64, String> {
+    channel_host::log(
+        channel_host::LogLevel::Warn,
+        &format!(
+            "Chunk too long ({} chars), splitting in half (depth {})",
+            text.chars().count(),
+            depth + 1
+        ),
+    );
+    // Find a midpoint at a natural boundary.
+    let mid_char = text.chars().count() / 2;
+    // safety: mid_byte comes from char_indices(), always a char boundary.
+    let mid_byte = text
+        .char_indices()
+        .nth(mid_char)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
+    let split_at = text[..mid_byte] // safety: mid_byte from char_indices()
+        .rfind("\n\n")
+        .or_else(|| text[..mid_byte].rfind('\n')) // safety: char boundary
+        .or_else(|| text[..mid_byte].rfind(' ')) // safety: char boundary
+        .unwrap_or(mid_byte);
+    let split_at = if split_at == 0 { mid_byte } else { split_at };
+
+    let first = text[..split_at].trim_end(); // safety: split_at from rfind (char boundary)
+    let second = text[split_at..].trim_start(); // safety: same
+
+    let first_id = send_chunk_inner(chat_id, first, reply_to, message_thread_id, depth + 1)?;
+
+    if second.is_empty() {
+        return Ok(first_id);
+    }
+
+    // Return last sent id so the reply chain continues from the final chunk.
+    send_chunk_inner(
+        chat_id,
+        second,
+        Some(first_id),
+        message_thread_id,
+        depth + 1,
+    )
 }
 
 /// Extract the base MIME type, stripping any parameters after `;`.
