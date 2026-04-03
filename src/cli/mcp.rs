@@ -125,13 +125,17 @@ pub enum McpCommand {
     },
 }
 
-/// Truncate a string to fit within `max_len` characters, appending "..." if truncated.
-/// Uses `str::floor_char_boundary` to avoid panicking on multi-byte UTF-8.
+/// Truncate a string to fit within `max_len` UTF-8 bytes, appending "..." if truncated.
+/// Uses `crate::util::floor_char_boundary` to avoid splitting multi-byte characters.
 fn truncate_description(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         return s.to_string();
     }
-    let boundary = s.floor_char_boundary(max_len.saturating_sub(3));
+    if max_len < 3 {
+        let boundary = crate::util::floor_char_boundary(s, max_len);
+        return s[..boundary].to_string();
+    }
+    let boundary = crate::util::floor_char_boundary(s, max_len - 3);
     format!("{}...", &s[..boundary])
 }
 
@@ -759,7 +763,8 @@ mod tests {
         let desc = "Tool: 这个工具用于处理中文文本数据并生成报告结果";
         let result = truncate_description(desc, 60);
         assert!(result.ends_with("..."));
-        // Must not panic and must be valid UTF-8
-        assert!(result.is_char_boundary(0));
+        assert!(result.len() <= 60);
+        let prefix = result.strip_suffix("...").unwrap();
+        assert!(desc.is_char_boundary(prefix.len()));
     }
 }
