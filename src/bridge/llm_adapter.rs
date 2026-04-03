@@ -14,6 +14,8 @@ pub struct LlmBridgeAdapter {
     provider: Arc<dyn LlmProvider>,
     /// Optional cheaper provider for sub-calls (depth > 0).
     cheap_provider: Option<Arc<dyn LlmProvider>>,
+    /// Optional callback for streaming content tokens.
+    on_token: Option<Arc<dyn Fn(String) + Send + Sync>>,
 }
 
 impl LlmBridgeAdapter {
@@ -24,7 +26,14 @@ impl LlmBridgeAdapter {
         Self {
             provider,
             cheap_provider,
+            on_token: None,
         }
+    }
+
+    /// Set the streaming token callback.
+    pub fn with_on_token(mut self, cb: Arc<dyn Fn(String) + Send + Sync>) -> Self {
+        self.on_token = Some(cb);
+        self
     }
 
     fn provider_for_depth(&self, depth: u32) -> &Arc<dyn LlmProvider> {
@@ -67,12 +76,21 @@ impl LlmBackend for LlmBridgeAdapter {
                 .with_temperature(temperature);
             request.metadata = config.metadata.clone();
 
-            let response = provider
-                .complete(request)
-                .await
-                .map_err(|e| EngineError::Llm {
-                    reason: e.to_string(),
-                })?;
+            let response = if let Some(ref cb) = self.on_token {
+                provider
+                    .complete_streaming(request, cb.as_ref())
+                    .await
+                    .map_err(|e| EngineError::Llm {
+                        reason: e.to_string(),
+                    })?
+            } else {
+                provider
+                    .complete(request)
+                    .await
+                    .map_err(|e| EngineError::Llm {
+                        reason: e.to_string(),
+                    })?
+            };
 
             // Check for code blocks in the response (CodeAct/RLM pattern)
             let llm_response = match extract_code_block(&response.content) {
@@ -102,14 +120,22 @@ impl LlmBackend for LlmBridgeAdapter {
             .with_tool_choice("auto");
         request.metadata = config.metadata.clone();
 
-        // Call provider
-        let response =
+        // Call provider (streaming when callback is set)
+        let response = if let Some(ref cb) = self.on_token {
+            provider
+                .complete_with_tools_streaming(request, cb.as_ref())
+                .await
+                .map_err(|e| EngineError::Llm {
+                    reason: e.to_string(),
+                })?
+        } else {
             provider
                 .complete_with_tools(request)
                 .await
                 .map_err(|e| EngineError::Llm {
                     reason: e.to_string(),
-                })?;
+                })?
+        };
 
         // Convert response — check for code blocks (CodeAct/RLM pattern)
         let llm_response = if !response.tool_calls.is_empty() {

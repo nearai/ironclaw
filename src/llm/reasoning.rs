@@ -887,6 +887,155 @@ Respond in JSON format:
         }
     }
 
+    /// Streaming variant of `respond_with_tools`.
+    ///
+    /// Content tokens are emitted via `on_token` as they arrive from the LLM.
+    /// Tool call deltas are buffered internally (tool JSON must be complete
+    /// before execution). Works with both tool-bearing and text-only paths.
+    pub async fn respond_streaming(
+        &self,
+        context: &ReasoningContext,
+        on_token: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<RespondOutput, LlmError> {
+        let system_prompt = match context.system_prompt {
+            Some(ref prompt) => prompt.clone(),
+            None => self.build_system_prompt_with_tools(&context.available_tools),
+        };
+
+        let system_prompt = merge_system_messages(system_prompt, &context.messages);
+        let mut messages = vec![ChatMessage::system(system_prompt)];
+        messages.extend(
+            context
+                .messages
+                .iter()
+                .filter(|m| m.role != Role::System)
+                .cloned(),
+        );
+
+        let effective_tools = if context.force_text {
+            Vec::new()
+        } else {
+            context.available_tools.clone()
+        };
+
+        if !effective_tools.is_empty() {
+            // Tools present: use streaming tool completion (content tokens
+            // stream, tool call JSON is buffered).
+            let mut request = ToolCompletionRequest::new(messages, effective_tools)
+                .with_max_tokens(4096)
+                .with_temperature(0.7)
+                .with_tool_choice("auto");
+            request.metadata = context.metadata.clone();
+            if let Some(ref model) = context.model_override {
+                request.model = Some(model.clone());
+            }
+
+            let response = self
+                .llm
+                .complete_with_tools_streaming(request, on_token)
+                .await?;
+            let usage = TokenUsage {
+                input_tokens: response.input_tokens,
+                output_tokens: response.output_tokens,
+                cache_read_input_tokens: response.cache_read_input_tokens,
+                cache_creation_input_tokens: response.cache_creation_input_tokens,
+            };
+
+            if !response.tool_calls.is_empty() {
+                let narrative = response.content.map(|c| {
+                    let pre_truncated = truncate_at_tool_tags(&c);
+                    clean_response(&pre_truncated)
+                });
+                return Ok(RespondOutput {
+                    result: RespondResult::ToolCalls {
+                        tool_calls: response.tool_calls,
+                        content: narrative,
+                    },
+                    usage,
+                    finish_reason: response.finish_reason,
+                    metadata: ResponseMetadata::default(),
+                });
+            }
+
+            let content = response.content.unwrap_or_default();
+            let recovered = recover_tool_calls_from_content(&content, &context.available_tools);
+            if !recovered.is_empty() {
+                let pre_truncated = truncate_at_tool_tags(&content);
+                let cleaned = clean_response(&pre_truncated);
+                return Ok(RespondOutput {
+                    result: RespondResult::ToolCalls {
+                        tool_calls: recovered,
+                        content: if cleaned.is_empty() {
+                            None
+                        } else {
+                            Some(cleaned)
+                        },
+                    },
+                    usage,
+                    finish_reason: response.finish_reason,
+                    metadata: ResponseMetadata::default(),
+                });
+            }
+
+            let pre_truncated = truncate_at_tool_tags(&content);
+            let cleaned = clean_response(&pre_truncated);
+            let metadata = if cleaned.trim().is_empty() {
+                ResponseMetadata {
+                    anomaly: Some(ResponseAnomaly::EmptyToolCompletion),
+                }
+            } else {
+                ResponseMetadata::default()
+            };
+            let final_text = if metadata.anomaly.is_some() {
+                "I'm not sure how to respond to that.".to_string()
+            } else {
+                cleaned
+            };
+            Ok(RespondOutput {
+                result: RespondResult::Text(final_text),
+                usage,
+                finish_reason: response.finish_reason,
+                metadata,
+            })
+        } else {
+            // No tools: use simple streaming completion.
+            let mut request = CompletionRequest::new(messages)
+                .with_max_tokens(4096)
+                .with_temperature(0.7);
+            request.metadata = context.metadata.clone();
+            if let Some(ref model) = context.model_override {
+                request.model = Some(model.clone());
+            }
+
+            let response = self.llm.complete_streaming(request, on_token).await?;
+            let pre_truncated = truncate_at_tool_tags(&response.content);
+            let cleaned = clean_response(&pre_truncated);
+            let metadata = if cleaned.trim().is_empty() {
+                ResponseMetadata {
+                    anomaly: Some(ResponseAnomaly::EmptyTextResponse),
+                }
+            } else {
+                ResponseMetadata::default()
+            };
+            let final_text = if metadata.anomaly.is_some() {
+                "I'm not sure how to respond to that.".to_string()
+            } else {
+                cleaned
+            };
+            Ok(RespondOutput {
+                result: RespondResult::Text(final_text),
+                usage: TokenUsage {
+                    input_tokens: response.input_tokens,
+                    output_tokens: response.output_tokens,
+                    cache_read_input_tokens: response.cache_read_input_tokens,
+                    cache_creation_input_tokens: response.cache_creation_input_tokens,
+                },
+                finish_reason: response.finish_reason,
+                metadata,
+            })
+        }
+    }
+
     fn build_planning_prompt(&self, context: &ReasoningContext) -> String {
         let tools_desc = if context.available_tools.is_empty() {
             "No tools available.".to_string()

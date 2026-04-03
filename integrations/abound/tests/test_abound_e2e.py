@@ -373,6 +373,42 @@ except Exception as e:
 print()
 
 # -----------------------------------------------------------
+# 7. Streaming: multiple deltas (not one big chunk)
+# -----------------------------------------------------------
+print("--- 7. Streaming: verify incremental deltas ---")
+try:
+    stream = client.responses.create(
+        model="default",
+        input="Write a short paragraph about exchange rates.",
+        stream=True,
+    )
+    delta_count = 0
+    delta_sizes = []
+    full_text = ""
+    for event in stream:
+        if event.type == "response.output_text.delta":
+            delta_count += 1
+            delta_sizes.append(len(event.delta))
+            full_text += event.delta
+
+    check("has multiple deltas", delta_count > 1,
+          f"got {delta_count} delta(s) — expected >1 for token-level streaming")
+    check("has text content", len(full_text) > 0, f"text length: {len(full_text)}")
+
+    if delta_count > 1:
+        avg_size = sum(delta_sizes) / len(delta_sizes)
+        check("avg delta smaller than full text", avg_size < len(full_text),
+              f"avg delta: {avg_size:.0f} chars, full text: {len(full_text)} chars")
+
+    print(f"  Deltas: {delta_count}")
+    print(f"  Delta sizes: {delta_sizes[:10]}{'...' if len(delta_sizes) > 10 else ''}")
+    print(f"  Full text: {len(full_text)} chars")
+    print(f"  Text: {full_text[:200]}")
+except Exception as e:
+    check("streaming succeeded", False, str(e))
+print()
+
+# -----------------------------------------------------------
 # Summary
 # -----------------------------------------------------------
 print(f"=== Results: {passed} passed, {failed} failed ===")

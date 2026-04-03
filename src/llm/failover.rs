@@ -329,6 +329,36 @@ impl LlmProvider for FailoverProvider {
         Ok(response)
     }
 
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        on_token: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<CompletionResponse, LlmError> {
+        let (provider_idx, response) = self
+            .try_providers(|provider| {
+                let req = request.clone();
+                async move { provider.complete_streaming(req, on_token).await }
+            })
+            .await?;
+        self.bind_provider_to_current_task(provider_idx);
+        Ok(response)
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        on_token: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let (provider_idx, response) = self
+            .try_providers(|provider| {
+                let req = request.clone();
+                async move { provider.complete_with_tools_streaming(req, on_token).await }
+            })
+            .await?;
+        self.bind_provider_to_current_task(provider_idx);
+        Ok(response)
+    }
+
     fn active_model_name(&self) -> String {
         self.providers[self.last_used.load(Ordering::Relaxed)].active_model_name()
     }

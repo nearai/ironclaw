@@ -939,6 +939,24 @@ impl LlmProvider for SmartRoutingProvider {
         self.primary.complete_with_tools(request).await
     }
 
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        on_token: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<CompletionResponse, LlmError> {
+        self.primary.complete_streaming(request, on_token).await
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        on_token: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.primary
+            .complete_with_tools_streaming(request, on_token)
+            .await
+    }
+
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
         self.primary.list_models().await
     }

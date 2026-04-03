@@ -1,7 +1,14 @@
 //! Engine v2 router — handles user messages via the engine when enabled.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+
+thread_local! {
+    /// Per-task context for streaming: (channel_name, metadata).
+    /// Set before engine calls so the on_token callback can route StreamChunk events.
+    static CURRENT_STREAM_CTX: RefCell<Option<(String, serde_json::Value)>> = const { RefCell::new(None) };
+}
 
 use tokio::sync::RwLock;
 use tracing::debug;
@@ -124,10 +131,30 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
 
     debug!("engine v2: initializing engine state");
 
-    let llm_adapter = Arc::new(LlmBridgeAdapter::new(
-        agent.llm().clone(),
-        Some(agent.cheap_llm().clone()),
-    ));
+    // Wire streaming: the on_token callback broadcasts StreamChunk events
+    // via the channel manager. The thread_id is extracted from a thread-local
+    // set by handle_with_engine_inner before each engine call.
+    let channels = agent.channels.clone();
+    let on_token: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |token: String| {
+        // Read the current thread's metadata from the thread-local
+        if let Some((ch, meta)) = CURRENT_STREAM_CTX.with(|c| c.borrow().clone()) {
+            let channels = channels.clone();
+            tokio::spawn(async move {
+                let _ = channels
+                    .send_status(
+                        &ch,
+                        crate::channels::StatusUpdate::StreamChunk(token),
+                        &meta,
+                    )
+                    .await;
+            });
+        }
+    });
+
+    let llm_adapter = Arc::new(
+        LlmBridgeAdapter::new(agent.llm().clone(), Some(agent.cheap_llm().clone()))
+            .with_on_token(on_token),
+    );
 
     let effect_adapter = Arc::new(EffectBridgeAdapter::new(
         agent.tools().clone(),
@@ -1228,6 +1255,11 @@ async fn handle_with_engine_inner(
             "Credential stored, but too many auth retries. Please resend your message.".into(),
         ));
     }
+
+    // Set stream context so the on_token callback can route StreamChunk events
+    CURRENT_STREAM_CTX.with(|c| {
+        *c.borrow_mut() = Some((message.channel.clone(), message.metadata.clone()));
+    });
 
     // Ensure engine is initialized
     init_engine(agent).await?;

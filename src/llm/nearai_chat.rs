@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use eventsource_stream::Eventsource;
+use futures::StreamExt;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::MathematicalOps;
@@ -521,6 +523,154 @@ impl LlmProvider for NearAiChatProvider {
         })
     }
 
+    async fn complete_streaming(
+        &self,
+        req: CompletionRequest,
+        on_token: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<CompletionResponse, LlmError> {
+        let model = req.model.unwrap_or_else(|| self.active_model_name());
+        let mut raw_messages = req.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut raw_messages);
+        let raw: Vec<ChatCompletionMessage> = raw_messages.into_iter().map(|m| m.into()).collect();
+
+        let messages = if self.flatten_tool_messages {
+            flatten_tool_messages(raw)
+        } else {
+            raw
+        };
+
+        let request = ChatCompletionRequest {
+            model,
+            messages,
+            temperature: req.temperature,
+            max_tokens: req.max_tokens,
+            stop: req.stop_sequences,
+            tools: None,
+            tool_choice: None,
+        };
+
+        // Enable streaming
+        let url = self.api_url("chat/completions");
+        let token = self.resolve_bearer_token().await?;
+        let mut body = serde_json::to_value(&request).map_err(|e| LlmError::RequestFailed {
+            provider: "nearai_chat".to_string(),
+            reason: format!("Failed to serialize request: {e}"),
+        })?;
+        body["stream"] = serde_json::Value::Bool(true);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "nearai_chat".to_string(),
+                reason: e.to_string(),
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            return Err(LlmError::RequestFailed {
+                provider: "nearai_chat".to_string(),
+                reason: format!("HTTP {status}: {text}"),
+            });
+        }
+
+        let stream = response
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(|e| e.to_string()));
+        let mut events = stream.eventsource();
+
+        let mut full_content = String::new();
+        let mut reasoning_buf = String::new();
+        let mut finish_reason = FinishReason::Unknown;
+        let mut input_tokens: u32 = 0;
+        let mut output_tokens: u32 = 0;
+
+        while let Some(event_result) = events.next().await {
+            let event = match event_result {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let data = event.data.trim();
+            if data == "[DONE]" || data.is_empty() {
+                continue;
+            }
+
+            let parsed: serde_json::Value = match serde_json::from_str(data) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            // Extract delta content from the SSE chunk
+            if let Some(choices) = parsed.get("choices").and_then(|v| v.as_array()) {
+                for choice in choices {
+                    if let Some(delta) = choice.get("delta") {
+                        if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
+                            if !content.is_empty() {
+                                on_token(content.to_string());
+                                full_content.push_str(content);
+                            }
+                        }
+                        // Thinking models: buffer reasoning tokens but don't
+                        // stream them (they're chain-of-thought, stripped later).
+                        // Only used as fallback content if no content deltas arrive.
+                        if let Some(reasoning) = delta
+                            .get("reasoning")
+                            .or_else(|| delta.get("reasoning_content"))
+                            .and_then(|v| v.as_str())
+                        {
+                            if !reasoning.is_empty() {
+                                reasoning_buf.push_str(reasoning);
+                            }
+                        }
+                    }
+                    if let Some(fr) = choice.get("finish_reason").and_then(|v| v.as_str()) {
+                        finish_reason = match fr {
+                            "stop" => FinishReason::Stop,
+                            "length" => FinishReason::Length,
+                            "tool_calls" => FinishReason::ToolUse,
+                            "content_filter" => FinishReason::ContentFilter,
+                            _ => FinishReason::Unknown,
+                        };
+                    }
+                }
+            }
+
+            // Extract usage from the final chunk (OpenAI includes it in the last SSE event)
+            if let Some(usage) = parsed.get("usage") {
+                input_tokens = usage
+                    .get("prompt_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+                output_tokens = usage
+                    .get("completion_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+            }
+        }
+
+        // Fall back to reasoning content if no content deltas arrived
+        let final_content = if full_content.is_empty() && !reasoning_buf.is_empty() {
+            reasoning_buf
+        } else {
+            full_content
+        };
+
+        Ok(CompletionResponse {
+            content: final_content,
+            finish_reason,
+            input_tokens,
+            output_tokens,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        })
+    }
+
     async fn complete_with_tools(
         &self,
         req: ToolCompletionRequest,
@@ -617,6 +767,214 @@ impl LlmProvider for NearAiChatProvider {
         };
 
         let (input_tokens, output_tokens) = parse_usage(response.usage.as_ref());
+
+        Ok(ToolCompletionResponse {
+            content,
+            tool_calls,
+            finish_reason,
+            input_tokens,
+            output_tokens,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        })
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        req: ToolCompletionRequest,
+        on_token: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        tracing::info!("NearAI: complete_with_tools_streaming called");
+        let model = req.model.unwrap_or_else(|| self.active_model_name());
+        let mut raw_messages = req.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut raw_messages);
+        let messages: Vec<ChatCompletionMessage> =
+            raw_messages.into_iter().map(|m| m.into()).collect();
+
+        let messages = if self.flatten_tool_messages {
+            flatten_tool_messages(messages)
+        } else {
+            messages
+        };
+
+        let tools: Vec<ChatCompletionTool> = req
+            .tools
+            .into_iter()
+            .map(|t| ChatCompletionTool {
+                tool_type: "function".to_string(),
+                function: ChatCompletionFunction {
+                    name: t.name,
+                    description: Some(t.description),
+                    parameters: Some(t.parameters),
+                },
+            })
+            .collect();
+
+        let request = ChatCompletionRequest {
+            model,
+            messages,
+            temperature: req.temperature,
+            max_tokens: req.max_tokens,
+            stop: req.stop_sequences,
+            tools: if tools.is_empty() { None } else { Some(tools) },
+            tool_choice: req.tool_choice,
+        };
+
+        let url = self.api_url("chat/completions");
+        let token = self.resolve_bearer_token().await?;
+        let mut body = serde_json::to_value(&request).map_err(|e| LlmError::RequestFailed {
+            provider: "nearai_chat".to_string(),
+            reason: format!("Failed to serialize request: {e}"),
+        })?;
+        body["stream"] = serde_json::Value::Bool(true);
+        // Request usage in the final SSE event
+        body["stream_options"] = serde_json::json!({"include_usage": true});
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "nearai_chat".to_string(),
+                reason: e.to_string(),
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            return Err(LlmError::RequestFailed {
+                provider: "nearai_chat".to_string(),
+                reason: format!("HTTP {status}: {text}"),
+            });
+        }
+
+        let stream = response
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(|e| e.to_string()));
+        let mut events = stream.eventsource();
+
+        let mut full_content = String::new();
+        let mut reasoning_buf = String::new();
+        let mut finish_reason = FinishReason::Unknown;
+        let mut input_tokens: u32 = 0;
+        let mut output_tokens: u32 = 0;
+
+        // Tool calls are buffered: index → (id, name, arguments_json)
+        let mut tool_call_buffers: std::collections::HashMap<u32, (String, String, String)> =
+            std::collections::HashMap::new();
+
+        while let Some(event_result) = events.next().await {
+            let event = match event_result {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let data = event.data.trim();
+            if data == "[DONE]" || data.is_empty() {
+                continue;
+            }
+
+            let parsed: serde_json::Value = match serde_json::from_str(data) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            if let Some(choices) = parsed.get("choices").and_then(|v| v.as_array()) {
+                for choice in choices {
+                    if let Some(delta) = choice.get("delta") {
+                        // Stream content tokens to callback
+                        if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
+                            if !content.is_empty() {
+                                on_token(content.to_string());
+                                full_content.push_str(content);
+                            }
+                        }
+                        // Buffer reasoning tokens (don't stream — chain-of-thought)
+                        if let Some(reasoning) = delta
+                            .get("reasoning")
+                            .or_else(|| delta.get("reasoning_content"))
+                            .and_then(|v| v.as_str())
+                        {
+                            if !reasoning.is_empty() {
+                                reasoning_buf.push_str(reasoning);
+                            }
+                        }
+                        // Buffer tool call deltas (don't stream these)
+                        if let Some(tcs) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+                            for tc in tcs {
+                                let idx =
+                                    tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                                let entry = tool_call_buffers.entry(idx).or_insert_with(|| {
+                                    (String::new(), String::new(), String::new())
+                                });
+                                if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
+                                    entry.0 = id.to_string();
+                                }
+                                if let Some(func) = tc.get("function") {
+                                    if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
+                                        entry.1 = name.to_string();
+                                    }
+                                    if let Some(args) =
+                                        func.get("arguments").and_then(|v| v.as_str())
+                                    {
+                                        entry.2.push_str(args);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(fr) = choice.get("finish_reason").and_then(|v| v.as_str()) {
+                        finish_reason = match fr {
+                            "stop" => FinishReason::Stop,
+                            "length" => FinishReason::Length,
+                            "tool_calls" => FinishReason::ToolUse,
+                            "content_filter" => FinishReason::ContentFilter,
+                            _ => FinishReason::Unknown,
+                        };
+                    }
+                }
+            }
+
+            if let Some(usage) = parsed.get("usage") {
+                input_tokens = usage
+                    .get("prompt_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+                output_tokens = usage
+                    .get("completion_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+            }
+        }
+
+        // Assemble tool calls from buffered deltas
+        let mut tool_calls: Vec<ToolCall> = tool_call_buffers
+            .into_iter()
+            .map(|(_, (id, name, args_json))| {
+                let arguments = serde_json::from_str(&args_json)
+                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                ToolCall {
+                    id,
+                    name,
+                    arguments,
+                    reasoning: None,
+                }
+            })
+            .collect();
+        tool_calls.sort_by_key(|tc| tc.id.clone());
+
+        // Fall back to reasoning if no content (thinking models)
+        let content =
+            if full_content.is_empty() && !reasoning_buf.is_empty() && tool_calls.is_empty() {
+                Some(reasoning_buf)
+            } else if full_content.is_empty() {
+                None
+            } else {
+                Some(full_content)
+            };
 
         Ok(ToolCompletionResponse {
             content,

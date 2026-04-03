@@ -405,8 +405,32 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             }
         }
 
-        let output = match reasoning.respond_with_tools(reason_ctx).await {
-            Ok(output) => output,
+        // Emit token-level StreamChunk events when tools are empty (final
+        // text response). The callback fires for each token from the LLM
+        // and broadcasts it via the web channel's SSE stream.
+        let channels = Arc::clone(&self.agent.channels);
+        let metadata = self.message.metadata.clone();
+        let channel = self.message.channel.clone();
+        let on_token = move |token: String| {
+            tracing::debug!(len = token.len(), "on_token callback fired");
+            let channels = Arc::clone(&channels);
+            let channel = channel.clone();
+            let metadata = metadata.clone();
+            tokio::spawn(async move {
+                let _ = channels
+                    .send_status(&channel, StatusUpdate::StreamChunk(token), &metadata)
+                    .await;
+            });
+        };
+
+        let output = match reasoning.respond_streaming(reason_ctx, &on_token).await {
+            Ok(output) => {
+                // Yield to let spawned StreamChunk tasks flush before the
+                // Response event is sent (prevents race where Response arrives
+                // before the last StreamChunk).
+                tokio::task::yield_now().await;
+                output
+            }
             Err(crate::error::LlmError::ContextLengthExceeded { used, limit }) => {
                 tracing::warn!(
                     used,
@@ -415,7 +439,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     "Context length exceeded, compacting messages and retrying"
                 );
 
-                // Compact messages in place and retry
+                // Compact messages in place and retry (non-streaming fallback)
                 reason_ctx.messages = compact_messages_for_retry(&reason_ctx.messages);
 
                 // When force_text, clear tools to further reduce token count
