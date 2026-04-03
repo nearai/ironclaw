@@ -25,6 +25,33 @@ use ironclaw_common::truncate_preview;
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
 
+#[derive(Clone)]
+struct PendingApprovalStatusSnapshot {
+    request_id: String,
+    tool_name: String,
+    description: String,
+    parameters: serde_json::Value,
+    allow_always: bool,
+}
+
+impl From<&PendingApproval> for PendingApprovalStatusSnapshot {
+    fn from(pending: &PendingApproval) -> Self {
+        let parameters = if pending.display_parameters.is_null() {
+            pending.parameters.clone()
+        } else {
+            pending.display_parameters.clone()
+        };
+
+        Self {
+            request_id: pending.request_id.to_string(),
+            tool_name: pending.tool_name.clone(),
+            description: pending.description.clone(),
+            parameters,
+            allow_always: pending.allow_always,
+        }
+    }
+}
+
 fn requires_preexisting_uuid_thread(channel: &str) -> bool {
     // Gateway-style channels send server-issued conversation UUIDs.
     // Unknown UUIDs should be rejected instead of silently creating a new thread.
@@ -267,7 +294,7 @@ impl Agent {
         );
 
         // First check thread state without holding lock during I/O
-        let (thread_state, approval_context) = {
+        let (thread_state, approval_context, approval_status) = {
             let sess = session.lock().await;
             let thread = sess
                 .threads
@@ -278,7 +305,11 @@ impl Agent {
                     crate::agent::agent_loop::truncate_for_preview(&a.description, 80);
                 (a.tool_name.clone(), desc_preview)
             });
-            (thread.state, approval_context)
+            let approval_status = thread
+                .pending_approval
+                .as_ref()
+                .map(PendingApprovalStatusSnapshot::from);
+            (thread.state, approval_context, approval_status)
         };
 
         tracing::debug!(
@@ -364,6 +395,22 @@ impl Agent {
                     thread_id = %thread_id,
                     "Thread awaiting approval, rejecting new input"
                 );
+                if let Some(ref pending) = approval_status {
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::ApprovalNeeded {
+                                request_id: pending.request_id.clone(),
+                                tool_name: pending.tool_name.clone(),
+                                description: pending.description.clone(),
+                                parameters: pending.parameters.clone(),
+                                allow_always: pending.allow_always,
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+                }
                 let msg = match approval_context {
                     Some((tool_name, desc_preview)) => format!(
                         "Waiting for approval: {tool_name} — {desc_preview}. Use /interrupt to cancel."
@@ -2459,6 +2506,78 @@ mod tests {
                             && approval.allow_always)
             )),
             "expected conversation history status with pending approval, got: {statuses:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_awaiting_approval_reemits_status_for_followup_message() {
+        use crate::agent::session::{PendingApproval, Session, Thread};
+
+        let (agent, statuses) = make_test_agent_with_status_channel("tui").await;
+        let mut session = Session::new("test-user");
+        let thread_id = Uuid::new_v4();
+        let mut thread = Thread::with_id(thread_id, session.id, Some("tui"));
+
+        let pending = PendingApproval {
+            request_id: Uuid::new_v4(),
+            tool_name: "shell".to_string(),
+            parameters: serde_json::json!({"command": "echo secret"}),
+            display_parameters: serde_json::json!({"command": "[REDACTED]"}),
+            description: "Execute: echo secret".to_string(),
+            tool_call_id: "call_0".to_string(),
+            context_messages: vec![],
+            deferred_tool_calls: vec![],
+            user_timezone: None,
+            allow_always: true,
+        };
+        thread.await_approval(pending.clone());
+        session.threads.insert(thread_id, thread);
+
+        let session = Arc::new(Mutex::new(session));
+        let rate = agent.deps.tenant_rates.get_or_create("test-user").await;
+        let tenant = crate::tenant::TenantCtx::new(
+            "test-user",
+            None,
+            None,
+            Arc::clone(&agent.deps.cost_guard),
+            rate,
+        );
+        let message = IncomingMessage::new("tui", "test-user", "what now?");
+
+        let result = agent
+            .process_user_input(&message, tenant, session, thread_id, &message.content)
+            .await
+            .expect("process user input");
+
+        match result {
+            crate::agent::submission::SubmissionResult::Ok {
+                message: Some(text),
+            } => {
+                assert!(
+                    text.contains("Waiting for approval"),
+                    "expected waiting text, got: {text}"
+                );
+            }
+            other => panic!("expected pending ok result, got {other:?}"),
+        }
+
+        let statuses = statuses.lock().expect("poisoned").clone();
+        assert!(
+            statuses.iter().any(|status| matches!(
+                status,
+                StatusUpdate::ApprovalNeeded {
+                    request_id,
+                    tool_name,
+                    description,
+                    parameters,
+                    allow_always,
+                } if request_id == &pending.request_id.to_string()
+                    && tool_name == "shell"
+                    && description == "Execute: echo secret"
+                    && parameters == &serde_json::json!({"command": "[REDACTED]"})
+                    && *allow_always
+            )),
+            "expected approval status to be re-emitted, got: {statuses:?}"
         );
     }
 
