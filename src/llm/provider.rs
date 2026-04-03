@@ -417,6 +417,24 @@ pub trait LlmProvider: Send + Sync {
         })
     }
 
+    /// Complete a chat conversation with token-level streaming.
+    ///
+    /// The `on_token` callback is invoked for each content token/chunk as it
+    /// arrives from the provider. The full `CompletionResponse` (with accurate
+    /// token counts) is returned after the stream completes.
+    ///
+    /// Default implementation falls back to non-streaming `complete()` and
+    /// emits the entire response as a single chunk.
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        on_token: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<CompletionResponse, LlmError> {
+        let response = self.complete(request).await?;
+        on_token(response.content.clone());
+        Ok(response)
+    }
+
     /// Calculate cost for a completion.
     fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
         let (input_cost, output_cost) = self.cost_per_token();

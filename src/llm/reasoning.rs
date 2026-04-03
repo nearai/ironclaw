@@ -887,6 +887,74 @@ Respond in JSON format:
         }
     }
 
+    /// Streaming variant of `respond_with_tools`.
+    ///
+    /// Calls `complete_streaming` on the LLM provider, forwarding tokens via
+    /// the `on_token` callback as they arrive. Only applies to the final
+    /// text-only completion path — tool call responses still use the
+    /// non-streaming path (tool JSON must be complete before execution).
+    pub async fn respond_streaming(
+        &self,
+        context: &ReasoningContext,
+        on_token: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<RespondOutput, LlmError> {
+        // Only stream when there are no tools (the final text response).
+        // Tool calls require complete JSON and can't stream incrementally.
+        if !context.available_tools.is_empty() || context.force_text {
+            return self.respond_with_tools(context).await;
+        }
+
+        let system_prompt = match context.system_prompt {
+            Some(ref prompt) => prompt.clone(),
+            None => self.build_system_prompt_with_tools(&context.available_tools),
+        };
+
+        let system_prompt = merge_system_messages(system_prompt, &context.messages);
+        let mut messages = vec![ChatMessage::system(system_prompt)];
+        messages.extend(
+            context
+                .messages
+                .iter()
+                .filter(|m| m.role != Role::System)
+                .cloned(),
+        );
+
+        let mut request = CompletionRequest::new(messages)
+            .with_max_tokens(4096)
+            .with_temperature(0.7);
+        request.metadata = context.metadata.clone();
+        if let Some(ref model) = context.model_override {
+            request.model = Some(model.clone());
+        }
+
+        let response = self.llm.complete_streaming(request, on_token).await?;
+        let pre_truncated = truncate_at_tool_tags(&response.content);
+        let cleaned = clean_response(&pre_truncated);
+        let metadata = if cleaned.trim().is_empty() {
+            ResponseMetadata {
+                anomaly: Some(ResponseAnomaly::EmptyTextResponse),
+            }
+        } else {
+            ResponseMetadata::default()
+        };
+        let final_text = if metadata.anomaly.is_some() {
+            "I'm not sure how to respond to that.".to_string()
+        } else {
+            cleaned
+        };
+        Ok(RespondOutput {
+            result: RespondResult::Text(final_text),
+            usage: TokenUsage {
+                input_tokens: response.input_tokens,
+                output_tokens: response.output_tokens,
+                cache_read_input_tokens: response.cache_read_input_tokens,
+                cache_creation_input_tokens: response.cache_creation_input_tokens,
+            },
+            finish_reason: response.finish_reason,
+            metadata,
+        })
+    }
+
     fn build_planning_prompt(&self, context: &ReasoningContext) -> String {
         let tools_desc = if context.available_tools.is_empty() {
             "No tools available.".to_string()

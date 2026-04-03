@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use eventsource_stream::Eventsource;
+use futures::StreamExt;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::MathematicalOps;
@@ -513,6 +515,145 @@ impl LlmProvider for NearAiChatProvider {
 
         Ok(CompletionResponse {
             content,
+            finish_reason,
+            input_tokens,
+            output_tokens,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        })
+    }
+
+    async fn complete_streaming(
+        &self,
+        req: CompletionRequest,
+        on_token: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<CompletionResponse, LlmError> {
+        let model = req.model.unwrap_or_else(|| self.active_model_name());
+        let mut raw_messages = req.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut raw_messages);
+        let raw: Vec<ChatCompletionMessage> = raw_messages.into_iter().map(|m| m.into()).collect();
+
+        let messages = if self.flatten_tool_messages {
+            flatten_tool_messages(raw)
+        } else {
+            raw
+        };
+
+        let request = ChatCompletionRequest {
+            model,
+            messages,
+            temperature: req.temperature,
+            max_tokens: req.max_tokens,
+            stop: req.stop_sequences,
+            tools: None,
+            tool_choice: None,
+        };
+
+        // Enable streaming
+        let url = self.api_url("chat/completions");
+        let token = self.resolve_bearer_token().await?;
+        let mut body = serde_json::to_value(&request).map_err(|e| LlmError::RequestFailed {
+            provider: "nearai_chat".to_string(),
+            reason: format!("Failed to serialize request: {e}"),
+        })?;
+        body["stream"] = serde_json::Value::Bool(true);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "nearai_chat".to_string(),
+                reason: e.to_string(),
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            return Err(LlmError::RequestFailed {
+                provider: "nearai_chat".to_string(),
+                reason: format!("HTTP {status}: {text}"),
+            });
+        }
+
+        let stream = response
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(|e| e.to_string()));
+        let mut events = stream.eventsource();
+
+        let mut full_content = String::new();
+        let mut finish_reason = FinishReason::Unknown;
+        let mut input_tokens: u32 = 0;
+        let mut output_tokens: u32 = 0;
+
+        while let Some(event_result) = events.next().await {
+            let event = match event_result {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let data = event.data.trim();
+            if data == "[DONE]" || data.is_empty() {
+                continue;
+            }
+
+            let parsed: serde_json::Value = match serde_json::from_str(data) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            // Extract delta content from the SSE chunk
+            if let Some(choices) = parsed.get("choices").and_then(|v| v.as_array()) {
+                for choice in choices {
+                    if let Some(delta) = choice.get("delta") {
+                        if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
+                            if !content.is_empty() {
+                                on_token(content.to_string());
+                                full_content.push_str(content);
+                            }
+                        }
+                        // Some models put content in reasoning_content
+                        if full_content.is_empty() {
+                            if let Some(reasoning) =
+                                delta.get("reasoning_content").and_then(|v| v.as_str())
+                            {
+                                if !reasoning.is_empty() {
+                                    on_token(reasoning.to_string());
+                                    full_content.push_str(reasoning);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(fr) = choice.get("finish_reason").and_then(|v| v.as_str()) {
+                        finish_reason = match fr {
+                            "stop" => FinishReason::Stop,
+                            "length" => FinishReason::Length,
+                            "tool_calls" => FinishReason::ToolUse,
+                            "content_filter" => FinishReason::ContentFilter,
+                            _ => FinishReason::Unknown,
+                        };
+                    }
+                }
+            }
+
+            // Extract usage from the final chunk (OpenAI includes it in the last SSE event)
+            if let Some(usage) = parsed.get("usage") {
+                input_tokens = usage
+                    .get("prompt_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+                output_tokens = usage
+                    .get("completion_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+            }
+        }
+
+        Ok(CompletionResponse {
+            content: full_content,
             finish_reason,
             input_tokens,
             output_tokens,
