@@ -975,6 +975,48 @@ pub(crate) async fn refresh_collection_tools(
     tool_names
 }
 
+/// Bootstrap per-collection tools for all existing collections owned by a user.
+///
+/// Called from the REST API handler after schema registration so that every
+/// collection the user owns has its per-collection tools available, and could
+/// be called at startup to restore tools after restart.
+pub async fn bootstrap_collection_tools(
+    db: &Arc<dyn Database>,
+    registry: &Arc<ToolRegistry>,
+    user_id: &str,
+    skills_dir: Option<&Path>,
+    skill_registry: Option<&Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>>,
+    collection_write_tx: Option<&broadcast::Sender<CollectionWriteEvent>>,
+    workspace_resolver: Option<&Arc<dyn WorkspaceResolver>>,
+) -> Vec<String> {
+    let schemas = match db.list_collections(user_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(user_id = %user_id, error = %e, "failed to load collections for tool bootstrap");
+            return Vec::new();
+        }
+    };
+    let mut all_tool_names = Vec::new();
+    for schema in &schemas {
+        let names = refresh_collection_tools(
+            schema,
+            db,
+            registry,
+            skills_dir,
+            skill_registry,
+            user_id,
+            collection_write_tx,
+            workspace_resolver,
+        )
+        .await;
+        all_tool_names.extend(names);
+    }
+    if !schemas.is_empty() {
+        tracing::info!(user_id = %user_id, count = schemas.len(), tools = all_tool_names.len(), "bootstrapped per-collection tools");
+    }
+    all_tool_names
+}
+
 /// Load existing collection schemas from the database and register their
 /// per-collection tools for every known user.
 ///
@@ -2861,6 +2903,90 @@ mod tests {
             !router_dir.exists(),
             "router directory should be removed for empty schemas"
         );
+    }
+
+    // ==================== Bootstrap tests ====================
+
+    #[cfg(feature = "postgres")]
+    mod bootstrap {
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        use crate::db::structured::{CollectionSchema, FieldDef, FieldType};
+        use crate::tools::registry::ToolRegistry;
+
+        fn test_schema(name: &str) -> CollectionSchema {
+            let mut fields = BTreeMap::new();
+            fields.insert(
+                "item".to_string(),
+                FieldDef {
+                    field_type: FieldType::Text,
+                    required: true,
+                    default: None,
+                },
+            );
+            CollectionSchema {
+                collection: name.to_string(),
+                description: Some("Test collection".to_string()),
+                fields,
+                source_scope: None,
+            }
+        }
+
+        #[tokio::test]
+        async fn bootstrap_generates_tools_for_all_collections() {
+            let db = match crate::tools::builtin::collections::tests::try_connect_postgres().await {
+                Some(db) => db,
+                None => {
+                    eprintln!("skipping: PostgreSQL not available");
+                    return;
+                }
+            };
+            let user_id = crate::tools::builtin::collections::tests::unique_id("bootstrap_user");
+
+            // Register two collections directly in the DB.
+            let schema_a = test_schema(&format!("{}_alpha", user_id));
+            let schema_b = test_schema(&format!("{}_beta", user_id));
+            db.register_collection(&user_id, &schema_a).await.unwrap();
+            db.register_collection(&user_id, &schema_b).await.unwrap();
+
+            // No tools should exist yet.
+            let registry = Arc::new(ToolRegistry::new());
+            let tool_name_a = format!("{}_{}_query", user_id, schema_a.collection);
+            assert!(registry.get(&tool_name_a).await.is_none());
+
+            // Bootstrap should generate tools for both collections.
+            let tool_names = crate::tools::builtin::collections::bootstrap_collection_tools(
+                &db,
+                &registry,
+                &user_id,
+                None, // skills_dir
+                None, // skill_registry
+                None, // collection_write_tx
+                None, // workspace_resolver
+            )
+            .await;
+
+            // Should have created tools for both collections.
+            assert!(
+                !tool_names.is_empty(),
+                "bootstrap should generate at least one tool"
+            );
+
+            // Verify tools for collection A are registered.
+            let query_a = format!("{}_{}_query", user_id, schema_a.collection);
+            assert!(
+                registry.get(&query_a).await.is_some(),
+                "query tool for collection A should be registered"
+            );
+
+            // Verify tools for collection B are registered.
+            let query_b = format!("{}_{}_query", user_id, schema_b.collection);
+            assert!(
+                registry.get(&query_b).await.is_some(),
+                "query tool for collection B should be registered"
+            );
+        }
     }
 
     // ==================== History tracking tests ====================

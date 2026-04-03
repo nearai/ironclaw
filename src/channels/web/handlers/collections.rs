@@ -545,8 +545,9 @@ pub async fn collections_register_handler(
 
     match db.register_collection(&user.user_id, &schema).await {
         Ok(()) => {
-            // Generate and register per-collection dynamic tools (best-effort).
-            // Without this, tools like {collection}_query won't appear in the registry.
+            // Bootstrap per-collection tools for ALL of this user's collections.
+            // This ensures tools are available even for collections registered in
+            // prior sessions whose tools were lost on restart.
             let mut tool_names = Vec::new();
             if let Some(ref registry) = state.tool_registry {
                 // Build workspace resolver from pool or single workspace.
@@ -557,13 +558,12 @@ pub async fn collections_register_handler(
                     } else {
                         None
                     };
-                tool_names = crate::tools::builtin::collections::refresh_collection_tools(
-                    &schema,
+                tool_names = crate::tools::builtin::collections::bootstrap_collection_tools(
                     &db,
                     registry,
+                    &user.user_id,
                     state.skills_dir.as_deref(),
                     state.skill_registry.as_ref(),
-                    &user.user_id,
                     state.collection_write_tx.as_ref(),
                     ws_resolver.as_ref(),
                 )
