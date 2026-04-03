@@ -6,7 +6,7 @@
 //! - Rate limiting for message emission
 
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::channels::wasm::capabilities::{ChannelCapabilities, EmitRateLimitConfig};
 use crate::channels::wasm::error::WasmChannelError;
@@ -502,6 +502,43 @@ impl ChannelHostState {
     }
 }
 
+/// Path infix that identifies dedup workspace keys.
+///
+/// WASM channels write event dedup keys under `state/dedup/<event_id>`.
+/// After the channel namespace prefix is applied the full path looks like
+/// `channels/<name>/state/dedup/<event_id>`.  We detect dedup writes by
+/// scanning for this infix so the dedup lifecycle can be tracked separately
+/// from ordinary workspace KV state.
+pub const DEDUP_PATH_INFIX: &str = "/state/dedup/";
+
+/// A Pending dedup entry expires after this many seconds if delivery never
+/// completes (e.g. process crash after commit but before promote).  Once
+/// expired the same event_id is allowed to be re-processed.
+const DEDUP_PENDING_TTL: Duration = Duration::from_secs(60);
+
+/// A Delivered dedup entry is kept for this long as the idempotency window.
+/// Webhook retries typically occur within ~30 minutes; 24 h is a safe margin.
+const DEDUP_DELIVERED_TTL: Duration = Duration::from_secs(24 * 3600);
+
+/// Lifecycle stage of a dedup entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DedupStatus {
+    /// WASM callback committed the key but message delivery has not yet been
+    /// confirmed.  Treated as duplicate by concurrent requests to prevent
+    /// double-processing.  Expires after `DEDUP_PENDING_TTL` so a crash does
+    /// not permanently block future retries.
+    Pending,
+    /// Message was successfully delivered to the agent queue.  Treated as
+    /// duplicate for the full `DEDUP_DELIVERED_TTL` idempotency window.
+    Delivered,
+}
+
+#[derive(Debug, Clone)]
+struct DedupEntry {
+    status: DedupStatus,
+    created_at: Instant,
+}
+
 /// In-memory workspace store for WASM channels.
 ///
 /// Persists workspace writes across callback invocations within a single
@@ -511,8 +548,17 @@ impl ChannelHostState {
 ///
 /// Uses `std::sync::RwLock` (not tokio) because WASM execution runs
 /// inside `spawn_blocking`.
+///
+/// # Dedup sub-store
+///
+/// Writes to paths matching `*/state/dedup/*` are diverted from the plain
+/// KV `data` map into a separate `dedup` map that tracks a two-stage
+/// lifecycle: **Pending → Delivered**.  Reads for the same paths consult the
+/// dedup map with TTL logic so stale Pending entries do not permanently block
+/// retries after a crash.
 pub struct ChannelWorkspaceStore {
     data: std::sync::RwLock<std::collections::HashMap<String, String>>,
+    dedup: std::sync::RwLock<std::collections::HashMap<String, DedupEntry>>,
 }
 
 impl ChannelWorkspaceStore {
@@ -520,22 +566,61 @@ impl ChannelWorkspaceStore {
     pub fn new() -> Self {
         Self {
             data: std::sync::RwLock::new(std::collections::HashMap::new()),
+            dedup: std::sync::RwLock::new(std::collections::HashMap::new()),
         }
     }
 
+    /// Returns true if `path` is a dedup key (contains the dedup infix).
+    fn is_dedup_path(path: &str) -> bool {
+        path.contains(DEDUP_PATH_INFIX)
+    }
+
     /// Commit pending writes from a callback execution into the store.
+    ///
+    /// Writes whose path contains the dedup infix are stored as **Pending**
+    /// entries in the dedup sub-store rather than in the plain KV map.
+    /// Call [`promote_pending_to_delivered`] immediately after this to advance
+    /// them to **Delivered** once you have confirmed successful message
+    /// delivery.
+    ///
+    /// Also opportunistically evicts expired dedup entries.
     pub fn commit_writes(&self, writes: &[PendingWorkspaceWrite]) {
         if writes.is_empty() {
             return;
         }
+
+        self.cleanup_expired_dedup();
+
+        // Acquire locks separately so a poisoned dedup lock never silently
+        // drops ordinary KV writes that have nothing to do with dedup.
         if let Ok(mut data) = self.data.write() {
             for write in writes {
-                tracing::debug!(
-                    path = %write.path,
-                    content_len = write.content.len(),
-                    "Committing workspace write to channel store"
-                );
-                data.insert(write.path.clone(), write.content.clone());
+                if !Self::is_dedup_path(&write.path) {
+                    tracing::debug!(
+                        path = %write.path,
+                        content_len = write.content.len(),
+                        "Committing workspace write to channel store"
+                    );
+                    data.insert(write.path.clone(), write.content.clone());
+                }
+            }
+        }
+
+        if let Ok(mut dedup) = self.dedup.write() {
+            for write in writes {
+                if Self::is_dedup_path(&write.path) {
+                    tracing::debug!(
+                        path = %write.path,
+                        "Registering dedup key as Pending"
+                    );
+                    // Only insert if not already Delivered — a second webhook
+                    // arriving after a successful delivery must not downgrade
+                    // the status.
+                    dedup.entry(write.path.clone()).or_insert_with(|| DedupEntry {
+                        status: DedupStatus::Pending,
+                        created_at: Instant::now(),
+                    });
+                }
             }
         }
     }
@@ -598,10 +683,72 @@ impl ChannelWorkspaceStore {
         data.insert(dest_path.to_string(), raw_queue);
         Ok(true)
     }
+
+    /// Promote any dedup entries found in `writes` from **Pending** to
+    /// **Delivered**.
+    ///
+    /// Call this immediately after [`commit_writes`] once message delivery to
+    /// the agent queue has been confirmed.  Only keys whose current status is
+    /// `Pending` are updated; already-Delivered keys are left unchanged.
+    pub fn promote_pending_to_delivered(&self, writes: &[PendingWorkspaceWrite]) {
+        if writes.is_empty() {
+            return;
+        }
+        if let Ok(mut dedup) = self.dedup.write() {
+            for write in writes {
+                if Self::is_dedup_path(&write.path) {
+                    if let Some(entry) = dedup.get_mut(&write.path) {
+                        if entry.status == DedupStatus::Pending {
+                            tracing::debug!(
+                                path = %write.path,
+                                "Promoting dedup key from Pending to Delivered"
+                            );
+                            entry.status = DedupStatus::Delivered;
+                            entry.created_at = Instant::now();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Remove expired dedup entries.
+    ///
+    /// - `Pending` entries older than `DEDUP_PENDING_TTL` are dropped so a
+    ///   crashed delivery attempt does not permanently block future retries.
+    /// - `Delivered` entries older than `DEDUP_DELIVERED_TTL` are dropped to
+    ///   bound memory usage.
+    pub fn cleanup_expired_dedup(&self) {
+        let now = Instant::now();
+        if let Ok(mut dedup) = self.dedup.write() {
+            dedup.retain(|_, entry| {
+                let ttl = match entry.status {
+                    DedupStatus::Pending => DEDUP_PENDING_TTL,
+                    DedupStatus::Delivered => DEDUP_DELIVERED_TTL,
+                };
+                now.duration_since(entry.created_at) < ttl
+            });
+        }
+    }
 }
 
 impl crate::tools::wasm::WorkspaceReader for ChannelWorkspaceStore {
     fn read(&self, path: &str) -> Option<String> {
+        if Self::is_dedup_path(path) {
+            // For dedup paths, return "1" only if a non-expired entry exists.
+            // This allows WASM guests to use workspace_read to check dedup status
+            // while the dedup lifecycle is managed separately.
+            let dedup = self.dedup.read().ok()?;
+            let entry = dedup.get(path)?;
+            let ttl = match entry.status {
+                DedupStatus::Pending => DEDUP_PENDING_TTL,
+                DedupStatus::Delivered => DEDUP_DELIVERED_TTL,
+            };
+            if Instant::now().duration_since(entry.created_at) < ttl {
+                return Some("1".to_string());
+            }
+            return None;
+        }
         self.data.read().ok()?.get(path).cloned()
     }
 }
@@ -1215,5 +1362,135 @@ mod tests {
 
         let messages = state.take_emitted_messages();
         assert_eq!(messages[0].attachments.len(), 2);
+    }
+
+    // --- ChannelWorkspaceStore dedup lifecycle tests ---
+
+    use std::time::{Duration, Instant};
+    use crate::tools::wasm::WorkspaceReader;
+    use super::{
+        ChannelWorkspaceStore, DedupEntry, DedupStatus, PendingWorkspaceWrite,
+        DEDUP_PENDING_TTL,
+    };
+
+    fn dedup_write(path: &str) -> PendingWorkspaceWrite {
+        PendingWorkspaceWrite { path: path.to_string(), content: "1".to_string() }
+    }
+
+    fn kv_write(path: &str, content: &str) -> PendingWorkspaceWrite {
+        PendingWorkspaceWrite { path: path.to_string(), content: content.to_string() }
+    }
+
+    #[test]
+    fn test_is_dedup_path() {
+        assert!(ChannelWorkspaceStore::is_dedup_path("channels/foo/state/dedup/evt1"));
+        assert!(ChannelWorkspaceStore::is_dedup_path("/state/dedup/anything"));
+        assert!(!ChannelWorkspaceStore::is_dedup_path("channels/foo/state/config"));
+        assert!(!ChannelWorkspaceStore::is_dedup_path(""));
+    }
+
+    #[test]
+    fn test_commit_writes_dedup_goes_to_pending() {
+        let store = ChannelWorkspaceStore::new();
+        let writes = vec![dedup_write("channels/foo/state/dedup/evt1")];
+        store.commit_writes(&writes);
+
+        // Dedup path must be readable while Pending (within TTL)
+        assert_eq!(
+            store.read("channels/foo/state/dedup/evt1"),
+            Some("1".to_string())
+        );
+
+        // Must not appear in the plain KV data map
+        assert!(store.data.read().unwrap().get("channels/foo/state/dedup/evt1").is_none());
+    }
+
+    #[test]
+    fn test_promote_pending_to_delivered() {
+        let store = ChannelWorkspaceStore::new();
+        let writes = vec![dedup_write("channels/foo/state/dedup/evt1")];
+        store.commit_writes(&writes);
+        store.promote_pending_to_delivered(&writes);
+
+        // Still readable after promotion
+        assert_eq!(
+            store.read("channels/foo/state/dedup/evt1"),
+            Some("1".to_string())
+        );
+
+        // Internal status must be Delivered
+        let dedup = store.dedup.read().unwrap();
+        let entry = dedup.get("channels/foo/state/dedup/evt1").unwrap();
+        assert_eq!(entry.status, DedupStatus::Delivered, "status should be Delivered");
+    }
+
+    #[test]
+    fn test_dedup_pending_ttl_expiry() {
+        let store = ChannelWorkspaceStore::new();
+        // Inject an already-expired Pending entry directly
+        {
+            let mut dedup = store.dedup.write().unwrap();
+            dedup.insert(
+                "channels/foo/state/dedup/old_evt".to_string(),
+                DedupEntry {
+                    status: DedupStatus::Pending,
+                    created_at: Instant::now()
+                        .checked_sub(DEDUP_PENDING_TTL + Duration::from_secs(1))
+                        .unwrap_or_else(Instant::now),
+                },
+            );
+        }
+
+        // Expired Pending entry must not be visible
+        assert_eq!(store.read("channels/foo/state/dedup/old_evt"), None);
+    }
+
+    #[test]
+    fn test_non_dedup_paths_unaffected() {
+        let store = ChannelWorkspaceStore::new();
+        let writes = vec![kv_write("channels/foo/state/config", "hello")];
+        store.commit_writes(&writes);
+
+        // Ordinary KV write must be readable
+        assert_eq!(store.read("channels/foo/state/config"), Some("hello".to_string()));
+
+        // Dedup map must stay empty
+        assert!(store.dedup.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_delivered_not_downgraded_to_pending() {
+        let store = ChannelWorkspaceStore::new();
+        let writes = vec![dedup_write("channels/foo/state/dedup/evt1")];
+
+        // First webhook: Pending → Delivered
+        store.commit_writes(&writes);
+        store.promote_pending_to_delivered(&writes);
+
+        // Second webhook for the same event — must not downgrade status
+        store.commit_writes(&writes);
+
+        let dedup = store.dedup.read().unwrap();
+        let entry = dedup.get("channels/foo/state/dedup/evt1").unwrap();
+        assert_eq!(entry.status, DedupStatus::Delivered, "must not downgrade Delivered to Pending");
+    }
+
+    #[test]
+    fn test_poisoned_dedup_lock_does_not_drop_kv_writes() {
+        // Simulate a poisoned dedup lock by panicking inside a write guard,
+        // then verify that subsequent commit_writes still persists plain KV.
+        let store = std::sync::Arc::new(ChannelWorkspaceStore::new());
+        let store2 = store.clone();
+
+        // Poison the dedup lock
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = store2.dedup.write().unwrap();
+            panic!("intentional poison");
+        });
+
+        // dedup lock is now poisoned; plain KV writes must still succeed
+        let kv = vec![kv_write("channels/foo/state/counter", "42")];
+        store.commit_writes(&kv);
+        assert_eq!((*store).read("channels/foo/state/counter"), Some("42".to_string()));
     }
 }
