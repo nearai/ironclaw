@@ -190,7 +190,7 @@ impl EffectBridgeAdapter {
                     .get("timezone")
                     .and_then(|v| v.as_str())
                     .and_then(ironclaw_engine::ValidTimezone::parse)
-                    .or(context.user_timezone.clone());
+                    .or(context.user_timezone);
                 // notify_channels: explicit array, or default to current channel
                 let notify_channels =
                     if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array()) {
@@ -337,7 +337,7 @@ impl EffectBridgeAdapter {
                                 .get("timezone")
                                 .and_then(|v| v.as_str())
                                 .and_then(ironclaw_engine::ValidTimezone::parse)
-                                .or(context.user_timezone.clone());
+                                .or(context.user_timezone);
                             updates.cadence = Some(parse_cadence(cadence, tz));
                         }
                         if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array())
