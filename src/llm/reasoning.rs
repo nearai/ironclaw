@@ -1008,8 +1008,7 @@ Example:
         } else {
             r#"## Response Format
 
-Respond directly with your answer. Do not wrap your response in any special tags.
-Your reasoning process is handled natively — just provide the final user-facing answer."#
+Respond directly with your final answer. Do not wrap your response in any special tags."#
         };
 
         format!(
@@ -3014,7 +3013,7 @@ That's my plan."#;
             !prompt.contains("<think>"),
             "Native thinking model should NOT have <think> in system prompt"
         );
-        assert!(prompt.contains("Respond directly with your answer"));
+        assert!(prompt.contains("Respond directly"));
     }
 
     #[test]
