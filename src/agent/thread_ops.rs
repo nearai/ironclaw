@@ -32,6 +32,15 @@ fn requires_preexisting_uuid_thread(channel: &str) -> bool {
     matches!(channel, "gateway" | "test")
 }
 
+fn turn_usage_from_result(result: &Result<AgenticLoopResult, Error>) -> Option<&TurnUsageSummary> {
+    match result {
+        Ok(AgenticLoopResult::Response { turn_usage, .. })
+        | Ok(AgenticLoopResult::NeedApproval { turn_usage, .. })
+        | Ok(AgenticLoopResult::Failed { turn_usage, .. }) => Some(turn_usage),
+        Err(_) => None,
+    }
+}
+
 impl Agent {
     /// Hydrate a historical thread from DB into memory if not already present.
     ///
@@ -514,6 +523,10 @@ impl Agent {
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
         if thread.state == ThreadState::Interrupted {
+            if let Some(turn_usage) = turn_usage_from_result(&result) {
+                self.send_turn_cost_status(&message.channel, &message.metadata, turn_usage)
+                    .await;
+            }
             let _ = self
                 .channels
                 .send_status(
@@ -2007,6 +2020,7 @@ fn rebuild_chat_messages_from_db(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal::Decimal;
 
     #[test]
     fn test_rebuild_chat_messages_user_assistant_only() {
@@ -2018,6 +2032,50 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].role, crate::llm::Role::User);
         assert_eq!(result[1].role, crate::llm::Role::Assistant);
+    }
+
+    #[test]
+    fn test_turn_usage_from_result_extracts_usage_for_interrupted_response() {
+        let result = Ok(AgenticLoopResult::Response {
+            text: "done".to_string(),
+            turn_usage: TurnUsageSummary {
+                usage: crate::llm::TokenUsage {
+                    input_tokens: 12,
+                    output_tokens: 3,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                },
+                cost_usd: Decimal::new(18, 3),
+            },
+        });
+
+        let turn_usage = turn_usage_from_result(&result).expect("usage should be present");
+        assert_eq!(turn_usage.usage.input_tokens, 12);
+        assert_eq!(turn_usage.usage.output_tokens, 3);
+    }
+
+    #[test]
+    fn test_turn_usage_from_result_extracts_usage_for_interrupted_failed_turn() {
+        let result = Ok(AgenticLoopResult::Failed {
+            error: crate::error::LlmError::InvalidResponse {
+                provider: "agent".to_string(),
+                reason: "Interrupted".to_string(),
+            }
+            .into(),
+            turn_usage: TurnUsageSummary {
+                usage: crate::llm::TokenUsage {
+                    input_tokens: 7,
+                    output_tokens: 2,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                },
+                cost_usd: Decimal::new(11, 3),
+            },
+        });
+
+        let turn_usage = turn_usage_from_result(&result).expect("usage should be present");
+        assert_eq!(turn_usage.usage.input_tokens, 7);
+        assert_eq!(turn_usage.usage.output_tokens, 2);
     }
 
     #[test]
