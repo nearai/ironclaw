@@ -131,12 +131,14 @@
 
   function logout() {
     token = '';
+    oidcProxyAuth = false;
     currentProfile = null;
     sessionStorage.removeItem('ironclaw_token');
     showAuth();
   }
 
   function authenticate(t) {
+    oidcProxyAuth = false;
     token = t;
     return apiFetch('/api/profile').then(function (profile) {
       currentProfile = profile;
@@ -789,15 +791,15 @@
       if (formEl) formEl.style.display = 'none';
       if (nameEl) nameEl.value = '';
       if (emailEl) emailEl.value = '';
-
-      if (res && (res.token || res.plaintext_token)) {
-        showTokenBanner(res.token || res.plaintext_token);
-      }
+      var createdToken = res && (res.token || res.plaintext_token);
 
       // Reload users list
       apiFetch('/api/admin/users').then(function (raw) {
         usersCache = Array.isArray(raw) ? raw : (raw && raw.users ? raw.users : []);
         renderUsersPage(el);
+        if (createdToken) {
+          showTokenBanner(createdToken);
+        }
       });
     }).catch(function (err) {
       alert('Failed to create user: ' + err.message);

@@ -190,6 +190,16 @@ pub async fn users_detail_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
+    let summary_stats = store
+        .user_summary_stats(Some(&id))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let db_stats = summary_stats.first();
+    let total_cost = db_stats.map_or(rust_decimal::Decimal::ZERO, |s| s.total_cost);
+    let last_active = db_stats
+        .and_then(|s| s.last_active_at)
+        .or(user_record.last_login_at);
+
     Ok(Json(serde_json::json!({
         "id": user_record.id,
         "email": user_record.email,
@@ -200,6 +210,9 @@ pub async fn users_detail_handler(
         "updated_at": user_record.updated_at.to_rfc3339(),
         "last_login_at": user_record.last_login_at.map(|dt| dt.to_rfc3339()),
         "created_by": user_record.created_by,
+        "job_count": db_stats.map_or(0, |s| s.job_count),
+        "total_cost": total_cost.to_string(),
+        "last_active_at": last_active.map(|dt| dt.to_rfc3339()),
         "metadata": user_record.metadata,
     })))
 }
@@ -406,6 +419,11 @@ pub async fn users_delete_handler(
 
     if !deleted {
         return Err((StatusCode::NOT_FOUND, "User not found".to_string()));
+    }
+
+    // Evict cached auth so deleted users lose access immediately.
+    if let Some(ref db_auth) = state.db_auth {
+        db_auth.invalidate_user(&id).await;
     }
 
     Ok(Json(serde_json::json!({
