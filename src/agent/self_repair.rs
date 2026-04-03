@@ -48,6 +48,22 @@ pub enum RepairResult {
 }
 
 /// Trait for self-repair implementations.
+///
+/// # Built-in tool exclusion
+///
+/// Built-in tools (those checked by [`is_protected_tool_name`](crate::tools::is_protected_tool_name))
+/// must be excluded from repair workflows. Errors on built-in tools are
+/// caller-side issues (bad LLM parameters), not tool defects — attempting to
+/// rebuild them via `SoftwareBuilder` wastes tokens and cannot succeed.
+///
+/// `DefaultSelfRepair` enforces this at two levels:
+/// - **Detection**: `detect_broken_tools` filters out protected names before
+///   returning results.
+/// - **Repair**: `repair_broken_tool` rejects protected names as a
+///   defense-in-depth guard (returns `RepairResult::Success` with a skip
+///   message).
+///
+/// Custom implementations should follow the same convention.
 #[async_trait]
 pub trait SelfRepair: Send + Sync {
     /// Detect stuck jobs.
@@ -56,10 +72,17 @@ pub trait SelfRepair: Send + Sync {
     /// Attempt to repair a stuck job.
     async fn repair_stuck_job(&self, job: &StuckJob) -> Result<RepairResult, RepairError>;
 
-    /// Detect broken tools.
+    /// Detect broken tools that need repair.
+    ///
+    /// Implementations should exclude built-in/protected tools from the
+    /// returned list — see the trait-level documentation.
     async fn detect_broken_tools(&self) -> Vec<BrokenTool>;
 
     /// Attempt to repair a broken tool.
+    ///
+    /// Implementations should reject built-in/protected tool names early as
+    /// a defense-in-depth measure, even though `detect_broken_tools` should
+    /// have already filtered them out.
     async fn repair_broken_tool(&self, tool: &BrokenTool) -> Result<RepairResult, RepairError>;
 }
 
@@ -251,10 +274,29 @@ impl SelfRepair for DefaultSelfRepair {
         // Threshold: 5 failures before considering a tool broken
         match store.get_broken_tools(5).await {
             Ok(tools) => {
-                if !tools.is_empty() {
-                    tracing::info!("Detected {} broken tools needing repair", tools.len());
+                // Filter out built-in tools — their errors are caller-side (bad
+                // parameters from the LLM), not tool defects. Attempting to rebuild
+                // them via SoftwareBuilder wastes LLM tokens and cannot fix anything.
+                let repairable: Vec<BrokenTool> = tools
+                    .into_iter()
+                    .filter(|t| {
+                        if crate::tools::is_protected_tool_name(&t.name) {
+                            tracing::debug!(
+                                tool = %t.name,
+                                failure_count = t.failure_count,
+                                "Skipping built-in tool in broken detection (caller-side errors)"
+                            );
+                            false
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
+
+                if !repairable.is_empty() {
+                    tracing::info!("Detected {} broken tools needing repair", repairable.len());
                 }
-                tools
+                repairable
             }
             Err(e) => {
                 tracing::warn!("Failed to detect broken tools: {}", e);
@@ -264,6 +306,21 @@ impl SelfRepair for DefaultSelfRepair {
     }
 
     async fn repair_broken_tool(&self, tool: &BrokenTool) -> Result<RepairResult, RepairError> {
+        // Defense-in-depth: reject built-in tools even if detect_broken_tools
+        // failed to filter them. Built-in tools cannot be rebuilt.
+        if crate::tools::is_protected_tool_name(&tool.name) {
+            tracing::debug!(
+                tool = %tool.name,
+                "Skipping repair of built-in tool (caller-side errors, not a tool defect)"
+            );
+            return Ok(RepairResult::Success {
+                message: format!(
+                    "Tool '{}' is a built-in — errors are caller-side, skipping repair",
+                    tool.name
+                ),
+            });
+        }
+
         let Some(ref builder) = self.builder else {
             return Ok(RepairResult::ManualRequired {
                 message: format!("Builder not available for repairing tool '{}'", tool.name),
@@ -585,6 +642,76 @@ mod tests {
         assert_eq!(ctx.state, JobState::InProgress);
     }
 
+    /// Regression: built-in tools (http, shell, json, etc.) must be filtered
+    /// out of broken tool detection. Errors on built-in tools are caller-side
+    /// (bad LLM parameters), not tool defects. Attempting to rebuild them via
+    /// SoftwareBuilder wastes LLM tokens and cannot fix anything.
+    #[test]
+    fn is_protected_tool_name_covers_common_builtins() {
+        use crate::tools::is_protected_tool_name;
+
+        // Built-in tools that triggered the original bug
+        assert!(is_protected_tool_name("http"));
+        assert!(is_protected_tool_name("shell"));
+        assert!(is_protected_tool_name("json"));
+        assert!(is_protected_tool_name("message"));
+        assert!(is_protected_tool_name("read_file"));
+        assert!(is_protected_tool_name("memory_write"));
+
+        // Job, extension, skill, secret tools
+        assert!(is_protected_tool_name("job_events"));
+        assert!(is_protected_tool_name("extension_info"));
+        assert!(is_protected_tool_name("skill_list"));
+        assert!(is_protected_tool_name("secret_list"));
+        assert!(is_protected_tool_name("tool_upgrade"));
+        assert!(is_protected_tool_name("routine_fire"));
+
+        // Dynamic tools should NOT be protected
+        assert!(!is_protected_tool_name("my_custom_tool"));
+        assert!(!is_protected_tool_name("weather_fetcher"));
+    }
+
+    /// Regression: repair_broken_tool must reject built-in tools as a
+    /// defense-in-depth measure, even if detect_broken_tools failed to
+    /// filter them out.
+    #[tokio::test]
+    async fn repair_broken_tool_skips_builtin() {
+        let cm = Arc::new(ContextManager::new(10));
+        let builder = Arc::new(MockBuilder::new());
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+
+        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(60), 3).with_builder(
+            Arc::clone(&builder) as Arc<dyn crate::tools::SoftwareBuilder>,
+            tools,
+        );
+
+        // "http" is a built-in tool — repair should skip it without invoking
+        // the builder.
+        let broken = BrokenTool {
+            name: "http".to_string(),
+            failure_count: 20,
+            last_error: Some("invalid params".to_string()),
+            first_failure: Utc::now(),
+            last_failure: Utc::now(),
+            last_build_result: None,
+            repair_attempts: 0,
+        };
+
+        let result = repair.repair_broken_tool(&broken).await.unwrap();
+        assert!(
+            matches!(result, RepairResult::Success { .. }),
+            "Built-in tool repair should return Success (skip), got: {:?}",
+            result
+        );
+
+        // Builder must NOT have been called
+        assert_eq!(
+            builder.builds(),
+            0,
+            "Builder should not be invoked for built-in tools"
+        );
+    }
+
     #[tokio::test]
     async fn detect_broken_tools_returns_empty_without_store() {
         let cm = Arc::new(ContextManager::new(10));
@@ -775,6 +902,38 @@ mod tests {
         ) -> Result<crate::tools::BuildResult, crate::error::ToolError> {
             unimplemented!("not needed for this test")
         }
+    }
+
+    /// Regression: detect_broken_tools must filter out built-in tools from the
+    /// database results. Seed failures for both a built-in ("http") and a
+    /// dynamic tool, then verify only the dynamic tool is returned.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn detect_broken_tools_filters_out_builtins() {
+        let cm = Arc::new(ContextManager::new(10));
+        let (db, _tmp_dir) = crate::testing::test_db().await;
+        let store = crate::tenant::AdminScope::new(Arc::clone(&db));
+
+        // Seed 6 failures for "http" (built-in) and "my_custom_tool" (dynamic).
+        // The threshold is 5, so both would qualify as "broken" without filtering.
+        for _ in 0..6 {
+            store
+                .record_tool_failure("http", "invalid params")
+                .await
+                .unwrap();
+            store
+                .record_tool_failure("my_custom_tool", "runtime crash")
+                .await
+                .unwrap();
+        }
+
+        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(60), 3).with_store(store);
+
+        let broken = repair.detect_broken_tools().await;
+
+        // Only the dynamic tool should be returned; "http" must be filtered.
+        assert_eq!(broken.len(), 1, "Expected 1 broken tool, got: {:?}", broken);
+        assert_eq!(broken[0].name, "my_custom_tool");
     }
 
     /// E2E test: stuck job detected -> repaired -> transitions back to InProgress,
