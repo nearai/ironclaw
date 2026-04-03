@@ -32,27 +32,42 @@ use crate::workspace::Workspace;
 use ironclaw_skills::catalog::SkillCatalog;
 use ironclaw_skills::registry::SkillRegistry;
 
-/// Names of built-in tools that cannot be shadowed by dynamic registrations.
-/// This prevents a dynamically built or installed tool from replacing a
-/// security-critical built-in like "shell" or "memory_write".
+/// Names of built-in tools that cannot be shadowed by dynamic registrations
+/// and should not be rebuilt by the self-repair system. Protected tools are
+/// authored as part of the ironclaw binary — errors on them are caller-side
+/// issues (bad LLM parameters), not tool defects.
+///
+/// Keep this list in sync with all `fn name() -> &str` implementations in
+/// `src/tools/builtin/` and `src/tools/builder/` (for `build_software`).
+/// Aliases like `web_fetch` are included for completeness. When adding a
+/// new built-in tool, add its name here too.
 const PROTECTED_TOOL_NAMES: &[&str] = &[
+    // Core tools
     "echo",
     "time",
     "json",
     "http",
     "shell",
+    "restart",
+    "message",
+    // File tools
     "read_file",
     "write_file",
     "list_dir",
     "apply_patch",
+    // Memory tools
     "memory_search",
     "memory_write",
     "memory_read",
     "memory_tree",
+    // Job tools
     "create_job",
     "list_jobs",
     "job_status",
+    "job_events",
+    "job_prompt",
     "cancel_job",
+    // Extension/tool management
     "build_software",
     "tool_search",
     "tool_install",
@@ -60,6 +75,10 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "tool_activate",
     "tool_list",
     "tool_remove",
+    "tool_upgrade",
+    "tool_info",
+    "extension_info",
+    // Routine tools
     "routine_create",
     "routine_list",
     "routine_update",
@@ -67,19 +86,31 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "routine_fire",
     "routine_history",
     "event_emit",
+    // Skill tools
     "skill_list",
     "skill_search",
     "skill_install",
     "skill_remove",
-    "message",
-    "web_fetch",
-    "restart",
+    // Secret tools
+    "secret_list",
+    "secret_delete",
+    // Image tools
     "image_generate",
     "image_edit",
     "image_analyze",
     "tool_info",
     "tool_permission_set",
+    // Aliases (web_fetch is an alias for http in some contexts)
+    "web_fetch",
 ];
+
+/// Check if a tool name is a protected built-in that should not be rebuilt
+/// by the self-repair system. Protected tools are authored as part of the
+/// ironclaw binary; errors in these tools are caller-side issues (bad
+/// parameters from the LLM), not tool defects.
+pub fn is_protected_tool_name(name: &str) -> bool {
+    PROTECTED_TOOL_NAMES.contains(&name)
+}
 
 /// Registry of available tools.
 pub struct ToolRegistry {
