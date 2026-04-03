@@ -407,13 +407,12 @@ impl EffectExecutor for EffectBridgeAdapter {
         {
             let has_mgr = self.auth_manager.read().await.is_some();
             let has_reg = self.tools.credential_registry().is_some();
-            // Use warn! so this is visible in E2E test logs (debug may be filtered)
             if !has_mgr || !has_reg {
-                tracing::warn!(
+                debug!(
                     tool = %lookup_name,
                     has_auth_manager = has_mgr,
                     has_credential_registry = has_reg,
-                    "Pre-flight auth gate SKIPPED — missing dependency"
+                    "Pre-flight auth gate skipped — missing dependency"
                 );
             }
         }

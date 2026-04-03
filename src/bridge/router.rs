@@ -370,7 +370,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         debug!("engine v2: resume_background_threads failed: {e}");
     }
     mission_manager.start_cron_ticker(agent.deps.owner_id.clone());
-    mission_manager.start_event_listener(agent.deps.owner_id.clone());
+    mission_manager.start_event_listener();
 
     // Ensure per-user learning missions exist for the owner
     if let Err(e) = mission_manager
@@ -1631,7 +1631,6 @@ async fn await_thread_outcome(
         ThreadOutcome::NeedAuthentication {
             credential_name, ..
         } => {
-            // Look up setup instructions from the skill's credential spec.
             // Look up setup instructions via AuthManager (or fall back to default).
             let setup_hint = state
                 .auth_manager

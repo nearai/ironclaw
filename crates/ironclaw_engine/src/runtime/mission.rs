@@ -166,6 +166,14 @@ impl MissionManager {
             return Ok(None);
         }
 
+        // Reset daily budget counter if the day has changed since the last update.
+        let mut mission = mission;
+        if mission.max_threads_per_day > 0
+            && mission.updated_at.date_naive() < chrono::Utc::now().date_naive()
+        {
+            mission.threads_today = 0;
+        }
+
         // Check daily budget
         if mission.max_threads_per_day > 0 && mission.threads_today >= mission.max_threads_per_day {
             debug!(mission_id = %id, "daily thread budget exhausted");
@@ -262,7 +270,6 @@ impl MissionManager {
         });
     }
 
-    /// List all missions in a project for a given user.
     /// List missions visible to a user (own + system shared).
     pub async fn list_missions(
         &self,
@@ -334,7 +341,7 @@ impl MissionManager {
     ///    fires `thread_completed_with_learnings`
     /// 4. **Conversation insights** — after every N threads in a conversation,
     ///    fires `conversation_insights_due`
-    pub fn start_event_listener(self: &Arc<Self>, _owner_id: String) {
+    pub fn start_event_listener(self: &Arc<Self>) {
         let mgr = Arc::clone(self);
         let mut rx = mgr.thread_manager.subscribe_events();
 
@@ -365,6 +372,14 @@ impl MissionManager {
 
                         // Skip Mission threads (no recursive self-improvement)
                         if thread.thread_type == ThreadType::Mission {
+                            continue;
+                        }
+
+                        // Skip threads with no meaningful work (e.g., user-interrupted
+                        // before any step executed). Recording usage or firing repair
+                        // for these would inflate failure counts and trigger spurious
+                        // learning missions.
+                        if thread.step_count == 0 {
                             continue;
                         }
 
@@ -983,7 +998,10 @@ async fn process_mission_outcome(
                 if !next_focus.is_empty() {
                     mission.current_focus = Some(next_focus.to_string());
                 }
-            } else if let Some(focus_start) = lower.find("next focus:") {
+            } else if let Some(focus_start) = find_ascii_needle_ci(text, "next focus:") {
+                // `find_ascii_needle_ci` returns a byte position in `text` (not `lower`),
+                // safe because the needle is pure ASCII and the match position is always
+                // a char boundary. This avoids the byte-index mismatch from `to_lowercase()`.
                 let after = &text[focus_start + "next focus:".len()..];
                 let next_focus: String = after.lines().next().unwrap_or("").trim().to_string();
                 if !next_focus.is_empty() {
@@ -1081,13 +1099,19 @@ async fn process_self_improvement_output(
 
     let project_id = mission.project_id;
 
-    // Process prompt additions
+    // Process prompt additions.
+    // Safety limits: max 5 rules per mission fire, each truncated to 500 chars,
+    // to bound the impact of indirect prompt injection via tool output.
+    const MAX_RULES_PER_FIRE: usize = 5;
+    const MAX_RULE_LENGTH: usize = 500;
+
     if let Some(additions) = json_val.get("prompt_additions").and_then(|v| v.as_array())
         && !additions.is_empty()
     {
         let new_rules: Vec<String> = additions
             .iter()
-            .filter_map(|v| v.as_str().map(String::from))
+            .take(MAX_RULES_PER_FIRE)
+            .filter_map(|v| v.as_str().map(|s| s.chars().take(MAX_RULE_LENGTH).collect()))
             .collect();
 
         if !new_rules.is_empty() {
@@ -1405,8 +1429,34 @@ fn is_recoverable_action_failure(error: &str) -> bool {
     is_recoverable_auth_failure_text(error)
 }
 
+/// Case-insensitive search for an ASCII-only needle in a haystack.
+///
+/// Returns the byte position in `haystack` where the needle starts.
+/// Safe because ASCII bytes are always valid char boundaries, so the
+/// returned index can be used to slice `haystack` without panic risk.
+///
+/// The needle MUST be lowercase ASCII — non-ASCII needles will not match.
+fn find_ascii_needle_ci(haystack: &str, needle: &str) -> Option<usize> {
+    debug_assert!(needle.is_ascii(), "needle must be ASCII");
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.len() > h.len() {
+        return None;
+    }
+    (0..=h.len() - n.len()).find(|&i| {
+        h[i..i + n.len()]
+            .iter()
+            .zip(n.iter())
+            .all(|(a, b)| a.to_ascii_lowercase() == *b)
+    })
+}
+
 /// Check whether `haystack` contains `word` as a whole word (bounded by
 /// whitespace, start, or end of string).
+///
+/// SAFETY: This uses byte-level boundary checks. All patterns in
+/// `WORD_PATTERNS` must be ASCII-only — non-ASCII patterns would
+/// produce incorrect boundary detection.
 fn contains_word(haystack: &str, word: &str) -> bool {
     for (start, _) in haystack.match_indices(word) {
         let before_ok = start == 0 || haystack.as_bytes()[start - 1].is_ascii_whitespace();
@@ -2352,6 +2402,81 @@ mod tests {
         let mission = mgr.get_mission(id).await.unwrap().unwrap();
         assert_eq!(mission.last_trigger_payload, Some(payload));
         assert_eq!(mission.threads_today, 1);
+    }
+
+    #[tokio::test]
+    async fn daily_budget_exhaustion_blocks_fire() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager_with_response(Arc::clone(&store) as Arc<dyn Store>, "done");
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "budget-test",
+                "test budget",
+                MissionCadence::Manual,
+            )
+            .await
+            .unwrap();
+
+        // Set max_threads_per_day to 2
+        {
+            let mut missions = store.missions.write().await;
+            if let Some(m) = missions.get_mut(&id) {
+                m.max_threads_per_day = 2;
+            }
+        }
+
+        // Fire twice — should succeed
+        let t1 = mgr.fire_mission(id, "test-user", None).await.unwrap();
+        assert!(t1.is_some(), "first fire should succeed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let t2 = mgr.fire_mission(id, "test-user", None).await.unwrap();
+        assert!(t2.is_some(), "second fire should succeed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Third fire — should be blocked by daily budget
+        let t3 = mgr.fire_mission(id, "test-user", None).await.unwrap();
+        assert!(t3.is_none(), "third fire should be blocked by daily budget");
+    }
+
+    #[tokio::test]
+    async fn daily_budget_resets_on_new_day() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager_with_response(Arc::clone(&store) as Arc<dyn Store>, "done");
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "reset-test",
+                "test reset",
+                MissionCadence::Manual,
+            )
+            .await
+            .unwrap();
+
+        // Set max_threads_per_day to 1 and simulate yesterday's usage
+        {
+            let mut missions = store.missions.write().await;
+            if let Some(m) = missions.get_mut(&id) {
+                m.max_threads_per_day = 1;
+                m.threads_today = 1;
+                // Set updated_at to yesterday so the daily reset triggers
+                m.updated_at = chrono::Utc::now() - chrono::Duration::days(1);
+            }
+        }
+
+        // Fire should succeed because the day has changed
+        let t1 = mgr.fire_mission(id, "test-user", None).await.unwrap();
+        assert!(
+            t1.is_some(),
+            "fire should succeed after daily budget reset"
+        );
     }
 
     #[tokio::test]
