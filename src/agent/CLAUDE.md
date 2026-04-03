@@ -46,6 +46,9 @@ Session (per user)
 - Group chat detection: if `metadata.chat_type` is `group`/`channel`/`supergroup`, `MEMORY.md` is excluded from the system prompt to prevent leaking personal context.
 - **Auth mode**: if a thread has `pending_auth` set (e.g. from `tool_auth` returning `awaiting_token`), the next user message is intercepted before any turn creation, logging, or safety validation and sent directly to the credential store. Any control submission (undo, interrupt, etc.) cancels auth mode.
 - `ThreadState` values: `Idle`, `Processing`, `AwaitingApproval`, `Completed`, `Interrupted`.
+- Threads also carry a `plan_mode` flag. When enabled, the agent may inspect,
+  search, summarize, and plan, but runtime tool gating blocks side-effectful
+  actions until the user exits plan mode.
 - `SessionManager` maps `(user_id, channel, external_thread_id)` → internal UUID. Prunes idle sessions every 10 minutes (warns at 1000 sessions).
 
 ## Agentic Loop (dispatcher.rs)
@@ -162,6 +165,9 @@ All commands parsed by `SubmissionParser::parse()`:
 | `/ping` | `SystemCommand { "ping" }` | |
 | `/debug` | `SystemCommand { "debug" }` | |
 | `/model [name]` | `SystemCommand { "model" }` | |
+| `/plan enter`, `/plan on`, `/plan mode`, `/plan-mode` | `PlanMode { Enter }` | Enables generic read-first planning mode |
+| `/plan exit`, `/plan off`, `/plan-mode exit` | `PlanMode { Exit }` | Disables generic planning mode |
+| `/plan-mode status` | `PlanMode { Status }` | Shows current planning mode |
 | Everything else | `UserInput` | Starts a new agentic turn |
 
 **`SystemCommand` vs control**: `SystemCommand` variants bypass thread-state checks entirely (no session lock, no turn creation). `Quit` returns `Ok(None)` from `handle_message` which breaks the main loop.

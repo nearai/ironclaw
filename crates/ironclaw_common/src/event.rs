@@ -108,6 +108,18 @@ pub enum AppEvent {
         /// Whether the "always" auto-approve option should be shown.
         allow_always: bool,
     },
+    #[serde(rename = "plan_exit_needed")]
+    PlanExitNeeded {
+        request_id: String,
+        title: String,
+        markdown: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        suggested_actions: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
     #[serde(rename = "auth_required")]
     AuthRequired {
         extension_name: String,
@@ -329,6 +341,7 @@ impl AppEvent {
             Self::Suggestions { .. } => "suggestions",
             Self::TurnCost { .. } => "turn_cost",
             Self::SkillActivated { .. } => "skill_activated",
+            Self::PlanExitNeeded { .. } => "plan_exit_needed",
             Self::ExtensionStatus { .. } => "extension_status",
             Self::ReasoningUpdate { .. } => "reasoning_update",
             Self::JobReasoning { .. } => "job_reasoning",
@@ -455,6 +468,14 @@ mod tests {
             },
             AppEvent::SkillActivated {
                 skill_names: vec![],
+                thread_id: None,
+            },
+            AppEvent::PlanExitNeeded {
+                request_id: String::new(),
+                title: String::new(),
+                markdown: String::new(),
+                path: None,
+                suggested_actions: vec![],
                 thread_id: None,
             },
             AppEvent::ExtensionStatus {

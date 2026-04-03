@@ -53,6 +53,13 @@ impl Agent {
             .get("chat_type")
             .and_then(|v| v.as_str())
             .is_some_and(|t| t == "group" || t == "channel" || t == "supergroup");
+        let plan_mode = {
+            let sess = session.lock().await;
+            sess.threads
+                .get(&thread_id)
+                .map(|thread| thread.plan_mode)
+                .unwrap_or(false)
+        };
 
         // Load workspace system prompt (identity files: AGENTS.md, SOUL.md, etc.)
         // In group chats, MEMORY.md is excluded to prevent leaking personal context.
@@ -136,6 +143,17 @@ impl Agent {
         } else {
             None
         };
+        let mode_context = if plan_mode {
+            Some(crate::agent::plan_mode::PLAN_MODE_PROMPT.to_string())
+        } else {
+            None
+        };
+        let supplemental_context = match (skill_context, mode_context) {
+            (Some(skills), Some(mode)) => Some(format!("{skills}\n\n{mode}")),
+            (Some(skills), None) => Some(skills),
+            (None, Some(mode)) => Some(mode),
+            (None, None) => None,
+        };
 
         let mut reasoning = Reasoning::new(self.llm().clone())
             .with_channel(message.channel.clone())
@@ -154,7 +172,7 @@ impl Agent {
         if let Some(prompt) = system_prompt {
             reasoning = reasoning.with_system_prompt(prompt);
         }
-        if let Some(ctx) = skill_context {
+        if let Some(ctx) = supplemental_context {
             reasoning = reasoning.with_skill_context(ctx);
         }
         if !active_skills.is_empty() {
@@ -167,6 +185,7 @@ impl Agent {
         let mut job_ctx =
             JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
                 .with_requester_id(&message.sender_id);
+        job_ctx.conversation_id = Some(thread_id);
         job_ctx.http_interceptor = self.deps.http_interceptor.clone();
         job_ctx.user_timezone = user_tz.name().to_string();
         job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
@@ -198,6 +217,7 @@ impl Agent {
             cached_prompt_no_tools,
             nudge_at,
             force_text_at,
+            plan_mode,
             user_tz,
         };
 
@@ -292,6 +312,7 @@ struct ChatDelegate<'a> {
     cached_prompt_no_tools: String,
     nudge_at: usize,
     force_text_at: usize,
+    plan_mode: bool,
     user_tz: chrono_tz::Tz,
 }
 
@@ -695,6 +716,24 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     }
                 },
                 _ => {}
+            }
+
+            if self.plan_mode
+                && let Some(tool) = tool_opt.as_ref()
+                && let Err(reason) = crate::agent::plan_mode::check_tool_allowed(
+                    &tc.name,
+                    &tc.arguments,
+                    tool.as_ref(),
+                )
+            {
+                preflight.push((
+                    tc,
+                    PreflightOutcome::Rejected(crate::agent::plan_mode::blocked_tool_message(
+                        &original_tc.name,
+                        reason,
+                    )),
+                ));
+                continue;
             }
 
             // Check if tool requires approval

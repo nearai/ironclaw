@@ -204,6 +204,38 @@ impl SubmissionParser {
             _ => {}
         }
 
+        // Generic plan mode commands
+        if matches!(
+            lower.as_str(),
+            "/plan enter"
+                | "/plan on"
+                | "/plan mode"
+                | "/plan-mode"
+                | "/plan-mode enter"
+                | "/plan-mode on"
+        ) {
+            return Submission::PlanMode {
+                action: PlanModeAction::Enter,
+            };
+        }
+        if matches!(
+            lower.as_str(),
+            "/plan exit"
+                | "/plan off"
+                | "/plan-mode exit"
+                | "/plan-mode off"
+                | "/plan-mode disable"
+        ) {
+            return Submission::PlanMode {
+                action: PlanModeAction::Exit,
+            };
+        }
+        if matches!(lower.as_str(), "/plan-mode status" | "/plan-mode show") {
+            return Submission::PlanMode {
+                action: PlanModeAction::Status,
+            };
+        }
+
         // Plan commands
         if lower == "/plan" || lower == "/plan list" {
             return Submission::Plan {
@@ -375,6 +407,17 @@ pub enum Submission {
         /// The plan subcommand.
         sub: PlanSubcommand,
     },
+
+    /// Generic thread-level plan mode.
+    PlanMode {
+        action: PlanModeAction,
+    },
+
+    /// Decision on a pending plan-exit review card.
+    PlanExitDecision {
+        request_id: Uuid,
+        action: PlanExitAction,
+    },
 }
 
 /// Subcommands for the /plan command.
@@ -393,6 +436,22 @@ pub enum PlanSubcommand {
     },
     /// List all plans: /plan list
     List,
+}
+
+/// Actions for generic thread-level plan mode.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PlanModeAction {
+    Enter,
+    Exit,
+    Status,
+}
+
+/// Actions available on the plan-exit review card.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PlanExitAction {
+    Approve,
+    Revise,
+    Stay,
 }
 
 impl Submission {
@@ -469,6 +528,8 @@ impl Submission {
                 | Self::JobStatus { .. }
                 | Self::JobCancel { .. }
                 | Self::SystemCommand { .. }
+                | Self::PlanMode { .. }
+                | Self::PlanExitDecision { .. }
         )
     }
 }
@@ -936,6 +997,34 @@ mod tests {
 
         let s = SubmissionParser::parse("/LIST");
         assert!(matches!(s, Submission::JobStatus { job_id: None }));
+    }
+
+    #[test]
+    fn test_parser_plan_mode_commands() {
+        assert!(matches!(
+            SubmissionParser::parse("/plan enter"),
+            Submission::PlanMode {
+                action: PlanModeAction::Enter
+            }
+        ));
+        assert!(matches!(
+            SubmissionParser::parse("/plan-mode"),
+            Submission::PlanMode {
+                action: PlanModeAction::Enter
+            }
+        ));
+        assert!(matches!(
+            SubmissionParser::parse("/plan exit"),
+            Submission::PlanMode {
+                action: PlanModeAction::Exit
+            }
+        ));
+        assert!(matches!(
+            SubmissionParser::parse("/plan-mode status"),
+            Submission::PlanMode {
+                action: PlanModeAction::Status
+            }
+        ));
     }
 
     #[test]

@@ -1559,6 +1559,8 @@ pub struct ConversationSummary {
     pub last_activity: DateTime<Utc>,
     /// Thread type extracted from metadata (e.g. "assistant", "thread").
     pub thread_type: Option<String>,
+    /// Whether generic read-first plan mode is active for this thread.
+    pub plan_mode: bool,
     /// Channel that owns this conversation (e.g. "gateway", "telegram", "routine").
     pub channel: String,
 }
@@ -1645,6 +1647,10 @@ impl Store {
                     .get("thread_type")
                     .and_then(|v| v.as_str())
                     .map(String::from);
+                let plan_mode = metadata
+                    .get("plan_mode")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let sql_title: Option<String> = r.get("title");
                 let title = sql_title.or_else(|| {
                     metadata
@@ -1659,6 +1665,7 @@ impl Store {
                     started_at: r.get("started_at"),
                     last_activity: r.get("last_activity"),
                     thread_type,
+                    plan_mode,
                     channel: r.get("channel"),
                 }
             })
@@ -1705,6 +1712,10 @@ impl Store {
                     .get("thread_type")
                     .and_then(|v| v.as_str())
                     .map(String::from);
+                let plan_mode = metadata
+                    .get("plan_mode")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 // For routine/heartbeat threads, derive title from metadata
                 // since they may have no user messages.
                 let sql_title: Option<String> = r.get("title");
@@ -1721,6 +1732,7 @@ impl Store {
                     started_at: r.get("started_at"),
                     last_activity: r.get("last_activity"),
                     thread_type,
+                    plan_mode,
                     channel: r.get("channel"),
                 }
             })
@@ -2875,6 +2887,7 @@ mod tests {
             started_at: Utc::now(),
             last_activity: Utc::now(),
             thread_type: Some("thread".to_string()),
+            plan_mode: false,
             channel: "telegram".to_string(),
         };
         assert_eq!(summary.channel, "telegram");
@@ -2890,6 +2903,7 @@ mod tests {
                 started_at: Utc::now(),
                 last_activity: Utc::now(),
                 thread_type: None,
+                plan_mode: false,
                 channel: ch.to_string(),
             };
             assert_eq!(summary.channel, ch);

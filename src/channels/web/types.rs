@@ -34,6 +34,7 @@ pub struct SendMessageResponse {
 pub struct ThreadInfo {
     pub id: Uuid,
     pub state: String,
+    pub plan_mode: bool,
     pub turn_count: usize,
     pub created_at: String,
     pub updated_at: String,
@@ -85,6 +86,7 @@ pub struct ToolCallInfo {
 #[derive(Debug, Serialize)]
 pub struct HistoryResponse {
     pub thread_id: Uuid,
+    pub plan_mode: bool,
     pub turns: Vec<TurnInfo>,
     /// Whether there are older messages available.
     #[serde(default)]
@@ -95,6 +97,9 @@ pub struct HistoryResponse {
     /// Unified pending gate state for engine v2.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_gate: Option<PendingGateInfo>,
+    /// Pending plan-exit review that needs user action.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_plan_exit: Option<PendingPlanExitInfo>,
 }
 
 /// Lightweight DTO for unified pending gate state.
@@ -107,6 +112,18 @@ pub struct PendingGateInfo {
     pub description: String,
     pub parameters: String,
     pub resume_kind: serde_json::Value,
+}
+
+/// Review card for exiting plan mode.
+#[derive(Debug, Serialize)]
+pub struct PendingPlanExitInfo {
+    pub request_id: String,
+    pub title: String,
+    pub markdown: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggested_actions: Vec<String>,
 }
 
 // --- Approval ---
@@ -140,6 +157,14 @@ pub struct GateResolveRequest {
     pub thread_id: Option<String>,
     #[serde(flatten)]
     pub resolution: GateResolutionPayload,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PlanExitActionRequest {
+    pub request_id: String,
+    /// "approve", "revise", or "stay"
+    pub action: String,
+    pub thread_id: Option<String>,
 }
 
 // --- App Event (re-exported from ironclaw_common) ---
@@ -1250,6 +1275,7 @@ mod tests {
         let info = ThreadInfo {
             id: Uuid::nil(),
             state: "Idle".to_string(),
+            plan_mode: true,
             turn_count: 0,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
@@ -1267,6 +1293,7 @@ mod tests {
         let info = ThreadInfo {
             id: Uuid::nil(),
             state: "Idle".to_string(),
+            plan_mode: false,
             turn_count: 0,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
@@ -1277,6 +1304,43 @@ mod tests {
         let json = serde_json::to_string(&info).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(parsed.get("channel").is_none());
+    }
+
+    #[test]
+    fn test_history_response_serializes_pending_plan_exit() {
+        let response = HistoryResponse {
+            thread_id: Uuid::nil(),
+            plan_mode: true,
+            turns: Vec::new(),
+            has_more: false,
+            oldest_timestamp: None,
+            pending_gate: None,
+            pending_plan_exit: Some(PendingPlanExitInfo {
+                request_id: "req-123".to_string(),
+                title: "Auth refactor".to_string(),
+                markdown: "## Plan".to_string(),
+                path: Some("plans/thread-123.md".to_string()),
+                suggested_actions: vec!["Implement the plan".to_string()],
+            }),
+        };
+
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["plan_mode"], true);
+        assert_eq!(json["pending_plan_exit"]["request_id"], "req-123");
+        assert_eq!(json["pending_plan_exit"]["title"], "Auth refactor");
+    }
+
+    #[test]
+    fn test_plan_exit_action_request_deserialize() {
+        let json = r#"{
+            "request_id": "550e8400-e29b-41d4-a716-446655440000",
+            "action": "approve",
+            "thread_id": "thread-123"
+        }"#;
+        let req: PlanExitActionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.request_id, "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(req.action, "approve");
+        assert_eq!(req.thread_id.as_deref(), Some("thread-123"));
     }
 
     fn make_routine_for_status_tests() -> crate::agent::routine::Routine {

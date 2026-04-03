@@ -331,6 +331,9 @@ impl AppBuilder {
 
         // Register memory tools if database is available
         let workspace_user_id = self.config.owner_id.as_str();
+        let mut workspace_resolver: Option<
+            Arc<dyn crate::tools::builtin::memory::WorkspaceResolver>,
+        > = None;
         let workspace = if let Some(ref db) = self.db {
             let emb_cache_config = EmbeddingCacheConfig {
                 max_entries: self.config.embeddings.cache_size,
@@ -366,7 +369,9 @@ impl AppBuilder {
                 self.config.search.clone(),
                 self.config.workspace.clone(),
             ));
-            tools.register_memory_tools_with_resolver(pool);
+            let resolver: Arc<dyn crate::tools::builtin::memory::WorkspaceResolver> = pool;
+            tools.register_memory_tools_with_resolver(Arc::clone(&resolver));
+            workspace_resolver = Some(resolver);
             tracing::debug!(
                 multi_tenant = is_multi_tenant,
                 "Memory tools configured with per-user workspace resolver"
@@ -376,6 +381,7 @@ impl AppBuilder {
         } else {
             None
         };
+        tools.register_plan_artifact_tool(self.db.clone(), workspace_resolver);
 
         // Register image/vision tools if we have a workspace and LLM API credentials
         if workspace.is_some() {

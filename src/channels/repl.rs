@@ -816,6 +816,9 @@ impl Channel for ReplChannel {
                     }
                 });
             }
+            StatusUpdate::PlanExitNeeded { .. } => {
+                // Plan review is web-gateway-specific; ignore in the REPL.
+            }
             StatusUpdate::AuthRequired {
                 extension_name,
                 instructions,

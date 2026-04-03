@@ -599,6 +599,20 @@ impl Channel for GatewayChannel {
                 thread_id,
                 allow_always,
             },
+            StatusUpdate::PlanExitNeeded {
+                request_id,
+                title,
+                markdown,
+                path,
+                suggested_actions,
+            } => AppEvent::PlanExitNeeded {
+                request_id,
+                title,
+                markdown,
+                path,
+                suggested_actions,
+                thread_id,
+            },
             StatusUpdate::AuthRequired {
                 extension_name,
                 instructions,

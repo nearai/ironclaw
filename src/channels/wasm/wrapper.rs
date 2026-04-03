@@ -2335,6 +2335,18 @@ impl WasmChannel {
                     );
                 }
             }
+            StatusUpdate::PlanExitNeeded { .. } => {
+                // Waiting on user action: stop typing and fire once.
+                self.cancel_typing_task().await;
+
+                if let Err(e) = self.call_on_status(&status, metadata).await {
+                    tracing::debug!(
+                        channel = %self.name,
+                        error = %e,
+                        "on_status failed (best-effort)"
+                    );
+                }
+            }
             StatusUpdate::Status(msg) if is_terminal_text_status(msg) => {
                 // Waiting on user or terminal states: stop typing and fire once.
                 self.cancel_typing_task().await;
@@ -3833,6 +3845,7 @@ fn status_to_wit(
         StatusUpdate::Suggestions { .. }
         | StatusUpdate::TurnCost { .. }
         | StatusUpdate::SkillActivated { .. } => return None,
+        StatusUpdate::PlanExitNeeded { .. } => return None,
         StatusUpdate::ReasoningUpdate {
             narrative,
             decisions,

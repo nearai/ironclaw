@@ -199,6 +199,90 @@ fn default_true() -> bool {
     true
 }
 
+/// A persisted markdown plan artifact for a thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanArtifact {
+    /// Stable plan identifier for this thread.
+    pub plan_id: String,
+    /// Workspace-memory path of the markdown artifact, if persisted.
+    pub path: String,
+    /// Short user-facing plan title.
+    pub title: String,
+    /// Full markdown body shown during exit review.
+    pub markdown: String,
+    /// Suggested follow-up actions to surface after approval.
+    #[serde(default)]
+    pub suggested_actions: Vec<String>,
+    /// Last update timestamp.
+    pub updated_at: DateTime<Utc>,
+}
+
+impl PlanArtifact {
+    pub fn for_thread(
+        thread_id: Uuid,
+        title: impl Into<String>,
+        markdown: impl Into<String>,
+        suggested_actions: Vec<String>,
+    ) -> Self {
+        let plan_id = format!("thread-{thread_id}");
+        Self {
+            path: format!("plans/{plan_id}.md"),
+            plan_id,
+            title: title.into(),
+            markdown: markdown.into(),
+            suggested_actions,
+            updated_at: Utc::now(),
+        }
+    }
+
+    pub fn from_metadata(metadata: &serde_json::Value, thread_id: Uuid) -> Option<Self> {
+        let title = metadata
+            .get("plan_artifact_title")
+            .and_then(|v| v.as_str())?
+            .to_string();
+        let markdown = metadata
+            .get("plan_artifact_markdown")
+            .and_then(|v| v.as_str())?
+            .to_string();
+        let path = metadata
+            .get("plan_artifact_path")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("plans/thread-{thread_id}.md"));
+        let suggested_actions = metadata
+            .get("plan_artifact_suggested_actions")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(ToOwned::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let updated_at = metadata
+            .get("plan_artifact_updated_at")
+            .and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(Utc::now);
+
+        Some(Self {
+            plan_id: format!("thread-{thread_id}"),
+            path,
+            title,
+            markdown,
+            suggested_actions,
+            updated_at,
+        })
+    }
+}
+
+/// Pending plan-exit review state for a thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingPlanExit {
+    pub request_id: Uuid,
+    pub artifact: PlanArtifact,
+}
+
 /// A conversation thread within a session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Thread {
@@ -222,6 +306,15 @@ pub struct Thread {
     /// Pending auth token request (thread is in auth mode).
     #[serde(default)]
     pub pending_auth: Option<PendingAuth>,
+    /// Generic read-first planning mode for this thread.
+    #[serde(default)]
+    pub plan_mode: bool,
+    /// Most recently saved plan artifact for this thread.
+    #[serde(default)]
+    pub current_plan: Option<PlanArtifact>,
+    /// Pending request to review and exit plan mode.
+    #[serde(default)]
+    pub pending_plan_exit: Option<PendingPlanExit>,
     /// Messages queued while the thread was processing a turn.
     #[serde(default, skip_serializing_if = "VecDeque::is_empty")]
     pub pending_messages: VecDeque<String>,
@@ -275,6 +368,9 @@ impl Thread {
             metadata: serde_json::Value::Null,
             pending_approval: None,
             pending_auth: None,
+            plan_mode: false,
+            current_plan: None,
+            pending_plan_exit: None,
             pending_messages: VecDeque::new(),
             source_channel: source_channel.map(String::from),
         }
@@ -293,6 +389,9 @@ impl Thread {
             metadata: serde_json::Value::Null,
             pending_approval: None,
             pending_auth: None,
+            plan_mode: false,
+            current_plan: None,
+            pending_plan_exit: None,
             pending_messages: VecDeque::new(),
             source_channel: source_channel.map(String::from),
         }
@@ -415,6 +514,37 @@ impl Thread {
     /// Take the pending auth (clearing auth mode).
     pub fn take_pending_auth(&mut self) -> Option<PendingAuth> {
         self.pending_auth.take()
+    }
+
+    /// Enable generic plan mode on this thread.
+    pub fn enter_plan_mode(&mut self) {
+        self.plan_mode = true;
+        self.updated_at = Utc::now();
+    }
+
+    /// Disable generic plan mode on this thread.
+    pub fn exit_plan_mode(&mut self) {
+        self.plan_mode = false;
+        self.updated_at = Utc::now();
+    }
+
+    /// Replace the thread's current plan artifact.
+    pub fn set_plan_artifact(&mut self, artifact: PlanArtifact) {
+        self.current_plan = Some(artifact);
+        self.updated_at = Utc::now();
+    }
+
+    /// Mark the thread as awaiting explicit plan-exit review.
+    pub fn request_plan_exit(&mut self, pending: PendingPlanExit) {
+        self.pending_plan_exit = Some(pending);
+        self.updated_at = Utc::now();
+    }
+
+    /// Clear any pending plan-exit review state.
+    pub fn clear_pending_plan_exit(&mut self) -> Option<PendingPlanExit> {
+        let pending = self.pending_plan_exit.take();
+        self.updated_at = Utc::now();
+        pending
     }
 
     /// Interrupt the current turn and discard any queued messages.
@@ -1148,6 +1278,34 @@ mod tests {
 
         thread.resume();
         assert_eq!(thread.state, ThreadState::Idle);
+    }
+
+    #[test]
+    fn test_plan_mode_toggle() {
+        let mut thread = Thread::new(Uuid::new_v4(), None);
+
+        assert!(!thread.plan_mode);
+
+        thread.enter_plan_mode();
+        assert!(thread.plan_mode);
+
+        thread.exit_plan_mode();
+        assert!(!thread.plan_mode);
+    }
+
+    #[test]
+    fn test_plan_mode_serialization_defaults_false() {
+        let mut thread = Thread::new(Uuid::new_v4(), None);
+        thread.enter_plan_mode();
+
+        let json = serde_json::to_string(&thread).expect("serialize thread");
+        let restored: Thread = serde_json::from_str(&json).expect("deserialize thread");
+        assert!(restored.plan_mode);
+
+        let old_json = json.replace(",\"plan_mode\":true", "");
+        let restored_old: Thread =
+            serde_json::from_str(&old_json).expect("deserialize legacy thread");
+        assert!(!restored_old.plan_mode);
     }
 
     #[test]

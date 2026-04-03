@@ -14,8 +14,10 @@ use crate::agent::compaction::ContextCompactor;
 use crate::agent::dispatcher::{
     AgenticLoopResult, check_auth_required, execute_chat_tool_standalone, parse_auth_result,
 };
-use crate::agent::session::{MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState};
-use crate::agent::submission::SubmissionResult;
+use crate::agent::session::{
+    MAX_PENDING_MESSAGES, PendingApproval, PendingPlanExit, PlanArtifact, Session, ThreadState,
+};
+use crate::agent::submission::{PlanExitAction, SubmissionResult};
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
@@ -24,6 +26,22 @@ use crate::tools::redact_params;
 use ironclaw_common::truncate_preview;
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
+const PLAN_EXIT_REQUEST_ID_KEY: &str = "plan_exit_request_id";
+
+fn pending_plan_exit_from_metadata(
+    metadata: &serde_json::Value,
+    thread_id: Uuid,
+) -> Option<PendingPlanExit> {
+    let request_id = metadata
+        .get(PLAN_EXIT_REQUEST_ID_KEY)
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())?;
+    let artifact = PlanArtifact::from_metadata(metadata, thread_id)?;
+    Some(PendingPlanExit {
+        request_id,
+        artifact,
+    })
+}
 
 fn requires_preexisting_uuid_thread(channel: &str) -> bool {
     // Gateway-style channels send server-issued conversation UUIDs.
@@ -67,6 +85,7 @@ impl Agent {
         // Load history from DB (may be empty for a newly created thread).
         let mut chat_messages: Vec<ChatMessage> = Vec::new();
         let msg_count;
+        let mut conversation_metadata: Option<serde_json::Value> = None;
 
         if let Some(store) = self.store() {
             // Never hydrate history from a conversation UUID that isn't owned
@@ -131,6 +150,11 @@ impl Agent {
                 .unwrap_or_default();
             msg_count = db_messages.len();
             chat_messages = rebuild_chat_messages_from_db(&db_messages);
+            conversation_metadata = store
+                .get_conversation_metadata(thread_uuid)
+                .await
+                .ok()
+                .flatten();
         } else {
             msg_count = 0;
         }
@@ -184,6 +208,14 @@ impl Agent {
         if !chat_messages.is_empty() {
             thread.restore_from_messages(chat_messages);
         }
+        if let Some(metadata) = conversation_metadata {
+            thread.plan_mode = metadata
+                .get("plan_mode")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            thread.current_plan = PlanArtifact::from_metadata(&metadata, thread_uuid);
+            thread.pending_plan_exit = pending_plan_exit_from_metadata(&metadata, thread_uuid);
+        }
 
         // Insert into session and register with session manager
         {
@@ -209,6 +241,54 @@ impl Agent {
         );
 
         None
+    }
+
+    async fn load_persisted_plan_artifact(&self, thread_id: Uuid) -> Option<PlanArtifact> {
+        let store = self.store()?;
+        let metadata = store
+            .get_conversation_metadata(thread_id)
+            .await
+            .ok()
+            .flatten()?;
+        PlanArtifact::from_metadata(&metadata, thread_id)
+    }
+
+    async fn persist_plan_mode_flag(&self, thread_id: Uuid, plan_mode: bool) {
+        if let Some(store) = self.store()
+            && let Err(e) = store
+                .update_conversation_metadata_field(
+                    thread_id,
+                    "plan_mode",
+                    &serde_json::json!(plan_mode),
+                )
+                .await
+        {
+            tracing::warn!(
+                thread_id = %thread_id,
+                plan_mode,
+                error = %e,
+                "Failed to persist plan_mode metadata"
+            );
+        }
+    }
+
+    async fn persist_pending_plan_exit_request(&self, thread_id: Uuid, request_id: Option<Uuid>) {
+        if let Some(store) = self.store() {
+            let value = match request_id {
+                Some(id) => serde_json::json!(id.to_string()),
+                None => serde_json::Value::Null,
+            };
+            if let Err(e) = store
+                .update_conversation_metadata_field(thread_id, PLAN_EXIT_REQUEST_ID_KEY, &value)
+                .await
+            {
+                tracing::warn!(
+                    thread_id = %thread_id,
+                    error = %e,
+                    "Failed to persist pending plan-exit request metadata"
+                );
+            }
+        }
     }
 
     pub(super) async fn process_user_input(
@@ -986,6 +1066,169 @@ impl Agent {
         }
     }
 
+    pub(super) async fn process_plan_mode(
+        &self,
+        message: &IncomingMessage,
+        session: Arc<Mutex<Session>>,
+        thread_id: Uuid,
+        action: crate::agent::submission::PlanModeAction,
+    ) -> Result<SubmissionResult, Error> {
+        let persisted_artifact = if matches!(action, crate::agent::submission::PlanModeAction::Exit)
+        {
+            self.load_persisted_plan_artifact(thread_id).await
+        } else {
+            None
+        };
+        let mut sess = session.lock().await;
+        let thread = sess
+            .threads
+            .get_mut(&thread_id)
+            .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+
+        match thread.state {
+            ThreadState::Processing => {
+                return Ok(SubmissionResult::error(
+                    "Thread is currently running. Use /interrupt before changing plan mode.",
+                ));
+            }
+            ThreadState::AwaitingApproval => {
+                return Ok(SubmissionResult::error(
+                    "Thread is waiting for approval. Resolve or cancel the approval before changing plan mode.",
+                ));
+            }
+            _ => {}
+        }
+
+        let mut persist_value: Option<bool> = None;
+        let mut plan_exit_event: Option<PendingPlanExit> = None;
+        let response_message = match action {
+            crate::agent::submission::PlanModeAction::Enter => {
+                if thread.plan_mode {
+                    "Plan mode is already active for this thread.".to_string()
+                } else {
+                    thread.enter_plan_mode();
+                    persist_value = Some(true);
+                    "Plan mode enabled. I will inspect, read, search, and plan, but I will not make changes or take side-effectful actions until you exit plan mode.".to_string()
+                }
+            }
+            crate::agent::submission::PlanModeAction::Exit => {
+                if !thread.plan_mode {
+                    "Plan mode is already disabled for this thread.".to_string()
+                } else if thread.pending_plan_exit.is_some() {
+                    "Plan review is already waiting for your decision. Approve, revise, or stay in plan mode.".to_string()
+                } else {
+                    let artifact = thread.current_plan.clone().or(persisted_artifact.clone());
+                    if let Some(artifact) = artifact {
+                        let pending = PendingPlanExit {
+                            request_id: Uuid::new_v4(),
+                            artifact: artifact.clone(),
+                        };
+                        thread.current_plan = Some(artifact);
+                        thread.request_plan_exit(pending.clone());
+                        plan_exit_event = Some(pending);
+                        "Plan ready for review. Approve it to leave plan mode, revise it, or stay in planning mode.".to_string()
+                    } else {
+                        thread.exit_plan_mode();
+                        persist_value = Some(false);
+                        "Plan mode disabled. Execution and write-capable tools are available again under the normal approval rules.".to_string()
+                    }
+                }
+            }
+            crate::agent::submission::PlanModeAction::Status => {
+                if thread.plan_mode {
+                    "Plan mode is active for this thread.".to_string()
+                } else {
+                    "Plan mode is inactive for this thread.".to_string()
+                }
+            }
+        };
+        drop(sess);
+
+        if let Some(plan_mode) = persist_value {
+            self.persist_plan_mode_flag(thread_id, plan_mode).await;
+        }
+        if let Some(ref pending) = plan_exit_event {
+            self.persist_pending_plan_exit_request(thread_id, Some(pending.request_id))
+                .await;
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::PlanExitNeeded {
+                        request_id: pending.request_id.to_string(),
+                        title: pending.artifact.title.clone(),
+                        markdown: pending.artifact.markdown.clone(),
+                        path: Some(pending.artifact.path.clone()),
+                        suggested_actions: pending.artifact.suggested_actions.clone(),
+                    },
+                    &message.metadata,
+                )
+                .await;
+        }
+
+        Ok(SubmissionResult::ok_with_message(response_message))
+    }
+
+    pub(super) async fn process_plan_exit_decision(
+        &self,
+        message: &IncomingMessage,
+        session: Arc<Mutex<Session>>,
+        thread_id: Uuid,
+        request_id: Uuid,
+        action: PlanExitAction,
+    ) -> Result<SubmissionResult, Error> {
+        let mut sess = session.lock().await;
+        let thread = sess
+            .threads
+            .get_mut(&thread_id)
+            .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+
+        let Some(pending) = thread.pending_plan_exit.clone() else {
+            return Ok(SubmissionResult::error(
+                "No pending plan review was found for this thread.",
+            ));
+        };
+        if pending.request_id != request_id {
+            return Ok(SubmissionResult::error(
+                "That plan review request is stale or does not belong to this thread.",
+            ));
+        }
+
+        let artifact = pending.artifact.clone();
+        thread.clear_pending_plan_exit();
+        let message_text = match action {
+            PlanExitAction::Approve => {
+                thread.exit_plan_mode();
+                "Plan approved. Plan mode disabled.".to_string()
+            }
+            PlanExitAction::Revise => {
+                "Plan mode stays active. Tell me what to change in the plan.".to_string()
+            }
+            PlanExitAction::Stay => "Plan mode stays active for this thread.".to_string(),
+        };
+        drop(sess);
+
+        self.persist_pending_plan_exit_request(thread_id, None)
+            .await;
+        if matches!(action, PlanExitAction::Approve) {
+            self.persist_plan_mode_flag(thread_id, false).await;
+            if !artifact.suggested_actions.is_empty() {
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::Suggestions {
+                            suggestions: artifact.suggested_actions.clone(),
+                        },
+                        &message.metadata,
+                    )
+                    .await;
+            }
+        }
+
+        Ok(SubmissionResult::ok_with_message(message_text))
+    }
+
     pub(super) async fn process_clear(
         &self,
         session: Arc<Mutex<Session>>,
@@ -1018,7 +1261,7 @@ impl Agent {
         always: bool,
     ) -> Result<SubmissionResult, Error> {
         // Get pending approval for this thread
-        let pending = {
+        let (pending, plan_mode) = {
             let mut sess = session.lock().await;
             let thread = sess
                 .threads
@@ -1035,7 +1278,8 @@ impl Agent {
                 return Ok(SubmissionResult::ok_with_message(""));
             }
 
-            thread.take_pending_approval()
+            let pending = thread.take_pending_approval();
+            (pending, thread.plan_mode)
         };
 
         let pending = match pending {
@@ -1083,10 +1327,13 @@ impl Agent {
                 }
             }
 
+            let tool_ref = self.tools().get(&pending.tool_name).await;
+
             // Execute the approved tool and continue the loop
             let mut job_ctx =
                 JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
                     .with_requester_id(&message.sender_id);
+            job_ctx.conversation_id = Some(thread_id);
             job_ctx.http_interceptor = self.deps.http_interceptor.clone();
             job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
             // Prefer a valid timezone from the approval message, fall back to the
@@ -1111,11 +1358,26 @@ impl Agent {
                 )
                 .await;
 
-            let tool_result = self
-                .execute_chat_tool(&pending.tool_name, &pending.parameters, &job_ctx)
-                .await;
+            let tool_result = if plan_mode
+                && let Some(tool) = tool_ref.as_ref()
+                && let Err(reason) = crate::agent::plan_mode::check_tool_allowed(
+                    &pending.tool_name,
+                    &pending.parameters,
+                    tool.as_ref(),
+                ) {
+                Err(crate::error::ToolError::ExecutionFailed {
+                    name: pending.tool_name.clone(),
+                    reason: crate::agent::plan_mode::blocked_tool_message(
+                        &pending.tool_name,
+                        reason,
+                    ),
+                }
+                .into())
+            } else {
+                self.execute_chat_tool(&pending.tool_name, &pending.parameters, &job_ctx)
+                    .await
+            };
 
-            let tool_ref = self.tools().get(&pending.tool_name).await;
             let _ = self
                 .channels
                 .send_status(
@@ -1230,6 +1492,35 @@ impl Agent {
 
             for (idx, tc) in deferred_tool_calls.iter().enumerate() {
                 if let Some(tool) = self.tools().get(&tc.name).await {
+                    if plan_mode
+                        && let Err(reason) = crate::agent::plan_mode::check_tool_allowed(
+                            &tc.name,
+                            &tc.arguments,
+                            tool.as_ref(),
+                        )
+                    {
+                        let error = crate::agent::plan_mode::blocked_tool_message(&tc.name, reason);
+                        let (deferred_content, tool_message) =
+                            crate::tools::execute::process_tool_result(
+                                self.safety(),
+                                &tc.name,
+                                &tc.id,
+                                &Err(error),
+                            );
+
+                        {
+                            let mut sess = session.lock().await;
+                            if let Some(thread) = sess.threads.get_mut(&thread_id)
+                                && let Some(turn) = thread.last_turn_mut()
+                            {
+                                turn.record_tool_error_for(&tc.id, deferred_content.clone());
+                            }
+                        }
+
+                        context_messages.push(tool_message);
+                        continue;
+                    }
+
                     // Match dispatcher.rs: when auto_approve_tools is true, skip
                     // all approval checks (including ApprovalRequirement::Always).
                     let (needs_approval, allow_always) = if self.config.auto_approve_tools {
@@ -1976,6 +2267,9 @@ fn rebuild_chat_messages_from_db(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use tokio::sync::Mutex;
 
     #[test]
     fn test_rebuild_chat_messages_user_assistant_only() {
@@ -2323,6 +2617,302 @@ mod tests {
         assert_ne!(t.state, ThreadState::Processing);
         // Verify nothing was queued — the fall-through path doesn't touch the queue.
         assert!(t.pending_messages.is_empty());
+    }
+
+    fn make_thread_ops_test_agent(store: Option<Arc<dyn crate::db::Database>>) -> Agent {
+        use std::time::Duration;
+
+        use crate::agent::AgentDeps;
+        use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+        use crate::channels::ChannelManager;
+        use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
+        use crate::context::ContextManager;
+        use crate::hooks::HookRegistry;
+        use crate::testing::StubLlm;
+        use crate::tools::ToolRegistry;
+        use ironclaw_safety::SafetyLayer;
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register_builtin_tools();
+        tools.register_sync(Arc::new(crate::tools::builtin::WriteFileTool::new()));
+
+        let deps = AgentDeps {
+            owner_id: "default".to_string(),
+            store,
+            llm: Arc::new(StubLlm::new("done")),
+            cheap_llm: None,
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+            })),
+            tools,
+            workspace: None,
+            extension_manager: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skills_config: SkillsConfig::default(),
+            hooks: Arc::new(HookRegistry::new()),
+            cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            sse_tx: None,
+            http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            builder: None,
+            llm_backend: "nearai".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+        };
+
+        Agent::new(
+            AgentConfig {
+                name: "test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_cost_per_user_per_day_cents: None,
+                max_tool_iterations: 8,
+                auto_approve_tools: false,
+                default_timezone: "UTC".to_string(),
+                max_jobs_per_user: None,
+                max_tokens_per_job: 0,
+                multi_tenant: false,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
+                engine_v2: false,
+            },
+            deps,
+            Arc::new(ChannelManager::new()),
+            None,
+            None,
+            None,
+            Some(Arc::new(ContextManager::new(1))),
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_process_approval_blocks_primary_tool_when_plan_mode_active() {
+        use crate::agent::session::{PendingApproval, Session};
+        use crate::agent::submission::SubmissionResult;
+        use crate::channels::IncomingMessage;
+
+        let agent = make_thread_ops_test_agent(None);
+        let session = Arc::new(Mutex::new(Session::new("test-user")));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let blocked_path = temp_dir.path().join("should_not_exist.txt");
+        let blocked_path_str = blocked_path.to_string_lossy().to_string();
+
+        let thread_id = {
+            let mut sess = session.lock().await;
+            let thread = sess.create_thread(Some("test"));
+            thread.plan_mode = true;
+            let turn = thread.start_turn("write a file");
+            turn.record_tool_call_with_reasoning(
+                "write_file",
+                serde_json::json!({
+                    "path": blocked_path_str,
+                    "content": "blocked"
+                }),
+                Some("write the requested file".to_string()),
+                Some("call_0".to_string()),
+            );
+            let pending = PendingApproval {
+                request_id: Uuid::new_v4(),
+                tool_name: "write_file".to_string(),
+                parameters: serde_json::json!({
+                    "path": blocked_path.to_string_lossy(),
+                    "content": "blocked"
+                }),
+                display_parameters: serde_json::json!({
+                    "path": blocked_path.to_string_lossy(),
+                    "content": "[REDACTED]"
+                }),
+                description: "Write a file".to_string(),
+                tool_call_id: "call_0".to_string(),
+                context_messages: vec![crate::llm::ChatMessage::user("write a file")],
+                deferred_tool_calls: vec![],
+                user_timezone: None,
+                allow_always: false,
+            };
+            thread.await_approval(pending);
+            thread.id
+        };
+
+        let message = IncomingMessage::new("test", "test-user", "approve");
+        let result = agent
+            .process_approval(&message, session.clone(), thread_id, None, true, false)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(result, SubmissionResult::Response { .. }),
+            "approval should continue with a normal response after recording the block"
+        );
+        assert!(
+            !blocked_path.exists(),
+            "write_file should not execute while plan mode is active"
+        );
+
+        let sess = session.lock().await;
+        let thread = sess.threads.get(&thread_id).expect("thread");
+        let turn = thread.turns.last().expect("turn");
+        let tool_call = turn.tool_calls.first().expect("tool call");
+        let error = tool_call.error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("Plan mode is active"),
+            "blocked tool should record a plan-mode error, got: {error}"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_maybe_hydrate_thread_restores_plan_mode_from_db_metadata() {
+        use crate::channels::IncomingMessage;
+
+        let (db, _dir) = crate::testing::test_db().await;
+        let agent = make_thread_ops_test_agent(Some(Arc::clone(&db)));
+        let thread_id = Uuid::new_v4();
+
+        db.ensure_conversation(thread_id, "gateway", "hydrate-user", None, Some("gateway"))
+            .await
+            .unwrap();
+        db.update_conversation_metadata_field(thread_id, "plan_mode", &serde_json::json!(true))
+            .await
+            .unwrap();
+
+        let message = IncomingMessage::new("gateway", "hydrate-user", "hello");
+        let rejection = agent
+            .maybe_hydrate_thread(&message, &thread_id.to_string())
+            .await;
+        assert!(rejection.is_none(), "hydration should succeed");
+
+        let session = agent
+            .session_manager
+            .get_or_create_session("hydrate-user")
+            .await;
+        let sess = session.lock().await;
+        let thread = sess.threads.get(&thread_id).expect("hydrated thread");
+        assert!(
+            thread.plan_mode,
+            "hydrated thread should restore persisted plan_mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_plan_mode_exit_with_artifact_requires_review() {
+        use crate::agent::session::{PlanArtifact, Session};
+        use crate::agent::submission::{PlanModeAction, SubmissionResult};
+        use crate::channels::IncomingMessage;
+
+        let agent = make_thread_ops_test_agent(None);
+        let session = Arc::new(Mutex::new(Session::new("test-user")));
+        let thread_id = {
+            let mut sess = session.lock().await;
+            let thread = sess.create_thread(Some("test"));
+            thread.plan_mode = true;
+            thread.current_plan = Some(PlanArtifact::for_thread(
+                thread.id,
+                "Auth refactor".to_string(),
+                "## Plan\n\n1. Inspect auth flow\n2. Split session and token auth".to_string(),
+                vec!["Implement the plan".to_string(), "Run tests".to_string()],
+            ));
+            thread.id
+        };
+
+        let message = IncomingMessage::new("test", "test-user", "/plan exit");
+        let result = agent
+            .process_plan_mode(&message, session.clone(), thread_id, PlanModeAction::Exit)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(
+                result,
+                SubmissionResult::Ok {
+                    message: Some(ref message)
+                } if message.contains("Plan ready for review")
+            ),
+            "plan exit should acknowledge that a review is required before leaving plan mode"
+        );
+
+        let sess = session.lock().await;
+        let thread = sess.threads.get(&thread_id).expect("thread");
+        assert!(
+            thread.plan_mode,
+            "plan mode should remain enabled until the review is approved"
+        );
+        let pending = thread
+            .pending_plan_exit
+            .as_ref()
+            .expect("pending plan review should be created");
+        assert_eq!(pending.artifact.title, "Auth refactor");
+        assert_eq!(pending.artifact.suggested_actions.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_process_plan_exit_decision_approve_disables_plan_mode() {
+        use crate::agent::session::{PendingPlanExit, PlanArtifact, Session};
+        use crate::agent::submission::{PlanExitAction, SubmissionResult};
+        use crate::channels::IncomingMessage;
+
+        let agent = make_thread_ops_test_agent(None);
+        let session = Arc::new(Mutex::new(Session::new("test-user")));
+        let request_id = Uuid::new_v4();
+        let thread_id = {
+            let mut sess = session.lock().await;
+            let thread = sess.create_thread(Some("test"));
+            thread.plan_mode = true;
+            thread.request_plan_exit(PendingPlanExit {
+                request_id,
+                artifact: PlanArtifact::for_thread(
+                    thread.id,
+                    "Auth refactor".to_string(),
+                    "## Plan\n\n1. Inspect auth flow\n2. Split session and token auth".to_string(),
+                    vec!["Implement the plan".to_string()],
+                ),
+            });
+            thread.id
+        };
+
+        let message = IncomingMessage::new("test", "test-user", "approve plan");
+        let result = agent
+            .process_plan_exit_decision(
+                &message,
+                session.clone(),
+                thread_id,
+                request_id,
+                PlanExitAction::Approve,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(
+                result,
+                SubmissionResult::Ok {
+                    message: Some(ref message)
+                } if message.contains("Plan approved")
+            ),
+            "approving the plan review should confirm that plan mode was disabled"
+        );
+
+        let sess = session.lock().await;
+        let thread = sess.threads.get(&thread_id).expect("thread");
+        assert!(
+            !thread.plan_mode,
+            "plan mode should be disabled after plan approval"
+        );
+        assert!(
+            thread.pending_plan_exit.is_none(),
+            "pending plan review should clear after approval"
+        );
     }
 
     // Helper function to extract the approval message without needing a full Agent instance

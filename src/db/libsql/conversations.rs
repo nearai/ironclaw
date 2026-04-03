@@ -158,6 +158,10 @@ impl ConversationStore for LibSqlBackend {
                 .get("thread_type")
                 .and_then(|v| v.as_str())
                 .map(String::from);
+            let plan_mode = metadata
+                .get("plan_mode")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let sql_title = get_opt_text(&row, 6);
             let title = sql_title.or_else(|| {
                 metadata
@@ -176,6 +180,7 @@ impl ConversationStore for LibSqlBackend {
                 message_count: get_i64(&row, 5),
                 title,
                 thread_type,
+                plan_mode,
                 channel: get_text(&row, 4),
             });
         }
@@ -225,6 +230,10 @@ impl ConversationStore for LibSqlBackend {
                 .get("thread_type")
                 .and_then(|v| v.as_str())
                 .map(String::from);
+            let plan_mode = metadata
+                .get("plan_mode")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let sql_title = get_opt_text(&row, 6);
             let title = sql_title.or_else(|| {
                 metadata
@@ -243,6 +252,7 @@ impl ConversationStore for LibSqlBackend {
                 message_count: get_i64(&row, 5),
                 title,
                 thread_type,
+                plan_mode,
                 channel: get_text(&row, 4),
             });
         }

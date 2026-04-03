@@ -333,6 +333,7 @@ fn event_matches_thread(event: &AppEvent, target: &str) -> bool {
         | AppEvent::ReasoningUpdate { thread_id, .. }
         | AppEvent::Status { thread_id, .. }
         | AppEvent::ApprovalNeeded { thread_id, .. }
+        | AppEvent::PlanExitNeeded { thread_id, .. }
         | AppEvent::GateRequired { thread_id, .. }
         | AppEvent::GateResolved { thread_id, .. } => thread_id.as_deref() == Some(target),
         // Global or job-scoped events are never matched.
@@ -515,6 +516,14 @@ impl ResponseAccumulator {
                 self.error_message = Some(format!(
                     "Tool '{tool_name}' requires approval which is not supported via the Responses API"
                 ));
+                true
+            }
+            AppEvent::PlanExitNeeded { .. } => {
+                self.failed = true;
+                self.error_message = Some(
+                    "Plan review is required before leaving plan mode, which is not supported via the Responses API"
+                        .to_string(),
+                );
                 true
             }
             // Ignore events we don't map (Thinking, Status, etc.).

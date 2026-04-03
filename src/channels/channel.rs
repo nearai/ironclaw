@@ -318,6 +318,14 @@ pub enum StatusUpdate {
         /// time and the "always" button should be hidden.
         allow_always: bool,
     },
+    /// Plan is ready to review before leaving plan mode.
+    PlanExitNeeded {
+        request_id: String,
+        title: String,
+        markdown: String,
+        path: Option<String>,
+        suggested_actions: Vec<String>,
+    },
     /// Extension needs user authentication (token or OAuth).
     AuthRequired {
         extension_name: String,

@@ -1585,6 +1585,14 @@ impl Agent {
                 self.process_user_input(message, tenant, session, thread_id, &rewritten)
                     .await
             }
+            Submission::PlanMode { action } => {
+                self.process_plan_mode(message, session, thread_id, action)
+                    .await
+            }
+            Submission::PlanExitDecision { request_id, action } => {
+                self.process_plan_exit_decision(message, session, thread_id, request_id, action)
+                    .await
+            }
         };
 
         // Convert SubmissionResult to response string

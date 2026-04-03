@@ -20,6 +20,7 @@ pub mod cost_guard;
 mod dispatcher;
 mod heartbeat;
 pub mod job_monitor;
+mod plan_mode;
 mod router;
 pub mod routine;
 pub mod routine_engine;

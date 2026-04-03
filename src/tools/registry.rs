@@ -17,10 +17,10 @@ use crate::tools::builder::{
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
     JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
-    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PlanUpdateTool, PromptQueue,
-    ReadFileTool, ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool,
-    TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool,
-    ToolSearchTool, ToolUpgradeTool, WriteFileTool,
+    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PlanArtifactSaveTool,
+    PlanUpdateTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool, SkillListTool,
+    SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
+    ToolListTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolDiscoverySummary, ToolDomain};
@@ -78,6 +78,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "image_edit",
     "image_analyze",
     "tool_info",
+    "plan_artifact_save",
 ];
 
 /// Registry of available tools.
@@ -373,6 +374,16 @@ impl ToolRegistry {
         self.register_sync(Arc::new(MemoryTreeTool::new(resolver)));
 
         tracing::debug!("Registered 4 memory tools");
+    }
+
+    /// Register the thread-scoped plan artifact tool used by generic plan mode.
+    pub fn register_plan_artifact_tool(
+        &self,
+        store: Option<Arc<dyn Database>>,
+        resolver: Option<Arc<dyn crate::tools::builtin::memory::WorkspaceResolver>>,
+    ) {
+        self.register_sync(Arc::new(PlanArtifactSaveTool::new(store, resolver)));
+        tracing::debug!("Registered plan_artifact_save tool");
     }
 
     /// Register memory tools with a fixed workspace (backward compatibility).
