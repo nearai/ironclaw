@@ -1245,13 +1245,21 @@ async fn handle_event(
         TuiEvent::ConversationHistory {
             thread_id,
             messages,
+            pending_approval,
         } => {
             state.messages.clear();
             state.active_tools.clear();
             state.recent_tools.clear();
             state.is_streaming = false;
             state.status_text.clear();
-            state.pending_approval = None;
+            state.pending_approval = pending_approval.map(|approval| ApprovalRequest {
+                request_id: approval.request_id,
+                tool_name: approval.tool_name,
+                description: approval.description,
+                parameters: approval.parameters,
+                allow_always: approval.allow_always,
+                selected: 0,
+            });
             state.suggestions.clear();
             for thread in &mut state.threads {
                 thread.is_foreground = thread.id == thread_id;
@@ -2241,7 +2249,7 @@ fn encode_rgba_to_png(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::ThreadEntry;
+    use crate::event::{HistoryMessage, ThreadEntry};
     use crate::widgets::approval::ApprovalWidget;
     use crate::widgets::registry::create_default_widgets;
     use crate::widgets::thread_picker::ThreadPickerWidget;
@@ -2477,6 +2485,55 @@ mod tests {
         assert!(state.pending_approval.is_none());
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].text, "n");
+    }
+
+    #[tokio::test]
+    async fn conversation_history_restores_pending_approval() {
+        let mut state = AppState {
+            pending_approval: Some(ApprovalRequest {
+                request_id: "stale".to_string(),
+                tool_name: "old-tool".to_string(),
+                description: "stale approval".to_string(),
+                parameters: serde_json::json!({"old": true}),
+                allow_always: false,
+                selected: 2,
+            }),
+            ..Default::default()
+        };
+
+        apply_event(
+            &mut state,
+            TuiEvent::ConversationHistory {
+                thread_id: "thread-1".to_string(),
+                messages: vec![HistoryMessage {
+                    role: "assistant".to_string(),
+                    content: "Waiting on approval".to_string(),
+                    timestamp: chrono::Utc::now(),
+                }],
+                pending_approval: Some(crate::event::HistoryApprovalRequest {
+                    request_id: "req-1".to_string(),
+                    tool_name: "shell".to_string(),
+                    description: "Run a command".to_string(),
+                    parameters: serde_json::json!({"command": "[REDACTED]"}),
+                    allow_always: true,
+                }),
+            },
+        )
+        .await;
+
+        let approval = state
+            .pending_approval
+            .as_ref()
+            .expect("pending approval should be restored");
+        assert_eq!(approval.request_id, "req-1");
+        assert_eq!(approval.tool_name, "shell");
+        assert_eq!(approval.description, "Run a command");
+        assert_eq!(
+            approval.parameters,
+            serde_json::json!({"command": "[REDACTED]"})
+        );
+        assert!(approval.allow_always);
+        assert_eq!(approval.selected, 0);
     }
 
     #[tokio::test]

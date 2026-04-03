@@ -41,7 +41,8 @@ pub mod widgets;
 
 pub use app::{TuiAppConfig, TuiAppHandle, start_tui};
 pub use event::{
-    HistoryMessage, ThreadEntry, TuiAttachment, TuiEvent, TuiLogEntry, TuiUserMessage,
+    HistoryApprovalRequest, HistoryMessage, ThreadEntry, TuiAttachment, TuiEvent, TuiLogEntry,
+    TuiUserMessage,
 };
 pub use layout::TuiLayout;
 pub use theme::Theme;

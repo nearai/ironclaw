@@ -410,6 +410,7 @@ pub enum StatusUpdate {
     ConversationHistory {
         thread_id: String,
         messages: Vec<HistoryMessage>,
+        pending_approval: Option<ChatApprovalPrompt>,
     },
 }
 

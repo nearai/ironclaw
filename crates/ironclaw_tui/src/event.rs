@@ -103,6 +103,16 @@ pub struct HistoryMessage {
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+/// A pending approval restored alongside conversation history.
+#[derive(Debug, Clone)]
+pub struct HistoryApprovalRequest {
+    pub request_id: String,
+    pub tool_name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+    pub allow_always: bool,
+}
+
 /// Events consumed by the TUI run loop.
 #[derive(Debug, Clone)]
 pub enum TuiEvent {
@@ -262,5 +272,6 @@ pub enum TuiEvent {
     ConversationHistory {
         thread_id: String,
         messages: Vec<HistoryMessage>,
+        pending_approval: Option<HistoryApprovalRequest>,
     },
 }

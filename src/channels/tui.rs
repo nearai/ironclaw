@@ -499,6 +499,7 @@ impl Channel for TuiChannel {
             StatusUpdate::ConversationHistory {
                 thread_id,
                 messages,
+                pending_approval,
             } => TuiEvent::ConversationHistory {
                 thread_id,
                 messages: messages
@@ -509,6 +510,15 @@ impl Channel for TuiChannel {
                         timestamp: m.timestamp,
                     })
                     .collect(),
+                pending_approval: pending_approval.map(|approval| {
+                    ironclaw_tui::HistoryApprovalRequest {
+                        request_id: approval.request_id,
+                        tool_name: approval.tool_name,
+                        description: approval.description,
+                        parameters: approval.parameters,
+                        allow_always: approval.allow_always,
+                    }
+                }),
             },
             StatusUpdate::SkillActivated { .. } | StatusUpdate::ImageGenerated { .. } => {
                 return Ok(());
