@@ -739,6 +739,16 @@ impl AppBuilder {
                 catalog_entries.clone(),
             ));
             tools.register_extension_tools(Arc::clone(&manager));
+
+            // Register permission management tool and upgrade tool_list with
+            // builtin registry support.
+            let settings_store_for_perms: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>> =
+                self.db
+                    .as_ref()
+                    .map(|db| Arc::clone(db) as Arc<dyn crate::db::SettingsStore + Send + Sync>);
+            tools.register_permission_tools(settings_store_for_perms.clone());
+            tools.upgrade_tool_list(Arc::clone(&manager), settings_store_for_perms);
+
             tracing::debug!("Extension manager initialized with in-chat discovery tools");
 
             if !startup_mcp_clients.is_empty() {
@@ -937,6 +947,11 @@ impl AppBuilder {
             tools.count()
         );
 
+        // Seed per-user tool permission defaults into the database.
+        // This runs after all tools (built-in, WASM, MCP) are registered so
+        // that every tool name is known.  Existing entries are never overwritten.
+        seed_tool_permissions(&tools, self.db.as_ref(), &self.config.owner_id).await;
+
         Ok(AppComponents {
             config: self.config,
             db: self.db,
@@ -964,6 +979,80 @@ impl AppBuilder {
             dev_loaded_tool_names,
             builder,
         })
+    }
+}
+
+/// Seed tool permission defaults into the database for every registered tool
+/// that has no explicit user override yet.
+///
+/// This is called once at startup after the full tool registry is built.
+/// It is idempotent: existing entries in `tool_permissions.*` are never touched.
+async fn seed_tool_permissions(
+    tools: &crate::tools::ToolRegistry,
+    db: Option<&Arc<dyn Database>>,
+    owner_id: &str,
+) {
+    use crate::tools::permissions::{TOOL_RISK_DEFAULTS, effective_permission};
+
+    let db = match db {
+        Some(db) => db,
+        None => {
+            tracing::debug!("seed_tool_permissions: no database available, skipping");
+            return;
+        }
+    };
+
+    // Load existing tool permission overrides from the DB.
+    let db_map = match db.get_all_settings(owner_id).await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("seed_tool_permissions: failed to load settings: {}", e);
+            return;
+        }
+    };
+    let existing = crate::settings::Settings::from_db_map(&db_map).tool_permissions;
+
+    let registered_names = tools.list().await;
+    let mut seeded = 0u32;
+
+    for name in &registered_names {
+        if existing.contains_key(name.as_str()) {
+            // User has an explicit override — do not touch it.
+            continue;
+        }
+
+        // Only insert if the tool appears in the static defaults table.
+        // Unknown/dynamic tools stay absent (they will fall back to AskEachTime
+        // at runtime via effective_permission) to avoid polluting the DB.
+        if TOOL_RISK_DEFAULTS.contains_key(name.as_str()) {
+            let default_state = effective_permission(name, &existing);
+            let json_value = match serde_json::to_value(default_state) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        "seed_tool_permissions: failed to serialize state for '{}': {}",
+                        name,
+                        e
+                    );
+                    continue;
+                }
+            };
+            if let Err(e) = db
+                .set_setting(owner_id, &format!("tool_permissions.{}", name), &json_value)
+                .await
+            {
+                tracing::warn!("seed_tool_permissions: failed to set '{}': {}", name, e);
+            } else {
+                seeded += 1;
+            }
+        }
+    }
+
+    if seeded > 0 {
+        tracing::debug!(
+            count = seeded,
+            "Seeded tool permission defaults into database"
+        );
     }
 }
 
@@ -1030,5 +1119,57 @@ mod tests {
 
         assert_eq!(user_id, "user-123");
         assert!(!session_id.is_empty());
+    }
+
+    /// Verify that `seed_tool_permissions` is idempotent: an existing user
+    /// override must survive a re-seed.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn seed_tool_permissions_preserves_user_overrides() {
+        use crate::db::Database;
+        use crate::db::libsql::LibSqlBackend;
+        use crate::tools::ToolRegistry;
+        use crate::tools::permissions::PermissionState;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_seed.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+        let db: Arc<dyn Database> = Arc::new(backend);
+
+        let registry = ToolRegistry::new();
+        registry.register_builtin_tools();
+
+        let owner = "test-user";
+
+        // 1. Initial seed: creates defaults for all registered tools.
+        super::seed_tool_permissions(&registry, Some(&db), owner).await;
+
+        // Verify "echo" was seeded as AlwaysAllow.
+        let map = db.get_all_settings(owner).await.unwrap();
+        let settings = crate::settings::Settings::from_db_map(&map);
+        assert_eq!(
+            settings.tool_permissions.get("echo"),
+            Some(&PermissionState::AlwaysAllow),
+            "echo should be AlwaysAllow after initial seed"
+        );
+
+        // 2. User overrides echo → Disabled.
+        let disabled_json = serde_json::to_value(PermissionState::Disabled).unwrap();
+        db.set_setting(owner, "tool_permissions.echo", &disabled_json)
+            .await
+            .unwrap();
+
+        // 3. Re-seed (e.g. after a restart).
+        super::seed_tool_permissions(&registry, Some(&db), owner).await;
+
+        // 4. Assert the override survived.
+        let map = db.get_all_settings(owner).await.unwrap();
+        let settings = crate::settings::Settings::from_db_map(&map);
+        assert_eq!(
+            settings.tool_permissions.get("echo"),
+            Some(&PermissionState::Disabled),
+            "user override to Disabled must survive re-seed"
+        );
     }
 }

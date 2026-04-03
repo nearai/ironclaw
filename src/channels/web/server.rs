@@ -60,6 +60,7 @@ use crate::channels::web::handlers::routines::{
 use crate::channels::web::handlers::settings::{
     settings_delete_handler, settings_export_handler, settings_get_handler,
     settings_import_handler, settings_list_handler, settings_set_handler,
+    settings_tools_list_handler, settings_tools_set_handler,
 };
 use crate::channels::web::handlers::skills::{
     skills_install_handler, skills_list_handler, skills_remove_handler, skills_search_handler,
@@ -649,6 +650,14 @@ pub async fn start_server(
         .route("/api/settings", get(settings_list_handler))
         .route("/api/settings/export", get(settings_export_handler))
         .route("/api/settings/import", post(settings_import_handler))
+        // NOTE: These static routes intentionally shadow `/api/settings/{key}` when
+        // key="tools". Axum resolves static routes before parameterized ones, so this
+        // works correctly. Avoid adding a setting named literally "tools".
+        .route("/api/settings/tools", get(settings_tools_list_handler))
+        .route(
+            "/api/settings/tools/{name}",
+            axum::routing::put(settings_tools_set_handler),
+        )
         .route("/api/settings/{key}", get(settings_get_handler))
         .route(
             "/api/settings/{key}",
