@@ -374,7 +374,10 @@ enum TelegramStatusAction {
 
 const TELEGRAM_STATUS_MAX_CHARS: usize = 600;
 /// Telegram's hard limit for message text length.
-const TELEGRAM_MAX_MESSAGE_LEN: usize = 4096;
+///
+/// The API nominally allows 4096, but Markdown entities and multi-codepoint
+/// emoji can cause edge-case rejections. We leave a safety margin.
+const TELEGRAM_MAX_MESSAGE_LEN: usize = 4000;
 
 fn utf16_code_unit_len(text: &str) -> usize {
     text.encode_utf16().count()
@@ -949,6 +952,8 @@ impl Guest for TelegramChannel {
 enum SendError {
     /// Telegram returned 400 with "can't parse entities" (Markdown issue).
     ParseEntities(String),
+    /// Telegram returned 400 with "message is too long".
+    TooLong(String),
     /// Any other failure.
     Other(String),
 }
@@ -957,6 +962,7 @@ impl std::fmt::Display for SendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SendError::ParseEntities(detail) => write!(f, "parse entities error: {}", detail),
+            SendError::TooLong(detail) => write!(f, "message too long: {}", detail),
             SendError::Other(msg) => write!(f, "{}", msg),
         }
     }
@@ -1020,6 +1026,9 @@ fn send_message(
                 let body_str = String::from_utf8_lossy(&http_response.body);
                 if body_str.contains("can't parse entities") {
                     return Err(SendError::ParseEntities(body_str.to_string()));
+                }
+                if body_str.contains("message is too long") {
+                    return Err(SendError::TooLong(body_str.to_string()));
                 }
                 return Err(SendError::Other(format!(
                     "Telegram API returned 400: {}",
@@ -1416,62 +1425,97 @@ fn send_response(
 
     // Split large messages into chunks that fit Telegram's limit.
     let chunks = split_message(&response.content);
-    let total = chunks.len();
 
     // The first chunk replies to the original message; subsequent chunks
     // reply to the previously sent chunk so they form a visual thread.
     let mut reply_to = reply_to_message_id;
 
-    for (i, chunk) in chunks.into_iter().enumerate() {
-        // Try Markdown, fall back to plain text on parse errors
-        let result = send_message(chat_id, &chunk, reply_to, Some("Markdown"), message_thread_id);
-
-        let msg_id = match result {
-            Ok(id) => {
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!(
-                        "Sent message chunk {}/{} to chat {}: message_id={}",
-                        i + 1,
-                        total,
-                        chat_id,
-                        id,
-                    ),
-                );
-                id
-            }
-            Err(SendError::ParseEntities(detail)) => {
-                channel_host::log(
-                    channel_host::LogLevel::Warn,
-                    &format!(
-                        "Markdown parse failed on chunk {}/{} ({}), retrying as plain text",
-                        i + 1,
-                        total,
-                        detail
-                    ),
-                );
-                let id = send_message(chat_id, &chunk, reply_to, None, message_thread_id)
-                    .map_err(|e| format!("Plain-text retry also failed: {}", e))?;
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!(
-                        "Sent plain-text chunk {}/{} to chat {}: message_id={}",
-                        i + 1,
-                        total,
-                        chat_id,
-                        id,
-                    ),
-                );
-                id
-            }
-            Err(e) => return Err(e.to_string()),
-        };
+    for chunk in &chunks {
+        let msg_id = send_chunk(chat_id, chunk, reply_to, message_thread_id)?;
 
         // Each subsequent chunk threads off the previous sent message.
         reply_to = Some(msg_id);
     }
 
     Ok(())
+}
+
+/// Send a single chunk, handling Markdown parse errors and too-long retries.
+///
+/// On `ParseEntities`, retries without Markdown formatting.
+/// On `TooLong`, halves the chunk and sends each half recursively (up to 3 levels deep).
+fn send_chunk(
+    chat_id: i64,
+    text: &str,
+    reply_to: Option<i64>,
+    message_thread_id: Option<i64>,
+) -> Result<i64, String> {
+    send_chunk_inner(chat_id, text, reply_to, message_thread_id, 0)
+}
+
+fn send_chunk_inner(
+    chat_id: i64,
+    text: &str,
+    reply_to: Option<i64>,
+    message_thread_id: Option<i64>,
+    depth: u8,
+) -> Result<i64, String> {
+    let result = send_message(chat_id, text, reply_to, Some("Markdown"), message_thread_id);
+
+    match result {
+        Ok(id) => Ok(id),
+        Err(SendError::ParseEntities(detail)) => {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("Markdown parse failed ({}), retrying as plain text", detail),
+            );
+            send_message(chat_id, text, reply_to, None, message_thread_id)
+                .map_err(|e| format!("Plain-text retry also failed: {}", e))
+        }
+        Err(SendError::TooLong(_)) if depth < 3 => {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!(
+                    "Chunk too long ({} chars), splitting in half (depth {})",
+                    text.chars().count(),
+                    depth + 1
+                ),
+            );
+            // Find a midpoint at a natural boundary.
+            let mid_char = text.chars().count() / 2;
+            // safety: mid_byte comes from char_indices(), always a char boundary.
+            let mid_byte = text
+                .char_indices()
+                .nth(mid_char)
+                .map(|(i, _)| i)
+                .unwrap_or(text.len());
+            let split_at = text[..mid_byte] // safety: mid_byte from char_indices()
+                .rfind("\n\n")
+                .or_else(|| text[..mid_byte].rfind('\n')) // safety: char boundary
+                .or_else(|| text[..mid_byte].rfind(' ')) // safety: char boundary
+                .unwrap_or(mid_byte);
+            let split_at = if split_at == 0 { mid_byte } else { split_at };
+
+            let first = text[..split_at].trim_end(); // safety: split_at from rfind (char boundary)
+            let second = text[split_at..].trim_start(); // safety: same
+
+            let first_id =
+                send_chunk_inner(chat_id, first, reply_to, message_thread_id, depth + 1)?;
+
+            if !second.is_empty() {
+                send_chunk_inner(
+                    chat_id,
+                    second,
+                    Some(first_id),
+                    message_thread_id,
+                    depth + 1,
+                )?;
+            }
+
+            Ok(first_id)
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Extract the base MIME type, stripping any parameters after `;`.
