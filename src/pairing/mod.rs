@@ -11,3 +11,11 @@ mod store;
 
 pub use code::PairingCodeChallenge;
 pub use store::PairingStore;
+
+/// Canonical channel identifier used for pairing persistence and cache keys.
+///
+/// Channel names are internal ASCII-ish identifiers (`telegram`, `slack`,
+/// etc.), so lowercasing keeps storage, cache, and lookup semantics aligned.
+pub(crate) fn normalize_channel_name(channel: &str) -> String {
+    channel.to_ascii_lowercase()
+}

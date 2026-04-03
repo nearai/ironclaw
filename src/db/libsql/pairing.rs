@@ -14,13 +14,14 @@ impl ChannelPairingStore for LibSqlBackend {
         channel: &str,
         external_id: &str,
     ) -> Result<Option<Identity>, DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT ci.owner_id, u.role
                  FROM channel_identities ci
                  JOIN users u ON u.id = ci.owner_id
-                 WHERE LOWER(ci.channel) = LOWER(?1) AND ci.external_id = ?2
+                 WHERE ci.channel = ?1 AND ci.external_id = ?2
                    AND u.status = 'active'
                  LIMIT 1",
                 params![channel, external_id],
@@ -57,6 +58,7 @@ impl ChannelPairingStore for LibSqlBackend {
         external_id: &str,
         meta: Option<serde_json::Value>,
     ) -> Result<PairingRequestRecord, DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
         let conn = self.connect().await?;
 
         // BEGIN IMMEDIATE acquires a write lock upfront, preventing concurrent upserts
@@ -70,11 +72,11 @@ impl ChannelPairingStore for LibSqlBackend {
                 .query(
                     "SELECT id, channel, external_id, code, created_at, expires_at
                      FROM pairing_requests
-                     WHERE LOWER(channel) = LOWER(?1) AND external_id = ?2
+                     WHERE channel = ?1 AND external_id = ?2
                        AND approved_at IS NULL
                        AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                      ORDER BY created_at DESC LIMIT 1",
-                    params![channel, external_id],
+                    params![channel.as_str(), external_id],
                 )
                 .await
                 .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -121,7 +123,7 @@ impl ChannelPairingStore for LibSqlBackend {
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                         params![
                             id.as_str(),
-                            channel,
+                            channel.as_str(),
                             external_id,
                             code.as_str(),
                             opt_text(meta_str.as_deref()),
@@ -180,6 +182,7 @@ impl ChannelPairingStore for LibSqlBackend {
         code: &str,
         owner_id: &str,
     ) -> Result<(), DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
         let conn = self.connect().await?;
 
         // BEGIN IMMEDIATE acquires a write lock upfront, preventing concurrent approvals
@@ -193,7 +196,7 @@ impl ChannelPairingStore for LibSqlBackend {
                 .query(
                     "SELECT id, channel, external_id FROM pairing_requests
                      WHERE UPPER(code) = UPPER(?1)
-                       AND LOWER(channel) = LOWER(?2)
+                       AND channel = ?2
                        AND approved_at IS NULL
                        AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                      LIMIT 1",
@@ -267,12 +270,13 @@ impl ChannelPairingStore for LibSqlBackend {
         &self,
         channel: &str,
     ) -> Result<Vec<PairingRequestRecord>, DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, channel, external_id, code, created_at, expires_at
                  FROM pairing_requests
-                 WHERE LOWER(channel) = LOWER(?1) AND approved_at IS NULL
+                 WHERE channel = ?1 AND approved_at IS NULL
                    AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                  ORDER BY created_at ASC",
                 params![channel],
@@ -314,9 +318,10 @@ impl ChannelPairingStore for LibSqlBackend {
         channel: &str,
         external_id: &str,
     ) -> Result<(), DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
         let conn = self.connect().await?;
         conn.execute(
-            "DELETE FROM channel_identities WHERE LOWER(channel) = LOWER(?1) AND external_id = ?2",
+            "DELETE FROM channel_identities WHERE channel = ?1 AND external_id = ?2",
             params![channel, external_id],
         )
         .await
@@ -573,5 +578,51 @@ mod tests {
             err.is_err(),
             "Approving an already-approved code should fail"
         );
+    }
+
+    #[tokio::test]
+    async fn test_pairing_channel_names_are_canonicalized() {
+        let (db, _dir) = setup_db_with_user("alice").await;
+
+        let req = db
+            .upsert_pairing_request("TeleGram", "user_case", None)
+            .await
+            .unwrap();
+        assert_eq!(req.channel, "telegram");
+        assert!(req.created);
+
+        let req_again = db
+            .upsert_pairing_request("telegram", "user_case", None)
+            .await
+            .unwrap();
+        assert_eq!(req_again.code, req.code);
+        assert!(!req_again.created);
+
+        let pending = db.list_pending_pairings("TELEGRAM").await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].channel, "telegram");
+
+        db.approve_pairing("TeLeGrAm", &req.code, "alice")
+            .await
+            .unwrap();
+
+        let identity = db
+            .resolve_channel_identity("TELEGRAM", "user_case")
+            .await
+            .unwrap()
+            .expect("identity should resolve");
+        assert_eq!(identity.owner_id.as_str(), "alice");
+
+        let conn = db.connect().await.unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT channel FROM channel_identities WHERE external_id = ?1",
+                libsql::params!["user_case"],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().expect("channel identity row");
+        let stored_channel: String = row.get(0).unwrap();
+        assert_eq!(stored_channel, "telegram");
     }
 }

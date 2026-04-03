@@ -1086,6 +1086,7 @@ impl ChannelPairingStore for PgBackend {
         external_id: &str,
     ) -> Result<Option<crate::ownership::Identity>, DatabaseError> {
         use crate::ownership::{Identity, OwnerId, UserRole};
+        let channel = crate::pairing::normalize_channel_name(channel);
         let client = self
             .pool()
             .get()
@@ -1096,7 +1097,7 @@ impl ChannelPairingStore for PgBackend {
                 "SELECT ci.owner_id, u.role
                  FROM channel_identities ci
                  JOIN users u ON u.id = ci.owner_id
-                 WHERE LOWER(ci.channel) = LOWER($1) AND ci.external_id = $2
+                 WHERE ci.channel = $1 AND ci.external_id = $2
                    AND u.status = 'active'",
                 &[&channel, &external_id],
             )
@@ -1121,6 +1122,7 @@ impl ChannelPairingStore for PgBackend {
         external_id: &str,
         meta: Option<serde_json::Value>,
     ) -> Result<PairingRequestRecord, DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
         let mut client = self
             .pool()
             .get()
@@ -1131,12 +1133,29 @@ impl ChannelPairingStore for PgBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
+        // Serialize upserts for the same normalized sender key so PostgreSQL
+        // preserves the single-live-code guarantee that libSQL gets from
+        // BEGIN IMMEDIATE.
+        let lock_key = format!(
+            "{}:{}:{}:{}",
+            channel.len(),
+            channel,
+            external_id.len(),
+            external_id
+        );
+        tx.query(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&lock_key],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
         // Return existing valid pending request if present
         let existing = tx
             .query_opt(
                 "SELECT id, channel, external_id, code, created_at, expires_at
                  FROM pairing_requests
-                 WHERE LOWER(channel) = LOWER($1) AND external_id = $2
+                 WHERE channel = $1 AND external_id = $2
                    AND approved_at IS NULL AND expires_at > NOW()
                  ORDER BY created_at DESC LIMIT 1",
                 &[&channel, &external_id],
@@ -1211,6 +1230,7 @@ impl ChannelPairingStore for PgBackend {
         code: &str,
         owner_id: &str,
     ) -> Result<(), DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
         let mut client = self
             .pool()
             .get()
@@ -1225,7 +1245,7 @@ impl ChannelPairingStore for PgBackend {
             .query_opt(
                 "SELECT id, channel, external_id FROM pairing_requests
                  WHERE UPPER(code) = UPPER($1)
-                   AND LOWER(channel) = LOWER($2)
+                   AND channel = $2
                    AND approved_at IS NULL
                    AND expires_at > NOW()
                  FOR UPDATE",
@@ -1268,6 +1288,7 @@ impl ChannelPairingStore for PgBackend {
         &self,
         channel: &str,
     ) -> Result<Vec<PairingRequestRecord>, DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
         let client = self
             .pool()
             .get()
@@ -1277,7 +1298,7 @@ impl ChannelPairingStore for PgBackend {
             .query(
                 "SELECT id, channel, external_id, code, created_at, expires_at
                  FROM pairing_requests
-                 WHERE LOWER(channel) = LOWER($1) AND approved_at IS NULL AND expires_at > NOW()
+                 WHERE channel = $1 AND approved_at IS NULL AND expires_at > NOW()
                  ORDER BY created_at ASC",
                 &[&channel],
             )
@@ -1303,6 +1324,7 @@ impl ChannelPairingStore for PgBackend {
         channel: &str,
         external_id: &str,
     ) -> Result<(), DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
         let client = self
             .pool()
             .get()
@@ -1310,7 +1332,7 @@ impl ChannelPairingStore for PgBackend {
             .map_err(|e| DatabaseError::Pool(e.to_string()))?;
         client
             .execute(
-                "DELETE FROM channel_identities WHERE LOWER(channel) = LOWER($1) AND external_id = $2",
+                "DELETE FROM channel_identities WHERE channel = $1 AND external_id = $2",
                 &[&channel, &external_id],
             )
             .await

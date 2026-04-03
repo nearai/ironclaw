@@ -652,7 +652,7 @@ CREATE INDEX IF NOT EXISTS idx_doc_versions_lookup
 CREATE TABLE IF NOT EXISTS channel_identities (
     id          TEXT    NOT NULL PRIMARY KEY,
     owner_id    TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    channel     TEXT    NOT NULL,
+    channel     TEXT    NOT NULL CHECK (channel = lower(channel)),
     external_id TEXT    NOT NULL,
     created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE (channel, external_id)
@@ -662,7 +662,7 @@ CREATE TABLE IF NOT EXISTS channel_identities (
 
 CREATE TABLE IF NOT EXISTS pairing_requests (
     id          TEXT    NOT NULL PRIMARY KEY,
-    channel     TEXT    NOT NULL,
+    channel     TEXT    NOT NULL CHECK (channel = lower(channel)),
     external_id TEXT    NOT NULL,
     code        TEXT    NOT NULL UNIQUE,
     owner_id    TEXT    REFERENCES users(id) ON DELETE CASCADE,
@@ -929,7 +929,7 @@ ALTER TABLE dynamic_tools ADD COLUMN scope TEXT NOT NULL DEFAULT 'user';
 CREATE TABLE IF NOT EXISTS channel_identities (
     id          TEXT    NOT NULL PRIMARY KEY,
     owner_id    TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    channel     TEXT    NOT NULL,
+    channel     TEXT    NOT NULL CHECK (channel = lower(channel)),
     external_id TEXT    NOT NULL,
     created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE (channel, external_id)
@@ -945,7 +945,7 @@ CREATE TABLE IF NOT EXISTS channel_identities (
         r#"
 CREATE TABLE IF NOT EXISTS pairing_requests (
     id          TEXT    NOT NULL PRIMARY KEY,
-    channel     TEXT    NOT NULL,
+    channel     TEXT    NOT NULL CHECK (channel = lower(channel)),
     external_id TEXT    NOT NULL,
     code        TEXT    NOT NULL UNIQUE,
     owner_id    TEXT    REFERENCES users(id) ON DELETE CASCADE,

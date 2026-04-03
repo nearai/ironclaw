@@ -2,7 +2,7 @@
 -- A pending request has owner_id = NULL until approved.
 CREATE TABLE pairing_requests (
     id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    channel     TEXT        NOT NULL,
+    channel     TEXT        NOT NULL CHECK (channel = LOWER(channel)),
     external_id TEXT        NOT NULL,
     code        TEXT        NOT NULL UNIQUE,
     owner_id    TEXT        REFERENCES users(id) ON DELETE CASCADE,

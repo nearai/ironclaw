@@ -200,4 +200,36 @@ mod tests {
                 .is_some()
         );
     }
+
+    #[tokio::test]
+    async fn test_pairing_store_normalizes_channel_keys_for_cache_and_db() {
+        let (db, _dir) = setup_db_with_user("owner_case").await;
+        let store = make_store(Arc::clone(&db));
+        let owner_id = OwnerId::from("owner_case");
+
+        let req = store
+            .upsert_request("TeleGram", "user_case", None)
+            .await
+            .unwrap();
+        assert_eq!(req.channel, "telegram");
+
+        store
+            .approve("telegram", &req.code, &owner_id)
+            .await
+            .unwrap();
+
+        let first = store
+            .resolve_identity("TELEGRAM", "user_case")
+            .await
+            .unwrap()
+            .expect("identity should resolve");
+        let second = store
+            .resolve_identity("telegram", "user_case")
+            .await
+            .unwrap()
+            .expect("identity should resolve on normalized cache key");
+
+        assert_eq!(first.owner_id.as_str(), "owner_case");
+        assert_eq!(second.owner_id.as_str(), "owner_case");
+    }
 }
