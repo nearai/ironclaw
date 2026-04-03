@@ -165,22 +165,23 @@ impl McpServerConfig {
             });
         }
 
-        // Allowlist: alphanumeric, dash, underscore.
+        // Allowlist: lowercase alphanumeric, dash, underscore.
         // Rejects shell metacharacters (;|&`$), path separators (/\),
         // dots (LLM providers require tool names match ^[a-zA-Z0-9_-]+$
-        // and server names are used as tool name prefixes), null bytes,
+        // and server names are used as tool name prefixes), uppercase
+        // (canonicalize_extension_name() only accepts lowercase), null bytes,
         // spaces, and other dangerous characters that could cause injection
         // when names are interpolated into secret keys, tool name prefixes,
         // or provider tags.
         if !self
             .name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
         {
             return Err(ConfigError::InvalidConfig {
                 reason: format!(
                     "Server name '{}' contains invalid characters \
-                     (only alphanumeric, dash, underscore are allowed)",
+                     (only lowercase alphanumeric, dash, underscore are allowed)",
                     self.name
                 ),
             });
@@ -1132,6 +1133,83 @@ mod tests {
 
         config.oauth = Some(OAuthConfig::new("client-123"));
         assert!(!config.requires_auth());
+    }
+
+    #[test]
+    fn test_server_name_valid_characters_accepted() {
+        // Alphanumeric, dashes, underscores, dots are all valid
+        for name in ["notion", "my-server", "my_server", "server.local", "MCP-1"] {
+            let config = McpServerConfig::new(name, "https://mcp.example.com");
+            assert!(
+                config.validate().is_ok(),
+                "Name '{}' should be accepted",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_server_name_shell_metacharacters_rejected() {
+        let dangerous_names = [
+            "server; rm -rf /",
+            "server$(whoami)",
+            "server`id`",
+            "server|cat /etc/passwd",
+            "server&bg",
+            "server>out",
+            "server<in",
+            "name with spaces",
+        ];
+        for name in dangerous_names {
+            let config = McpServerConfig::new(name, "https://mcp.example.com");
+            assert!(
+                config.validate().is_err(),
+                "Name '{}' should be rejected",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_server_name_path_separators_rejected() {
+        for name in ["../etc/passwd", "server/name", "server\\name"] {
+            let config = McpServerConfig::new(name, "https://mcp.example.com");
+            assert!(
+                config.validate().is_err(),
+                "Name '{}' should be rejected",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_server_name_null_byte_rejected() {
+        let config = McpServerConfig::new("server\0name", "https://mcp.example.com");
+        assert!(config.validate().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_load_rejects_corrupted_server_name() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-servers.json");
+
+        let corrupted = serde_json::json!({
+            "servers": [{
+                "name": "bad;rm -rf /",
+                "url": "https://mcp.example.com",
+                "enabled": true,
+                "headers": {}
+            }]
+        });
+        tokio::fs::write(&path, corrupted.to_string())
+            .await
+            .unwrap();
+
+        let result = load_mcp_servers_from(&path).await;
+        assert!(
+            result.is_err(),
+            "Load should reject server with dangerous name"
+        );
     }
 
     #[test]
