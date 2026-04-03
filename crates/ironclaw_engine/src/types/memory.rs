@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::types::project::ProjectId;
 use crate::types::thread::ThreadId;
 
-use super::default_user_id;
+use super::{OwnerId, default_user_id};
 
 /// Strongly-typed document identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -98,5 +98,13 @@ impl MemoryDoc {
     pub fn with_tags(mut self, tags: Vec<String>) -> Self {
         self.tags = tags;
         self
+    }
+
+    pub fn owner_id(&self) -> OwnerId<'_> {
+        OwnerId::from_user_id(&self.user_id)
+    }
+
+    pub fn is_owned_by(&self, user_id: &str) -> bool {
+        self.owner_id().matches_user(user_id)
     }
 }

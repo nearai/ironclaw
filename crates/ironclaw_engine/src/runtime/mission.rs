@@ -17,7 +17,37 @@ use crate::types::error::EngineError;
 use crate::types::memory::MemoryDoc;
 use crate::types::mission::{Mission, MissionCadence, MissionId, MissionStatus};
 use crate::types::project::ProjectId;
+use crate::types::shared_owner_id;
 use crate::types::thread::{ThreadConfig, ThreadId, ThreadType};
+
+/// Notification emitted when a mission thread completes.
+///
+/// The bridge subscribes to these and routes the response text to
+/// the mission's `notify_channels` via `ChannelManager::broadcast()`.
+#[derive(Debug, Clone)]
+pub struct MissionNotification {
+    pub mission_id: MissionId,
+    pub mission_name: String,
+    pub thread_id: ThreadId,
+    pub user_id: String,
+    /// Channels to notify (from `Mission.notify_channels`).
+    pub notify_channels: Vec<String>,
+    /// The thread's response text (None if failed/no output).
+    pub response: Option<String>,
+    /// True if the thread failed.
+    pub is_error: bool,
+}
+
+/// Optional updates to apply to a mission via [`MissionManager::update_mission`].
+#[derive(Debug, Default)]
+pub struct MissionUpdate {
+    pub name: Option<String>,
+    pub goal: Option<String>,
+    pub cadence: Option<MissionCadence>,
+    pub notify_channels: Option<Vec<String>>,
+    pub max_threads_per_day: Option<u32>,
+    pub success_criteria: Option<String>,
+}
 
 /// Manages mission lifecycle and thread spawning.
 pub struct MissionManager {
@@ -25,15 +55,26 @@ pub struct MissionManager {
     thread_manager: Arc<ThreadManager>,
     /// Active missions indexed by ID for quick lookup.
     active: RwLock<Vec<MissionId>>,
+    /// Broadcast channel for mission outcome notifications.
+    notification_tx: tokio::sync::broadcast::Sender<MissionNotification>,
 }
 
 impl MissionManager {
     pub fn new(store: Arc<dyn Store>, thread_manager: Arc<ThreadManager>) -> Self {
+        let (notification_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
             store,
             thread_manager,
             active: RwLock::new(Vec::new()),
+            notification_tx,
         }
+    }
+
+    /// Subscribe to mission outcome notifications.
+    ///
+    /// The bridge uses this to route mission results to channels.
+    pub fn subscribe_notifications(&self) -> tokio::sync::broadcast::Receiver<MissionNotification> {
+        self.notification_tx.subscribe()
     }
 
     /// Populate the active mission index from persisted mission state.
@@ -60,8 +101,10 @@ impl MissionManager {
         name: impl Into<String>,
         goal: impl Into<String>,
         cadence: MissionCadence,
+        notify_channels: Vec<String>,
     ) -> Result<MissionId, EngineError> {
-        let mission = Mission::new(project_id, user_id, name, goal, cadence);
+        let mut mission = Mission::new(project_id, user_id, name, goal, cadence);
+        mission.notify_channels = notify_channels;
         let id = mission.id;
         self.store.save_mission(&mission).await?;
         self.active.write().await.push(id);
@@ -69,14 +112,62 @@ impl MissionManager {
         Ok(id)
     }
 
+    /// Update mutable fields on a mission. Only non-None fields are applied.
+    pub async fn update_mission(
+        &self,
+        id: MissionId,
+        user_id: &str,
+        updates: MissionUpdate,
+    ) -> Result<(), EngineError> {
+        let mut mission = self
+            .store
+            .load_mission(id)
+            .await?
+            .ok_or_else(|| EngineError::Store {
+                reason: format!("mission {id} not found"),
+            })?;
+
+        if !mission.owner_id().is_shared() && !mission.is_owned_by(user_id) {
+            return Err(EngineError::AccessDenied {
+                user_id: user_id.to_string(),
+                entity: format!("mission {id}"),
+            });
+        }
+
+        if let Some(name) = updates.name {
+            mission.name = name;
+        }
+        if let Some(goal) = updates.goal {
+            mission.goal = goal;
+        }
+        if let Some(cadence) = updates.cadence {
+            mission.cadence = cadence;
+        }
+        if let Some(channels) = updates.notify_channels {
+            mission.notify_channels = channels;
+        }
+        if let Some(max) = updates.max_threads_per_day {
+            mission.max_threads_per_day = max;
+        }
+        if let Some(criteria) = updates.success_criteria {
+            mission.success_criteria = Some(criteria);
+        }
+
+        mission.updated_at = chrono::Utc::now();
+        self.store.save_mission(&mission).await?;
+        debug!(mission_id = %id, "mission updated");
+        Ok(())
+    }
+
     /// Pause an active mission. No new threads will be spawned.
     ///
-    /// For system missions (`user_id="system"`), the caller (web handler) must
+    /// For shared missions, the caller (web handler) must
     /// verify admin role before calling this. The engine only checks ownership.
     pub async fn pause_mission(&self, id: MissionId, user_id: &str) -> Result<(), EngineError> {
-        // Validate ownership. System missions require admin role (checked by caller).
+        // Validate ownership. Shared missions require admin role (checked by caller).
         if let Some(mission) = self.store.load_mission(id).await?
-            && mission.user_id != user_id
+            && !mission.is_owned_by(user_id)
+            && !mission.owner_id().is_shared()
         {
             return Err(EngineError::AccessDenied {
                 user_id: user_id.to_string(),
@@ -93,12 +184,13 @@ impl MissionManager {
 
     /// Resume a paused mission.
     ///
-    /// For system missions (`user_id="system"`), the caller (web handler) must
+    /// For shared missions, the caller (web handler) must
     /// verify admin role before calling this. The engine only checks ownership.
     pub async fn resume_mission(&self, id: MissionId, user_id: &str) -> Result<(), EngineError> {
-        // Validate ownership. System missions require admin role (checked by caller).
+        // Validate ownership. Shared missions require admin role (checked by caller).
         if let Some(mission) = self.store.load_mission(id).await?
-            && mission.user_id != user_id
+            && !mission.is_owned_by(user_id)
+            && !mission.owner_id().is_shared()
         {
             return Err(EngineError::AccessDenied {
                 user_id: user_id.to_string(),
@@ -147,9 +239,9 @@ impl MissionManager {
         };
 
         // Tenant isolation: verify the requesting user owns this mission.
-        // System missions (user_id="system") can be fired by any user — the spawned
+        // Shared missions can be fired by any user — the spawned
         // thread inherits the requesting user's identity, keeping artifacts user-scoped.
-        if mission.user_id != "system" && mission.user_id != user_id {
+        if !mission.owner_id().is_shared() && !mission.is_owned_by(user_id) {
             return Err(EngineError::AccessDenied {
                 user_id: user_id.to_string(),
                 entity: format!("mission {id}"),
@@ -227,7 +319,7 @@ impl MissionManager {
                 }
 
                 self.thread_manager
-                    .resume_thread(thread_id, user_id.to_string(), None, None)
+                    .resume_thread(thread_id, user_id.to_string(), None, None, None)
                     .await?;
                 self.spawn_mission_outcome_watcher(mission_id, thread_id);
                 resumed.push(thread_id);
@@ -258,7 +350,7 @@ impl MissionManager {
     }
 
     /// List all missions in a project for a given user.
-    /// List missions visible to a user (own + system shared).
+    /// List missions visible to a user (own + shared).
     pub async fn list_missions(
         &self,
         project_id: ProjectId,
@@ -295,8 +387,8 @@ impl MissionManager {
             };
 
             // Only fire missions owned by this user (per-user learning missions)
-            // or system-wide shared missions.
-            if mission.user_id != user_id && mission.user_id != "system" {
+            // or globally shared missions.
+            if !mission.is_owned_by(user_id) && !mission.owner_id().is_shared() {
                 continue;
             }
 
@@ -587,7 +679,7 @@ impl MissionManager {
         self.active.write().await.push(id);
 
         // Seed the fix pattern database if it doesn't exist
-        let docs = self.store.list_memory_docs(project_id, "system").await?;
+        let docs = self.store.list_shared_memory_docs(project_id).await?;
         let has_patterns = docs.iter().any(|d| {
             d.title == FIX_PATTERN_DB_TITLE && d.tags.contains(&FIX_PATTERN_DB_TAG.to_string())
         });
@@ -595,7 +687,7 @@ impl MissionManager {
             use crate::types::memory::{DocType, MemoryDoc};
             let pattern_doc = MemoryDoc::new(
                 project_id,
-                "system",
+                shared_owner_id(),
                 DocType::Note,
                 FIX_PATTERN_DB_TITLE,
                 SEED_FIX_PATTERNS,
@@ -689,7 +781,7 @@ impl MissionManager {
         };
         use crate::types::memory::{DocType, MemoryDoc};
 
-        let docs = self.store.list_memory_docs(project_id, "system").await?;
+        let docs = self.store.list_shared_memory_docs(project_id).await?;
         let existing_v0 = docs.iter().find(|d| {
             d.title == ORCHESTRATOR_TITLE
                 && d.tags.contains(&ORCHESTRATOR_TAG.to_string())
@@ -715,7 +807,7 @@ impl MissionManager {
         // Create v0 doc
         let mut doc = MemoryDoc::new(
             project_id,
-            "system",
+            shared_owner_id(),
             DocType::Note,
             ORCHESTRATOR_TITLE,
             DEFAULT_ORCHESTRATOR,
@@ -807,11 +899,18 @@ impl MissionManager {
     fn spawn_mission_outcome_watcher(&self, mission_id: MissionId, thread_id: ThreadId) {
         let tm = Arc::clone(&self.thread_manager);
         let store = Arc::clone(&self.store);
+        let notification_tx = self.notification_tx.clone();
         tokio::spawn(async move {
             match tm.join_thread(thread_id).await {
                 Ok(outcome) => {
-                    if let Err(e) =
-                        process_mission_outcome(&store, mission_id, thread_id, &outcome).await
+                    if let Err(e) = process_mission_outcome_and_notify(
+                        &store,
+                        mission_id,
+                        thread_id,
+                        &outcome,
+                        &notification_tx,
+                    )
+                    .await
                     {
                         debug!(mission_id = %mission_id, "failed to process outcome: {e}");
                     }
@@ -908,16 +1007,33 @@ When done, call FINAL() with your response. Include:\n\
 /// Extracts next_focus from the FINAL() response and updates the mission.
 /// For self-improvement missions (metadata contains `"self_improvement": true`),
 /// also processes prompt overlay additions and fix pattern updates.
+#[cfg(test)]
 async fn process_mission_outcome(
     store: &Arc<dyn Store>,
     mission_id: MissionId,
-    _thread_id: ThreadId,
+    thread_id: ThreadId,
     outcome: &ThreadOutcome,
+) -> Result<(), EngineError> {
+    let (notification_tx, _) = tokio::sync::broadcast::channel(1);
+    process_mission_outcome_and_notify(store, mission_id, thread_id, outcome, &notification_tx)
+        .await
+}
+
+async fn process_mission_outcome_and_notify(
+    store: &Arc<dyn Store>,
+    mission_id: MissionId,
+    thread_id: ThreadId,
+    outcome: &ThreadOutcome,
+    notification_tx: &tokio::sync::broadcast::Sender<MissionNotification>,
 ) -> Result<(), EngineError> {
     let mut mission = match store.load_mission(mission_id).await? {
         Some(m) => m,
         None => return Ok(()),
     };
+
+    // Build notification fields while processing the outcome.
+    let mut notify_response: Option<String> = None;
+    let mut is_error = false;
 
     match outcome {
         ThreadOutcome::Completed {
@@ -944,9 +1060,9 @@ async fn process_mission_outcome(
                 }
             }
 
-            // Record approach
-            let accomplishment: String = text.chars().take(200).collect();
-            mission.approach_history.push(accomplishment);
+            // Record approach (full response — LLM output is never truncated)
+            mission.approach_history.push(text.clone());
+            notify_response = Some(text.clone());
 
             // If this is a self-improvement mission, process structured output
             if is_self_improvement_mission(&mission)
@@ -961,13 +1077,32 @@ async fn process_mission_outcome(
         ThreadOutcome::Completed { response: None } => {}
         ThreadOutcome::Failed { error } => {
             mission.approach_history.push(format!("FAILED: {error}"));
+            notify_response = Some(format!("Mission failed: {error}"));
+            is_error = true;
         }
         ThreadOutcome::MaxIterations => {
             mission
                 .approach_history
                 .push("Hit max iterations without completing".into());
+            notify_response = Some("Mission thread hit max iterations without completing".into());
+            is_error = true;
         }
         _ => {}
+    }
+
+    // Emit notification if there are channels to notify.
+    if !mission.notify_channels.is_empty() && notify_response.is_some() {
+        let notification = MissionNotification {
+            mission_id,
+            mission_name: mission.name.clone(),
+            thread_id,
+            user_id: mission.user_id.clone(),
+            notify_channels: mission.notify_channels.clone(),
+            response: notify_response,
+            is_error,
+        };
+        // Best-effort: ignore send errors (no subscribers = no problem).
+        let _ = notification_tx.send(notification);
     }
 
     mission.updated_at = chrono::Utc::now();
@@ -1016,10 +1151,22 @@ async fn process_self_improvement_output(
 
     let project_id = mission.project_id;
 
+    // Check if self-modification is allowed before applying prompt/orchestrator changes
+    let allow_self_modify = std::env::var("ORCHESTRATOR_SELF_MODIFY")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
     // Process prompt additions
     if let Some(additions) = json_val.get("prompt_additions").and_then(|v| v.as_array())
         && !additions.is_empty()
     {
+        if !allow_self_modify {
+            debug!(
+                "self-improvement: skipping prompt additions — ORCHESTRATOR_SELF_MODIFY is disabled"
+            );
+            return Ok(());
+        }
+
         let new_rules: Vec<String> = additions
             .iter()
             .filter_map(|v| v.as_str().map(String::from))
@@ -1027,7 +1174,7 @@ async fn process_self_improvement_output(
 
         if !new_rules.is_empty() {
             // Load or create the prompt overlay doc
-            let docs = store.list_memory_docs(project_id, "system").await?;
+            let docs = store.list_shared_memory_docs(project_id).await?;
             let existing = docs.iter().find(|d| {
                 d.title == PREAMBLE_OVERLAY_TITLE
                     && d.tags.contains(&PROMPT_OVERLAY_TAG.to_string())
@@ -1038,7 +1185,7 @@ async fn process_self_improvement_output(
             } else {
                 MemoryDoc::new(
                     project_id,
-                    "system",
+                    shared_owner_id(),
                     DocType::Note,
                     PREAMBLE_OVERLAY_TITLE,
                     "",
@@ -1067,7 +1214,7 @@ async fn process_self_improvement_output(
     if let Some(patterns) = json_val.get("fix_patterns").and_then(|v| v.as_array())
         && !patterns.is_empty()
     {
-        let docs = store.list_memory_docs(project_id, "system").await?;
+        let docs = store.list_shared_memory_docs(project_id).await?;
         let existing = docs.iter().find(|d| {
             d.title == FIX_PATTERN_DB_TITLE && d.tags.contains(&FIX_PATTERN_DB_TAG.to_string())
         });
@@ -1077,7 +1224,7 @@ async fn process_self_improvement_output(
         } else {
             MemoryDoc::new(
                 project_id,
-                "system",
+                shared_owner_id(),
                 DocType::Note,
                 FIX_PATTERN_DB_TITLE,
                 SEED_FIX_PATTERNS,
@@ -1456,6 +1603,7 @@ mod tests {
                 "test mission",
                 "do the thing",
                 MissionCadence::Manual,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -1482,6 +1630,7 @@ mod tests {
                 "pausable",
                 "goal",
                 MissionCadence::Manual,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -1510,6 +1659,7 @@ mod tests {
                 "completable",
                 "goal",
                 MissionCadence::Manual,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -1538,6 +1688,7 @@ mod tests {
                 "fireable",
                 "build something",
                 MissionCadence::Manual,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -1574,6 +1725,7 @@ mod tests {
                 "terminal",
                 "goal",
                 MissionCadence::Manual,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -1605,6 +1757,7 @@ mod tests {
                     expression: "* * * * *".into(),
                     timezone: None,
                 },
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -1665,6 +1818,7 @@ mod tests {
                 "Tech News",
                 "Deliver daily tech news briefing",
                 MissionCadence::Manual,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -1696,6 +1850,7 @@ mod tests {
                 "Test Coverage",
                 "Increase test coverage to 80%",
                 MissionCadence::Manual,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -1731,6 +1886,7 @@ mod tests {
                 "Coverage Mission",
                 "Get to 80% coverage",
                 MissionCadence::Manual,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -1844,6 +2000,7 @@ mod tests {
                     path: "github".into(),
                     secret: None,
                 },
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -1885,6 +2042,7 @@ mod tests {
                 source: "engine".into(),
                 event_type: "thread_completed_with_issues".into(),
             },
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -1917,6 +2075,7 @@ mod tests {
                 source: "github".into(),
                 event_type: "push".into(),
             },
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -1940,6 +2099,7 @@ mod tests {
             "manual",
             "goal",
             MissionCadence::Manual,
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -1952,6 +2112,7 @@ mod tests {
                 expression: "* * * * *".into(),
                 timezone: None,
             },
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -1982,6 +2143,9 @@ mod tests {
         let id = mission.id;
         store.save_mission(&mission).await.unwrap();
 
+        // Enable self-modification for this test so prompt additions are applied
+        unsafe { std::env::set_var("ORCHESTRATOR_SELF_MODIFY", "true") };
+
         let response = r#"{"prompt_additions": ["9. Never call web_fetch — use http() instead."], "fix_patterns": [], "level": 1}"#;
         let outcome = ThreadOutcome::Completed {
             response: Some(response.into()),
@@ -1989,6 +2153,8 @@ mod tests {
         process_mission_outcome(&store, id, ThreadId::new(), &outcome)
             .await
             .unwrap();
+
+        unsafe { std::env::remove_var("ORCHESTRATOR_SELF_MODIFY") };
 
         // Verify prompt overlay was saved
         let docs = store.list_memory_docs(project_id, "system").await.unwrap();
@@ -2122,6 +2288,7 @@ mod tests {
                 "budget test",
                 "goal",
                 MissionCadence::Manual,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -2201,6 +2368,7 @@ mod tests {
                 "alice-task",
                 "goal",
                 MissionCadence::Manual,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -2213,6 +2381,7 @@ mod tests {
                 "bob-task",
                 "goal",
                 MissionCadence::Manual,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -2299,6 +2468,7 @@ mod tests {
                 "shared-monitoring",
                 "monitor uptime",
                 MissionCadence::Manual,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -2311,6 +2481,7 @@ mod tests {
                 "alice-task",
                 "do stuff",
                 MissionCadence::Manual,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -2350,6 +2521,7 @@ mod tests {
                 "shared-mission",
                 "shared goal",
                 MissionCadence::Manual,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -2386,6 +2558,7 @@ mod tests {
                 "alice-only",
                 "private goal",
                 MissionCadence::Manual,
+                Vec::new(),
             )
             .await
             .unwrap();

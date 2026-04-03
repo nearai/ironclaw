@@ -95,7 +95,7 @@ impl Tool for PlanUpdateTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -140,7 +140,7 @@ impl Tool for PlanUpdateTool {
                 status: status.to_string(),
                 steps: steps.clone(),
                 mission_id: mission_id.clone(),
-                thread_id: None,
+                thread_id: ctx.conversation_id.map(|id| id.to_string()),
             });
         }
 

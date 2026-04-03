@@ -91,6 +91,10 @@ Three event-driven missions fire automatically after thread completion:
 
 Created by `MissionManager::ensure_learning_missions()` at project bootstrap.
 
+## Data Retention: Never Delete LLM Output
+
+Thread messages, steps, and events are **never deleted** from the database. This data (context fed to the model, reasoning, tool calls, results) is the most valuable information in the system. The `Store` implementation uses in-memory HashMaps as a cache backed by the database (via Workspace). "Cleanup" of terminal threads means evicting from in-memory caches to bound RAM — the database rows always stay. `load_thread()`, `load_steps()`, and `load_events()` must fall back to the database on a cache miss.
+
 ## External Trait Boundaries
 
 The engine defines three traits that the host crate implements:

@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::default_user_id;
+use super::{OwnerId, default_user_id};
 
 /// Strongly-typed project identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -55,5 +55,13 @@ impl Project {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    pub fn owner_id(&self) -> OwnerId<'_> {
+        OwnerId::from_user_id(&self.user_id)
+    }
+
+    pub fn is_owned_by(&self, user_id: &str) -> bool {
+        self.owner_id().matches_user(user_id)
     }
 }

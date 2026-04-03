@@ -184,6 +184,16 @@ pub enum EventKind {
     ApprovalRequested {
         action_name: String,
         call_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parameters: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_always: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gate_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        params_summary: Option<String>,
     },
     ApprovalReceived {
         call_id: String,

@@ -12,6 +12,7 @@ use crate::types::mission::{Mission, MissionId, MissionStatus};
 use crate::types::project::{Project, ProjectId};
 use crate::types::step::Step;
 use crate::types::thread::{Thread, ThreadId, ThreadState};
+use crate::types::{is_shared_owner, shared_owner_candidates};
 
 /// Persistence abstraction for the engine.
 #[async_trait::async_trait]
@@ -46,8 +47,14 @@ pub trait Store: Send + Sync {
     async fn save_project(&self, project: &Project) -> Result<(), EngineError>;
     async fn load_project(&self, id: ProjectId) -> Result<Option<Project>, EngineError>;
     async fn list_projects(&self, user_id: &str) -> Result<Vec<Project>, EngineError> {
-        let _ = user_id;
-        Ok(Vec::new())
+        Err(EngineError::Store {
+            reason: format!("Store::list_projects not implemented for user '{user_id}'"),
+        })
+    }
+    async fn list_all_projects(&self) -> Result<Vec<Project>, EngineError> {
+        Err(EngineError::Store {
+            reason: "Store::list_all_projects not implemented".into(),
+        })
     }
 
     // ── Conversation operations ─────────────────────────────
@@ -56,22 +63,28 @@ pub trait Store: Send + Sync {
         &self,
         conversation: &ConversationSurface,
     ) -> Result<(), EngineError> {
-        let _ = conversation;
-        Ok(())
+        Err(EngineError::Store {
+            reason: format!(
+                "Store::save_conversation not implemented for conversation '{}'",
+                conversation.id
+            ),
+        })
     }
     async fn load_conversation(
         &self,
         id: ConversationId,
     ) -> Result<Option<ConversationSurface>, EngineError> {
-        let _ = id;
-        Ok(None)
+        Err(EngineError::Store {
+            reason: format!("Store::load_conversation not implemented for '{id}'"),
+        })
     }
     async fn list_conversations(
         &self,
         user_id: &str,
     ) -> Result<Vec<ConversationSurface>, EngineError> {
-        let _ = user_id;
-        Ok(Vec::new())
+        Err(EngineError::Store {
+            reason: format!("Store::list_conversations not implemented for user '{user_id}'"),
+        })
     }
 
     // ── Memory doc operations ───────────────────────────────
@@ -84,10 +97,10 @@ pub trait Store: Send + Sync {
         user_id: &str,
     ) -> Result<Vec<MemoryDoc>, EngineError>;
 
-    /// List memory docs visible to a user: their own docs + shared "system" docs.
+    /// List memory docs visible to a user: their own docs + shared docs.
     ///
     /// This is the "shared space" pattern: admins can install skills and
-    /// knowledge under `user_id="system"`, and they're visible to all users
+    /// knowledge under the shared owner id, and they're visible to all users
     /// alongside their personal docs. Used for skill listing, context
     /// retrieval, and any place where shared knowledge should be accessible.
     async fn list_memory_docs_with_shared(
@@ -95,12 +108,24 @@ pub trait Store: Send + Sync {
         project_id: ProjectId,
         user_id: &str,
     ) -> Result<Vec<MemoryDoc>, EngineError> {
-        if user_id == "system" {
-            return self.list_memory_docs(project_id, "system").await;
+        if is_shared_owner(user_id) {
+            return self.list_shared_memory_docs(project_id).await;
         }
         let mut docs = self.list_memory_docs(project_id, user_id).await?;
-        let system_docs = self.list_memory_docs(project_id, "system").await?;
-        docs.extend(system_docs);
+        docs.extend(self.list_shared_memory_docs(project_id).await?);
+        Ok(docs)
+    }
+
+    async fn list_shared_memory_docs(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<Vec<MemoryDoc>, EngineError> {
+        let mut docs = Vec::new();
+        for owner_id in shared_owner_candidates() {
+            docs.extend(self.list_memory_docs(project_id, owner_id).await?);
+        }
+        docs.sort_by_key(|doc| doc.id.0);
+        docs.dedup_by_key(|doc| doc.id);
         Ok(docs)
     }
 
@@ -128,22 +153,34 @@ pub trait Store: Send + Sync {
         status: MissionStatus,
     ) -> Result<(), EngineError>;
 
-    /// List missions visible to a user: their own + shared "system" missions.
+    /// List missions visible to a user: their own + shared missions.
     ///
-    /// System learning missions (self-improvement, skill-extraction, etc.) are
-    /// created under `user_id="system"` and should be visible/manageable by all
+    /// Shared learning missions (self-improvement, skill-extraction, etc.) are
+    /// created under the shared owner id and should be visible/manageable by all
     /// users through the API.
     async fn list_missions_with_shared(
         &self,
         project_id: ProjectId,
         user_id: &str,
     ) -> Result<Vec<Mission>, EngineError> {
-        if user_id == "system" {
-            return self.list_missions(project_id, "system").await;
+        if is_shared_owner(user_id) {
+            return self.list_shared_missions(project_id).await;
         }
         let mut missions = self.list_missions(project_id, user_id).await?;
-        let system = self.list_missions(project_id, "system").await?;
-        missions.extend(system);
+        missions.extend(self.list_shared_missions(project_id).await?);
+        Ok(missions)
+    }
+
+    async fn list_shared_missions(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<Vec<Mission>, EngineError> {
+        let mut missions = Vec::new();
+        for owner_id in shared_owner_candidates() {
+            missions.extend(self.list_missions(project_id, owner_id).await?);
+        }
+        missions.sort_by_key(|mission| mission.id.0);
+        missions.dedup_by_key(|mission| mission.id);
         Ok(missions)
     }
 
@@ -152,14 +189,16 @@ pub trait Store: Send + Sync {
     /// List all threads in a project regardless of user.
     /// Used by: recovery, background thread resume at startup.
     async fn list_all_threads(&self, project_id: ProjectId) -> Result<Vec<Thread>, EngineError> {
-        let _ = project_id;
-        Ok(Vec::new())
+        Err(EngineError::Store {
+            reason: format!("Store::list_all_threads not implemented for project '{project_id}'"),
+        })
     }
 
     /// List all missions in a project regardless of user.
     /// Used by: cron ticker, event listener, bootstrap.
     async fn list_all_missions(&self, project_id: ProjectId) -> Result<Vec<Mission>, EngineError> {
-        let _ = project_id;
-        Ok(Vec::new())
+        Err(EngineError::Store {
+            reason: format!("Store::list_all_missions not implemented for project '{project_id}'"),
+        })
     }
 }

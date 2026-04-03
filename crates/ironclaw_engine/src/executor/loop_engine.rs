@@ -194,13 +194,16 @@ impl ExecutionLoop {
             self.thread.transition_to(ThreadState::Running, None)?;
         }
 
-        // Pre-fetch system memory docs once — used by both prompt overlay and
+        // Pre-fetch shared memory docs once — used by both prompt overlay and
         // orchestrator loading, avoiding a duplicate Store query.
         let system_docs = if let Some(store) = self.store.as_ref() {
-            store
-                .list_memory_docs(self.thread.project_id, "system")
-                .await
-                .unwrap_or_default()
+            match store.list_shared_memory_docs(self.thread.project_id).await {
+                Ok(docs) => docs,
+                Err(e) => {
+                    debug!("failed to load shared docs for orchestrator: {e}");
+                    Vec::new()
+                }
+            }
         } else {
             Vec::new()
         };
@@ -238,9 +241,17 @@ impl ExecutionLoop {
         self.persist_runtime_state(None, &mut persisted_event_count)
             .await?;
 
-        // Load versioned Python orchestrator using pre-fetched docs
+        // Load versioned Python orchestrator using pre-fetched docs.
+        // Self-modification is disabled by default — only the compiled-in v0
+        // runs unless explicitly opted in via ORCHESTRATOR_SELF_MODIFY=true.
+        let allow_self_modify = std::env::var("ORCHESTRATOR_SELF_MODIFY")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
         let (orchestrator_code, orchestrator_version) =
-            crate::executor::orchestrator::load_orchestrator_from_docs(&system_docs);
+            crate::executor::orchestrator::load_orchestrator_from_docs(
+                &system_docs,
+                allow_self_modify,
+            );
 
         debug!(
             thread_id = %self.thread.id,
@@ -284,26 +295,6 @@ impl ExecutionLoop {
                     .await;
                 }
                 let _ = &orch_result.tokens_used;
-
-                // Safety net: if the orchestrator returned NeedApproval or
-                // NeedAuthentication but didn't transition to Waiting, do it
-                // now so resume_thread works.
-                if matches!(
-                    orch_result.outcome,
-                    ThreadOutcome::NeedApproval { .. } | ThreadOutcome::NeedAuthentication { .. }
-                ) && self.thread.state != ThreadState::Waiting
-                {
-                    debug!(
-                        thread_id = %self.thread.id,
-                        state = ?self.thread.state,
-                        outcome = ?std::mem::discriminant(&orch_result.outcome),
-                        "orchestrator returned pause outcome without transitioning to Waiting"
-                    );
-                    let _ = self.thread.transition_to(
-                        ThreadState::Waiting,
-                        Some("waiting for credentials".into()),
-                    );
-                }
 
                 self.clear_runtime_checkpoint();
                 self.persist_runtime_state(None, &mut persisted_event_count)
@@ -420,7 +411,7 @@ mod tests {
     use crate::runtime::messaging::ThreadSignal;
     use crate::traits::effect::ThreadExecutionContext;
     use crate::traits::llm::{LlmCallConfig, LlmOutput};
-    use crate::types::capability::{ActionDef, CapabilityLease, EffectType};
+    use crate::types::capability::{ActionDef, CapabilityLease, EffectType, GrantedActions};
     use crate::types::project::ProjectId;
     use crate::types::step::LlmResponse;
     use crate::types::step::{ActionResult, TokenUsage};
@@ -576,7 +567,10 @@ mod tests {
         let policy = Arc::new(PolicyEngine::new());
 
         // Grant a default lease
-        leases.grant(tid, "test_cap", vec![], None, None).await;
+        leases
+            .grant(tid, "test_cap", GrantedActions::All, None, None)
+            .await
+            .unwrap();
 
         let (tx, rx) = crate::runtime::messaging::signal_channel(16);
 
@@ -1124,17 +1118,17 @@ mod tests {
 
         exec.run().await.unwrap();
 
-        // Find the ActionResult message on the thread
+        // Find the ActionResult message in the internal orchestrator transcript
         let action_results: Vec<_> = exec
             .thread
-            .messages
+            .internal_messages
             .iter()
             .filter(|m| m.role == crate::types::message::MessageRole::ActionResult)
             .collect();
 
         assert!(
             !action_results.is_empty(),
-            "thread should have at least one ActionResult message"
+            "thread should have at least one internal ActionResult message"
         );
 
         for msg in &action_results {
@@ -1187,7 +1181,7 @@ mod tests {
         }
     }
 
-    /// When a tool call fails (no lease), the ActionResult message and
+    /// When a tool call fails (no lease), the internal ActionResult message and
     /// ActionFailed event must still carry the original call_id.
     #[tokio::test]
     async fn failed_action_preserves_call_id_in_message_and_event() {
@@ -1230,7 +1224,10 @@ mod tests {
         let policy = Arc::new(PolicyEngine::new());
 
         // Grant a lease that does NOT cover "restricted_tool"
-        leases.grant(tid, "basic_cap", vec![], None, None).await;
+        leases
+            .grant(tid, "basic_cap", GrantedActions::All, None, None)
+            .await
+            .unwrap();
 
         let (_tx, rx) = crate::runtime::messaging::signal_channel(16);
         let mut exec =
@@ -1238,10 +1235,10 @@ mod tests {
 
         exec.run().await.unwrap();
 
-        // Check ActionResult messages
+        // Check internal ActionResult messages
         let action_results: Vec<_> = exec
             .thread
-            .messages
+            .internal_messages
             .iter()
             .filter(|m| m.role == crate::types::message::MessageRole::ActionResult)
             .collect();

@@ -12,7 +12,6 @@
 //! - `__execute_actions_parallel__` — execute multiple tool actions concurrently
 //! - `__check_signals__` — poll for stop/inject signals
 //! - `__emit_event__` — broadcast a ThreadEvent
-//! - `__add_message__` — append a message to the thread
 //! - `__save_checkpoint__` — persist thread state
 //! - `__transition_to__` — change thread state (validated)
 //! - `__retrieve_docs__` — query memory docs
@@ -40,8 +39,9 @@ use crate::types::error::EngineError;
 use crate::types::event::{EventKind, ThreadEvent, summarize_params};
 use crate::types::message::ThreadMessage;
 use crate::types::project::ProjectId;
+use crate::types::shared_owner_id;
 use crate::types::step::{StepId, TokenUsage};
-use crate::types::thread::Thread;
+use crate::types::thread::{Thread, ThreadState};
 
 use super::scripting::{execute_code, json_to_monty, monty_to_json, monty_to_string};
 
@@ -62,6 +62,28 @@ pub struct OrchestratorResult {
     pub tokens_used: TokenUsage,
 }
 
+/// Extract source_channel from thread metadata (set by ConversationManager).
+fn thread_source_channel(thread: &Thread) -> Option<String> {
+    thread
+        .metadata
+        .get("source_channel")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+fn normalize_pause_outcome(
+    thread: &mut Thread,
+    outcome: &ThreadOutcome,
+) -> Result<(), EngineError> {
+    if matches!(outcome, ThreadOutcome::GatePaused { .. }) && thread.state != ThreadState::Waiting {
+        thread.transition_to(
+            ThreadState::Waiting,
+            Some("waiting on external gate resolution".into()),
+        )?;
+    }
+    Ok(())
+}
+
 /// Resource limits for the orchestrator VM.
 fn orchestrator_limits() -> ResourceLimits {
     ResourceLimits::new()
@@ -78,18 +100,28 @@ const FAILURE_TRACKER_TITLE: &str = "orchestrator:failures";
 
 /// Load orchestrator code: runtime version from Store, or compiled-in default.
 ///
+/// When `allow_self_modify` is false, always uses the compiled-in default
+/// regardless of any runtime versions in the Store. This is the safe default
+/// for production — runtime orchestrator patching is opt-in.
+///
 /// Checks the failure tracker — if the latest version has >= 3 consecutive
 /// failures, falls back to the previous version (or compiled-in default).
 pub async fn load_orchestrator(
     store: Option<&Arc<dyn Store>>,
     project_id: ProjectId,
+    allow_self_modify: bool,
 ) -> (String, u64) {
+    if !allow_self_modify {
+        debug!("orchestrator self-modification disabled, using compiled-in default (v0)");
+        return (DEFAULT_ORCHESTRATOR.to_string(), 0);
+    }
+
     let Some(store) = store else {
         debug!("using compiled-in default orchestrator (v0, no store)");
         return (DEFAULT_ORCHESTRATOR.to_string(), 0);
     };
 
-    let docs = match store.list_memory_docs(project_id, "system").await {
+    let docs = match store.list_shared_memory_docs(project_id).await {
         Ok(d) => d,
         Err(_) => {
             debug!("using compiled-in default orchestrator (v0, store error)");
@@ -97,14 +129,24 @@ pub async fn load_orchestrator(
         }
     };
 
-    load_orchestrator_from_docs(&docs)
+    load_orchestrator_from_docs(&docs, allow_self_modify)
 }
 
 /// Load orchestrator from pre-fetched system memory docs.
 ///
 /// When the caller already has the `list_memory_docs` result, use this to
 /// avoid a duplicate Store query. Returns `(code, version)`.
-pub fn load_orchestrator_from_docs(docs: &[crate::types::memory::MemoryDoc]) -> (String, u64) {
+///
+/// Respects `allow_self_modify` — when false, always returns the compiled-in
+/// default. The caller in `loop_engine.rs` passes this from engine config.
+pub fn load_orchestrator_from_docs(
+    docs: &[crate::types::memory::MemoryDoc],
+    allow_self_modify: bool,
+) -> (String, u64) {
+    if !allow_self_modify {
+        return (DEFAULT_ORCHESTRATOR.to_string(), 0);
+    }
+
     // Find all orchestrator versions, sorted by version number descending
     let mut versions: Vec<_> = docs
         .iter()
@@ -172,7 +214,7 @@ pub async fn record_orchestrator_failure(
 ) {
     use crate::types::memory::{DocType, MemoryDoc};
 
-    let docs = match store.list_memory_docs(project_id, "system").await {
+    let docs = match store.list_shared_memory_docs(project_id).await {
         Ok(docs) => docs,
         Err(e) => {
             debug!("failed to list memory docs for failure tracker: {e}");
@@ -186,7 +228,7 @@ pub async fn record_orchestrator_failure(
     } else {
         MemoryDoc::new(
             project_id,
-            "system",
+            shared_owner_id(),
             DocType::Note,
             FAILURE_TRACKER_TITLE,
             "",
@@ -223,7 +265,7 @@ pub async fn record_orchestrator_failure(
 /// Reset the failure counter (called after successful execution).
 pub async fn reset_orchestrator_failures(store: &Arc<dyn Store>, project_id: ProjectId) {
     let docs = store
-        .list_memory_docs(project_id, "system")
+        .list_shared_memory_docs(project_id)
         .await
         .unwrap_or_default();
     let existing = docs.iter().find(|d| d.title == FAILURE_TRACKER_TITLE);
@@ -321,8 +363,12 @@ pub async fn execute_orchestrator(
                 } else {
                     monty_to_json(&obj)
                 };
+                sync_runtime_state(thread, result.get("state"));
+                let outcome = parse_outcome(&result);
+                sync_visible_outcome(thread, &outcome);
+                normalize_pause_outcome(thread, &outcome)?;
                 return Ok(OrchestratorResult {
-                    outcome: parse_outcome(&result),
+                    outcome,
                     tokens_used: total_tokens,
                 });
             }
@@ -381,13 +427,10 @@ pub async fn execute_orchestrator(
                     }
 
                     // __check_signals__()
-                    "__check_signals__" => handle_check_signals(signal_rx),
+                    "__check_signals__" => handle_check_signals(signal_rx, thread),
 
                     // __emit_event__(kind, **data)
                     "__emit_event__" => handle_emit_event(args, kwargs, thread, event_tx),
-
-                    // __add_message__(role, content)
-                    "__add_message__" => handle_add_message(args, kwargs, thread),
 
                     // __save_checkpoint__(state, counters)
                     "__save_checkpoint__" => handle_save_checkpoint(args, kwargs, thread),
@@ -485,11 +528,8 @@ pub async fn execute_orchestrator(
 /// Calls the LLM and returns the response as a dict:
 /// `{type: "text"|"code"|"actions", content/code/calls: ..., usage: {...}}`
 ///
-/// For `ActionCalls` responses, the assistant message with structured action_calls
-/// is added directly to the thread (not by Python) so the LLM backend can convert
-/// them to the provider-specific tool_calls format on the next call.
 async fn handle_llm_complete(
-    _args: &[MontyObject],
+    args: &[MontyObject],
     _kwargs: &[(MontyObject, MontyObject)],
     thread: &mut Thread,
     llm: &Arc<dyn LlmBackend>,
@@ -499,8 +539,13 @@ async fn handle_llm_complete(
 ) -> ExtFunctionResult {
     use crate::types::step::LlmResponse;
 
-    // Build messages from thread (the orchestrator's __add_message__ calls
-    // have already populated thread.messages)
+    let explicit_messages = args.first().map(monty_to_json).filter(|v| !v.is_null());
+    let explicit_config = args.get(2).map(monty_to_json).filter(|v| !v.is_null());
+    let messages = explicit_messages
+        .as_ref()
+        .and_then(json_to_thread_messages)
+        .unwrap_or_else(|| thread.messages.clone());
+
     let active_leases = leases.active_for_thread(thread.id).await;
     let actions = effects
         .available_actions(&active_leases)
@@ -508,21 +553,35 @@ async fn handle_llm_complete(
         .unwrap_or_default();
 
     let config = LlmCallConfig {
-        max_tokens: None,
-        temperature: None,
-        force_text: false,
+        max_tokens: explicit_config
+            .as_ref()
+            .and_then(|cfg| cfg.get("max_tokens"))
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok()),
+        temperature: explicit_config
+            .as_ref()
+            .and_then(|cfg| cfg.get("temperature"))
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32),
+        force_text: explicit_config
+            .as_ref()
+            .and_then(|cfg| cfg.get("force_text"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         depth: thread.config.depth,
         metadata: HashMap::new(),
     };
 
-    match llm.complete(&thread.messages, &actions, &config).await {
+    match llm.complete(&messages, &actions, &config).await {
         Ok(output) => {
             total_tokens.input_tokens += output.usage.input_tokens;
             total_tokens.output_tokens += output.usage.output_tokens;
+            total_tokens.cost_usd += output.usage.cost_usd;
 
             let usage = serde_json::json!({
                 "input_tokens": output.usage.input_tokens,
                 "output_tokens": output.usage.output_tokens,
+                "cost_usd": output.usage.cost_usd,
             });
 
             let result = match output.response {
@@ -533,15 +592,6 @@ async fn handle_llm_complete(
                     serde_json::json!({"type": "code", "code": code, "usage": usage})
                 }
                 LlmResponse::ActionCalls { calls, content } => {
-                    // Add the assistant message with structured action_calls so the
-                    // LLM backend sees proper tool_calls on the next round-trip.
-                    // Python must NOT call __add_message__("assistant_actions", ...) —
-                    // the message is already on the thread.
-                    thread.add_message(ThreadMessage::assistant_with_actions(
-                        content,
-                        calls.clone(),
-                    ));
-
                     let calls_json: Vec<serde_json::Value> = calls
                         .iter()
                         .map(|c| {
@@ -552,7 +602,12 @@ async fn handle_llm_complete(
                             })
                         })
                         .collect();
-                    serde_json::json!({"type": "actions", "calls": calls_json, "usage": usage})
+                    serde_json::json!({
+                        "type": "actions",
+                        "content": content,
+                        "calls": calls_json,
+                        "usage": usage
+                    })
                 }
             };
 
@@ -601,6 +656,8 @@ async fn handle_execute_code_step(
         project_id: thread.project_id,
         user_id: thread.user_id.clone(),
         step_id: StepId::new(),
+        current_call_id: None,
+        source_channel: thread_source_channel(thread),
     };
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
@@ -649,24 +706,17 @@ async fn handle_execute_code_step(
                 "action_results": action_results,
                 "final_answer": result.final_answer,
                 "had_error": result.had_error,
-                "need_approval": result.need_approval.as_ref().map(|na| {
+                "pending_gate": result.need_approval.as_ref().map(|na| {
                     match na {
-                        ThreadOutcome::NeedApproval { action_name, call_id, parameters } => {
-                            serde_json::json!({
-                                "action_name": action_name,
-                                "call_id": call_id,
-                                "parameters": parameters,
-                            })
-                        }
-                        ThreadOutcome::NeedAuthentication { credential_name, action_name, call_id, parameters } => {
-                            serde_json::json!({
-                                "need_authentication": true,
-                                "credential_name": credential_name,
-                                "action_name": action_name,
-                                "call_id": call_id,
-                                "parameters": parameters,
-                            })
-                        }
+                        ThreadOutcome::GatePaused { gate_name, action_name, call_id, parameters, resume_kind, resume_output } => serde_json::json!({
+                            "gate_paused": true,
+                            "gate_name": gate_name,
+                            "action_name": action_name,
+                            "call_id": call_id,
+                            "parameters": parameters,
+                            "resume_kind": serde_json::to_value(resume_kind).unwrap_or_default(),
+                            "resume_output": resume_output,
+                        }),
                         _ => serde_json::Value::Null,
                     }
                 }),
@@ -689,9 +739,9 @@ async fn handle_execute_code_step(
 /// 3. Lease consumption
 /// 4. Action execution via EffectExecutor
 /// 5. Event emission (ActionExecuted/ActionFailed)
-/// 6. Message addition (ActionResult with correct call_id)
 ///
-/// Python only needs to check the returned `need_approval` flag.
+/// Python owns the working transcript and decides how tool outputs are
+/// represented in internal message history.
 async fn handle_execute_action(
     args: &[MontyObject],
     kwargs: &[(MontyObject, MontyObject)],
@@ -724,26 +774,23 @@ async fn handle_execute_action(
         project_id: thread.project_id,
         user_id: thread.user_id.clone(),
         step_id: StepId::new(),
+        current_call_id: Some(call_id.clone()),
+        source_channel: thread_source_channel(thread),
     };
 
-    // Helper: emit event and add ActionResult message to thread
+    // Helper: emit event only. The orchestrator owns transcript recording.
     let emit_and_record = |thread: &mut Thread,
                            event_tx: Option<&tokio::sync::broadcast::Sender<ThreadEvent>>,
                            event_kind: EventKind,
-                           call_id: &str,
-                           action_name: &str,
-                           output: &serde_json::Value| {
+                           _call_id: &str,
+                           _action_name: &str,
+                           _output: &serde_json::Value| {
         let event = ThreadEvent::new(thread.id, event_kind);
         if let Some(tx) = event_tx {
             let _ = tx.send(event.clone());
         }
         thread.events.push(event);
         thread.updated_at = chrono::Utc::now();
-        thread.add_message(ThreadMessage::action_result(
-            call_id,
-            action_name,
-            output.to_string(),
-        ));
     };
 
     // 1. Find lease for this action
@@ -806,21 +853,33 @@ async fn handle_execute_action(
                 return ExtFunctionResult::Return(json_to_monty(&result));
             }
             crate::capability::policy::PolicyDecision::RequireApproval { .. } => {
-                let output = serde_json::json!({"status": "awaiting_approval"});
+                let output = serde_json::json!({"status": "gate_paused", "gate_name": "approval"});
                 emit_and_record(
                     thread,
                     event_tx,
                     EventKind::ApprovalRequested {
                         action_name: name.clone(),
                         call_id: call_id.clone(),
+                        parameters: Some(params.clone()),
+                        description: None,
+                        allow_always: None,
+                        gate_name: None,
+                        params_summary: summarize_params(&name, &params),
                     },
                     &call_id,
                     &name,
                     &output,
                 );
                 let result = serde_json::json!({
-                    "need_approval": true,
+                    "gate_paused": true,
+                    "gate_name": "approval",
                     "action_name": name,
+                    "call_id": call_id,
+                    "parameters": params,
+                    "resume_kind": serde_json::to_value(crate::gate::ResumeKind::Approval {
+                        allow_always: true,
+                    })
+                    .unwrap_or_default(),
                 });
                 return ExtFunctionResult::Return(json_to_monty(&result));
             }
@@ -862,47 +921,43 @@ async fn handle_execute_action(
             });
             ExtFunctionResult::Return(json_to_monty(&result))
         }
-        Err(EngineError::NeedApproval { .. }) => {
-            let output = serde_json::json!({"status": "awaiting_approval"});
+        Err(EngineError::GatePaused {
+            gate_name,
+            action_name: _,
+            call_id: _,
+            parameters,
+            resume_kind,
+            resume_output,
+        }) => {
+            let _ = leases.refund_use(lease.id).await;
+            let output = serde_json::json!({"status": "gate_paused", "gate_name": gate_name});
             emit_and_record(
                 thread,
                 event_tx,
                 EventKind::ApprovalRequested {
                     action_name: name.clone(),
                     call_id: call_id.clone(),
+                    parameters: Some((*parameters).clone()),
+                    description: None,
+                    allow_always: match resume_kind.as_ref() {
+                        crate::gate::ResumeKind::Approval { allow_always } => Some(*allow_always),
+                        _ => None,
+                    },
+                    gate_name: Some(gate_name.clone()),
+                    params_summary: summarize_params(&name, &parameters),
                 },
                 &call_id,
                 &name,
                 &output,
             );
             let result = serde_json::json!({
-                "need_approval": true,
+                "gate_paused": true,
+                "gate_name": gate_name,
                 "action_name": name,
-            });
-            ExtFunctionResult::Return(json_to_monty(&result))
-        }
-        Err(EngineError::NeedAuthentication {
-            credential_name, ..
-        }) => {
-            let output = serde_json::json!({"status": "authentication_required", "credential_name": credential_name});
-            emit_and_record(
-                thread,
-                event_tx,
-                EventKind::ActionFailed {
-                    step_id: exec_ctx.step_id,
-                    action_name: name.clone(),
-                    call_id: call_id.clone(),
-                    error: format!("authentication required for credential '{credential_name}'"),
-                    params_summary: ps,
-                },
-                &call_id,
-                &name,
-                &output,
-            );
-            let result = serde_json::json!({
-                "need_authentication": true,
-                "credential_name": credential_name,
-                "action_name": name,
+                "call_id": call_id,
+                "parameters": parameters,
+                "resume_kind": serde_json::to_value(&*resume_kind).unwrap_or_default(),
+                "resume_output": resume_output,
             });
             ExtFunctionResult::Return(json_to_monty(&result))
         }
@@ -937,11 +992,9 @@ async fn handle_execute_action(
 /// concurrently. Each call is a dict with `name`, `params`, and optionally `call_id`.
 ///
 /// Returns a list of result dicts (one per call, in order). Each result has the
-/// same shape as `__execute_action__` output, plus an optional `need_approval` or
-/// `need_authentication` flag.
+/// same shape as `__execute_action__` output, plus an optional gate pause payload.
 ///
-/// Events are emitted and ActionResult messages are added to the thread in
-/// original call order after all parallel executions complete.
+/// Events are emitted in original call order after all parallel executions complete.
 async fn handle_execute_actions_parallel(
     args: &[MontyObject],
     thread: &mut Thread,
@@ -1085,7 +1138,6 @@ async fn handle_execute_actions_parallel(
                                     let _ = tx.send(ev.clone());
                                 }
                                 thread.events.push(ev);
-                                // Don't add ActionResult message for earlier errors during approval interrupt
                                 results_json.push(result_json);
                             }
                             Some(PfOutcome::Runnable { .. }) | None => {
@@ -1094,12 +1146,16 @@ async fn handle_execute_actions_parallel(
                         }
                     }
                     // Add the approval entry
-                    let output = serde_json::json!({"status": "awaiting_approval"});
                     let ev = ThreadEvent::new(
                         thread.id,
                         EventKind::ApprovalRequested {
                             action_name: pc.name.clone(),
                             call_id: pc.call_id.clone(),
+                            parameters: Some(pc.params.clone()),
+                            description: None,
+                            allow_always: None,
+                            gate_name: None,
+                            params_summary: summarize_params(&pc.name, &pc.params),
                         },
                     );
                     if let Some(tx) = event_tx {
@@ -1107,15 +1163,17 @@ async fn handle_execute_actions_parallel(
                     }
                     thread.events.push(ev);
                     thread.updated_at = chrono::Utc::now();
-                    thread.add_message(ThreadMessage::action_result(
-                        &pc.call_id,
-                        &pc.name,
-                        output.to_string(),
-                    ));
 
                     results_json.push(serde_json::json!({
-                        "need_approval": true,
+                        "gate_paused": true,
+                        "gate_name": "approval",
                         "action_name": &pc.name,
+                        "call_id": &pc.call_id,
+                        "parameters": &pc.params,
+                        "resume_kind": serde_json::to_value(crate::gate::ResumeKind::Approval {
+                            allow_always: true,
+                        })
+                        .unwrap_or_default(),
                     }));
                     return ExtFunctionResult::Return(json_to_monty(&serde_json::json!(
                         results_json
@@ -1170,6 +1228,8 @@ async fn handle_execute_actions_parallel(
             project_id: thread.project_id,
             user_id: thread.user_id.clone(),
             step_id,
+            current_call_id: Some(pc.call_id.clone()),
+            source_channel: None,
         };
         let ps = summarize_params(&pc.name, &pc.params);
         let (result_json, event, output) = execute_single_action(
@@ -1182,6 +1242,9 @@ async fn handle_execute_actions_parallel(
             ps,
         )
         .await;
+        if interrupted_result_needs_refund(&result_json) {
+            let _ = leases.refund_use(lease.id).await;
+        }
         slot_results[idx] = Some(result_json);
         slot_events[idx] = Some(event);
         slot_outputs[idx] = Some(output);
@@ -1202,6 +1265,8 @@ async fn handle_execute_actions_parallel(
                 project_id: thread.project_id,
                 user_id: thread.user_id.clone(),
                 step_id,
+                current_call_id: Some(pc_call_id.clone()),
+                source_channel: None,
             };
             let ps = summarize_params(&pc_name, &pc_params);
 
@@ -1216,13 +1281,16 @@ async fn handle_execute_actions_parallel(
                     ps,
                 )
                 .await;
-                (idx, result_json, event, output)
+                (idx, lease.id, result_json, event, output)
             });
         }
 
         while let Some(join_result) = join_set.join_next().await {
             match join_result {
-                Ok((idx, result_json, event, output)) => {
+                Ok((idx, lease_id, result_json, event, output)) => {
+                    if interrupted_result_needs_refund(&result_json) {
+                        let _ = leases.refund_use(lease_id).await;
+                    }
                     slot_results[idx] = Some(result_json);
                     slot_events[idx] = Some(event);
                     slot_outputs[idx] = Some(output);
@@ -1234,14 +1302,14 @@ async fn handle_execute_actions_parallel(
         }
     }
 
-    // ── Phase 3: Emit events and add messages in order ──────────
+    // ── Phase 3: Emit events in order ───────────────────────────
 
     let mut results_json = Vec::with_capacity(parsed.len());
     for idx in 0..parsed.len() {
         let result_json = slot_results[idx].take().unwrap_or(
             serde_json::json!({"is_error": true, "output": {"error": "execution slot empty"}}),
         );
-        let output = slot_outputs[idx]
+        let _output = slot_outputs[idx]
             .take()
             .unwrap_or(serde_json::json!({"error": "no output"}));
 
@@ -1252,12 +1320,6 @@ async fn handle_execute_actions_parallel(
             }
             thread.events.push(ev);
         }
-
-        thread.add_message(ThreadMessage::action_result(
-            &parsed[idx].call_id,
-            &parsed[idx].name,
-            output.to_string(),
-        ));
 
         results_json.push(result_json.clone());
     }
@@ -1294,34 +1356,35 @@ async fn execute_single_action(
             });
             (result_json, event, r.output)
         }
-        Err(EngineError::NeedApproval { .. }) => {
-            let output = serde_json::json!({"status": "awaiting_approval"});
+        Err(EngineError::GatePaused {
+            gate_name,
+            action_name: _,
+            call_id: _,
+            parameters,
+            resume_kind,
+            resume_output,
+        }) => {
+            let output = serde_json::json!({"status": "gate_paused", "gate_name": &gate_name});
             let event = EventKind::ApprovalRequested {
                 action_name: name.to_string(),
                 call_id: call_id.to_string(),
+                parameters: Some((*parameters).clone()),
+                description: None,
+                allow_always: match resume_kind.as_ref() {
+                    crate::gate::ResumeKind::Approval { allow_always } => Some(*allow_always),
+                    _ => None,
+                },
+                gate_name: Some(gate_name.clone()),
+                params_summary: summarize_params(name, &parameters),
             };
             let result_json = serde_json::json!({
-                "need_approval": true,
+                "gate_paused": true,
+                "gate_name": gate_name,
                 "action_name": name,
-            });
-            (result_json, event, output)
-        }
-        Err(EngineError::NeedAuthentication {
-            credential_name, ..
-        }) => {
-            let output = serde_json::json!({"status": "authentication_required", "credential_name": &credential_name});
-            let error_msg = format!("authentication required for credential '{credential_name}'");
-            let event = EventKind::ActionFailed {
-                step_id: exec_ctx.step_id,
-                action_name: name.to_string(),
-                call_id: call_id.to_string(),
-                error: error_msg,
-                params_summary,
-            };
-            let result_json = serde_json::json!({
-                "need_authentication": true,
-                "credential_name": credential_name,
-                "action_name": name,
+                "call_id": call_id,
+                "parameters": parameters,
+                "resume_kind": serde_json::to_value(&*resume_kind).unwrap_or_default(),
+                "resume_output": resume_output,
             });
             (result_json, event, output)
         }
@@ -1343,13 +1406,18 @@ async fn execute_single_action(
     }
 }
 
+fn interrupted_result_needs_refund(result: &serde_json::Value) -> bool {
+    result.get("gate_paused").and_then(|v| v.as_bool()) == Some(true)
+}
+
 /// Handle `__check_signals__()`.
-fn handle_check_signals(signal_rx: &mut SignalReceiver) -> ExtFunctionResult {
+fn handle_check_signals(signal_rx: &mut SignalReceiver, thread: &mut Thread) -> ExtFunctionResult {
     match signal_rx.try_recv() {
         Ok(ThreadSignal::Stop) | Ok(ThreadSignal::Suspend) => {
             ExtFunctionResult::Return(MontyObject::String("stop".into()))
         }
         Ok(ThreadSignal::InjectMessage(msg)) => {
+            thread.add_message(msg.clone());
             let result = serde_json::json!({"inject": msg.content});
             ExtFunctionResult::Return(json_to_monty(&result))
         }
@@ -1440,42 +1508,6 @@ fn handle_emit_event(
     ExtFunctionResult::Return(MontyObject::None)
 }
 
-/// Handle `__add_message__(role, content)`.
-///
-/// ActionResult messages are NOT added here — they are handled by
-/// `__execute_action__` which is the single source of truth for
-/// action execution, event emission, and message recording.
-fn handle_add_message(
-    args: &[MontyObject],
-    _kwargs: &[(MontyObject, MontyObject)],
-    thread: &mut Thread,
-) -> ExtFunctionResult {
-    let role = args.first().map(monty_to_string).unwrap_or_default();
-    let content = args.get(1).map(monty_to_string).unwrap_or_default();
-
-    match role.as_str() {
-        "user" => thread.add_message(ThreadMessage::user(&content)),
-        "assistant" => thread.add_message(ThreadMessage::assistant(&content)),
-        "system" => thread.add_message(ThreadMessage::system(&content)),
-        "system_append" => {
-            // Append to existing system message (for doc injection)
-            if let Some(msg) = thread
-                .messages
-                .iter_mut()
-                .find(|m| m.role == crate::types::message::MessageRole::System)
-            {
-                msg.content.push_str("\n\n");
-                msg.content.push_str(&content);
-            }
-        }
-        _ => {
-            thread.add_message(ThreadMessage::user(&content));
-        }
-    }
-
-    ExtFunctionResult::Return(MontyObject::None)
-}
-
 /// Handle `__save_checkpoint__(state, counters)`.
 fn handle_save_checkpoint(
     args: &[MontyObject],
@@ -1490,6 +1522,8 @@ fn handle_save_checkpoint(
         .get(1)
         .map(monty_to_json)
         .unwrap_or(serde_json::json!({}));
+
+    sync_runtime_state(thread, Some(&state));
 
     if let Some(metadata) = thread.metadata.as_object_mut() {
         metadata.insert(
@@ -1737,14 +1771,22 @@ fn build_orchestrator_inputs(
         "config".into(),
     ];
 
-    // Build context (message history)
-    let context: Vec<serde_json::Value> = thread
-        .messages
+    // Build orchestrator bootstrap context. Prefer the internal execution
+    // transcript when present, otherwise fall back to the user-visible transcript.
+    let bootstrap_messages = if thread.internal_messages.is_empty() {
+        &thread.messages
+    } else {
+        &thread.internal_messages
+    };
+    let context: Vec<serde_json::Value> = bootstrap_messages
         .iter()
         .map(|m| {
             serde_json::json!({
                 "role": format!("{:?}", m.role),
                 "content": m.content,
+                "action_name": m.action_name,
+                "action_call_id": m.action_call_id,
+                "action_calls": m.action_calls,
             })
         })
         .collect();
@@ -1759,6 +1801,7 @@ fn build_orchestrator_inputs(
         "max_budget_usd": thread.config.max_budget_usd,
         "model_context_limit": thread.config.model_context_limit,
         "enable_compaction": thread.config.enable_compaction,
+        "compaction_threshold": thread.config.compaction_threshold,
         "depth": thread.config.depth,
         "max_depth": thread.config.max_depth,
         "step_count": thread.step_count,
@@ -1773,6 +1816,78 @@ fn build_orchestrator_inputs(
     ];
 
     (names, values)
+}
+
+fn json_to_thread_messages(value: &serde_json::Value) -> Option<Vec<ThreadMessage>> {
+    let arr = value.as_array()?;
+    let mut messages = Vec::with_capacity(arr.len());
+
+    for item in arr {
+        let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("User");
+        let content = item
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let action_calls = item
+            .get("action_calls")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+        let message = match role {
+            "System" | "system" => ThreadMessage::system(content),
+            "Assistant" | "assistant" => {
+                if let Some(calls) = action_calls {
+                    ThreadMessage::assistant_with_actions(Some(content.to_string()), calls)
+                } else {
+                    ThreadMessage::assistant(content)
+                }
+            }
+            "ActionResult" | "action_result" => ThreadMessage::action_result(
+                item.get("action_call_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default(),
+                item.get("action_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default(),
+                content,
+            ),
+            _ => ThreadMessage::user(content),
+        };
+        messages.push(message);
+    }
+
+    Some(messages)
+}
+
+fn sync_runtime_state(thread: &mut Thread, state: Option<&serde_json::Value>) {
+    let Some(state) = state else {
+        return;
+    };
+    if let Some(messages) = state
+        .get("working_messages")
+        .and_then(json_to_thread_messages)
+    {
+        thread.internal_messages = messages;
+        thread.updated_at = chrono::Utc::now();
+    }
+}
+
+fn sync_visible_outcome(thread: &mut Thread, outcome: &ThreadOutcome) {
+    if let ThreadOutcome::Completed {
+        response: Some(response),
+    } = outcome
+    {
+        let already_present = thread
+            .messages
+            .last()
+            .map(|msg| {
+                msg.role == crate::types::message::MessageRole::Assistant
+                    && msg.content == *response
+            })
+            .unwrap_or(false);
+        if !already_present {
+            thread.add_message(ThreadMessage::assistant(response));
+        }
+    }
 }
 
 /// Parse the orchestrator's return value into a ThreadOutcome.
@@ -1798,43 +1913,40 @@ fn parse_outcome(result: &serde_json::Value) -> ThreadOutcome {
                 .unwrap_or("unknown error")
                 .to_string(),
         },
-        "need_approval" => ThreadOutcome::NeedApproval {
-            action_name: result
-                .get("action_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            call_id: result
-                .get("call_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            parameters: result
-                .get("parameters")
+        "gate_paused" => {
+            let resume_kind_value = result
+                .get("resume_kind")
                 .cloned()
-                .unwrap_or(serde_json::json!({})),
-        },
-        "need_authentication" => ThreadOutcome::NeedAuthentication {
-            credential_name: result
-                .get("credential_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            action_name: result
-                .get("action_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            call_id: result
-                .get("call_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            parameters: result
-                .get("parameters")
-                .cloned()
-                .unwrap_or(serde_json::json!({})),
-        },
+                .unwrap_or(serde_json::json!({}));
+            let resume_kind = serde_json::from_value(resume_kind_value).unwrap_or(
+                crate::gate::ResumeKind::Approval {
+                    allow_always: false,
+                },
+            );
+            ThreadOutcome::GatePaused {
+                gate_name: result
+                    .get("gate_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                action_name: result
+                    .get("action_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                call_id: result
+                    .get("call_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                parameters: result
+                    .get("parameters")
+                    .cloned()
+                    .unwrap_or(serde_json::json!({})),
+                resume_kind,
+                resume_output: result.get("resume_output").cloned(),
+            }
+        }
         _ => ThreadOutcome::Completed { response: None },
     }
 }
@@ -2105,7 +2217,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_orchestrator_without_store_returns_default() {
-        let (code, version) = load_orchestrator(None, ProjectId::new()).await;
+        let (code, version) = load_orchestrator(None, ProjectId::new(), true).await;
         assert_eq!(version, 0);
         assert!(code.contains("run_loop"));
         assert!(code.contains("__llm_complete__"));
@@ -2125,7 +2237,8 @@ mod tests {
         doc.metadata = serde_json::json!({"version": 1});
 
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![doc]));
-        let (code, version) = load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id).await;
+        let (code, version) =
+            load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id, true).await;
         assert_eq!(version, 1);
         assert!(code.contains("custom_orchestrator_code"));
     }
@@ -2166,7 +2279,8 @@ mod tests {
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![
             doc_v1, doc_v3, doc_v2,
         ]));
-        let (code, version) = load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id).await;
+        let (code, version) =
+            load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id, true).await;
         assert_eq!(version, 3);
         assert!(code.contains("v3_code"));
     }
@@ -2210,7 +2324,8 @@ mod tests {
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![
             doc_v2, doc_v1, tracker,
         ]));
-        let (code, version) = load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id).await;
+        let (code, version) =
+            load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id, true).await;
 
         // Should skip v2 (too many failures) and load v1
         assert_eq!(version, 1);
@@ -2244,7 +2359,8 @@ mod tests {
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![
             doc_v1, tracker,
         ]));
-        let (code, version) = load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id).await;
+        let (code, version) =
+            load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id, true).await;
 
         // Should fall back to compiled-in default (v0)
         assert_eq!(version, 0);
@@ -2261,13 +2377,13 @@ mod tests {
         record_orchestrator_failure(&store, project_id, 2).await;
         record_orchestrator_failure(&store, project_id, 2).await;
 
-        let docs = store.list_memory_docs(project_id, "system").await.unwrap();
+        let docs = store.list_shared_memory_docs(project_id).await.unwrap();
         let count = load_failure_count(&docs);
         assert_eq!(count, 3);
 
         // Reset
         reset_orchestrator_failures(&store, project_id).await;
-        let docs = store.list_memory_docs(project_id, "system").await.unwrap();
+        let docs = store.list_shared_memory_docs(project_id).await.unwrap();
         let count = load_failure_count(&docs);
         assert_eq!(count, 0);
     }
@@ -2284,9 +2400,32 @@ mod tests {
         // Switch to version 2 — count should reset to 1
         record_orchestrator_failure(&store, project_id, 2).await;
 
-        let docs = store.list_memory_docs(project_id, "system").await.unwrap();
+        let docs = store.list_shared_memory_docs(project_id).await.unwrap();
         let count = load_failure_count(&docs);
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn normalize_pause_outcome_transitions_thread_to_waiting() {
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        let outcome = ThreadOutcome::GatePaused {
+            gate_name: "approval".into(),
+            action_name: "shell".into(),
+            call_id: "call-1".into(),
+            parameters: serde_json::json!({"cmd":"ls"}),
+            resume_kind: crate::gate::ResumeKind::Approval { allow_always: true },
+            resume_output: None,
+        };
+        normalize_pause_outcome(&mut thread, &outcome).unwrap();
+        assert_eq!(thread.state, ThreadState::Waiting);
     }
 
     #[test]
@@ -2304,16 +2443,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_outcome_need_approval() {
+    fn parse_outcome_gate_paused() {
         let result = serde_json::json!({
-            "outcome": "need_approval",
+            "outcome": "gate_paused",
+            "gate_name": "approval",
             "action_name": "shell",
             "call_id": "abc",
-            "parameters": {"cmd": "rm -rf /"}
+            "parameters": {"cmd": "rm -rf /"},
+            "resume_kind": {"Approval": {"allow_always": true}}
         });
         let outcome = parse_outcome(&result);
         assert!(
-            matches!(outcome, ThreadOutcome::NeedApproval { action_name, .. } if action_name == "shell")
+            matches!(outcome, ThreadOutcome::GatePaused { action_name, .. } if action_name == "shell")
         );
     }
 

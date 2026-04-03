@@ -69,7 +69,7 @@ pub async fn execute_action_calls(
     // the entire batch immediately. Denied/no-lease calls become error results.
 
     for (idx, call) in calls.iter().enumerate() {
-        // 1. Find the lease for this action
+        // 1. Find the lease for this action (read-only lookup for policy check)
         let lease = match leases
             .find_lease_for_action(thread.id, &call.action_name)
             .await
@@ -144,14 +144,25 @@ pub async fn execute_action_calls(
                     early_events.push(EventKind::ApprovalRequested {
                         action_name: call.action_name.clone(),
                         call_id: call.id.clone(),
+                        parameters: Some(call.parameters.clone()),
+                        description: None,
+                        allow_always: None,
+                        gate_name: None,
+                        params_summary: crate::types::event::summarize_params(
+                            &call.action_name,
+                            &call.parameters,
+                        ),
                     });
                     return Ok(ActionBatchResult {
                         results: early_results,
                         events: early_events,
-                        need_approval: Some(ThreadOutcome::NeedApproval {
+                        need_approval: Some(ThreadOutcome::GatePaused {
+                            gate_name: "approval".into(),
                             action_name: call.action_name.clone(),
                             call_id: call.id.clone(),
                             parameters: call.parameters.clone(),
+                            resume_kind: crate::gate::ResumeKind::Approval { allow_always: true },
+                            resume_output: None,
                         }),
                     });
                 }
@@ -159,8 +170,12 @@ pub async fn execute_action_calls(
             }
         }
 
-        // 3. Consume a lease use
-        leases.consume_use(lease.id).await?;
+        // 3. Atomically find + consume a lease use under a single write lock.
+        // This avoids the TOCTOU race where a concurrent call could exhaust
+        // the lease between our read-only find (step 1) and this consume.
+        let lease = leases
+            .find_and_consume(thread.id, &call.action_name)
+            .await?;
 
         preflight_results.push(PreflightOutcome::Runnable { index: idx, lease });
     }
@@ -193,10 +208,20 @@ pub async fn execute_action_calls(
     if runnable_indices.len() == 1 {
         let (idx, lease) = runnable_indices.into_iter().next().unwrap(); // safety: len()==1 checked above
         let call = &calls[idx];
+        let mut exec_ctx = context.clone();
+        exec_ctx.current_call_id = Some(call.id.clone());
         let exec_result = effects
-            .execute_action(&call.action_name, call.parameters.clone(), &lease, context)
+            .execute_action(
+                &call.action_name,
+                call.parameters.clone(),
+                &lease,
+                &exec_ctx,
+            )
             .await;
-        slot_results[idx] = Some(classify_exec_result(exec_result, call, context));
+        if interrupted_call_needs_refund(&exec_result) {
+            let _ = leases.refund_use(lease.id).await;
+        }
+        slot_results[idx] = Some(classify_exec_result(exec_result, call, &exec_ctx));
     } else if runnable_indices.len() > 1 {
         // Multiple calls: execute in parallel via JoinSet
         let mut join_set = tokio::task::JoinSet::new();
@@ -204,7 +229,8 @@ pub async fn execute_action_calls(
 
         for (idx, lease) in runnable_indices {
             let call = calls[idx].clone();
-            let ctx = context.clone();
+            let mut ctx = context.clone();
+            ctx.current_call_id = Some(call.id.clone());
             let effects = effects.clone();
             let lease = lease.clone();
 
@@ -212,14 +238,17 @@ pub async fn execute_action_calls(
                 let result = effects
                     .execute_action(&call.action_name, call.parameters.clone(), &lease, &ctx)
                     .await;
-                (idx, classify_exec_result(result, &call, &ctx))
+                (idx, lease.id, result, call, ctx)
             });
         }
 
         while let Some(join_result) = join_set.join_next().await {
             match join_result {
-                Ok((idx, classified)) => {
-                    slot_results[idx] = Some(classified);
+                Ok((idx, lease_id, result, call, ctx)) => {
+                    if interrupted_call_needs_refund(&result) {
+                        let _ = leases.refund_use(lease_id).await;
+                    }
+                    slot_results[idx] = Some(classify_exec_result(result, &call, &ctx));
                 }
                 Err(e) => {
                     // Task panicked — should not happen, but handle gracefully
@@ -237,24 +266,37 @@ pub async fn execute_action_calls(
 
     for (idx, slot) in slot_results.into_iter().enumerate() {
         if let Some((result, event)) = slot {
-            // Check for NeedAuthentication — record the first one as the
-            // batch interrupt but still collect all other results.
+            // Record the first gate pause as the batch interrupt but still
+            // collect all other results.
             if first_interrupt.is_none()
-                && let EventKind::ActionFailed { ref error, .. } = event
-                && error.starts_with("authentication required")
+                && let EventKind::ApprovalRequested {
+                    ref action_name,
+                    ref call_id,
+                    ..
+                } = event
+                && result.output.get("status").and_then(|v| v.as_str()) == Some("gate_paused")
             {
-                let call = &calls[idx];
-                // Extract credential name from the error message
-                let credential_name = error
-                    .strip_prefix("authentication required for credential '")
-                    .and_then(|s| s.strip_suffix('\''))
-                    .unwrap_or("")
+                let gate_name = result
+                    .output
+                    .get("gate")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
                     .to_string();
-                first_interrupt = Some(ThreadOutcome::NeedAuthentication {
-                    credential_name,
-                    action_name: call.action_name.clone(),
-                    call_id: call.id.clone(),
+                let call = &calls[idx];
+                first_interrupt = Some(ThreadOutcome::GatePaused {
+                    gate_name,
+                    action_name: action_name.clone(),
+                    call_id: call_id.clone(),
                     parameters: call.parameters.clone(),
+                    resume_kind: serde_json::from_value(
+                        result.output.get("resume_kind").cloned().unwrap_or_else(
+                            || serde_json::json!({"Approval":{"allow_always":false}}),
+                        ),
+                    )
+                    .unwrap_or(crate::gate::ResumeKind::Approval {
+                        allow_always: false,
+                    }),
+                    resume_output: result.output.get("resume_output").cloned(),
                 });
             }
             results.push(result);
@@ -290,26 +332,41 @@ fn classify_exec_result(
             };
             (action_result, event)
         }
-        Err(EngineError::NeedAuthentication {
-            credential_name,
+        Err(EngineError::GatePaused {
+            gate_name,
             action_name,
             call_id,
-            ..
+            parameters,
+            resume_kind,
+            resume_output,
         }) => {
-            let error_msg = format!("authentication required for credential '{credential_name}'");
+            let _error_msg = format!("gate paused: {gate_name}");
             let error_result = ActionResult {
                 call_id: call.id.clone(),
                 action_name: call.action_name.clone(),
-                output: serde_json::json!({"error": &error_msg}),
+                output: serde_json::json!({
+                    "status": "gate_paused",
+                    "gate": gate_name,
+                    "resume_kind": serde_json::to_value(&*resume_kind).unwrap_or_default(),
+                    "resume_output": resume_output.as_deref().cloned(),
+                }),
                 is_error: true,
                 duration: std::time::Duration::ZERO,
             };
-            let event = EventKind::ActionFailed {
-                step_id: context.step_id,
+            let event = EventKind::ApprovalRequested {
                 action_name,
                 call_id,
-                error: error_msg,
-                params_summary: None,
+                parameters: Some((*parameters).clone()),
+                description: None,
+                allow_always: match *resume_kind {
+                    crate::gate::ResumeKind::Approval { allow_always } => Some(allow_always),
+                    _ => None,
+                },
+                gate_name: Some(gate_name.clone()),
+                params_summary: crate::types::event::summarize_params(
+                    &call.action_name,
+                    &parameters,
+                ),
             };
             (error_result, event)
         }
@@ -333,11 +390,15 @@ fn classify_exec_result(
     }
 }
 
+fn interrupted_call_needs_refund(result: &Result<ActionResult, EngineError>) -> bool {
+    matches!(result, Err(EngineError::GatePaused { .. }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::traits::effect::ThreadExecutionContext;
-    use crate::types::capability::{ActionDef, CapabilityLease, EffectType};
+    use crate::types::capability::{ActionDef, CapabilityLease, EffectType, GrantedActions};
     use crate::types::project::ProjectId;
     use crate::types::step::StepId;
     use crate::types::thread::{Thread, ThreadConfig, ThreadType};
@@ -407,6 +468,8 @@ mod tests {
             project_id: thread.project_id,
             user_id: "test".into(),
             step_id: StepId::new(),
+            current_call_id: None,
+            source_channel: None,
         }
     }
 
@@ -435,7 +498,10 @@ mod tests {
         let policy = Arc::new(PolicyEngine::new());
         let ctx = make_exec_context(&thread);
 
-        leases.grant(thread.id, "search", vec![], None, None).await;
+        leases
+            .grant(thread.id, "search", GrantedActions::All, None, None)
+            .await
+            .unwrap();
 
         let calls = vec![ActionCall {
             id: "call_r2o5mqBgdNUlH8KzskncUGaX".into(),
@@ -489,7 +555,10 @@ mod tests {
         let policy = Arc::new(PolicyEngine::new());
         let ctx = make_exec_context(&thread);
 
-        leases.grant(thread.id, "exec", vec![], None, None).await;
+        leases
+            .grant(thread.id, "exec", GrantedActions::All, None, None)
+            .await
+            .unwrap();
 
         let calls = vec![ActionCall {
             id: "call_abc123def".into(),
@@ -584,7 +653,10 @@ mod tests {
         let policy = Arc::new(PolicyEngine::new());
         let ctx = make_exec_context(&thread);
 
-        leases.grant(thread.id, "cap", vec![], None, None).await;
+        leases
+            .grant(thread.id, "cap", GrantedActions::All, None, None)
+            .await
+            .unwrap();
 
         let calls = vec![
             ActionCall {
@@ -608,10 +680,10 @@ mod tests {
         assert_eq!(result.results[1].call_id, "id_bbbb");
     }
 
-    // ── NeedAuthentication tests ─────────────────────────────
+    // ── GatePaused(Authentication) tests ─────────────────────
 
     #[tokio::test]
-    async fn need_authentication_interrupts_batch() {
+    async fn authentication_gate_interrupts_batch() {
         let thread = Thread::new(
             "test",
             ThreadType::Foreground,
@@ -621,18 +693,27 @@ mod tests {
         );
         let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(
             vec![test_action("http")],
-            vec![Err(EngineError::NeedAuthentication {
-                credential_name: "github_token".into(),
+            vec![Err(EngineError::GatePaused {
+                gate_name: "authentication".into(),
                 action_name: "http".into(),
                 call_id: "call_auth_1".into(),
-                parameters: serde_json::json!({"url": "https://api.github.com/repos"}),
+                parameters: Box::new(serde_json::json!({"url": "https://api.github.com/repos"})),
+                resume_kind: Box::new(crate::gate::ResumeKind::Authentication {
+                    credential_name: "github_token".into(),
+                    instructions: "Provide your github_token token".into(),
+                    auth_url: None,
+                }),
+                resume_output: None,
             })],
         ));
         let leases = Arc::new(LeaseManager::new());
         let policy = Arc::new(PolicyEngine::new());
         let ctx = make_exec_context(&thread);
 
-        leases.grant(thread.id, "tools", vec![], None, None).await;
+        leases
+            .grant(thread.id, "tools", GrantedActions::All, None, None)
+            .await
+            .unwrap();
 
         let calls = vec![ActionCall {
             id: "call_auth_1".into(),
@@ -644,38 +725,47 @@ mod tests {
             .await
             .unwrap();
 
-        // Batch should be interrupted with NeedAuthentication outcome
+        // Batch should be interrupted with GatePaused(Authentication)
         assert!(
             result.need_approval.is_some(),
-            "NeedAuthentication should interrupt the batch"
+            "GatePaused(Authentication) should interrupt the batch"
         );
         match result.need_approval.unwrap() {
-            ThreadOutcome::NeedAuthentication {
-                credential_name,
+            ThreadOutcome::GatePaused {
+                gate_name,
                 action_name,
+                resume_kind,
                 ..
             } => {
-                assert_eq!(credential_name, "github_token");
+                assert_eq!(gate_name, "authentication");
                 assert_eq!(action_name, "http");
+                match resume_kind {
+                    crate::gate::ResumeKind::Authentication {
+                        credential_name, ..
+                    } => {
+                        assert_eq!(credential_name, "github_token");
+                    }
+                    other => panic!("expected auth resume kind, got {:?}", other),
+                }
             }
-            other => panic!("expected NeedAuthentication, got {:?}", other),
+            other => panic!("expected GatePaused, got {:?}", other),
         }
 
-        // ActionFailed event should be emitted
+        // Gate pause event should be emitted
         assert!(
             result
                 .events
                 .iter()
-                .any(|e| matches!(e, EventKind::ActionFailed { .. })),
-            "should emit ActionFailed event"
+                .any(|e| matches!(e, EventKind::ApprovalRequested { gate_name: Some(name), .. } if name == "authentication")),
+            "should emit gate pause event"
         );
     }
 
     #[tokio::test]
-    async fn need_authentication_flags_batch_with_parallel_results() {
+    async fn authentication_gate_flags_batch_with_parallel_results() {
         // Two calls: first needs auth, second succeeds.
         // With parallel execution, both run concurrently — the batch is flagged
-        // with NeedAuthentication but results from all calls are available.
+        // with GatePaused(Authentication) but results from all calls are available.
         let thread = Thread::new(
             "test",
             ThreadType::Foreground,
@@ -686,11 +776,17 @@ mod tests {
         let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(
             vec![test_action("http"), test_action("echo")],
             vec![
-                Err(EngineError::NeedAuthentication {
-                    credential_name: "api_key".into(),
+                Err(EngineError::GatePaused {
+                    gate_name: "authentication".into(),
                     action_name: "http".into(),
                     call_id: "call_1".into(),
-                    parameters: serde_json::json!({}),
+                    parameters: Box::new(serde_json::json!({})),
+                    resume_kind: Box::new(crate::gate::ResumeKind::Authentication {
+                        credential_name: "api_key".into(),
+                        instructions: "Provide your api_key token".into(),
+                        auth_url: None,
+                    }),
+                    resume_output: None,
                 }),
                 Ok(ActionResult {
                     call_id: String::new(),
@@ -705,7 +801,10 @@ mod tests {
         let policy = Arc::new(PolicyEngine::new());
         let ctx = make_exec_context(&thread);
 
-        leases.grant(thread.id, "tools", vec![], None, None).await;
+        leases
+            .grant(thread.id, "tools", GrantedActions::All, None, None)
+            .await
+            .unwrap();
 
         let calls = vec![
             ActionCall {
@@ -732,17 +831,29 @@ mod tests {
         // Second call succeeded
         assert_eq!(result.results[1].call_id, "call_2");
         assert!(!result.results[1].is_error);
-        // Batch is still flagged with NeedAuthentication
+        // Batch is still flagged with GatePaused(Authentication)
         assert!(result.need_approval.is_some());
         match result.need_approval.unwrap() {
-            ThreadOutcome::NeedAuthentication {
-                credential_name, ..
-            } => assert_eq!(credential_name, "api_key"),
-            other => panic!("expected NeedAuthentication, got {:?}", other),
+            ThreadOutcome::GatePaused {
+                gate_name,
+                resume_kind,
+                ..
+            } => {
+                assert_eq!(gate_name, "authentication");
+                match resume_kind {
+                    crate::gate::ResumeKind::Authentication {
+                        credential_name, ..
+                    } => {
+                        assert_eq!(credential_name, "api_key");
+                    }
+                    other => panic!("expected auth resume kind, got {:?}", other),
+                }
+            }
+            other => panic!("expected GatePaused, got {:?}", other),
         }
     }
 
-    /// Regular EngineError::Effect (not NeedAuthentication) should NOT interrupt —
+    /// Regular EngineError::Effect (not GatePaused) should NOT interrupt —
     /// it becomes a normal error result and execution continues.
     #[tokio::test]
     async fn regular_effect_error_does_not_interrupt() {
@@ -772,7 +883,10 @@ mod tests {
         let policy = Arc::new(PolicyEngine::new());
         let ctx = make_exec_context(&thread);
 
-        leases.grant(thread.id, "tools", vec![], None, None).await;
+        leases
+            .grant(thread.id, "tools", GrantedActions::All, None, None)
+            .await
+            .unwrap();
 
         let calls = vec![
             ActionCall {
@@ -828,7 +942,10 @@ mod tests {
         let policy = Arc::new(PolicyEngine::new());
         let ctx = make_exec_context(&thread);
 
-        leases.grant(thread.id, "cap", vec![], None, None).await;
+        leases
+            .grant(thread.id, "cap", GrantedActions::All, None, None)
+            .await
+            .unwrap();
 
         let calls = vec![ActionCall {
             id: "aB3xK9mZq".into(), // Mistral-compatible 9-char ID
@@ -871,7 +988,10 @@ mod tests {
         let policy = Arc::new(PolicyEngine::new());
         let ctx = make_exec_context(&thread);
 
-        leases.grant(thread.id, "cap", vec![], None, None).await;
+        leases
+            .grant(thread.id, "cap", GrantedActions::All, None, None)
+            .await
+            .unwrap();
 
         // Mistral format: exactly 9 alphanumeric chars
         let mistral_id = "xK3mR9bZq";

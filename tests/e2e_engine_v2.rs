@@ -12,10 +12,18 @@ mod support;
 
 #[cfg(feature = "libsql")]
 mod engine_v2_tests {
+    use std::sync::OnceLock;
     use std::time::Duration;
+
+    use tokio::sync::Mutex;
 
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
+
+    fn engine_v2_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     /// Check that a tool name appears in the started list.
     /// Engine v2 formats tool names as `"name(param_summary)"`, so we match
@@ -44,6 +52,7 @@ mod engine_v2_tests {
     /// response arrives via the TestChannel.
     #[tokio::test]
     async fn v2_smoke_text_response() {
+        let _guard = engine_v2_test_lock().lock().await;
         let trace = LlmTrace::from_file(format!("{FIXTURES}/smoke_text.json")).unwrap();
         let rig = TestRigBuilder::new()
             .with_engine_v2()
@@ -67,6 +76,7 @@ mod engine_v2_tests {
     /// flow back through the engine thread.
     #[tokio::test]
     async fn v2_single_tool_call() {
+        let _guard = engine_v2_test_lock().lock().await;
         let trace = LlmTrace::from_file(format!("{FIXTURES}/single_tool_echo.json")).unwrap();
         let rig = TestRigBuilder::new()
             .with_engine_v2()
@@ -87,6 +97,7 @@ mod engine_v2_tests {
     /// Verifies that multiple tool invocations work in a single engine thread.
     #[tokio::test]
     async fn v2_multi_tool_chain() {
+        let _guard = engine_v2_test_lock().lock().await;
         let trace = LlmTrace::from_file(format!("{FIXTURES}/multi_tool_chain.json")).unwrap();
         let rig = TestRigBuilder::new()
             .with_engine_v2()
@@ -109,6 +120,7 @@ mod engine_v2_tests {
     /// Verifies that error propagation through the engine thread works.
     #[tokio::test]
     async fn v2_tool_error_recovery() {
+        let _guard = engine_v2_test_lock().lock().await;
         let trace = LlmTrace::from_file(format!("{FIXTURES}/tool_error_recovery.json")).unwrap();
         let rig = TestRigBuilder::new()
             .with_engine_v2()
@@ -128,6 +140,7 @@ mod engine_v2_tests {
     /// Verifies that ConversationManager preserves context across turns.
     #[tokio::test]
     async fn v2_multi_turn_conversation() {
+        let _guard = engine_v2_test_lock().lock().await;
         let trace = LlmTrace::from_file(format!("{FIXTURES}/multi_turn.json")).unwrap();
         let rig = TestRigBuilder::new()
             .with_engine_v2()
@@ -143,6 +156,7 @@ mod engine_v2_tests {
     /// Status events: verify that tool calls produce ToolStarted/ToolCompleted events.
     #[tokio::test]
     async fn v2_status_events() {
+        let _guard = engine_v2_test_lock().lock().await;
         let trace = LlmTrace::from_file(format!("{FIXTURES}/single_tool_echo.json")).unwrap();
         let rig = TestRigBuilder::new()
             .with_engine_v2()
@@ -173,6 +187,7 @@ mod engine_v2_tests {
     /// tool names, but v2 formats them as `"name(param_summary)"`.
     #[tokio::test]
     async fn v2_recorded_telegram_check() {
+        let _guard = engine_v2_test_lock().lock().await;
         let path = format!(
             "{}/tests/fixtures/llm_traces/recorded/telegram_check.json",
             env!("CARGO_MANIFEST_DIR")
@@ -203,6 +218,7 @@ mod engine_v2_tests {
     /// Exercises the HTTP tool with a large response.
     #[tokio::test]
     async fn v2_recorded_weather_sf() {
+        let _guard = engine_v2_test_lock().lock().await;
         let path = format!(
             "{}/tests/fixtures/llm_traces/recorded/weather_sf.json",
             env!("CARGO_MANIFEST_DIR")

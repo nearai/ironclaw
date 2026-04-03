@@ -33,6 +33,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::secrets::{CredentialLocation, CredentialMapping};
+use crate::tools::tool::ToolDiscoverySummary;
 use crate::tools::wasm::{
     Capabilities, EndpointPattern, HttpCapability, RateLimitConfig, SecretsCapability,
     ToolInvokeCapability, WebhookCapability, WorkspaceCapability,
@@ -46,6 +47,10 @@ pub struct CapabilitiesFile {
     /// If omitted, a generic fallback is used (with a warning).
     #[serde(default)]
     pub description: Option<String>,
+
+    /// Optional curated guidance surfaced by `tool_info(detail: "summary")`.
+    #[serde(default)]
+    pub discovery_summary: Option<ToolDiscoverySummary>,
 
     /// Extension version (semver).
     #[serde(default)]
@@ -154,6 +159,7 @@ impl CapabilitiesFile {
         if let Some(inner) = self.capabilities.take() {
             let inner = inner.resolve_nested_inner(depth + 1);
             self.description = self.description.or(inner.description);
+            self.discovery_summary = self.discovery_summary.or(inner.discovery_summary);
             self.http = self.http.or(inner.http);
             self.secrets = self.secrets.or(inner.secrets);
             self.tool_invoke = self.tool_invoke.or(inner.tool_invoke);
@@ -1529,6 +1535,28 @@ mod tests {
             caps.description.as_deref(),
             Some("Outer description wins"),
             "Outer description should take precedence over inner"
+        );
+    }
+
+    #[test]
+    fn test_discovery_summary_promoted_from_nested_capabilities() {
+        let json = r#"{
+            "capabilities": {
+                "discovery_summary": {
+                    "always_required": ["action"],
+                    "notes": ["Use tool_info for full schema"]
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let summary = caps
+            .discovery_summary
+            .expect("discovery summary should be promoted");
+        assert_eq!(summary.always_required, vec!["action".to_string()]);
+        assert_eq!(
+            summary.notes,
+            vec!["Use tool_info for full schema".to_string()]
         );
     }
 

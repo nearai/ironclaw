@@ -171,12 +171,37 @@ function initApp() {
   connectSSE();
   connectLogSSE();
   startGatewayStatusPolling();
-  // Hide the Users settings tab for non-admin users.
+  // Fetch user profile and render avatar + account menu.
   apiFetch('/api/profile').then(function(profile) {
-    if (profile && profile.role !== 'admin') {
+    if (!profile) return;
+    window._currentUser = profile;
+    // Hide admin tabs for non-admin users.
+    if (profile.role !== 'admin') {
       var usersTab = document.querySelector('[data-settings-subtab="users"]');
       if (usersTab) usersTab.style.display = 'none';
     }
+    // Render avatar.
+    var avatarImg = document.getElementById('user-avatar-img');
+    var avatarInitials = document.getElementById('user-avatar-initials');
+    var displayName = profile.display_name || profile.email || profile.id || '?';
+    if (avatarInitials) {
+      avatarInitials.textContent = displayName.charAt(0).toUpperCase();
+    }
+    if (profile.avatar_url && avatarImg) {
+      avatarImg.referrerPolicy = 'no-referrer';
+      avatarImg.onload = function() {
+        if (avatarInitials) avatarInitials.style.display = 'none';
+      };
+      avatarImg.src = profile.avatar_url;
+      avatarImg.removeAttribute('hidden');
+    }
+    // Populate dropdown.
+    var nameEl = document.getElementById('user-dropdown-name');
+    var emailEl = document.getElementById('user-dropdown-email');
+    var roleEl = document.getElementById('user-dropdown-role');
+    if (nameEl) nameEl.textContent = profile.display_name || profile.id;
+    if (emailEl) emailEl.textContent = profile.email || '';
+    if (roleEl) roleEl.textContent = profile.role;
   }).catch(function() {});
   checkTeeStatus();
   loadThreads();
@@ -249,6 +274,125 @@ document.addEventListener('visibilitychange', () => {
     if (currentTab === 'logs') connectLogSSE();
   }
 });
+
+// --- Social login (OAuth + NEAR wallet) ---
+
+// Show the token form (used as fallback when no OAuth providers are available).
+function showTokenForm() {
+  var tokenForm = document.getElementById('auth-token-form');
+  if (tokenForm) {
+    tokenForm.style.display = '';
+    var input = document.getElementById('token-input');
+    if (input) input.focus();
+  }
+}
+
+// Discover enabled providers and show corresponding buttons.
+fetch('/auth/providers', { credentials: 'include' })
+  .then(function(r) { return r.ok ? r.json() : { providers: [] }; })
+  .then(function(data) {
+    var providers = data.providers || [];
+    if (providers.length === 0) { showTokenForm(); return; }
+    // Store NEAR network for the wallet connector.
+    if (data.near_network) window._nearNetwork = data.near_network;
+    var social = document.getElementById('auth-social');
+    if (social) social.style.display = '';
+    providers.forEach(function(p) {
+      var btn = document.getElementById('auth-' + p + '-btn');
+      if (!btn) return;
+      btn.style.display = '';
+      if (p === 'near') {
+        btn.addEventListener('click', authenticateWithNear);
+      } else {
+        btn.addEventListener('click', function() { window.location = '/auth/login/' + p; });
+      }
+    });
+    // When social providers are available, collapse the token form
+    // and show the "or use a token" divider instead.
+    var tokenForm = document.getElementById('auth-token-form');
+    var tokenDivider = document.getElementById('auth-token-divider');
+    if (tokenForm && tokenDivider) {
+      tokenForm.style.display = 'none';
+      tokenDivider.style.display = '';
+      tokenDivider.style.cursor = 'pointer';
+      tokenDivider.addEventListener('click', function() {
+        tokenForm.style.display = '';
+        tokenDivider.style.display = 'none';
+        var input = document.getElementById('token-input');
+        if (input) input.focus();
+      });
+    }
+  })
+  .catch(function() { showTokenForm(); });
+
+// NEAR wallet authentication via near-connect.
+async function authenticateWithNear() {
+  var nearBtn = document.getElementById('auth-near-btn');
+  var errEl = document.getElementById('auth-error');
+  if (nearBtn) { nearBtn.disabled = true; nearBtn.textContent = 'Connecting wallet...'; }
+  if (errEl) errEl.textContent = '';
+
+  try {
+    // 1. Get challenge nonce from the server.
+    var challengeResp = await fetch('/auth/near/challenge', { credentials: 'include' });
+    if (!challengeResp.ok) throw new Error('Failed to get challenge');
+    var challenge = await challengeResp.json();
+
+    // 2. Load near-connect dynamically if not already loaded.
+    if (!window._nearConnector) {
+      var mod = await import('https://esm.sh/@hot-labs/near-connect@0.11');
+      var network = window._nearNetwork || 'mainnet';
+      window._nearConnector = new mod.NearConnector({ network: network });
+    }
+    var connector = window._nearConnector;
+
+    // 3. Connect wallet and request signature.
+    if (nearBtn) nearBtn.textContent = 'Sign with wallet...';
+    var wallet = await connector.connect();
+    var accounts = await wallet.getAccounts();
+    if (!accounts || accounts.length === 0) throw new Error('No NEAR account found');
+
+    var accountId = accounts[0].accountId;
+
+    // Convert hex nonce to Uint8Array for signMessage.
+    var nonceBytes = new Uint8Array(challenge.nonce.match(/.{2}/g).map(function(b) { return parseInt(b, 16); }));
+
+    var signed = await wallet.signMessage({
+      message: challenge.message,
+      recipient: challenge.recipient || 'ironclaw',
+      nonce: nonceBytes,
+    });
+
+    // 4. Send signature to server for verification.
+    if (nearBtn) nearBtn.textContent = 'Verifying...';
+    var verifyResp = await fetch('/auth/near/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        account_id: accountId,
+        public_key: signed.publicKey,
+        signature: signed.signature,
+        nonce: challenge.nonce,
+      }),
+    });
+
+    if (!verifyResp.ok) {
+      var errText = await verifyResp.text();
+      throw new Error(errText || 'Verification failed');
+    }
+
+    await verifyResp.json();
+
+    // 5. Rely on the HttpOnly session cookie created by the backend.
+    token = '';
+    sessionStorage.removeItem('ironclaw_token');
+    initApp();
+  } catch (err) {
+    if (errEl) errEl.textContent = err.message || 'NEAR wallet login failed';
+    if (nearBtn) { nearBtn.disabled = false; nearBtn.textContent = 'Sign in with NEAR'; }
+  }
+}
 
 // Note: main event listener registration is at the bottom of this file (search
 // "Event Listener Registration"). Do NOT add duplicate listeners here.
@@ -418,7 +562,8 @@ function connectSSE() {
 
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
-    document.getElementById('sse-status').textContent = I18n.t('status.connected');
+    var statusEl = document.getElementById('sse-status');
+    if (statusEl) statusEl.textContent = I18n.t('status.connected');
     _reconnectAttempts = 0;
 
     // Dismiss connection-lost banner and show reconnected flash
@@ -460,7 +605,8 @@ function connectSSE() {
   eventSource.onerror = () => {
     _reconnectAttempts++;
     document.getElementById('sse-dot').classList.add('disconnected');
-    document.getElementById('sse-status').textContent = I18n.t('status.reconnecting');
+    var statusEl2 = document.getElementById('sse-status');
+    if (statusEl2) statusEl2.textContent = I18n.t('status.reconnecting');
 
     // Update existing banner with attempt count
     const existingBanner = document.getElementById('connection-banner');
@@ -633,6 +779,16 @@ function connectSSE() {
   eventSource.addEventListener('auth_completed', (e) => {
     const data = JSON.parse(e.data);
     handleAuthCompleted(data);
+  });
+
+  eventSource.addEventListener('gate_required', (e) => {
+    const data = JSON.parse(e.data);
+    handleGateRequired(data);
+  });
+
+  eventSource.addEventListener('gate_resolved', (e) => {
+    const data = JSON.parse(e.data);
+    handleGateResolved(data);
   });
 
   eventSource.addEventListener('extension_status', (e) => {
@@ -1020,9 +1176,14 @@ function filterSlashCommands(value) {
 }
 
 function sendApprovalAction(requestId, action) {
-  apiFetch('/api/chat/approval', {
+  apiFetch('/api/chat/gate/resolve', {
     method: 'POST',
-    body: { request_id: requestId, action: action, thread_id: currentThreadId },
+    body: {
+      request_id: requestId,
+      thread_id: currentThreadId,
+      resolution: action === 'deny' ? 'denied' : 'approved',
+      always: action === 'always',
+    },
   }).catch((err) => {
     addMessage('system', 'Failed to send approval: ' + err.message);
   });
@@ -1634,6 +1795,11 @@ function showJobCard(data) {
 // --- Auth card ---
 
 function handleAuthRequired(data) {
+  if (data.thread_id && !isCurrentThread(data.thread_id)) {
+    unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
+    debouncedLoadThreads();
+    return;
+  }
   setAuthFlowPending(true, data.instructions);
   if (data.auth_url || data.instructions) {
     // Token paste flow (with optional OAuth button): show the global auth
@@ -1648,7 +1814,61 @@ function handleAuthRequired(data) {
   }
 }
 
+function parseGateResumeKind(resumeKind) {
+  if (!resumeKind || typeof resumeKind !== 'object') return null;
+  if (resumeKind.Approval) return { type: 'approval', ...resumeKind.Approval };
+  if (resumeKind.Authentication) return { type: 'authentication', ...resumeKind.Authentication };
+  if (resumeKind.External) return { type: 'external', ...resumeKind.External };
+  return null;
+}
+
+function handleGateRequired(data) {
+  const hasThread = !!data.thread_id;
+  const forCurrentThread = !hasThread || isCurrentThread(data.thread_id);
+  const resume = parseGateResumeKind(data.resume_kind);
+  if (!forCurrentThread) {
+    unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
+    debouncedLoadThreads();
+    return;
+  }
+  if (resume && resume.type === 'authentication') {
+    handleAuthRequired({
+      extension_name: resume.credential_name,
+      instructions: resume.instructions,
+      auth_url: resume.auth_url || null,
+      request_id: data.request_id,
+      thread_id: data.thread_id || currentThreadId,
+    });
+    return;
+  }
+  showApproval({
+    request_id: data.request_id,
+    tool_name: data.tool_name,
+    description: data.description,
+    parameters: data.parameters,
+    allow_always: !(resume && resume.type === 'approval' && resume.allow_always === false),
+    thread_id: data.thread_id || currentThreadId,
+  });
+}
+
+function handleGateResolved(data) {
+  const hasThread = !!data.thread_id;
+  if (hasThread && !isCurrentThread(data.thread_id)) {
+    debouncedLoadThreads();
+    return;
+  }
+  document.querySelectorAll('.approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]').forEach((el) => el.remove());
+  if (data.resolution === 'credential_provided' || data.resolution === 'cancelled') {
+    removeAuthCard(data.tool_name);
+    enableChatInput();
+  }
+}
+
 function handleAuthCompleted(data) {
+  if (data.thread_id && !isCurrentThread(data.thread_id)) {
+    debouncedLoadThreads();
+    return;
+  }
   showToast(data.message, data.success ? 'success' : 'error');
   // Dismiss only the matching extension's UI so stale prompts are cleared.
   removeAuthCard(data.extension_name);
@@ -1696,6 +1916,7 @@ function getConfigureOverlay(extensionName) {
 }
 
 function showAuthCard(data) {
+  if (data.thread_id && !isCurrentThread(data.thread_id)) return;
   // Keep a single global auth prompt so the experience is consistent across tabs.
   const existing = getAuthOverlay();
   if (existing) existing.remove();
@@ -1710,6 +1931,12 @@ function showAuthCard(data) {
   const card = document.createElement('div');
   card.className = 'auth-card auth-modal';
   card.setAttribute('data-extension-name', data.extension_name);
+  if (data.thread_id) {
+    card.setAttribute('data-thread-id', data.thread_id);
+  }
+  if (data.request_id) {
+    card.setAttribute('data-request-id', data.request_id);
+  }
 
   const header = document.createElement('div');
   header.className = 'auth-header';
@@ -1811,15 +2038,33 @@ function submitAuthToken(extensionName, tokenValue) {
 
   // Disable submit button while in flight
   const card = getAuthCard(extensionName);
+  const threadId = card ? card.getAttribute('data-thread-id') : null;
   if (card) {
     const btns = card.querySelectorAll('button');
     btns.forEach((b) => { b.disabled = true; });
   }
 
-  apiFetch('/api/chat/auth-token', {
+  const isGateResolution = !!(card && card.getAttribute('data-request-id'));
+  const requestId = card ? card.getAttribute('data-request-id') : null;
+  const request = isGateResolution ? apiFetch('/api/chat/gate/resolve', {
     method: 'POST',
-    body: { extension_name: extensionName, token: tokenValue.trim() },
-  }).then((result) => {
+    body: {
+      request_id: requestId,
+      thread_id: threadId || currentThreadId || undefined,
+      resolution: 'credential_provided',
+      token: tokenValue.trim(),
+    },
+  }) : apiFetch('/api/chat/auth-token', {
+    method: 'POST',
+    body: {
+      extension_name: extensionName,
+      token: tokenValue.trim(),
+      request_id: requestId,
+      thread_id: threadId || currentThreadId || undefined,
+    },
+  });
+
+  request.then((result) => {
     if (result.success) {
       // Close immediately for responsiveness; the authoritative success UX
       // (toast + extensions refresh) still comes from auth_completed SSE.
@@ -1834,10 +2079,25 @@ function submitAuthToken(extensionName, tokenValue) {
 }
 
 function cancelAuth(extensionName) {
-  apiFetch('/api/chat/auth-cancel', {
+  const card = getAuthCard(extensionName);
+  const threadId = card ? card.getAttribute('data-thread-id') : null;
+  const requestId = card ? card.getAttribute('data-request-id') : null;
+  const request = requestId ? apiFetch('/api/chat/gate/resolve', {
     method: 'POST',
-    body: { extension_name: extensionName },
-  }).catch(() => {});
+    body: {
+      request_id: requestId,
+      thread_id: threadId || currentThreadId || undefined,
+      resolution: 'cancelled',
+    },
+  }) : apiFetch('/api/chat/auth-cancel', {
+    method: 'POST',
+    body: {
+      extension_name: extensionName,
+      request_id: requestId,
+      thread_id: threadId || currentThreadId || undefined,
+    },
+  });
+  request.catch(() => {});
   removeAuthCard(extensionName);
   setAuthFlowPending(false);
   enableChatInput();
@@ -1919,19 +2179,23 @@ function loadHistory(before) {
       if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
         showActivityThinking('Processing...');
       }
-      // Re-render pending approval card if the thread is awaiting approval
-      if (data.pending_approval) {
-        showApproval(data.pending_approval);
-      }
-      // Re-show auth card if auth flow is pending (survives SSE reconnect)
-      if (data.pending_auth) {
-        handleAuthRequired({
-          extension_name: data.pending_auth.extension_name,
-          instructions: data.pending_auth.instructions,
-          auth_url: null,
+      if (data.pending_gate) {
+        handleGateRequired({
+          ...data.pending_gate,
+          thread_id: data.pending_gate.thread_id || currentThreadId,
         });
       } else {
-        // No pending auth — ensure stale auth UI is cleaned up
+        // No pending gate for this history view. Keep a global auth overlay if
+        // it belongs to a different thread; another tab/thread may still be
+        // waiting on it.
+        const overlay = getAuthOverlay();
+        if (overlay) {
+          const overlayThreadId = overlay.getAttribute('data-thread-id');
+          if (overlayThreadId && overlayThreadId !== currentThreadId) {
+            return;
+          }
+        }
+        removeAuthCard();
         setAuthFlowPending(false);
       }
     } else {
@@ -4635,12 +4899,19 @@ function renderMissionDetail(m) {
       + '<div class="job-description-body">' + renderMarkdown(m.success_criteria) + '</div></div>';
   }
 
+  if (m.notify_channels && m.notify_channels.length > 0) {
+    html += '<div class="job-description"><h3>Notify Channels</h3>'
+      + '<div class="job-description-body">' + m.notify_channels.map(escapeHtml).join(', ') + '</div></div>';
+  }
+
   if (m.approach_history && m.approach_history.length > 0) {
-    html += '<div class="job-description"><h3>Approach History</h3><ul>';
-    m.approach_history.forEach((a) => {
-      html += '<li>' + escapeHtml(a) + '</li>';
+    html += '<div class="job-description"><h3>Approach History</h3>';
+    m.approach_history.forEach((a, i) => {
+      html += '<div class="job-description-body" style="margin-bottom:8px">'
+        + '<strong>Run ' + (i + 1) + '</strong><br>'
+        + renderMarkdown(a) + '</div>';
     });
-    html += '</ul></div>';
+    html += '</div>';
   }
 
   if (m.threads && m.threads.length > 0) {
@@ -5026,13 +5297,8 @@ function fetchGatewayStatus() {
   }).catch(function() {});
 }
 
-// Show/hide popover on hover
-document.getElementById('gateway-status-trigger').addEventListener('mouseenter', () => {
-  document.getElementById('gateway-popover').classList.add('visible');
-});
-document.getElementById('gateway-status-trigger').addEventListener('mouseleave', () => {
-  document.getElementById('gateway-popover').classList.remove('visible');
-});
+// Gateway popover is now inline in the user dropdown — no hover toggle needed.
+// The popover content is updated by startGatewayStatusPolling() into #gateway-popover.
 
 // --- TEE attestation ---
 
@@ -6549,6 +6815,30 @@ function formatDate(isoString) {
 // --- Event Listener Registration (CSP-safe, no inline handlers) ---
 
 document.getElementById('auth-connect-btn').addEventListener('click', () => authenticate());
+
+// User avatar dropdown toggle.
+document.getElementById('user-avatar-btn').addEventListener('click', function(e) {
+  e.stopPropagation();
+  var dd = document.getElementById('user-dropdown');
+  if (dd) dd.style.display = dd.style.display === 'none' ? '' : 'none';
+});
+// Close dropdown on click outside.
+document.addEventListener('click', function(e) {
+  var dd = document.getElementById('user-dropdown');
+  var account = document.getElementById('user-account');
+  if (dd && account && !account.contains(e.target)) {
+    dd.style.display = 'none';
+  }
+});
+// Logout handler.
+document.getElementById('user-logout-btn').addEventListener('click', function() {
+  fetch('/auth/logout', { method: 'POST', credentials: 'include' })
+    .finally(function() {
+      sessionStorage.removeItem('ironclaw_token');
+      sessionStorage.removeItem('ironclaw_oidc');
+      window.location.reload();
+    });
+});
 document.getElementById('restart-overlay').addEventListener('click', () => cancelRestart());
 document.getElementById('restart-close-btn').addEventListener('click', () => cancelRestart());
 document.getElementById('restart-cancel-btn').addEventListener('click', () => cancelRestart());

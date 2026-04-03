@@ -17,7 +17,7 @@ use crate::traits::effect::EffectExecutor;
 use crate::traits::llm::LlmBackend;
 use crate::traits::store::Store;
 use crate::types::error::EngineError;
-use crate::types::message::ThreadMessage;
+use crate::types::message::{MessageRole, ThreadMessage};
 use crate::types::project::ProjectId;
 use crate::types::thread::{Thread, ThreadConfig, ThreadId, ThreadState, ThreadType};
 
@@ -143,7 +143,7 @@ impl ThreadManager {
                     None,
                     None,
                 )
-                .await;
+                .await?;
             self.store.save_lease(&lease).await?;
             thread.capability_leases.push(lease.id);
         }
@@ -169,6 +169,7 @@ impl ThreadManager {
         user_id: impl Into<String>,
         injected_message: Option<ThreadMessage>,
         approval_event: Option<(String, bool)>,
+        resolved_call_id: Option<String>,
     ) -> Result<(), EngineError> {
         if self.is_running(thread_id).await {
             return Err(EngineError::Thread(
@@ -184,7 +185,7 @@ impl ThreadManager {
 
         // Tenant isolation: verify the requesting user owns this thread.
         let uid: String = user_id.into();
-        if thread.user_id != uid {
+        if !thread.is_owned_by(&uid) {
             return Err(EngineError::AccessDenied {
                 user_id: uid,
                 entity: format!("thread {thread_id}"),
@@ -214,8 +215,23 @@ impl ThreadManager {
             thread.updated_at = chrono::Utc::now();
         }
 
+        if let Some(ref call_id) = resolved_call_id {
+            thread
+                .messages
+                .retain(|existing| !is_resolved_call_message(existing, call_id));
+        }
+
         if let Some(message) = injected_message {
             thread.add_message(message);
+        }
+
+        // Waiting threads paused on approval/auth should resume from the
+        // newly injected context rather than replaying the old checkpointed
+        // interrupt. Suspended threads keep their checkpoint for restart.
+        if thread.state == crate::types::thread::ThreadState::Waiting
+            && let Some(metadata) = thread.metadata.as_object_mut()
+        {
+            metadata.remove("runtime_checkpoint");
         }
 
         self.store.save_thread(&thread).await?;
@@ -325,7 +341,7 @@ impl ThreadManager {
     pub async fn stop_thread(&self, thread_id: ThreadId, user_id: &str) -> Result<(), EngineError> {
         // Validate ownership before allowing stop.
         if let Some(thread) = self.store.load_thread(thread_id).await?
-            && thread.user_id != user_id
+            && !thread.is_owned_by(user_id)
         {
             return Err(EngineError::AccessDenied {
                 user_id: user_id.to_string(),
@@ -361,7 +377,7 @@ impl ThreadManager {
     ) -> Result<(), EngineError> {
         // Validate ownership before allowing injection.
         if let Some(thread) = self.store.load_thread(thread_id).await?
-            && thread.user_id != user_id
+            && !thread.is_owned_by(user_id)
         {
             return Err(EngineError::AccessDenied {
                 user_id: user_id.to_string(),
@@ -398,6 +414,19 @@ impl ThreadManager {
         }
     }
 
+    /// Set a metadata key on a thread (best-effort, for tagging).
+    pub async fn set_thread_metadata(&self, thread_id: ThreadId, key: &str, value: &str) {
+        if let Ok(Some(mut thread)) = self.store.load_thread(thread_id).await {
+            if let Some(obj) = thread.metadata.as_object_mut() {
+                obj.insert(
+                    key.to_string(),
+                    serde_json::Value::String(value.to_string()),
+                );
+            }
+            let _ = self.store.save_thread(&thread).await;
+        }
+    }
+
     /// Check if a thread is still running.
     pub async fn is_running(&self, thread_id: ThreadId) -> bool {
         let running = self.running.read().await;
@@ -419,15 +448,19 @@ impl ThreadManager {
         };
 
         match rt {
-            Some(rt) => match rt.handle.await {
-                Ok(result) => result,
-                Err(e) => {
-                    error!(thread_id = %thread_id, "thread task panicked: {e}");
-                    Ok(ThreadOutcome::Failed {
-                        error: format!("thread task panicked: {e}"),
-                    })
-                }
-            },
+            Some(rt) => {
+                let result = match rt.handle.await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        error!(thread_id = %thread_id, "thread task panicked: {e}");
+                        Ok(ThreadOutcome::Failed {
+                            error: format!("thread task panicked: {e}"),
+                        })
+                    }
+                };
+                self.completed.write().await.remove(&thread_id);
+                result
+            }
             None => Err(EngineError::ThreadNotFound(thread_id)),
         }
     }
@@ -481,7 +514,7 @@ impl ThreadManager {
                 continue;
             }
 
-            self.resume_thread(thread.id, thread.user_id.clone(), None, None)
+            self.resume_thread(thread.id, thread.user_id.clone(), None, None, None)
                 .await?;
             resumed.push(thread.id);
         }
@@ -547,6 +580,20 @@ impl ThreadManager {
 
         Ok(recovered)
     }
+}
+
+fn is_resolved_call_message(message: &ThreadMessage, call_id: &str) -> bool {
+    if message.role == MessageRole::ActionResult
+        && message.action_call_id.as_deref() == Some(call_id)
+    {
+        return true;
+    }
+
+    message.role == MessageRole::Assistant
+        && message
+            .action_calls
+            .as_ref()
+            .is_some_and(|calls| calls.iter().any(|call| call.id == call_id))
 }
 
 #[cfg(test)]

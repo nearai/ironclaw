@@ -15,7 +15,7 @@ use crate::types::event::{EventKind, ThreadEvent};
 use crate::types::message::ThreadMessage;
 use crate::types::project::ProjectId;
 
-use super::default_user_id;
+use super::{OwnerId, default_user_id};
 
 /// Strongly-typed thread identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -181,7 +181,12 @@ pub struct Thread {
     pub user_id: String,
     pub parent_id: Option<ThreadId>,
     pub config: ThreadConfig,
+    /// User-visible transcript for the thread.
     pub messages: Vec<ThreadMessage>,
+    /// Internal execution transcript used by the orchestrator for inference,
+    /// tool traces, compaction, and resumable working state.
+    #[serde(default)]
+    pub internal_messages: Vec<ThreadMessage>,
     pub events: Vec<ThreadEvent>,
     pub capability_leases: Vec<LeaseId>,
     pub metadata: serde_json::Value,
@@ -214,6 +219,7 @@ impl Thread {
             parent_id: None,
             config,
             messages: Vec::new(),
+            internal_messages: Vec::new(),
             events: Vec::new(),
             capability_leases: Vec::new(),
             metadata: serde_json::Value::Object(serde_json::Map::new()),
@@ -230,6 +236,14 @@ impl Thread {
     pub fn with_parent(mut self, parent_id: ThreadId) -> Self {
         self.parent_id = Some(parent_id);
         self
+    }
+
+    pub fn owner_id(&self) -> OwnerId<'_> {
+        OwnerId::from_user_id(&self.user_id)
+    }
+
+    pub fn is_owned_by(&self, user_id: &str) -> bool {
+        self.owner_id().matches_user(user_id)
     }
 
     /// Transition to a new state, recording an event.
@@ -283,6 +297,13 @@ impl Thread {
             content_preview: preview,
         });
         self.messages.push(message);
+    }
+
+    /// Add a message to the internal execution transcript without exposing it
+    /// as a user-visible conversation message.
+    pub fn add_internal_message(&mut self, message: ThreadMessage) {
+        self.internal_messages.push(message);
+        self.updated_at = Utc::now();
     }
 }
 

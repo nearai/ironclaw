@@ -372,7 +372,9 @@ fn event_matches_thread(event: &AppEvent, target: &str) -> bool {
         | AppEvent::Suggestions { thread_id, .. }
         | AppEvent::ReasoningUpdate { thread_id, .. }
         | AppEvent::Status { thread_id, .. }
-        | AppEvent::ApprovalNeeded { thread_id, .. } => thread_id.as_deref() == Some(target),
+        | AppEvent::ApprovalNeeded { thread_id, .. }
+        | AppEvent::GateRequired { thread_id, .. }
+        | AppEvent::GateResolved { thread_id, .. } => thread_id.as_deref() == Some(target),
         // Global or job-scoped events are never matched.
         _ => false,
     }
@@ -538,7 +540,17 @@ impl ResponseAccumulator {
                 self.error_message = Some(message);
                 true // turn complete (failed)
             }
-            AppEvent::ApprovalNeeded { tool_name, .. } => {
+            AppEvent::ApprovalNeeded {
+                tool_name,
+                parameters,
+                ..
+            } => {
+                self.output.push(ResponseOutputItem::FunctionCall {
+                    id: make_item_id(),
+                    call_id: format!("call_{}", Uuid::new_v4().simple()),
+                    name: tool_name.clone(),
+                    arguments: parameters,
+                });
                 self.failed = true;
                 self.error_message = Some(format!(
                     "Tool '{tool_name}' requires approval which is not supported via the Responses API"
@@ -1458,6 +1470,11 @@ mod tests {
         }));
         let resp = acc.finish();
         assert_eq!(resp.status, ResponseStatus::Failed);
+        assert!(matches!(
+            &resp.output[0],
+            ResponseOutputItem::FunctionCall { name, arguments, .. }
+                if name == "shell" && arguments == "{}"
+        ));
     }
 
     #[test]

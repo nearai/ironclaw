@@ -16,6 +16,7 @@ use ironclaw_engine::traits::store::Store;
 use ironclaw_engine::types::error::EngineError;
 use ironclaw_engine::types::memory::{DocType, MemoryDoc};
 use ironclaw_engine::types::project::ProjectId;
+use ironclaw_engine::types::shared_owner_id;
 
 use ironclaw_skills::SkillRegistry;
 use ironclaw_skills::types::{LoadedSkill, SkillSource};
@@ -48,7 +49,7 @@ pub async fn migrate_v1_skill_list(
     }
 
     // Load existing skill docs to check for duplicates by content_hash
-    let existing_docs = store.list_memory_docs(project_id, "system").await?;
+    let existing_docs = store.list_shared_memory_docs(project_id).await?;
     let existing_hashes: std::collections::HashSet<String> = existing_docs
         .iter()
         .filter(|d| d.doc_type == DocType::Skill)
@@ -114,7 +115,7 @@ fn v1_skill_to_memory_doc(skill: &LoadedSkill, project_id: ProjectId) -> MemoryD
 
     let mut doc = MemoryDoc::new(
         project_id,
-        "system",
+        shared_owner_id(),
         DocType::Skill,
         format!("skill:{}", skill.manifest.name),
         &skill.prompt_content,

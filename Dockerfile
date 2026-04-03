@@ -3,6 +3,10 @@
 # Uses cargo-chef for dependency caching — only rebuilds deps when
 # Cargo.toml/Cargo.lock change, not on every source edit.
 #
+# Debian-based build + runtime. The bundled libSQL/SQLite C code has
+# threading issues when statically linked against musl (segfault on
+# database reopen), so we use glibc.
+#
 # Build:
 #   docker build --platform linux/amd64 -t ironclaw:latest .
 #
@@ -10,14 +14,12 @@
 #   docker run --env-file .env -p 3000:3000 ironclaw:latest
 
 # Stage 1: Install cargo-chef
-FROM rust:1.92-slim-bookworm AS chef
+FROM rust:1.92-bookworm AS chef
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev cmake gcc g++ \
-    python3-dev \
+RUN apt-get update && apt-get install -y --no-install-recommends python3-dev \
     && rm -rf /var/lib/apt/lists/* \
     && rustup target add wasm32-wasip2 \
-    && cargo install cargo-chef wasm-tools
+    && cargo install cargo-chef@0.1.77 wasm-tools@1.246.1
 
 WORKDIR /app
 
@@ -41,8 +43,13 @@ RUN cargo chef prepare --recipe-path recipe.json
 # Stage 3: Build dependencies (cached unless Cargo.toml/lock change)
 FROM chef AS deps
 
+# Docker-only overrides for the dist profile (not in Cargo.toml because
+# cargo-dist uses dist for release binaries that need unwinding).
+ENV CARGO_PROFILE_DIST_PANIC=abort \
+    CARGO_PROFILE_DIST_CODEGEN_UNITS=1
+
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
+RUN cargo chef cook --profile dist --recipe-path recipe.json
 
 # Stage 4: Build the actual binary (only recompiles ironclaw source)
 FROM deps AS builder
@@ -59,23 +66,22 @@ COPY channels-src/ channels-src/
 COPY wit/ wit/
 COPY providers.json providers.json
 
-RUN cargo build --release --bin ironclaw
+RUN cargo build --profile dist --bin ironclaw
 
-# Stage 5: Runtime
+# Stage 5: Minimal runtime
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libssl3 \
-    && update-ca-certificates \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/ironclaw /usr/local/bin/ironclaw
+COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw
 COPY --from=builder /app/migrations /app/migrations
 COPY skills/ /app/skills/
 COPY integrations/ /app/integrations/
 
 # Non-root user
-RUN useradd -m -u 1000 -s /bin/bash ironclaw
+RUN adduser --disabled-password --uid 1000 ironclaw
 USER ironclaw
 
 EXPOSE 3000

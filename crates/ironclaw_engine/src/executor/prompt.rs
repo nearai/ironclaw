@@ -169,7 +169,7 @@ fn build_codeact_system_prompt_inner(
 
 /// Load the prompt overlay from the Store, if one exists for this project.
 async fn load_prompt_overlay(store: &Arc<dyn Store>, project_id: ProjectId) -> Option<String> {
-    let docs = store.list_memory_docs(project_id, "system").await.ok()?;
+    let docs = store.list_shared_memory_docs(project_id).await.ok()?;
     extract_prompt_overlay(&docs)
 }
 
@@ -194,6 +194,7 @@ pub fn extract_prompt_overlay(docs: &[crate::types::memory::MemoryDoc]) -> Optio
 mod tests {
     use super::*;
     use crate::types::memory::{DocId, DocType, MemoryDoc};
+    use crate::types::shared_owner_id;
 
     #[tokio::test]
     async fn prompt_without_store_uses_compiled_preamble() {
@@ -210,7 +211,7 @@ mod tests {
         let overlay = MemoryDoc {
             id: DocId::new(),
             project_id,
-            user_id: "system".into(),
+            user_id: shared_owner_id().into(),
             doc_type: DocType::Note,
             title: PREAMBLE_OVERLAY_TITLE.into(),
             content: "9. Never call web_fetch — use http() instead.".into(),
@@ -238,7 +239,7 @@ mod tests {
         let overlay = MemoryDoc {
             id: DocId::new(),
             project_id,
-            user_id: "system".into(),
+            user_id: shared_owner_id().into(),
             doc_type: DocType::Note,
             title: PREAMBLE_OVERLAY_TITLE.into(),
             content: huge_content,
@@ -265,7 +266,7 @@ mod tests {
         let overlay = MemoryDoc {
             id: DocId::new(),
             project_id: other_project,
-            user_id: "system".into(),
+            user_id: shared_owner_id().into(),
             doc_type: DocType::Note,
             title: PREAMBLE_OVERLAY_TITLE.into(),
             content: "Should not appear".into(),

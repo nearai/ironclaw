@@ -562,4 +562,58 @@ mod tests {
             "should flag exactly the 2 empty call_ids"
         );
     }
+
+    #[test]
+    fn trace_serializes_approval_request_payload() {
+        let mut thread = make_thread();
+        thread.add_message(ThreadMessage::system("sys"));
+        thread.add_message(ThreadMessage::assistant("installing notion"));
+        thread.events.push(ThreadEvent::new(
+            thread.id,
+            EventKind::ApprovalRequested {
+                action_name: "tool_install".into(),
+                call_id: "call_install_1".into(),
+                parameters: Some(serde_json::json!({"name": "notion", "kind": "mcp_server"})),
+                description: Some("Install an extension".into()),
+                allow_always: Some(true),
+                gate_name: Some("approval".into()),
+                params_summary: Some("notion".into()),
+            },
+        ));
+
+        let trace = build_trace(&thread);
+        match &trace.events[0].kind {
+            EventKind::ApprovalRequested {
+                action_name,
+                call_id,
+                parameters,
+                description,
+                allow_always,
+                gate_name,
+                params_summary,
+            } => {
+                assert_eq!(action_name, "tool_install");
+                assert_eq!(call_id, "call_install_1");
+                assert_eq!(
+                    parameters.as_ref().and_then(|p| p.get("name")),
+                    Some(&serde_json::json!("notion"))
+                );
+                assert_eq!(description.as_deref(), Some("Install an extension"));
+                assert_eq!(*allow_always, Some(true));
+                assert_eq!(gate_name.as_deref(), Some("approval"));
+                assert_eq!(params_summary.as_deref(), Some("notion"));
+            }
+            other => panic!("unexpected event kind: {other:?}"),
+        }
+
+        let json = serde_json::to_string(&trace).expect("trace serializes");
+        assert!(json.contains("\"ApprovalRequested\""));
+        assert!(json.contains("\"action_name\":\"tool_install\""));
+        assert!(json.contains("\"call_id\":\"call_install_1\""));
+        assert!(json.contains("\"parameters\":{\"name\":\"notion\",\"kind\":\"mcp_server\"}"));
+        assert!(json.contains("\"description\":\"Install an extension\""));
+        assert!(json.contains("\"allow_always\":true"));
+        assert!(json.contains("\"gate_name\":\"approval\""));
+        assert!(json.contains("\"params_summary\":\"notion\""));
+    }
 }

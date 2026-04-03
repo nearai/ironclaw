@@ -265,12 +265,83 @@ async def _wait_for_response(base_url, thread_id, *, timeout=45.0, expect_substr
     raise AssertionError(f"Timed out waiting for response in thread {thread_id}")
 
 
+async def _wait_for_pending_auth(base_url, thread_id, *, timeout=45.0):
+    for _ in range(int(timeout * 2)):
+        r = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
+        r.raise_for_status()
+        pending = r.json().get("pending_auth")
+        if pending and pending.get("extension_name"):
+            return pending
+        await asyncio.sleep(0.5)
+    raise AssertionError(f"Timed out waiting for pending_auth in thread {thread_id}")
+
+
+async def _wait_for_pending_auth_clear(base_url, thread_id, *, timeout=45.0):
+    for _ in range(int(timeout * 2)):
+        r = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
+        r.raise_for_status()
+        if not r.json().get("pending_auth"):
+            return r.json()
+        await asyncio.sleep(0.5)
+    raise AssertionError(f"Timed out waiting for pending_auth to clear in thread {thread_id}")
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
 class TestGatewayAuthCard:
     """Test the auth flow through the gateway API endpoints (simulating frontend)."""
+
+    async def test_same_user_auth_is_thread_scoped(self, v2_server, mock_api):
+        mock_api_url = mock_api["url"]
+        async with httpx.AsyncClient() as client:
+            await client.post(f"{mock_api_url}/__mock/reset")
+
+        thread_a = (await api_post(v2_server, "/api/chat/thread/new", timeout=15)).json()["id"]
+        thread_b = (await api_post(v2_server, "/api/chat/thread/new", timeout=15)).json()["id"]
+
+        for thread_id in (thread_a, thread_b):
+            await api_post(
+                v2_server,
+                "/api/chat/send",
+                json={
+                    "content": "list issues in nearai/ironclaw github repo",
+                    "thread_id": thread_id,
+                },
+                timeout=30,
+            )
+
+        pending_a = await _wait_for_pending_auth(v2_server, thread_a, timeout=60)
+        pending_b = await _wait_for_pending_auth(v2_server, thread_b, timeout=60)
+        assert pending_a["extension_name"] == "github_token"
+        assert pending_b["extension_name"] == "github_token"
+
+        cancel_a = await api_post(
+            v2_server,
+            "/api/chat/auth-cancel",
+            json={"extension_name": "github_token", "thread_id": thread_a},
+            timeout=15,
+        )
+        assert cancel_a.status_code == 200, cancel_a.text
+
+        await _wait_for_pending_auth_clear(v2_server, thread_a, timeout=60)
+        history_b = await api_get(
+            v2_server,
+            f"/api/chat/history?thread_id={thread_b}",
+            timeout=15,
+        )
+        history_b.raise_for_status()
+        assert history_b.json().get("pending_auth"), history_b.json()
+
+        cancel_b = await api_post(
+            v2_server,
+            "/api/chat/auth-cancel",
+            json={"extension_name": "github_token", "thread_id": thread_b},
+            timeout=15,
+        )
+        assert cancel_b.status_code == 200, cancel_b.text
+        await _wait_for_pending_auth_clear(v2_server, thread_b, timeout=60)
 
     async def test_auth_token_endpoint_stores_credential_for_v2(self, v2_server, mock_api):
         """Submit token via /api/chat/auth-token → credential stored → retry works.

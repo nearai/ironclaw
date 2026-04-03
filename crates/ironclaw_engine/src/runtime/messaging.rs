@@ -32,19 +32,16 @@ pub enum ThreadOutcome {
     MaxIterations,
     /// Terminal failure.
     Failed { error: String },
-    /// A capability action requires user approval before continuing.
-    NeedApproval {
+    /// A unified execution gate paused the thread.
+    GatePaused {
+        gate_name: String,
         action_name: String,
         call_id: String,
         parameters: serde_json::Value,
-    },
-    /// An action needs a credential that requires user authentication (e.g. OAuth).
-    /// The thread pauses until the credential is available, then resumes.
-    NeedAuthentication {
-        credential_name: String,
-        action_name: String,
-        call_id: String,
-        parameters: serde_json::Value,
+        resume_kind: crate::gate::ResumeKind,
+        /// Completed action output that should be injected on resume instead
+        /// of re-running the action.
+        resume_output: Option<serde_json::Value>,
     },
 }
 

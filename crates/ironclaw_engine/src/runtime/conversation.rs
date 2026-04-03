@@ -165,7 +165,13 @@ impl ConversationManager {
                     "resuming suspended foreground thread"
                 );
                 self.thread_manager
-                    .resume_thread(thread_id, user_id, Some(ThreadMessage::user(content)), None)
+                    .resume_thread(
+                        thread_id,
+                        user_id,
+                        Some(ThreadMessage::user(content)),
+                        None,
+                        None,
+                    )
                     .await?;
                 conv.add_entry(ConversationEntry::system_for_thread(
                     thread_id,
@@ -191,6 +197,19 @@ impl ConversationManager {
                         history,
                     )
                     .await?;
+
+                // Store the base channel name in thread metadata so the
+                // orchestrator can populate `source_channel` in the execution
+                // context (used by mission_create to default notify_channels).
+                let base_channel = conv
+                    .channel
+                    .split(':')
+                    .next()
+                    .unwrap_or(&conv.channel)
+                    .to_string();
+                self.thread_manager
+                    .set_thread_metadata(thread_id, "source_channel", &base_channel)
+                    .await;
 
                 conv.track_thread(thread_id);
                 conv.add_entry(ConversationEntry::system_for_thread(
@@ -246,28 +265,16 @@ impl ConversationManager {
                     ));
                     conv.untrack_thread(thread_id);
                 }
-                ThreadOutcome::NeedApproval {
+                ThreadOutcome::GatePaused {
+                    gate_name,
                     action_name,
-                    call_id: _,
-                    parameters: _,
+                    ..
                 } => {
                     conv.add_entry(ConversationEntry::system_for_thread(
                         thread_id,
-                        format!("Approval needed for action: {action_name}"),
+                        format!("Gate '{gate_name}' paused execution of action: {action_name}"),
                     ));
-                    // Thread stays active — waiting for approval
-                }
-                ThreadOutcome::NeedAuthentication {
-                    credential_name,
-                    action_name: _,
-                    call_id: _,
-                    parameters: _,
-                } => {
-                    conv.add_entry(ConversationEntry::system_for_thread(
-                        thread_id,
-                        format!("Authentication required for credential: {credential_name}"),
-                    ));
-                    // Thread stays active — waiting for OAuth completion
+                    // Thread stays active — waiting for gate resolution
                 }
             }
             self.store.save_conversation(conv).await?;

@@ -230,6 +230,17 @@ async def _wait_for_response(
     )
 
 
+async def _wait_for_no_pending_approval(base_url: str, thread_id: str, *, timeout: float = 45.0):
+    for _ in range(int(timeout * 2)):
+        r = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
+        r.raise_for_status()
+        history = r.json()
+        if not history.get("pending_approval"):
+            return history
+        await asyncio.sleep(0.5)
+    raise AssertionError(f"Timed out waiting for pending_approval to clear in thread {thread_id}")
+
+
 async def _approve(
     base_url: str,
     thread_id: str,
@@ -258,6 +269,43 @@ async def _approve(
 # ---------------------------------------------------------------------------
 
 class TestV2EngineApprovalFlow:
+    async def test_same_user_approvals_are_thread_scoped(self, v2_approval_server):
+        base_url = v2_approval_server
+
+        thread_a = (await api_post(base_url, "/api/chat/thread/new", timeout=15)).json()["id"]
+        thread_b = (await api_post(base_url, "/api/chat/thread/new", timeout=15)).json()["id"]
+
+        await api_post(
+            base_url,
+            "/api/chat/send",
+            json={"content": "make approval post alpha", "thread_id": thread_a},
+            timeout=30,
+        )
+        await api_post(
+            base_url,
+            "/api/chat/send",
+            json={"content": "make approval post beta", "thread_id": thread_b},
+            timeout=30,
+        )
+
+        pending_a = await _wait_for_approval(base_url, thread_a, timeout=60)
+        pending_b = await _wait_for_approval(base_url, thread_b, timeout=60)
+        assert pending_a["request_id"] != pending_b["request_id"]
+
+        approve_a = await _approve(base_url, thread_a, pending_a["request_id"], "approve")
+        assert approve_a.status_code == 202, approve_a.text
+        await _wait_for_no_pending_approval(base_url, thread_a, timeout=60)
+
+        history_b = await api_get(base_url, f"/api/chat/history?thread_id={thread_b}", timeout=15)
+        history_b.raise_for_status()
+        still_pending_b = history_b.json().get("pending_approval")
+        assert still_pending_b is not None, history_b.json()
+        assert still_pending_b["request_id"] == pending_b["request_id"]
+
+        approve_b = await _approve(base_url, thread_b, pending_b["request_id"], "approve")
+        assert approve_b.status_code == 202, approve_b.text
+        await _wait_for_no_pending_approval(base_url, thread_b, timeout=60)
+
     """Test the v2 engine tool approval lifecycle.
 
     Uses text-based approval ("yes"/"no"/"always" as chat messages) rather

@@ -280,6 +280,7 @@ async fn handle_client_message(
                                     instructions: Some(result.message),
                                     auth_url: None,
                                     setup_url: None,
+                                    thread_id: None,
                                 },
                             );
                         } else {
@@ -290,6 +291,7 @@ async fn handle_client_message(
                                     extension_name,
                                     success: true,
                                     message: result.message,
+                                    thread_id: None,
                                 },
                             );
                         }
@@ -304,6 +306,7 @@ async fn handle_client_message(
                                     instructions: Some(msg.clone()),
                                     auth_url: None,
                                     setup_url: None,
+                                    thread_id: None,
                                 },
                             );
                         }
@@ -527,7 +530,7 @@ mod tests {
             skill_registry: None,
             skill_catalog: None,
             chat_rate_limiter: crate::channels::web::server::PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: crate::channels::web::server::RateLimiter::new(10, 60),
+            oauth_rate_limiter: crate::channels::web::server::PerUserRateLimiter::new(20, 60),
             webhook_rate_limiter: crate::channels::web::server::RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
@@ -536,6 +539,14 @@ mod tests {
             active_config: crate::channels::web::server::ActiveConfigSnapshot::default(),
             secrets_store: None,
             db_auth: None,
+            oauth_providers: None,
+            oauth_state_store: None,
+            oauth_base_url: None,
+            oauth_allowed_domains: Vec::new(),
+            near_nonce_store: None,
+            near_rpc_url: None,
+            near_network: None,
+            oauth_sweep_shutdown: None,
         }
     }
 }

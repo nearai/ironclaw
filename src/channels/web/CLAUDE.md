@@ -35,9 +35,10 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | GET | `/api/chat/history` | Paginated turn history for a thread |
 | GET | `/api/chat/threads` | List threads (returns `assistant_thread` + regular threads) |
 | POST | `/api/chat/thread/new` | Create new thread |
-| POST | `/api/chat/approval` | Approve/deny/always a pending tool call |
-| POST | `/api/chat/auth-token` | Submit auth token for an extension |
-| POST | `/api/chat/auth-cancel` | Cancel pending auth flow |
+| POST | `/api/chat/gate/resolve` | Resolve a pending engine v2 gate (approve, deny, credential, cancel) |
+| POST | `/api/chat/approval` | Legacy approval shim; translates to unified gate resolution |
+| POST | `/api/chat/auth-token` | Legacy auth shim; translates engine v2 auth gates or configures extensions directly |
+| POST | `/api/chat/auth-cancel` | Legacy auth-cancel shim |
 
 ### Memory
 | Method | Path | Description |
@@ -169,8 +170,10 @@ The SSE contract — every field is `#[serde(tag = "type")]`:
 | `job_tool_result` | Tool result from sandbox |
 | `job_status` | Sandbox job status update |
 | `job_result` | Sandbox job final result |
-| `approval_needed` | Tool requires user approval (pauses agent) |
-| `auth_required` | Extension needs auth credentials |
+| `gate_required` | Engine v2 gate requires user input (approval/auth/external) |
+| `gate_resolved` | Engine v2 gate was resolved |
+| `approval_needed` | Legacy approval event |
+| `auth_required` | Legacy extension/auth event |
 | `auth_completed` | Extension auth flow finished |
 | `extension_status` | WASM channel activation status changed |
 | `error` | Error from agent or gateway |
@@ -227,9 +230,9 @@ All responses include:
 
 **Request body limit:** 10 MB (`DefaultBodyLimit::max(10 * 1024 * 1024)`), sized for image uploads (#725). Larger payloads return 413.
 
-## Pending Approvals
+## Pending Gates
 
-Classic agent approvals are in-memory, but engine v2 approvals are mirrored into durable engine metadata. `HistoryResponse.pending_approval` should rehydrate from live session state first and then from engine metadata so approval cards survive thread switches and restart recovery.
+Classic agent approvals are in-memory, but engine v2 pauses live in the unified pending-gate store with file-backed recovery under `~/.ironclaw/pending-gates.json`. `HistoryResponse.pending_gate` rehydrates from that store so cards survive thread switches, SSE reconnects, and process restarts. Gate UI must remain thread-scoped: stale cards from another thread should not be rendered or resolved in the current thread.
 
 ## Adding a New API Endpoint
 

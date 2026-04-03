@@ -383,28 +383,23 @@ impl AppBuilder {
             ws = ws.with_memory_layers(self.config.workspace.memory_layers.clone());
             let ws = Arc::new(ws);
 
-            // Detect multi-tenant mode: when the database has registered users,
-            // each authenticated user needs their own workspace scope. Use
-            // WorkspacePool (which implements WorkspaceResolver) to create
-            // per-user workspaces on demand instead of sharing the startup
-            // workspace across all users.
+            // Memory tools must resolve by `ctx.user_id`, not a fixed startup
+            // workspace. Even outside authenticated multi-tenant mode, some
+            // channels and test harnesses route non-owner users through
+            // per-user tenant workspaces seeded on demand.
             let is_multi_tenant = db.has_any_users().await.unwrap_or(false);
-
-            if is_multi_tenant {
-                let pool = Arc::new(crate::channels::web::server::WorkspacePool::new(
-                    Arc::clone(db),
-                    embeddings.clone(),
-                    emb_cache_config,
-                    self.config.search.clone(),
-                    self.config.workspace.clone(),
-                ));
-                tools.register_memory_tools_with_resolver(pool);
-                tracing::info!(
-                    "Memory tools configured with per-user workspace resolver (multi-tenant mode)"
-                );
-            } else {
-                tools.register_memory_tools(Arc::clone(&ws));
-            }
+            let pool = Arc::new(crate::channels::web::server::WorkspacePool::new(
+                Arc::clone(db),
+                embeddings.clone(),
+                emb_cache_config,
+                self.config.search.clone(),
+                self.config.workspace.clone(),
+            ));
+            tools.register_memory_tools_with_resolver(pool);
+            tracing::debug!(
+                multi_tenant = is_multi_tenant,
+                "Memory tools configured with per-user workspace resolver"
+            );
 
             Some(ws)
         } else {
@@ -787,6 +782,31 @@ impl AppBuilder {
 
             Some(manager)
         };
+
+        // Validate ACP agent configs at startup (lightweight — no connections, just config check).
+        {
+            let acp_agents = if let Some(ref d) = self.db {
+                crate::config::acp::load_acp_agents_from_db(d.as_ref(), &self.config.owner_id).await
+            } else {
+                crate::config::acp::load_acp_agents().await
+            };
+            match acp_agents {
+                Ok(file) => {
+                    let enabled: Vec<_> = file.enabled_agents().collect();
+                    if !enabled.is_empty() {
+                        let names: Vec<&str> = enabled.iter().map(|a| a.name.as_str()).collect();
+                        tracing::info!(
+                            "ACP agents configured: {} ({} enabled)",
+                            names.join(", "),
+                            enabled.len()
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("No ACP agents configured ({})", e);
+                }
+            }
+        }
 
         // register_builder_tool() already calls register_dev_tools() internally,
         // so only register them here when the builder didn't already do it.

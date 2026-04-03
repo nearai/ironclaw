@@ -205,11 +205,11 @@ impl Tool for MessageTool {
                 },
                 "channel": {
                     "type": "string",
-                    "description": "Target channel (defaults to current channel if omitted)"
+                    "description": "Transport/integration name: 'slack-relay', 'telegram', 'signal', 'gateway'. This is NOT a Slack channel ID — use target for that. Defaults to current channel if omitted."
                 },
                 "target": {
                     "type": "string",
-                    "description": "Recipient: E.164 phone, group ID, chat ID (defaults to current sender/group if omitted)"
+                    "description": "Recipient within the transport. Slack: channel ID (C0...), user ID (U0...), or #channel-name. Telegram: chat ID. Signal: E.164 phone or group ID. Defaults to current conversation target if omitted."
                 },
                 "attachments": {
                     "type": "array",

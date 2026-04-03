@@ -117,12 +117,37 @@ pub enum AppEvent {
         auth_url: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         setup_url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
     },
     #[serde(rename = "auth_completed")]
     AuthCompleted {
         extension_name: String,
         success: bool,
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+    #[serde(rename = "gate_required")]
+    GateRequired {
+        request_id: String,
+        gate_name: String,
+        tool_name: String,
+        description: String,
+        parameters: String,
+        resume_kind: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+    #[serde(rename = "gate_resolved")]
+    GateResolved {
+        request_id: String,
+        gate_name: String,
+        tool_name: String,
+        resolution: String,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
     },
     #[serde(rename = "error")]
     Error {
@@ -291,6 +316,8 @@ impl AppEvent {
             Self::ApprovalNeeded { .. } => "approval_needed",
             Self::AuthRequired { .. } => "auth_required",
             Self::AuthCompleted { .. } => "auth_completed",
+            Self::GateRequired { .. } => "gate_required",
+            Self::GateResolved { .. } => "gate_resolved",
             Self::Error { .. } => "error",
             Self::Heartbeat => "heartbeat",
             Self::JobMessage { .. } => "job_message",
@@ -373,11 +400,13 @@ mod tests {
                 instructions: None,
                 auth_url: None,
                 setup_url: None,
+                thread_id: None,
             },
             AppEvent::AuthCompleted {
                 extension_name: String::new(),
                 success: true,
                 message: String::new(),
+                thread_id: None,
             },
             AppEvent::Error {
                 message: String::new(),

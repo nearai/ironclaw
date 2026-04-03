@@ -16,6 +16,7 @@
 
 pub mod capability;
 pub mod executor;
+pub mod gate;
 pub mod memory;
 pub mod reliability;
 pub mod runtime;
@@ -25,8 +26,8 @@ pub mod types;
 // ── Re-exports: types ───────────────────────────────────────
 
 pub use types::capability::{
-    ActionDef, Capability, CapabilityLease, EffectType, LeaseId, PolicyCondition, PolicyEffect,
-    PolicyRule,
+    ActionDef, Capability, CapabilityLease, EffectType, GrantedActions, LeaseId, PolicyCondition,
+    PolicyEffect, PolicyRule,
 };
 pub use types::error::{CapabilityError, EngineError, StepError, ThreadError};
 pub use types::event::{EventId, EventKind, ThreadEvent};
@@ -53,13 +54,22 @@ pub use capability::planner::{CapabilityGrantPlan, LeasePlanner};
 pub use capability::policy::{PolicyDecision, PolicyEngine};
 pub use capability::registry::CapabilityRegistry;
 
+// ── Re-exports: gate ─────────────────────────────────────────
+
+pub use gate::lease::LeaseGate;
+pub use gate::pipeline::GatePipeline;
+pub use gate::tool_tier::{ToolTier, classify_tool_tier};
+pub use gate::{
+    ExecutionGate, ExecutionMode, GateContext, GateDecision, GateResolution, ResumeKind,
+};
+
 // ── Re-exports: runtime ───────────────────────────────────────
 
 pub use executor::prompt::PlatformInfo;
 pub use runtime::conversation::ConversationManager;
 pub use runtime::manager::ThreadManager;
 pub use runtime::messaging::ThreadOutcome;
-pub use runtime::mission::MissionManager;
+pub use runtime::mission::{MissionManager, MissionNotification, MissionUpdate};
 pub use runtime::tree::ThreadTree;
 
 pub use types::conversation::{
@@ -87,6 +97,7 @@ pub(crate) mod tests {
 
     use crate::traits::store::Store;
     use crate::types::capability::{CapabilityLease, LeaseId};
+    use crate::types::conversation::{ConversationId, ConversationSurface};
     use crate::types::error::EngineError;
     use crate::types::event::ThreadEvent;
     use crate::types::memory::{DocId, MemoryDoc};
@@ -104,6 +115,7 @@ pub(crate) mod tests {
         steps: RwLock<Vec<Step>>,
         events: RwLock<Vec<ThreadEvent>>,
         projects: RwLock<Vec<Project>>,
+        conversations: RwLock<Vec<ConversationSurface>>,
         docs: RwLock<Vec<MemoryDoc>>,
         leases: RwLock<Vec<CapabilityLease>>,
         missions: RwLock<Vec<Mission>>,
@@ -116,6 +128,7 @@ pub(crate) mod tests {
                 steps: RwLock::new(Vec::new()),
                 events: RwLock::new(Vec::new()),
                 projects: RwLock::new(Vec::new()),
+                conversations: RwLock::new(Vec::new()),
                 docs: RwLock::new(Vec::new()),
                 leases: RwLock::new(Vec::new()),
                 missions: RwLock::new(Vec::new()),
@@ -217,6 +230,53 @@ pub(crate) mod tests {
                 .find(|p| p.id == id)
                 .cloned())
         }
+        async fn list_projects(&self, user_id: &str) -> Result<Vec<Project>, EngineError> {
+            Ok(self
+                .projects
+                .read()
+                .await
+                .iter()
+                .filter(|p| p.user_id == user_id)
+                .cloned()
+                .collect())
+        }
+        async fn list_all_projects(&self) -> Result<Vec<Project>, EngineError> {
+            Ok(self.projects.read().await.iter().cloned().collect())
+        }
+        async fn save_conversation(
+            &self,
+            conversation: &ConversationSurface,
+        ) -> Result<(), EngineError> {
+            let mut conversations = self.conversations.write().await;
+            conversations.retain(|c| c.id != conversation.id);
+            conversations.push(conversation.clone());
+            Ok(())
+        }
+        async fn load_conversation(
+            &self,
+            id: ConversationId,
+        ) -> Result<Option<ConversationSurface>, EngineError> {
+            Ok(self
+                .conversations
+                .read()
+                .await
+                .iter()
+                .find(|c| c.id == id)
+                .cloned())
+        }
+        async fn list_conversations(
+            &self,
+            user_id: &str,
+        ) -> Result<Vec<ConversationSurface>, EngineError> {
+            Ok(self
+                .conversations
+                .read()
+                .await
+                .iter()
+                .filter(|c| c.user_id == user_id)
+                .cloned()
+                .collect())
+        }
         async fn save_memory_doc(&self, doc: &MemoryDoc) -> Result<(), EngineError> {
             let mut docs = self.docs.write().await;
             docs.retain(|d| d.id != doc.id);
@@ -306,5 +366,165 @@ pub(crate) mod tests {
             }
             Ok(())
         }
+        async fn list_all_threads(
+            &self,
+            project_id: ProjectId,
+        ) -> Result<Vec<Thread>, EngineError> {
+            Ok(self
+                .threads
+                .read()
+                .await
+                .iter()
+                .filter(|t| t.project_id == project_id)
+                .cloned()
+                .collect())
+        }
+        async fn list_all_missions(
+            &self,
+            project_id: ProjectId,
+        ) -> Result<Vec<Mission>, EngineError> {
+            Ok(self
+                .missions
+                .read()
+                .await
+                .iter()
+                .filter(|m| m.project_id == project_id)
+                .cloned()
+                .collect())
+        }
+    }
+
+    struct MinimalStore;
+
+    #[async_trait::async_trait]
+    impl Store for MinimalStore {
+        async fn save_thread(&self, _thread: &Thread) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn load_thread(&self, _id: ThreadId) -> Result<Option<Thread>, EngineError> {
+            Ok(None)
+        }
+        async fn list_threads(
+            &self,
+            _project_id: ProjectId,
+            _user_id: &str,
+        ) -> Result<Vec<Thread>, EngineError> {
+            Ok(Vec::new())
+        }
+        async fn update_thread_state(
+            &self,
+            _id: ThreadId,
+            _state: ThreadState,
+        ) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn save_step(&self, _step: &Step) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn load_steps(&self, _thread_id: ThreadId) -> Result<Vec<Step>, EngineError> {
+            Ok(Vec::new())
+        }
+        async fn append_events(&self, _events: &[ThreadEvent]) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn load_events(&self, _thread_id: ThreadId) -> Result<Vec<ThreadEvent>, EngineError> {
+            Ok(Vec::new())
+        }
+        async fn save_project(&self, _project: &Project) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn load_project(&self, _id: ProjectId) -> Result<Option<Project>, EngineError> {
+            Ok(None)
+        }
+        async fn save_memory_doc(&self, _doc: &MemoryDoc) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn load_memory_doc(&self, _id: DocId) -> Result<Option<MemoryDoc>, EngineError> {
+            Ok(None)
+        }
+        async fn list_memory_docs(
+            &self,
+            _project_id: ProjectId,
+            _user_id: &str,
+        ) -> Result<Vec<MemoryDoc>, EngineError> {
+            Ok(Vec::new())
+        }
+        async fn save_lease(&self, _lease: &CapabilityLease) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn load_active_leases(
+            &self,
+            _thread_id: ThreadId,
+        ) -> Result<Vec<CapabilityLease>, EngineError> {
+            Ok(Vec::new())
+        }
+        async fn revoke_lease(&self, _lease_id: LeaseId, _reason: &str) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn save_mission(&self, _mission: &Mission) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn load_mission(&self, _id: MissionId) -> Result<Option<Mission>, EngineError> {
+            Ok(None)
+        }
+        async fn list_missions(
+            &self,
+            _project_id: ProjectId,
+            _user_id: &str,
+        ) -> Result<Vec<Mission>, EngineError> {
+            Ok(Vec::new())
+        }
+        async fn update_mission_status(
+            &self,
+            _id: MissionId,
+            _status: MissionStatus,
+        ) -> Result<(), EngineError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn store_defaults_fail_closed() {
+        let store = MinimalStore;
+        assert!(matches!(
+            store.list_projects("alice").await,
+            Err(EngineError::Store { .. })
+        ));
+        assert!(matches!(
+            store.list_all_projects().await,
+            Err(EngineError::Store { .. })
+        ));
+        assert!(matches!(
+            store.load_conversation(ConversationId::new()).await,
+            Err(EngineError::Store { .. })
+        ));
+        assert!(matches!(
+            store.list_all_threads(ProjectId::new()).await,
+            Err(EngineError::Store { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn shared_queries_include_legacy_and_current_shared_owner() {
+        use crate::types::memory::DocType;
+        use crate::types::{LEGACY_SHARED_OWNER_ID, shared_owner_id};
+
+        let project_id = ProjectId::new();
+        let mut legacy = MemoryDoc::new(
+            project_id,
+            LEGACY_SHARED_OWNER_ID,
+            DocType::Note,
+            "legacy",
+            "a",
+        );
+        let current = MemoryDoc::new(project_id, shared_owner_id(), DocType::Note, "current", "b");
+        legacy.id = DocId::new();
+        let store = InMemoryStore::with_docs(vec![legacy, current]);
+
+        let docs = store
+            .list_memory_docs_with_shared(project_id, "alice")
+            .await
+            .unwrap();
+        assert_eq!(docs.len(), 2);
     }
 }

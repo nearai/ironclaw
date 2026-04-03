@@ -26,6 +26,7 @@ SEL = {
     "chat_messages": "#chat-messages",
     "message_user": "#chat-messages .message.user",
     "message_assistant": "#chat-messages .message.assistant",
+    "message_system": "#chat-messages .message.system",
     # Skills
     "skill_search_input": "#skill-search-input",
     "skill_search_results": "#skill-search-results",
@@ -189,6 +190,75 @@ async def api_post(base_url: str, path: str, **kwargs) -> httpx.Response:
             timeout=kwargs.pop("timeout", 10),
             **kwargs,
         )
+
+
+async def send_chat_and_wait_for_terminal_message(
+    page,
+    message: str,
+    *,
+    timeout: int = 30000,
+) -> dict[str, str]:
+    """Send a chat message and wait for the next terminal visible outcome.
+
+    Returns a dict with:
+    - ``role``: ``assistant`` or ``system``
+    - ``text``: rendered text of the newest terminal message
+    """
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+
+    assistant_sel = SEL["message_assistant"]
+    system_sel = SEL["message_system"]
+    before_assistant = await page.locator(assistant_sel).count()
+    before_system = await page.locator(system_sel).count()
+
+    await chat_input.fill(message)
+    await chat_input.press("Enter")
+
+    handle = await page.wait_for_function(
+        """({
+            assistantSelector,
+            systemSelector,
+            chatInputSelector,
+            assistantCount,
+            systemCount,
+        }) => {
+            const input = document.querySelector(chatInputSelector);
+            const systems = document.querySelectorAll(systemSelector);
+            if (systems.length > systemCount) {
+                const last = systems[systems.length - 1];
+                const content = last.querySelector('.message-content');
+                return {
+                    role: 'system',
+                    text: ((content && content.innerText) || last.innerText || '').trim(),
+                };
+            }
+
+            const assistants = document.querySelectorAll(assistantSelector);
+            if (assistants.length > assistantCount && input && !input.disabled) {
+                const last = assistants[assistants.length - 1];
+                const content = last.querySelector('.message-content');
+                const text = ((content && content.innerText) || last.innerText || '').trim();
+                if (text.length > 0 && !last.hasAttribute('data-streaming')) {
+                    return {
+                        role: 'assistant',
+                        text,
+                    };
+                }
+            }
+
+            return null;
+        }""",
+        arg={
+            "assistantSelector": assistant_sel,
+            "systemSelector": system_sel,
+            "chatInputSelector": SEL["chat_input"],
+            "assistantCount": before_assistant,
+            "systemCount": before_system,
+        },
+        timeout=timeout,
+    )
+    return await handle.json_value()
 
 
 def signed_http_webhook_headers(body: bytes) -> dict[str, str]:

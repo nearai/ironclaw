@@ -186,19 +186,24 @@ pub fn extract_skill_mentions<'a>(
                 || bytes[i - 1] == b'(';
 
             if is_boundary {
-                // Extract the name: [a-z0-9-]+
+                // Extract the name using the same character class accepted by
+                // skill validation: [a-zA-Z0-9._-]+
                 let start = i + 1;
                 let mut end = start;
                 while end < bytes.len()
                     && (bytes[end].is_ascii_lowercase()
+                        || bytes[end].is_ascii_uppercase()
                         || bytes[end].is_ascii_digit()
-                        || bytes[end] == b'-')
+                        || bytes[end] == b'-'
+                        || bytes[end] == b'_'
+                        || bytes[end] == b'.')
                 {
                     end += 1;
                 }
                 if end > start {
                     let name = &message[start..end];
-                    if let Some(skill) = skill_map.get(name) {
+                    let lookup = name.to_lowercase();
+                    if let Some(skill) = skill_map.get(&lookup) {
                         let replacement = if skill.manifest.description.is_empty() {
                             // No description — just remove the slash
                             name.replace('-', " ")
@@ -639,6 +644,28 @@ mod tests {
             rewritten,
             "please file detailed GitHub issues for all found bugs"
         );
+    }
+
+    #[test]
+    fn test_extract_underscored_skill_name() {
+        let mut skill = make_skill("my_skill", &["skill"], &[], &[]);
+        skill.manifest.description = "custom workflow".to_string();
+        let skills = vec![skill];
+        let (matched, rewritten) = extract_skill_mentions("run /my_skill on this task", &skills);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].manifest.name, "my_skill");
+        assert_eq!(rewritten, "run custom workflow on this task");
+    }
+
+    #[test]
+    fn test_extract_dotted_skill_name() {
+        let mut skill = make_skill("skill.v2", &["skill"], &[], &[]);
+        skill.manifest.description = "second generation skill".to_string();
+        let skills = vec![skill];
+        let (matched, rewritten) = extract_skill_mentions("please use /skill.v2 here", &skills);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].manifest.name, "skill.v2");
+        assert_eq!(rewritten, "please use second generation skill here");
     }
 
     #[test]

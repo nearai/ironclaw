@@ -2298,63 +2298,16 @@ impl WasmChannel {
             StatusUpdate::StreamChunk(_) => {
                 // No-op, too noisy
             }
-            StatusUpdate::ApprovalNeeded {
-                tool_name,
-                description,
-                parameters,
-                allow_always,
-                ..
-            } => {
+            StatusUpdate::ApprovalNeeded { .. } => {
                 // WASM channels (Telegram, Slack, etc.) cannot render
                 // interactive approval overlays.  Send the approval prompt
                 // as an actual message so the user can reply yes/no.
                 self.cancel_typing_task().await;
 
-                let params_preview = parameters
-                    .as_object()
-                    .map(|obj| {
-                        obj.iter()
-                            .map(|(k, v)| {
-                                let val = match v {
-                                    serde_json::Value::String(s) => {
-                                        if s.chars().count() > 80 {
-                                            let truncated: String = s.chars().take(77).collect();
-                                            format!("\"{}...\"", truncated)
-                                        } else {
-                                            format!("\"{}\"", s)
-                                        }
-                                    }
-                                    other => {
-                                        let s = other.to_string();
-                                        if s.chars().count() > 80 {
-                                            let truncated: String = s.chars().take(77).collect();
-                                            format!("{}...", truncated)
-                                        } else {
-                                            s
-                                        }
-                                    }
-                                };
-                                format!("  {}: {}", k, val)
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    })
-                    .unwrap_or_default();
-
-                let reply_hint = if *allow_always {
-                    "Reply \"yes\" to approve, \"no\" to deny, or \"always\" to auto-approve."
-                } else {
-                    "Reply \"yes\" to approve or \"no\" to deny."
+                let Some(prompt) = crate::channels::ChatApprovalPrompt::from_status(&status) else {
+                    return Ok(());
                 };
-                let prompt = format!(
-                    "Approval needed: {tool_name}\n\
-                     {description}\n\
-                     \n\
-                     Parameters:\n\
-                     {params_preview}\n\
-                     \n\
-                     {reply_hint}"
-                );
+                let prompt = prompt.plain_text_message();
 
                 let metadata_json = serde_json::to_string(metadata).unwrap_or_default();
                 if let Err(e) = self
@@ -3813,24 +3766,11 @@ fn status_to_wit(
                 metadata_json,
             }
         }
-        StatusUpdate::ApprovalNeeded {
-            request_id,
-            tool_name,
-            description,
-            allow_always,
-            ..
-        } => {
-            let reply_hint = if *allow_always {
-                "yes (or /approve), no (or /deny), or always (or /always)"
-            } else {
-                "yes (or /approve) or no (or /deny)"
-            };
+        StatusUpdate::ApprovalNeeded { .. } => {
+            let prompt = crate::channels::ChatApprovalPrompt::from_status(status)?;
             wit_channel::StatusUpdate {
                 status: wit_channel::StatusType::ApprovalNeeded,
-                message: format!(
-                    "Approval needed for tool '{}'. {}\nRequest ID: {}\nReply with: {}.",
-                    tool_name, description, request_id, reply_hint
-                ),
+                message: prompt.plain_text_message(),
                 metadata_json,
             }
         }

@@ -92,35 +92,21 @@ pub struct HistoryResponse {
     /// Cursor for the next page (ISO8601 timestamp of the oldest message returned).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oldest_timestamp: Option<String>,
-    /// Pending tool approval that needs user action (re-rendered on thread switch).
-    ///
-    /// Populated from live session state and, when engine v2 is active,
-    /// durable engine metadata so approval cards survive thread switches and restarts.
+    /// Unified pending gate state for engine v2.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pending_approval: Option<PendingApprovalInfo>,
-    /// Pending auth flow that needs user action (re-rendered on SSE reconnect).
-    ///
-    /// When present, the frontend should show the auth card so the user can
-    /// submit credentials. Without this, SSE disconnects lose the auth card
-    /// and the user is stuck with a blocked chat input.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pending_auth: Option<PendingAuthInfo>,
+    pub pending_gate: Option<PendingGateInfo>,
 }
 
-/// Lightweight DTO for pending auth state (credential name + instructions).
+/// Lightweight DTO for unified pending gate state.
 #[derive(Debug, Serialize)]
-pub struct PendingAuthInfo {
-    pub extension_name: String,
-    pub instructions: Option<String>,
-}
-
-/// Lightweight DTO for a pending tool approval (excludes context_messages).
-#[derive(Debug, Serialize)]
-pub struct PendingApprovalInfo {
+pub struct PendingGateInfo {
     pub request_id: String,
+    pub thread_id: String,
+    pub gate_name: String,
     pub tool_name: String,
     pub description: String,
     pub parameters: String,
+    pub resume_kind: serde_json::Value,
 }
 
 // --- Approval ---
@@ -132,6 +118,28 @@ pub struct ApprovalRequest {
     pub action: String,
     /// Thread that owns the pending approval (so the agent loop finds the right session).
     pub thread_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "resolution", rename_all = "snake_case")]
+pub enum GateResolutionPayload {
+    Approved {
+        #[serde(default)]
+        always: bool,
+    },
+    Denied,
+    CredentialProvided {
+        token: String,
+    },
+    Cancelled,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GateResolveRequest {
+    pub request_id: String,
+    pub thread_id: Option<String>,
+    #[serde(flatten)]
+    pub resolution: GateResolutionPayload,
 }
 
 // --- App Event (re-exported from ironclaw_common) ---
@@ -580,12 +588,16 @@ pub struct SkillInstallRequest {
 pub struct AuthTokenRequest {
     pub extension_name: String,
     pub token: String,
+    pub request_id: Option<String>,
+    pub thread_id: Option<String>,
 }
 
 /// Request to cancel an in-progress auth flow.
 #[derive(Debug, Deserialize)]
 pub struct AuthCancelRequest {
     pub extension_name: String,
+    pub request_id: Option<String>,
+    pub thread_id: Option<String>,
 }
 
 // --- WebSocket ---
@@ -1117,6 +1129,7 @@ mod tests {
             instructions: Some("Get your token from...".to_string()),
             auth_url: None,
             setup_url: Some("https://notion.so/integrations".to_string()),
+            thread_id: Some("thread-1".to_string()),
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1125,6 +1138,7 @@ mod tests {
         assert_eq!(parsed["instructions"], "Get your token from...");
         assert!(parsed.get("auth_url").is_none());
         assert_eq!(parsed["setup_url"], "https://notion.so/integrations");
+        assert_eq!(parsed["thread_id"], "thread-1");
     }
 
     #[test]
@@ -1133,12 +1147,14 @@ mod tests {
             extension_name: "notion".to_string(),
             success: true,
             message: "notion authenticated (3 tools loaded)".to_string(),
+            thread_id: Some("thread-1".to_string()),
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["type"], "auth_completed");
         assert_eq!(parsed["extension_name"], "notion");
         assert_eq!(parsed["success"], true);
+        assert_eq!(parsed["thread_id"], "thread-1");
     }
 
     #[test]
@@ -1148,6 +1164,7 @@ mod tests {
             instructions: Some("Enter API key".to_string()),
             auth_url: None,
             setup_url: None,
+            thread_id: None,
         };
         let ws = WsServerMessage::from_app_event(&event);
         match ws {
@@ -1165,6 +1182,7 @@ mod tests {
             extension_name: "slack".to_string(),
             success: false,
             message: "Invalid token".to_string(),
+            thread_id: None,
         };
         let ws = WsServerMessage::from_app_event(&event);
         match ws {

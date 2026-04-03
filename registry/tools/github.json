@@ -4,13 +4,15 @@
   "kind": "tool",
   "version": "0.2.2",
   "wit_version": "0.3.0",
-  "description": "GitHub integration for issues, PRs, repos, and code search",
+  "description": "GitHub integration for repositories, issues, pull requests, search, branches, file writes, releases, and workflows",
   "keywords": [
     "git",
     "code",
     "issues",
     "pull-requests",
-    "repositories"
+    "repositories",
+    "search",
+    "releases"
   ],
   "source": {
     "dir": "tools-src/github",
