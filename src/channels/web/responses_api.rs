@@ -750,7 +750,7 @@ async fn handle_streaming(
     model: String,
     thread_id: String,
     user_id: String,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>> + Send>, ApiError> {
+) -> Result<Response, ApiError> {
     let event_stream = state.sse.subscribe_raw(Some(user_id)).ok_or_else(|| {
         api_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -774,7 +774,18 @@ async fn handle_streaming(
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok::<_, Infallible>);
 
-    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("")))
+    // Prevent reverse proxies (Railway, Cloudflare, nginx) from buffering SSE
+    let headers = axum::response::AppendHeaders([
+        (axum::http::header::CACHE_CONTROL, "no-cache, no-transform"),
+        (
+            axum::http::header::HeaderName::from_static("x-accel-buffering"),
+            "no",
+        ),
+    ]);
+    let sse =
+        Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text(""));
+
+    Ok((headers, sse).into_response())
 }
 
 /// Background task that reads `AppEvent`s and sends SSE `Event`s to the client.
