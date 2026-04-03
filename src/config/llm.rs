@@ -687,6 +687,18 @@ mod tests {
         parse_extra_headers_with_key(val, "TEST_HEADERS")
     }
 
+    /// Stub `NEARAI_AUTH_URL` and `NEARAI_BASE_URL` to loopback addresses so
+    /// `LlmConfig::resolve()` doesn't attempt DNS resolution of
+    /// `private.near.ai` in offline/sandboxed test environments.
+    /// Must be called under `lock_env()`.
+    fn stub_nearai_auth() {
+        // SAFETY: Only called under ENV_MUTEX in tests.
+        unsafe {
+            std::env::set_var("NEARAI_AUTH_URL", "http://127.0.0.1:1");
+            std::env::set_var("NEARAI_BASE_URL", "http://127.0.0.1:1");
+        }
+    }
+
     /// Clear all openai-compatible-related env vars.
     fn clear_openai_compatible_env() {
         // SAFETY: Only called under ENV_MUTEX in tests.
@@ -695,6 +707,7 @@ mod tests {
             std::env::remove_var("LLM_BASE_URL");
             std::env::remove_var("LLM_MODEL");
         }
+        stub_nearai_auth();
     }
 
     #[test]
@@ -840,6 +853,7 @@ mod tests {
             std::env::remove_var("OLLAMA_BASE_URL");
             std::env::remove_var("OLLAMA_MODEL");
         }
+        stub_nearai_auth();
     }
 
     #[test]
@@ -912,6 +926,7 @@ mod tests {
     #[test]
     fn registry_provider_resolves_groq() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -937,6 +952,7 @@ mod tests {
     #[test]
     fn registry_provider_resolves_tinfoil() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -965,6 +981,7 @@ mod tests {
     #[test]
     fn registry_provider_alias_resolves_zai() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -990,6 +1007,7 @@ mod tests {
     #[test]
     fn registry_provider_resolves_github_copilot_alias() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::set_var("LLM_BACKEND", "github-copilot");
@@ -1038,6 +1056,7 @@ mod tests {
     #[test]
     fn nearai_backend_has_no_registry_provider() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1102,6 +1121,7 @@ mod tests {
     #[test]
     fn nearai_aliases_all_resolve_to_nearai() {
         let _guard = lock_env();
+        stub_nearai_auth();
 
         for alias in &["nearai", "near_ai", "near"] {
             // SAFETY: Under ENV_MUTEX.
@@ -1183,6 +1203,7 @@ mod tests {
             std::env::remove_var("ANTHROPIC_MODEL");
             std::env::remove_var("ANTHROPIC_BASE_URL");
         }
+        stub_nearai_auth();
     }
 
     #[test]
@@ -1369,6 +1390,7 @@ mod tests {
     #[test]
     fn test_request_timeout_defaults_to_120() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_REQUEST_TIMEOUT_SECS");
@@ -1380,6 +1402,7 @@ mod tests {
     #[test]
     fn test_request_timeout_configurable() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::set_var("LLM_REQUEST_TIMEOUT_SECS", "300");
@@ -1397,6 +1420,7 @@ mod tests {
     #[test]
     fn custom_provider_resolves_when_backend_matches_id() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1432,6 +1456,7 @@ mod tests {
     #[test]
     fn db_llm_backend_takes_priority_over_env_var() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX. RAII guard removes LLM_BACKEND on drop so
         // a panicking assertion cannot leak the env var to other tests.
         struct RemoveOnDrop(&'static str);
@@ -1477,11 +1502,13 @@ mod tests {
             std::env::remove_var("OPENAI_CODEX_MODEL");
             std::env::remove_var("OPENAI_MODEL");
         }
+        stub_nearai_auth();
     }
 
     #[test]
     fn builtin_override_model_used_when_no_selected_model() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1534,6 +1561,7 @@ mod tests {
     #[test]
     fn selected_model_takes_priority_over_builtin_override_model() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1591,6 +1619,7 @@ mod tests {
     #[test]
     fn builtin_override_api_key_used_when_no_env_var() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1730,6 +1759,7 @@ mod tests {
     #[test]
     fn builtin_override_api_key_wins_over_env_var() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1773,6 +1803,7 @@ mod tests {
     #[test]
     fn builtin_override_model_wins_over_env_var() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1810,6 +1841,7 @@ mod tests {
     #[test]
     fn custom_provider_selected_model_wins_over_env() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1875,6 +1907,7 @@ mod tests {
     #[test]
     fn nearai_selected_model_wins_over_env() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1902,6 +1935,7 @@ mod tests {
     #[test]
     fn nearai_override_model_wins_over_env() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1938,6 +1972,7 @@ mod tests {
     #[test]
     fn nearai_selected_model_wins_over_override_model() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1970,6 +2005,7 @@ mod tests {
     #[test]
     fn nearai_override_base_url_wins_over_env() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -2007,6 +2043,7 @@ mod tests {
     #[test]
     fn nearai_env_base_url_used_when_no_override() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -2034,6 +2071,7 @@ mod tests {
     #[test]
     fn nearai_override_api_key_wins_over_env() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -2075,6 +2113,7 @@ mod tests {
     #[test]
     fn nearai_base_url_auto_selects_when_no_override_or_env() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -2120,6 +2159,7 @@ mod tests {
     #[test]
     fn registry_provider_override_base_url_wins_over_env() {
         let _guard = lock_env();
+        stub_nearai_auth();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");

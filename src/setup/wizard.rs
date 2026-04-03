@@ -4453,9 +4453,14 @@ mod tests {
     #[test]
     fn test_build_nearai_model_fetch_config_picks_up_runtime_env() {
         let _lock = lock_env();
-        // Ensure the real env var is unset so the only source is the overlay.
-        let _guard = EnvGuard::clear("NEARAI_API_KEY");
+        // Ensure the real env vars are unset so the only source is the overlay.
+        let _guard_key = EnvGuard::clear("NEARAI_API_KEY");
+        let _guard_url = EnvGuard::clear("NEARAI_BASE_URL");
 
+        // Also clear any runtime overlay and injected vars for base URL so
+        // they don't leak from other tests running in the same process.
+        crate::config::helpers::set_runtime_env("NEARAI_BASE_URL", "");
+        crate::config::inject_single_var("NEARAI_BASE_URL", "");
         crate::config::helpers::set_runtime_env("NEARAI_API_KEY", "test-key-from-overlay");
         let config = build_nearai_model_fetch_config();
 

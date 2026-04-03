@@ -754,11 +754,14 @@ mod tests {
 
         let _mutex = crate::config::helpers::lock_env();
         let prev = std::env::var("LLM_BACKEND").ok();
+        let prev_auth = std::env::var("NEARAI_AUTH_URL").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::set_var("LLM_BACKEND", "anthropic");
+            std::env::set_var("NEARAI_AUTH_URL", "http://127.0.0.1:1");
         }
         let _env_guard = EnvGuard("LLM_BACKEND", prev);
+        let _auth_guard = EnvGuard("NEARAI_AUTH_URL", prev_auth);
 
         let settings = Settings::default();
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -877,6 +880,7 @@ mod tests {
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
+            std::env::set_var("NEARAI_AUTH_URL", "http://127.0.0.1:1");
         }
         let settings = Settings::default();
         match check_llm_config(&settings) {
