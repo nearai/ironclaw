@@ -365,6 +365,7 @@ fn titlecase(s: &str) -> String {
 /// rather than injecting full schemas into the prompt.
 ///
 /// If `schemas` is empty the router file is removed.
+#[allow(dead_code)]
 pub(crate) fn generate_router_skill(schemas: &[CollectionSchema], skills_dir: &Path) {
     let router_dir = skills_dir.join("collections-router");
     let router_path = router_dir.join("SKILL.md");
@@ -908,11 +909,6 @@ pub(crate) async fn refresh_collection_tools(
     if let Some(skills_dir) = skills_dir {
         generate_collection_skill(schema, skills_dir, user_id);
 
-        // Update the router skill
-        if let Ok(schemas) = db.list_collections(user_id).await {
-            generate_router_skill(&schemas, skills_dir);
-        }
-
         // Hot-reload skills into the registry so they're available immediately
         // (not just on next restart).  Use spawn_blocking to avoid blocking
         // the tokio runtime — std::sync::RwLock can't be held across .await.
@@ -1393,10 +1389,6 @@ impl Tool for CollectionDropTool {
                 let _ = reg.commit_remove(collection);
             }
 
-            // Update the router skill on disk
-            if let Ok(schemas) = self.db.list_collections(&ctx.user_id).await {
-                generate_router_skill(&schemas, skills_dir);
-            }
         }
 
         // Remove collection discovery doc from workspace memory (best-effort)
