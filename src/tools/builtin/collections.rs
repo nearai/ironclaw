@@ -898,7 +898,7 @@ pub(crate) async fn refresh_collection_tools(
     db: &Arc<dyn Database>,
     registry: &Arc<ToolRegistry>,
     skills_dir: Option<&Path>,
-    skill_registry: Option<&Arc<std::sync::RwLock<crate::skills::SkillRegistry>>>,
+    skill_registry: Option<&Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>>,
     user_id: &str,
     collection_write_tx: Option<&broadcast::Sender<CollectionWriteEvent>>,
     workspace_resolver: Option<&Arc<dyn WorkspaceResolver>>,
@@ -989,7 +989,7 @@ pub async fn initialize_collection_tools_for_users(
     db: &Arc<dyn Database>,
     registry: &Arc<ToolRegistry>,
     skills_dir: Option<&Path>,
-    skill_registry: Option<&Arc<std::sync::RwLock<crate::skills::SkillRegistry>>>,
+    skill_registry: Option<&Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>>,
     collection_write_tx: Option<&broadcast::Sender<CollectionWriteEvent>>,
     workspace_resolver: Option<&Arc<dyn WorkspaceResolver>>,
 ) {
@@ -1134,7 +1134,7 @@ pub struct CollectionRegisterTool {
     db: Arc<dyn Database>,
     registry: Arc<ToolRegistry>,
     skills_dir: Option<PathBuf>,
-    skill_registry: Option<Arc<std::sync::RwLock<crate::skills::SkillRegistry>>>,
+    skill_registry: Option<Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>>,
     collection_write_tx: Option<broadcast::Sender<CollectionWriteEvent>>,
     workspace_resolver: Option<Arc<dyn WorkspaceResolver>>,
 }
@@ -1158,7 +1158,7 @@ impl CollectionRegisterTool {
 
     pub fn with_skill_registry(
         mut self,
-        sr: Arc<std::sync::RwLock<crate::skills::SkillRegistry>>,
+        sr: Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>,
     ) -> Self {
         self.skill_registry = Some(sr);
         self
@@ -1320,7 +1320,7 @@ pub struct CollectionDropTool {
     db: Arc<dyn Database>,
     registry: Arc<ToolRegistry>,
     skills_dir: Option<PathBuf>,
-    skill_registry: Option<Arc<std::sync::RwLock<crate::skills::SkillRegistry>>>,
+    skill_registry: Option<Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>>,
     workspace_resolver: Option<Arc<dyn WorkspaceResolver>>,
 }
 
@@ -1342,7 +1342,7 @@ impl CollectionDropTool {
 
     pub fn with_skill_registry(
         mut self,
-        sr: Arc<std::sync::RwLock<crate::skills::SkillRegistry>>,
+        sr: Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>,
     ) -> Self {
         self.skill_registry = Some(sr);
         self
@@ -1462,7 +1462,7 @@ pub struct CollectionsAlterTool {
     db: Arc<dyn Database>,
     registry: Arc<ToolRegistry>,
     skills_dir: Option<PathBuf>,
-    skill_registry: Option<Arc<std::sync::RwLock<crate::skills::SkillRegistry>>>,
+    skill_registry: Option<Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>>,
     collection_write_tx: Option<broadcast::Sender<CollectionWriteEvent>>,
     workspace_resolver: Option<Arc<dyn WorkspaceResolver>>,
 }
@@ -1486,7 +1486,7 @@ impl CollectionsAlterTool {
 
     pub fn with_skill_registry(
         mut self,
-        sr: Arc<std::sync::RwLock<crate::skills::SkillRegistry>>,
+        sr: Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>,
     ) -> Self {
         self.skill_registry = Some(sr);
         self
