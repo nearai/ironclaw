@@ -186,6 +186,12 @@ pub(crate) fn parse_string_env(
     Ok(optional_env(key)?.unwrap_or_else(|| default.into()))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BaseUrlPolicy {
+    StrictSsrf,
+    AllowPrivateNetwork,
+}
+
 /// Validate a user-configurable base URL to prevent SSRF attacks (#1103).
 ///
 /// Rejects:
@@ -196,7 +202,60 @@ pub(crate) fn parse_string_env(
 /// This is intended for config-time validation of base URLs like
 /// `OLLAMA_BASE_URL`, `EMBEDDING_BASE_URL`, `NEARAI_BASE_URL`, etc.
 pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), ConfigError> {
+    validate_base_url_with_policy(url, field_name, BaseUrlPolicy::StrictSsrf)
+}
+
+/// Validate an operator-configured model endpoint.
+///
+/// Unlike generic SSRF validation, this allows private/loopback LLM endpoints
+/// over both HTTP and HTTPS because they are explicitly configured by the
+/// operator. Public HTTP endpoints remain blocked to avoid sending credentials
+/// over plaintext transport.
+pub(crate) fn validate_operator_base_url(url: &str, field_name: &str) -> Result<(), ConfigError> {
+    validate_base_url_with_policy(url, field_name, BaseUrlPolicy::AllowPrivateNetwork)
+}
+
+fn classify_ip(ip: &std::net::IpAddr) -> IpClass {
     use std::net::{IpAddr, Ipv4Addr};
+
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_unspecified() || v4.is_multicast() || *v4 == Ipv4Addr::new(169, 254, 169, 254)
+            {
+                IpClass::AlwaysBlocked
+            } else if v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
+            {
+                IpClass::PrivateOrLoopback
+            } else {
+                IpClass::Public
+            }
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                classify_ip(&IpAddr::V4(v4))
+            } else if v6.is_unspecified() || v6.octets()[0] == 0xff {
+                IpClass::AlwaysBlocked
+            } else if v6.is_loopback()
+                || (v6.octets()[0] & 0xfe) == 0xfc
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+            {
+                IpClass::PrivateOrLoopback
+            } else {
+                IpClass::Public
+            }
+        }
+    }
+}
+
+fn validate_base_url_with_policy(
+    url: &str,
+    field_name: &str,
+    policy: BaseUrlPolicy,
+) -> Result<(), ConfigError> {
+    use std::net::{IpAddr, ToSocketAddrs};
 
     let parsed = reqwest::Url::parse(url).map_err(|e| ConfigError::InvalidValue {
         key: field_name.to_string(),
@@ -217,118 +276,113 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
     })?;
 
     let host_lower = host.to_lowercase();
+    let normalized_host = host.trim_start_matches('[').trim_end_matches(']');
 
-    // For HTTP (non-TLS), only allow localhost — remote HTTP endpoints
-    // risk credential leakage (e.g. NEAR AI bearer tokens sent over plaintext).
-    if scheme == "http" {
-        let is_localhost = host_lower == "localhost"
+    let is_localhost_name = || {
+        host_lower == "localhost"
             || host_lower == "127.0.0.1"
-            || host_lower == "::1"
-            || host_lower == "[::1]"
-            || host_lower.ends_with(".localhost");
-        if !is_localhost {
-            return Err(ConfigError::InvalidValue {
+            || normalized_host == "::1"
+            || host_lower.ends_with(".localhost")
+    };
+
+    let resolved_ips = if let Ok(ip) = normalized_host.parse::<IpAddr>() {
+        vec![ip]
+    } else {
+        let port = parsed
+            .port()
+            .unwrap_or(if scheme == "http" { 80 } else { 443 });
+        (host, port)
+            .to_socket_addrs()
+            .map_err(|e| ConfigError::InvalidValue {
                 key: field_name.to_string(),
                 message: format!(
+                    "failed to resolve hostname '{}': {}. \
+                     Base URLs must be resolvable at config time.",
+                    host, e
+                ),
+            })?
+            .map(|addr| addr.ip())
+            .collect::<Vec<_>>()
+    };
+
+    if scheme == "http" {
+        if is_localhost_name() {
+            return Ok(());
+        }
+
+        let all_private = !resolved_ips.is_empty()
+            && resolved_ips
+                .iter()
+                .all(|ip| matches!(classify_ip(ip), IpClass::PrivateOrLoopback));
+        let any_blocked = resolved_ips
+            .iter()
+            .any(|ip| matches!(classify_ip(ip), IpClass::AlwaysBlocked));
+
+        if policy == BaseUrlPolicy::AllowPrivateNetwork && all_private && !any_blocked {
+            return Ok(());
+        }
+
+        return Err(ConfigError::InvalidValue {
+            key: field_name.to_string(),
+            message: if policy == BaseUrlPolicy::AllowPrivateNetwork {
+                format!(
+                    "HTTP (non-TLS) is only allowed for localhost or private/internal endpoints, got '{}'. \
+                     Use HTTPS for public endpoints.",
+                    host
+                )
+            } else {
+                format!(
                     "HTTP (non-TLS) is only allowed for localhost, got '{}'. \
                      Use HTTPS for remote endpoints.",
                     host
-                ),
-            });
-        }
-        return Ok(());
+                )
+            },
+        });
     }
 
-    // Check whether an IP is in a blocked range (private, loopback,
-    // link-local, multicast, metadata, CGN, ULA).
-    let is_dangerous_ip = |ip: &IpAddr| -> bool {
-        match ip {
-            IpAddr::V4(v4) => {
-                v4.is_private()
-                    || v4.is_loopback()
-                    || v4.is_link_local()
-                    || v4.is_multicast()
-                    || v4.is_unspecified()
-                    || *v4 == Ipv4Addr::new(169, 254, 169, 254)
-                    || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64) // CGN
-            }
-            IpAddr::V6(v6) => {
-                if let Some(v4) = v6.to_ipv4_mapped() {
-                    v4.is_private()
-                        || v4.is_loopback()
-                        || v4.is_link_local()
-                        || v4.is_multicast()
-                        || v4.is_unspecified()
-                        || v4 == Ipv4Addr::new(169, 254, 169, 254)
-                        || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64) // CGN
-                } else {
-                    v6.is_loopback()
-                        || v6.is_unspecified()
-                        || (v6.octets()[0] & 0xfe) == 0xfc // ULA (fc00::/7)
-                        || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local (fe80::/10)
-                        || v6.octets()[0] == 0xff // multicast (ff00::/8)
-                }
-            }
-        }
-    };
-
-    // For HTTPS, reject private/loopback/link-local/metadata IPs.
-    // Check both IP literals and resolved hostnames to prevent DNS-based SSRF.
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_dangerous_ip(&ip) {
-            return Err(ConfigError::InvalidValue {
-                key: field_name.to_string(),
-                message: format!(
-                    "URL points to a private/internal IP '{}'. \
-                     This is blocked to prevent SSRF attacks.",
-                    ip
-                ),
-            });
-        }
-    } else {
-        // Hostname — resolve and check all resulting IPs as defense-in-depth.
-        // NOTE: This does NOT fully prevent DNS rebinding attacks (the hostname
-        // could resolve to a different IP at request time). Full protection
-        // would require pinning the resolved IP in the HTTP client's connector.
-        // This validation catches the common case of misconfigured or malicious URLs.
-        //
-        // NOTE: `to_socket_addrs()` performs blocking DNS resolution. This is
-        // acceptable because `validate_base_url` runs at config-load time only,
-        // before the async runtime is fully driving I/O. If this ever moves to
-        // a hot path, wrap in `tokio::task::spawn_blocking` or use
-        // `tokio::net::lookup_host`.
-        use std::net::ToSocketAddrs;
-        let port = parsed.port().unwrap_or(443);
-        match (host, port).to_socket_addrs() {
-            Ok(addrs) => {
-                for addr in addrs {
-                    if is_dangerous_ip(&addr.ip()) {
-                        return Err(ConfigError::InvalidValue {
-                            key: field_name.to_string(),
-                            message: format!(
-                                "hostname '{}' resolves to private/internal IP '{}'. \
-                                 This is blocked to prevent SSRF attacks.",
-                                host,
-                                addr.ip()
-                            ),
-                        });
-                    }
-                }
-            }
-            Err(e) => {
+    for ip in resolved_ips {
+        match classify_ip(&ip) {
+            IpClass::AlwaysBlocked => {
                 return Err(ConfigError::InvalidValue {
                     key: field_name.to_string(),
                     message: format!(
-                        "failed to resolve hostname '{}': {}. \
-                         Base URLs must be resolvable at config time.",
-                        host, e
+                        "URL points to a blocked IP '{}'. \
+                         This is blocked to prevent SSRF attacks.",
+                        ip
                     ),
                 });
             }
+            IpClass::PrivateOrLoopback if policy == BaseUrlPolicy::StrictSsrf => {
+                let message = if normalized_host.parse::<IpAddr>().is_ok() {
+                    format!(
+                        "URL points to a private/internal IP '{}'. \
+                         This is blocked to prevent SSRF attacks.",
+                        ip
+                    )
+                } else {
+                    format!(
+                        "hostname '{}' resolves to private/internal IP '{}'. \
+                         This is blocked to prevent SSRF attacks.",
+                        host, ip
+                    )
+                };
+                return Err(ConfigError::InvalidValue {
+                    key: field_name.to_string(),
+                    message,
+                });
+            }
+            _ => {}
         }
     }
 
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IpClass {
+    Public,
+    PrivateOrLoopback,
+    AlwaysBlocked,
 }
 
 // ---------------------------------------------------------------------------
@@ -611,6 +665,25 @@ mod tests {
             err.contains("failed to resolve"),
             "Expected DNS resolution failure, got: {err}"
         );
+    }
+
+    #[test]
+    fn validate_operator_base_url_allows_https_private_ips() {
+        assert!(validate_operator_base_url("https://100.64.0.1/v1", "TEST").is_ok());
+        assert!(validate_operator_base_url("https://127.0.0.1/v1", "TEST").is_ok());
+        assert!(validate_operator_base_url("https://[::1]/v1", "TEST").is_ok());
+    }
+
+    #[test]
+    fn validate_operator_base_url_allows_http_private_ips() {
+        assert!(validate_operator_base_url("http://100.64.0.1:8000/v1", "TEST").is_ok());
+        assert!(validate_operator_base_url("http://192.168.1.50:8000/v1", "TEST").is_ok());
+    }
+
+    #[test]
+    fn validate_operator_base_url_still_rejects_public_http_and_metadata() {
+        assert!(validate_operator_base_url("http://8.8.8.8/v1", "TEST").is_err());
+        assert!(validate_operator_base_url("https://169.254.169.254/v1", "TEST").is_err());
     }
 
     // --- db_first_* helper tests ---

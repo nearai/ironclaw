@@ -4,7 +4,9 @@ use std::sync::Once;
 use secrecy::SecretString;
 
 use crate::bootstrap::ironclaw_base_dir;
-use crate::config::helpers::{optional_env, parse_optional_env, validate_base_url};
+use crate::config::helpers::{
+    optional_env, parse_optional_env, validate_base_url, validate_operator_base_url,
+};
 use crate::error::ConfigError;
 use crate::llm::config::*;
 use crate::llm::registry::{ProviderProtocol, ProviderRegistry};
@@ -532,10 +534,12 @@ impl LlmConfig {
             });
         }
 
-        // Validate base URL to prevent SSRF (#1103).
+        // Provider base URLs are explicit operator configuration, so allow
+        // private/local endpoints while still rejecting unsafe schemes,
+        // public plaintext HTTP, and special blocked addresses.
         if !base_url.is_empty() {
             let field = base_url_env.unwrap_or("LLM_BASE_URL");
-            validate_base_url(&base_url, field)?;
+            validate_operator_base_url(&base_url, field)?;
         }
 
         // Resolve model: selected_model (DB) > per-provider override (DB) > env var > registry default
@@ -912,6 +916,40 @@ mod tests {
             provider.model, "llama3.2",
             "model name with dot must not be truncated"
         );
+    }
+
+    #[test]
+    fn openai_compatible_allows_https_localhost_base_url() {
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("https://localhost:8443/v1".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("provider config should be present");
+
+        assert_eq!(provider.base_url, "https://localhost:8443/v1");
+    }
+
+    #[test]
+    fn openai_compatible_allows_http_private_network_base_url() {
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("http://100.64.0.10:8000/v1".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("provider config should be present");
+
+        assert_eq!(provider.base_url, "http://100.64.0.10:8000/v1");
     }
 
     #[test]

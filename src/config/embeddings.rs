@@ -3,7 +3,8 @@ use std::sync::Arc;
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::config::helpers::{
-    db_first_bool, db_first_or_default, optional_env, parse_optional_env, validate_base_url,
+    db_first_bool, db_first_or_default, optional_env, parse_optional_env,
+    validate_operator_base_url,
 };
 use crate::error::ConfigError;
 use crate::llm::SessionManager;
@@ -115,9 +116,9 @@ impl EmbeddingsConfig {
         let openai_base_url = optional_env("EMBEDDING_BASE_URL")?;
 
         // Validate base URLs to prevent SSRF attacks (#1103).
-        validate_base_url(&ollama_base_url, "OLLAMA_BASE_URL")?;
+        validate_operator_base_url(&ollama_base_url, "OLLAMA_BASE_URL")?;
         if let Some(ref url) = openai_base_url {
-            validate_base_url(url, "EMBEDDING_BASE_URL")?;
+            validate_operator_base_url(url, "EMBEDDING_BASE_URL")?;
         }
 
         let cache_size = parse_optional_env("EMBEDDING_CACHE_SIZE", DEFAULT_EMBEDDING_CACHE_SIZE)?;
