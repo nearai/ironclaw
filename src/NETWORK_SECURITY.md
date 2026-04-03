@@ -134,11 +134,11 @@ Shutdown is triggered via a `oneshot::Sender` stored in `GatewayState::shutdown_
 
 ### Bind Address
 
-Configurable via `HTTP_HOST` (default `0.0.0.0`) and `HTTP_PORT` (default `8080`).
+Configurable via `HTTP_HOST` (default `127.0.0.1`) and `HTTP_PORT` (default `8080`).
 
-**WARNING:** The default bind address is `0.0.0.0`, meaning the webhook server listens on **all interfaces** by default. This is intentional (webhooks must be reachable from external services like Telegram/Slack), but operators should be aware of the exposure.
+By default the webhook server binds to loopback only. For external webhook providers, expose it intentionally via a tunnel or set `HTTP_HOST` explicitly.
 
-**Reference:** `src/config.rs` — `http_host` default (`"0.0.0.0"`), `http_port` default (`8080`)
+**Reference:** `src/config/channels.rs` — `http_host` default (`"127.0.0.1"`), `http_port` default (`8080`)
 
 ### Authentication
 
@@ -503,11 +503,11 @@ Sandbox containers route all HTTP traffic through the proxy, which enforces a do
 **Location:** `src/channels/http.rs` — `webhook_handler()`
 **Status:** Resolved — webhook secret now uses `subtle::ConstantTimeEq` (`ct_eq`), consistent with web gateway and orchestrator auth.
 
-#### F-4. ~~HTTP webhook server binds to `0.0.0.0` by default~~ (Mitigated)
+#### F-4. ~~HTTP webhook server binds to `0.0.0.0` by default~~ (Resolved)
 
 **Severity:** Low
-**Location:** `src/config.rs`, `src/main.rs`
-**Status:** Mitigated — a `tracing::warn!` is now emitted at startup when the webhook server binds to an unspecified address (`0.0.0.0` or `::`), advising operators to set `HTTP_HOST=127.0.0.1` to restrict to localhost. The default bind address remains `0.0.0.0`, so webhook exposure is still controlled by operator configuration and external network controls (firewalls, ingress rules).
+**Location:** `src/config/channels.rs`, `src/main.rs`
+**Status:** Resolved — the default HTTP bind address is now `127.0.0.1`, and a `tracing::warn!` is still emitted when operators explicitly bind the webhook server to an unspecified address (`0.0.0.0` or `::`).
 
 #### F-5. ~~Missing security headers on web gateway~~ (Mitigated)
 
