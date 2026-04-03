@@ -1,5 +1,5 @@
-# Scope labels for actions/labeler@v6
-# Maps file path globs to scope labels. Multiple labels can apply per PR.
+# Labels for actions/labeler@v6
+# Maps file path globs to labels. Multiple labels can apply per PR.
 
 "scope: agent":
   - changed-files:
@@ -66,6 +66,11 @@
   - changed-files:
       - any-glob-to-any-file:
           - src/db/postgres.rs
+          - migrations/**
+
+"DB MIGRATION":
+  - changed-files:
+      - any-glob-to-any-file:
           - migrations/**
 
 "scope: db/libsql":
