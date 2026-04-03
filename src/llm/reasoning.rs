@@ -984,21 +984,16 @@ Respond with a JSON plan in this format:
                 .to_string()
         };
 
-        // Models with native thinking (Qwen3, DeepSeek-R1, etc.) produce their
-        // own <think> tags or reasoning_content. Injecting our <think>/<final>
-        // format collides with their native behavior, causing thinking-only
-        // responses that clean to empty strings. See issue #789.
-        let has_native_thinking = self
+        // Default: direct-answer format. Only inject <think>/<final> tags for
+        // models explicitly known to require them. Unknown models, aliases like
+        // "auto", and native-thinking models all get the safe direct-answer
+        // format. See issue #789.
+        let needs_tags = self
             .model_name
             .as_ref()
-            .is_some_and(|n| crate::llm::reasoning_models::has_native_thinking(n));
+            .is_some_and(|n| crate::llm::reasoning_models::requires_think_final_tags(n));
 
-        let response_format = if has_native_thinking {
-            r#"## Response Format
-
-Respond directly with your answer. Do not wrap your response in any special tags.
-Your reasoning process is handled natively — just provide the final user-facing answer."#
-        } else {
+        let response_format = if needs_tags {
             r#"## Response Format — CRITICAL
 
 ALL internal reasoning MUST be inside <think>...</think> tags.
@@ -1010,6 +1005,11 @@ Only text inside <final> is shown to the user; everything else is discarded.
 Example:
 <think>The user is asking about X.</think>
 <final>Here is the answer about X.</final>"#
+        } else {
+            r#"## Response Format
+
+Respond directly with your answer. Do not wrap your response in any special tags.
+Your reasoning process is handled natively — just provide the final user-facing answer."#
         };
 
         format!(
@@ -3007,7 +3007,7 @@ That's my plan."#;
     }
 
     #[test]
-    fn test_system_prompt_skips_think_final_for_native_thinking() {
+    fn test_system_prompt_direct_answer_for_native_thinking_model() {
         let reasoning = make_reasoning_with_model("qwen3-8b");
         let prompt = reasoning.build_system_prompt_with_tools(&[]);
         assert!(
@@ -3018,27 +3018,47 @@ That's my plan."#;
     }
 
     #[test]
-    fn test_system_prompt_includes_think_final_for_regular_model() {
+    fn test_system_prompt_direct_answer_for_regular_model() {
+        // Regular models also get direct-answer format by default (inverted default)
         let reasoning = make_reasoning_with_model("llama-3.1-70b");
         let prompt = reasoning.build_system_prompt_with_tools(&[]);
-        assert!(prompt.contains("<think>"));
-        assert!(prompt.contains("<final>"));
+        assert!(!prompt.contains("<think>"));
+        assert!(!prompt.contains("<final>"));
+        assert!(prompt.contains("Respond directly"));
     }
 
     #[test]
-    fn test_system_prompt_defaults_to_think_final_when_no_model() {
+    fn test_system_prompt_defaults_to_direct_answer_when_no_model() {
         use crate::testing::StubLlm;
         let reasoning = Reasoning::new(Arc::new(StubLlm::new("test")));
         let prompt = reasoning.build_system_prompt_with_tools(&[]);
-        assert!(prompt.contains("<think>"));
-        assert!(prompt.contains("<final>"));
+        // No model name → safe default → direct-answer (no tags)
+        assert!(!prompt.contains("<think>"));
+        assert!(!prompt.contains("<final>"));
+        assert!(prompt.contains("Respond directly"));
     }
 
     #[test]
-    fn test_system_prompt_deepseek_r1_skips_think_final() {
+    fn test_system_prompt_direct_answer_for_deepseek_r1() {
         let reasoning = make_reasoning_with_model("deepseek-r1-distill-qwen-32b");
         let prompt = reasoning.build_system_prompt_with_tools(&[]);
         assert!(!prompt.contains("CRITICAL"));
+        assert!(prompt.contains("Respond directly"));
+    }
+
+    #[test]
+    fn test_system_prompt_direct_answer_for_auto_alias() {
+        let reasoning = make_reasoning_with_model("auto");
+        let prompt = reasoning.build_system_prompt_with_tools(&[]);
+        assert!(!prompt.contains("<think>"));
+        assert!(prompt.contains("Respond directly"));
+    }
+
+    #[test]
+    fn test_system_prompt_direct_answer_for_resolved_qwen() {
+        let reasoning = make_reasoning_with_model("Qwen/Qwen3.5-122B-A10B");
+        let prompt = reasoning.build_system_prompt_with_tools(&[]);
+        assert!(!prompt.contains("<think>"));
         assert!(prompt.contains("Respond directly"));
     }
 
@@ -3332,13 +3352,15 @@ That's my plan."#;
         );
         assert!(prompt.contains("Respond directly"));
 
-        // Now create reasoning WITHOUT with_model_name — should get default prompt
+        // Now create reasoning WITHOUT with_model_name — should get direct-answer
+        // default (inverted default: unknown models are native-thinking-safe)
         let reasoning_no_model = Reasoning::new(llm);
         let prompt2 = reasoning_no_model.build_system_prompt_with_tools(&[]);
         assert!(
-            prompt2.contains("<think>"),
-            "Without model name, should get default think/final prompt"
+            !prompt2.contains("<think>"),
+            "Without model name, should get direct-answer prompt (safe default)"
         );
+        assert!(prompt2.contains("Respond directly"));
     }
 
     // ---- Issue #789: case-insensitive truncation ----
