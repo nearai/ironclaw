@@ -659,7 +659,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         let result: Result<Option<crate::ownership::Identity>, crate::error::DatabaseError> =
             // SAFETY: block_in_place requires a multi-thread Tokio runtime. WASM channel
             // callbacks are always invoked from a multi-thread runtime worker thread.
-            // Do NOT use this pattern in #[tokio::test] (which uses current_thread by default).
+            // Do NOT use this pattern from current-thread runtimes or non-Tokio contexts.
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async move {
                     store.resolve_identity(&channel, &external_id).await

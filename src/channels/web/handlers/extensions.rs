@@ -22,13 +22,12 @@ pub(crate) fn derive_activation_status(
     has_owner_binding: bool,
 ) -> Option<ExtensionActivationStatus> {
     if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-        // In the DB-backed model there is no separate allowFrom file to check.
-        // Treat the channel as "owner-bound" (or simply active) when it is
-        // active — the pairing state lives in the DB now.
-        // TODO(ownership): `has_paired` should ideally query channel_identities
-        // for this channel, not just use ext.active. For single-tenant this is
-        // equivalent; for multi-tenant it should check actual DB pairing state.
-        classify_wasm_channel_activation(ext, ext.active, has_owner_binding || ext.active)
+        // In the DB-backed model, "paired" no longer comes from a local allowFrom
+        // file. Until this handler can query channel_identities directly, be
+        // conservative: only explicit owner binding upgrades an active channel to
+        // Active. Otherwise it remains in Pairing.
+        // TODO(ownership): derive has_paired from the DB-backed pairing tables.
+        classify_wasm_channel_activation(ext, false, has_owner_binding)
     } else if ext.kind == crate::extensions::ExtensionKind::ChannelRelay {
         Some(if ext.active {
             ExtensionActivationStatus::Active
@@ -180,12 +179,11 @@ mod tests {
     }
 
     #[test]
-    fn active_authenticated_wasm_channel_without_owner_binding_is_active() {
+    fn active_authenticated_wasm_channel_without_owner_binding_stays_pairing() {
         let ext = active_authenticated_wasm_channel("discord");
-        // With the DB-backed pairing model, an active channel is treated as Active.
         assert_eq!(
             derive_activation_status(&ext, false),
-            Some(ExtensionActivationStatus::Active)
+            Some(ExtensionActivationStatus::Pairing)
         );
     }
 

@@ -3,6 +3,12 @@
 //! `Identity` is the single struct that flows from the channel boundary through
 //! every scope constructor and authorization check. `can_act_on` is the sole
 //! place that decides whether an actor may mutate a resource.
+//!
+//! Known single-tenant assumptions still remain elsewhere in the app. In
+//! particular, extension lifecycle/configuration, orchestrator secret injection,
+//! some channel secret setup, and MCP session management still have owner-scoped
+//! behavior that should not be mistaken for full multi-tenant isolation yet.
+//! The ownership model here is the foundation for tightening those paths.
 
 /// Typed wrapper over `users.id`. Replaces all raw `&str`/`String` user_id params.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

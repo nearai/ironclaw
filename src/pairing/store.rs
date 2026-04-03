@@ -21,8 +21,10 @@ use crate::pairing::PairingCodeChallenge;
 /// Pairing operations: create pending requests, approve them, resolve identities.
 ///
 /// Wraps `ChannelPairingStore` (DB operations) with `OwnershipCache` (warm-path reads).
-/// Write-through: `insert` and `remove` update the cache immediately.
-/// `approve` populates lazily on next `resolve_identity` call.
+/// Read-through: `resolve_identity` populates the cache on hits from the DB.
+/// `remove` evicts immediately, while `approve` populates lazily on the next
+/// `resolve_identity` call because the approved request does not carry the
+/// external sender identity back out to this layer.
 /// When `db` is `None`, all operations degrade gracefully (no-ops / empty results).
 #[derive(Clone)]
 pub struct PairingStore {

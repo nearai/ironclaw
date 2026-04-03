@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use libsql::params;
 
-use super::{LibSqlBackend, fmt_ts, get_ts};
+use super::{LibSqlBackend, fmt_ts, get_ts, opt_text};
 use crate::db::{ChannelPairingStore, DatabaseError, PairingRequestRecord};
 use crate::ownership::{Identity, OwnerId, UserRole};
 
@@ -124,7 +124,7 @@ impl ChannelPairingStore for LibSqlBackend {
                             channel,
                             external_id,
                             code.as_str(),
-                            meta_str.as_deref().unwrap_or_default(),
+                            opt_text(meta_str.as_deref()),
                             now_str.as_str(),
                             expires_str.as_str()
                         ],
@@ -424,6 +424,30 @@ mod tests {
         assert_eq!(
             r1.code, r2.code,
             "Should return existing request, not create new one"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_upsert_pairing_request_preserves_null_meta() {
+        let (db, _dir) = setup_db().await;
+        let req = db
+            .upsert_pairing_request("telegram", "user_null_meta", None)
+            .await
+            .unwrap();
+
+        let conn = db.connect().await.unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT meta FROM pairing_requests WHERE id = ?1",
+                libsql::params![req.id.to_string()],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().expect("pairing request row");
+        let meta: Option<String> = row.get(0).ok();
+        assert!(
+            meta.is_none(),
+            "None meta should be stored as SQL NULL, got {meta:?}"
         );
     }
 
