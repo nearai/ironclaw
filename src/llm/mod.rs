@@ -95,8 +95,6 @@ pub async fn create_llm_provider(
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     let timeout = config.request_timeout_secs;
 
-    tracing::info!(backend = %config.backend, "Creating LLM provider");
-
     if config.backend == "nearai" || config.backend == "near_ai" || config.backend == "near" {
         return create_llm_provider_with_config(&config.nearai, session, timeout);
     }

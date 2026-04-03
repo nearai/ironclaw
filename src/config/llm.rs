@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Once;
 
 use secrecy::SecretString;
 
@@ -9,6 +10,8 @@ use crate::llm::config::*;
 use crate::llm::registry::{ProviderProtocol, ProviderRegistry};
 use crate::llm::session::SessionConfig;
 use crate::settings::Settings;
+
+static LOG_LLM_BACKEND_RESOLUTION: Once = Once::new();
 
 impl LlmConfig {
     /// Create a test-friendly config without reading env vars.
@@ -73,13 +76,15 @@ impl LlmConfig {
         } else {
             ("nearai".to_string(), "default")
         };
-        tracing::info!(
-            backend = %backend,
-            source = %backend_source,
-            db_llm_backend = ?settings.llm_backend,
-            custom_providers_count = settings.llm_custom_providers.len(),
-            "Resolving LLM backend"
-        );
+        LOG_LLM_BACKEND_RESOLUTION.call_once(|| {
+            tracing::debug!(
+                backend = %backend,
+                source = %backend_source,
+                db_llm_backend = ?settings.llm_backend,
+                custom_providers_count = settings.llm_custom_providers.len(),
+                "Resolving LLM backend"
+            );
+        });
         // Warn operators when a DB-persisted value silently overrides LLM_BACKEND.
         if backend_source == "db:llm_backend"
             && let Ok(env_val) = std::env::var("LLM_BACKEND")
