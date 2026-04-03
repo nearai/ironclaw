@@ -1626,6 +1626,7 @@ fn reject_private_ip(url: &str) -> Result<(), String> {
     crate::tools::wasm::reject_private_ip(url)
 }
 
+#[cfg(test)]
 fn is_private_ip(ip: std::net::IpAddr) -> bool {
     crate::tools::wasm::is_private_ip(ip)
 }
