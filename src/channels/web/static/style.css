@@ -3545,6 +3545,28 @@ body {
   margin-bottom: 4px;
 }
 
+.pairing-help {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.pairing-input {
+  flex: 1;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-family: inherit;
+}
+
+.pairing-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .pairing-code {
   font-family: var(--font-mono);
   font-size: var(--text-sm);

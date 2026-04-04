@@ -811,22 +811,6 @@ function connectSSE() {
     }
   });
 
-  eventSource.addEventListener('turn_cost', (e) => {
-    const event = JSON.parse(e.data);
-    if (!isCurrentThread(event.thread_id)) return;
-    // Add cost badge below last assistant message
-    const messages = document.querySelectorAll('.message.assistant');
-    const lastMsg = messages[messages.length - 1];
-    const tokens = (event.input_tokens || 0) + (event.output_tokens || 0);
-    if (lastMsg && tokens > 0) {
-      const badge = document.createElement('div');
-      badge.className = 'turn-cost-badge';
-      const cost = event.cost_usd ? ' \u00b7 ' + event.cost_usd : '';
-      badge.textContent = tokens.toLocaleString() + ' tokens' + cost;
-      lastMsg.appendChild(badge);
-    }
-  });
-
   // Job event listeners (activity stream for all sandbox jobs)
   const jobEventTypes = [
     'job_message', 'job_tool_use', 'job_tool_result',
@@ -3424,11 +3408,18 @@ function renderExtensionCard(ext) {
 
   // For WASM channels, check for pending pairing requests.
   if (ext.kind === 'wasm_channel') {
-    const pairingSection = document.createElement('div');
-    pairingSection.className = 'ext-pairing';
-    pairingSection.setAttribute('data-channel', ext.name);
-    card.appendChild(pairingSection);
-    loadPairingRequests(ext.name, pairingSection);
+    if (currentUserIsAdmin()) {
+      const pairingSection = document.createElement('div');
+      pairingSection.className = 'ext-pairing';
+      pairingSection.setAttribute('data-channel', ext.name);
+      card.appendChild(pairingSection);
+      loadPairingRequests(ext.name, pairingSection);
+    } else if ((ext.activation_status || 'installed') === 'pairing') {
+      const pairingSection = document.createElement('div');
+      pairingSection.className = 'ext-pairing';
+      card.appendChild(pairingSection);
+      renderMemberPairingClaim(ext, pairingSection);
+    }
   }
 
   return card;
@@ -3858,6 +3849,10 @@ function closeConfigureModal(extensionName) {
   }
 }
 
+function currentUserIsAdmin() {
+  return !!(window._currentUser && window._currentUser.role === 'admin');
+}
+
 // Validate that a server-supplied OAuth URL is HTTPS before opening a popup.
 // Rejects javascript:, data:, and other non-HTTPS schemes to prevent URL-injection.
 // Uses the URL constructor to safely parse and validate the scheme, which also
@@ -3880,6 +3875,8 @@ function openOAuthUrl(url) {
 // --- Pairing ---
 
 function loadPairingRequests(channel, container) {
+  if (!currentUserIsAdmin()) return;
+
   apiFetch('/api/pairing/' + encodeURIComponent(channel))
     .then(data => {
       container.innerHTML = '';
@@ -3887,7 +3884,7 @@ function loadPairingRequests(channel, container) {
 
       const heading = document.createElement('div');
       heading.className = 'pairing-heading';
-      heading.textContent = 'Pending pairing requests';
+      heading.textContent = I18n.t('extensions.pendingPairing');
       container.appendChild(heading);
 
       data.requests.forEach(req => {
@@ -3901,13 +3898,19 @@ function loadPairingRequests(channel, container) {
 
         const sender = document.createElement('span');
         sender.className = 'pairing-sender';
-        sender.textContent = 'from ' + req.sender_id;
+        sender.textContent = I18n.t('extensions.from') + ' ' + req.sender_id;
         row.appendChild(sender);
 
         const btn = document.createElement('button');
         btn.className = 'btn-ext activate';
-        btn.textContent = 'Approve';
-        btn.addEventListener('click', () => approvePairing(channel, req.code, container));
+        btn.textContent = I18n.t('common.approve');
+        btn.addEventListener('click', function() {
+          approvePairing(channel, req.code, {
+            onSuccess: function() {
+              loadPairingRequests(channel, container);
+            }
+          });
+        });
         row.appendChild(btn);
 
         container.appendChild(row);
@@ -3916,13 +3919,60 @@ function loadPairingRequests(channel, container) {
     .catch(() => {});
 }
 
-function approvePairing(channel, code, container) {
+function renderMemberPairingClaim(ext, container) {
+  const heading = document.createElement('div');
+  heading.className = 'pairing-heading';
+  heading.textContent = I18n.t('extensions.claimPairing');
+  container.appendChild(heading);
+
+  const help = document.createElement('div');
+  help.className = 'pairing-help';
+  help.textContent = I18n.t('extensions.claimPairingHelp');
+  container.appendChild(help);
+
+  const row = document.createElement('div');
+  row.className = 'pairing-row';
+
+  const input = document.createElement('input');
+  input.className = 'pairing-input';
+  input.type = 'text';
+  input.placeholder = I18n.t('extensions.pairingCodePlaceholder');
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  input.maxLength = 64;
+  row.appendChild(input);
+
+  const btn = document.createElement('button');
+  btn.className = 'btn-ext activate';
+  btn.textContent = I18n.t('extensions.claimPairingAction');
+  btn.addEventListener('click', function() {
+    approvePairing(ext.name, input.value, {
+      onSuccess: function() {
+        input.value = '';
+      }
+    });
+  });
+  row.appendChild(btn);
+
+  input.addEventListener('keydown', function(event) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      btn.click();
+    }
+  });
+
+  container.appendChild(row);
+}
+
+function approvePairing(channel, code, options) {
+  options = options || {};
   apiFetch('/api/pairing/' + encodeURIComponent(channel) + '/approve', {
     method: 'POST',
     body: { code },
   }).then(res => {
     if (res.success) {
       showToast('Pairing approved', 'success');
+      if (typeof options.onSuccess === 'function') options.onSuccess(res);
       refreshCurrentSettingsTab();
     } else {
       showToast(res.message || 'Approve failed', 'error');

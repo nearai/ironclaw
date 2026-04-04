@@ -337,6 +337,12 @@ pub async fn users_suspend_handler(
         db_auth.invalidate_user(&id).await;
     }
 
+    // Evict cached ownership identity so the suspended user cannot
+    // resolve via pairing cache until process restart or re-approval.
+    if let Some(ref ps) = state.pairing_store {
+        ps.evict_user(&id);
+    }
+
     Ok(Json(serde_json::json!({
         "id": id,
         "status": "suspended",
@@ -406,6 +412,14 @@ pub async fn users_delete_handler(
 
     if !deleted {
         return Err((StatusCode::NOT_FOUND, "User not found".to_string()));
+    }
+
+    if let Some(ref db_auth) = state.db_auth {
+        db_auth.invalidate_user(&id).await;
+    }
+
+    if let Some(ref ps) = state.pairing_store {
+        ps.evict_user(&id);
     }
 
     Ok(Json(serde_json::json!({
