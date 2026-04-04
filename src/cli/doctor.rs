@@ -755,8 +755,11 @@ mod tests {
         let _mutex = crate::config::helpers::lock_env();
         let prev = std::env::var("LLM_BACKEND").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        // Stub nearai URLs to avoid DNS resolution in sandboxed CI.
         unsafe {
             std::env::set_var("LLM_BACKEND", "anthropic");
+            std::env::set_var("NEARAI_BASE_URL", "http://127.0.0.1:19999");
+            std::env::set_var("NEARAI_AUTH_URL", "http://127.0.0.1:19998");
         }
         let _env_guard = EnvGuard("LLM_BACKEND", prev);
 
@@ -875,8 +878,11 @@ mod tests {
     fn check_llm_config_shows_nearai_model_for_nearai_backend() {
         let _guard = crate::config::helpers::lock_env();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        // Stub nearai URLs to avoid DNS resolution in sandboxed CI.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
+            std::env::set_var("NEARAI_BASE_URL", "http://127.0.0.1:19999");
+            std::env::set_var("NEARAI_AUTH_URL", "http://127.0.0.1:19998");
         }
         let settings = Settings::default();
         match check_llm_config(&settings) {

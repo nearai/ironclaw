@@ -692,6 +692,17 @@ mod tests {
         parse_extra_headers_with_key(val, "TEST_HEADERS")
     }
 
+    /// Stub NEARAI_BASE_URL and NEARAI_AUTH_URL to localhost so tests don't
+    /// require DNS resolution for `private.near.ai` / `cloud-api.near.ai`.
+    /// Must be called under `ENV_MUTEX`.
+    fn stub_nearai_urls() {
+        // SAFETY: Only called under ENV_MUTEX in tests.
+        unsafe {
+            std::env::set_var("NEARAI_BASE_URL", "http://127.0.0.1:19999");
+            std::env::set_var("NEARAI_AUTH_URL", "http://127.0.0.1:19998");
+        }
+    }
+
     /// Clear all openai-compatible-related env vars.
     fn clear_openai_compatible_env() {
         // SAFETY: Only called under ENV_MUTEX in tests.
@@ -705,6 +716,7 @@ mod tests {
     #[test]
     fn openai_compatible_uses_selected_model_when_llm_model_unset() {
         let _guard = lock_env();
+        stub_nearai_urls();
         clear_openai_compatible_env();
 
         let settings = Settings {
@@ -723,6 +735,7 @@ mod tests {
     #[test]
     fn openai_compatible_selected_model_overrides_env() {
         let _guard = lock_env();
+        stub_nearai_urls();
         clear_openai_compatible_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -850,6 +863,7 @@ mod tests {
     #[test]
     fn ollama_uses_selected_model_when_ollama_model_unset() {
         let _guard = lock_env();
+        stub_nearai_urls();
         clear_ollama_env();
 
         let settings = Settings {
@@ -867,6 +881,7 @@ mod tests {
     #[test]
     fn ollama_selected_model_overrides_env() {
         let _guard = lock_env();
+        stub_nearai_urls();
         clear_ollama_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -896,6 +911,7 @@ mod tests {
     #[test]
     fn openai_compatible_preserves_dotted_model_name() {
         let _guard = lock_env();
+        stub_nearai_urls();
         clear_openai_compatible_env();
 
         let settings = Settings {
@@ -917,6 +933,7 @@ mod tests {
     #[test]
     fn registry_provider_resolves_groq() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -942,6 +959,7 @@ mod tests {
     #[test]
     fn registry_provider_resolves_tinfoil() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -970,6 +988,7 @@ mod tests {
     #[test]
     fn registry_provider_alias_resolves_zai() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -995,6 +1014,7 @@ mod tests {
     #[test]
     fn registry_provider_resolves_github_copilot_alias() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::set_var("LLM_BACKEND", "github-copilot");
@@ -1043,6 +1063,7 @@ mod tests {
     #[test]
     fn nearai_backend_has_no_registry_provider() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1057,6 +1078,7 @@ mod tests {
     #[test]
     fn backend_alias_normalized_to_canonical_id() {
         let _guard = lock_env();
+        stub_nearai_urls();
         clear_openai_compatible_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1083,6 +1105,7 @@ mod tests {
     #[test]
     fn unknown_backend_falls_back_to_openai_compatible() {
         let _guard = lock_env();
+        stub_nearai_urls();
         clear_openai_compatible_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1107,6 +1130,7 @@ mod tests {
     #[test]
     fn nearai_aliases_all_resolve_to_nearai() {
         let _guard = lock_env();
+        stub_nearai_urls();
 
         for alias in &["nearai", "near_ai", "near"] {
             // SAFETY: Under ENV_MUTEX.
@@ -1134,6 +1158,7 @@ mod tests {
     #[test]
     fn base_url_resolution_priority() {
         let _guard = lock_env();
+        stub_nearai_urls();
         clear_openai_compatible_env();
 
         // SAFETY: Under ENV_MUTEX.
@@ -1195,6 +1220,7 @@ mod tests {
         use secrecy::ExposeSecret;
 
         let _guard = lock_env();
+        stub_nearai_urls();
         clear_anthropic_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1233,6 +1259,7 @@ mod tests {
         use secrecy::ExposeSecret;
 
         let _guard = lock_env();
+        stub_nearai_urls();
         clear_anthropic_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1266,6 +1293,7 @@ mod tests {
     #[test]
     fn non_anthropic_provider_has_no_oauth_token() {
         let _guard = lock_env();
+        stub_nearai_urls();
         clear_anthropic_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1374,6 +1402,7 @@ mod tests {
     #[test]
     fn test_request_timeout_defaults_to_120() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_REQUEST_TIMEOUT_SECS");
@@ -1385,6 +1414,7 @@ mod tests {
     #[test]
     fn test_request_timeout_configurable() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::set_var("LLM_REQUEST_TIMEOUT_SECS", "300");
@@ -1402,6 +1432,7 @@ mod tests {
     #[test]
     fn custom_provider_resolves_when_backend_matches_id() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1437,6 +1468,7 @@ mod tests {
     #[test]
     fn db_llm_backend_takes_priority_over_env_var() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX. RAII guard removes LLM_BACKEND on drop so
         // a panicking assertion cannot leak the env var to other tests.
         struct RemoveOnDrop(&'static str);
@@ -1487,6 +1519,7 @@ mod tests {
     #[test]
     fn builtin_override_model_used_when_no_selected_model() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1519,6 +1552,7 @@ mod tests {
     #[test]
     fn openai_codex_resolves_config() {
         let _guard = lock_env();
+        stub_nearai_urls();
         clear_openai_codex_env();
 
         let settings = Settings {
@@ -1539,6 +1573,7 @@ mod tests {
     #[test]
     fn selected_model_takes_priority_over_builtin_override_model() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1572,6 +1607,7 @@ mod tests {
     #[test]
     fn openai_codex_model_env_resolution() {
         let _guard = lock_env();
+        stub_nearai_urls();
         clear_openai_codex_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1596,6 +1632,7 @@ mod tests {
     #[test]
     fn builtin_override_api_key_used_when_no_env_var() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1634,6 +1671,7 @@ mod tests {
     #[test]
     fn openai_codex_falls_back_to_openai_model() {
         let _guard = lock_env();
+        stub_nearai_urls();
         clear_openai_codex_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1658,6 +1696,7 @@ mod tests {
     #[test]
     fn openai_codex_falls_back_to_selected_model() {
         let _guard = lock_env();
+        stub_nearai_urls();
         clear_openai_codex_env();
 
         let settings = Settings {
@@ -1675,6 +1714,7 @@ mod tests {
     #[test]
     fn openai_codex_rejects_ssrf_api_url() {
         let _guard = lock_env();
+        stub_nearai_urls();
         clear_openai_codex_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1706,6 +1746,7 @@ mod tests {
     #[test]
     fn openai_codex_rejects_ssrf_auth_url() {
         let _guard = lock_env();
+        stub_nearai_urls();
         clear_openai_codex_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1735,6 +1776,7 @@ mod tests {
     #[test]
     fn builtin_override_api_key_wins_over_env_var() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1778,6 +1820,7 @@ mod tests {
     #[test]
     fn builtin_override_model_wins_over_env_var() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1815,6 +1858,7 @@ mod tests {
     #[test]
     fn custom_provider_selected_model_wins_over_env() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1852,6 +1896,7 @@ mod tests {
     #[test]
     fn openai_codex_selected_model_wins_over_env() {
         let _guard = lock_env();
+        stub_nearai_urls();
         clear_openai_codex_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1880,6 +1925,7 @@ mod tests {
     #[test]
     fn nearai_selected_model_wins_over_env() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1907,6 +1953,7 @@ mod tests {
     #[test]
     fn nearai_override_model_wins_over_env() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1943,6 +1990,7 @@ mod tests {
     #[test]
     fn nearai_selected_model_wins_over_override_model() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1975,6 +2023,7 @@ mod tests {
     #[test]
     fn nearai_override_base_url_wins_over_env() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -2012,6 +2061,7 @@ mod tests {
     #[test]
     fn nearai_env_base_url_used_when_no_override() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -2039,6 +2089,7 @@ mod tests {
     #[test]
     fn nearai_override_api_key_wins_over_env() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -2125,6 +2176,7 @@ mod tests {
     #[test]
     fn registry_provider_override_base_url_wins_over_env() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
