@@ -138,7 +138,9 @@ mod tests {
         create_user(&db, "henry", "admin").await;
 
         // Run twice — should not error
-        db.migrate_default_owner("henry").await.unwrap();
+        db.migrate_default_owner("owner-bootstrap-test")
+            .await
+            .unwrap();
         db.migrate_default_owner("henry").await.unwrap();
 
         // Still exactly one henry row
@@ -152,6 +154,16 @@ mod tests {
         create_user(&db, "henry", "admin").await;
 
         // No 'default' rows to migrate — should succeed without error
+        db.migrate_default_owner("henry").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_migrate_default_owner_succeeds_on_fresh_migrated_db() {
+        let (db, _dir) = setup_db().await;
+
+        // Fresh installs include ownerless tables like `dynamic_tools`; the
+        // bootstrap rewrite should still succeed without assuming every table
+        // in the schema carries a `user_id` column.
         db.migrate_default_owner("henry").await.unwrap();
     }
 
