@@ -847,7 +847,7 @@ impl RoutineEngine {
             sandbox_readiness: self.sandbox_readiness,
 
             event_cache: Arc::clone(&self.event_cache),
- 
+
             inject_tx: self.inject_tx.clone(),
             agent_review_count: self.agent_review_count.clone(),
             agent_review_window_start: self.agent_review_window_start.clone(),
@@ -939,7 +939,7 @@ impl RoutineEngine {
             sandbox_readiness: self.sandbox_readiness,
 
             event_cache: Arc::clone(&self.event_cache),
- 
+
             inject_tx: self.inject_tx.clone(),
             agent_review_count: self.agent_review_count.clone(),
             agent_review_window_start: self.agent_review_window_start.clone(),
@@ -997,7 +997,7 @@ impl RoutineEngine {
             sandbox_readiness: self.sandbox_readiness,
 
             event_cache: Arc::clone(&self.event_cache),
- 
+
             inject_tx: self.inject_tx.clone(),
             agent_review_count: self.agent_review_count.clone(),
             agent_review_window_start: self.agent_review_window_start.clone(),
@@ -1142,7 +1142,7 @@ struct EngineContext {
     sandbox_readiness: SandboxReadiness,
 
     event_cache: Arc<RwLock<Vec<EventMatcher>>>,
- 
+
     inject_tx: Option<mpsc::Sender<IncomingMessage>>,
     agent_review_count: Arc<AtomicU32>,
     agent_review_window_start: Arc<std::sync::atomic::AtomicI64>,

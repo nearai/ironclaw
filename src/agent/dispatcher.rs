@@ -520,7 +520,6 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             tool_defs
         };
 
-
         // Update context for this iteration
         reason_ctx.available_tools = tool_defs;
         // Preserve force_text if already set (e.g. by truncation escalation).
