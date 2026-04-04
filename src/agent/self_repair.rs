@@ -912,7 +912,7 @@ mod tests {
     async fn detect_broken_tools_filters_out_builtins() {
         let cm = Arc::new(ContextManager::new(10));
         let (db, _tmp_dir) = crate::testing::test_db().await;
-        let store = crate::tenant::AdminScope::new(Arc::clone(&db));
+        let store = crate::tenant::SystemScope::new(Arc::clone(&db));
 
         // Seed 6 failures for "http" (built-in) and "my_custom_tool" (dynamic).
         // The threshold is 5, so both would qualify as "broken" without filtering.
