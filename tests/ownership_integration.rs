@@ -113,9 +113,7 @@ mod tests {
         create_user(&db, "henry", "admin").await;
 
         // Run migrate_default_owner
-        db.migrate_default_owner("owner-bootstrap-test")
-            .await
-            .unwrap();
+        db.migrate_default_owner("henry").await.unwrap();
 
         // The settings row should now be under 'henry'
         let conn = db.connect().await.unwrap();
@@ -140,7 +138,9 @@ mod tests {
         create_user(&db, "henry", "admin").await;
 
         // Run twice — should not error
-        db.migrate_default_owner("henry").await.unwrap();
+        db.migrate_default_owner("owner-bootstrap-test")
+            .await
+            .unwrap();
         db.migrate_default_owner("henry").await.unwrap();
 
         // Still exactly one henry row
