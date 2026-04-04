@@ -519,7 +519,11 @@ pub struct Workspace {
     /// Process-local lock map for read-modify-write append paths.
     /// Keyed by `(scope, agent_id, path)` so unrelated append targets can proceed concurrently.
     append_locks:
-        Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+        Arc<
+            tokio::sync::Mutex<
+                std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
+            >,
+        >,
 }
 
 impl Workspace {
@@ -1059,11 +1063,17 @@ impl Workspace {
 
     async fn append_path_lock(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut locks = self.append_locks.lock().await;
-        Arc::clone(
-            locks
-                .entry(key.to_string())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-        )
+        // Opportunistically prune stale entries so lock-key cardinality does not
+        // grow forever when paths are used once and never touched again.
+        locks.retain(|_, weak| weak.strong_count() > 0);
+
+        if let Some(existing) = locks.get(key).and_then(std::sync::Weak::upgrade) {
+            return existing;
+        }
+
+        let new_lock = Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(key.to_string(), Arc::downgrade(&new_lock));
+        new_lock
     }
 
     /// Append content to a file.
@@ -2764,6 +2774,29 @@ mod versioning_tests {
         assert_eq!(doc.content.matches("entry-a").count(), 1);
         assert_eq!(doc.content.matches("entry-b").count(), 1);
         assert!(doc.content.contains("base"));
+    }
+
+    #[tokio::test]
+    async fn append_lock_map_prunes_stale_entries() {
+        let (ws, _dir) = create_test_workspace().await;
+        let key_a = ws.append_lock_key("scope-a", "a.md");
+        let key_b = ws.append_lock_key("scope-b", "b.md");
+
+        let lock_a = ws.append_path_lock(&key_a).await;
+        drop(lock_a);
+
+        // Requesting another lock triggers opportunistic stale-key pruning.
+        let _lock_b = ws.append_path_lock(&key_b).await;
+
+        let locks = ws.append_locks.lock().await;
+        assert!(
+            !locks.contains_key(&key_a),
+            "stale append lock entry should be pruned"
+        );
+        assert!(
+            locks.contains_key(&key_b),
+            "active append lock entry should remain in map"
+        );
     }
 
     #[tokio::test]
