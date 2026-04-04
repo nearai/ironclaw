@@ -516,9 +516,10 @@ pub struct Workspace {
     /// Optional privacy classifier for shared layer writes.
     /// When None, writes go exactly where requested — no silent redirect.
     privacy_classifier: Option<Arc<dyn crate::workspace::privacy::PrivacyClassifier>>,
-    /// Process-local lock that serializes read-modify-write append paths.
-    /// Prevents lost updates from concurrent appends in the same process.
-    append_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Process-local lock map for read-modify-write append paths.
+    /// Keyed by `(scope, agent_id, path)` so unrelated append targets can proceed concurrently.
+    append_locks:
+        Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl Workspace {
@@ -538,7 +539,7 @@ impl Workspace {
             search_defaults: SearchConfig::default(),
             memory_layers,
             privacy_classifier: None,
-            append_lock: Arc::new(tokio::sync::Mutex::new(())),
+            append_locks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -559,7 +560,7 @@ impl Workspace {
             search_defaults: SearchConfig::default(),
             memory_layers,
             privacy_classifier: None,
-            append_lock: Arc::new(tokio::sync::Mutex::new(())),
+            append_locks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -730,7 +731,7 @@ impl Workspace {
             search_defaults: self.search_defaults.clone(),
             memory_layers,
             privacy_classifier: self.privacy_classifier.clone(),
-            append_lock: Arc::clone(&self.append_lock),
+            append_locks: Arc::clone(&self.append_locks),
         }
     }
 
@@ -1048,6 +1049,23 @@ impl Workspace {
         self.storage.get_document_by_id(doc.id).await
     }
 
+    fn append_lock_key(&self, scope: &str, path: &str) -> String {
+        let agent = self
+            .agent_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        format!("{scope}|{agent}|{path}")
+    }
+
+    async fn append_path_lock(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.append_locks.lock().await;
+        Arc::clone(
+            locks
+                .entry(key.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    }
+
     /// Append content to a file.
     ///
     /// Creates the file if it doesn't exist.
@@ -1055,12 +1073,14 @@ impl Workspace {
     /// For semantic separation (e.g., memory entries), use `append_memory()`
     /// which uses `\n\n`.
     ///
-    /// Uses a read-modify-write pattern guarded by a process-local mutex,
-    /// preventing lost writes from concurrent appends in this process.
+    /// Uses a read-modify-write pattern guarded by a process-local, path-scoped mutex,
+    /// preventing lost writes from concurrent appends to the same target in this process.
     /// Cross-process concurrent appends still depend on backend isolation.
     pub async fn append(&self, path: &str, content: &str) -> Result<(), WorkspaceError> {
         let path = normalize_path(path);
-        let _append_guard = self.append_lock.lock().await;
+        let lock_key = self.append_lock_key(&self.user_id, &path);
+        let append_lock = self.append_path_lock(&lock_key).await;
+        let _append_guard = append_lock.lock().await;
         // Scan system-prompt-injected files for prompt injection.
         if is_system_prompt_file(&path) && !content.is_empty() {
             reject_if_injected(&path, content)?;
@@ -1209,8 +1229,8 @@ impl Workspace {
     /// shared document at that path. The `WriteResult::redirected` flag
     /// indicates when this has happened.
     ///
-    /// Uses a read-modify-write pattern guarded by a process-local mutex,
-    /// preventing lost writes from concurrent appends in this process.
+    /// Uses a read-modify-write pattern guarded by a process-local, path-scoped mutex,
+    /// preventing lost writes from concurrent appends to the same target in this process.
     /// Cross-process concurrent appends still depend on backend isolation.
     pub async fn append_to_layer(
         &self,
@@ -1219,10 +1239,12 @@ impl Workspace {
         content: &str,
         force: bool,
     ) -> Result<WriteResult, WorkspaceError> {
-        let _append_guard = self.append_lock.lock().await;
         let (scope, actual_layer, redirected) =
             self.resolve_layer_target(layer_name, content, force)?;
         let path = normalize_path(path);
+        let lock_key = self.append_lock_key(&scope, &path);
+        let append_lock = self.append_path_lock(&lock_key).await;
+        let _append_guard = append_lock.lock().await;
         let doc = self
             .storage
             .get_or_create_document_by_path(&scope, self.agent_id, &path)
@@ -1436,7 +1458,9 @@ impl Workspace {
     /// which in multi-scope mode may return a document owned by a secondary
     /// scope; writing to that document by UUID would violate write isolation.
     pub async fn append_memory(&self, entry: &str) -> Result<(), WorkspaceError> {
-        let _append_guard = self.append_lock.lock().await;
+        let lock_key = self.append_lock_key(&self.user_id, paths::MEMORY);
+        let append_lock = self.append_path_lock(&lock_key).await;
+        let _append_guard = append_lock.lock().await;
         // Always get/create in the primary scope to preserve write isolation.
         let doc = self
             .storage
