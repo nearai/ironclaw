@@ -8,6 +8,13 @@ authors = ["Proof of Claw <proof@proofofclaw.xyz>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Proof-of-Claw/ProofOfClaw"
 
+[features]
+default = []
+# Real ZK proving via RISC Zero (requires `cargo install cargo-risczero && risczero install`)
+zk = ["dep:risc0-zkvm", "dep:risc0-build"]
+# IronClaw lifecycle hooks integration
+ironclaw = ["dep:ironclaw-hooks"]
+
 [dependencies]
 # Ethereum / smart contracts
 ethers = { version = "2.0", default-features = false, features = ["rustls", "abigen", "eip712"] }
@@ -23,8 +30,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # Tracing / logging
 tracing = "0.1"
 
-# IronClaw peer crate (hooks system)
-ironclaw = { path = "../.." }
+# Shared hook interface (only needed when ironclaw feature is enabled)
+ironclaw-hooks = { path = "../../crates/ironclaw_hooks", optional = true }
 
 # Std / serialization
 serde = { version = "1", features = ["derive"] }
@@ -43,6 +50,10 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # Safety / parsing
 regex = "1"
 aho-corasick = "1"
+
+# ZK proving
+risc0-zkvm = { version = "1.0", optional = true }
+risc0-build = { version = "1.0", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

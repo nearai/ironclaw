@@ -43,14 +43,19 @@ pub mod zero_g;
 // Re-exports for convenience
 pub use config::{AgentConfig, PolicyConfig};
 pub use injection_detector::InjectionDetector;
-pub use ironclaw_adapter::{
-    InjectionDetectionHook, IronClawAdapter, PolicyEnforcementHook, ProofGenerationHook,
-};
+pub use ironclaw_adapter::IronClawAdapter;
 pub use policy_engine::PolicyEngine;
 pub use proof_generator::ProofGenerator;
 pub use registry::{compute_capability_hash, Tool, ToolRegistry};
+pub use zero_g::{ZeroGCompute, ZeroGStorage};
 pub use types::{
     AgentMessage, AgentPolicy, ExecutionTrace, InferenceRequest, InferenceResponse,
     MessagePayload, MessageType, PolicyResult, PolicySeverity, ProofReceipt, ToolInvocation,
     VerifiedOutput,
+};
+
+// Ironclaw hook implementations — only available when ironclaw feature is enabled
+#[cfg(feature = "ironclaw")]
+pub use ironclaw_adapter::{
+    InjectionDetectionHook, PolicyEnforcementHook, ProofGenerationHook,
 };

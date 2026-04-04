@@ -10,14 +10,17 @@ use crate::{
     injection_detector::InjectionDetector,
     policy_engine::PolicyEngine,
     proof_generator::ProofGenerator,
-    types::{
-        AgentMessage, ExecutionTrace, PolicyResult, PolicySeverity, ToolInvocation,
-    },
+    types::{ExecutionTrace, PolicyResult, ToolInvocation},
     zero_g::{ZeroGCompute, ZeroGStorage},
 };
 use anyhow::Result;
-use async_trait::async_trait;
 use sha2::{Digest, Sha256};
+
+#[cfg(feature = "ironclaw")]
+use crate::types::{AgentMessage, PolicySeverity};
+#[cfg(feature = "ironclaw")]
+use async_trait::async_trait;
+#[cfg(feature = "ironclaw")]
 use std::sync::Arc;
 
 /// Full adapter — holds all POC components needed by the hooks.
@@ -129,22 +132,27 @@ fn sha256_json(value: &serde_json::Value) -> String {
 // ── Ironclaw hook implementations ────────────────────────────────────────────
 //
 // These implement ironclaw's `Hook` trait and delegate to the adapter.
+// Only compiled when the `ironclaw` feature is enabled.
 
-use ironclaw::hooks::{
+#[cfg(feature = "ironclaw")]
+use ironclaw_hooks::{
     Hook, HookContext, HookError, HookEvent, HookFailureMode, HookOutcome, HookPoint,
 };
 
 /// Hook at `BeforeInbound` — rejects prompt injection attempts.
+#[cfg(feature = "ironclaw")]
 pub struct InjectionDetectionHook {
     detector: InjectionDetector,
 }
 
+#[cfg(feature = "ironclaw")]
 impl InjectionDetectionHook {
     pub fn new(detector: InjectionDetector) -> Self {
         Self { detector }
     }
 }
 
+#[cfg(feature = "ironclaw")]
 #[async_trait]
 impl Hook for InjectionDetectionHook {
     fn name(&self) -> &str {
@@ -184,16 +192,19 @@ impl Hook for InjectionDetectionHook {
 }
 
 /// Hook at `BeforeToolCall` — checks tool against policy and value thresholds.
+#[cfg(feature = "ironclaw")]
 pub struct PolicyEnforcementHook {
     engine: PolicyEngine,
 }
 
+#[cfg(feature = "ironclaw")]
 impl PolicyEnforcementHook {
     pub fn new(engine: PolicyEngine) -> Self {
         Self { engine }
     }
 }
 
+#[cfg(feature = "ironclaw")]
 #[async_trait]
 impl Hook for PolicyEnforcementHook {
     fn name(&self) -> &str {
@@ -272,16 +283,19 @@ impl Hook for PolicyEnforcementHook {
 }
 
 /// Hook at `OnSessionEnd` — stores execution trace and generates ZK proof.
+#[cfg(feature = "ironclaw")]
 pub struct ProofGenerationHook {
     adapter: Arc<IronClawAdapter>,
 }
 
+#[cfg(feature = "ironclaw")]
 impl ProofGenerationHook {
     pub fn new(adapter: Arc<IronClawAdapter>) -> Self {
         Self { adapter }
     }
 }
 
+#[cfg(feature = "ironclaw")]
 #[async_trait]
 impl Hook for ProofGenerationHook {
     fn name(&self) -> &str {
@@ -303,7 +317,6 @@ impl Hook for ProofGenerationHook {
     ) -> Result<HookOutcome, HookError> {
         let session_id = match event {
             HookEvent::SessionEnd { session_id, .. } => session_id,
-            HookEvent::SessionStart { session_id, .. } => session_id,
             _ => return Ok(HookOutcome::ok()),
         };
 
