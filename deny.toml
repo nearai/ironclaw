@@ -41,6 +41,13 @@ allow = [
 ]
 unused-allowed-license = "allow"
 
+[[licenses.clarify]]
+name = "ring"
+version = "0.16.20"
+# ring 0.16.x uses ISC/OpenSSL/MIT but cargo-deny can't parse the non-standard LICENSE file
+expression = "ISC AND MIT AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
@@ -58,5 +65,5 @@ allow-git = [
     "https://github.com/pydantic/monty.git",
     "https://github.com/astral-sh/ruff.git",
     # WalletConnect v2 client — forked for native tokio transport support
-    "https://github.com/zmanian/walletconnect-client",
+    "https://github.com/zmanian/walletconnect-client.git",
 ]
