@@ -33,6 +33,10 @@ pub struct AgentConfig {
     pub eip8004_integration_contract: Option<String>,
     /// ERC-7857 iNFT contract address.
     pub inft_contract: Option<String>,
+    /// Agent description/persona (SOUL metadata).
+    pub description: Option<String>,
+    /// Comma-separated skills list.
+    pub skills: Option<String>,
     /// RISC Zero image ID for the proof circuit.
     pub risc_zero_image_id: Option<String>,
     pub policy: PolicyConfig,
@@ -124,6 +128,8 @@ impl AgentConfig {
             eip8004_validation_registry: env_address("EIP8004_VALIDATION_REGISTRY"),
             eip8004_integration_contract: env_address("EIP8004_INTEGRATION_CONTRACT"),
             inft_contract: env_address("INFT_CONTRACT"),
+            description: env_opt("AGENT_DESCRIPTION"),
+            skills: env_opt("AGENT_SKILLS"),
             risc_zero_image_id: env_hash("RISC_ZERO_IMAGE_ID"),
             policy: PolicyConfig {
                 allowed_tools: env_or("ALLOWED_TOOLS", "query,read,swap_tokens,transfer", mock)

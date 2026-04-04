@@ -145,13 +145,22 @@ impl ProofOfClawAgent {
         let policy_result = self.policy_engine.check(&agent_msg, &mock_inference);
 
         // ── 0G Compute inference ─────────────────────────────────────────
+        // Build dynamic system prompt from agent NFT metadata
+        let system_prompt = input.system_prompt.clone().unwrap_or_else(|| {
+            let desc = self.config.description.as_deref().unwrap_or(
+                "You are a provable AI agent with cryptographic verification via RISC Zero and 0G Compute TEE attestations."
+            );
+            let skills = self.config.skills.as_deref().unwrap_or("general assistance, blockchain operations");
+            let ens = &self.config.ens_name;
+            let tools = self.config.policy.allowed_tools.join(", ");
+            
+            format!("You are {ens}.\n\nYour identity is secured on-chain via ENS and your behavior is enforced by RISC Zero zero-knowledge proofs. Every response is attested by 0G Compute TEEs.\n\nPERSONA: {desc}\n\nSKILLS: {skills}\n\nALLOWED TOOLS: {tools}\n\nOPERATING PRINCIPLES:\n- Always act within your policy constraints (tools and value limits)\n- Responses should reflect your specific persona and expertise\n- You can only use the tools listed above\n- Large autonomous actions require Ledger approval\n- Every interaction generates a cryptographic proof\n\nRespond as {ens} would, leveraging your unique skills and persona.")
+        });
+        
         let zero_g = ZeroGCompute::new(&self.config).await?;
         let inference_resp = zero_g
             .inference(&InferenceRequest {
-                system_prompt: input.system_prompt.clone().unwrap_or_else(|| {
-                    "You are a provable AI agent. Every action is cryptographically verifiable."
-                        .to_string()
-                }),
+                system_prompt,
                 user_prompt: input.message.clone(),
                 model: input.model.clone(),
             })
@@ -235,6 +244,7 @@ impl ProofOfClawAgent {
             session_id,
             response: inference_resp.content,
             attestation: inference_resp.attestation_signature,
+            provider: inference_resp.provider,
             proof_id,
             trace_root,
             policy_result,
@@ -438,6 +448,7 @@ struct ChatOutput {
     session_id: String,
     response: String,
     attestation: String,
+    provider: String,
     proof_id: String,
     trace_root: String,
     policy_result: proof_of_claw::PolicyResult,
