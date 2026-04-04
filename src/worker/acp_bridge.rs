@@ -197,14 +197,7 @@ impl AcpBridgeRuntime {
 
         // Monitor the child process so the follow-up loop can exit if the agent dies.
         // The oneshot is Send, so it crosses the LocalSet boundary cleanly.
-        let (child_exit_tx, child_exit_rx) = tokio::sync::oneshot::channel::<Option<i32>>();
-        tokio::spawn(async move {
-            let exit_code = match child.wait().await {
-                Ok(status) => status.code(),
-                Err(_) => None,
-            };
-            let _ = child_exit_tx.send(exit_code);
-        });
+        let (child_exit_rx, kill_tx) = spawn_child_monitor(child);
 
         let local_set = tokio::task::LocalSet::new();
         let acp_result = local_set
@@ -287,7 +280,11 @@ impl AcpBridgeRuntime {
             })
             .await;
 
-        // Wait for stderr reader to finish
+        // Kill the child on protocol failure so stderr closes (see kill channel above).
+        if acp_result.is_err() {
+            let _ = kill_tx.send(());
+        }
+
         let _ = stderr_handle.await;
 
         acp_result
@@ -379,6 +376,38 @@ pub(crate) fn ironclaw_init_request() -> acp::InitializeRequest {
     )
 }
 
+// ==================== Child process monitor ====================
+
+/// Spawn a background task that monitors a child process for natural exit
+/// or a kill signal. Returns `(child_exit_rx, kill_tx)`.
+///
+/// - `child_exit_rx`: fires with the exit code when the child terminates
+/// - `kill_tx`: send `()` to terminate the child (e.g. on protocol failure
+///   so stderr closes and the stderr reader task can finish)
+fn spawn_child_monitor(
+    mut child: tokio::process::Child,
+) -> (
+    tokio::sync::oneshot::Receiver<Option<i32>>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (child_exit_tx, child_exit_rx) = tokio::sync::oneshot::channel();
+    let (kill_tx, kill_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let exit_code_of =
+            |r: std::io::Result<std::process::ExitStatus>| r.ok().and_then(|s| s.code());
+        let exit_code = tokio::select! {
+            status = child.wait() => exit_code_of(status),
+            // Only fire on explicit send, not on sender drop.
+            Ok(()) = kill_rx => {
+                let _ = child.kill().await;
+                exit_code_of(child.wait().await)
+            }
+        };
+        let _ = child_exit_tx.send(exit_code);
+    });
+    (child_exit_rx, kill_tx)
+}
+
 // ==================== Follow-up loop ====================
 
 /// Wrapper that implements `AcpPromptSender` for an ACP `ClientSideConnection`.
@@ -413,7 +442,18 @@ async fn run_follow_up_loop(
 ) -> Result<(), WorkerError> {
     let session_id_str = session_id.to_string();
     loop {
-        let backoff = match prompt_source.poll_prompt().await {
+        // Race poll_prompt against child exit so we detect process death
+        // even during a long-poll HTTP request to the orchestrator.
+        let poll_result = tokio::select! {
+            result = prompt_source.poll_prompt() => result,
+            exit_code = &mut child_exit_rx => {
+                let code = exit_code.ok().flatten();
+                tracing::debug!(job_id = %job_id, exit_code = ?code, "ACP agent exited, ending follow-up loop");
+                break;
+            }
+        };
+
+        let backoff = match poll_result {
             Ok(Some(follow_up)) => {
                 if follow_up.done {
                     tracing::debug!(job_id = %job_id, "Orchestrator signaled done");
@@ -454,11 +494,7 @@ async fn run_follow_up_loop(
             _ = tokio::time::sleep(backoff) => {}
             exit_code = &mut child_exit_rx => {
                 let code = exit_code.ok().flatten();
-                tracing::debug!(
-                    job_id = %job_id,
-                    exit_code = ?code,
-                    "ACP agent process exited, ending follow-up loop"
-                );
+                tracing::debug!(job_id = %job_id, exit_code = ?code, "ACP agent exited, ending follow-up loop");
                 break;
             }
         }
@@ -825,6 +861,93 @@ mod tests {
         assert!(
             events.iter().any(|e| e.event_type == "result"),
             "Should emit result event for successful prompt"
+        );
+    }
+
+    /// Stub that blocks forever on poll_prompt, simulating a long-poll HTTP
+    /// request that never returns. Only cancellation (via select!) can end this.
+    struct ForeverPromptSource;
+
+    impl FollowUpPromptSource for ForeverPromptSource {
+        async fn poll_prompt(&self) -> Result<Option<PromptResponse>, WorkerError> {
+            std::future::pending::<()>().await;
+            unreachable!()
+        }
+    }
+
+    /// Regression test: child exit must be detected even when poll_prompt()
+    /// is blocked on a long-poll HTTP request. Without the select! fix around
+    /// poll_prompt, this test times out because the loop never checks
+    /// child_exit_rx during active polling.
+    #[tokio::test]
+    async fn follow_up_loop_exits_during_long_poll_when_child_dies() {
+        let sink = CollectingSink::new();
+        let prompt_source = ForeverPromptSource;
+        let agent = StubAcpPromptSender::new(vec![]);
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let session_id = acp::SessionId::new("test-session");
+
+        // Simulate child exit after a short delay
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = tx.send(Some(0));
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_follow_up_loop(&prompt_source, &agent, &sink, &session_id, rx, Uuid::nil()),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "Loop should exit promptly when child dies during long poll, not timeout"
+        );
+        assert!(
+            result.unwrap().is_ok(),
+            "Child exit during poll should be a clean exit (Ok), not an error"
+        );
+    }
+
+    /// Regression test for #1981 review feedback: when the ACP protocol fails
+    /// while the subprocess is still alive, the kill channel must terminate the
+    /// child so the stderr reader hits EOF and cleanup completes. Without the
+    /// kill mechanism, stderr_handle.await blocks forever and the job hangs.
+    #[tokio::test]
+    async fn child_monitor_kills_process_so_stderr_reader_completes() {
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn sleep");
+
+        let child_stderr = child.stderr.take().unwrap();
+
+        // Use the actual production function
+        let (child_exit_rx, kill_tx) = spawn_child_monitor(child);
+
+        // Stderr reader — same pattern as production (lines 176-187)
+        let stderr_handle = tokio::spawn(async move {
+            let reader = BufReader::new(child_stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(_)) = lines.next_line().await {}
+        });
+
+        // Simulate protocol failure → send kill signal
+        let _ = kill_tx.send(());
+
+        // Both must complete; would hang forever without the kill channel
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let _ = child_exit_rx.await;
+            let _ = stderr_handle.await;
+        })
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "kill signal should terminate child and unblock stderr reader"
         );
     }
 
