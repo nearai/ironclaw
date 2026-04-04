@@ -4423,8 +4423,7 @@ mod multi_lens_tool_visibility_tests {
         let defs = registry.tool_definitions_for_user("alice", &[]).await;
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
 
-        assert!(names.contains(&"alice_tasks_query"), "should see own tools");
-        assert!(names.contains(&"alice_tasks_add"), "should see own tools");
+        assert!(names.contains(&"alice_tasks"), "should see own tool");
         assert!(
             !names.iter().any(|n| n.starts_with("bob_")),
             "should NOT see bob's tools: {names:?}"
@@ -4454,9 +4453,9 @@ mod multi_lens_tool_visibility_tests {
         let defs = registry.tool_definitions_for_user("alice", &scopes).await;
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
 
-        assert!(names.contains(&"alice_tasks_query"), "should see own");
+        assert!(names.contains(&"alice_tasks"), "should see own");
         assert!(
-            names.contains(&"shared_expenses_query"),
+            names.contains(&"shared_expenses"),
             "should see shared via scope: {names:?}"
         );
         assert!(
@@ -4484,9 +4483,9 @@ mod multi_lens_tool_visibility_tests {
         let defs = registry.tool_definitions_for_user("alice", &scopes).await;
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
 
-        assert!(names.contains(&"alice_tasks_add"));
-        assert!(names.contains(&"bob_diary_query"));
-        assert!(names.contains(&"shared_expenses_summary"));
+        assert!(names.contains(&"alice_tasks"));
+        assert!(names.contains(&"bob_diary"));
+        assert!(names.contains(&"shared_expenses"));
         let collection_tools: Vec<&&str> = names
             .iter()
             .filter(|n| {
@@ -4495,8 +4494,8 @@ mod multi_lens_tool_visibility_tests {
             .collect();
         assert_eq!(
             collection_tools.len(),
-            15,
-            "should see exactly 15 collection tools (5 per collection x 3): {collection_tools:?}"
+            3,
+            "should see exactly 3 collection tools (1 per collection x 3): {collection_tools:?}"
         );
     }
 
@@ -4519,8 +4518,8 @@ mod multi_lens_tool_visibility_tests {
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
 
         assert!(
-            names.contains(&"shared_expenses_query"),
-            "should see own tools"
+            names.contains(&"shared_expenses"),
+            "should see own tool"
         );
         assert!(
             !names.iter().any(|n| n.starts_with("alice_")),
@@ -4544,12 +4543,12 @@ mod multi_lens_tool_visibility_tests {
         let defs = registry.tool_definitions_for_user("alice", &scopes).await;
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
 
-        assert!(names.contains(&"alice_tasks_add"));
-        assert!(names.contains(&"bob_tasks_add"));
+        assert!(names.contains(&"alice_tasks"));
+        assert!(names.contains(&"bob_tasks"));
         assert_eq!(
             names.len(),
-            10,
-            "should have exactly 10 tools (no duplicates): {names:?}"
+            2,
+            "should have exactly 2 tools (1 per collection, no duplicates): {names:?}"
         );
 
         let unique: std::collections::HashSet<&&str> = names.iter().collect();
@@ -4580,7 +4579,7 @@ mod multi_lens_tool_visibility_tests {
 
         assert_eq!(
             expense_tools.len(),
-            5,
+            1,
             "cross-scope registration should not create duplicates: {:?}",
             expense_tools
                 .iter()
@@ -4597,7 +4596,7 @@ mod multi_lens_tool_visibility_tests {
         register_tools(&registry, &db, &simple_schema("diary", None), "bob").await;
 
         let tool = registry
-            .get_for_user("bob_diary_query", "alice", &[])
+            .get_for_user("bob_diary", "alice", &[])
             .await;
         assert!(
             tool.is_none(),
@@ -4606,7 +4605,7 @@ mod multi_lens_tool_visibility_tests {
 
         let scopes = vec!["bob".to_string()];
         let tool = registry
-            .get_for_user("bob_diary_query", "alice", &scopes)
+            .get_for_user("bob_diary", "alice", &scopes)
             .await;
         assert!(
             tool.is_some(),
@@ -4614,9 +4613,134 @@ mod multi_lens_tool_visibility_tests {
         );
 
         let tool = registry
-            .get_for_user("bob_diary_query", "bob", &[])
+            .get_for_user("bob_diary", "bob", &[])
             .await;
         assert!(tool.is_some(), "owner should always access own tool");
+    }
+
+    // ---- CollectionWriteEvent broadcast tests ----
+
+    #[tokio::test]
+    async fn add_broadcasts_collection_write_event() {
+        let (db, _dir) = make_db().await;
+        let schema = simple_schema("items", None);
+        db.register_collection("alice", &schema).await.unwrap();
+
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        let tools = generate_collection_tools(&schema, Arc::clone(&db), Some(tx), "alice");
+        let tool = &tools[0];
+
+        let ctx = crate::context::JobContext::with_user("alice", "test", "test");
+        tool.execute(
+            serde_json::json!({"operation": "add", "data": {"item": "milk"}}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.operation, "insert");
+        assert_eq!(event.collection, "items");
+        assert_eq!(event.user_id, "alice");
+    }
+
+    #[tokio::test]
+    async fn update_broadcasts_collection_write_event() {
+        let (db, _dir) = make_db().await;
+        let schema = simple_schema("items", None);
+        db.register_collection("alice", &schema).await.unwrap();
+
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        let tools = generate_collection_tools(&schema, Arc::clone(&db), Some(tx), "alice");
+        let tool = &tools[0];
+
+        let ctx = crate::context::JobContext::with_user("alice", "test", "test");
+
+        // Insert a record first
+        let result = tool
+            .execute(
+                serde_json::json!({"operation": "add", "data": {"item": "milk"}}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let record_id = result.result["record_id"].as_str().unwrap();
+        let _insert_event = rx.try_recv().unwrap(); // drain the insert event
+
+        // Update it
+        tool.execute(
+            serde_json::json!({
+                "operation": "update",
+                "record_id": record_id,
+                "data": {"item": "oat milk"}
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.operation, "update");
+        assert_eq!(event.collection, "items");
+        assert_eq!(event.user_id, "alice");
+    }
+
+    #[tokio::test]
+    async fn delete_broadcasts_collection_write_event() {
+        let (db, _dir) = make_db().await;
+        let schema = simple_schema("items", None);
+        db.register_collection("alice", &schema).await.unwrap();
+
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        let tools = generate_collection_tools(&schema, Arc::clone(&db), Some(tx), "alice");
+        let tool = &tools[0];
+
+        let ctx = crate::context::JobContext::with_user("alice", "test", "test");
+
+        // Insert a record first
+        let result = tool
+            .execute(
+                serde_json::json!({"operation": "add", "data": {"item": "milk"}}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let record_id = result.result["record_id"].as_str().unwrap();
+        let _insert_event = rx.try_recv().unwrap();
+
+        // Delete it
+        tool.execute(
+            serde_json::json!({"operation": "delete", "record_id": record_id}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.operation, "delete");
+        assert_eq!(event.collection, "items");
+        assert_eq!(event.data, serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn query_does_not_broadcast_event() {
+        let (db, _dir) = make_db().await;
+        let schema = simple_schema("items", None);
+        db.register_collection("alice", &schema).await.unwrap();
+
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        let tools = generate_collection_tools(&schema, Arc::clone(&db), Some(tx), "alice");
+        let tool = &tools[0];
+
+        let ctx = crate::context::JobContext::with_user("alice", "test", "test");
+        tool.execute(serde_json::json!({"operation": "query"}), &ctx)
+            .await
+            .unwrap();
+
+        assert!(
+            rx.try_recv().is_err(),
+            "read-only query should not broadcast events"
+        );
     }
 
     #[tokio::test]
@@ -4653,8 +4777,8 @@ mod multi_lens_tool_visibility_tests {
             .tool_definitions_for_user("alice", &["shared".to_string()])
             .await;
         let alice_names: Vec<&str> = alice_defs.iter().map(|d| d.name.as_str()).collect();
-        assert!(alice_names.contains(&"alice_tasks_add"));
-        assert!(alice_names.contains(&"shared_expenses_query"));
+        assert!(alice_names.contains(&"alice_tasks"));
+        assert!(alice_names.contains(&"shared_expenses"));
         assert!(
             !alice_names.iter().any(|n| n.starts_with("bob_")),
             "alice should not see bob's tools without scope"
@@ -4662,7 +4786,7 @@ mod multi_lens_tool_visibility_tests {
 
         let shared_defs = registry.tool_definitions_for_user("shared", &[]).await;
         let shared_names: Vec<&str> = shared_defs.iter().map(|d| d.name.as_str()).collect();
-        assert!(shared_names.contains(&"shared_expenses_add"));
+        assert!(shared_names.contains(&"shared_expenses"));
         assert!(
             !shared_names.iter().any(|n| n.starts_with("alice_")),
             "shared must not see alice's tools: {shared_names:?}"
