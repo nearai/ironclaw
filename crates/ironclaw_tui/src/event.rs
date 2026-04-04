@@ -73,6 +73,8 @@ pub struct TuiUserMessage {
     pub text: String,
     /// Pasted image attachments.
     pub attachments: Vec<TuiAttachment>,
+    /// Active thread scope for this message, if the TUI has one selected.
+    pub thread_id: Option<String>,
 }
 
 impl TuiUserMessage {
@@ -81,7 +83,14 @@ impl TuiUserMessage {
         Self {
             text: text.into(),
             attachments: Vec::new(),
+            thread_id: None,
         }
+    }
+
+    /// Attach a thread scope to this message.
+    pub fn with_thread_id(mut self, thread_id: Option<String>) -> Self {
+        self.thread_id = thread_id;
+        self
     }
 }
 
@@ -111,6 +120,21 @@ pub struct HistoryApprovalRequest {
     pub description: String,
     pub parameters: serde_json::Value,
     pub allow_always: bool,
+}
+
+/// An engine v2 thread entry for the activity sidebar.
+#[derive(Debug, Clone)]
+pub struct EngineThreadEntry {
+    pub id: String,
+    pub goal: String,
+    /// "Foreground", "Research", or "Mission".
+    pub thread_type: String,
+    /// Engine ThreadState as a string (e.g. "Running", "Waiting").
+    pub state: String,
+    pub step_count: usize,
+    pub total_tokens: u64,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// Events consumed by the TUI run loop.
@@ -267,6 +291,9 @@ pub enum TuiEvent {
 
     /// Thread list for the interactive resume picker.
     ThreadList { threads: Vec<ThreadEntry> },
+
+    /// Engine v2 thread list update for the activity sidebar.
+    EngineThreadList { threads: Vec<EngineThreadEntry> },
 
     /// Full conversation history for a resumed thread.
     ConversationHistory {

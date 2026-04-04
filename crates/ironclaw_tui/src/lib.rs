@@ -36,12 +36,14 @@ pub mod event;
 pub mod input;
 pub mod layout;
 pub mod render;
+pub mod spinner;
 pub mod theme;
 pub mod widgets;
 
 pub use app::{TuiAppConfig, TuiAppHandle, start_tui};
 pub use event::{
-    HistoryApprovalRequest, HistoryMessage, ThreadEntry, TuiAttachment, TuiEvent, TuiLogEntry,
+    EngineThreadEntry, HistoryApprovalRequest, HistoryMessage, ThreadEntry, TuiAttachment,
+    TuiEvent, TuiLogEntry,
     TuiUserMessage,
 };
 pub use layout::TuiLayout;

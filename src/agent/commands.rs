@@ -720,7 +720,7 @@ impl Agent {
                 "  /interrupt        Stop current operation\n",
                 "  /new              New conversation thread\n",
                 "  /thread <id>      Switch to thread\n",
-                "  /resume <id>      Resume from checkpoint\n",
+                "  /resume           Resume a previous conversation\n",
                 "\n",
                 "Skills:\n",
                 "  /skills             List installed skills\n",

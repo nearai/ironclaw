@@ -676,6 +676,7 @@ impl Channel for GatewayChannel {
             | StatusUpdate::SecretsStatus { .. }
             | StatusUpdate::CostGuard { .. }
             | StatusUpdate::ThreadList { .. }
+            | StatusUpdate::EngineThreadList { .. }
             | StatusUpdate::ConversationHistory { .. } => {
                 return Ok(());
             }

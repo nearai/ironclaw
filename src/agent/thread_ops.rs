@@ -1931,6 +1931,12 @@ impl Agent {
         message: &IncomingMessage,
         target_thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
+        // Try hydrating from DB if not already in session.
+        let thread_id_str = target_thread_id.to_string();
+        if let Some(rejection) = self.maybe_hydrate_thread(message, &thread_id_str).await {
+            return Ok(SubmissionResult::error(rejection));
+        }
+
         let session = self
             .session_manager
             .get_or_create_session(&message.user_id)
@@ -2000,6 +2006,63 @@ impl Agent {
         } else {
             Ok(SubmissionResult::error("Checkpoint not found."))
         }
+    }
+
+    /// List past conversations from the database and emit a `ThreadList`
+    /// status update so the TUI can show the interactive resume picker.
+    pub(super) async fn process_list_threads(
+        &self,
+        _session: Arc<Mutex<Session>>,
+        message: &IncomingMessage,
+    ) -> Result<SubmissionResult, Error> {
+        let Some(db) = self.store() else {
+            return Ok(SubmissionResult::ok_with_message(
+                "No database configured — cannot list conversations.".to_string(),
+            ));
+        };
+
+        let conversations = match db
+            .list_conversations_all_channels(&message.user_id, 20)
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!("Failed to list conversations: {e}");
+                return Ok(SubmissionResult::error(format!(
+                    "Failed to list conversations: {e}"
+                )));
+            }
+        };
+
+        let summaries: Vec<crate::channels::ThreadSummary> = conversations
+            .into_iter()
+            .map(|c| crate::channels::ThreadSummary {
+                id: c.id.to_string(),
+                title: c.title,
+                message_count: c.message_count,
+                last_activity: c.last_activity.to_rfc3339(),
+                channel: c.channel,
+            })
+            .collect();
+
+        if summaries.is_empty() {
+            return Ok(SubmissionResult::ok_with_message(
+                "No conversations to resume.".to_string(),
+            ));
+        }
+
+        let _ = self
+            .channels
+            .send_status(
+                &message.channel,
+                StatusUpdate::ThreadList { threads: summaries },
+                &message.metadata,
+            )
+            .await;
+
+        Ok(SubmissionResult::Ok {
+            message: Some(String::new()),
+        })
     }
 }
 

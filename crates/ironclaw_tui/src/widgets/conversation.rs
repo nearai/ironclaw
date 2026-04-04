@@ -194,14 +194,11 @@ impl TuiWidget for ConversationWidget {
             }
         }
 
-        // Show thinking indicator if active
-        const SPINNER: &[&str] = &[
-            "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}", "\u{2834}", "\u{2826}",
-            "\u{2827}", "\u{2807}", "\u{280F}",
-        ];
+        // Show thinking indicator if active (tick interval = 33ms)
+        const TICK_MS: u64 = 33;
 
         if !state.status_text.is_empty() && !state.is_streaming {
-            let frame = SPINNER[state.spinner_frame % SPINNER.len()];
+            let frame = state.spinner.frame(state.tick_count, TICK_MS);
             all_lines.push(Line::from(vec![
                 Span::styled(format!("  {frame} "), self.theme.accent_style()),
                 Span::styled(state.status_text.clone(), self.theme.dim_style()),
@@ -210,7 +207,7 @@ impl TuiWidget for ConversationWidget {
 
         // Show streaming dots indicator
         if state.is_streaming {
-            let dots = match state.spinner_frame % 4 {
+            let dots = match (state.tick_count / 4) % 4 {
                 0 => "\u{00B7}",
                 1 => "\u{00B7}\u{00B7}",
                 2 => "\u{00B7}\u{00B7}\u{00B7}",

@@ -406,6 +406,8 @@ pub enum StatusUpdate {
     SkillActivated { skill_names: Vec<String> },
     /// Thread list for interactive resume picker.
     ThreadList { threads: Vec<ThreadSummary> },
+    /// Engine v2 thread list for TUI activity sidebar.
+    EngineThreadList { threads: Vec<EngineThreadSummary> },
     /// Full conversation history for displaying a resumed thread in the TUI.
     ConversationHistory {
         thread_id: String,
@@ -420,6 +422,19 @@ pub struct HistoryMessage {
     pub role: String,
     pub content: String,
     pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+/// Engine v2 thread summary for TUI sidebar display.
+#[derive(Debug, Clone)]
+pub struct EngineThreadSummary {
+    pub id: String,
+    pub goal: String,
+    pub thread_type: String,
+    pub state: String,
+    pub step_count: usize,
+    pub total_tokens: u64,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// Lightweight thread summary for the resume picker.

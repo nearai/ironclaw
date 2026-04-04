@@ -3841,6 +3841,7 @@ fn status_to_wit(
         | StatusUpdate::SecretsStatus { .. }
         | StatusUpdate::CostGuard { .. }
         | StatusUpdate::ThreadList { .. }
+        | StatusUpdate::EngineThreadList { .. }
         | StatusUpdate::ConversationHistory { .. } => return None,
         StatusUpdate::ReasoningUpdate {
             narrative,

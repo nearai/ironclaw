@@ -20,7 +20,7 @@ use crate::agent::session::ThreadState;
 use crate::agent::session_manager::SessionManager;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
 use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, Router, Scheduler, SchedulerDeps};
-use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse};
+use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
 use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
 use crate::context::ContextManager;
 use crate::db::Database;
@@ -979,6 +979,35 @@ impl Agent {
                     }
                 }
             }
+
+            // Refresh engine v2 thread list in the TUI sidebar after each turn.
+            if self.config.engine_v2 {
+                if let Ok(threads) =
+                    crate::bridge::list_engine_threads(None, &message.user_id).await
+                {
+                    let summaries: Vec<crate::channels::EngineThreadSummary> = threads
+                        .into_iter()
+                        .map(|t| crate::channels::EngineThreadSummary {
+                            id: t.id,
+                            goal: t.goal,
+                            thread_type: t.thread_type,
+                            state: t.state,
+                            step_count: t.step_count,
+                            total_tokens: t.total_tokens,
+                            created_at: t.created_at,
+                            updated_at: t.updated_at,
+                        })
+                        .collect();
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::EngineThreadList { threads: summaries },
+                            &message.metadata,
+                        )
+                        .await;
+                }
+            }
         }
 
         // Cleanup
@@ -1531,6 +1560,7 @@ impl Agent {
             Submission::Resume { checkpoint_id } => {
                 self.process_resume(session, thread_id, checkpoint_id).await
             }
+            Submission::ListThreads => self.process_list_threads(session, &message).await,
             Submission::ExecApproval {
                 request_id,
                 approved,

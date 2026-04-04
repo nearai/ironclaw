@@ -42,9 +42,9 @@ mod webhook_server;
 #[cfg(feature = "tui")]
 pub use self::tui::TuiChannel;
 pub use channel::{
-    AttachmentKind, Channel, ChannelSecretUpdater, ChatApprovalPrompt, HistoryMessage,
-    IncomingAttachment, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
-    ThreadSummary, ToolDecision, routing_target_from_metadata,
+    AttachmentKind, Channel, ChannelSecretUpdater, ChatApprovalPrompt, EngineThreadSummary,
+    HistoryMessage, IncomingAttachment, IncomingMessage, MessageStream, OutgoingResponse,
+    StatusUpdate, ThreadSummary, ToolDecision, routing_target_from_metadata,
 };
 pub use http::{HttpChannel, HttpChannelState};
 pub use manager::ChannelManager;

@@ -127,6 +127,40 @@ fn infer_context_window(model_id: &str) -> u64 {
     128_000
 }
 
+fn build_tui_incoming_message(
+    user_msg: ironclaw_tui::TuiUserMessage,
+    user_id: &str,
+    sys_tz: &str,
+) -> IncomingMessage {
+    let attachments: Vec<IncomingAttachment> = user_msg
+        .attachments
+        .into_iter()
+        .enumerate()
+        .map(|(i, a)| IncomingAttachment {
+            id: format!("tui-paste-{i}"),
+            kind: AttachmentKind::Image,
+            mime_type: a.mime_type,
+            filename: Some(format!("{}.png", a.label)),
+            size_bytes: Some(a.data.len() as u64),
+            source_url: None,
+            storage_key: None,
+            extracted_text: None,
+            data: a.data,
+            duration_secs: None,
+        })
+        .collect();
+
+    let msg = IncomingMessage::new("tui", user_id, &user_msg.text)
+        .with_timezone(sys_tz)
+        .with_attachments(attachments);
+
+    if let Some(thread_id) = user_msg.thread_id {
+        msg.with_thread(thread_id)
+    } else {
+        msg
+    }
+}
+
 /// TUI channel backed by `ironclaw_tui`.
 pub struct TuiChannel {
     user_id: String,
@@ -292,27 +326,7 @@ impl Channel for TuiChannel {
 
         tokio::spawn(async move {
             while let Some(user_msg) = msg_rx.recv().await {
-                let attachments: Vec<IncomingAttachment> = user_msg
-                    .attachments
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, a)| IncomingAttachment {
-                        id: format!("tui-paste-{i}"),
-                        kind: AttachmentKind::Image,
-                        mime_type: a.mime_type,
-                        filename: Some(format!("{}.png", a.label)),
-                        size_bytes: Some(a.data.len() as u64),
-                        source_url: None,
-                        storage_key: None,
-                        extracted_text: None,
-                        data: a.data,
-                        duration_secs: None,
-                    })
-                    .collect();
-
-                let msg = IncomingMessage::new("tui", &user_id, &user_msg.text)
-                    .with_timezone(&sys_tz)
-                    .with_attachments(attachments);
+                let msg = build_tui_incoming_message(user_msg, &user_id, &sys_tz);
                 if incoming_tx.send(msg).await.is_err() {
                     break;
                 }
@@ -496,6 +510,21 @@ impl Channel for TuiChannel {
                     })
                     .collect(),
             },
+            StatusUpdate::EngineThreadList { threads } => TuiEvent::EngineThreadList {
+                threads: threads
+                    .into_iter()
+                    .map(|t| ironclaw_tui::EngineThreadEntry {
+                        id: t.id,
+                        goal: t.goal,
+                        thread_type: t.thread_type,
+                        state: t.state,
+                        step_count: t.step_count,
+                        total_tokens: t.total_tokens,
+                        created_at: t.created_at,
+                        updated_at: t.updated_at,
+                    })
+                    .collect(),
+            },
             StatusUpdate::ConversationHistory {
                 thread_id,
                 messages,
@@ -557,6 +586,8 @@ impl Channel for TuiChannel {
 
 #[cfg(test)]
 mod tests {
+    use ironclaw_tui::TuiUserMessage;
+
     #[test]
     fn resolve_tui_layout_merges_file_and_config() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -578,5 +609,20 @@ mod tests {
         assert_eq!(layout.theme, "dark");
         assert!(layout.sidebar.visible);
         assert_eq!(layout.sidebar.width_percent, 33);
+    }
+
+    #[test]
+    fn build_tui_incoming_message_preserves_thread_scope() {
+        let msg = super::build_tui_incoming_message(
+            TuiUserMessage::text_only("hello").with_thread_id(Some("thread-123".to_string())),
+            "user-1",
+            "Europe/Istanbul",
+        );
+
+        assert_eq!(msg.thread_id.as_deref(), Some("thread-123"));
+        assert_eq!(msg.channel, "tui");
+        assert_eq!(msg.user_id, "user-1");
+        assert_eq!(msg.content, "hello");
+        assert_eq!(msg.timezone.as_deref(), Some("Europe/Istanbul"));
     }
 }

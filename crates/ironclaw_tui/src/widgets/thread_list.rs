@@ -26,6 +26,16 @@ use crate::theme::Theme;
 
 use super::{AppState, JobStatus, ThreadStatus, TuiWidget};
 
+/// Compact type tag for engine thread types.
+fn thread_type_tag(thread_type: &str) -> &str {
+    match thread_type {
+        "Foreground" => "[FG]",
+        "Research" => "[R]",
+        "Mission" => "[M]",
+        _ => "[?]",
+    }
+}
+
 /// Status icon for each job state.
 fn job_icon(status: JobStatus) -> &'static str {
     match status {
@@ -149,7 +159,7 @@ impl TuiWidget for ThreadListWidget {
         // Global empty state hint
         let has_any_data = !state.jobs.is_empty()
             || !state.routines.is_empty()
-            || !state.threads.is_empty()
+            || !state.engine_threads.is_empty()
             || state.sandbox_status.is_some()
             || state.secrets_status.is_some();
         if !has_any_data {
@@ -279,17 +289,21 @@ impl TuiWidget for ThreadListWidget {
             ]));
         }
 
-        // ── THREADS section ───────────────────────────────────────────
-        lines.push(self.render_section_header("THREADS", state.threads.len(), width));
+        // ── THREADS section (engine v2) ──────────────────────────────
+        lines.push(self.render_section_header("THREADS", state.engine_threads.len(), width));
 
-        if state.threads.is_empty() {
+        if state.engine_threads.is_empty() {
             lines.push(Line::from(Span::styled(
                 " (no threads)",
                 self.theme.dim_style(),
             )));
         }
 
-        for thread in &state.threads {
+        // Column layout accounts for type tag: " {icon} {tag} {goal}  {status}  {uptime}"
+        let tag_width: usize = 5; // "[FG] " is the widest tag + space
+        let thread_name_len = max_name_len.saturating_sub(tag_width);
+
+        for thread in &state.engine_threads {
             let style = self.thread_status_style(thread.status);
             let icon = thread_icon(thread.status);
 
@@ -299,18 +313,15 @@ impl TuiWidget for ThreadListWidget {
                 .max(0) as u64;
             let uptime = format_uptime(uptime_secs);
 
-            let name = if thread.label.is_empty() {
-                truncate(&thread.id, max_name_len)
-            } else {
-                truncate(&thread.label, max_name_len)
-            };
-
-            let padded_name = format!("{:<width$}", name, width = max_name_len);
+            let tag = thread_type_tag(&thread.thread_type);
+            let goal = truncate(&thread.goal, thread_name_len);
+            let padded_goal = format!("{:<width$}", goal, width = thread_name_len);
             let status_text = format!("{}", thread.status);
 
             lines.push(Line::from(vec![
                 Span::styled(format!(" {icon} "), style),
-                Span::styled(padded_name, self.theme.bold_style()),
+                Span::styled(format!("{tag:<4} "), self.theme.dim_style()),
+                Span::styled(padded_goal, self.theme.bold_style()),
                 Span::raw("  "),
                 Span::styled(format!("{:<6}", status_text), style),
                 Span::raw("  "),
@@ -328,7 +339,9 @@ impl TuiWidget for ThreadListWidget {
 mod tests {
     use super::*;
     use crate::theme::Theme;
-    use crate::widgets::{AppState, JobInfo, JobStatus, RoutineInfo, ThreadInfo, ThreadStatus};
+    use crate::widgets::{
+        AppState, EngineThreadInfo, JobInfo, JobStatus, RoutineInfo, ThreadStatus,
+    };
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
@@ -438,19 +451,21 @@ mod tests {
         let theme = Theme::dark();
         let widget = ThreadListWidget::new(theme);
         let mut state = make_state();
-        state.threads = vec![ThreadInfo {
+        state.engine_threads = vec![EngineThreadInfo {
             id: "t1".to_string(),
-            label: "main".to_string(),
-            is_foreground: true,
-            is_running: true,
-            duration_secs: 120,
+            goal: "fix login bug".to_string(),
+            thread_type: "Foreground".to_string(),
             status: ThreadStatus::Active,
+            step_count: 5,
+            total_tokens: 1200,
             started_at: chrono::Utc::now() - chrono::Duration::seconds(120),
+            updated_at: chrono::Utc::now(),
         }];
         let buf = render_to_buffer(&widget, &state, 50, 12);
         let text = buffer_text(&buf);
         assert!(text.contains("THREADS (1)"));
-        assert!(text.contains("main"));
+        assert!(text.contains("[FG]"));
+        assert!(text.contains("fix login bug"));
         assert!(text.contains("active"));
         assert!(text.contains("\u{25CF}")); // ● icon
     }
@@ -475,14 +490,15 @@ mod tests {
             last_run: None,
             next_fire: None,
         }];
-        state.threads = vec![ThreadInfo {
+        state.engine_threads = vec![EngineThreadInfo {
             id: "t1".to_string(),
-            label: "main".to_string(),
-            is_foreground: true,
-            is_running: true,
-            duration_secs: 30,
+            goal: "deploy".to_string(),
+            thread_type: "Mission".to_string(),
             status: ThreadStatus::Active,
+            step_count: 2,
+            total_tokens: 500,
             started_at: now - chrono::Duration::seconds(30),
+            updated_at: now,
         }];
         let buf = render_to_buffer(&widget, &state, 50, 15);
         let text = buffer_text(&buf);
@@ -491,7 +507,7 @@ mod tests {
         assert!(text.contains("ROUTINES (1)"));
         assert!(text.contains("watch"));
         assert!(text.contains("THREADS (1)"));
-        assert!(text.contains("main"));
+        assert!(text.contains("deploy"));
     }
 
     #[test]
@@ -557,22 +573,24 @@ mod tests {
     }
 
     #[test]
-    fn label_falls_back_to_id() {
+    fn engine_thread_shows_type_tag() {
         let theme = Theme::dark();
         let widget = ThreadListWidget::new(theme);
         let mut state = make_state();
-        state.threads = vec![ThreadInfo {
-            id: "abc-def".to_string(),
-            label: String::new(),
-            is_foreground: false,
-            is_running: true,
-            duration_secs: 10,
-            status: ThreadStatus::Active,
+        state.engine_threads = vec![EngineThreadInfo {
+            id: "t1".to_string(),
+            goal: "research caching".to_string(),
+            thread_type: "Research".to_string(),
+            status: ThreadStatus::Idle,
+            step_count: 0,
+            total_tokens: 0,
             started_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
         }];
         let buf = render_to_buffer(&widget, &state, 50, 12);
         let text = buffer_text(&buf);
-        assert!(text.contains("abc-def"));
+        assert!(text.contains("[R]"));
+        assert!(text.contains("research caching"));
     }
 
     #[test]

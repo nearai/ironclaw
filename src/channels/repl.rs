@@ -895,6 +895,7 @@ impl Channel for ReplChannel {
             | StatusUpdate::SecretsStatus { .. }
             | StatusUpdate::CostGuard { .. }
             | StatusUpdate::ThreadList { .. }
+            | StatusUpdate::EngineThreadList { .. }
             | StatusUpdate::ConversationHistory { .. } => {
                 // Infrastructure status events are only rendered by the TUI.
             }

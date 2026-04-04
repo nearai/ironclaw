@@ -37,10 +37,10 @@ use crate::widgets::model_picker::{ModelPickerState, ModelPickerWidget};
 use crate::widgets::registry::{BuiltinWidgets, create_default_widgets};
 use crate::widgets::thread_picker::ThreadPickerWidget;
 use crate::widgets::{
-    ActiveTab, AppState, ApprovalRequest, ChatMessage, ContextPressureInfo, CostGuardInfo, JobInfo,
-    JobStatus, MessageRole, RoutineInfo, SandboxInfo, ScreenSnapshot, SecretsInfo, SelectionPoint,
-    SkillCategory, TextSelection, ThreadInfo, ThreadStatus, Toast, ToastKind, ToolActivity,
-    ToolCategory, ToolDetailModal, ToolStatus, TuiWidget, TurnCostSummary,
+    ActiveTab, AppState, ApprovalRequest, ChatMessage, ContextPressureInfo, CostGuardInfo,
+    EngineThreadInfo, JobInfo, JobStatus, MessageRole, RoutineInfo, SandboxInfo, ScreenSnapshot,
+    SecretsInfo, SelectionPoint, SkillCategory, TextSelection, ThreadStatus, Toast, ToastKind,
+    ToolActivity, ToolCategory, ToolDetailModal, ToolStatus, TuiWidget, TurnCostSummary,
 };
 
 /// Handle returned when the TUI is started. The main crate uses this to
@@ -302,6 +302,29 @@ fn count_search_matches(messages: &[ChatMessage], query: &str) -> usize {
         .sum()
 }
 
+fn outgoing_thread_scope(text: &str, current_thread_id: Option<&str>) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.eq_ignore_ascii_case("/new")
+        || trimmed.eq_ignore_ascii_case("/clear")
+        || trimmed.eq_ignore_ascii_case("/thread new")
+        || trimmed.to_ascii_lowercase().starts_with("/thread ")
+    {
+        return None;
+    }
+
+    current_thread_id.map(str::to_owned)
+}
+
+fn update_local_thread_scope_after_submit(state: &mut AppState, text: &str) {
+    let trimmed = text.trim();
+    if trimmed.eq_ignore_ascii_case("/new")
+        || trimmed.eq_ignore_ascii_case("/clear")
+        || trimmed.eq_ignore_ascii_case("/thread new")
+    {
+        state.current_thread_id = None;
+    }
+}
+
 /// Handle a single TUI event.
 async fn handle_event(
     event: TuiEvent,
@@ -389,10 +412,14 @@ async fn handle_event(
                             state.model = model;
                         }
                         // Send to agent
+                        update_local_thread_scope_after_submit(state, &trimmed);
+                        let thread_id =
+                            outgoing_thread_scope(&trimmed, state.current_thread_id.as_deref());
                         let _ = msg_tx
                             .send(TuiUserMessage {
                                 text: trimmed,
                                 attachments,
+                                thread_id,
                             })
                             .await;
                     }
@@ -427,7 +454,12 @@ async fn handle_event(
                     }
                 },
                 InputAction::Interrupt => {
-                    let _ = msg_tx.send(TuiUserMessage::text_only("/interrupt")).await;
+                    let _ = msg_tx
+                        .send(
+                            TuiUserMessage::text_only("/interrupt")
+                                .with_thread_id(state.current_thread_id.clone()),
+                        )
+                        .await;
                     state.status_text.clear();
                 }
                 InputAction::ApprovalUp => {
@@ -454,36 +486,64 @@ async fn handle_event(
                             .copied()
                             .unwrap_or(ApprovalAction::Deny);
                         let _ = msg_tx
-                            .send(TuiUserMessage::text_only(action.as_response()))
+                            .send(
+                                TuiUserMessage::text_only(action.as_response())
+                                    .with_thread_id(state.current_thread_id.clone()),
+                            )
                             .await;
                         state.pending_approval = None;
                     }
                 }
                 InputAction::ApprovalCancel => {
                     if state.pending_approval.is_some() {
-                        let _ = msg_tx.send(TuiUserMessage::text_only("n")).await;
+                        let _ = msg_tx
+                            .send(
+                                TuiUserMessage::text_only("n")
+                                    .with_thread_id(state.current_thread_id.clone()),
+                            )
+                            .await;
                         state.pending_approval = None;
                     }
                 }
                 InputAction::QuickApprove => {
                     if state.pending_approval.is_some() {
-                        let _ = msg_tx.send(TuiUserMessage::text_only("y")).await;
+                        let _ = msg_tx
+                            .send(
+                                TuiUserMessage::text_only("y")
+                                    .with_thread_id(state.current_thread_id.clone()),
+                            )
+                            .await;
                         state.pending_approval = None;
                     }
                 }
                 InputAction::QuickAlways => {
                     if let Some(ref ap) = state.pending_approval {
                         if ap.allow_always {
-                            let _ = msg_tx.send(TuiUserMessage::text_only("a")).await;
+                            let _ = msg_tx
+                                .send(
+                                    TuiUserMessage::text_only("a")
+                                        .with_thread_id(state.current_thread_id.clone()),
+                                )
+                                .await;
                         } else {
-                            let _ = msg_tx.send(TuiUserMessage::text_only("y")).await;
+                            let _ = msg_tx
+                                .send(
+                                    TuiUserMessage::text_only("y")
+                                        .with_thread_id(state.current_thread_id.clone()),
+                                )
+                                .await;
                         }
                         state.pending_approval = None;
                     }
                 }
                 InputAction::QuickDeny => {
                     if state.pending_approval.is_some() {
-                        let _ = msg_tx.send(TuiUserMessage::text_only("n")).await;
+                        let _ = msg_tx
+                            .send(
+                                TuiUserMessage::text_only("n")
+                                    .with_thread_id(state.current_thread_id.clone()),
+                            )
+                            .await;
                         state.pending_approval = None;
                     }
                 }
@@ -543,10 +603,14 @@ async fn handle_event(
                                 state.model = model.to_string();
                             }
 
+                            update_local_thread_scope_after_submit(state, &command);
+                            let thread_id =
+                                outgoing_thread_scope(&command, state.current_thread_id.as_deref());
                             let _ = msg_tx
                                 .send(TuiUserMessage {
                                     text: command,
                                     attachments,
+                                    thread_id,
                                 })
                                 .await;
                         }
@@ -587,10 +651,16 @@ async fn handle_event(
                                     });
                                     state.scroll_offset = 0;
 
+                                    update_local_thread_scope_after_submit(state, &command);
+                                    let thread_id = outgoing_thread_scope(
+                                        &command,
+                                        state.current_thread_id.as_deref(),
+                                    );
                                     let _ = msg_tx
                                         .send(TuiUserMessage {
                                             text: command,
                                             attachments,
+                                            thread_id,
                                         })
                                         .await;
                                 }
@@ -723,7 +793,10 @@ async fn handle_event(
                             crate::widgets::thread_picker::thread_picker_selected_id(picker)
                     {
                         let cmd = format!("/thread {id}");
-                        let _ = msg_tx.send(TuiUserMessage::text_only(cmd)).await;
+                        let _ = msg_tx
+                            .send(TuiUserMessage::text_only(cmd).with_thread_id(None))
+                            .await;
+                        state.current_thread_id = Some(id.to_string());
                     }
                     state.pending_thread_picker = None;
                 }
@@ -825,7 +898,7 @@ async fn handle_event(
         }
 
         TuiEvent::Tick => {
-            state.spinner_frame = (state.spinner_frame + 1) % 10;
+            state.tick_count = state.tick_count.wrapping_add(1);
         }
 
         TuiEvent::Thinking(msg) => {
@@ -937,7 +1010,10 @@ async fn handle_event(
             state.status_text = msg;
         }
 
-        TuiEvent::Response { content, .. } => {
+        TuiEvent::Response { content, thread_id } => {
+            if let Some(thread_id) = thread_id {
+                state.current_thread_id = Some(thread_id);
+            }
             let was_streaming = state.is_streaming;
             state.is_streaming = false;
             state.status_text.clear();
@@ -1217,21 +1293,8 @@ async fn handle_event(
         }
 
         TuiEvent::ThreadList { threads } => {
-            state.threads = threads
-                .iter()
-                .map(|thread| ThreadInfo {
-                    id: thread.id.clone(),
-                    label: thread
-                        .title
-                        .clone()
-                        .unwrap_or_else(|| thread.channel.clone()),
-                    is_foreground: false,
-                    is_running: false,
-                    duration_secs: 0,
-                    status: ThreadStatus::Idle,
-                    started_at: parse_thread_activity_timestamp(&thread.last_activity),
-                })
-                .collect();
+            // ThreadList only populates the /resume picker, not the sidebar.
+            // The sidebar THREADS section uses EngineThreadList instead.
             state.pending_thread_picker = if threads.is_empty() {
                 None
             } else {
@@ -1242,11 +1305,37 @@ async fn handle_event(
             };
         }
 
+        TuiEvent::EngineThreadList { threads } => {
+            state.engine_threads = threads
+                .iter()
+                .map(|t| EngineThreadInfo {
+                    id: t.id.clone(),
+                    goal: t.goal.clone(),
+                    thread_type: t.thread_type.clone(),
+                    status: match t.state.as_str() {
+                        "Running" => ThreadStatus::Active,
+                        "Completed" | "Done" => ThreadStatus::Completed,
+                        "Failed" => ThreadStatus::Failed,
+                        _ => ThreadStatus::Idle,
+                    },
+                    step_count: t.step_count,
+                    total_tokens: t.total_tokens,
+                    started_at: chrono::DateTime::parse_from_rfc3339(&t.created_at)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                    updated_at: chrono::DateTime::parse_from_rfc3339(&t.updated_at)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                })
+                .collect();
+        }
+
         TuiEvent::ConversationHistory {
             thread_id,
             messages,
             pending_approval,
         } => {
+            state.current_thread_id = Some(thread_id.clone());
             state.messages.clear();
             state.active_tools.clear();
             state.recent_tools.clear();
@@ -1394,12 +1483,6 @@ fn parse_model_list_response(content: &str) -> Option<(String, Vec<String>)> {
     }
 }
 
-fn parse_thread_activity_timestamp(last_activity: &str) -> chrono::DateTime<chrono::Utc> {
-    chrono::NaiveDateTime::parse_from_str(last_activity, "%Y-%m-%d %H:%M")
-        .map(|dt| dt.and_utc())
-        .unwrap_or_else(|_| chrono::Utc::now())
-}
-
 struct TerminalRestoreGuard {
     active: bool,
 }
@@ -1484,7 +1567,10 @@ async fn handle_mouse_click(
         && let Some(action) = approval_action_at(terminal, approval, column, row)
     {
         let _ = msg_tx
-            .send(TuiUserMessage::text_only(action.as_response()))
+            .send(
+                TuiUserMessage::text_only(action.as_response())
+                    .with_thread_id(state.current_thread_id.clone()),
+            )
             .await;
         state.pending_approval = None;
         state.text_selection = None;
@@ -1495,8 +1581,12 @@ async fn handle_mouse_click(
         if let Some(index) = thread_picker_index_at(terminal, picker, column, row) {
             if let Some(thread) = picker.threads.get(index) {
                 let _ = msg_tx
-                    .send(TuiUserMessage::text_only(format!("/thread {}", thread.id)))
+                    .send(
+                        TuiUserMessage::text_only(format!("/thread {}", thread.id))
+                            .with_thread_id(None),
+                    )
                     .await;
+                state.current_thread_id = Some(thread.id.clone());
             }
             state.pending_thread_picker = None;
             state.text_selection = None;
@@ -2348,7 +2438,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn thread_list_updates_sidebar_threads() {
+    async fn response_tracks_active_thread_id() {
+        let mut state = AppState::default();
+
+        apply_event(
+            &mut state,
+            TuiEvent::Response {
+                content: "ok".to_string(),
+                thread_id: Some("thread-42".to_string()),
+            },
+        )
+        .await;
+
+        assert_eq!(state.current_thread_id.as_deref(), Some("thread-42"));
+    }
+
+    #[tokio::test]
+    async fn thread_list_only_populates_picker() {
         let mut state = AppState::default();
 
         apply_event(
@@ -2365,14 +2471,44 @@ mod tests {
         )
         .await;
 
-        assert_eq!(state.threads.len(), 1);
-        assert_eq!(state.threads[0].id, "thread-1");
-        assert_eq!(state.threads[0].label, "Bug bash");
-        assert_eq!(state.threads[0].status, ThreadStatus::Idle);
+        // ThreadList no longer populates the sidebar — only the picker.
+        assert!(state.engine_threads.is_empty());
+        assert!(state.pending_thread_picker.is_some());
+        assert_eq!(
+            state.pending_thread_picker.as_ref().unwrap().threads.len(),
+            1
+        );
     }
 
     #[tokio::test]
-    async fn empty_thread_list_clears_sidebar_threads_and_picker() {
+    async fn engine_thread_list_updates_sidebar() {
+        let mut state = AppState::default();
+
+        apply_event(
+            &mut state,
+            TuiEvent::EngineThreadList {
+                threads: vec![crate::event::EngineThreadEntry {
+                    id: "eng-1".to_string(),
+                    goal: "fix login".to_string(),
+                    thread_type: "Foreground".to_string(),
+                    state: "Running".to_string(),
+                    step_count: 3,
+                    total_tokens: 800,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    updated_at: chrono::Utc::now().to_rfc3339(),
+                }],
+            },
+        )
+        .await;
+
+        assert_eq!(state.engine_threads.len(), 1);
+        assert_eq!(state.engine_threads[0].goal, "fix login");
+        assert_eq!(state.engine_threads[0].thread_type, "Foreground");
+        assert_eq!(state.engine_threads[0].status, ThreadStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn empty_thread_list_clears_picker() {
         let mut state = AppState::default();
 
         apply_event(
@@ -2392,7 +2528,6 @@ mod tests {
 
         apply_event(&mut state, TuiEvent::ThreadList { threads: vec![] }).await;
 
-        assert!(state.threads.is_empty());
         assert!(state.pending_thread_picker.is_none());
     }
 
@@ -2574,6 +2709,8 @@ mod tests {
         assert!(state.pending_thread_picker.is_none());
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].text, "/thread thread-2");
+        assert!(messages[0].thread_id.is_none());
+        assert_eq!(state.current_thread_id.as_deref(), Some("thread-2"));
     }
 
     #[tokio::test]
@@ -2750,8 +2887,35 @@ mod tests {
 
         let message = msg_rx.try_recv().expect("model command sent");
         assert_eq!(message.text, "/model gpt-5");
+        assert!(message.thread_id.is_none());
         assert_eq!(state.model, "gpt-5");
         assert!(!state.model_picker.visible);
+    }
+
+    #[tokio::test]
+    async fn submit_uses_current_thread_scope() {
+        let mut state = AppState {
+            current_thread_id: Some("thread-123".to_string()),
+            ..Default::default()
+        };
+        let layout = TuiLayout::default();
+        let mut widgets = create_default_widgets(&layout);
+        let (msg_tx, mut msg_rx) = mpsc::channel(4);
+
+        widgets.input_box.set_text("run it");
+
+        handle_event(
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut state,
+            &mut widgets,
+            &msg_tx,
+            &layout,
+        )
+        .await;
+
+        let message = msg_rx.try_recv().expect("message sent");
+        assert_eq!(message.text, "run it");
+        assert_eq!(message.thread_id.as_deref(), Some("thread-123"));
     }
 
     #[tokio::test]

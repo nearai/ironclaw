@@ -25,6 +25,7 @@ use ratatui::layout::Rect;
 
 use crate::event::LogRingBuffer;
 use crate::layout::TuiSlot;
+use crate::spinner::{Spinner, SpinnerKind};
 use command_palette::CommandPaletteState;
 use model_picker::ModelPickerState;
 
@@ -69,8 +70,14 @@ pub struct AppState {
     /// Recently completed tools.
     pub recent_tools: Vec<ToolActivity>,
 
-    /// Active threads.
+    /// Active threads (session-level, used by /resume picker).
     pub threads: Vec<ThreadInfo>,
+
+    /// Engine v2 threads for the activity sidebar.
+    pub engine_threads: Vec<EngineThreadInfo>,
+
+    /// Currently selected conversation thread for outbound messages.
+    pub current_thread_id: Option<String>,
 
     /// Tracked sandbox jobs.
     pub jobs: Vec<JobInfo>,
@@ -114,8 +121,14 @@ pub struct AppState {
     /// Whether the TUI is waiting for a `/model` response to hydrate the picker.
     pub awaiting_model_list: bool,
 
-    /// Current spinner animation frame index (cycles 0..9 on each tick).
-    pub spinner_frame: usize,
+    /// Tick counter incremented each TUI tick (used for spinner timing).
+    pub tick_count: usize,
+
+    /// Active spinner definition.
+    pub spinner: Spinner,
+
+    /// Which spinner variant is selected.
+    pub spinner_kind: SpinnerKind,
 
     /// History of sent messages for up-arrow recall.
     pub input_history: Vec<String>,
@@ -205,6 +218,8 @@ impl Default for AppState {
             active_tools: Vec::new(),
             recent_tools: Vec::new(),
             threads: Vec::new(),
+            engine_threads: Vec::new(),
+            current_thread_id: None,
             jobs: Vec::new(),
             routines: Vec::new(),
             status_text: String::new(),
@@ -219,7 +234,9 @@ impl Default for AppState {
             command_palette: CommandPaletteState::default(),
             model_picker: ModelPickerState::default(),
             awaiting_model_list: false,
-            spinner_frame: 0,
+            tick_count: 0,
+            spinner: SpinnerKind::default().definition(),
+            spinner_kind: SpinnerKind::default(),
             input_history: Vec::new(),
             history_index: None,
             history_draft: String::new(),
@@ -394,6 +411,20 @@ pub struct ThreadInfo {
     pub status: ThreadStatus,
     /// When the thread was created / started.
     pub started_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Engine v2 thread information for the activity sidebar.
+#[derive(Debug, Clone)]
+pub struct EngineThreadInfo {
+    pub id: String,
+    pub goal: String,
+    /// "Foreground", "Research", or "Mission".
+    pub thread_type: String,
+    pub status: ThreadStatus,
+    pub step_count: usize,
+    pub total_tokens: u64,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Context pressure status for the status bar.
