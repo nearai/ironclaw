@@ -67,14 +67,13 @@ pub struct IncomingMessage {
     pub id: Uuid,
     /// Channel this message came from.
     pub channel: String,
-    /// Storage/persistence scope for this interaction.
+    /// Resolved owner identity for this message.
     ///
     /// For owner-capable channels this is the stable instance owner ID when the
-    /// configured owner is speaking; otherwise it can be a guest/sender-scoped
-    /// identifier to preserve isolation.
+    /// configured owner is speaking; for pairing-aware channels (e.g. WASM) this
+    /// is the result of `pairing_resolve_identity`; for non-pairing channels
+    /// (HTTP, web, REPL) it comes directly from the authenticated token.
     pub user_id: String,
-    /// Stable instance owner scope for this IronClaw deployment.
-    pub owner_id: String,
     /// Channel-specific sender/actor identifier.
     pub sender_id: String,
     /// Optional display name.
@@ -110,7 +109,6 @@ impl IncomingMessage {
         Self {
             id: Uuid::new_v4(),
             channel: channel.into(),
-            owner_id: user_id.clone(),
             sender_id: user_id.clone(),
             user_id,
             user_name: None,
@@ -130,12 +128,6 @@ impl IncomingMessage {
         let thread_id = thread_id.into();
         self.conversation_scope_id = Some(thread_id.clone());
         self.thread_id = Some(thread_id);
-        self
-    }
-
-    /// Set the stable owner scope for this message.
-    pub fn with_owner_id(mut self, owner_id: impl Into<String>) -> Self {
-        self.owner_id = owner_id.into();
         self
     }
 

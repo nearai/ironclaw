@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import re
 import time
+import uuid
 
 import httpx
 
@@ -64,8 +65,15 @@ SEL = {
     "ext_auth_dot_unauthed":    ".ext-auth-dot.unauthed",
     "ext_active_label":         ".ext-active-label",
     "ext_pairing_label":        ".ext-pairing-label",
+    "ext_pairing":              ".ext-pairing",
     "ext_error":                ".ext-error",
     "ext_tools":                ".ext-tools",
+    "pairing_heading":          ".pairing-heading",
+    "pairing_help":             ".pairing-help",
+    "pairing_input":            ".pairing-input",
+    "pairing_row":              ".pairing-row",
+    "pairing_code":             ".pairing-code",
+    "pairing_sender":           ".pairing-sender",
     # Extensions tab – action buttons
     "ext_install_btn":          ".btn-ext.install",
     "ext_remove_btn":           ".btn-ext.remove",
@@ -171,31 +179,63 @@ async def wait_for_port_line(process, pattern: str, *, timeout: float = 60) -> i
 
 # -- API helpers -----------------------------------------------------------
 
-def auth_headers() -> dict[str, str]:
+def auth_headers(token: str = AUTH_TOKEN) -> dict[str, str]:
     """Return Authorization header dict for authenticated API calls."""
-    return {"Authorization": f"Bearer {AUTH_TOKEN}"}
+    return {"Authorization": f"Bearer {token}"}
 
 
-async def api_get(base_url: str, path: str, **kwargs) -> httpx.Response:
+async def api_get(base_url: str, path: str, *, token: str = AUTH_TOKEN, **kwargs) -> httpx.Response:
     """Make an authenticated GET request to the ironclaw API."""
     async with httpx.AsyncClient() as client:
         return await client.get(
             f"{base_url}{path}",
-            headers=auth_headers(),
+            headers=auth_headers(token),
             timeout=kwargs.pop("timeout", 10),
             **kwargs,
         )
 
 
-async def api_post(base_url: str, path: str, **kwargs) -> httpx.Response:
+async def api_post(base_url: str, path: str, *, token: str = AUTH_TOKEN, **kwargs) -> httpx.Response:
     """Make an authenticated POST request to the ironclaw API."""
     async with httpx.AsyncClient() as client:
         return await client.post(
             f"{base_url}{path}",
-            headers=auth_headers(),
+            headers=auth_headers(token),
             timeout=kwargs.pop("timeout", 10),
             **kwargs,
         )
+
+
+async def create_member_user(
+    base_url: str,
+    *,
+    display_name: str | None = None,
+    email: str | None = None,
+) -> dict[str, str]:
+    """Create a member user through the real admin API and return credentials."""
+    suffix = uuid.uuid4().hex[:8]
+    payload = {
+        "display_name": display_name or f"E2E Member {suffix}",
+        "role": "member",
+    }
+    if email is not None:
+        payload["email"] = email
+    else:
+        payload["email"] = f"e2e-member-{suffix}@example.test"
+
+    response = await api_post(base_url, "/api/admin/users", json=payload)
+    response.raise_for_status()
+    body = response.json()
+    return {"id": body["id"], "token": body["token"], "display_name": body["display_name"]}
+
+
+async def open_authed_page(browser, base_url: str, *, token: str = AUTH_TOKEN):
+    """Open a fresh authenticated page using the given bearer token query param."""
+    context = await browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    await page.goto(f"{base_url}/?token={token}", wait_until="networkidle", timeout=15000)
+    await page.locator(SEL["auth_screen"]).wait_for(state="hidden", timeout=10000)
+    return context, page
 
 
 async def send_chat_and_wait_for_terminal_message(

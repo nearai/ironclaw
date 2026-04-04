@@ -712,7 +712,7 @@ impl TestRigBuilder {
                 let (notify_tx, _notify_rx) = tokio::sync::mpsc::channel(16);
                 let engine = Arc::new(RoutineEngine::new(
                     routine_config,
-                    ironclaw::tenant::AdminScope::new(Arc::clone(db_arc)),
+                    ironclaw::tenant::SystemScope::new(Arc::clone(db_arc)),
                     components.llm.clone(),
                     Arc::clone(ws),
                     notify_tx,

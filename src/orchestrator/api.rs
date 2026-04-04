@@ -534,7 +534,7 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
-            user_id: "default".to_string(),
+            user_id: "<unset>".to_string(), // sentinel for tests only — real startup sets this from config.owner_id
             job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
@@ -728,10 +728,10 @@ mod tests {
         use secrecy::SecretString;
         let secrets_store = Arc::new(test_secrets_store());
 
-        // Create a secret
+        // Create a secret under the test sentinel user_id
         secrets_store
             .create(
-                "default",
+                "<unset>",
                 crate::secrets::CreateSecretParams {
                     name: "test_secret".to_string(),
                     value: SecretString::from("supersecretvalue".to_string()),
@@ -764,7 +764,7 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: Some(secrets_store),
-            user_id: "default".to_string(),
+            user_id: "<unset>".to_string(), // sentinel for tests only — real startup sets this from config.owner_id
             job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
 
@@ -800,7 +800,7 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
-            user_id: "default".to_string(),
+            user_id: "<unset>".to_string(), // sentinel for tests only — real startup sets this from config.owner_id
             job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
 
@@ -858,7 +858,7 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
-            user_id: "default".to_string(),
+            user_id: "<unset>".to_string(), // sentinel for tests only — real startup sets this from config.owner_id
             job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
 
@@ -907,7 +907,7 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
-            user_id: "default".to_string(),
+            user_id: "<unset>".to_string(), // sentinel for tests only — real startup sets this from config.owner_id
             job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
 

@@ -539,6 +539,7 @@ mod tests {
             active_config: crate::channels::web::server::ActiveConfigSnapshot::default(),
             secrets_store: None,
             db_auth: None,
+            pairing_store: None,
             oauth_providers: None,
             oauth_state_store: None,
             oauth_base_url: None,

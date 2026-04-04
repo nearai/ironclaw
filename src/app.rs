@@ -57,6 +57,10 @@ pub struct AppComponents {
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
     pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
+    /// In-process write-through cache: `(channel, external_id)` → `Identity`.
+    /// Populated by the pairing flow (Task 8). Pre-allocated here so all
+    /// subsystems can hold an `Arc` to the same cache instance.
+    pub ownership_cache: Arc<crate::ownership::OwnershipCache>,
 }
 
 /// Options that control optional init phases.
@@ -139,6 +143,11 @@ impl AppBuilder {
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         self.handles = Some(handles);
+
+        // Post-init: ensure owner user row exists and rewrite 'default' user_id rows.
+        bootstrap_ownership(db.as_ref(), &self.config)
+            .await
+            .map_err(|e| anyhow::anyhow!("bootstrap_ownership failed: {e}"))?;
 
         // Post-init: migrate disk config, reload config from DB, attach session, cleanup
         if let Err(e) =
@@ -238,6 +247,11 @@ impl AppBuilder {
                     &self.config.owner_id,
                 )
                 .await;
+
+                // Migrate NEAR AI session token from plaintext settings to
+                // encrypted secrets. Idempotent — safe to run on every startup.
+                migrate_session_credential(db.as_ref(), secrets.as_ref(), &self.config.owner_id)
+                    .await;
             }
 
             // Inject LLM API keys from encrypted storage
@@ -262,6 +276,10 @@ impl AppBuilder {
             {
                 tracing::warn!("Failed to re-resolve LLM config after secret injection: {e}");
             }
+
+            // Wire the secrets store into the session manager so future
+            // token saves go to encrypted storage.
+            self.session.attach_secrets(Arc::clone(secrets)).await;
         }
 
         self.secrets_store = store;
@@ -978,7 +996,163 @@ impl AppBuilder {
             catalog_entries,
             dev_loaded_tool_names,
             builder,
+            ownership_cache: Arc::new(crate::ownership::OwnershipCache::new()),
         })
+    }
+}
+
+/// FK constraints applied after bootstrap_ownership rewrites 'default' rows.
+/// NOT applied by the automatic refinery sweep — applied programmatically below.
+///
+/// PostgreSQL uses `ADD CONSTRAINT IF NOT EXISTS` to be idempotent.
+/// libSQL (SQLite) does not support `ADD CONSTRAINT` at all — FK enforcement
+/// there is handled by `PRAGMA foreign_keys = ON` in the schema declarations.
+// TODO(ownership): Apply OWNERSHIP_FK_SQL on PostgreSQL after bootstrap completes.
+// Requires detecting the database backend type from the Database trait object.
+#[allow(dead_code)]
+const OWNERSHIP_FK_SQL: &str = r#"
+ALTER TABLE conversations    ADD CONSTRAINT IF NOT EXISTS fk_conversations_user
+    FOREIGN KEY (user_id) REFERENCES users(id);
+ALTER TABLE memory_documents ADD CONSTRAINT IF NOT EXISTS fk_memory_documents_user
+    FOREIGN KEY (user_id) REFERENCES users(id);
+ALTER TABLE heartbeat_state  ADD CONSTRAINT IF NOT EXISTS fk_heartbeat_user
+    FOREIGN KEY (user_id) REFERENCES users(id);
+ALTER TABLE secrets          ADD CONSTRAINT IF NOT EXISTS fk_secrets_user
+    FOREIGN KEY (user_id) REFERENCES users(id);
+ALTER TABLE wasm_tools       ADD CONSTRAINT IF NOT EXISTS fk_wasm_tools_user
+    FOREIGN KEY (user_id) REFERENCES users(id);
+ALTER TABLE routines         ADD CONSTRAINT IF NOT EXISTS fk_routines_user
+    FOREIGN KEY (user_id) REFERENCES users(id);
+ALTER TABLE settings         ADD CONSTRAINT IF NOT EXISTS fk_settings_user
+    FOREIGN KEY (user_id) REFERENCES users(id);
+ALTER TABLE agent_jobs       ADD CONSTRAINT IF NOT EXISTS fk_agent_jobs_user
+    FOREIGN KEY (user_id) REFERENCES users(id);
+"#;
+
+/// Runs on every startup after migrations V1–V20.
+/// Idempotent — safe to call multiple times.
+///
+/// 1. Ensures the owner user row exists in `users`.
+/// 2. Rewrites all `user_id = 'default'` rows to the real owner_id.
+pub async fn bootstrap_ownership(
+    db: &dyn crate::db::Database,
+    config: &crate::config::Config,
+) -> Result<(), anyhow::Error> {
+    let owner_id = &config.owner_id;
+
+    // 1. Ensure owner user exists
+    db.get_or_create_user(crate::db::UserRecord {
+        id: owner_id.clone(),
+        role: "admin".to_string(),
+        display_name: "Owner".to_string(),
+        status: "active".to_string(),
+        email: None,
+        last_login_at: None,
+        created_by: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        metadata: serde_json::Value::Object(Default::default()),
+    })
+    .await?;
+
+    // 2. Rewrite 'default' rows to the real owner_id
+    db.migrate_default_owner(owner_id).await?;
+
+    tracing::info!(
+        owner_id = %owner_id,
+        "bootstrap_ownership: owner user ensured, default rows migrated"
+    );
+    Ok(())
+}
+
+/// Migrate the NEAR AI session token from the plaintext settings table to the
+/// encrypted secrets store.
+///
+/// The `nearai.session_token` settings key stores a JSON-serialized `SessionData`
+/// object. This migration re-serializes it as a JSON string and stores it under
+/// the `nearai_session_token` secret name.
+///
+/// Idempotent: if the secret already exists, the settings key is removed (cleanup).
+/// If the settings key is absent, nothing happens.
+async fn migrate_session_credential(
+    db: &dyn crate::db::Database,
+    secrets: &(dyn crate::secrets::SecretsStore + Send + Sync),
+    user_id: &str,
+) {
+    // If already migrated and the secret decrypts to valid JSON, clean up the
+    // plaintext copy and return. If the secret exists but is corrupt, fall
+    // through to re-migrate from the plaintext settings value.
+    match secrets.get_decrypted(user_id, "nearai_session_token").await {
+        Ok(decrypted) => {
+            if let Ok(secret_value) = serde_json::from_str::<serde_json::Value>(decrypted.expose())
+            {
+                // Verify the decrypted secret matches the plaintext setting (round-trip check).
+                match db.get_setting(user_id, "nearai.session_token").await {
+                    Ok(Some(settings_value)) if secret_value == settings_value => {
+                        // Round-trip verified — safe to clean up plaintext copy.
+                        let _ = db.delete_setting(user_id, "nearai.session_token").await;
+                        return;
+                    }
+                    Ok(Some(_)) => {
+                        // Secret doesn't match plaintext — fall through to re-migrate.
+                        tracing::warn!(
+                            "nearai_session_token secret doesn't match plaintext setting; re-migrating"
+                        );
+                    }
+                    Ok(None) => {
+                        // No plaintext left — treat as already migrated.
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to read nearai.session_token setting for round-trip check: {e}"
+                        );
+                        return;
+                    }
+                }
+            } else {
+                // Secret exists but failed JSON parsing — fall through to re-migrate.
+                tracing::warn!(
+                    "nearai_session_token secret exists but failed JSON validation; re-migrating"
+                );
+            }
+        }
+        Err(crate::secrets::SecretError::NotFound(_)) => {
+            // Not yet migrated — continue.
+        }
+        Err(e) => {
+            tracing::warn!("Failed to check secrets store for nearai_session_token: {e}");
+            return;
+        }
+    }
+
+    // Read the JSON value from settings.
+    let value = match db.get_setting(user_id, "nearai.session_token").await {
+        Ok(Some(v)) => v,
+        Ok(None) => return, // Nothing to migrate.
+        Err(e) => {
+            tracing::warn!("Failed to read nearai.session_token from settings: {e}");
+            return;
+        }
+    };
+
+    // Re-serialize the JSON value to a string for secrets storage.
+    let value_str = match &value {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+
+    let params = crate::secrets::CreateSecretParams::new("nearai_session_token", value_str)
+        .with_provider("nearai");
+
+    match secrets.create(user_id, params).await {
+        Ok(_) => {
+            tracing::info!("Migrated nearai.session_token from settings to encrypted secrets");
+            let _ = db.delete_setting(user_id, "nearai.session_token").await;
+        }
+        Err(e) => {
+            tracing::warn!("Failed to migrate nearai.session_token to secrets: {e}");
+        }
     }
 }
 

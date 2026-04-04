@@ -543,7 +543,6 @@ async fn process_authenticated_request(
 
     let sender_id = normalized_user_id.unwrap_or(&state.user_id).to_string();
     let mut msg = IncomingMessage::new("http", &state.user_id, &req.content)
-        .with_owner_id(&state.user_id)
         .with_sender_id(sender_id)
         .with_metadata(serde_json::json!({
             "wait_for_response": wait_for_response,
@@ -879,7 +878,7 @@ mod tests {
             .expect("timed out waiting for webhook message")
             .expect("stream should yield a webhook message");
         assert_eq!(msg.sender_id, "http");
-        assert_eq!(msg.owner_id, "http");
+        assert_eq!(msg.user_id, "http");
     }
 
     #[tokio::test]
@@ -911,7 +910,7 @@ mod tests {
             .expect("timed out waiting for webhook message")
             .expect("stream should yield a webhook message");
         assert_eq!(msg.sender_id, "alice");
-        assert_eq!(msg.owner_id, "http");
+        assert_eq!(msg.user_id, "http");
     }
 
     /// Regression test for issue #869: RwLock read guard was held across

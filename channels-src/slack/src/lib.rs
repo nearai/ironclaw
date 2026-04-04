@@ -757,8 +757,8 @@ fn send_pairing_reply(channel_id: &str, code: &str) -> Result<(), String> {
     let payload = serde_json::json!({
         "channel": channel_id,
         "text": format!(
-            "To pair with this bot, run: `ironclaw pairing approve slack {}`",
-            code
+            "Enter this code in IronClaw to pair your slack account: `{}`. CLI fallback: `ironclaw pairing approve slack {}`",
+            code, code
         ),
     });
 
