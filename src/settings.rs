@@ -251,7 +251,7 @@ pub struct EmbeddingsSettings {
     #[serde(default)]
     pub enabled: bool,
 
-    /// Provider to use: "openai" or "nearai".
+    /// Provider to use: "openai", "gemini", "nearai", or "ollama" (via env/config only).
     #[serde(default = "default_embeddings_provider")]
     pub provider: String,
 

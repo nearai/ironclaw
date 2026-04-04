@@ -350,7 +350,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | MMR re-ranking | ✅ | ❌ | Maximal marginal relevance for result diversity |
 | LLM-based query expansion | ✅ | ❌ | Expand FTS queries via LLM |
 | OpenAI embeddings | ✅ | ✅ | |
-| Gemini embeddings | ✅ | ❌ | |
+| Gemini embeddings | ✅ | ✅ | `gemini-embedding-001` via Gemini API |
 | Local embeddings | ✅ | ❌ | |
 | SQLite-vec backend | ✅ | ❌ | IronClaw uses PostgreSQL |
 | LanceDB backend | ✅ | ❌ | Configurable auto-capture max length |
