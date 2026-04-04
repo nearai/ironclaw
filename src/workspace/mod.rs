@@ -1078,13 +1078,14 @@ impl Workspace {
     /// Cross-process concurrent appends still depend on backend isolation.
     pub async fn append(&self, path: &str, content: &str) -> Result<(), WorkspaceError> {
         let path = normalize_path(path);
+        let is_system_prompt = is_system_prompt_file(&path);
+        // Fast pre-check before entering the append critical section.
+        if is_system_prompt && !content.is_empty() {
+            reject_if_injected(&path, content)?;
+        }
         let lock_key = self.append_lock_key(&self.user_id, &path);
         let append_lock = self.append_path_lock(&lock_key).await;
         let _append_guard = append_lock.lock().await;
-        // Scan system-prompt-injected files for prompt injection.
-        if is_system_prompt_file(&path) && !content.is_empty() {
-            reject_if_injected(&path, content)?;
-        }
         let doc = self
             .storage
             .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)
@@ -1097,8 +1098,9 @@ impl Workspace {
         };
 
         // Scan the combined content (not just the appended chunk) so that
-        // injection patterns split across multiple appends are caught.
-        if is_system_prompt_file(&path) && !new_content.is_empty() {
+        // injection patterns split across multiple appends are caught. This
+        // remains in-lock as the TOCTOU backstop.
+        if is_system_prompt && !new_content.is_empty() {
             reject_if_injected(&path, &new_content)?;
         }
 
@@ -1248,6 +1250,11 @@ impl Workspace {
         let (scope, actual_layer, redirected) =
             self.resolve_layer_target(layer_name, content, force)?;
         let path = normalize_path(path);
+        let is_system_prompt = is_system_prompt_file(&path);
+        // Pre-check before entering the append critical section.
+        if is_system_prompt && !content.is_empty() {
+            reject_if_injected(&path, content)?;
+        }
         let lock_key = self.append_lock_key(&scope, &path);
         let append_lock = self.append_path_lock(&lock_key).await;
         let _append_guard = append_lock.lock().await;
@@ -1260,7 +1267,7 @@ impl Workspace {
         } else {
             format!("{}\n\n{}", doc.content, content)
         };
-        if is_system_prompt_file(&path) && !new_content.is_empty() {
+        if is_system_prompt && !new_content.is_empty() {
             reject_if_injected(&path, &new_content)?;
         }
 
@@ -1467,6 +1474,9 @@ impl Workspace {
     /// which in multi-scope mode may return a document owned by a secondary
     /// scope; writing to that document by UUID would violate write isolation.
     pub async fn append_memory(&self, entry: &str) -> Result<(), WorkspaceError> {
+        if !entry.is_empty() {
+            reject_if_injected(paths::MEMORY, entry)?;
+        }
         let lock_key = self.append_lock_key(&self.user_id, paths::MEMORY);
         let append_lock = self.append_path_lock(&lock_key).await;
         let _append_guard = append_lock.lock().await;
