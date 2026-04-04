@@ -19,19 +19,51 @@ use async_trait::async_trait;
 use crate::agent::agentic_loop::{
     AgenticLoopConfig, LoopDelegate, LoopOutcome, LoopSignal, TextAction,
 };
-use crate::llm::{ChatMessage, Reasoning, ReasoningContext};
+use crate::llm::{ChatMessage, Reasoning, ReasoningContext, TokenUsage};
 use crate::tools::permissions::{PermissionState, effective_permission};
 use crate::tools::redact_params;
 
 /// Result of the agentic loop execution.
 pub(super) enum AgenticLoopResult {
     /// Completed with a response.
-    Response(String),
+    Response {
+        text: String,
+        turn_usage: TurnUsageSummary,
+    },
     /// A tool requires approval before continuing.
     NeedApproval {
         /// The pending approval request to store.
         pending: Box<PendingApproval>,
+        /// Usage accumulated before the turn paused for approval.
+        turn_usage: TurnUsageSummary,
     },
+    /// The loop failed after spending usage in the current turn.
+    Failed {
+        error: Error,
+        turn_usage: TurnUsageSummary,
+    },
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct TurnUsageSummary {
+    pub usage: TokenUsage,
+    pub cost_usd: rust_decimal::Decimal,
+}
+
+impl TurnUsageSummary {
+    fn record_llm_call(&mut self, usage: TokenUsage, cost_usd: rust_decimal::Decimal) {
+        self.usage.input_tokens = self.usage.input_tokens.saturating_add(usage.input_tokens);
+        self.usage.output_tokens = self.usage.output_tokens.saturating_add(usage.output_tokens);
+        self.usage.cache_read_input_tokens = self
+            .usage
+            .cache_read_input_tokens
+            .saturating_add(usage.cache_read_input_tokens);
+        self.usage.cache_creation_input_tokens = self
+            .usage
+            .cache_creation_input_tokens
+            .saturating_add(usage.cache_creation_input_tokens);
+        self.cost_usd += cost_usd;
+    }
 }
 
 impl Agent {
@@ -200,6 +232,7 @@ impl Agent {
             nudge_at,
             force_text_at,
             user_tz,
+            turn_usage: std::sync::Mutex::new(TurnUsageSummary::default()),
             cached_tool_permissions: std::sync::Mutex::new(None),
         };
 
@@ -242,26 +275,41 @@ impl Agent {
             &mut reason_ctx,
             &loop_config,
         )
-        .await?;
+        .await;
+
+        let turn_usage = delegate.turn_usage_summary();
 
         match outcome {
-            LoopOutcome::Response(text) => Ok(AgenticLoopResult::Response(text)),
-            LoopOutcome::Stopped => Err(crate::error::JobError::ContextError {
-                id: thread_id,
-                reason: "Interrupted".to_string(),
-            }
-            .into()),
-            LoopOutcome::MaxIterations => Err(crate::error::LlmError::InvalidResponse {
-                provider: "agent".to_string(),
-                reason: format!("Exceeded maximum tool iterations ({max_tool_iterations})"),
-            }
-            .into()),
-            LoopOutcome::Failure(reason) => Err(crate::error::LlmError::InvalidResponse {
-                provider: "agent".to_string(),
-                reason,
-            }
-            .into()),
-            LoopOutcome::NeedApproval(pending) => Ok(AgenticLoopResult::NeedApproval { pending }),
+            Ok(LoopOutcome::Response(text)) => Ok(AgenticLoopResult::Response { text, turn_usage }),
+            Ok(LoopOutcome::Stopped) => Ok(AgenticLoopResult::Failed {
+                error: crate::error::JobError::ContextError {
+                    id: thread_id,
+                    reason: "Interrupted".to_string(),
+                }
+                .into(),
+                turn_usage,
+            }),
+            Ok(LoopOutcome::MaxIterations) => Ok(AgenticLoopResult::Failed {
+                error: crate::error::LlmError::InvalidResponse {
+                    provider: "agent".to_string(),
+                    reason: format!("Exceeded maximum tool iterations ({max_tool_iterations})"),
+                }
+                .into(),
+                turn_usage,
+            }),
+            Ok(LoopOutcome::Failure(reason)) => Ok(AgenticLoopResult::Failed {
+                error: crate::error::LlmError::InvalidResponse {
+                    provider: "agent".to_string(),
+                    reason,
+                }
+                .into(),
+                turn_usage,
+            }),
+            Ok(LoopOutcome::NeedApproval(pending)) => Ok(AgenticLoopResult::NeedApproval {
+                pending,
+                turn_usage,
+            }),
+            Err(error) => Ok(AgenticLoopResult::Failed { error, turn_usage }),
         }
     }
 
@@ -295,8 +343,30 @@ struct ChatDelegate<'a> {
     nudge_at: usize,
     force_text_at: usize,
     user_tz: chrono_tz::Tz,
+    turn_usage: std::sync::Mutex<TurnUsageSummary>,
     cached_tool_permissions:
         std::sync::Mutex<Option<std::collections::HashMap<String, PermissionState>>>,
+}
+
+impl ChatDelegate<'_> {
+    fn turn_usage_summary(&self) -> TurnUsageSummary {
+        self.with_turn_usage(|turn_usage| turn_usage.clone())
+    }
+
+    fn record_turn_usage(&self, usage: TokenUsage, cost_usd: rust_decimal::Decimal) {
+        self.with_turn_usage(|turn_usage| turn_usage.record_llm_call(usage, cost_usd));
+    }
+
+    fn with_turn_usage<R>(&self, f: impl FnOnce(&mut TurnUsageSummary) -> R) -> R {
+        match self.turn_usage.lock() {
+            Ok(mut turn_usage) => f(&mut turn_usage),
+            Err(poisoned) => {
+                tracing::warn!("turn usage mutex poisoned; recovering accumulated usage");
+                let mut turn_usage = poisoned.into_inner();
+                f(&mut turn_usage)
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -587,6 +657,8 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 tracing::warn!("Failed to persist LLM call to DB: {}", e);
             }
         }
+
+        self.record_turn_usage(output.usage, call_cost);
 
         Ok(output)
     }
@@ -1471,6 +1543,48 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: 0,
                 output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    struct FixedUsageTextProvider;
+
+    #[async_trait]
+    impl LlmProvider for FixedUsageTextProvider {
+        fn model_name(&self) -> &str {
+            "fixed-usage"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::new(1, 3), Decimal::new(2, 3))
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            Ok(CompletionResponse {
+                content: "done".to_string(),
+                input_tokens: 12,
+                output_tokens: 3,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
+            Ok(ToolCompletionResponse {
+                content: Some("done".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 12,
+                output_tokens: 3,
                 finish_reason: FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
@@ -2587,11 +2701,60 @@ mod tests {
 
         // Verify we got a text response.
         match inner.unwrap() {
-            super::AgenticLoopResult::Response(text) => {
+            super::AgenticLoopResult::Response { text, .. } => {
                 assert!(!text.is_empty(), "Expected non-empty forced text response");
             }
             super::AgenticLoopResult::NeedApproval { .. } => {
                 panic!("Expected text response, got NeedApproval");
+            }
+            super::AgenticLoopResult::Failed { error, .. } => {
+                panic!("Expected text response, got Failed: {error}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatcher_response_usage_is_per_turn_not_cumulative() {
+        use crate::agent::session::Session;
+        use crate::channels::IncomingMessage;
+        use crate::llm::ChatMessage;
+        use tokio::sync::Mutex;
+
+        let agent = make_test_agent_with_llm(Arc::new(FixedUsageTextProvider), 3);
+        let session = Arc::new(Mutex::new(Session::new("test-user")));
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread(Some("test")).id
+        };
+        let tenant = agent.tenant_ctx("test-user").await;
+
+        for prompt in ["first turn", "second turn"] {
+            let message = IncomingMessage::new("test", "test-user", prompt);
+            let initial_messages = vec![ChatMessage::user(prompt)];
+            let result = agent
+                .run_agentic_loop(
+                    &message,
+                    tenant.clone(),
+                    session.clone(),
+                    thread_id,
+                    initial_messages,
+                )
+                .await
+                .expect("dispatcher run should succeed");
+
+            match result {
+                super::AgenticLoopResult::Response { text, turn_usage } => {
+                    assert_eq!(text, "done");
+                    assert_eq!(turn_usage.usage.input_tokens, 12);
+                    assert_eq!(turn_usage.usage.output_tokens, 3);
+                    assert_eq!(turn_usage.cost_usd, Decimal::new(18, 3));
+                }
+                super::AgenticLoopResult::NeedApproval { .. } => {
+                    panic!("expected a text response");
+                }
+                super::AgenticLoopResult::Failed { error, .. } => {
+                    panic!("expected a text response, got Failed: {error}");
+                }
             }
         }
     }

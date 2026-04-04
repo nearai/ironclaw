@@ -811,22 +811,6 @@ function connectSSE() {
     }
   });
 
-  eventSource.addEventListener('turn_cost', (e) => {
-    const event = JSON.parse(e.data);
-    if (!isCurrentThread(event.thread_id)) return;
-    // Add cost badge below last assistant message
-    const messages = document.querySelectorAll('.message.assistant');
-    const lastMsg = messages[messages.length - 1];
-    const tokens = (event.input_tokens || 0) + (event.output_tokens || 0);
-    if (lastMsg && tokens > 0) {
-      const badge = document.createElement('div');
-      badge.className = 'turn-cost-badge';
-      const cost = event.cost_usd ? ' \u00b7 ' + event.cost_usd : '';
-      badge.textContent = tokens.toLocaleString() + ' tokens' + cost;
-      lastMsg.appendChild(badge);
-    }
-  });
-
   // Job event listeners (activity stream for all sandbox jobs)
   const jobEventTypes = [
     'job_message', 'job_tool_use', 'job_tool_result',
