@@ -516,6 +516,9 @@ pub struct Workspace {
     /// Optional privacy classifier for shared layer writes.
     /// When None, writes go exactly where requested — no silent redirect.
     privacy_classifier: Option<Arc<dyn crate::workspace::privacy::PrivacyClassifier>>,
+    /// Process-local lock that serializes read-modify-write append paths.
+    /// Prevents lost updates from concurrent appends in the same process.
+    append_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Workspace {
@@ -535,6 +538,7 @@ impl Workspace {
             search_defaults: SearchConfig::default(),
             memory_layers,
             privacy_classifier: None,
+            append_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -555,6 +559,7 @@ impl Workspace {
             search_defaults: SearchConfig::default(),
             memory_layers,
             privacy_classifier: None,
+            append_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -725,6 +730,7 @@ impl Workspace {
             search_defaults: self.search_defaults.clone(),
             memory_layers,
             privacy_classifier: self.privacy_classifier.clone(),
+            append_lock: Arc::clone(&self.append_lock),
         }
     }
 
@@ -1049,10 +1055,12 @@ impl Workspace {
     /// For semantic separation (e.g., memory entries), use `append_memory()`
     /// which uses `\n\n`.
     ///
-    /// Uses a read-modify-write pattern that is not concurrency-safe:
-    /// concurrent appends to the same path may lose writes.
+    /// Uses a read-modify-write pattern guarded by a process-local mutex,
+    /// preventing lost writes from concurrent appends in this process.
+    /// Cross-process concurrent appends still depend on backend isolation.
     pub async fn append(&self, path: &str, content: &str) -> Result<(), WorkspaceError> {
         let path = normalize_path(path);
+        let _append_guard = self.append_lock.lock().await;
         // Scan system-prompt-injected files for prompt injection.
         if is_system_prompt_file(&path) && !content.is_empty() {
             reject_if_injected(&path, content)?;
@@ -1201,8 +1209,9 @@ impl Workspace {
     /// shared document at that path. The `WriteResult::redirected` flag
     /// indicates when this has happened.
     ///
-    /// Uses a read-modify-write pattern that is not concurrency-safe:
-    /// concurrent appends to the same path may lose writes.
+    /// Uses a read-modify-write pattern guarded by a process-local mutex,
+    /// preventing lost writes from concurrent appends in this process.
+    /// Cross-process concurrent appends still depend on backend isolation.
     pub async fn append_to_layer(
         &self,
         layer_name: &str,
@@ -1210,6 +1219,7 @@ impl Workspace {
         content: &str,
         force: bool,
     ) -> Result<WriteResult, WorkspaceError> {
+        let _append_guard = self.append_lock.lock().await;
         let (scope, actual_layer, redirected) =
             self.resolve_layer_target(layer_name, content, force)?;
         let path = normalize_path(path);
@@ -1426,6 +1436,7 @@ impl Workspace {
     /// which in multi-scope mode may return a document owned by a secondary
     /// scope; writing to that document by UUID would violate write isolation.
     pub async fn append_memory(&self, entry: &str) -> Result<(), WorkspaceError> {
+        let _append_guard = self.append_lock.lock().await;
         // Always get/create in the primary scope to preserve write isolation.
         let doc = self
             .storage
@@ -2688,6 +2699,25 @@ mod versioning_tests {
             v.content, "line1",
             "version should contain pre-append content"
         );
+    }
+
+    #[tokio::test]
+    async fn append_to_layer_concurrent_appends_preserve_all_entries() {
+        let (ws, _dir) = create_test_workspace().await;
+        ws.write_to_layer("private", "layer-log.md", "base", false)
+            .await
+            .unwrap();
+
+        let append_a = ws.append_to_layer("private", "layer-log.md", "entry-a", false);
+        let append_b = ws.append_to_layer("private", "layer-log.md", "entry-b", false);
+        let (result_a, result_b) = tokio::join!(append_a, append_b);
+        result_a.unwrap();
+        result_b.unwrap();
+
+        let doc = ws.read("layer-log.md").await.unwrap();
+        assert_eq!(doc.content.matches("entry-a").count(), 1);
+        assert_eq!(doc.content.matches("entry-b").count(), 1);
+        assert!(doc.content.contains("base"));
     }
 
     #[tokio::test]
