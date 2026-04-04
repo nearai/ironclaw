@@ -12,7 +12,8 @@ use uuid::Uuid;
 use crate::agent::Agent;
 use crate::agent::compaction::ContextCompactor;
 use crate::agent::dispatcher::{
-    AgenticLoopResult, check_auth_required, execute_chat_tool_standalone, parse_auth_result,
+    AgenticLoopResult, TurnUsageSummary, check_auth_required, execute_chat_tool_standalone,
+    parse_auth_result,
 };
 use crate::agent::session::{MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState};
 use crate::agent::submission::SubmissionResult;
@@ -34,6 +35,15 @@ fn requires_preexisting_uuid_thread(channel: &str) -> bool {
 
 fn validate_inbound_text_for_message(safety: &SafetyLayer, content: &str) -> ValidationResult {
     safety.validate_input(content)
+}
+
+fn turn_usage_from_result(result: &Result<AgenticLoopResult, Error>) -> Option<&TurnUsageSummary> {
+    match result {
+        Ok(AgenticLoopResult::Response { turn_usage, .. })
+        | Ok(AgenticLoopResult::NeedApproval { turn_usage, .. })
+        | Ok(AgenticLoopResult::Failed { turn_usage, .. }) => Some(turn_usage),
+        Err(_) => None,
+    }
 }
 
 impl Agent {
@@ -505,6 +515,10 @@ impl Agent {
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
         if thread.state == ThreadState::Interrupted {
+            if let Some(turn_usage) = turn_usage_from_result(&result) {
+                self.send_turn_cost_status(&message.channel, &message.metadata, turn_usage)
+                    .await;
+            }
             let _ = self
                 .channels
                 .send_status(
@@ -518,7 +532,10 @@ impl Agent {
 
         // Complete, fail, or request approval
         match result {
-            Ok(AgenticLoopResult::Response(response)) => {
+            Ok(AgenticLoopResult::Response {
+                text: response,
+                turn_usage,
+            }) => {
                 // Extract <suggestions> from response text before user sees it
                 let (response, suggestions) =
                     crate::agent::dispatcher::extract_suggestions(&response);
@@ -589,36 +606,15 @@ impl Agent {
                         .await;
                 }
 
-                // Emit per-turn cost summary
-                {
-                    let usage = self.cost_guard().model_usage().await;
-                    let (total_in, total_out, total_cost) =
-                        usage
-                            .values()
-                            .fold((0u64, 0u64, rust_decimal::Decimal::ZERO), |acc, m| {
-                                (
-                                    acc.0 + m.input_tokens,
-                                    acc.1 + m.output_tokens,
-                                    acc.2 + m.cost,
-                                )
-                            });
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::TurnCost {
-                                input_tokens: total_in,
-                                output_tokens: total_out,
-                                cost_usd: format!("${:.4}", total_cost),
-                            },
-                            &message.metadata,
-                        )
-                        .await;
-                }
+                self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
+                    .await;
 
                 Ok(SubmissionResult::response(response))
             }
-            Ok(AgenticLoopResult::NeedApproval { pending }) => {
+            Ok(AgenticLoopResult::NeedApproval {
+                pending,
+                turn_usage,
+            }) => {
                 // Store pending approval in thread and update state
                 let request_id = pending.request_id;
                 let tool_name = pending.tool_name.clone();
@@ -626,6 +622,8 @@ impl Agent {
                 let parameters = pending.display_parameters.clone();
                 let allow_always = pending.allow_always;
                 thread.await_approval(*pending);
+                self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
+                    .await;
                 let _ = self
                     .channels
                     .send_status(
@@ -647,6 +645,12 @@ impl Agent {
                     parameters,
                     allow_always,
                 })
+            }
+            Ok(AgenticLoopResult::Failed { error, turn_usage }) => {
+                self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
+                    .await;
+                thread.fail_turn(error.to_string());
+                Ok(SubmissionResult::error(error.to_string()))
             }
             Err(e) => {
                 thread.fail_turn(e.to_string());
@@ -1056,7 +1060,7 @@ impl Agent {
         }
 
         if approved {
-            // If always, add to auto-approved set
+            // If always, add to auto-approved set and persist to settings.
             if always {
                 let mut sess = session.lock().await;
                 sess.auto_approve_tool(&pending.tool_name);
@@ -1065,6 +1069,52 @@ impl Agent {
                     pending.tool_name,
                     sess.id
                 );
+                drop(sess);
+
+                // Defense-in-depth: don't persist AlwaysAllow for tools that
+                // declare ApprovalRequirement::Always (the UI hides the
+                // "Always" button for locked tools, but a crafted client
+                // could send it).
+                let tool_ref = self.tools().get(&pending.tool_name).await;
+                let is_locked = tool_ref
+                    .as_ref()
+                    .map(|t| {
+                        matches!(
+                            t.requires_approval(&serde_json::json!({})),
+                            crate::tools::ApprovalRequirement::Always
+                        )
+                    })
+                    .unwrap_or(false);
+
+                if is_locked {
+                    tracing::warn!(
+                        tool = %pending.tool_name,
+                        "Skipping AlwaysAllow persist — tool declares ApprovalRequirement::Always"
+                    );
+                } else {
+                    // Persist AlwaysAllow to the per-user DB settings so the
+                    // preference survives process restarts. Uses the same
+                    // set_setting path as tool_permission_set and the web UI.
+                    let tenant = self.tenant_ctx(&message.user_id).await;
+                    if let Some(store) = tenant.store() {
+                        let key = format!("tool_permissions.{}", pending.tool_name);
+                        let val = serde_json::to_value(
+                            crate::tools::permissions::PermissionState::AlwaysAllow,
+                        )
+                        .unwrap_or(serde_json::Value::String("always_allow".to_string()));
+                        match store.set_setting(&key, &val).await {
+                            Ok(()) => tracing::debug!(
+                                tool = %pending.tool_name,
+                                "Persisted AlwaysAllow permission to DB settings"
+                            ),
+                            Err(e) => tracing::warn!(
+                                "process_approval: failed to persist AlwaysAllow for '{}': {}",
+                                pending.tool_name,
+                                e
+                            ),
+                        }
+                    }
+                } // else (not locked)
             }
 
             // Reset thread state to processing
@@ -1522,7 +1572,10 @@ impl Agent {
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
             match result {
-                Ok(AgenticLoopResult::Response(response)) => {
+                Ok(AgenticLoopResult::Response {
+                    text: response,
+                    turn_usage,
+                }) => {
                     let (response, suggestions) =
                         crate::agent::dispatcher::extract_suggestions(&response);
                     thread.complete_turn(&response);
@@ -1566,10 +1619,13 @@ impl Agent {
                             )
                             .await;
                     }
+                    self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
+                        .await;
                     Ok(SubmissionResult::response(response))
                 }
                 Ok(AgenticLoopResult::NeedApproval {
                     pending: new_pending,
+                    turn_usage,
                 }) => {
                     let request_id = new_pending.request_id;
                     let tool_name = new_pending.tool_name.clone();
@@ -1577,6 +1633,8 @@ impl Agent {
                     let parameters = new_pending.display_parameters.clone();
                     let allow_always = new_pending.allow_always;
                     thread.await_approval(*new_pending);
+                    self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
+                        .await;
                     let _ = self
                         .channels
                         .send_status(
@@ -1598,6 +1656,12 @@ impl Agent {
                         parameters,
                         allow_always,
                     })
+                }
+                Ok(AgenticLoopResult::Failed { error, turn_usage }) => {
+                    self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
+                        .await;
+                    thread.fail_turn(error.to_string());
+                    Ok(SubmissionResult::error(error.to_string()))
                 }
                 Err(e) => {
                     thread.fail_turn(e.to_string());
@@ -1682,6 +1746,32 @@ impl Agent {
                     setup_url: auth_data.setup_url,
                 },
                 &message.metadata,
+            )
+            .await;
+    }
+
+    async fn send_turn_cost_status(
+        &self,
+        channel: &str,
+        metadata: &serde_json::Value,
+        turn_usage: &TurnUsageSummary,
+    ) {
+        let total_tokens =
+            u64::from(turn_usage.usage.input_tokens) + u64::from(turn_usage.usage.output_tokens);
+        if total_tokens == 0 && turn_usage.cost_usd.is_zero() {
+            return;
+        }
+
+        let _ = self
+            .channels
+            .send_status(
+                channel,
+                StatusUpdate::TurnCost {
+                    input_tokens: u64::from(turn_usage.usage.input_tokens),
+                    output_tokens: u64::from(turn_usage.usage.output_tokens),
+                    cost_usd: format!("${:.4}", turn_usage.cost_usd),
+                },
+                metadata,
             )
             .await;
     }
@@ -1971,6 +2061,7 @@ mod tests {
     use crate::channels::{AttachmentKind, IncomingAttachment};
     use crate::config::SafetyConfig;
     use ironclaw_safety::SafetyLayer;
+    use rust_decimal::Decimal;
 
     #[test]
     fn test_rebuild_chat_messages_user_assistant_only() {
@@ -1982,6 +2073,50 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].role, crate::llm::Role::User);
         assert_eq!(result[1].role, crate::llm::Role::Assistant);
+    }
+
+    #[test]
+    fn test_turn_usage_from_result_extracts_usage_for_interrupted_response() {
+        let result = Ok(AgenticLoopResult::Response {
+            text: "done".to_string(),
+            turn_usage: TurnUsageSummary {
+                usage: crate::llm::TokenUsage {
+                    input_tokens: 12,
+                    output_tokens: 3,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                },
+                cost_usd: Decimal::new(18, 3),
+            },
+        });
+
+        let turn_usage = turn_usage_from_result(&result).expect("usage should be present");
+        assert_eq!(turn_usage.usage.input_tokens, 12);
+        assert_eq!(turn_usage.usage.output_tokens, 3);
+    }
+
+    #[test]
+    fn test_turn_usage_from_result_extracts_usage_for_interrupted_failed_turn() {
+        let result = Ok(AgenticLoopResult::Failed {
+            error: crate::error::LlmError::InvalidResponse {
+                provider: "agent".to_string(),
+                reason: "Interrupted".to_string(),
+            }
+            .into(),
+            turn_usage: TurnUsageSummary {
+                usage: crate::llm::TokenUsage {
+                    input_tokens: 7,
+                    output_tokens: 2,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                },
+                cost_usd: Decimal::new(11, 3),
+            },
+        });
+
+        let turn_usage = turn_usage_from_result(&result).expect("usage should be present");
+        assert_eq!(turn_usage.usage.input_tokens, 7);
+        assert_eq!(turn_usage.usage.output_tokens, 2);
     }
 
     #[test]
@@ -2360,6 +2495,8 @@ mod tests {
         // Verify nothing was queued — the fall-through path doesn't touch the queue.
         assert!(t.pending_messages.is_empty());
     }
+
+    // Approval persistence is tested via e2e_builtin_tool_coverage integration tests.
 
     // Helper function to extract the approval message without needing a full Agent instance
     fn extract_approval_message(

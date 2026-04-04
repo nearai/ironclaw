@@ -1035,7 +1035,10 @@ impl SetupWizard {
                 self.settings.secrets_master_key_hex = Some(key_hex.clone());
 
                 println!();
-                print_info("Master key generated and will be saved to ~/.ironclaw/.env");
+                print_info(&format!(
+                    "Master key generated and will be saved to {}",
+                    crate::bootstrap::ironclaw_env_path().display()
+                ));
                 println!();
                 println!("  SECRETS_MASTER_KEY={}", key_hex);
                 println!();
@@ -1183,7 +1186,10 @@ impl SetupWizard {
         crate::config::inject_single_var("SECRETS_MASTER_KEY", &key_hex);
         self.settings.secrets_master_key_hex = Some(key_hex);
         self.settings.secrets_master_key_source = KeySource::Env;
-        print_success("Master key stored in ~/.ironclaw/.env");
+        print_success(&format!(
+            "Master key stored in {}",
+            crate::bootstrap::ironclaw_env_path().display()
+        ));
         Ok(())
     }
 
@@ -3269,16 +3275,17 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Persist the NEAR AI session token to the database.
+    /// Persist the NEAR AI session token to encrypted secrets and the database.
     ///
     /// The session manager writes to disk during `ensure_authenticated()` but
     /// doesn't have a DB store attached during onboarding. This reads the
-    /// session file from disk and stores it under the `nearai.session_token`
-    /// key so the runtime's `attach_store()` finds it without fallback.
+    /// session file from disk and stores it under `nearai_session_token` in the
+    /// encrypted secrets store. Falls back to the plaintext settings table
+    /// only when no secrets store is available.
     ///
     /// Best-effort: silently ignores errors (no DB connection yet, no
     /// session file, etc.).
-    async fn persist_session_to_db(&self) {
+    async fn persist_session_to_db(&mut self) {
         let session_path = crate::config::llm::default_session_path();
         let data = match std::fs::read_to_string(&session_path) {
             Ok(d) if !d.trim().is_empty() => d,
@@ -3289,6 +3296,23 @@ impl SetupWizard {
             Err(_) => return,
         };
 
+        // Try to persist to encrypted secrets store (preferred).
+        if let Ok(ctx) = self.init_secrets_context().await {
+            if let Err(e) = ctx
+                .save_secret(
+                    "nearai_session_token",
+                    &secrecy::SecretString::from(data.clone()),
+                )
+                .await
+            {
+                tracing::debug!("Could not persist session token to secrets store: {}", e);
+            } else {
+                tracing::debug!("Session token persisted to encrypted secrets store");
+                return;
+            }
+        }
+
+        // Fallback: persist to plaintext settings table.
         #[cfg(feature = "postgres")]
         if let Some(ref pool) = self.db_pool {
             let store = crate::history::Store::from_pool(pool.clone());

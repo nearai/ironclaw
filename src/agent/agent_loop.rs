@@ -247,7 +247,7 @@ impl Agent {
                 store: deps
                     .store
                     .as_ref()
-                    .map(|db| crate::tenant::AdminScope::new(Arc::clone(db))),
+                    .map(|db| crate::tenant::SystemScope::new(Arc::clone(db))),
                 hooks: deps.hooks.clone(),
             },
         );
@@ -352,24 +352,34 @@ impl Agent {
             repo_url: Some("https://github.com/nearai/ironclaw".to_string()),
         }
     }
-
-    pub(super) fn cost_guard(&self) -> &Arc<crate::agent::cost_guard::CostGuard> {
-        &self.deps.cost_guard
-    }
-
     /// Build a tenant-scoped execution context for the given user.
     ///
     /// This is the standard entry point for per-user operations. The returned
     /// [`TenantCtx`] provides a [`TenantScope`] that auto-binds `user_id` on
     /// every database operation and a per-user rate limiter.
     pub(super) async fn tenant_ctx(&self, user_id: &str) -> crate::tenant::TenantCtx {
+        use crate::ownership::{Identity, OwnerId, UserRole};
+        // Bridge: creates Member identity from raw string.
+        // Will be replaced by OwnershipCache lookup in Task 9.
+        let identity = Identity::new(OwnerId::from(user_id), UserRole::Member);
+        self.tenant_ctx_with_identity(identity).await
+    }
+
+    /// Build a tenant-scoped execution context from a resolved `Identity`.
+    ///
+    /// Preferred over [`tenant_ctx`](Self::tenant_ctx) once the call site has a
+    /// full `Identity` available.
+    pub(super) async fn tenant_ctx_with_identity(
+        &self,
+        identity: crate::ownership::Identity,
+    ) -> crate::tenant::TenantCtx {
+        let user_id = identity.owner_id.as_str();
         let rate = self.deps.tenant_rates.get_or_create(user_id).await;
 
-        let store = self
-            .deps
-            .store
-            .as_ref()
-            .map(|db| crate::tenant::TenantScope::new(user_id, Arc::clone(db)));
+        let store =
+            self.deps.store.as_ref().map(|db| {
+                crate::tenant::TenantScope::with_identity(identity.clone(), Arc::clone(db))
+            });
 
         // Reuse the owner workspace if user matches, otherwise create per-user.
         // Per-user workspaces are seeded on first creation so they get identity
@@ -394,7 +404,7 @@ impl Agent {
         };
 
         crate::tenant::TenantCtx::new(
-            user_id,
+            identity,
             store,
             workspace,
             Arc::clone(&self.deps.cost_guard),
@@ -402,15 +412,15 @@ impl Agent {
         )
     }
 
-    /// Get an admin-scoped database accessor for cross-tenant operations.
+    /// Get a system-scoped database accessor for cross-tenant operations.
     ///
     /// Only for system-level components (heartbeat, routine engine, self-repair,
     /// scheduler). Handler code should use [`tenant_ctx()`](Self::tenant_ctx) instead.
-    pub(super) fn admin_store(&self) -> Option<crate::tenant::AdminScope> {
+    pub(super) fn system_store(&self) -> Option<crate::tenant::SystemScope> {
         self.deps
             .store
             .as_ref()
-            .map(|db| crate::tenant::AdminScope::new(Arc::clone(db)))
+            .map(|db| crate::tenant::SystemScope::new(Arc::clone(db)))
     }
 
     pub(super) fn skill_registry(&self) -> Option<&Arc<std::sync::RwLock<SkillRegistry>>> {
@@ -507,8 +517,8 @@ impl Agent {
             self.config.stuck_threshold,
             self.config.max_repair_attempts,
         );
-        if let Some(admin) = self.admin_store() {
-            self_repair = self_repair.with_store(admin);
+        if let Some(system) = self.system_store() {
+            self_repair = self_repair.with_store(system);
         }
         if let Some(ref builder) = self.deps.builder {
             self_repair = self_repair.with_builder(Arc::clone(builder), Arc::clone(self.tools()));
@@ -704,13 +714,13 @@ impl Agent {
                         .unwrap_or_default();
 
                     if config.multi_tenant {
-                        if let Some(admin) = self.admin_store() {
+                        if let Some(system) = self.system_store() {
                             Some(spawn_multi_user_heartbeat(
                                 config,
                                 hygiene,
                                 self.cheap_llm().clone(),
                                 Some(notify_tx),
-                                admin,
+                                system,
                             ))
                         } else {
                             tracing::warn!("Multi-tenant heartbeat requires a database store");
@@ -723,7 +733,7 @@ impl Agent {
                             workspace.clone(),
                             self.cheap_llm().clone(),
                             Some(notify_tx),
-                            self.admin_store(),
+                            self.system_store(),
                         ))
                     }
                 } else {
@@ -747,7 +757,7 @@ impl Agent {
 
                     let engine = Arc::new(RoutineEngine::new(
                         rt_config.clone(),
-                        crate::tenant::AdminScope::new(Arc::clone(store)),
+                        crate::tenant::SystemScope::new(Arc::clone(store)),
                         self.llm().clone(),
                         Arc::clone(workspace),
                         notify_tx,

@@ -811,22 +811,6 @@ function connectSSE() {
     }
   });
 
-  eventSource.addEventListener('turn_cost', (e) => {
-    const event = JSON.parse(e.data);
-    if (!isCurrentThread(event.thread_id)) return;
-    // Add cost badge below last assistant message
-    const messages = document.querySelectorAll('.message.assistant');
-    const lastMsg = messages[messages.length - 1];
-    const tokens = (event.input_tokens || 0) + (event.output_tokens || 0);
-    if (lastMsg && tokens > 0) {
-      const badge = document.createElement('div');
-      badge.className = 'turn-cost-badge';
-      const cost = event.cost_usd ? ' \u00b7 ' + event.cost_usd : '';
-      badge.textContent = tokens.toLocaleString() + ' tokens' + cost;
-      lastMsg.appendChild(badge);
-    }
-  });
-
   // Job event listeners (activity stream for all sandbox jobs)
   const jobEventTypes = [
     'job_message', 'job_tool_use', 'job_tool_result',
@@ -3424,11 +3408,18 @@ function renderExtensionCard(ext) {
 
   // For WASM channels, check for pending pairing requests.
   if (ext.kind === 'wasm_channel') {
-    const pairingSection = document.createElement('div');
-    pairingSection.className = 'ext-pairing';
-    pairingSection.setAttribute('data-channel', ext.name);
-    card.appendChild(pairingSection);
-    loadPairingRequests(ext.name, pairingSection);
+    if (currentUserIsAdmin()) {
+      const pairingSection = document.createElement('div');
+      pairingSection.className = 'ext-pairing';
+      pairingSection.setAttribute('data-channel', ext.name);
+      card.appendChild(pairingSection);
+      loadPairingRequests(ext.name, pairingSection);
+    } else if ((ext.activation_status || 'installed') === 'pairing') {
+      const pairingSection = document.createElement('div');
+      pairingSection.className = 'ext-pairing';
+      card.appendChild(pairingSection);
+      renderMemberPairingClaim(ext, pairingSection);
+    }
   }
 
   return card;
@@ -4089,6 +4080,10 @@ function closeConfigureModal(extensionName) {
   }
 }
 
+function currentUserIsAdmin() {
+  return !!(window._currentUser && window._currentUser.role === 'admin');
+}
+
 // Validate that a server-supplied OAuth URL is HTTPS before opening a popup.
 // Rejects javascript:, data:, and other non-HTTPS schemes to prevent URL-injection.
 // Uses the URL constructor to safely parse and validate the scheme, which also
@@ -4111,6 +4106,8 @@ function openOAuthUrl(url) {
 // --- Pairing ---
 
 function loadPairingRequests(channel, container) {
+  if (!currentUserIsAdmin()) return;
+
   apiFetch('/api/pairing/' + encodeURIComponent(channel))
     .then(data => {
       container.innerHTML = '';
@@ -4118,7 +4115,7 @@ function loadPairingRequests(channel, container) {
 
       const heading = document.createElement('div');
       heading.className = 'pairing-heading';
-      heading.textContent = 'Pending pairing requests';
+      heading.textContent = I18n.t('extensions.pendingPairing');
       container.appendChild(heading);
 
       data.requests.forEach(req => {
@@ -4132,13 +4129,19 @@ function loadPairingRequests(channel, container) {
 
         const sender = document.createElement('span');
         sender.className = 'pairing-sender';
-        sender.textContent = 'from ' + req.sender_id;
+        sender.textContent = I18n.t('extensions.from') + ' ' + req.sender_id;
         row.appendChild(sender);
 
         const btn = document.createElement('button');
         btn.className = 'btn-ext activate';
-        btn.textContent = 'Approve';
-        btn.addEventListener('click', () => approvePairing(channel, req.code, container));
+        btn.textContent = I18n.t('common.approve');
+        btn.addEventListener('click', function() {
+          approvePairing(channel, req.code, {
+            onSuccess: function() {
+              loadPairingRequests(channel, container);
+            }
+          });
+        });
         row.appendChild(btn);
 
         container.appendChild(row);
@@ -4147,13 +4150,60 @@ function loadPairingRequests(channel, container) {
     .catch(() => {});
 }
 
-function approvePairing(channel, code, container) {
+function renderMemberPairingClaim(ext, container) {
+  const heading = document.createElement('div');
+  heading.className = 'pairing-heading';
+  heading.textContent = I18n.t('extensions.claimPairing');
+  container.appendChild(heading);
+
+  const help = document.createElement('div');
+  help.className = 'pairing-help';
+  help.textContent = I18n.t('extensions.claimPairingHelp');
+  container.appendChild(help);
+
+  const row = document.createElement('div');
+  row.className = 'pairing-row';
+
+  const input = document.createElement('input');
+  input.className = 'pairing-input';
+  input.type = 'text';
+  input.placeholder = I18n.t('extensions.pairingCodePlaceholder');
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  input.maxLength = 64;
+  row.appendChild(input);
+
+  const btn = document.createElement('button');
+  btn.className = 'btn-ext activate';
+  btn.textContent = I18n.t('extensions.claimPairingAction');
+  btn.addEventListener('click', function() {
+    approvePairing(ext.name, input.value, {
+      onSuccess: function() {
+        input.value = '';
+      }
+    });
+  });
+  row.appendChild(btn);
+
+  input.addEventListener('keydown', function(event) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      btn.click();
+    }
+  });
+
+  container.appendChild(row);
+}
+
+function approvePairing(channel, code, options) {
+  options = options || {};
   apiFetch('/api/pairing/' + encodeURIComponent(channel) + '/approve', {
     method: 'POST',
     body: { code },
   }).then(res => {
     if (res.success) {
       showToast('Pairing approved', 'success');
+      if (typeof options.onSuccess === 'function') options.onSuccess(res);
       refreshCurrentSettingsTab();
     } else {
       showToast(res.message || 'Approve failed', 'error');
@@ -6020,6 +6070,110 @@ document.getElementById('skill-search-input').addEventListener('keydown', functi
   if (e.key === 'Enter') searchClawHub();
 });
 
+// --- Tool Permissions ---
+
+function loadToolsPermissions() {
+  var container = document.getElementById('tools-permissions-list');
+  if (!container) return;
+  container.innerHTML = '<div class="empty-state">' + I18n.t('common.loading') + '</div>';
+  apiFetch('/api/settings/tools').then(function(data) {
+    if (!data.tools || data.tools.length === 0) {
+      container.innerHTML = '<div class="empty-state">' + I18n.t('tools.noTools') + '</div>';
+      return;
+    }
+    container.innerHTML = '';
+    for (var i = 0; i < data.tools.length; i++) {
+      container.appendChild(renderToolPermissionRow(data.tools[i]));
+    }
+  }).catch(function(err) {
+    container.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': ' + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function renderToolPermissionRow(tool) {
+  var row = document.createElement('div');
+  row.className = 'tool-permission-row';
+  row.dataset.toolName = tool.name;
+
+  // Left: name + description
+  var info = document.createElement('div');
+  info.className = 'tool-permission-info';
+
+  var name = document.createElement('span');
+  name.className = 'tool-permission-name';
+  name.textContent = tool.name;
+
+  var desc = document.createElement('span');
+  desc.className = 'tool-permission-desc';
+  desc.textContent = tool.description;
+
+  info.appendChild(name);
+  info.appendChild(desc);
+
+  // Right: lock icon or toggle + default badge
+  var controls = document.createElement('div');
+  controls.className = 'tool-permission-controls';
+
+  if (tool.locked) {
+    var lock = document.createElement('span');
+    lock.className = 'tool-lock-icon';
+    lock.title = I18n.t('tools.lockedTooltip');
+    lock.textContent = '\uD83D\uDD12';
+    controls.appendChild(lock);
+  } else {
+    var toggle = document.createElement('div');
+    toggle.className = 'tool-permission-toggle';
+
+    var states = [
+      { value: 'always_allow', label: I18n.t('tools.alwaysAllow') },
+      { value: 'ask_each_time', label: I18n.t('tools.askEachTime') },
+      { value: 'disabled', label: I18n.t('tools.disabled') },
+    ];
+
+    for (var j = 0; j < states.length; j++) {
+      (function(state) {
+        var btn = document.createElement('button');
+        btn.textContent = state.label;
+        btn.dataset.state = state.value;
+        btn.setAttribute('aria-pressed', tool.current_state === state.value);
+        if (tool.current_state === state.value) btn.classList.add('active');
+        btn.addEventListener('click', function() {
+          setToolPermission(tool.name, state.value, row);
+        });
+        toggle.appendChild(btn);
+      })(states[j]);
+    }
+
+    controls.appendChild(toggle);
+  }
+
+  if (tool.current_state === tool.default_state) {
+    var badge = document.createElement('span');
+    badge.className = 'tool-default-badge';
+    badge.textContent = I18n.t('tools.defaultBadge');
+    controls.appendChild(badge);
+  }
+
+  row.appendChild(info);
+  row.appendChild(controls);
+  return row;
+}
+
+function setToolPermission(toolName, newState, rowEl) {
+  apiFetch('/api/settings/tools/' + encodeURIComponent(toolName), {
+    method: 'PUT',
+    body: { state: newState },
+  }).then(function(updated) {
+    // Re-render just this row in-place.
+    var newRow = renderToolPermissionRow(updated);
+    if (rowEl && rowEl.parentNode) {
+      rowEl.parentNode.replaceChild(newRow, rowEl);
+    }
+  }).catch(function(err) {
+    showToast(I18n.t('tools.saveFailed', { message: err.message }), 'error');
+  });
+}
+
 // --- Keyboard shortcuts ---
 
 document.addEventListener('keydown', (e) => {
@@ -6126,6 +6280,7 @@ function loadSettingsSubtab(subtab) {
   else if (subtab === 'mcp') loadMcpServers();
   else if (subtab === 'skills') loadSkills();
   else if (subtab === 'users') loadUsers();
+  else if (subtab === 'tools') loadToolsPermissions();
   if (subtab !== 'extensions' && subtab !== 'channels') stopPairingPoll();
 }
 

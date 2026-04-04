@@ -3755,7 +3755,6 @@ dependencies = [
  "clap 4.6.0",
  "clap_complete",
  "cookie",
- "criterion",
  "cron",
  "crossterm",
  "deadpool-postgres",
@@ -3870,6 +3869,7 @@ name = "ironclaw_safety"
 version = "0.2.0"
 dependencies = [
  "aho-corasick",
+ "criterion",
  "regex",
  "serde_json",
  "thiserror 2.0.18",

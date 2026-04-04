@@ -632,30 +632,59 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         } else {
             serde_json::from_str(&meta_json).ok()
         };
-        match self.pairing_store.upsert_request(&channel, &id, meta) {
-            Ok(r) => Ok(near::agent::channel_host::PairingUpsertResult {
-                code: r.code,
-                created: r.created,
+        let store = self.pairing_store.clone();
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| "pairing host callback requires a Tokio runtime".to_string())?;
+        if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+            return Err("pairing host callback requires a multi-thread Tokio runtime".to_string());
+        }
+        let result: Result<crate::db::PairingRequestRecord, crate::error::DatabaseError> =
+            tokio::task::block_in_place(move || {
+                handle.block_on(async move { store.upsert_request(&channel, &id, meta).await })
+            });
+        match result {
+            Ok(req) => Ok(near::agent::channel_host::PairingUpsertResult {
+                code: req.code,
+                created: req.created,
             }),
             Err(e) => Err(e.to_string()),
         }
     }
 
-    fn pairing_is_allowed(
+    fn pairing_resolve_identity(
         &mut self,
         channel: String,
-        id: String,
-        username: Option<String>,
-    ) -> Result<bool, String> {
-        self.pairing_store
-            .is_sender_allowed(&channel, &id, username.as_deref())
-            .map_err(|e| e.to_string())
+        external_id: String,
+    ) -> Result<Option<String>, String> {
+        let store = self.pairing_store.clone();
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| "pairing host callback requires a Tokio runtime".to_string())?;
+        if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+            return Err("pairing host callback requires a multi-thread Tokio runtime".to_string());
+        }
+        let result: Result<Option<crate::ownership::Identity>, crate::error::DatabaseError> =
+            tokio::task::block_in_place(move || {
+                handle.block_on(async move { store.resolve_identity(&channel, &external_id).await })
+            });
+        match result {
+            Ok(Some(identity)) => Ok(Some(identity.owner_id.to_string())),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     fn pairing_read_allow_from(&mut self, channel: String) -> Result<Vec<String>, String> {
-        self.pairing_store
-            .read_allow_from(&channel)
-            .map_err(|e| e.to_string())
+        let store = self.pairing_store.clone();
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| "pairing host callback requires a Tokio runtime".to_string())?;
+        if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+            return Err("pairing host callback requires a multi-thread Tokio runtime".to_string());
+        }
+        let result: Result<Vec<String>, crate::error::DatabaseError> =
+            tokio::task::block_in_place(move || {
+                handle.block_on(async move { store.read_allow_from(&channel).await })
+            });
+        result.map_err(|e| e.to_string())
     }
 }
 
@@ -822,6 +851,23 @@ fn apply_emitted_metadata(mut msg: IncomingMessage, metadata_json: &str) -> Inco
         {
             msg = msg.with_conversation_scope(scope_id);
         }
+    }
+    msg
+}
+
+fn apply_owner_scope_metadata(
+    mut msg: IncomingMessage,
+    owner_scope_id: &str,
+) -> IncomingMessage {
+    match &mut msg.metadata {
+        serde_json::Value::Object(map) => {
+            map.entry("owner_id".to_string())
+                .or_insert_with(|| serde_json::Value::String(owner_scope_id.to_string()));
+        }
+        serde_json::Value::Null => {
+            msg = msg.with_metadata(serde_json::json!({ "owner_id": owner_scope_id }));
+        }
+        _ => {}
     }
     msg
 }
@@ -2438,9 +2484,10 @@ impl WasmChannel {
             );
 
             // Convert to IncomingMessage
-            let mut msg = IncomingMessage::new(&self.name, &resolved_user_id, &content)
-                .with_owner_id(&self.owner_scope_id)
-                .with_sender_id(&user_id);
+            let mut msg =
+                IncomingMessage::new(&self.name, &resolved_user_id, &content).with_sender_id(
+                    &user_id,
+                );
 
             if let Some(name) = user_name {
                 msg = msg.with_user_name(name);
@@ -2459,6 +2506,7 @@ impl WasmChannel {
 
             // Parse metadata JSON
             msg = apply_emitted_metadata(msg, &metadata_json);
+            msg = apply_owner_scope_metadata(msg, &self.owner_scope_id);
             if is_owner_sender {
                 // Store for owner-target routing (chat_id etc.).
                 self.update_broadcast_metadata(&metadata_json).await;
@@ -2740,7 +2788,6 @@ impl WasmChannel {
 
             // Convert to IncomingMessage
             let mut msg = IncomingMessage::new(dispatch.channel_name, &resolved_user_id, &content)
-                .with_owner_id(dispatch.owner_scope_id)
                 .with_sender_id(&user_id);
 
             if let Some(name) = user_name {
@@ -2763,6 +2810,7 @@ impl WasmChannel {
             }
 
             msg = apply_emitted_metadata(msg, &metadata_json);
+            msg = apply_owner_scope_metadata(msg, dispatch.owner_scope_id);
             if is_owner_sender {
                 // Store for owner-target routing (chat_id etc.)
                 do_update_broadcast_metadata(
@@ -3145,7 +3193,7 @@ fn build_gateway_presence_update(
 fn discord_gateway_presence_status(
     channel_name: &str,
     workspace_store: &crate::channels::wasm::host::ChannelWorkspaceStore,
-    pairing_store: &PairingStore,
+    _pairing_store: &PairingStore,
 ) -> &'static str {
     use crate::tools::wasm::WorkspaceReader;
 
@@ -3154,14 +3202,6 @@ fn discord_gateway_presence_status(
         .read(&owner_key)
         .filter(|s| !s.is_empty())
         .is_some()
-    {
-        return "online";
-    }
-
-    if pairing_store
-        .read_allow_from(channel_name)
-        .ok()
-        .is_some_and(|v| !v.is_empty())
     {
         return "online";
     }
@@ -4164,8 +4204,6 @@ mod tests {
     use crate::tools::wasm::{
         Capabilities as ToolCapabilities, EndpointPattern, HttpCapability, LogLevel, ResourceLimits,
     };
-    use tempfile::tempdir;
-
     fn create_test_channel() -> WasmChannel {
         create_test_channel_with_owner_scope("default")
     }
@@ -4189,7 +4227,7 @@ mod tests {
             capabilities,
             owner_scope_id,
             "{}".to_string(),
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
             None,
         )
     }
@@ -4339,8 +4377,7 @@ mod tests {
     #[test]
     fn test_discord_gateway_presence_defaults_to_dnd() {
         let store = crate::channels::wasm::host::ChannelWorkspaceStore::new();
-        let pairing_dir = tempdir().unwrap();
-        let pairing_store = PairingStore::with_base_dir(pairing_dir.path().to_path_buf());
+        let pairing_store = PairingStore::new_noop();
 
         assert_eq!(
             discord_gateway_presence_status("discord", &store, &pairing_store),
@@ -4351,8 +4388,7 @@ mod tests {
     #[test]
     fn test_discord_gateway_presence_empty_owner_id_is_dnd() {
         let store = crate::channels::wasm::host::ChannelWorkspaceStore::new();
-        let pairing_dir = tempdir().unwrap();
-        let pairing_store = PairingStore::with_base_dir(pairing_dir.path().to_path_buf());
+        let pairing_store = PairingStore::new_noop();
         // Simulate on_start writing empty string when no owner_id is configured
         store.commit_writes(&[PendingWorkspaceWrite {
             path: "channels/discord/state/owner_id".to_string(),
@@ -4366,26 +4402,9 @@ mod tests {
     }
 
     #[test]
-    fn test_discord_gateway_presence_pairing_approved_is_online() {
-        let store = crate::channels::wasm::host::ChannelWorkspaceStore::new();
-        let pairing_dir = tempdir().unwrap();
-        let pairing_store = PairingStore::with_base_dir(pairing_dir.path().to_path_buf());
-        let request = pairing_store
-            .upsert_request("discord", "user-1", None)
-            .unwrap();
-        pairing_store.approve("discord", &request.code).unwrap();
-
-        assert_eq!(
-            discord_gateway_presence_status("discord", &store, &pairing_store),
-            "online"
-        );
-    }
-
-    #[test]
     fn test_discord_gateway_presence_owner_id_is_online() {
         let store = crate::channels::wasm::host::ChannelWorkspaceStore::new();
-        let pairing_dir = tempdir().unwrap();
-        let pairing_store = PairingStore::with_base_dir(pairing_dir.path().to_path_buf());
+        let pairing_store = PairingStore::new_noop();
         store.commit_writes(&[PendingWorkspaceWrite {
             path: "channels/discord/state/owner_id".to_string(),
             content: "owner-1".to_string(),
@@ -4533,7 +4552,7 @@ mod tests {
             &capabilities,
             &credentials,
             Vec::new(), // no host credentials in test
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
             timeout,
             &workspace_store,
         )
@@ -4654,7 +4673,7 @@ mod tests {
             capabilities,
             "default",
             "{}".to_string(),
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
             None,
         );
 
@@ -5430,7 +5449,7 @@ mod tests {
             ChannelCapabilities::default(),
             creds,
             Vec::new(),
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
         );
 
         let error = format!(
@@ -5464,7 +5483,7 @@ mod tests {
             ChannelCapabilities::default(),
             std::collections::HashMap::new(),
             Vec::new(),
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
         );
 
         let input = "some error message";
@@ -5495,7 +5514,7 @@ mod tests {
             ChannelCapabilities::default(),
             creds,
             host_creds,
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
         );
 
         // Error containing URL-encoded form of the credential
@@ -5528,7 +5547,7 @@ mod tests {
             ChannelCapabilities::default(),
             creds,
             Vec::new(),
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
         );
 
         let input = "should not match anything";
@@ -5729,7 +5748,6 @@ mod tests {
 
         let msg = rx.try_recv().expect("Should receive message"); // safety: test-only assertion
         assert_eq!(msg.user_id, "owner-scope"); // safety: test-only assertion
-        assert_eq!(msg.owner_id, "owner-scope"); // safety: test-only assertion
         assert_eq!(msg.sender_id, "telegram-owner"); // safety: test-only assertion
         assert_eq!(msg.conversation_scope(), Some("12345")); // safety: test-only assertion
         let stored_metadata = last_broadcast_metadata.read().await.clone();
@@ -5774,7 +5792,6 @@ mod tests {
 
         let msg = rx.try_recv().expect("Should receive message"); // safety: test-only assertion
         assert_eq!(msg.user_id, "guest-42"); // safety: test-only assertion
-        assert_eq!(msg.owner_id, "owner-scope"); // safety: test-only assertion
         assert_eq!(msg.sender_id, "guest-42"); // safety: test-only assertion
         assert_eq!(msg.conversation_scope(), Some("999")); // safety: test-only assertion
         assert!(last_broadcast_metadata.read().await.is_none()); // safety: test-only assertion

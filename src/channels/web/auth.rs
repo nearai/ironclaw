@@ -56,6 +56,7 @@ use tokio::sync::RwLock;
 
 use crate::config::GatewayOidcConfig;
 use crate::db::Database;
+use crate::ownership::{Identity, OwnerId, UserRole};
 
 /// Cookie name for OAuth browser sessions. Shared between the auth middleware
 /// (cookie extraction) and the auth handlers (cookie set/clear).
@@ -71,6 +72,16 @@ pub struct UserIdentity {
     pub role: String,
     /// Additional user scopes this identity can read from.
     pub workspace_read_scopes: Vec<String>,
+}
+
+/// Convert an authenticated web user into the ownership-layer identity type.
+pub(crate) fn ownership_identity(user: &UserIdentity) -> Identity {
+    let role = if user.role.eq_ignore_ascii_case("admin") {
+        UserRole::Admin
+    } else {
+        UserRole::Member
+    };
+    Identity::new(OwnerId::from(user.user_id.clone()), role)
 }
 
 /// Hash a token with SHA-256 for constant-size, timing-safe storage.

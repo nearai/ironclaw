@@ -12,25 +12,18 @@ use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 
+/// Derive the activation status for an installed extension.
+///
+/// Derive activation conservatively from extension state and owner binding.
+///
+/// Pairing approval is DB-backed now; this handler does not query channel
+/// identity tables directly yet, so it does not try to infer `has_paired`.
 pub(crate) fn derive_activation_status(
     ext: &crate::extensions::InstalledExtension,
-    pairing_store: &crate::pairing::PairingStore,
     has_owner_binding: bool,
 ) -> Option<ExtensionActivationStatus> {
     if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-        let allowlist_exists = pairing_store
-            .has_allow_from_file(&ext.name)
-            .unwrap_or(false);
-        let has_paired = pairing_store
-            .read_allow_from(&ext.name)
-            .map(|list| !list.is_empty())
-            .unwrap_or(false);
-        classify_wasm_channel_activation(
-            ext,
-            has_paired,
-            has_owner_binding || (ext.active && !allowlist_exists),
-            ext.requires_binding,
-        )
+        classify_wasm_channel_activation(ext, false, has_owner_binding, ext.requires_binding)
     } else if ext.kind == crate::extensions::ExtensionKind::ChannelRelay {
         Some(if ext.active {
             ExtensionActivationStatus::Active
@@ -58,7 +51,6 @@ pub async fn extensions_list_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let pairing_store = crate::pairing::PairingStore::new();
     let mut owner_bound_channels = std::collections::HashSet::new();
     for ext in &installed {
         if ext.kind == crate::extensions::ExtensionKind::WasmChannel
@@ -70,11 +62,8 @@ pub async fn extensions_list_handler(
     let extensions = installed
         .into_iter()
         .map(|ext| {
-            let activation_status = derive_activation_status(
-                &ext,
-                &pairing_store,
-                owner_bound_channels.contains(&ext.name),
-            );
+            let activation_status =
+                derive_activation_status(&ext, owner_bound_channels.contains(&ext.name));
             ExtensionInfo {
                 name: ext.name,
                 display_name: ext.display_name,
@@ -163,14 +152,9 @@ pub async fn extensions_remove_handler(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
-    use tempfile::TempDir;
-
     use super::derive_activation_status;
     use crate::channels::web::types::ExtensionActivationStatus;
     use crate::extensions::{ExtensionKind, InstalledExtension};
-    use crate::pairing::PairingStore;
 
     fn active_authenticated_wasm_channel(name: &str) -> InstalledExtension {
         InstalledExtension {
@@ -192,32 +176,20 @@ mod tests {
     }
 
     #[test]
-    fn active_authenticated_wasm_channel_without_allowlist_file_is_active() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let pairing_store = PairingStore::with_base_dir(temp_dir.path().to_path_buf());
+    fn active_authenticated_wasm_channel_without_owner_binding_stays_pairing() {
         let ext = active_authenticated_wasm_channel("discord");
-
         assert_eq!(
-            derive_activation_status(&ext, &pairing_store, false),
-            Some(ExtensionActivationStatus::Active)
+            derive_activation_status(&ext, false),
+            Some(ExtensionActivationStatus::Pairing)
         );
     }
 
     #[test]
-    fn active_authenticated_wasm_channel_with_empty_allowlist_file_is_pairing() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let pairing_store = PairingStore::with_base_dir(temp_dir.path().to_path_buf());
+    fn active_authenticated_wasm_channel_with_owner_binding_is_active() {
         let ext = active_authenticated_wasm_channel("discord");
-
-        fs::write(
-            temp_dir.path().join("discord-allowFrom.json"),
-            r#"{"version":1,"allowFrom":[]}"#,
-        )
-        .expect("write empty allowlist");
-
         assert_eq!(
-            derive_activation_status(&ext, &pairing_store, false),
-            Some(ExtensionActivationStatus::Pairing)
+            derive_activation_status(&ext, true),
+            Some(ExtensionActivationStatus::Active)
         );
     }
 }

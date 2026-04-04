@@ -35,6 +35,7 @@ pub async fn setup_wasm_channels(
     extension_manager: Option<&Arc<ExtensionManager>>,
     database: Option<&Arc<dyn Database>>,
     registered_channel_names: &[String],
+    ownership_cache: Arc<crate::ownership::OwnershipCache>,
 ) -> Option<WasmChannelSetup> {
     let runtime = match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
         Ok(r) => Arc::new(r),
@@ -44,7 +45,12 @@ pub async fn setup_wasm_channels(
         }
     };
 
-    let pairing_store = Arc::new(PairingStore::new());
+    let pairing_store = if let Some(db) = database {
+        Arc::new(PairingStore::new(Arc::clone(db), ownership_cache))
+    } else {
+        tracing::warn!("No database available for WASM channels; DM pairing will not persist");
+        Arc::new(PairingStore::new_noop())
+    };
     let settings_store: Option<Arc<dyn crate::db::SettingsStore>> =
         database.map(|db| Arc::clone(db) as Arc<dyn crate::db::SettingsStore>);
     let mut loader = WasmChannelLoader::new(
@@ -229,7 +235,7 @@ async fn register_channel(
         if channel_name == TELEGRAM_CHANNEL_NAME
             && let Some(store) = settings_store
             && let Ok(Some(serde_json::Value::String(username))) = store
-                .get_setting("default", &bot_username_setting_key(&channel_name))
+                .get_setting(&config.owner_id, &bot_username_setting_key(&channel_name))
                 .await
             && !username.trim().is_empty()
         {
