@@ -81,7 +81,9 @@ impl McpClient {
             tools_cache: RwLock::new(None),
             session_manager: None,
             secrets: None,
-            user_id: "default".to_string(),
+            // TODO(ownership): unauthenticated constructor; user_id set properly via
+            // create_client_from_config() for production paths
+            user_id: "<unset>".to_string(),
             server_config: None,
             custom_headers: HashMap::new(),
             initialized: tokio::sync::OnceCell::new(),
@@ -104,7 +106,9 @@ impl McpClient {
             tools_cache: RwLock::new(None),
             session_manager: None,
             secrets: None,
-            user_id: "default".to_string(),
+            // TODO(ownership): unauthenticated constructor; user_id set properly via
+            // create_client_from_config() for production paths
+            user_id: "<unset>".to_string(),
             server_config: None,
             custom_headers: HashMap::new(),
             initialized: tokio::sync::OnceCell::new(),
@@ -145,7 +149,9 @@ impl McpClient {
             tools_cache: RwLock::new(None),
             session_manager: None,
             secrets: None,
-            user_id: "default".to_string(),
+            // TODO(ownership): unauthenticated constructor; user_id set properly via
+            // create_client_from_config() for production paths
+            user_id: "<unset>".to_string(),
             custom_headers: config.headers.clone(),
             initialized: tokio::sync::OnceCell::new(),
             server_config: Some(config),
@@ -769,7 +775,7 @@ mod tests {
         assert_eq!(client.server_name(), "localhost");
         assert!(client.session_manager.is_none());
         assert!(client.secrets.is_none());
-        assert_eq!(client.user_id, "default");
+        assert_eq!(client.user_id, "<unset>");
     }
 
     #[test]
@@ -777,7 +783,7 @@ mod tests {
         let client = McpClient::new_with_name("my-server", "http://localhost:8080");
         assert_eq!(client.server_name(), "my-server");
         assert_eq!(client.server_url(), "http://localhost:8080");
-        assert_eq!(client.user_id, "default");
+        assert_eq!(client.user_id, "<unset>");
         assert!(client.session_manager.is_none());
         assert!(client.secrets.is_none());
     }
@@ -803,7 +809,7 @@ mod tests {
         let cloned = client.clone();
         assert_eq!(cloned.server_url(), "http://localhost:5555");
         assert_eq!(cloned.server_name(), "cloned-server");
-        assert_eq!(cloned.user_id, "default");
+        assert_eq!(cloned.user_id, "<unset>");
         assert_eq!(cloned.next_id.load(Ordering::SeqCst), 3);
     }
 

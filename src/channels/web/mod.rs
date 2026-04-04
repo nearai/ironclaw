@@ -138,6 +138,7 @@ impl GatewayChannel {
             active_config: server::ActiveConfigSnapshot::default(),
             secrets_store: None,
             db_auth: None,
+            pairing_store: None,
             oauth_providers: None,
             oauth_state_store: None,
             oauth_base_url: None,
@@ -188,6 +189,7 @@ impl GatewayChannel {
             active_config: self.state.active_config.clone(),
             secrets_store: self.state.secrets_store.clone(),
             db_auth: self.state.db_auth.clone(),
+            pairing_store: self.state.pairing_store.clone(),
             oauth_providers: self.state.oauth_providers.clone(),
             oauth_state_store: self.state.oauth_state_store.clone(),
             oauth_base_url: self.state.oauth_base_url.clone(),
@@ -467,6 +469,12 @@ impl GatewayChannel {
     /// Inject the per-user workspace pool for multi-user mode.
     pub fn with_workspace_pool(mut self, pool: Arc<server::WorkspacePool>) -> Self {
         self.rebuild_state(|s| s.workspace_pool = Some(pool));
+        self
+    }
+
+    /// Inject the shared pairing store for the pairing API endpoints.
+    pub fn with_pairing_store(mut self, store: Arc<crate::pairing::PairingStore>) -> Self {
+        self.rebuild_state(|s| s.pairing_store = Some(store));
         self
     }
 
