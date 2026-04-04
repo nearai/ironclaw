@@ -228,6 +228,9 @@ pub struct Thread {
     /// Channel that created this thread (for approval authorization).
     #[serde(default)]
     pub source_channel: Option<String>,
+    /// One-shot post-compaction context to inject into the next user turn.
+    #[serde(default)]
+    pub pending_post_compaction_context: Option<String>,
 }
 
 /// Maximum number of messages that can be queued while a thread is processing.
@@ -277,6 +280,7 @@ impl Thread {
             pending_auth: None,
             pending_messages: VecDeque::new(),
             source_channel: source_channel.map(String::from),
+            pending_post_compaction_context: None,
         }
     }
 
@@ -295,6 +299,7 @@ impl Thread {
             pending_auth: None,
             pending_messages: VecDeque::new(),
             source_channel: source_channel.map(String::from),
+            pending_post_compaction_context: None,
         }
     }
 
@@ -352,6 +357,21 @@ impl Thread {
     pub fn requeue_drained(&mut self, content: String) {
         self.pending_messages.push_front(content);
         self.updated_at = Utc::now();
+    }
+
+    /// Queue one-shot post-compaction context for the next turn.
+    pub fn set_post_compaction_context(&mut self, content: String) {
+        self.pending_post_compaction_context = Some(content);
+        self.updated_at = Utc::now();
+    }
+
+    /// Take one-shot post-compaction context.
+    pub fn take_post_compaction_context(&mut self) -> Option<String> {
+        let ctx = self.pending_post_compaction_context.take();
+        if ctx.is_some() {
+            self.updated_at = Utc::now();
+        }
+        ctx
     }
 
     /// Start a new turn with user input.
@@ -1856,13 +1876,17 @@ mod tests {
 
     #[test]
     fn test_source_channel_serde_backcompat() {
-        // Simulate deserializing a Thread from older DB records that lack source_channel.
+        // Simulate deserializing a Thread from older DB records that lack newly added fields.
         let thread = Thread::new(Uuid::new_v4(), Some("cli"));
         let json = serde_json::to_string(&thread).unwrap();
 
-        // Remove the source_channel field to simulate an old record.
+        // Remove fields to simulate an old record.
         let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
         value.as_object_mut().unwrap().remove("source_channel");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("pending_post_compaction_context");
         let old_json = serde_json::to_string(&value).unwrap();
 
         let deserialized: Thread = serde_json::from_str(&old_json).unwrap();
@@ -1870,6 +1894,29 @@ mod tests {
             deserialized.source_channel.is_none(),
             "missing source_channel should deserialize as None"
         );
+        assert!(
+            deserialized.pending_post_compaction_context.is_none(),
+            "missing pending_post_compaction_context should deserialize as None"
+        );
+    }
+
+    #[test]
+    fn test_post_compaction_context_set_and_take_once() {
+        let mut thread = Thread::new(Uuid::new_v4(), Some("cli"));
+        assert!(thread.pending_post_compaction_context.is_none());
+
+        thread.set_post_compaction_context("ctx-a".to_string());
+        assert_eq!(
+            thread.pending_post_compaction_context.as_deref(),
+            Some("ctx-a")
+        );
+
+        let first = thread.take_post_compaction_context();
+        assert_eq!(first.as_deref(), Some("ctx-a"));
+        assert!(thread.pending_post_compaction_context.is_none());
+
+        let second = thread.take_post_compaction_context();
+        assert!(second.is_none(), "context should be one-shot");
     }
 
     #[test]

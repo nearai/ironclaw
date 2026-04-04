@@ -4,13 +4,15 @@
 //! processing, undo/redo, approval, auth, persistence) from the core loop.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::agent::Agent;
-use crate::agent::compaction::ContextCompactor;
+use crate::agent::compaction::{CompactionResult, ContextCompactor};
 use crate::agent::dispatcher::{
     AgenticLoopResult, TurnUsageSummary, check_auth_required, execute_chat_tool_standalone,
     parse_auth_result,
@@ -20,11 +22,12 @@ use crate::agent::submission::SubmissionResult;
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
-use crate::llm::{ChatMessage, ToolCall};
+use crate::llm::{ChatMessage, Role, ToolCall};
 use crate::tools::redact_params;
 use ironclaw_common::truncate_preview;
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
+const POST_COMPACTION_EVENT_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn requires_preexisting_uuid_thread(channel: &str) -> bool {
     // Gateway-style channels send server-issued conversation UUIDs.
@@ -39,6 +42,81 @@ fn turn_usage_from_result(result: &Result<AgenticLoopResult, Error>) -> Option<&
         | Ok(AgenticLoopResult::Failed { turn_usage, .. }) => Some(turn_usage),
         Err(_) => None,
     }
+}
+
+fn inject_post_compaction_context(messages: &mut Vec<ChatMessage>, context: String) {
+    let historical_note = ChatMessage::assistant(context);
+    if let Some(last_user_idx) = messages.iter().rposition(|m| m.role == Role::User) {
+        messages.insert(last_user_idx, historical_note);
+    } else {
+        messages.push(historical_note);
+    }
+}
+
+fn has_llm_activity(result: &Result<AgenticLoopResult, Error>) -> bool {
+    let Some(turn_usage) = turn_usage_from_result(result) else {
+        return false;
+    };
+    let usage = &turn_usage.usage;
+    usage.input_tokens > 0
+        || usage.output_tokens > 0
+        || usage.cache_read_input_tokens > 0
+        || usage.cache_creation_input_tokens > 0
+}
+
+fn should_requeue_post_compaction_context(
+    injected_context: &Option<String>,
+    result: &Result<AgenticLoopResult, Error>,
+) -> bool {
+    if injected_context.is_none() {
+        return false;
+    }
+    let is_failure_path = matches!(result, Err(_) | Ok(AgenticLoopResult::Failed { .. }));
+    is_failure_path && !has_llm_activity(result)
+}
+
+fn compaction_strategy_name(
+    strategy: crate::agent::context_monitor::CompactionStrategy,
+) -> &'static str {
+    match strategy {
+        crate::agent::context_monitor::CompactionStrategy::Summarize { .. } => "summarize",
+        crate::agent::context_monitor::CompactionStrategy::Truncate { .. } => "truncate",
+        crate::agent::context_monitor::CompactionStrategy::MoveToWorkspace => "move_to_workspace",
+    }
+}
+
+#[derive(Clone)]
+struct CompactionThreadSnapshot {
+    state: ThreadState,
+    updated_at: DateTime<Utc>,
+    turns_len: usize,
+    thread: crate::agent::session::Thread,
+}
+
+fn capture_compaction_snapshot(thread: &crate::agent::session::Thread) -> CompactionThreadSnapshot {
+    CompactionThreadSnapshot {
+        state: thread.state,
+        updated_at: thread.updated_at,
+        turns_len: thread.turns.len(),
+        thread: thread.clone(),
+    }
+}
+
+fn thread_matches_compaction_snapshot(
+    thread: &crate::agent::session::Thread,
+    snapshot: &CompactionThreadSnapshot,
+) -> bool {
+    thread.state == snapshot.state
+        && thread.updated_at == snapshot.updated_at
+        && thread.turns.len() == snapshot.turns_len
+}
+
+fn apply_compaction_snapshot(
+    thread: &mut crate::agent::session::Thread,
+    snapshot: &CompactionThreadSnapshot,
+) {
+    thread.turns = snapshot.thread.turns.clone();
+    thread.updated_at = Utc::now();
 }
 
 impl Agent {
@@ -407,40 +485,105 @@ impl Agent {
         // Natural language goes through the agentic loop
         // Job tools (create_job, list_jobs, etc.) are in the tool registry
 
-        // Auto-compact if needed BEFORE adding new turn
-        {
-            let mut sess = session.lock().await;
+        // Auto-compact if needed BEFORE adding new turn.
+        // Keep the session lock short: snapshot thread state first, run compaction
+        // (LLM + workspace I/O) outside the lock, then re-apply only if unchanged.
+        let mut auto_compaction_result: Option<CompactionResult> = None;
+        let mut auto_compaction_warning: Option<String> = None;
+        let auto_compaction_plan: Option<(
+            crate::agent::context_monitor::CompactionStrategy,
+            f64,
+            CompactionThreadSnapshot,
+        )> = {
+            let sess = session.lock().await;
             let thread = sess
                 .threads
-                .get_mut(&thread_id)
+                .get(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-
             let messages = thread.messages();
-            if let Some(strategy) = self.context_monitor.suggest_compaction(&messages) {
-                let pct = self.context_monitor.usage_percent(&messages);
-                tracing::info!("Context at {:.1}% capacity, auto-compacting", pct);
-
-                // Notify the user that compaction is happening
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::Status(format!(
-                            "Context at {:.0}% capacity, compacting...",
-                            pct
-                        )),
-                        &message.metadata,
+            self.context_monitor
+                .suggest_compaction(&messages)
+                .map(|strategy| {
+                    (
+                        strategy,
+                        self.context_monitor.usage_percent(&messages),
+                        capture_compaction_snapshot(thread),
                     )
-                    .await;
+                })
+        };
 
-                let compactor = ContextCompactor::new(self.llm().clone());
-                if let Err(e) = compactor
-                    .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
-                    .await
-                {
+        if let Some((strategy, pct, mut snapshot)) = auto_compaction_plan {
+            tracing::info!("Context at {:.1}% capacity, auto-compacting", pct);
+
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::Status(format!("Context at {:.0}% capacity, compacting...", pct)),
+                    &message.metadata,
+                )
+                .await;
+
+            let compactor = ContextCompactor::new(self.llm().clone());
+            match compactor
+                .compact(
+                    &mut snapshot.thread,
+                    strategy,
+                    self.workspace().map(|w| w.as_ref()),
+                )
+                .await
+            {
+                Ok(result) => {
+                    let applied = {
+                        let mut sess = session.lock().await;
+                        match sess.threads.get_mut(&thread_id) {
+                            Some(thread)
+                                if thread_matches_compaction_snapshot(thread, &snapshot) =>
+                            {
+                                apply_compaction_snapshot(thread, &snapshot);
+                                if let Some(context) = result.post_compaction_context.as_deref() {
+                                    thread.set_post_compaction_context(context.to_string());
+                                }
+                                if result.read_audit_passed == Some(false) {
+                                    auto_compaction_warning = Some(
+                                        "Compaction archive read-audit failed; preserved original context."
+                                            .to_string(),
+                                    );
+                                }
+                                true
+                            }
+                            Some(_) => {
+                                auto_compaction_warning = Some(
+                                    "Compaction finished, but thread changed concurrently; skipped applying in-memory compaction."
+                                        .to_string(),
+                                );
+                                false
+                            }
+                            None => false,
+                        }
+                    };
+                    if applied {
+                        auto_compaction_result = Some(result);
+                    }
+                }
+                Err(e) => {
                     tracing::warn!("Auto-compaction failed: {}", e);
                 }
             }
+        }
+        if let Some(warning) = auto_compaction_warning {
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::Status(warning),
+                    &message.metadata,
+                )
+                .await;
+        }
+        if let Some(result) = auto_compaction_result.as_ref() {
+            self.emit_post_compaction_event(&message.user_id, thread_id, "auto", result)
+                .await;
         }
 
         // Create checkpoint before turn
@@ -469,15 +612,22 @@ impl Agent {
         };
 
         // Start the turn and get messages
+        let mut injected_post_compaction_context: Option<String> = None;
         let turn_messages = {
             let mut sess = session.lock().await;
             let thread = sess
                 .threads
                 .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+            let post_compaction_context = thread.take_post_compaction_context();
             let turn = thread.start_turn(effective_content);
             turn.image_content_parts = image_parts;
-            thread.messages()
+            let mut messages = thread.messages();
+            if let Some(context) = post_compaction_context {
+                inject_post_compaction_context(&mut messages, context.clone());
+                injected_post_compaction_context = Some(context);
+            }
+            messages
         };
 
         // Persist user message to DB immediately so it survives crashes
@@ -521,6 +671,16 @@ impl Agent {
             .threads
             .get_mut(&thread_id)
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+
+        if should_requeue_post_compaction_context(&injected_post_compaction_context, &result)
+            && let Some(context) = injected_post_compaction_context.take()
+        {
+            thread.set_post_compaction_context(context);
+            tracing::debug!(
+                thread_id = %thread_id,
+                "Re-queued post-compaction context after pre-LLM failure"
+            );
+        }
 
         if thread.state == ThreadState::Interrupted {
             if let Some(turn_usage) = turn_usage_from_result(&result) {
@@ -953,41 +1113,92 @@ impl Agent {
 
     pub(super) async fn process_compact(
         &self,
+        message: &IncomingMessage,
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
-        let mut sess = session.lock().await;
-        let thread = sess
-            .threads
-            .get_mut(&thread_id)
-            .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+        let (usage, strategy, mut snapshot) = {
+            let sess = session.lock().await;
+            let thread = sess
+                .threads
+                .get(&thread_id)
+                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
-        let messages = thread.messages();
-        let usage = self.context_monitor.usage_percent(&messages);
-        let strategy = self
-            .context_monitor
-            .suggest_compaction(&messages)
-            .unwrap_or(
-                crate::agent::context_monitor::CompactionStrategy::Summarize { keep_recent: 5 },
-            );
+            let messages = thread.messages();
+            let usage = self.context_monitor.usage_percent(&messages);
+            let strategy = self
+                .context_monitor
+                .suggest_compaction(&messages)
+                .unwrap_or(
+                    crate::agent::context_monitor::CompactionStrategy::Summarize { keep_recent: 5 },
+                );
+            (usage, strategy, capture_compaction_snapshot(thread))
+        };
 
         let compactor = ContextCompactor::new(self.llm().clone());
-        match compactor
-            .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
-            .await
-        {
+        let result = compactor
+            .compact(
+                &mut snapshot.thread,
+                strategy,
+                self.workspace().map(|w| w.as_ref()),
+            )
+            .await;
+
+        let mut compaction_for_event: Option<CompactionResult> = None;
+        let response = match result {
             Ok(result) => {
-                let mut msg = format!(
-                    "Compacted: {} turns removed, {} → {} tokens (was {:.1}% full)",
-                    result.turns_removed, result.tokens_before, result.tokens_after, usage
-                );
-                if result.summary_written {
-                    msg.push_str(", summary saved to workspace");
+                let applied = {
+                    let mut sess = session.lock().await;
+                    let thread = sess.threads.get_mut(&thread_id).ok_or_else(|| {
+                        Error::from(crate::error::JobError::NotFound { id: thread_id })
+                    })?;
+
+                    if thread_matches_compaction_snapshot(thread, &snapshot) {
+                        apply_compaction_snapshot(thread, &snapshot);
+                        if let Some(context) = result.post_compaction_context.as_deref() {
+                            thread.set_post_compaction_context(context.to_string());
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                };
+
+                if !applied {
+                    SubmissionResult::ok_with_message(
+                        "Compaction finished, but thread changed concurrently; skipped applying in-memory compaction."
+                            .to_string(),
+                    )
+                } else {
+                    let mut msg = format!(
+                        "Compacted: {} turns removed, {} -> {} tokens (was {:.1}% full)",
+                        result.turns_removed, result.tokens_before, result.tokens_after, usage
+                    );
+                    if let Some(path) = result.workspace_path.as_deref() {
+                        msg.push_str(&format!(", workspace archived at {}", path));
+                    } else if result.summary_written {
+                        msg.push_str(", summary generated");
+                    }
+                    if result.read_audit_passed == Some(false) {
+                        msg.push_str(", read-audit failed and turns were preserved");
+                    }
+                    if result.post_compaction_context.is_some() {
+                        msg.push_str(", context queued for next turn");
+                    }
+
+                    compaction_for_event = Some(result);
+                    SubmissionResult::ok_with_message(msg)
                 }
-                Ok(SubmissionResult::ok_with_message(msg))
             }
-            Err(e) => Ok(SubmissionResult::error(format!("Compaction failed: {}", e))),
+            Err(e) => SubmissionResult::error(format!("Compaction failed: {}", e)),
+        };
+
+        if let Some(result) = compaction_for_event.as_ref() {
+            self.emit_post_compaction_event(&message.user_id, thread_id, "manual", result)
+                .await;
         }
+
+        Ok(response)
     }
 
     pub(super) async fn process_clear(
@@ -1002,6 +1213,7 @@ impl Agent {
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
         thread.turns.clear();
         thread.pending_messages.clear();
+        thread.pending_post_compaction_context = None;
         thread.state = ThreadState::Idle;
 
         // Clear undo history too
@@ -1009,6 +1221,86 @@ impl Agent {
         undo_mgr.lock().await.clear();
 
         Ok(SubmissionResult::ok_with_message("Thread cleared."))
+    }
+
+    async fn emit_post_compaction_event(
+        &self,
+        user_id: &str,
+        thread_id: Uuid,
+        mode: &str,
+        result: &CompactionResult,
+    ) {
+        let payload = serde_json::json!({
+            "thread_id": thread_id.to_string(),
+            "mode": mode,
+            "strategy": compaction_strategy_name(result.strategy),
+            "turns_removed": result.turns_removed,
+            "tokens_before": result.tokens_before,
+            "tokens_after": result.tokens_after,
+            "tokens_reduced": result.tokens_before.saturating_sub(result.tokens_after),
+            "summary_written": result.summary_written,
+            "workspace_path": result.workspace_path,
+            "read_audit_passed": result.read_audit_passed,
+            "read_audit_error": result.read_audit_error,
+            "summary_preview": result.summary.as_deref().map(|s| truncate_preview(s, 300)),
+            "context_preview": result.post_compaction_context.as_deref().map(|s| truncate_preview(s, 300)),
+        });
+
+        let mission_manager = self.mission_manager().await;
+        let routine_engine = self.routine_engine().await;
+        let user_id = user_id.to_string();
+        let mode = mode.to_string();
+        let strategy = compaction_strategy_name(result.strategy).to_string();
+        tokio::spawn(async move {
+            let mut fired = 0usize;
+            if let Some(mgr) = mission_manager {
+                match tokio::time::timeout(
+                    POST_COMPACTION_EVENT_TIMEOUT,
+                    mgr.fire_on_system_event(
+                        "context",
+                        "post_compaction",
+                        &user_id,
+                        Some(payload.clone()),
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(ids)) => fired += ids.len(),
+                    Ok(Err(e)) => {
+                        tracing::debug!("failed to fire post-compaction mission event: {e}");
+                    }
+                    Err(_) => {
+                        tracing::debug!("timed out firing post-compaction mission event");
+                    }
+                }
+            }
+            if let Some(engine) = routine_engine {
+                match tokio::time::timeout(
+                    POST_COMPACTION_EVENT_TIMEOUT,
+                    engine.emit_system_event(
+                        "context",
+                        "post_compaction",
+                        &payload,
+                        Some(&user_id),
+                    ),
+                )
+                .await
+                {
+                    Ok(count) => fired += count,
+                    Err(_) => {
+                        tracing::debug!("timed out emitting post-compaction routine event");
+                    }
+                }
+            }
+            tracing::debug!(
+                user = %user_id,
+                thread_id = %thread_id,
+                mode = %mode,
+                strategy = %strategy,
+                fired,
+                "Post-compaction event emitted"
+            );
+        });
     }
 
     /// Process an approval or rejection of a pending tool execution.
@@ -2081,6 +2373,97 @@ mod tests {
     }
 
     #[test]
+    fn test_inject_post_compaction_context_places_assistant_note_before_last_user() {
+        let mut messages = vec![
+            ChatMessage::system("base"),
+            ChatMessage::assistant("prior"),
+            ChatMessage::user("latest"),
+        ];
+        inject_post_compaction_context(&mut messages, "post-compaction".to_string());
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[2].role, crate::llm::Role::Assistant);
+        assert!(messages[2].content.contains("post-compaction"));
+        assert_eq!(messages[3].role, crate::llm::Role::User);
+        assert_eq!(messages[3].content, "latest");
+    }
+
+    #[test]
+    fn test_inject_post_compaction_context_appends_when_no_user_message_exists() {
+        let mut messages = vec![ChatMessage::assistant("only-assistant")];
+        inject_post_compaction_context(&mut messages, "ctx".to_string());
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].role, crate::llm::Role::Assistant);
+        assert_eq!(messages[1].content, "ctx");
+    }
+
+    #[test]
+    fn test_should_requeue_post_compaction_context_on_pre_llm_failure() {
+        let result = Ok(AgenticLoopResult::Failed {
+            error: crate::error::LlmError::InvalidResponse {
+                provider: "agent".to_string(),
+                reason: "pre-llm failure".to_string(),
+            }
+            .into(),
+            turn_usage: TurnUsageSummary::default(),
+        });
+
+        assert!(should_requeue_post_compaction_context(
+            &Some("ctx".to_string()),
+            &result
+        ));
+    }
+
+    #[test]
+    fn test_should_not_requeue_post_compaction_context_after_llm_activity() {
+        let result = Ok(AgenticLoopResult::Failed {
+            error: crate::error::LlmError::InvalidResponse {
+                provider: "agent".to_string(),
+                reason: "failed after llm".to_string(),
+            }
+            .into(),
+            turn_usage: TurnUsageSummary {
+                usage: crate::llm::TokenUsage {
+                    input_tokens: 9,
+                    output_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                },
+                cost_usd: Decimal::ZERO,
+            },
+        });
+
+        assert!(!should_requeue_post_compaction_context(
+            &Some("ctx".to_string()),
+            &result
+        ));
+    }
+
+    #[test]
+    fn test_should_not_requeue_post_compaction_context_for_need_approval_even_without_usage() {
+        let pending = crate::agent::session::PendingApproval {
+            request_id: Uuid::new_v4(),
+            tool_name: "shell".to_string(),
+            parameters: serde_json::json!({"cmd":"echo hi"}),
+            display_parameters: serde_json::json!({"cmd":"[REDACTED]"}),
+            description: "needs approval".to_string(),
+            tool_call_id: "call_0".to_string(),
+            context_messages: vec![],
+            deferred_tool_calls: vec![],
+            user_timezone: None,
+            allow_always: false,
+        };
+        let result = Ok(AgenticLoopResult::NeedApproval {
+            pending: Box::new(pending),
+            turn_usage: TurnUsageSummary::default(),
+        });
+
+        assert!(!should_requeue_post_compaction_context(
+            &Some("ctx".to_string()),
+            &result
+        ));
+    }
+
+    #[test]
     fn test_turn_usage_from_result_extracts_usage_for_interrupted_response() {
         let result = Ok(AgenticLoopResult::Response {
             text: "done".to_string(),
@@ -2390,14 +2773,17 @@ mod tests {
 
         thread.queue_message("pending-1".to_string());
         thread.queue_message("pending-2".to_string());
+        thread.set_post_compaction_context("ctx".to_string());
         assert_eq!(thread.pending_messages.len(), 2);
 
         // Simulate what process_clear does: clear turns and pending_messages
         thread.turns.clear();
         thread.pending_messages.clear();
+        thread.pending_post_compaction_context = None;
         thread.state = ThreadState::Idle;
 
         assert!(thread.pending_messages.is_empty());
+        assert!(thread.pending_post_compaction_context.is_none());
         assert!(thread.turns.is_empty());
         assert_eq!(thread.state, ThreadState::Idle);
     }
