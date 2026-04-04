@@ -98,6 +98,28 @@ fn approval_prompt_from_pending(pending: &PendingApproval) -> ChatApprovalPrompt
     }
 }
 
+fn thread_summaries_from_conversations(
+    mut conversations: Vec<crate::history::ConversationSummary>,
+) -> Vec<crate::channels::ThreadSummary> {
+    conversations.sort_by(|a, b| {
+        b.last_activity
+            .cmp(&a.last_activity)
+            .then_with(|| b.started_at.cmp(&a.started_at))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    conversations
+        .into_iter()
+        .map(|c| crate::channels::ThreadSummary {
+            id: c.id.to_string(),
+            title: c.title,
+            message_count: c.message_count,
+            last_activity: c.last_activity.to_rfc3339(),
+            channel: c.channel,
+        })
+        .collect()
+}
+
 impl Agent {
     /// Hydrate a historical thread from DB into memory if not already present.
     ///
@@ -2034,16 +2056,7 @@ impl Agent {
             }
         };
 
-        let summaries: Vec<crate::channels::ThreadSummary> = conversations
-            .into_iter()
-            .map(|c| crate::channels::ThreadSummary {
-                id: c.id.to_string(),
-                title: c.title,
-                message_count: c.message_count,
-                last_activity: c.last_activity.to_rfc3339(),
-                channel: c.channel,
-            })
-            .collect();
+        let summaries = thread_summaries_from_conversations(conversations);
 
         if summaries.is_empty() {
             return Ok(SubmissionResult::ok_with_message(
@@ -2179,7 +2192,53 @@ mod tests {
     use crate::hooks::HookRegistry;
     use crate::testing::{StubChannel, StubLlm};
     use crate::tools::ToolRegistry;
+    use chrono::TimeZone;
     use ironclaw_safety::SafetyLayer;
+
+    #[test]
+    fn thread_summaries_are_sorted_by_last_activity_descending() {
+        let conversations = vec![
+            crate::history::ConversationSummary {
+                id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+                title: Some("older".to_string()),
+                message_count: 1,
+                started_at: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 0, 0).unwrap(),
+                last_activity: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 5, 0).unwrap(),
+                thread_type: None,
+                channel: "gateway".to_string(),
+            },
+            crate::history::ConversationSummary {
+                id: Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
+                title: Some("newest".to_string()),
+                message_count: 2,
+                started_at: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 10, 0).unwrap(),
+                last_activity: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 30, 0).unwrap(),
+                thread_type: None,
+                channel: "gateway".to_string(),
+            },
+            crate::history::ConversationSummary {
+                id: Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap(),
+                title: Some("middle".to_string()),
+                message_count: 3,
+                started_at: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 8, 0).unwrap(),
+                last_activity: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 15, 0).unwrap(),
+                thread_type: None,
+                channel: "gateway".to_string(),
+            },
+        ];
+
+        let summaries = thread_summaries_from_conversations(conversations);
+        let titles: Vec<Option<String>> = summaries.into_iter().map(|s| s.title).collect();
+
+        assert_eq!(
+            titles,
+            vec![
+                Some("newest".to_string()),
+                Some("middle".to_string()),
+                Some("older".to_string()),
+            ]
+        );
+    }
 
     #[test]
     fn test_rebuild_chat_messages_user_assistant_only() {
