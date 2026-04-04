@@ -977,6 +977,9 @@ async fn async_main() -> anyhow::Result<()> {
         },
         builder: components.builder,
         embeddings: components.embeddings,
+        skill_embedding_cache: std::sync::Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
         llm_backend: config.llm.backend.clone(),
         tenant_rates: Arc::new(ironclaw::tenant::TenantRateRegistry::new(
             config.agent.max_llm_concurrent_per_user.unwrap_or(4),

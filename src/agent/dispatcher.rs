@@ -106,6 +106,12 @@ impl Agent {
         let (active_skills, rewritten_content) =
             self.select_active_skills(&message.content, &tool_names);
 
+        // Semantic re-scoring: use embeddings to discover skills missed by keywords
+        // and boost relevance of keyword-matched skills.
+        let active_skills = self
+            .semantic_boost_skills(&rewritten_content, active_skills, &tool_names)
+            .await;
+
         // Use the rewritten message (with /skill-name expanded) for the LLM
         let user_content = if rewritten_content != message.content {
             tracing::debug!(
@@ -1438,6 +1444,7 @@ mod tests {
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
             embeddings: None,
+            skill_embedding_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
         };
@@ -2322,6 +2329,7 @@ mod tests {
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
             embeddings: None,
+            skill_embedding_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
         };
@@ -2452,6 +2460,7 @@ mod tests {
                 sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
                 builder: None,
                 embeddings: None,
+                skill_embedding_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
                 llm_backend: "nearai".to_string(),
                 tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
             };

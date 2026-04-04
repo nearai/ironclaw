@@ -832,6 +832,9 @@ impl TestRigBuilder {
             sandbox_readiness: ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
             embeddings: None,
+            skill_embedding_cache: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
             llm_backend: "nearai".to_string(),
             tenant_rates: std::sync::Arc::new(ironclaw::tenant::TenantRateRegistry::new(4, 3)),
         };

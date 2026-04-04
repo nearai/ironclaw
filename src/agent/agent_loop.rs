@@ -7,9 +7,11 @@
 //! - `commands` - System commands and job handlers
 //! - `thread_ops` - Thread/session operations (user input, undo, approval, persistence)
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::StreamExt;
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::agent::context_monitor::ContextMonitor;
@@ -55,6 +57,30 @@ pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
         format!("{}...", &collapsed[..byte_offset])
     } else {
         collapsed
+    }
+}
+
+/// Cosine similarity between two vectors.
+///
+/// Returns a value in [-1.0, 1.0] where 1.0 means identical direction.
+/// Returns 0.0 if either vector has zero magnitude.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let mut dot = 0.0_f32;
+    let mut mag_a = 0.0_f32;
+    let mut mag_b = 0.0_f32;
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        mag_a += x * x;
+        mag_b += y * y;
+    }
+    let denom = mag_a.sqrt() * mag_b.sqrt();
+    if denom == 0.0 {
+        0.0
+    } else {
+        dot / denom
     }
 }
 
@@ -176,6 +202,9 @@ pub struct AgentDeps {
     pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
     /// Embedding provider for semantic search (used by engine v2 skill matching).
     pub embeddings: Option<Arc<dyn crate::workspace::EmbeddingProvider>>,
+    /// Cache of skill description embeddings (skill name → embedding vector).
+    /// Populated lazily on first semantic skill selection.
+    pub skill_embedding_cache: Arc<RwLock<HashMap<String, Vec<f32>>>>,
     /// Resolved LLM backend identifier (e.g., "nearai", "openai", "groq").
     /// Used by `/model` persistence to determine which env var to update.
     pub llm_backend: String,
@@ -487,6 +516,200 @@ impl Agent {
         }
 
         (selected, rewritten)
+    }
+
+    /// Semantic re-scoring pass for skill selection.
+    ///
+    /// After keyword-based selection, this uses the embedding provider to:
+    /// 1. Score already-selected skills with a semantic bonus (up to 25 points)
+    /// 2. Discover skills that keywords missed but are semantically relevant
+    ///
+    /// Skill description embeddings are cached across calls. Falls back gracefully
+    /// if embeddings are unavailable or fail.
+    pub(super) async fn semantic_boost_skills(
+        &self,
+        message: &str,
+        keyword_selected: Vec<ironclaw_skills::LoadedSkill>,
+        available_tool_names: &[String],
+    ) -> Vec<ironclaw_skills::LoadedSkill> {
+        let embeddings = match self.deps.embeddings.as_ref() {
+            Some(e) => e,
+            None => return keyword_selected,
+        };
+
+        let registry = match self.skill_registry() {
+            Some(r) => r,
+            None => return keyword_selected,
+        };
+
+        // Embed the user message
+        let message_embedding = match embeddings.embed(message).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!("Semantic skill boost: embedding failed for message: {}", e);
+                return keyword_selected;
+            }
+        };
+
+        // Get all available skills from registry
+        let all_skills: Vec<ironclaw_skills::LoadedSkill> = {
+            let guard = match registry.read() {
+                Ok(g) => g,
+                Err(e) => {
+                    tracing::debug!("Semantic skill boost: registry lock poisoned: {}", e);
+                    return keyword_selected;
+                }
+            };
+            guard.skills().to_vec()
+        };
+
+        // Build/retrieve cached embeddings for all skill descriptions
+        let skill_embeddings =
+            self.get_or_embed_skills(embeddings, &all_skills).await;
+
+        // Score each skill by cosine similarity to the message
+        let selected_names: std::collections::HashSet<String> = keyword_selected
+            .iter()
+            .map(|s| s.name().to_string())
+            .collect();
+
+        struct ScoredEntry {
+            skill: ironclaw_skills::LoadedSkill,
+            semantic_score: f32,
+            was_keyword_selected: bool,
+        }
+
+        let mut scored: Vec<ScoredEntry> = Vec::new();
+
+        for skill in &all_skills {
+            // Apply tools_prefix gate (same as keyword path)
+            if let Some(ref prefix) = skill.manifest.activation.tools_prefix {
+                let prefix_lower = prefix.to_lowercase();
+                if !available_tool_names
+                    .iter()
+                    .any(|name| name.to_lowercase().starts_with(&prefix_lower))
+                {
+                    continue;
+                }
+            }
+
+            let similarity = match skill_embeddings.get(skill.name()) {
+                Some(skill_emb) => cosine_similarity(&message_embedding, skill_emb),
+                None => continue,
+            };
+
+            let was_selected = selected_names.contains(skill.name());
+            scored.push(ScoredEntry {
+                skill: skill.clone(),
+                semantic_score: similarity,
+                was_keyword_selected: was_selected,
+            });
+        }
+
+        // Sort: keyword-selected skills first (boosted), then semantic-only by score
+        scored.sort_by(|a, b| {
+            // Primary: keyword-selected skills always come first
+            b.was_keyword_selected
+                .cmp(&a.was_keyword_selected)
+                .then_with(|| {
+                    b.semantic_score
+                        .partial_cmp(&a.semantic_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+
+        // Threshold: only add semantic-only skills if similarity >= 0.5
+        const SEMANTIC_THRESHOLD: f32 = 0.5;
+        let max_skills = self.deps.skills_config.max_active_skills;
+
+        let mut result: Vec<ironclaw_skills::LoadedSkill> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for entry in &scored {
+            if result.len() >= max_skills {
+                break;
+            }
+            if seen.contains(entry.skill.name()) {
+                continue;
+            }
+
+            if entry.was_keyword_selected {
+                // Always include keyword-selected skills
+                seen.insert(entry.skill.name().to_string());
+                result.push(entry.skill.clone());
+            } else if entry.semantic_score >= SEMANTIC_THRESHOLD {
+                // Add semantically discovered skills
+                tracing::debug!(
+                    skill = entry.skill.name(),
+                    similarity = %format!("{:.3}", entry.semantic_score),
+                    "Semantic skill discovery: adding skill not found by keywords"
+                );
+                seen.insert(entry.skill.name().to_string());
+                result.push(entry.skill.clone());
+            }
+        }
+
+        if result.len() != keyword_selected.len() {
+            tracing::debug!(
+                keyword_count = keyword_selected.len(),
+                semantic_count = result.len(),
+                "Semantic boost changed skill selection"
+            );
+        }
+
+        result
+    }
+
+    /// Get or compute cached embeddings for skill descriptions.
+    ///
+    /// On first call, embeds all skill descriptions and caches them.
+    /// On subsequent calls, only embeds new/changed skills.
+    async fn get_or_embed_skills(
+        &self,
+        embeddings: &Arc<dyn crate::workspace::EmbeddingProvider>,
+        skills: &[ironclaw_skills::LoadedSkill],
+    ) -> HashMap<String, Vec<f32>> {
+        let cache = &self.deps.skill_embedding_cache;
+
+        // Check which skills need embedding
+        let needs_embedding: Vec<&ironclaw_skills::LoadedSkill> = {
+            let cached = cache.read().await;
+            skills
+                .iter()
+                .filter(|s| !cached.contains_key(s.name()))
+                .collect()
+        };
+
+        if !needs_embedding.is_empty() {
+            // Build embedding texts: name + description + keywords
+            let texts: Vec<String> = needs_embedding
+                .iter()
+                .map(|s| {
+                    let mut parts = vec![s.manifest.name.clone()];
+                    if !s.manifest.description.is_empty() {
+                        parts.push(s.manifest.description.clone());
+                    }
+                    if !s.manifest.activation.keywords.is_empty() {
+                        parts.push(s.manifest.activation.keywords.join(" "));
+                    }
+                    parts.join(". ")
+                })
+                .collect();
+
+            match embeddings.embed_batch(&texts).await {
+                Ok(vectors) => {
+                    let mut cached = cache.write().await;
+                    for (skill, vector) in needs_embedding.iter().zip(vectors) {
+                        cached.insert(skill.name().to_string(), vector);
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("Semantic skill boost: batch embedding failed: {}", e);
+                }
+            }
+        }
+
+        cache.read().await.clone()
     }
 
     /// Run the agent main loop.
@@ -1811,5 +2034,49 @@ mod tests {
         assert!(is_single_message_repl(&repl)); // safety: test-only assertion
         assert!(!is_single_message_repl(&gateway)); // safety: test-only assertion
         assert!(!is_single_message_repl(&plain_repl)); // safety: test-only assertion
+    }
+
+    #[test]
+    fn cosine_similarity_identical_vectors() {
+        let v = vec![1.0, 2.0, 3.0];
+        let sim = super::cosine_similarity(&v, &v);
+        assert!((sim - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_orthogonal_vectors() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![0.0, 1.0, 0.0];
+        let sim = super::cosine_similarity(&a, &b);
+        assert!(sim.abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_opposite_vectors() {
+        let a = vec![1.0, 0.0];
+        let b = vec![-1.0, 0.0];
+        let sim = super::cosine_similarity(&a, &b);
+        assert!((sim + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_zero_vector_returns_zero() {
+        let a = vec![1.0, 2.0, 3.0];
+        let zero = vec![0.0, 0.0, 0.0];
+        assert_eq!(super::cosine_similarity(&a, &zero), 0.0);
+        assert_eq!(super::cosine_similarity(&zero, &a), 0.0);
+    }
+
+    #[test]
+    fn cosine_similarity_mismatched_lengths_returns_zero() {
+        let a = vec![1.0, 2.0];
+        let b = vec![1.0, 2.0, 3.0];
+        assert_eq!(super::cosine_similarity(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn cosine_similarity_empty_vectors_returns_zero() {
+        let empty: Vec<f32> = vec![];
+        assert_eq!(super::cosine_similarity(&empty, &empty), 0.0);
     }
 }
