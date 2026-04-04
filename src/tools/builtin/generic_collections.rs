@@ -1,8 +1,7 @@
-//! Unified collection tool — experiment branch.
+//! Unified collection tool.
 //!
-//! When `COLLECTION_TOOL_MODE=unified`, each collection gets ONE tool
-//! (`{owner}_{collection}`) with an `operation` enum parameter instead
-//! of five separate tools per collection.
+//! Each collection gets ONE tool (`{owner}_{collection}`) with an `operation`
+//! enum parameter instead of five separate tools per collection.
 //!
 //! This reduces tool count from 5N to N while keeping collection-specific
 //! tool names so the LLM still knows which collection to target.
@@ -23,16 +22,7 @@ use crate::tools::tool::{Tool, ToolError, ToolOutput, ToolRateLimitConfig, requi
 
 use super::collections::resolve_collection_scope;
 
-/// Check whether separate (legacy) collection tool mode is enabled.
-/// Default is unified (1 tool per collection). Set COLLECTION_TOOL_MODE=separate
-/// to get 5 tools per collection (add/update/delete/query/summary).
-pub fn is_separate_mode() -> bool {
-    std::env::var("COLLECTION_TOOL_MODE")
-        .map(|v| v == "separate")
-        .unwrap_or(false)
-}
-
-/// Generate a single unified tool for a collection schema.
+/// Generate the unified tool for a collection schema.
 ///
 /// Returns a `Vec<Arc<dyn Tool>>` with exactly one element for API
 /// compatibility with `generate_collection_tools`.
@@ -211,14 +201,26 @@ impl UnifiedCollectionTool {
             final_updates.insert("_history".to_string(), history.clone());
         }
 
+        let update_data = serde_json::Value::Object(final_updates);
+
         self.db
             .update_record(
                 self.owner_scope(ctx),
                 record_id,
-                serde_json::Value::Object(final_updates),
+                update_data.clone(),
             )
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to update record: {e}")))?;
+
+        if let Some(tx) = &self.collection_write_tx {
+            let _ = tx.send(CollectionWriteEvent {
+                user_id: self.owner_scope(ctx).to_string(),
+                collection: self.schema.collection.clone(),
+                record_id,
+                operation: "update".to_string(),
+                data: update_data,
+            });
+        }
 
         Ok(ToolOutput::success(
             json!({
@@ -245,6 +247,16 @@ impl UnifiedCollectionTool {
             .delete_record(self.owner_scope(ctx), record_id)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to delete record: {e}")))?;
+
+        if let Some(tx) = &self.collection_write_tx {
+            let _ = tx.send(CollectionWriteEvent {
+                user_id: self.owner_scope(ctx).to_string(),
+                collection: self.schema.collection.clone(),
+                record_id,
+                operation: "delete".to_string(),
+                data: serde_json::Value::Null,
+            });
+        }
 
         Ok(ToolOutput::success(
             json!({

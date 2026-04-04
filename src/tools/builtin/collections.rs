@@ -116,6 +116,10 @@ pub(crate) fn field_type_to_json_schema(field_type: &FieldType) -> serde_json::V
 
 /// Generate tool instances for a collection schema.
 ///
+/// Returns a single unified tool per collection. The tool accepts an
+/// `operation` parameter (add/update/delete/query/summary) rather than
+/// generating five separate tools.
+///
 /// `owner_user_id` is the database user who owns this collection — used to
 /// build globally unique tool names (`{user}_{collection}_{suffix}`).
 pub fn generate_collection_tools(
@@ -124,44 +128,12 @@ pub fn generate_collection_tools(
     collection_write_tx: Option<broadcast::Sender<CollectionWriteEvent>>,
     owner_user_id: &str,
 ) -> Vec<Arc<dyn Tool>> {
-    // Default: unified mode (1 tool per collection with operation enum).
-    // Set COLLECTION_TOOL_MODE=separate for legacy 5-tools-per-collection.
-    if !super::generic_collections::is_separate_mode() {
-        return super::generic_collections::generate_unified_collection_tool(
-            schema,
-            Arc::clone(&db),
-            collection_write_tx,
-            owner_user_id,
-        );
-    }
-    vec![
-        Arc::new(CollectionAddTool::new(
-            schema.clone(),
-            Arc::clone(&db),
-            collection_write_tx,
-            owner_user_id,
-        )),
-        Arc::new(CollectionUpdateTool::new(
-            schema.clone(),
-            Arc::clone(&db),
-            owner_user_id,
-        )),
-        Arc::new(CollectionDeleteTool::new(
-            schema.clone(),
-            Arc::clone(&db),
-            owner_user_id,
-        )),
-        Arc::new(CollectionQueryTool::new(
-            schema.clone(),
-            Arc::clone(&db),
-            owner_user_id,
-        )),
-        Arc::new(CollectionSummaryTool::new(
-            schema.clone(),
-            db,
-            owner_user_id,
-        )),
-    ]
+    super::generic_collections::generate_unified_collection_tool(
+        schema,
+        db,
+        collection_write_tx,
+        owner_user_id,
+    )
 }
 
 // ==================== Per-Collection Skill Generation ====================
@@ -912,36 +884,22 @@ pub(crate) async fn refresh_collection_tools(
     collection_write_tx: Option<&broadcast::Sender<CollectionWriteEvent>>,
     workspace_resolver: Option<&Arc<dyn WorkspaceResolver>>,
 ) -> Vec<String> {
-    let separate = super::generic_collections::is_separate_mode();
-
-    // Unregister old tools (if they exist) — both modes, to handle mode switches.
+    // Unregister old tools — covers both legacy per-op names and current unified name.
     let suffixes = ["add", "update", "delete", "query", "summary"];
     for suffix in &suffixes {
         let name = tool_name_for(schema, suffix, user_id);
         registry.unregister(&name).await;
     }
-    // Also unregister the unified tool name.
     let scope = schema.source_scope.as_deref().unwrap_or(user_id);
     let unified_name = format!("{}_{}", scope, schema.collection);
     registry.unregister(&unified_name).await;
 
-    // Generate and register tools based on mode.
-    // Default: unified (1 tool per collection). Legacy: separate (5 per collection).
-    let tools = if separate {
-        generate_collection_tools(
-            schema,
-            Arc::clone(db),
-            collection_write_tx.cloned(),
-            user_id,
-        )
-    } else {
-        super::generic_collections::generate_unified_collection_tool(
-            schema,
-            Arc::clone(db),
-            collection_write_tx.cloned(),
-            user_id,
-        )
-    };
+    let tools = generate_collection_tools(
+        schema,
+        Arc::clone(db),
+        collection_write_tx.cloned(),
+        user_id,
+    );
     let tool_names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
     for tool in tools {
         registry.register(tool).await;
