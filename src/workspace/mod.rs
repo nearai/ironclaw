@@ -518,12 +518,11 @@ pub struct Workspace {
     privacy_classifier: Option<Arc<dyn crate::workspace::privacy::PrivacyClassifier>>,
     /// Process-local lock map for read-modify-write append paths.
     /// Keyed by `(scope, agent_id, path)` so unrelated append targets can proceed concurrently.
-    append_locks:
-        Arc<
-            tokio::sync::Mutex<
-                std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
-            >,
+    append_locks: Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
         >,
+    >,
 }
 
 impl Workspace {
