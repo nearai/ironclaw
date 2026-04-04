@@ -5,8 +5,12 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -87,17 +91,45 @@ fn compaction_strategy_name(
 
 #[derive(Clone)]
 struct CompactionThreadSnapshot {
-    state: ThreadState,
-    updated_at: DateTime<Utc>,
+    expected_state: ThreadState,
+    restore_state: ThreadState,
     turns_len: usize,
+    turns_signature: u64,
     thread: crate::agent::session::Thread,
 }
 
-fn capture_compaction_snapshot(thread: &crate::agent::session::Thread) -> CompactionThreadSnapshot {
+fn thread_turns_signature(thread: &crate::agent::session::Thread) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    thread.turns.len().hash(&mut hasher);
+    for turn in &thread.turns {
+        turn.turn_number.hash(&mut hasher);
+        turn.user_input.hash(&mut hasher);
+        turn.response.hash(&mut hasher);
+        turn.error.hash(&mut hasher);
+        for call in &turn.tool_calls {
+            call.name.hash(&mut hasher);
+            call.parameters.to_string().hash(&mut hasher);
+            call.result
+                .as_ref()
+                .map(|v| v.to_string())
+                .hash(&mut hasher);
+            call.error.hash(&mut hasher);
+            call.rationale.hash(&mut hasher);
+            call.tool_call_id.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn capture_compaction_snapshot(
+    thread: &crate::agent::session::Thread,
+    restore_state: ThreadState,
+) -> CompactionThreadSnapshot {
     CompactionThreadSnapshot {
-        state: thread.state,
-        updated_at: thread.updated_at,
+        expected_state: thread.state,
+        restore_state,
         turns_len: thread.turns.len(),
+        turns_signature: thread_turns_signature(thread),
         thread: thread.clone(),
     }
 }
@@ -106,9 +138,9 @@ fn thread_matches_compaction_snapshot(
     thread: &crate::agent::session::Thread,
     snapshot: &CompactionThreadSnapshot,
 ) -> bool {
-    thread.state == snapshot.state
-        && thread.updated_at == snapshot.updated_at
+    thread.state == snapshot.expected_state
         && thread.turns.len() == snapshot.turns_len
+        && thread_turns_signature(thread) == snapshot.turns_signature
 }
 
 fn apply_compaction_snapshot(
@@ -117,6 +149,16 @@ fn apply_compaction_snapshot(
 ) {
     thread.turns = snapshot.thread.turns.clone();
     thread.updated_at = Utc::now();
+}
+
+fn restore_post_compaction_gate_state(
+    thread: &mut crate::agent::session::Thread,
+    snapshot: &CompactionThreadSnapshot,
+) {
+    if thread.state == snapshot.expected_state {
+        thread.state = snapshot.restore_state;
+        thread.updated_at = Utc::now();
+    }
 }
 
 impl Agent {
@@ -495,19 +537,23 @@ impl Agent {
             f64,
             CompactionThreadSnapshot,
         )> = {
-            let sess = session.lock().await;
+            let mut sess = session.lock().await;
             let thread = sess
                 .threads
-                .get(&thread_id)
+                .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
             let messages = thread.messages();
             self.context_monitor
                 .suggest_compaction(&messages)
                 .map(|strategy| {
+                    let restore_state = thread.state;
+                    // Gate concurrent turn mutations while compaction runs lock-free.
+                    thread.state = ThreadState::Processing;
+                    thread.updated_at = Utc::now();
                     (
                         strategy,
                         self.context_monitor.usage_percent(&messages),
-                        capture_compaction_snapshot(thread),
+                        capture_compaction_snapshot(thread, restore_state),
                     )
                 })
         };
@@ -550,13 +596,15 @@ impl Agent {
                                             .to_string(),
                                     );
                                 }
+                                restore_post_compaction_gate_state(thread, &snapshot);
                                 true
                             }
-                            Some(_) => {
+                            Some(thread) => {
                                 auto_compaction_warning = Some(
                                     "Compaction finished, but thread changed concurrently; skipped applying in-memory compaction."
                                         .to_string(),
                                 );
+                                restore_post_compaction_gate_state(thread, &snapshot);
                                 false
                             }
                             None => false,
@@ -568,6 +616,10 @@ impl Agent {
                 }
                 Err(e) => {
                     tracing::warn!("Auto-compaction failed: {}", e);
+                    let mut sess = session.lock().await;
+                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                        restore_post_compaction_gate_state(thread, &snapshot);
+                    }
                 }
             }
         }
@@ -1118,10 +1170,10 @@ impl Agent {
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
         let (usage, strategy, mut snapshot) = {
-            let sess = session.lock().await;
+            let mut sess = session.lock().await;
             let thread = sess
                 .threads
-                .get(&thread_id)
+                .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
             let messages = thread.messages();
@@ -1132,7 +1184,15 @@ impl Agent {
                 .unwrap_or(
                     crate::agent::context_monitor::CompactionStrategy::Summarize { keep_recent: 5 },
                 );
-            (usage, strategy, capture_compaction_snapshot(thread))
+            let restore_state = thread.state;
+            // Gate concurrent turn mutations while manual compaction runs lock-free.
+            thread.state = ThreadState::Processing;
+            thread.updated_at = Utc::now();
+            (
+                usage,
+                strategy,
+                capture_compaction_snapshot(thread, restore_state),
+            )
         };
 
         let compactor = ContextCompactor::new(self.llm().clone());
@@ -1158,8 +1218,10 @@ impl Agent {
                         if let Some(context) = result.post_compaction_context.as_deref() {
                             thread.set_post_compaction_context(context.to_string());
                         }
+                        restore_post_compaction_gate_state(thread, &snapshot);
                         true
                     } else {
+                        restore_post_compaction_gate_state(thread, &snapshot);
                         false
                     }
                 };
@@ -1190,7 +1252,13 @@ impl Agent {
                     SubmissionResult::ok_with_message(msg)
                 }
             }
-            Err(e) => SubmissionResult::error(format!("Compaction failed: {}", e)),
+            Err(e) => {
+                let mut sess = session.lock().await;
+                if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                    restore_post_compaction_gate_state(thread, &snapshot);
+                }
+                SubmissionResult::error(format!("Compaction failed: {}", e))
+            }
         };
 
         if let Some(result) = compaction_for_event.as_ref() {
@@ -2844,6 +2912,38 @@ mod tests {
         assert_ne!(t.state, ThreadState::Processing);
         // Verify nothing was queued — the fall-through path doesn't touch the queue.
         assert!(t.pending_messages.is_empty());
+    }
+
+    #[test]
+    fn test_compaction_snapshot_allows_non_turn_metadata_changes() {
+        use crate::agent::session::Thread;
+
+        let mut thread = Thread::new(Uuid::new_v4(), None);
+        thread.start_turn("q1");
+        thread.complete_turn("a1");
+
+        // Capture while compaction gate is active.
+        thread.state = ThreadState::Processing;
+        let snapshot = capture_compaction_snapshot(&thread, ThreadState::Idle);
+
+        // Queue metadata changes should not invalidate turn snapshot matching.
+        thread.queue_message("follow-up".to_string());
+        assert!(thread_matches_compaction_snapshot(&thread, &snapshot));
+    }
+
+    #[test]
+    fn test_compaction_snapshot_detects_turn_mutation() {
+        use crate::agent::session::Thread;
+
+        let mut thread = Thread::new(Uuid::new_v4(), None);
+        thread.start_turn("q1");
+        thread.complete_turn("a1");
+        thread.state = ThreadState::Processing;
+        let snapshot = capture_compaction_snapshot(&thread, ThreadState::Idle);
+
+        // Mutating turn content must invalidate the snapshot.
+        thread.turns[0].response = Some("changed".to_string());
+        assert!(!thread_matches_compaction_snapshot(&thread, &snapshot));
     }
 
     // Approval persistence is tested via e2e_builtin_tool_coverage integration tests.
