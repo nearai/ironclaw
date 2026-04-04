@@ -124,6 +124,16 @@ pub fn generate_collection_tools(
     collection_write_tx: Option<broadcast::Sender<CollectionWriteEvent>>,
     owner_user_id: &str,
 ) -> Vec<Arc<dyn Tool>> {
+    // Default: unified mode (1 tool per collection with operation enum).
+    // Set COLLECTION_TOOL_MODE=separate for legacy 5-tools-per-collection.
+    if !super::generic_collections::is_separate_mode() {
+        return super::generic_collections::generate_unified_collection_tool(
+            schema,
+            Arc::clone(&db),
+            collection_write_tx,
+            owner_user_id,
+        );
+    }
     vec![
         Arc::new(CollectionAddTool::new(
             schema.clone(),
@@ -902,7 +912,7 @@ pub(crate) async fn refresh_collection_tools(
     collection_write_tx: Option<&broadcast::Sender<CollectionWriteEvent>>,
     workspace_resolver: Option<&Arc<dyn WorkspaceResolver>>,
 ) -> Vec<String> {
-    let unified = super::generic_collections::is_unified_mode();
+    let separate = super::generic_collections::is_separate_mode();
 
     // Unregister old tools (if they exist) — both modes, to handle mode switches.
     let suffixes = ["add", "update", "delete", "query", "summary"];
@@ -916,15 +926,16 @@ pub(crate) async fn refresh_collection_tools(
     registry.unregister(&unified_name).await;
 
     // Generate and register tools based on mode.
-    let tools = if unified {
-        super::generic_collections::generate_unified_collection_tool(
+    // Default: unified (1 tool per collection). Legacy: separate (5 per collection).
+    let tools = if separate {
+        generate_collection_tools(
             schema,
             Arc::clone(db),
             collection_write_tx.cloned(),
             user_id,
         )
     } else {
-        generate_collection_tools(
+        super::generic_collections::generate_unified_collection_tool(
             schema,
             Arc::clone(db),
             collection_write_tx.cloned(),
@@ -2558,6 +2569,26 @@ mod tests {
                 }
             }
         };
+    }
+
+    #[tokio::test]
+    async fn generate_collection_tools_returns_one_tool_by_default() {
+        // Unified mode is the default — 1 tool per collection, not 5.
+        // This test guards against regressions (e.g. rebase losing unified mode).
+        let schema = CollectionSchema {
+            collection: "test_items".to_string(),
+            description: Some("test".to_string()),
+            fields: std::collections::BTreeMap::new(),
+            source_scope: None,
+        };
+        let db: Arc<dyn crate::db::Database> =
+            Arc::new(crate::db::libsql::LibSqlBackend::new_memory().await.unwrap());
+        let tools = generate_collection_tools(&schema, db, None, "user1");
+        assert_eq!(tools.len(), 1, "unified mode should generate exactly 1 tool per collection");
+        assert!(
+            tools[0].name().contains("test_items"),
+            "tool name should contain the collection name"
+        );
     }
 
     #[test]

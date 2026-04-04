@@ -23,10 +23,12 @@ use crate::tools::tool::{Tool, ToolError, ToolOutput, ToolRateLimitConfig, requi
 
 use super::collections::resolve_collection_scope;
 
-/// Check whether unified collection tool mode is enabled.
-pub fn is_unified_mode() -> bool {
+/// Check whether separate (legacy) collection tool mode is enabled.
+/// Default is unified (1 tool per collection). Set COLLECTION_TOOL_MODE=separate
+/// to get 5 tools per collection (add/update/delete/query/summary).
+pub fn is_separate_mode() -> bool {
     std::env::var("COLLECTION_TOOL_MODE")
-        .map(|v| v == "unified")
+        .map(|v| v == "separate")
         .unwrap_or(false)
 }
 
