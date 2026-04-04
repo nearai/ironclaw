@@ -618,8 +618,11 @@ impl Agent {
                 })
         });
 
-        // Threshold: only add semantic-only skills if similarity >= 0.5
-        const SEMANTIC_THRESHOLD: f32 = 0.5;
+        // Thresholds:
+        // - VETO: keyword-matched skills below this are dropped (irrelevant built-ins)
+        // - DISCOVERY: semantic-only skills above this are added
+        const VETO_THRESHOLD: f32 = 0.3;
+        const DISCOVERY_THRESHOLD: f32 = 0.5;
         let max_skills = self.deps.skills_config.max_active_skills;
 
         let mut result: Vec<ironclaw_skills::LoadedSkill> = Vec::new();
@@ -634,10 +637,20 @@ impl Agent {
             }
 
             if entry.was_keyword_selected {
-                // Always include keyword-selected skills
+                // Veto keyword-matched skills that are semantically irrelevant.
+                // The user can always force-activate with /skill-name.
+                if entry.semantic_score < VETO_THRESHOLD {
+                    tracing::debug!(
+                        skill = entry.skill.name(),
+                        similarity = %format!("{:.3}", entry.semantic_score),
+                        "Semantic veto: dropping keyword-matched skill (below {:.1} threshold)",
+                        VETO_THRESHOLD,
+                    );
+                    continue;
+                }
                 seen.insert(entry.skill.name().to_string());
                 result.push(entry.skill.clone());
-            } else if entry.semantic_score >= SEMANTIC_THRESHOLD {
+            } else if entry.semantic_score >= DISCOVERY_THRESHOLD {
                 // Add semantically discovered skills
                 tracing::debug!(
                     skill = entry.skill.name(),
