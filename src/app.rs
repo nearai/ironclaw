@@ -483,6 +483,15 @@ impl AppBuilder {
         let mcp_session_manager = Arc::new(McpSessionManager::new());
         let mcp_process_manager = Arc::new(McpProcessManager::new());
 
+        if let Err(e) = crate::tools::mcp::config::bootstrap_nearai_mcp_server(
+            self.db.as_deref(),
+            &self.config.owner_id,
+        )
+        .await
+        {
+            tracing::warn!("Failed to bootstrap NEAR AI MCP server: {}", e);
+        }
+
         // Create WASM tool runtime eagerly so extensions installed after startup
         // (e.g. via the web UI) can still be activated. The tools directory is only
         // needed when loading modules, not for engine initialisation.
@@ -585,6 +594,7 @@ impl AppBuilder {
 
                             join_set.spawn(async move {
                                 let server_name = server.name.clone();
+                                let has_custom_auth_header = server.has_custom_auth_header();
 
                                 let client = match crate::tools::mcp::create_client_from_config(
                                     server,
@@ -635,15 +645,26 @@ impl AppBuilder {
                                     }
                                     Err(e) => {
                                         let err_str = e.to_string();
+                                        let err_lower = err_str.to_ascii_lowercase();
                                         if err_str.contains("401")
-                                            || err_str.contains("authentication")
+                                            || err_lower.contains("authentication")
+                                            || (err_str.contains("400")
+                                                && (err_lower.contains("authorization")
+                                                    || err_lower.contains("authenticate")))
                                         {
-                                            tracing::warn!(
-                                                "MCP server '{}' requires authentication. \
-                                                 Run: ironclaw mcp auth {}",
-                                                server_name,
-                                                server_name
-                                            );
+                                            if has_custom_auth_header {
+                                                tracing::warn!(
+                                                    "MCP server '{}' rejected its configured Authorization header. Update the configured credential and try again.",
+                                                    server_name
+                                                );
+                                            } else {
+                                                tracing::warn!(
+                                                    "MCP server '{}' requires authentication. \
+                                                     Run: ironclaw mcp auth {}",
+                                                    server_name,
+                                                    server_name
+                                                );
+                                            }
                                         } else {
                                             tracing::warn!(
                                                 "Failed to connect to MCP server '{}': {}",

@@ -408,6 +408,60 @@ impl From<ConfigError> for ToolError {
     }
 }
 
+pub const NEARAI_MCP_SERVER_NAME: &str = "nearai-mcp";
+const NEARAI_MCP_DESCRIPTION: &str = "Hosted tools from NEAR AI";
+
+fn derive_nearai_mcp_url(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    let base = base.strip_suffix("/v1").unwrap_or(base);
+    format!("{}/mcp", base)
+}
+
+fn nearai_mcp_server_from_env() -> Option<McpServerConfig> {
+    let base_url = crate::config::helpers::env_or_override("NEARAI_BASE_URL")?;
+    let api_key = crate::config::helpers::env_or_override("NEARAI_API_KEY")?;
+
+    let headers = HashMap::from([("Authorization".to_string(), format!("Bearer {}", api_key))]);
+    let server = McpServerConfig::new(NEARAI_MCP_SERVER_NAME, derive_nearai_mcp_url(&base_url))
+        .with_headers(headers)
+        .with_description(NEARAI_MCP_DESCRIPTION);
+
+    match server.validate() {
+        Ok(()) => Some(server),
+        Err(err) => {
+            tracing::warn!("Ignoring invalid NEAR AI MCP bootstrap config: {}", err);
+            None
+        }
+    }
+}
+
+pub async fn bootstrap_nearai_mcp_server(
+    db: Option<&dyn crate::db::Database>,
+    user_id: &str,
+) -> Result<bool, ConfigError> {
+    let Some(server) = nearai_mcp_server_from_env() else {
+        return Ok(false);
+    };
+
+    if let Some(db) = db {
+        let mut servers = load_mcp_servers_from_db(db, user_id).await?;
+        if servers.get(&server.name).is_some() {
+            return Ok(false);
+        }
+        servers.upsert(server);
+        save_mcp_servers_to_db(db, user_id, &servers).await?;
+        return Ok(true);
+    }
+
+    let mut servers = load_mcp_servers().await?;
+    if servers.get(&server.name).is_some() {
+        return Ok(false);
+    }
+    servers.upsert(server);
+    save_mcp_servers(&servers).await?;
+    Ok(true)
+}
+
 /// Get the default MCP servers configuration path.
 pub fn default_config_path() -> PathBuf {
     ironclaw_base_dir().join("mcp-servers.json")
@@ -1185,5 +1239,45 @@ mod tests {
     fn test_is_localhost_url_rejects_remote() {
         assert!(!is_localhost_url("https://mcp.example.com"));
         assert!(!is_localhost_url("http://192.168.1.1:8080"));
+    }
+
+    #[test]
+    fn test_derive_nearai_mcp_url_strips_v1_and_trailing_slash() {
+        assert_eq!(
+            derive_nearai_mcp_url("https://cloud-api.near.ai/v1"),
+            "https://cloud-api.near.ai/mcp"
+        );
+        assert_eq!(
+            derive_nearai_mcp_url("https://cloud-api.near.ai/v1/"),
+            "https://cloud-api.near.ai/mcp"
+        );
+        assert_eq!(
+            derive_nearai_mcp_url("https://private.near.ai"),
+            "https://private.near.ai/mcp"
+        );
+    }
+
+    #[test]
+    fn test_nearai_mcp_server_from_env_builds_standard_server() {
+        let _guard = crate::config::helpers::lock_env();
+        // SAFETY: Tests serialize env access with lock_env().
+        unsafe {
+            std::env::set_var("NEARAI_BASE_URL", "https://cloud-api.near.ai/v1/");
+            std::env::set_var("NEARAI_API_KEY", "test-nearai-key");
+        }
+
+        let server = nearai_mcp_server_from_env().expect("server from env");
+        assert_eq!(server.name, NEARAI_MCP_SERVER_NAME);
+        assert_eq!(server.url, "https://cloud-api.near.ai/mcp");
+        assert_eq!(
+            server.headers.get("Authorization").map(String::as_str),
+            Some("Bearer test-nearai-key")
+        );
+
+        // SAFETY: Tests serialize env access with lock_env().
+        unsafe {
+            std::env::remove_var("NEARAI_BASE_URL");
+            std::env::remove_var("NEARAI_API_KEY");
+        }
     }
 }

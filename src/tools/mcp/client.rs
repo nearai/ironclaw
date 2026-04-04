@@ -466,10 +466,25 @@ impl McpClient {
                             }
                         }
                     }
-                    return Err(ToolError::ExternalService(format!(
-                        "MCP server '{}' requires authentication. Run: ironclaw mcp auth {}",
-                        self.server_name, self.server_name
-                    )));
+                    let auth_message = if let Some(config) = self.server_config.as_ref() {
+                        if config.has_custom_auth_header() {
+                            format!(
+                                "MCP server '{}' rejected its configured Authorization header. Update the configured credential and try again.",
+                                self.server_name
+                            )
+                        } else {
+                            format!(
+                                "MCP server '{}' requires authentication. Run: ironclaw mcp auth {}",
+                                self.server_name, self.server_name
+                            )
+                        }
+                    } else {
+                        format!(
+                            "MCP server '{}' requires authentication. Run: ironclaw mcp auth {}",
+                            self.server_name, self.server_name
+                        )
+                    };
+                    return Err(ToolError::ExternalService(auth_message));
                 }
                 Err(e) => return Err(e),
             }
