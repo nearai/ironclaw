@@ -366,6 +366,92 @@ impl EffectBridgeAdapter {
         })
     }
 
+    fn mission_action_defs() -> Vec<ActionDef> {
+        vec![
+            ActionDef {
+                name: "mission_create".into(),
+                description: "Create a new mission (routine). Use when the user wants to set up a recurring task, scheduled check, or periodic routine. Results are delivered to the current channel by default.".into(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Short name for the mission/routine"},
+                        "goal": {"type": "string", "description": "What this mission should accomplish each run"},
+                        "cadence": {"type": "string", "description": "How often to run: 'hourly', '30m', '6h', 'daily', 'manual'"},
+                        "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl']). Defaults to current channel."}
+                    },
+                    "required": ["name", "goal"]
+                }),
+                effects: vec![],
+                requires_approval: false,
+            },
+            ActionDef {
+                name: "mission_list".into(),
+                description: "List all missions and routines in the current project.".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![],
+                requires_approval: false,
+            },
+            ActionDef {
+                name: "mission_fire".into(),
+                description: "Manually trigger a mission or routine to run immediately.".into(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Mission/routine ID to trigger"}
+                    },
+                    "required": ["id"]
+                }),
+                effects: vec![],
+                requires_approval: false,
+            },
+            ActionDef {
+                name: "mission_pause".into(),
+                description: "Pause a running mission or routine.".into(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Mission/routine ID to pause"}
+                    },
+                    "required": ["id"]
+                }),
+                effects: vec![],
+                requires_approval: false,
+            },
+            ActionDef {
+                name: "mission_resume".into(),
+                description: "Resume a paused mission or routine.".into(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Mission/routine ID to resume"}
+                    },
+                    "required": ["id"]
+                }),
+                effects: vec![],
+                requires_approval: false,
+            },
+            ActionDef {
+                name: "mission_update".into(),
+                description: "Update a mission/routine. Change name, goal, cadence, notification channels, daily budget, or success criteria.".into(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Mission/routine ID to update"},
+                        "name": {"type": "string", "description": "New name"},
+                        "goal": {"type": "string", "description": "New goal"},
+                        "cadence": {"type": "string", "description": "New cadence: 'hourly', '30m', '6h', 'daily', 'manual'"},
+                        "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl'])"},
+                        "max_threads_per_day": {"type": "integer", "description": "Max threads per day (0 = unlimited)"},
+                        "success_criteria": {"type": "string", "description": "Criteria for declaring mission complete"}
+                    },
+                    "required": ["id"]
+                }),
+                effects: vec![],
+                requires_approval: false,
+            },
+        ]
+    }
+
     /// Reset the per-step call counter (called between threads/steps).
     pub fn reset_call_count(&self) {
         self.call_count
@@ -741,7 +827,7 @@ impl EffectExecutor for EffectBridgeAdapter {
 
     async fn available_actions(
         &self,
-        _leases: &[CapabilityLease],
+        leases: &[CapabilityLease],
     ) -> Result<Vec<ActionDef>, EngineError> {
         let tool_defs = self.tools.tool_definitions().await;
 
@@ -772,6 +858,12 @@ impl EffectExecutor for EffectBridgeAdapter {
                 // those runtime checks.
                 requires_approval: false,
             });
+        }
+
+        for action in Self::mission_action_defs() {
+            if leases.iter().any(|lease| lease.covers_action(&action.name)) {
+                actions.push(action);
+            }
         }
 
         Ok(actions)
@@ -967,6 +1059,26 @@ mod tests {
         }
     }
 
+    fn specific_lease(
+        capability_name: &str,
+        actions: Vec<&str>,
+    ) -> ironclaw_engine::CapabilityLease {
+        ironclaw_engine::CapabilityLease {
+            id: ironclaw_engine::types::capability::LeaseId::new(),
+            thread_id: ironclaw_engine::ThreadId::new(),
+            capability_name: capability_name.to_string(),
+            granted_actions: ironclaw_engine::GrantedActions::Specific(
+                actions.into_iter().map(str::to_string).collect(),
+            ),
+            granted_at: chrono::Utc::now(),
+            expires_at: None,
+            max_uses: None,
+            uses_remaining: None,
+            revoked: false,
+            revoked_reason: None,
+        }
+    }
+
     fn exec_ctx(
         thread_id: ironclaw_engine::ThreadId,
         call_id: Option<&str>,
@@ -1067,6 +1179,30 @@ mod tests {
             )
             .await;
         assert!(matches!(third, Err(EngineError::GatePaused { .. })));
+    }
+
+    #[tokio::test]
+    async fn available_actions_exposes_mission_actions_from_mission_lease() {
+        let adapter = make_adapter();
+        let leases = vec![specific_lease(
+            "missions",
+            vec!["mission_create", "mission_fire"],
+        )];
+
+        let actions = adapter
+            .available_actions(&leases)
+            .await
+            .expect("available actions");
+        let names: Vec<String> = actions.into_iter().map(|action| action.name).collect();
+
+        assert!(
+            names.iter().any(|name| name == "mission_create"),
+            "expected mission_create in available actions, got {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "mission_fire"),
+            "expected mission_fire in available actions, got {names:?}"
+        );
     }
 
     // ── extract_credential_name tests ──────────────────────────
