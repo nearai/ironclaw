@@ -3012,10 +3012,7 @@ mod tests {
         assert!(result.ends_with("..."));
     }
 
-    /// Verify that agent review only triggers when the matching `agent_review_on_*`
-    /// flag is set for the given status, and that `agent_review_enabled` gates it.
-    #[test]
-    /// Verify that the default config has `agent_review_enabled = false`.
+    /// Verify that the default config has `agent_review_enabled = true`.
     #[test]
     fn test_agent_review_disabled_by_default() {
         let config = RoutineConfig::default();
@@ -3136,7 +3133,7 @@ mod tests {
 
         let ctx = super::EngineContext {
             config,
-            store: crate::tenant::AdminScope::new(db.clone()),
+            store: crate::tenant::SystemScope::new(db.clone()),
             llm,
             workspace: ws,
             notify_tx,
@@ -3146,6 +3143,7 @@ mod tests {
             tools,
             safety,
             sandbox_readiness: super::SandboxReadiness::DisabledByConfig,
+            event_cache: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             inject_tx: Some(inject_tx),
             agent_review_count: Arc::new(AtomicU32::new(0)),
             agent_review_window_start: Arc::new(std::sync::atomic::AtomicI64::new(0)),
@@ -3254,7 +3252,7 @@ mod tests {
 
         let ctx = super::EngineContext {
             config,
-            store: crate::tenant::AdminScope::new(db.clone()),
+            store: crate::tenant::SystemScope::new(db.clone()),
             llm: Arc::new(StubLlm::default()) as Arc<dyn crate::llm::LlmProvider>,
             workspace: Arc::new(crate::workspace::Workspace::new_with_db(
                 "default",
@@ -3272,6 +3270,7 @@ mod tests {
                 },
             )),
             sandbox_readiness: super::SandboxReadiness::DisabledByConfig,
+            event_cache: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             inject_tx: Some(inject_tx),
             agent_review_count: Arc::new(AtomicU32::new(0)),
             agent_review_window_start: Arc::new(std::sync::atomic::AtomicI64::new(0)),
