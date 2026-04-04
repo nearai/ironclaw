@@ -1,6 +1,6 @@
 //! Broadcast channel for collection write events.
 //!
-//! Decouples the write path (event ingest HTTP handler + CollectionAddTool)
+//! Decouples the write path (event ingest HTTP handler + UnifiedCollectionTool)
 //! from the routine engine that processes CollectionWrite triggers.
 
 use serde_json::Value;

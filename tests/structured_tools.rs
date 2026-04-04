@@ -13,10 +13,8 @@ use ironclaw::db::Database;
 use ironclaw::db::libsql::LibSqlBackend;
 use ironclaw::db::structured::CollectionSchema;
 use ironclaw::tools::{Tool, ToolRegistry};
-use ironclaw::tools::builtin::collections::{
-    CollectionAddTool, CollectionDeleteTool, CollectionQueryTool, CollectionSummaryTool,
-    CollectionUpdateTool, generate_collection_tools,
-};
+use ironclaw::tools::builtin::collections::generate_collection_tools;
+use ironclaw::tools::builtin::generic_collections::UnifiedCollectionTool;
 
 // ==================== Setup ====================
 
@@ -80,40 +78,34 @@ fn grocery_schema() -> CollectionSchema {
 // ==================== Tool Generation ====================
 
 #[tokio::test]
-async fn generates_five_tools_per_collection() {
+async fn generates_one_unified_tool_per_collection() {
     let (db, _dir) = setup().await;
     let schema = nanny_schema();
 
     let tools = generate_collection_tools(&schema, db, None, "andrew");
-    assert_eq!(tools.len(), 5);
-
-    let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-    assert!(names.contains(&"andrew_nanny_shifts_add"));
-    assert!(names.contains(&"andrew_nanny_shifts_update"));
-    assert!(names.contains(&"andrew_nanny_shifts_delete"));
-    assert!(names.contains(&"andrew_nanny_shifts_query"));
-    assert!(names.contains(&"andrew_nanny_shifts_summary"));
+    assert_eq!(tools.len(), 1, "unified mode: 1 tool per collection");
+    assert_eq!(tools[0].name(), "andrew_nanny_shifts");
 }
 
 #[tokio::test]
-async fn add_tool_has_typed_parameters() {
+async fn unified_tool_has_operation_parameter() {
     let (db, _dir) = setup().await;
     let schema = nanny_schema();
-    let tool = CollectionAddTool::new(schema, Arc::clone(&db), None, "andrew");
+    let tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "andrew");
 
     let params = tool.parameters_schema();
-    // date field should have format: "date"
-    assert_eq!(params["properties"]["date"]["format"], "date");
-    // start_time should have format: "date-time"
-    assert_eq!(params["properties"]["start_time"]["format"], "date-time");
-    // hours should be number
-    assert_eq!(params["properties"]["hours"]["type"], "number");
-    // status should have enum values
-    assert!(params["properties"]["status"]["enum"].is_array());
-    // required should include date and start_time
+    // operation is required
     let required = params["required"].as_array().unwrap();
-    assert!(required.contains(&json!("date")));
-    assert!(required.contains(&json!("start_time")));
+    assert!(required.contains(&json!("operation")));
+    // operation enum has all 5 ops
+    let ops = params["properties"]["operation"]["enum"].as_array().unwrap();
+    assert!(ops.contains(&json!("add")));
+    assert!(ops.contains(&json!("update")));
+    assert!(ops.contains(&json!("delete")));
+    assert!(ops.contains(&json!("query")));
+    assert!(ops.contains(&json!("summary")));
+    // data object for add/update is present
+    assert_eq!(params["properties"]["data"]["type"], "object");
 }
 
 // ==================== CRUD via Tools ====================
@@ -129,16 +121,18 @@ async fn add_and_query_via_tools() {
         .await
         .expect("register schema");
 
-    let add_tool = CollectionAddTool::new(schema.clone(), Arc::clone(&db), None, "andrew");
-    let query_tool = CollectionQueryTool::new(schema, Arc::clone(&db), "andrew");
+    let tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "andrew");
 
     // Add a record via tool
-    let result = add_tool
+    let result = tool
         .execute(
             json!({
-                "date": "2026-02-22",
-                "start_time": "2026-02-22T08:00:00Z",
-                "notes": "Regular shift"
+                "operation": "add",
+                "data": {
+                    "date": "2026-02-22",
+                    "start_time": "2026-02-22T08:00:00Z",
+                    "notes": "Regular shift"
+                }
             }),
             &ctx,
         )
@@ -150,8 +144,8 @@ async fn add_and_query_via_tools() {
     assert!(!record_id.is_empty());
 
     // Query via tool
-    let result = query_tool
-        .execute(json!({}), &ctx)
+    let result = tool
+        .execute(json!({"operation": "query"}), &ctx)
         .await
         .expect("query should succeed");
 
@@ -171,10 +165,15 @@ async fn add_rejects_invalid_data_via_tool() {
         .await
         .expect("register schema");
 
-    let add_tool = CollectionAddTool::new(schema, Arc::clone(&db), None, "andrew");
+    let tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "andrew");
 
     // Missing required field
-    let err = add_tool.execute(json!({ "notes": "no date" }), &ctx).await;
+    let err = tool
+        .execute(
+            json!({"operation": "add", "data": { "notes": "no date" }}),
+            &ctx,
+        )
+        .await;
     assert!(err.is_err());
 }
 
@@ -188,15 +187,17 @@ async fn update_via_tool() {
         .await
         .expect("register schema");
 
-    let add_tool = CollectionAddTool::new(schema.clone(), Arc::clone(&db), None, "andrew");
-    let update_tool = CollectionUpdateTool::new(schema, Arc::clone(&db), "andrew");
+    let tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "andrew");
 
     // Add a record
-    let result = add_tool
+    let result = tool
         .execute(
             json!({
-                "date": "2026-02-22",
-                "start_time": "2026-02-22T08:00:00Z"
+                "operation": "add",
+                "data": {
+                    "date": "2026-02-22",
+                    "start_time": "2026-02-22T08:00:00Z"
+                }
             }),
             &ctx,
         )
@@ -205,13 +206,16 @@ async fn update_via_tool() {
     let record_id = result.result["record_id"].as_str().unwrap().to_string();
 
     // Update via tool
-    let result = update_tool
+    let result = tool
         .execute(
             json!({
+                "operation": "update",
                 "record_id": record_id,
-                "status": "completed",
-                "end_time": "2026-02-22T17:00:00Z",
-                "hours": 9.0
+                "data": {
+                    "status": "completed",
+                    "end_time": "2026-02-22T17:00:00Z",
+                    "hours": 9.0
+                }
             }),
             &ctx,
         )
@@ -240,15 +244,17 @@ async fn delete_via_tool() {
         .await
         .expect("register schema");
 
-    let add_tool = CollectionAddTool::new(schema.clone(), Arc::clone(&db), None, "andrew");
-    let delete_tool = CollectionDeleteTool::new(schema, Arc::clone(&db), "andrew");
+    let tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "andrew");
 
     // Add and delete
-    let result = add_tool
+    let result = tool
         .execute(
             json!({
-                "date": "2026-02-22",
-                "start_time": "2026-02-22T08:00:00Z"
+                "operation": "add",
+                "data": {
+                    "date": "2026-02-22",
+                    "start_time": "2026-02-22T08:00:00Z"
+                }
             }),
             &ctx,
         )
@@ -256,8 +262,11 @@ async fn delete_via_tool() {
         .unwrap();
     let record_id = result.result["record_id"].as_str().unwrap().to_string();
 
-    let result = delete_tool
-        .execute(json!({ "record_id": record_id }), &ctx)
+    let result = tool
+        .execute(
+            json!({"operation": "delete", "record_id": record_id}),
+            &ctx,
+        )
         .await
         .expect("delete should succeed");
 
@@ -283,36 +292,33 @@ async fn query_with_filters_via_tool() {
         .await
         .expect("register schema");
 
-    let add_tool = CollectionAddTool::new(schema.clone(), Arc::clone(&db), None, "andrew");
-    let query_tool = CollectionQueryTool::new(schema, Arc::clone(&db), "andrew");
+    let tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "andrew");
 
     // Add items
-    add_tool
-        .execute(
-            json!({ "name": "milk", "category": "dairy", "on_list": true }),
-            &ctx,
-        )
-        .await
-        .unwrap();
-    add_tool
-        .execute(
-            json!({ "name": "bread", "category": "pantry", "on_list": true }),
-            &ctx,
-        )
-        .await
-        .unwrap();
-    add_tool
-        .execute(
-            json!({ "name": "eggs", "category": "dairy", "on_list": false }),
-            &ctx,
-        )
-        .await
-        .unwrap();
+    tool.execute(
+        json!({"operation": "add", "data": { "name": "milk", "category": "dairy", "on_list": true }}),
+        &ctx,
+    )
+    .await
+    .unwrap();
+    tool.execute(
+        json!({"operation": "add", "data": { "name": "bread", "category": "pantry", "on_list": true }}),
+        &ctx,
+    )
+    .await
+    .unwrap();
+    tool.execute(
+        json!({"operation": "add", "data": { "name": "eggs", "category": "dairy", "on_list": false }}),
+        &ctx,
+    )
+    .await
+    .unwrap();
 
     // Query with filter
-    let result = query_tool
+    let result = tool
         .execute(
             json!({
+                "operation": "query",
                 "filters": [
                     { "field": "category", "op": "eq", "value": "dairy" }
                 ]
@@ -337,30 +343,32 @@ async fn summary_sum_via_tool() {
         .await
         .expect("register schema");
 
-    let add_tool = CollectionAddTool::new(schema.clone(), Arc::clone(&db), None, "andrew");
-    let summary_tool = CollectionSummaryTool::new(schema, Arc::clone(&db), "andrew");
+    let tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "andrew");
 
     // Add shifts with hours
     for hours in [8.0, 7.5, 9.0] {
-        add_tool
-            .execute(
-                json!({
+        tool.execute(
+            json!({
+                "operation": "add",
+                "data": {
                     "date": "2026-02-22",
                     "start_time": "2026-02-22T08:00:00Z",
                     "hours": hours,
                     "status": "completed"
-                }),
-                &ctx,
-            )
-            .await
-            .unwrap();
+                }
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
     }
 
     // Sum hours
-    let result = summary_tool
+    let result = tool
         .execute(
             json!({
-                "operation": "sum",
+                "operation": "summary",
+                "agg_operation": "sum",
                 "field": "hours"
             }),
             &ctx,
@@ -386,22 +394,24 @@ async fn summary_count_via_tool() {
         .await
         .expect("register schema");
 
-    let add_tool = CollectionAddTool::new(schema.clone(), Arc::clone(&db), None, "andrew");
-    let summary_tool = CollectionSummaryTool::new(schema, Arc::clone(&db), "andrew");
+    let tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "andrew");
 
     // Add items
     for name in ["milk", "bread", "eggs", "waffles"] {
-        add_tool
-            .execute(json!({ "name": name }), &ctx)
-            .await
-            .unwrap();
+        tool.execute(
+            json!({"operation": "add", "data": { "name": name }}),
+            &ctx,
+        )
+        .await
+        .unwrap();
     }
 
     // Count
-    let result = summary_tool
+    let result = tool
         .execute(
             json!({
-                "operation": "count",
+                "operation": "summary",
+                "agg_operation": "count",
                 "field": "name"
             }),
             &ctx,
@@ -430,37 +440,41 @@ async fn tools_respect_user_isolation() {
         .await
         .expect("register for grace");
 
-    // Each user gets their own tool instances (scoped by owner_user_id).
-    let andrew_add = CollectionAddTool::new(schema.clone(), Arc::clone(&db), None, "andrew");
-    let andrew_query = CollectionQueryTool::new(schema.clone(), Arc::clone(&db), "andrew");
-    let grace_add = CollectionAddTool::new(schema.clone(), Arc::clone(&db), None, "grace");
-    let grace_query = CollectionQueryTool::new(schema, Arc::clone(&db), "grace");
+    // Each user gets their own unified tool instance (scoped by owner_user_id).
+    let andrew_tool = UnifiedCollectionTool::new(schema.clone(), Arc::clone(&db), None, "andrew");
+    let grace_tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "grace");
 
     let andrew_ctx = test_ctx("andrew");
     let grace_ctx = test_ctx("grace");
 
     // Andrew adds items via his tool
-    andrew_add
-        .execute(json!({ "name": "waffles" }), &andrew_ctx)
+    andrew_tool
+        .execute(json!({"operation": "add", "data": { "name": "waffles" }}), &andrew_ctx)
         .await
         .unwrap();
-    andrew_add
-        .execute(json!({ "name": "milk" }), &andrew_ctx)
+    andrew_tool
+        .execute(json!({"operation": "add", "data": { "name": "milk" }}), &andrew_ctx)
         .await
         .unwrap();
 
     // Grace adds items via her tool
-    grace_add
-        .execute(json!({ "name": "yogurt" }), &grace_ctx)
+    grace_tool
+        .execute(json!({"operation": "add", "data": { "name": "yogurt" }}), &grace_ctx)
         .await
         .unwrap();
 
     // Andrew sees 2 items
-    let result = andrew_query.execute(json!({}), &andrew_ctx).await.unwrap();
+    let result = andrew_tool
+        .execute(json!({"operation": "query"}), &andrew_ctx)
+        .await
+        .unwrap();
     assert_eq!(result.result["count"], 2);
 
     // Grace sees 1 item
-    let result = grace_query.execute(json!({}), &grace_ctx).await.unwrap();
+    let result = grace_tool
+        .execute(json!({"operation": "query"}), &grace_ctx)
+        .await
+        .unwrap();
     assert_eq!(result.result["count"], 1);
 }
 
@@ -487,11 +501,13 @@ async fn tool_names_dont_collide_across_users() {
         );
     }
 
-    // Verify prefixes are correct
-    assert!(andrew_names.iter().all(|n| n.starts_with("andrew_")),
-        "andrew tools should all start with andrew_: {andrew_names:?}");
-    assert!(grace_names.iter().all(|n| n.starts_with("grace_")),
-        "grace tools should all start with grace_: {grace_names:?}");
+    // Verify prefixes are correct (unified mode: 1 tool per collection)
+    assert_eq!(andrew_names.len(), 1, "unified mode: 1 tool per user per collection");
+    assert_eq!(grace_names.len(), 1);
+    assert!(andrew_names[0].starts_with("andrew_"),
+        "andrew tool should start with andrew_: {andrew_names:?}");
+    assert!(grace_names[0].starts_with("grace_"),
+        "grace tool should start with grace_: {grace_names:?}");
 }
 
 // ==================== Per-user tool filtering ====================
@@ -543,29 +559,29 @@ async fn tool_definitions_for_user_filters_by_owner() {
     }).count();
     assert_eq!(grace_builtin, builtin_count, "grace should see all built-in tools");
 
-    // Andrew should see his 5 collection tools but NOT grace's
+    // Andrew should see his 1 collection tool but NOT grace's (unified mode)
     let andrew_collection: Vec<&str> = andrew_defs.iter()
         .filter(|d| d.name.starts_with("andrew_"))
         .map(|d| d.name.as_str())
         .collect();
-    assert_eq!(andrew_collection.len(), 5, "andrew should have 5 collection tools");
+    assert_eq!(andrew_collection.len(), 1, "andrew should have 1 unified collection tool");
     assert!(andrew_defs.iter().all(|d| !d.name.starts_with("grace_")),
         "andrew should NOT see any grace_ tools");
 
-    // Grace should see her 5 collection tools but NOT andrew's
+    // Grace should see her 1 collection tool but NOT andrew's
     let grace_collection: Vec<&str> = grace_defs.iter()
         .filter(|d| d.name.starts_with("grace_"))
         .map(|d| d.name.as_str())
         .collect();
-    assert_eq!(grace_collection.len(), 5, "grace should have 5 collection tools");
+    assert_eq!(grace_collection.len(), 1, "grace should have 1 unified collection tool");
     assert!(grace_defs.iter().all(|d| !d.name.starts_with("andrew_")),
         "grace should NOT see any andrew_ tools");
 
-    // Total should include everything
-    assert_eq!(total.len(), builtin_count + 10,
-        "total should include all built-ins + 5 andrew + 5 grace tools");
-    assert_eq!(andrew_defs.len(), builtin_count + 5);
-    assert_eq!(grace_defs.len(), builtin_count + 5);
+    // Total should include everything (unified mode: 1 tool per user per collection)
+    assert_eq!(total.len(), builtin_count + 2,
+        "total should include all built-ins + 1 andrew + 1 grace tool");
+    assert_eq!(andrew_defs.len(), builtin_count + 1);
+    assert_eq!(grace_defs.len(), builtin_count + 1);
 }
 
 // ==================== Security: source_scope stripping ====================
@@ -655,14 +671,10 @@ async fn drop_tool_removes_tools_from_registry() {
         registry.register(Arc::clone(tool)).await;
     }
 
-    // Verify tools are registered
+    // Verify unified tool is registered
     assert!(
-        registry.has("andrew_grocery_items_add").await,
-        "add tool should be registered"
-    );
-    assert!(
-        registry.has("andrew_grocery_items_query").await,
-        "query tool should be registered"
+        registry.has("andrew_grocery_items").await,
+        "unified tool should be registered"
     );
 
     // Create and execute the drop tool
@@ -674,31 +686,15 @@ async fn drop_tool_removes_tools_from_registry() {
 
     assert_eq!(result.result["status"], "dropped");
 
-    // Verify all 5 per-collection tools are removed
+    // Verify unified tool is removed
     assert!(
-        !registry.has("andrew_grocery_items_add").await,
-        "add tool should be removed"
-    );
-    assert!(
-        !registry.has("andrew_grocery_items_update").await,
-        "update tool should be removed"
-    );
-    assert!(
-        !registry.has("andrew_grocery_items_delete").await,
-        "delete tool should be removed"
-    );
-    assert!(
-        !registry.has("andrew_grocery_items_query").await,
-        "query tool should be removed"
-    );
-    assert!(
-        !registry.has("andrew_grocery_items_summary").await,
-        "summary tool should be removed"
+        !registry.has("andrew_grocery_items").await,
+        "unified tool should be removed"
     );
 
-    // The tools_removed list should contain all 5
+    // The tools_removed list should contain the unified tool
     let removed = result.result["tools_removed"].as_array().unwrap();
-    assert_eq!(removed.len(), 5, "should have removed 5 tools");
+    assert_eq!(removed.len(), 1, "should have removed 1 unified tool");
 }
 
 // ==================== Startup Bootstrap ====================
@@ -737,12 +733,12 @@ async fn startup_bootstrap_restores_collection_tools() {
 
     // Verify no collection tools exist yet
     assert!(
-        !registry.has("andrew_nanny_shifts_query").await,
-        "andrew's nanny_shifts_query should NOT exist before bootstrap"
+        !registry.has("andrew_nanny_shifts").await,
+        "andrew's nanny_shifts should NOT exist before bootstrap"
     );
     assert!(
-        !registry.has("grace_grocery_items_add").await,
-        "grace's grocery_items_add should NOT exist before bootstrap"
+        !registry.has("grace_grocery_items").await,
+        "grace's grocery_items should NOT exist before bootstrap"
     );
 
     // --- Startup bootstrap ---
@@ -758,49 +754,17 @@ async fn startup_bootstrap_restores_collection_tools() {
     )
     .await;
 
-    // --- Verify tools are restored ---
-    // Andrew's nanny_shifts tools
+    // --- Verify unified tools are restored ---
+    // Andrew's nanny_shifts tool
     assert!(
-        registry.has("andrew_nanny_shifts_add").await,
-        "andrew_nanny_shifts_add should exist after bootstrap"
-    );
-    assert!(
-        registry.has("andrew_nanny_shifts_query").await,
-        "andrew_nanny_shifts_query should exist after bootstrap"
-    );
-    assert!(
-        registry.has("andrew_nanny_shifts_update").await,
-        "andrew_nanny_shifts_update should exist after bootstrap"
-    );
-    assert!(
-        registry.has("andrew_nanny_shifts_delete").await,
-        "andrew_nanny_shifts_delete should exist after bootstrap"
-    );
-    assert!(
-        registry.has("andrew_nanny_shifts_summary").await,
-        "andrew_nanny_shifts_summary should exist after bootstrap"
+        registry.has("andrew_nanny_shifts").await,
+        "andrew_nanny_shifts should exist after bootstrap"
     );
 
-    // Grace's grocery_items tools
+    // Grace's grocery_items tool
     assert!(
-        registry.has("grace_grocery_items_add").await,
-        "grace_grocery_items_add should exist after bootstrap"
-    );
-    assert!(
-        registry.has("grace_grocery_items_query").await,
-        "grace_grocery_items_query should exist after bootstrap"
-    );
-    assert!(
-        registry.has("grace_grocery_items_update").await,
-        "grace_grocery_items_update should exist after bootstrap"
-    );
-    assert!(
-        registry.has("grace_grocery_items_delete").await,
-        "grace_grocery_items_delete should exist after bootstrap"
-    );
-    assert!(
-        registry.has("grace_grocery_items_summary").await,
-        "grace_grocery_items_summary should exist after bootstrap"
+        registry.has("grace_grocery_items").await,
+        "grace_grocery_items should exist after bootstrap"
     );
 
     // Cross-user isolation: andrew should NOT see grace's tools in filtered view
@@ -849,10 +813,10 @@ async fn startup_bootstrap_skips_users_without_collections() {
     )
     .await;
 
-    // Andrew's tools should exist
+    // Andrew's tool should exist
     assert!(
-        registry.has("andrew_nanny_shifts_query").await,
-        "andrew_nanny_shifts_query should exist"
+        registry.has("andrew_nanny_shifts").await,
+        "andrew_nanny_shifts should exist"
     );
 
     // No tools should be created for the nonexistent user
