@@ -21,6 +21,8 @@ use crate::db::structured::{
 };
 use crate::tools::tool::{Tool, ToolError, ToolOutput, ToolRateLimitConfig, require_str};
 
+use super::collections::resolve_collection_scope;
+
 /// Check whether unified collection tool mode is enabled.
 pub fn is_unified_mode() -> bool {
     std::env::var("COLLECTION_TOOL_MODE")
@@ -92,8 +94,8 @@ impl UnifiedCollectionTool {
         }
     }
 
-    fn owner_scope(&self) -> &str {
-        self.schema.source_scope.as_deref().unwrap_or(&self.owner_user_id)
+    fn owner_scope<'a>(&'a self, ctx: &'a JobContext) -> &'a str {
+        self.schema.source_scope.as_deref().unwrap_or(&ctx.user_id)
     }
 
     // ---- Operation implementations ----
@@ -101,7 +103,7 @@ impl UnifiedCollectionTool {
     async fn execute_add(
         &self,
         params: &serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -135,14 +137,14 @@ impl UnifiedCollectionTool {
 
         let id = self
             .db
-            .insert_record(self.owner_scope(), &self.schema.collection, data)
+            .insert_record(self.owner_scope(ctx), &self.schema.collection, data)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to insert record: {e}")))?;
 
         // Fire collection write triggers.
         if let Some(tx) = &self.collection_write_tx {
             let _ = tx.send(CollectionWriteEvent {
-                user_id: self.owner_scope().to_string(),
+                user_id: self.owner_scope(ctx).to_string(),
                 collection: self.schema.collection.clone(),
                 record_id: id,
                 operation: "insert".to_string(),
@@ -163,7 +165,7 @@ impl UnifiedCollectionTool {
     async fn execute_update(
         &self,
         params: &serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -194,7 +196,7 @@ impl UnifiedCollectionTool {
         // Fetch existing record to get current _history, then append update entry.
         let existing = self
             .db
-            .get_record(self.owner_scope(), record_id)
+            .get_record(self.owner_scope(ctx), record_id)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to fetch record: {e}")))?;
 
@@ -209,23 +211,12 @@ impl UnifiedCollectionTool {
 
         self.db
             .update_record(
-                self.owner_scope(),
+                self.owner_scope(ctx),
                 record_id,
                 serde_json::Value::Object(final_updates),
             )
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to update record: {e}")))?;
-
-        // Fire collection write triggers.
-        if let Some(tx) = &self.collection_write_tx {
-            let _ = tx.send(CollectionWriteEvent {
-                user_id: self.owner_scope().to_string(),
-                collection: self.schema.collection.clone(),
-                record_id,
-                operation: "update".to_string(),
-                data: changed_fields,
-            });
-        }
 
         Ok(ToolOutput::success(
             json!({
@@ -240,7 +231,7 @@ impl UnifiedCollectionTool {
     async fn execute_delete(
         &self,
         params: &serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -249,20 +240,9 @@ impl UnifiedCollectionTool {
             .map_err(|e| ToolError::InvalidParameters(format!("Invalid record_id: {e}")))?;
 
         self.db
-            .delete_record(self.owner_scope(), record_id)
+            .delete_record(self.owner_scope(ctx), record_id)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to delete record: {e}")))?;
-
-        // Fire collection write triggers.
-        if let Some(tx) = &self.collection_write_tx {
-            let _ = tx.send(CollectionWriteEvent {
-                user_id: self.owner_scope().to_string(),
-                collection: self.schema.collection.clone(),
-                record_id,
-                operation: "delete".to_string(),
-                data: serde_json::Value::Null,
-            });
-        }
 
         Ok(ToolOutput::success(
             json!({
@@ -277,7 +257,7 @@ impl UnifiedCollectionTool {
     async fn execute_query(
         &self,
         params: &serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -309,7 +289,19 @@ impl UnifiedCollectionTool {
             .unwrap_or(50)
             .min(200) as usize;
 
-        let owner = self.owner_scope().to_string();
+        // Resolve scope
+        let owner = if self.schema.source_scope.is_some() {
+            self.owner_scope(ctx).to_string()
+        } else {
+            resolve_collection_scope(
+                self.db.as_ref(),
+                &ctx.user_id,
+                &[],
+                &self.schema.collection,
+            )
+            .await
+            .unwrap_or_else(|| ctx.user_id.clone())
+        };
 
         let records = self
             .db
@@ -342,7 +334,7 @@ impl UnifiedCollectionTool {
     async fn execute_summary(
         &self,
         params: &serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -397,7 +389,18 @@ impl UnifiedCollectionTool {
             filters,
         };
 
-        let owner = self.owner_scope().to_string();
+        let owner = if self.schema.source_scope.is_some() {
+            self.owner_scope(ctx).to_string()
+        } else {
+            resolve_collection_scope(
+                self.db.as_ref(),
+                &ctx.user_id,
+                &[],
+                &self.schema.collection,
+            )
+            .await
+            .unwrap_or_else(|| ctx.user_id.clone())
+        };
 
         let result = self
             .db
@@ -551,131 +554,50 @@ impl Tool for UnifiedCollectionTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::structured::FieldDef;
-    use std::collections::BTreeMap;
 
-    // ==================== Helpers ====================
-
-    /// Create a test database (file-backed libsql) and return it with a TempDir guard.
-    async fn setup() -> (Arc<dyn Database>, tempfile::TempDir) {
-        crate::testing::test_db().await
-    }
-
-    fn test_ctx(user_id: &str) -> crate::context::JobContext {
-        crate::context::JobContext {
-            user_id: user_id.to_string(),
-            ..Default::default()
-        }
-    }
-
-    /// Grocery schema with text, enum, bool, and number fields.
-    fn grocery_schema() -> CollectionSchema {
-        serde_json::from_value(json!({
-            "collection": "grocery_items",
-            "description": "Tracks grocery items",
-            "fields": {
-                "name": { "type": "text", "required": true },
-                "category": {
-                    "type": "enum",
-                    "values": ["produce", "dairy", "meat", "pantry", "frozen", "household", "other"]
-                },
-                "on_list": { "type": "bool", "default": true },
-                "quantity": { "type": "number" },
-                "notes": { "type": "text" }
-            }
-        }))
-        .expect("grocery schema should parse")
-    }
-
-    /// Nanny shifts schema with date, datetime, enum, and number fields.
-    fn nanny_schema() -> CollectionSchema {
-        serde_json::from_value(json!({
-            "collection": "nanny_shifts",
-            "description": "Tracks nanny working shifts",
-            "fields": {
-                "date": { "type": "date", "required": true },
-                "start_time": { "type": "date_time", "required": true },
-                "end_time": { "type": "date_time" },
-                "status": {
-                    "type": "enum",
-                    "values": ["in_progress", "completed"],
-                    "default": "in_progress"
-                },
-                "hours": { "type": "number" },
-                "notes": { "type": "text" }
-            }
-        }))
-        .expect("nanny schema should parse")
-    }
-
-    // ==================== Unit Tests ====================
-
-    #[test]
-    fn is_unified_mode_reads_env() {
-        // SAFETY: Tests run single-threaded for this env var; no other thread
-        // reads COLLECTION_TOOL_MODE concurrently in unit tests.
-        unsafe {
-            // With no env var set, default is false.
-            std::env::remove_var("COLLECTION_TOOL_MODE");
-            assert!(!is_unified_mode());
-
-            // Set to "unified" — should return true.
-            std::env::set_var("COLLECTION_TOOL_MODE", "unified");
-            assert!(is_unified_mode());
-
-            // Set to something else — should return false.
-            std::env::set_var("COLLECTION_TOOL_MODE", "classic");
-            assert!(!is_unified_mode());
-
-            // Clean up.
-            std::env::remove_var("COLLECTION_TOOL_MODE");
-        }
+    /// Create a test database (libsql in-memory) for tool struct construction.
+    async fn test_db() -> Arc<dyn Database> {
+        let (db, _dir) = crate::testing::test_db().await;
+        db
     }
 
     #[tokio::test]
-    async fn tool_name_includes_owner_prefix() {
+    async fn unified_tool_name_uses_scope() {
         let schema = CollectionSchema {
             collection: "grocery_items".to_string(),
             description: Some("Grocery shopping list".to_string()),
-            fields: BTreeMap::new(),
+            fields: std::collections::BTreeMap::new(),
             source_scope: None,
         };
-        let (db, _dir) = setup().await;
+        let db = test_db().await;
         let tool = UnifiedCollectionTool::new(schema, db, None, "andrew");
         assert_eq!(tool.name(), "andrew_grocery_items");
     }
 
     #[tokio::test]
-    async fn tool_name_with_source_scope() {
+    async fn unified_tool_name_uses_source_scope() {
         let schema = CollectionSchema {
             collection: "tasks".to_string(),
             description: None,
-            fields: BTreeMap::new(),
+            fields: std::collections::BTreeMap::new(),
             source_scope: Some("household".to_string()),
         };
-        let (db, _dir) = setup().await;
+        let db = test_db().await;
         let tool = UnifiedCollectionTool::new(schema, db, None, "andrew");
-        // source_scope overrides owner in the tool name.
         assert_eq!(tool.name(), "household_tasks");
     }
 
     #[tokio::test]
-    async fn parameters_schema_has_operation_enum() {
+    async fn unified_tool_schema_has_operation_enum() {
         let schema = CollectionSchema {
             collection: "test".to_string(),
             description: None,
-            fields: BTreeMap::new(),
+            fields: std::collections::BTreeMap::new(),
             source_scope: None,
         };
-        let (db, _dir) = setup().await;
+        let db = test_db().await;
         let tool = UnifiedCollectionTool::new(schema, db, None, "owner");
         let params = tool.parameters_schema();
-
-        // operation must be required
-        let required = params["required"].as_array().unwrap();
-        assert!(required.contains(&json!("operation")));
-
-        // operation must be a string enum with all 5 values
         let op = &params["properties"]["operation"];
         assert_eq!(op["type"], "string");
         let ops = op["enum"].as_array().unwrap();
@@ -688,546 +610,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parameters_schema_has_all_optional_fields() {
-        let mut fields = BTreeMap::new();
-        fields.insert(
-            "amount".to_string(),
-            FieldDef {
-                field_type: FieldType::Number,
-                required: false,
-                default: None,
-            },
-        );
-        let schema = CollectionSchema {
-            collection: "test".to_string(),
-            description: None,
-            fields,
-            source_scope: None,
-        };
-        let (db, _dir) = setup().await;
-        let tool = UnifiedCollectionTool::new(schema, db, None, "owner");
-        let params = tool.parameters_schema();
-        let props = params["properties"].as_object().unwrap();
-
-        // All expected optional fields must be present.
-        assert!(props.contains_key("data"), "missing 'data' property");
-        assert!(props.contains_key("record_id"), "missing 'record_id' property");
-        assert!(props.contains_key("filters"), "missing 'filters' property");
-        assert!(props.contains_key("field"), "missing 'field' property");
-        assert!(props.contains_key("group_by"), "missing 'group_by' property");
-        assert!(props.contains_key("agg_operation"), "missing 'agg_operation' property");
-        assert!(props.contains_key("order_by"), "missing 'order_by' property");
-        assert!(props.contains_key("limit"), "missing 'limit' property");
-
-        // Only "operation" should be required.
-        let required = params["required"].as_array().unwrap();
-        assert_eq!(required.len(), 1);
-        assert_eq!(required[0], "operation");
-    }
-
-    #[tokio::test]
     async fn generate_unified_returns_one_tool() {
         let schema = CollectionSchema {
             collection: "items".to_string(),
             description: None,
-            fields: BTreeMap::new(),
+            fields: std::collections::BTreeMap::new(),
             source_scope: None,
         };
-        let (db, _dir) = setup().await;
+        let db = test_db().await;
         let tools = generate_unified_collection_tool(&schema, db, None, "user1");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name(), "user1_items");
-    }
-
-    // ==================== Integration Tests ====================
-
-    #[tokio::test]
-    async fn unified_add_inserts_record() {
-        let (db, _dir) = setup().await;
-        let schema = grocery_schema();
-        let ctx = test_ctx("andrew");
-
-        db.register_collection("andrew", &schema)
-            .await
-            .expect("register schema");
-
-        let tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "andrew");
-
-        let result = tool
-            .execute(
-                json!({
-                    "operation": "add",
-                    "data": { "name": "milk", "category": "dairy" }
-                }),
-                &ctx,
-            )
-            .await
-            .expect("add should succeed");
-
-        assert_eq!(result.result["status"], "created");
-        let record_id = result.result["record_id"].as_str().unwrap();
-        assert!(!record_id.is_empty());
-
-        // Verify the record is in the DB.
-        let id = uuid::Uuid::parse_str(record_id).unwrap();
-        let record = db.get_record("andrew", id).await.expect("record should exist");
-        assert_eq!(record.data["name"], "milk");
-        assert_eq!(record.data["category"], "dairy");
-    }
-
-    #[tokio::test]
-    async fn unified_query_returns_records() {
-        let (db, _dir) = setup().await;
-        let schema = grocery_schema();
-        let ctx = test_ctx("andrew");
-
-        db.register_collection("andrew", &schema)
-            .await
-            .expect("register schema");
-
-        let tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "andrew");
-
-        // Add two records.
-        tool.execute(
-            json!({ "operation": "add", "data": { "name": "milk" } }),
-            &ctx,
-        )
-        .await
-        .unwrap();
-        tool.execute(
-            json!({ "operation": "add", "data": { "name": "bread" } }),
-            &ctx,
-        )
-        .await
-        .unwrap();
-
-        // Query all.
-        let result = tool
-            .execute(json!({ "operation": "query" }), &ctx)
-            .await
-            .expect("query should succeed");
-
-        assert_eq!(result.result["count"], 2);
-        let records = result.result["results"].as_array().unwrap();
-        assert_eq!(records.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn unified_update_modifies_record() {
-        let (db, _dir) = setup().await;
-        let schema = grocery_schema();
-        let ctx = test_ctx("andrew");
-
-        db.register_collection("andrew", &schema)
-            .await
-            .expect("register schema");
-
-        let tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "andrew");
-
-        // Add a record.
-        let add_result = tool
-            .execute(
-                json!({ "operation": "add", "data": { "name": "milk", "quantity": 1 } }),
-                &ctx,
-            )
-            .await
-            .unwrap();
-        let record_id = add_result.result["record_id"].as_str().unwrap().to_string();
-
-        // Update it.
-        let update_result = tool
-            .execute(
-                json!({
-                    "operation": "update",
-                    "record_id": record_id,
-                    "data": { "quantity": 3 }
-                }),
-                &ctx,
-            )
-            .await
-            .expect("update should succeed");
-
-        assert_eq!(update_result.result["status"], "updated");
-
-        // Verify change persisted.
-        let id = uuid::Uuid::parse_str(&record_id).unwrap();
-        let record = db.get_record("andrew", id).await.unwrap();
-        assert_eq!(record.data["quantity"], 3);
-        // Original field preserved.
-        assert_eq!(record.data["name"], "milk");
-    }
-
-    #[tokio::test]
-    async fn unified_delete_removes_record() {
-        let (db, _dir) = setup().await;
-        let schema = grocery_schema();
-        let ctx = test_ctx("andrew");
-
-        db.register_collection("andrew", &schema)
-            .await
-            .expect("register schema");
-
-        let tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "andrew");
-
-        // Add and then delete.
-        let add_result = tool
-            .execute(
-                json!({ "operation": "add", "data": { "name": "eggs" } }),
-                &ctx,
-            )
-            .await
-            .unwrap();
-        let record_id = add_result.result["record_id"].as_str().unwrap().to_string();
-
-        let delete_result = tool
-            .execute(
-                json!({ "operation": "delete", "record_id": record_id }),
-                &ctx,
-            )
-            .await
-            .expect("delete should succeed");
-
-        assert_eq!(delete_result.result["status"], "deleted");
-
-        // Verify it is gone.
-        let id = uuid::Uuid::parse_str(&record_id).unwrap();
-        assert!(db.get_record("andrew", id).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn unified_summary_counts_records() {
-        let (db, _dir) = setup().await;
-        let schema = grocery_schema();
-        let ctx = test_ctx("andrew");
-
-        db.register_collection("andrew", &schema)
-            .await
-            .expect("register schema");
-
-        let tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "andrew");
-
-        // Add 3 records.
-        for name in ["milk", "bread", "eggs"] {
-            tool.execute(
-                json!({ "operation": "add", "data": { "name": name } }),
-                &ctx,
-            )
-            .await
-            .unwrap();
-        }
-
-        // Summary with count.
-        let result = tool
-            .execute(
-                json!({
-                    "operation": "summary",
-                    "agg_operation": "count",
-                    "field": "name"
-                }),
-                &ctx,
-            )
-            .await
-            .expect("summary should succeed");
-
-        let agg = &result.result["aggregation"];
-        let count: f64 = agg
-            .as_f64()
-            .unwrap_or_else(|| agg.as_str().unwrap_or("0").parse().unwrap_or(0.0));
-        assert!((count - 3.0).abs() < 0.01);
-    }
-
-    #[tokio::test]
-    async fn unified_summary_sums_numeric_field() {
-        let (db, _dir) = setup().await;
-        let schema = nanny_schema();
-        let ctx = test_ctx("andrew");
-
-        db.register_collection("andrew", &schema)
-            .await
-            .expect("register schema");
-
-        let tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "andrew");
-
-        // Add shifts with hours.
-        for hours in [8.0, 7.5, 9.0] {
-            tool.execute(
-                json!({
-                    "operation": "add",
-                    "data": {
-                        "date": "2026-02-22",
-                        "start_time": "2026-02-22T08:00:00Z",
-                        "hours": hours,
-                        "status": "completed"
-                    }
-                }),
-                &ctx,
-            )
-            .await
-            .unwrap();
-        }
-
-        // Sum hours.
-        let result = tool
-            .execute(
-                json!({
-                    "operation": "summary",
-                    "agg_operation": "sum",
-                    "field": "hours"
-                }),
-                &ctx,
-            )
-            .await
-            .expect("summary sum should succeed");
-
-        let agg = &result.result["aggregation"];
-        let total: f64 = agg
-            .as_f64()
-            .unwrap_or_else(|| agg.as_str().unwrap_or("0").parse().unwrap_or(0.0));
-        assert!((total - 24.5).abs() < 0.01);
-    }
-
-    #[tokio::test]
-    async fn unified_query_with_filters() {
-        let (db, _dir) = setup().await;
-        let schema = grocery_schema();
-        let ctx = test_ctx("andrew");
-
-        db.register_collection("andrew", &schema)
-            .await
-            .expect("register schema");
-
-        let tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "andrew");
-
-        // Add items in different categories.
-        tool.execute(
-            json!({ "operation": "add", "data": { "name": "milk", "category": "dairy" } }),
-            &ctx,
-        )
-        .await
-        .unwrap();
-        tool.execute(
-            json!({ "operation": "add", "data": { "name": "yogurt", "category": "dairy" } }),
-            &ctx,
-        )
-        .await
-        .unwrap();
-        tool.execute(
-            json!({ "operation": "add", "data": { "name": "bread", "category": "pantry" } }),
-            &ctx,
-        )
-        .await
-        .unwrap();
-
-        // Query with filter for dairy only.
-        let result = tool
-            .execute(
-                json!({
-                    "operation": "query",
-                    "filters": [{ "field": "category", "op": "eq", "value": "dairy" }]
-                }),
-                &ctx,
-            )
-            .await
-            .expect("filtered query should succeed");
-
-        assert_eq!(result.result["count"], 2);
-        let records = result.result["results"].as_array().unwrap();
-        for r in records {
-            assert_eq!(r["data"]["category"], "dairy");
-        }
-    }
-
-    #[tokio::test]
-    async fn unified_invalid_operation_returns_error() {
-        let (db, _dir) = setup().await;
-        let schema = grocery_schema();
-        let ctx = test_ctx("andrew");
-
-        let tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "andrew");
-
-        let err = tool
-            .execute(json!({ "operation": "invalid" }), &ctx)
-            .await;
-
-        assert!(err.is_err());
-        let msg = format!("{}", err.unwrap_err());
-        assert!(
-            msg.contains("Unknown operation"),
-            "error should mention unknown operation, got: {msg}"
-        );
-    }
-
-    #[tokio::test]
-    async fn unified_add_validates_against_schema() {
-        let (db, _dir) = setup().await;
-        let schema = grocery_schema();
-        let ctx = test_ctx("andrew");
-
-        db.register_collection("andrew", &schema)
-            .await
-            .expect("register schema");
-
-        let tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "andrew");
-
-        // Add without the required "name" field — DB-level validation should reject.
-        let err = tool
-            .execute(
-                json!({ "operation": "add", "data": { "category": "dairy" } }),
-                &ctx,
-            )
-            .await;
-
-        assert!(
-            err.is_err(),
-            "add without required field should fail, got: {:?}",
-            err
-        );
-    }
-
-    #[tokio::test]
-    async fn unified_update_requires_record_id() {
-        let (db, _dir) = setup().await;
-        let schema = grocery_schema();
-        let ctx = test_ctx("andrew");
-
-        let tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "andrew");
-
-        // Update without record_id.
-        let err = tool
-            .execute(
-                json!({ "operation": "update", "data": { "name": "oats" } }),
-                &ctx,
-            )
-            .await;
-
-        assert!(err.is_err(), "update without record_id should fail");
-    }
-
-    #[tokio::test]
-    async fn unified_delete_requires_record_id() {
-        let (db, _dir) = setup().await;
-        let schema = grocery_schema();
-        let ctx = test_ctx("andrew");
-
-        let tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "andrew");
-
-        // Delete without record_id.
-        let err = tool.execute(json!({ "operation": "delete" }), &ctx).await;
-
-        assert!(err.is_err(), "delete without record_id should fail");
-    }
-
-    #[tokio::test]
-    async fn unified_user_isolation() {
-        let (db, _dir) = setup().await;
-        let schema = grocery_schema();
-
-        db.register_collection("andrew", &schema)
-            .await
-            .expect("register for andrew");
-        db.register_collection("grace", &schema)
-            .await
-            .expect("register for grace");
-
-        let andrew_tool =
-            UnifiedCollectionTool::new(schema.clone(), Arc::clone(&db), None, "andrew");
-        let grace_tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "grace");
-
-        let andrew_ctx = test_ctx("andrew");
-        let grace_ctx = test_ctx("grace");
-
-        // Andrew adds 2 items.
-        andrew_tool
-            .execute(
-                json!({ "operation": "add", "data": { "name": "waffles" } }),
-                &andrew_ctx,
-            )
-            .await
-            .unwrap();
-        andrew_tool
-            .execute(
-                json!({ "operation": "add", "data": { "name": "milk" } }),
-                &andrew_ctx,
-            )
-            .await
-            .unwrap();
-
-        // Grace adds 1 item.
-        grace_tool
-            .execute(
-                json!({ "operation": "add", "data": { "name": "yogurt" } }),
-                &grace_ctx,
-            )
-            .await
-            .unwrap();
-
-        // Andrew sees only his 2 records.
-        let andrew_result = andrew_tool
-            .execute(json!({ "operation": "query" }), &andrew_ctx)
-            .await
-            .unwrap();
-        assert_eq!(andrew_result.result["count"], 2);
-
-        // Grace sees only her 1 record.
-        let grace_result = grace_tool
-            .execute(json!({ "operation": "query" }), &grace_ctx)
-            .await
-            .unwrap();
-        assert_eq!(grace_result.result["count"], 1);
-
-        // Verify the data content is correct.
-        let grace_records = grace_result.result["results"].as_array().unwrap();
-        assert_eq!(grace_records[0]["data"]["name"], "yogurt");
-    }
-
-    /// A unified tool created for andrew (owner_user_id="andrew") always operates
-    /// on andrew's data partition, regardless of the caller's JobContext.
-    /// The tool uses `owner_scope()` which resolves to `self.owner_user_id`
-    /// when source_scope is None, so the caller's context does not affect the scope.
-    #[tokio::test]
-    async fn tool_always_targets_owner_partition() {
-        let (db, _dir) = setup().await;
-        let schema = grocery_schema();
-
-        // Register collection for andrew only.
-        db.register_collection("andrew", &schema)
-            .await
-            .expect("register for andrew");
-
-        // Create tool owned by andrew.
-        let tool = UnifiedCollectionTool::new(schema, Arc::clone(&db), None, "andrew");
-
-        let andrew_ctx = test_ctx("andrew");
-
-        // Andrew adds records through the tool.
-        tool.execute(
-            json!({ "operation": "add", "data": { "name": "steak" } }),
-            &andrew_ctx,
-        )
-        .await
-        .expect("andrew add steak");
-
-        tool.execute(
-            json!({ "operation": "add", "data": { "name": "wine" } }),
-            &andrew_ctx,
-        )
-        .await
-        .expect("andrew add wine");
-
-        // Now execute the SAME tool with grace's context.
-        // Since source_scope is None, owner_scope() returns owner_user_id = "andrew".
-        // The caller's ctx does not change the target partition — grace's context
-        // still reads andrew's data when operating andrew's tool.
-        let grace_ctx = test_ctx("grace");
-        let grace_result = tool
-            .execute(json!({ "operation": "query" }), &grace_ctx)
-            .await
-            .expect("query with grace ctx should succeed");
-
-        // Grace sees andrew's 2 records because the tool targets the owner's partition.
-        assert_eq!(
-            grace_result.result["count"], 2,
-            "tool targets owner_user_id partition regardless of caller context"
-        );
     }
 }

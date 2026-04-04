@@ -76,7 +76,6 @@ fn scoped_description(schema: &CollectionSchema, base: &str, owner_user_id: &str
 /// Used by read-only collection tools (query, summary). Write tools (add,
 /// update, delete) intentionally skip this and always operate on the caller's
 /// own scope.
-#[allow(dead_code)]
 pub(crate) async fn resolve_collection_scope(
     db: &dyn Database,
     caller_user_id: &str,
