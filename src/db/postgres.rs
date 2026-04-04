@@ -74,13 +74,15 @@ impl Database for PgBackend {
             .transaction()
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        // Only tables with a real `user_id` column participate in the legacy
+        // 'default' -> owner rewrite. `dynamic_tools` is intentionally excluded:
+        // it is ownerless today and scoped by `scope`, not `user_id`.
         let tables = [
             "conversations",
             "memory_documents",
             "heartbeat_state",
             "secrets",
             "wasm_tools",
-            "dynamic_tools",
             "routines",
             "settings",
             "agent_jobs",
