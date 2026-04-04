@@ -1,0 +1,48 @@
+[package]
+name = "proof_of_claw"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+description = "Proof of Claw — provable execution, ZK proofs, hardware approval for IronClaw agents"
+authors = ["Proof of Claw <proof@proofofclaw.xyz>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Proof-of-Claw/ProofOfClaw"
+
+[dependencies]
+# Ethereum / smart contracts
+ethers = { version = "2.0", default-features = false, features = ["rustls", "abigen", "eip712"] }
+
+# Cryptography
+blake3 = "1"
+sha2 = "0.10"
+hex = "0.4"
+
+# Async / networking
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+
+# Tracing / logging
+tracing = "0.1"
+
+# IronClaw peer crate (hooks system)
+ironclaw = { path = "../.." }
+
+# Std / serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
+async-trait = "0.1"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Unique identifiers
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Safety / parsing
+regex = "1"
+aho-corasick = "1"
+
+[dev-dependencies]
+tokio-test = "0.4"

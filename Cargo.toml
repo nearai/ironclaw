@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/ironclaw_common", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_engine"]
+members = [".", "crates/ironclaw_common", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_engine", "crates/proof_of_claw"]
 exclude = [
     "channels-src/discord",
     "channels-src/telegram",
