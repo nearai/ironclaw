@@ -1520,7 +1520,7 @@ impl Agent {
             Submission::Undo => self.process_undo(session, thread_id).await,
             Submission::Redo => self.process_redo(session, thread_id).await,
             Submission::Interrupt => self.process_interrupt(session, thread_id).await,
-            Submission::Compact => self.process_compact(session, thread_id).await,
+            Submission::Compact => self.process_compact(message, session, thread_id).await,
             Submission::Clear => self.process_clear(session, thread_id).await,
             Submission::NewThread => self.process_new_thread(message).await,
             Submission::Heartbeat => self.process_heartbeat().await,

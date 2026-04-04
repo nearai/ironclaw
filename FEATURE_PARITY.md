@@ -200,8 +200,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Session pruning | ✅ | ❌ | Auto cleanup old sessions |
 | Context compaction | ✅ | ✅ | Auto summarization |
 | Compaction model override | ✅ | ❌ | Use a dedicated provider/model for summarization only |
-| Post-compaction read audit | ✅ | ❌ | Layer 3: workspace rules appended to summaries |
-| Post-compaction context injection | ✅ | ❌ | Workspace context as system event |
+| Post-compaction read audit | ✅ | ✅ | Read-back audit via marker + Layer 3 rules (`src/agent/compaction.rs`) |
+| Post-compaction context injection | ✅ | ✅ | One-shot context queued on thread, injected as assistant-scoped historical note, and emitted as `post_compaction` system event (`src/agent/thread_ops.rs`, `src/agent/session.rs`) |
 | Custom system prompts | ✅ | ✅ | Template variables, safety guardrails |
 | Skills (modular capabilities) | ✅ | ✅ | Prompt-based skills with trust gating, attenuation, activation criteria, catalog, selector |
 | Skill routing blocks | ✅ | 🚧 | ActivationCriteria (keywords, patterns, tags) but no "Use when / Don't use when" blocks |
