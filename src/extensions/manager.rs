@@ -4212,12 +4212,7 @@ impl ExtensionManager {
         // is badly formatted" instead of 401 when auth is missing or invalid.
         let mcp_tools = client.list_tools().await.map_err(|e| {
             let msg = e.to_string();
-            let msg_lower = msg.to_ascii_lowercase();
-            if msg_lower.contains("requires authentication")
-                || msg.contains("401")
-                || (msg.contains("400")
-                    && (msg_lower.contains("authorization") || msg_lower.contains("authenticate")))
-            {
+            if crate::tools::mcp::is_auth_error_message(&msg) {
                 if server.has_custom_auth_header() {
                     ExtensionError::ActivationFailed(format!(
                         "MCP server '{}' rejected its configured Authorization header. Update the configured credential and try again.",

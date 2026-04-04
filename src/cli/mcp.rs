@@ -584,13 +584,8 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
         }
         Err(e) => {
             let err_str = e.to_string();
-            let err_lower = err_str.to_ascii_lowercase();
             // Check if server requires auth but we don't have valid tokens
-            if err_str.contains("401")
-                || err_lower.contains("requires authentication")
-                || (err_str.contains("400")
-                    && (err_lower.contains("authorization") || err_lower.contains("authenticate")))
-            {
+            if crate::tools::mcp::is_auth_error_message(&err_str) {
                 if has_tokens {
                     // We had tokens but they failed - need to re-authenticate
                     println!(

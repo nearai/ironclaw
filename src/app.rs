@@ -645,12 +645,7 @@ impl AppBuilder {
                                     }
                                     Err(e) => {
                                         let err_str = e.to_string();
-                                        let err_lower = err_str.to_ascii_lowercase();
-                                        if err_str.contains("401")
-                                            || err_lower.contains("authentication")
-                                            || (err_str.contains("400")
-                                                && (err_lower.contains("authorization")
-                                                    || err_lower.contains("authenticate")))
+                                        if crate::tools::mcp::is_auth_error_message(&err_str)
                                         {
                                             if has_custom_auth_header {
                                                 tracing::warn!(
