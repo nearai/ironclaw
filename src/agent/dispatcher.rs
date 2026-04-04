@@ -157,6 +157,15 @@ impl Agent {
                     safe_name, safe_version, trust_label, safe_content, suffix,
                 ));
             }
+            // Emit skill activation event so SSE consumers can track which skills were injected
+            let skill_names: Vec<String> = active_skills.iter().map(|s| s.name().to_string()).collect();
+            let _ = self.channels.send_status(
+                &message.channel,
+                StatusUpdate::SkillActivated { skill_names },
+                &message.metadata,
+            )
+            .await;
+
             Some(context_parts.join("\n\n"))
         } else {
             None
