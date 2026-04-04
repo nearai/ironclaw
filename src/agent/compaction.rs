@@ -363,6 +363,17 @@ Rules:
             }
         };
 
+        let memory_content = match workspace.memory().await {
+            Ok(doc) => doc.content,
+            Err(e) => {
+                tracing::warn!(
+                    "Structured memory dedupe read failed; proceeding without existing-memory check: {}",
+                    e
+                );
+                String::new()
+            }
+        };
+
         let mut seen = HashSet::new();
         let mut entries = Vec::new();
         for memory in parsed
@@ -379,10 +390,7 @@ Rules:
                 continue;
             }
 
-            if self
-                .structured_memory_exists(workspace, &memory.content)
-                .await
-            {
+            if Self::structured_memory_exists(&memory_content, &memory.content) {
                 continue;
             }
 
@@ -409,7 +417,7 @@ Rules:
     }
 
     /// Check whether a structured memory already appears in workspace search results.
-    async fn structured_memory_exists(&self, workspace: &Workspace, content: &str) -> bool {
+    fn structured_memory_exists(memory_content: &str, content: &str) -> bool {
         let query = content.trim();
         if query.is_empty() {
             return true;
@@ -417,12 +425,7 @@ Rules:
 
         let normalized_query = normalize_memory_text(query);
 
-        let Ok(memory_doc) = workspace.memory().await else {
-            tracing::warn!("Structured memory dedupe read failed; treating as new");
-            return false;
-        };
-
-        memory_doc.content.lines().any(|line| {
+        memory_content.lines().any(|line| {
             let normalized_existing = line
                 .trim()
                 .starts_with("- **")
