@@ -1634,8 +1634,8 @@ fn send_pairing_reply(chat_id: i64, code: &str) -> Result<(), String> {
     send_message(
         chat_id,
         &format!(
-            "To pair with this bot, run: `ironclaw pairing approve telegram {}`",
-            code
+            "Enter this code in IronClaw to pair your telegram account: `{}`. CLI fallback: `ironclaw pairing approve telegram {}`",
+            code, code
         ),
         None,
         Some("Markdown"),

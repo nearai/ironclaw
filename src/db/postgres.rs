@@ -16,9 +16,9 @@ use crate::agent::routine::{Routine, RoutineRun, RunStatus};
 use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
-    ApiTokenRecord, ConversationStore, Database, IdentityStore, JobStore, RoutineStore,
-    SandboxStore, SettingsStore, ToolFailureStore, UserIdentityRecord, UserRecord, UserStore,
-    WorkspaceStore,
+    ApiTokenRecord, ChannelPairingStore, ConversationStore, Database, IdentityStore, JobStore,
+    PairingRequestRecord, RoutineStore, SandboxStore, SettingsStore, ToolFailureStore,
+    UserIdentityRecord, UserRecord, UserStore, WorkspaceStore,
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
@@ -62,6 +62,45 @@ impl PgBackend {
 impl Database for PgBackend {
     async fn run_migrations(&self) -> Result<(), DatabaseError> {
         self.store.run_migrations().await
+    }
+
+    async fn migrate_default_owner(&self, owner_id: &str) -> Result<(), DatabaseError> {
+        let mut client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let tables = [
+            "conversations",
+            "memory_documents",
+            "heartbeat_state",
+            "secrets",
+            "wasm_tools",
+            "dynamic_tools",
+            "routines",
+            "settings",
+            "agent_jobs",
+            "api_tokens",
+        ];
+        for table in &tables {
+            tx.execute(
+                &format!(
+                    "UPDATE {} SET user_id = $1 WHERE user_id = 'default'",
+                    table
+                ),
+                &[&owner_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("migrate_default_owner {table}: {e}")))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
     }
 }
 
@@ -904,6 +943,35 @@ impl UserStore for PgBackend {
         self.store.create_user(user).await
     }
 
+    async fn get_or_create_user(&self, user: UserRecord) -> Result<(), DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        client
+            .execute(
+                "INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 ON CONFLICT (id) DO NOTHING",
+                &[
+                    &user.id,
+                    &user.email,
+                    &user.display_name,
+                    &user.status,
+                    &user.role,
+                    &user.created_at,
+                    &user.updated_at,
+                    &user.last_login_at,
+                    &user.created_by,
+                    &user.metadata,
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("get_or_create_user: {e}")))?;
+        Ok(())
+    }
+
     async fn get_user(&self, id: &str) -> Result<Option<UserRecord>, DatabaseError> {
         self.store.get_user(id).await
     }
@@ -1005,6 +1073,294 @@ impl UserStore for PgBackend {
         self.store
             .create_user_with_token(user, token_name, token_hash, token_prefix, expires_at)
             .await
+    }
+}
+
+// ==================== ChannelPairingStore ====================
+
+#[async_trait]
+impl ChannelPairingStore for PgBackend {
+    async fn resolve_channel_identity(
+        &self,
+        channel: &str,
+        external_id: &str,
+    ) -> Result<Option<crate::ownership::Identity>, DatabaseError> {
+        use crate::ownership::{Identity, OwnerId, UserRole};
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let row = client
+            .query_opt(
+                "SELECT ci.owner_id, u.role
+                 FROM channel_identities ci
+                 JOIN users u ON u.id = ci.owner_id
+                 WHERE ci.channel = $1 AND ci.external_id = $2
+                   AND u.status = 'active'",
+                &[&channel, &external_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(row.map(|r| {
+            let owner_id: String = r.get(0);
+            let role_str: String = r.get(1);
+            let role = if role_str.eq_ignore_ascii_case("admin") {
+                UserRole::Admin
+            } else {
+                UserRole::Member
+            };
+            Identity::new(OwnerId::from(owner_id), role)
+        }))
+    }
+
+    async fn read_allow_from(&self, channel: &str) -> Result<Vec<String>, DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let rows = client
+            .query(
+                "SELECT ci.external_id
+                 FROM channel_identities ci
+                 JOIN users u ON u.id = ci.owner_id
+                 WHERE ci.channel = $1
+                   AND u.status = 'active'
+                 ORDER BY ci.external_id ASC",
+                &[&channel],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(rows.into_iter().map(|row| row.get(0)).collect())
+    }
+
+    async fn upsert_pairing_request(
+        &self,
+        channel: &str,
+        external_id: &str,
+        meta: Option<serde_json::Value>,
+    ) -> Result<PairingRequestRecord, DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let mut client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        // Serialize upserts for the same normalized sender key so PostgreSQL
+        // preserves the single-live-code guarantee that libSQL gets from
+        // BEGIN IMMEDIATE.
+        let lock_key = format!(
+            "{}:{}:{}:{}",
+            channel.len(),
+            channel,
+            external_id.len(),
+            external_id
+        );
+        tx.query(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&lock_key],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        // Return existing valid pending request if present
+        let existing = tx
+            .query_opt(
+                "SELECT id, channel, external_id, code, created_at, expires_at
+                 FROM pairing_requests
+                 WHERE channel = $1 AND external_id = $2
+                   AND approved_at IS NULL AND expires_at > NOW()
+                 ORDER BY created_at DESC LIMIT 1",
+                &[&channel, &external_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        if let Some(row) = existing {
+            tx.commit()
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            return Ok(PairingRequestRecord {
+                id: row.get(0),
+                channel: row.get(1),
+                external_id: row.get(2),
+                code: row.get(3),
+                created: false,
+                created_at: row.get(4),
+                expires_at: row.get(5),
+            });
+        }
+
+        let expires_at = chrono::Utc::now() + chrono::Duration::minutes(15);
+        let meta_json: Option<serde_json::Value> = meta;
+
+        // Retry loop: regenerate code on UNIQUE violation (code collision)
+        for attempt in 0..3 {
+            let code = crate::db::generate_pairing_code();
+            match tx
+                .query_one(
+                    "INSERT INTO pairing_requests (id, channel, external_id, code, meta, expires_at)
+                     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)
+                     RETURNING id, channel, external_id, code, created_at, expires_at",
+                    &[&channel, &external_id, &code, &meta_json, &expires_at],
+                )
+                .await
+            {
+                Ok(row) => {
+                    tx.commit()
+                        .await
+                        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                    return Ok(PairingRequestRecord {
+                        id: row.get(0),
+                        channel: row.get(1),
+                        external_id: row.get(2),
+                        code: row.get(3),
+                        created: true,
+                        created_at: row.get(4),
+                        expires_at: row.get(5),
+                    });
+                }
+                Err(e) => {
+                    let is_unique = e
+                        .code()
+                        .is_some_and(|c| *c == tokio_postgres::error::SqlState::UNIQUE_VIOLATION);
+                    if attempt < 2 && is_unique {
+                        continue;
+                    }
+                    return Err(DatabaseError::Query(e.to_string()));
+                }
+            }
+        }
+
+        Err(DatabaseError::Query(
+            "failed to generate unique pairing code after 3 attempts".to_string(),
+        ))
+    }
+
+    async fn approve_pairing(
+        &self,
+        channel: &str,
+        code: &str,
+        owner_id: &str,
+    ) -> Result<(), DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let mut client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let row = tx
+            .query_opt(
+                "SELECT id, channel, external_id FROM pairing_requests
+                 WHERE UPPER(code) = UPPER($1)
+                   AND channel = $2
+                   AND approved_at IS NULL
+                   AND expires_at > NOW()
+                 FOR UPDATE",
+                &[&code, &channel],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+            .ok_or_else(|| DatabaseError::NotFound {
+                entity: "pairing_request".to_string(),
+                id: code.to_string(),
+            })?;
+
+        let req_id: uuid::Uuid = row.get(0);
+        let channel: String = row.get(1);
+        let external_id: String = row.get(2);
+
+        tx.execute(
+            "UPDATE pairing_requests SET owner_id = $1, approved_at = NOW() WHERE id = $2",
+            &[&owner_id, &req_id],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        tx.execute(
+            "INSERT INTO channel_identities (id, owner_id, channel, external_id)
+             VALUES (gen_random_uuid(), $1, $2, $3)
+             ON CONFLICT (channel, external_id) DO UPDATE SET owner_id = $1",
+            &[&owner_id, &channel, &external_id],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn list_pending_pairings(
+        &self,
+        channel: &str,
+    ) -> Result<Vec<PairingRequestRecord>, DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let rows = client
+            .query(
+                "SELECT id, channel, external_id, code, created_at, expires_at
+                 FROM pairing_requests
+                 WHERE channel = $1 AND approved_at IS NULL AND expires_at > NOW()
+                 ORDER BY created_at ASC",
+                &[&channel],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(rows
+            .iter()
+            .map(|r| PairingRequestRecord {
+                id: r.get(0),
+                channel: r.get(1),
+                external_id: r.get(2),
+                code: r.get(3),
+                created: false,
+                created_at: r.get(4),
+                expires_at: r.get(5),
+            })
+            .collect())
+    }
+
+    async fn remove_channel_identity(
+        &self,
+        channel: &str,
+        external_id: &str,
+    ) -> Result<(), DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        client
+            .execute(
+                "DELETE FROM channel_identities WHERE channel = $1 AND external_id = $2",
+                &[&channel, &external_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
     }
 }
 

@@ -517,16 +517,23 @@ fn handle_message_event(event_data: &serde_json::Value) {
     // DM pairing check for p2p chats.
     let chat_type = msg_event.message.chat_type.as_deref().unwrap_or("unknown");
 
+    // Resolved user_id for the emitted message. Defaults to sender_id but
+    // is overwritten with the owner_id when the sender is paired, ensuring
+    // the message is scoped to the correct owner/tenant.
+    let mut user_id = sender_id.to_string();
+
     if chat_type == "p2p" {
         let dm_policy =
             channel_host::workspace_read(DM_POLICY_PATH).unwrap_or_else(|| "pairing".to_string());
 
         if dm_policy == "pairing" {
-            let sender_name = sender_id.to_string();
-            match channel_host::pairing_is_allowed("feishu", sender_id, Some(&sender_name)) {
-                Ok(true) => {}
-                Ok(false) => {
-                    // Upsert a pairing request.
+            match channel_host::pairing_resolve_identity("feishu", sender_id) {
+                Ok(Some(owner_id)) => {
+                    // Sender is paired; scope message to owner.
+                    user_id = owner_id;
+                }
+                Ok(None) => {
+                    // Unknown sender — upsert a pairing request.
                     let meta = serde_json::json!({
                         "sender_id": sender_id,
                         "chat_id": msg_event.message.chat_id,
@@ -586,7 +593,7 @@ fn handle_message_event(event_data: &serde_json::Value) {
 
     // Emit message to the agent.
     channel_host::emit_message(&EmittedMessage {
-        user_id: sender_id.to_string(),
+        user_id,
         user_name: None,
         content: text,
         thread_id,
