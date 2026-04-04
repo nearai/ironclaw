@@ -126,12 +126,20 @@ pub struct RoutineEngine {
     /// Sender for injecting routine-review messages into the agent loop.
     inject_tx: Option<mpsc::Sender<IncomingMessage>>,
     /// Hourly agent review counter (rate limit).
+    ///
+    /// **Scope:** Global per-engine, not per-routine or per-tenant. In a
+    /// multi-tenant deployment, one noisy tenant can exhaust the hourly budget
+    /// for all tenants. Per-routine tracking would require a `HashMap` under a
+    /// lock instead of a single atomic — a worthwhile follow-up but out of
+    /// scope for the initial implementation.
     agent_review_count: Arc<AtomicU32>,
     /// Timestamp (epoch secs) when the hourly review window started.
     agent_review_window_start: Arc<std::sync::atomic::AtomicI64>,
-    /// Consecutive agent review failures (circuit breaker). Per-routine tracking
-    /// is not feasible with atomics alone, so this is a global counter that
-    /// trips the circuit breaker for all routines.
+    /// Consecutive agent review failures (circuit breaker).
+    ///
+    /// **Scope:** Global per-engine (same caveat as `agent_review_count`).
+    /// One routine with a broken inject_tx can trip the breaker for all
+    /// routines. Per-routine circuit breakers are a future improvement.
     agent_review_consecutive_failures: Arc<AtomicU32>,
     /// Timestamp when this engine instance was created. Used by
     /// `sync_dispatched_runs` to distinguish orphaned runs (from a previous

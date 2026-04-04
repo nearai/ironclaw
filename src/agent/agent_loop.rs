@@ -127,12 +127,41 @@ async fn resolve_routine_notification_target(
 }
 
 pub(crate) fn chat_tool_execution_metadata(message: &IncomingMessage) -> serde_json::Value {
+    // For RoutineReview messages, the real notify target is in metadata
+    // (not in message.channel, which is the synthetic "routine-review").
+    let (channel, user, thread_id) = if message.source == MessageSource::RoutineReview {
+        let ch = message
+            .metadata
+            .get("notify_channel")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&message.channel);
+        let usr = message
+            .metadata
+            .get("notify_user")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&message.user_id);
+        let tid = message
+            .metadata
+            .get("notify_thread_id")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| message.thread_id.clone());
+        (ch.to_string(), usr.to_string(), tid)
+    } else {
+        (
+            message.channel.clone(),
+            message
+                .routing_target()
+                .unwrap_or_else(|| message.user_id.clone()),
+            message.thread_id.clone(),
+        )
+    };
     serde_json::json!({
-        "notify_channel": message.channel,
-        "notify_user": message
-            .routing_target()
-            .unwrap_or_else(|| message.user_id.clone()),
-        "notify_thread_id": message.thread_id,
+        "notify_channel": channel,
+        "notify_user": user,
+        "notify_thread_id": thread_id,
         "notify_metadata": message.metadata,
     })
 }
@@ -945,6 +974,8 @@ impl Agent {
                         if let Some(content) = final_content {
                             // Route via broadcast (not channel.respond) because
                             // "routine-review" is not a real channel.
+                            // Use resolve_routine_notification_target() for
+                            // consistency with normal routine notifications.
                             let notify_channel = message
                                 .metadata
                                 .get("notify_channel")
@@ -957,12 +988,15 @@ impl Agent {
                                 .and_then(|v| v.as_str())
                                 .map(String::from);
 
-                            let target_user = message
-                                .metadata
-                                .get("notify_user")
-                                .and_then(|v| v.as_str())
-                                .filter(|s| !s.is_empty())
-                                .unwrap_or(&message.user_id);
+                            let target_user = match resolve_routine_notification_target(
+                                self.deps.extension_manager.as_ref(),
+                                &message.metadata,
+                            )
+                            .await
+                            {
+                                Some(user) => user,
+                                None => message.user_id.clone(),
+                            };
 
                             let outgoing = OutgoingResponse {
                                 content,
@@ -974,7 +1008,7 @@ impl Agent {
                             if let Some(channel) = notify_channel {
                                 if let Err(e) = self
                                     .channels
-                                    .broadcast(channel, target_user, outgoing.clone())
+                                    .broadcast(channel, &target_user, outgoing.clone())
                                     .await
                                 {
                                     tracing::warn!(
@@ -983,7 +1017,7 @@ impl Agent {
                                         "Failed to send routine review response, falling back"
                                     );
                                     let results =
-                                        self.channels.broadcast_all(target_user, outgoing).await;
+                                        self.channels.broadcast_all(&target_user, outgoing).await;
                                     if results.iter().all(|(_, r)| r.is_err())
                                         && !results.is_empty()
                                     {
@@ -1010,7 +1044,7 @@ impl Agent {
                                     );
                                 }
                                 let results =
-                                    self.channels.broadcast_all(target_user, outgoing).await;
+                                    self.channels.broadcast_all(&target_user, outgoing).await;
                                 if results.iter().all(|(_, r)| r.is_err()) && !results.is_empty() {
                                     tracing::warn!(
                                         "Routine review response failed to deliver on all channels"
@@ -1244,7 +1278,29 @@ impl Agent {
 
                 return match result {
                     Ok(SubmissionResult::Response { content }) => Ok(Some(content)),
-                    Ok(SubmissionResult::Ok { message: msg }) => Ok(Some(msg.unwrap_or_default())),
+                    Ok(SubmissionResult::Ok { message: msg }) => {
+                        // If the thread was already Processing, the message was
+                        // queued. Don't surface the "Message queued" ack as a
+                        // routine-review response — it would be sent to the
+                        // user as if it were the actual review.
+                        if msg.as_deref().is_some_and(|m| m.contains("queued")) {
+                            tracing::debug!(
+                                "Routine review queued (thread was busy), will be processed later"
+                            );
+                            Ok(Some(String::new()))
+                        } else {
+                            Ok(Some(msg.unwrap_or_default()))
+                        }
+                    }
+                    Ok(SubmissionResult::NeedApproval { .. }) => {
+                        // Routine-review turns should never prompt for approval
+                        // (autonomous tool denylist filters approval-requiring
+                        // tools). If one slips through, don't wedge the thread.
+                        tracing::warn!(
+                            "Routine review requested tool approval — auto-denying to prevent stuck thread"
+                        );
+                        Ok(Some(String::new()))
+                    }
                     Ok(SubmissionResult::Error { message: err }) => Ok(Some(err)),
                     Ok(_) => {
                         tracing::debug!("Routine review returned non-standard result");
