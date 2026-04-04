@@ -4353,6 +4353,339 @@ mod owner_scope_tests {
     }
 }
 
+/// Multi-tenant tool visibility tests — validates that `generate_collection_tools()` +
+/// `ToolRegistry::tool_definitions_for_user()` produce the correct per-user tool sets.
+///
+/// Exercises the full path: schema → generate_collection_tools → registry.register →
+/// tool_definitions_for_user filter. Three tenants: two members (alice, bob) and a
+/// shared scope (shared). Members with read scopes see the shared tools; the shared
+/// scope with no read scopes sees only its own.
+///
+/// Covers:
+/// - Each user sees only its own collection tools (no cross-user leakage)
+/// - workspace_read_scopes grants visibility to other users' tools
+/// - source_scope tools use the source as the name prefix
+/// - No duplicate tools when cross-scope schemas mirror own schemas
+/// - Unscoped users see only their own tools
+/// - Tool execution gating matches tool visibility
+#[cfg(all(test, feature = "libsql"))]
+mod multi_lens_tool_visibility_tests {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use crate::db::Database;
+    use crate::db::libsql::LibSqlBackend;
+    use crate::db::structured::{CollectionSchema, FieldDef, FieldType};
+    use crate::tools::builtin::collections::generate_collection_tools;
+    use crate::tools::registry::ToolRegistry;
+
+    fn simple_schema(collection: &str, source_scope: Option<&str>) -> CollectionSchema {
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "item".to_string(),
+            FieldDef {
+                field_type: FieldType::Text,
+                required: true,
+                default: None,
+            },
+        );
+        CollectionSchema {
+            collection: collection.to_string(),
+            description: Some(format!("test {collection}")),
+            fields,
+            source_scope: source_scope.map(|s| s.to_string()),
+        }
+    }
+
+    async fn make_db() -> (Arc<dyn Database>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+        (Arc::new(backend), dir)
+    }
+
+    async fn register_tools(
+        registry: &ToolRegistry,
+        db: &Arc<dyn Database>,
+        schema: &CollectionSchema,
+        owner_user_id: &str,
+    ) {
+        let tools = generate_collection_tools(schema, Arc::clone(db), None, owner_user_id);
+        for tool in tools {
+            registry.register(tool).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn user_sees_only_own_tools_without_scopes() {
+        let (db, _dir) = make_db().await;
+        let registry = ToolRegistry::new();
+
+        register_tools(&registry, &db, &simple_schema("tasks", None), "alice").await;
+        register_tools(&registry, &db, &simple_schema("diary", None), "bob").await;
+        register_tools(
+            &registry,
+            &db,
+            &simple_schema("expenses", None),
+            "shared",
+        )
+        .await;
+
+        let defs = registry.tool_definitions_for_user("alice", &[]).await;
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+
+        assert!(names.contains(&"alice_tasks_query"), "should see own tools");
+        assert!(names.contains(&"alice_tasks_add"), "should see own tools");
+        assert!(
+            !names.iter().any(|n| n.starts_with("bob_")),
+            "should NOT see bob's tools: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("shared_")),
+            "should NOT see shared tools: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_sees_shared_tools_with_read_scope() {
+        let (db, _dir) = make_db().await;
+        let registry = ToolRegistry::new();
+
+        register_tools(&registry, &db, &simple_schema("tasks", None), "alice").await;
+        register_tools(&registry, &db, &simple_schema("diary", None), "bob").await;
+        register_tools(
+            &registry,
+            &db,
+            &simple_schema("expenses", None),
+            "shared",
+        )
+        .await;
+
+        let scopes = vec!["shared".to_string()];
+        let defs = registry.tool_definitions_for_user("alice", &scopes).await;
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+
+        assert!(names.contains(&"alice_tasks_query"), "should see own");
+        assert!(
+            names.contains(&"shared_expenses_query"),
+            "should see shared via scope: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("bob_")),
+            "should NOT see bob (not in scopes): {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_sees_all_with_full_scopes() {
+        let (db, _dir) = make_db().await;
+        let registry = ToolRegistry::new();
+
+        register_tools(&registry, &db, &simple_schema("tasks", None), "alice").await;
+        register_tools(&registry, &db, &simple_schema("diary", None), "bob").await;
+        register_tools(
+            &registry,
+            &db,
+            &simple_schema("expenses", None),
+            "shared",
+        )
+        .await;
+
+        let scopes = vec!["bob".to_string(), "shared".to_string()];
+        let defs = registry.tool_definitions_for_user("alice", &scopes).await;
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+
+        assert!(names.contains(&"alice_tasks_add"));
+        assert!(names.contains(&"bob_diary_query"));
+        assert!(names.contains(&"shared_expenses_summary"));
+        let collection_tools: Vec<&&str> = names
+            .iter()
+            .filter(|n| {
+                n.starts_with("alice_") || n.starts_with("bob_") || n.starts_with("shared_")
+            })
+            .collect();
+        assert_eq!(
+            collection_tools.len(),
+            15,
+            "should see exactly 15 collection tools (5 per collection x 3): {collection_tools:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unscoped_user_sees_only_own_tools() {
+        let (db, _dir) = make_db().await;
+        let registry = ToolRegistry::new();
+
+        register_tools(&registry, &db, &simple_schema("tasks", None), "alice").await;
+        register_tools(&registry, &db, &simple_schema("diary", None), "bob").await;
+        register_tools(
+            &registry,
+            &db,
+            &simple_schema("expenses", None),
+            "shared",
+        )
+        .await;
+
+        let defs = registry.tool_definitions_for_user("shared", &[]).await;
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+
+        assert!(
+            names.contains(&"shared_expenses_query"),
+            "should see own tools"
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("alice_")),
+            "must NOT see alice's tools: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("bob_")),
+            "must NOT see bob's tools: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_duplicates_with_same_collection_name_different_owners() {
+        let (db, _dir) = make_db().await;
+        let registry = ToolRegistry::new();
+
+        register_tools(&registry, &db, &simple_schema("tasks", None), "alice").await;
+        register_tools(&registry, &db, &simple_schema("tasks", None), "bob").await;
+
+        let scopes = vec!["bob".to_string()];
+        let defs = registry.tool_definitions_for_user("alice", &scopes).await;
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+
+        assert!(names.contains(&"alice_tasks_add"));
+        assert!(names.contains(&"bob_tasks_add"));
+        assert_eq!(
+            names.len(),
+            10,
+            "should have exactly 10 tools (no duplicates): {names:?}"
+        );
+
+        let unique: std::collections::HashSet<&&str> = names.iter().collect();
+        assert_eq!(names.len(), unique.len(), "all tool names should be unique");
+    }
+
+    #[tokio::test]
+    async fn cross_scope_schema_does_not_double_register() {
+        let (db, _dir) = make_db().await;
+        let registry = ToolRegistry::new();
+
+        register_tools(
+            &registry,
+            &db,
+            &simple_schema("expenses", None),
+            "shared",
+        )
+        .await;
+
+        let cross_schema = simple_schema("expenses", Some("shared"));
+        register_tools(&registry, &db, &cross_schema, "alice").await;
+
+        let all = registry.all().await;
+        let expense_tools: Vec<_> = all
+            .iter()
+            .filter(|t| t.name().contains("expenses"))
+            .collect();
+
+        assert_eq!(
+            expense_tools.len(),
+            5,
+            "cross-scope registration should not create duplicates: {:?}",
+            expense_tools
+                .iter()
+                .map(|t| t.name())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_gating_matches_visibility() {
+        let (db, _dir) = make_db().await;
+        let registry = ToolRegistry::new();
+
+        register_tools(&registry, &db, &simple_schema("diary", None), "bob").await;
+
+        let tool = registry
+            .get_for_user("bob_diary_query", "alice", &[])
+            .await;
+        assert!(
+            tool.is_none(),
+            "alice should not execute bob's tool without scope"
+        );
+
+        let scopes = vec!["bob".to_string()];
+        let tool = registry
+            .get_for_user("bob_diary_query", "alice", &scopes)
+            .await;
+        assert!(
+            tool.is_some(),
+            "alice should execute bob's tool with scope"
+        );
+
+        let tool = registry
+            .get_for_user("bob_diary_query", "bob", &[])
+            .await;
+        assert!(tool.is_some(), "owner should always access own tool");
+    }
+
+    #[tokio::test]
+    async fn initialize_for_users_registers_correct_tools() {
+        let (db, _dir) = make_db().await;
+        let registry = Arc::new(ToolRegistry::new());
+
+        db.register_collection("alice", &simple_schema("tasks", None))
+            .await
+            .unwrap();
+        db.register_collection("bob", &simple_schema("diary", None))
+            .await
+            .unwrap();
+        db.register_collection("shared", &simple_schema("expenses", None))
+            .await
+            .unwrap();
+
+        super::initialize_collection_tools_for_users(
+            &[
+                "alice".to_string(),
+                "bob".to_string(),
+                "shared".to_string(),
+            ],
+            &db,
+            &registry,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let alice_defs = registry
+            .tool_definitions_for_user("alice", &["shared".to_string()])
+            .await;
+        let alice_names: Vec<&str> = alice_defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(alice_names.contains(&"alice_tasks_add"));
+        assert!(alice_names.contains(&"shared_expenses_query"));
+        assert!(
+            !alice_names.iter().any(|n| n.starts_with("bob_")),
+            "alice should not see bob's tools without scope"
+        );
+
+        let shared_defs = registry.tool_definitions_for_user("shared", &[]).await;
+        let shared_names: Vec<&str> = shared_defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(shared_names.contains(&"shared_expenses_add"));
+        assert!(
+            !shared_names.iter().any(|n| n.starts_with("alice_")),
+            "shared must not see alice's tools: {shared_names:?}"
+        );
+        assert!(
+            !shared_names.iter().any(|n| n.starts_with("bob_")),
+            "shared must not see bob's tools: {shared_names:?}"
+        );
+    }
+}
+
 /// Cross-scope integration tests using file-backed libsql (no postgres dependency).
 ///
 /// These tests validate:
