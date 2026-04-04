@@ -317,6 +317,14 @@ impl LoadedChannel {
             .map(|f| f.webhook_secret_name())
             .unwrap_or_else(|| format!("{}_webhook_secret", self.channel.channel_name()))
     }
+
+    /// Whether the host should enforce generic webhook-secret validation.
+    pub fn webhook_secret_managed_by_host(&self) -> bool {
+        self.capabilities_file
+            .as_ref()
+            .map(|f| f.webhook_secret_managed_by_host())
+            .unwrap_or(true)
+    }
 }
 
 /// Results from loading multiple channels.
@@ -492,7 +500,7 @@ mod tests {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
         let loader =
-            WasmChannelLoader::new(runtime, Arc::new(PairingStore::new()), None, "default");
+            WasmChannelLoader::new(runtime, Arc::new(PairingStore::new_noop()), None, "default");
 
         let dir = TempDir::new().unwrap();
         let wasm_path = dir.path().join("test.wasm");
@@ -511,7 +519,7 @@ mod tests {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
         let loader =
-            WasmChannelLoader::new(runtime, Arc::new(PairingStore::new()), None, "default");
+            WasmChannelLoader::new(runtime, Arc::new(PairingStore::new_noop()), None, "default");
 
         let dir = TempDir::new().unwrap();
         let missing = dir.path().join("nonexistent_channels_dir");

@@ -253,6 +253,6 @@ async def test_telegram_hot_activation_transitions_installed_to_active(page):
     assert await card.locator(SEL["ext_pairing_label"]).count() == 0
 
     assert captured_setup_payloads == [
-        {"secrets": {"telegram_bot_token": "123456789:ABCdefGhI"}},
-        {"secrets": {}},
+        {"secrets": {"telegram_bot_token": "123456789:ABCdefGhI"}, "fields": {}},
+        {"secrets": {}, "fields": {}},
     ]

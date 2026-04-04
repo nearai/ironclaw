@@ -8,8 +8,8 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::context::{ContextManager, JobState};
-use crate::db::Database;
 use crate::error::RepairError;
+use crate::tenant::SystemScope;
 use crate::tools::{BuildRequirement, Language, SoftwareBuilder, SoftwareType, ToolRegistry};
 
 /// A job that has been detected as stuck.
@@ -69,7 +69,7 @@ pub struct DefaultSelfRepair {
     /// Jobs in `InProgress` longer than this are treated as stuck.
     stuck_threshold: Duration,
     max_repair_attempts: u32,
-    store: Option<Arc<dyn Database>>,
+    store: Option<SystemScope>,
     builder: Option<Arc<dyn SoftwareBuilder>>,
     tools: Option<Arc<ToolRegistry>>,
 }
@@ -91,8 +91,8 @@ impl DefaultSelfRepair {
         }
     }
 
-    /// Add a Store for tool failure tracking.
-    pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
+    /// Add a system-scoped store for tool failure tracking.
+    pub fn with_store(mut self, store: SystemScope) -> Self {
         self.store = Some(store);
         self
     }
@@ -806,7 +806,7 @@ mod tests {
         // Create self-repair with zero threshold (detect immediately),
         // wired with store, builder, and tools.
         let repair = DefaultSelfRepair::new(Arc::clone(&cm), Duration::from_secs(0), 3)
-            .with_store(Arc::clone(&db))
+            .with_store(crate::tenant::SystemScope::new(Arc::clone(&db)))
             .with_builder(
                 Arc::clone(&builder) as Arc<dyn crate::tools::SoftwareBuilder>,
                 tools,

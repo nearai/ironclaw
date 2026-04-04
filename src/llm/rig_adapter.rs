@@ -301,6 +301,10 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
             }
             crate::llm::Role::User => {
                 if msg.content_parts.is_empty() {
+                    // Skip empty user messages — some providers (e.g. Kimi) reject "content": ""
+                    if msg.content.is_empty() {
+                        continue;
+                    }
                     history.push(RigMessage::user(&msg.content));
                 } else {
                     // Build multimodal user message with text + image parts
@@ -364,6 +368,12 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                         history.push(RigMessage::assistant(&msg.content));
                     }
                 } else {
+                    // Skip empty assistant messages — these occur when thinking-tag stripping
+                    // leaves a blank response; sending "content": "" causes 400 on strict
+                    // OpenAI-compatible providers (e.g. Kimi).
+                    if msg.content.is_empty() {
+                        continue;
+                    }
                     history.push(RigMessage::assistant(&msg.content));
                 }
             }
@@ -490,6 +500,7 @@ fn extract_response(
                     id: tc.id.clone(),
                     name: tc.function.name.clone(),
                     arguments: tc.function.arguments.clone(),
+                    reasoning: None,
                 });
             }
             // Reasoning and Image variants are not mapped to IronClaw types
@@ -597,6 +608,33 @@ fn build_rig_request(
     })
 }
 
+/// Inject a per-request model override into the rig request's `additional_params`.
+///
+/// Rig-core bakes the model name at construction time inside each provider's
+/// `CompletionModel` implementation. This helper inserts a top-level `"model"`
+/// key into `additional_params`, which rig-core flattens into the provider's
+/// request payload via `#[serde(flatten)]`.
+///
+/// Whether the override takes effect depends on the downstream API server's
+/// handling of duplicate JSON keys (most Python/Go servers use last-key-wins,
+/// but this is not guaranteed by the JSON spec). The `effective_model_name()`
+/// trait method should be consulted to determine the model actually used.
+fn inject_model_override(rig_req: &mut RigRequest, model_override: Option<&str>) {
+    let Some(model) = model_override else {
+        return;
+    };
+    match rig_req.additional_params {
+        Some(ref mut params) => {
+            if let Some(obj) = params.as_object_mut() {
+                obj.insert("model".to_string(), serde_json::json!(model));
+            }
+        }
+        None => {
+            rig_req.additional_params = Some(serde_json::json!({ "model": model }));
+        }
+    }
+}
+
 #[async_trait]
 impl<M> LlmProvider for RigAdapter<M>
 where
@@ -631,15 +669,7 @@ where
         &self,
         mut request: CompletionRequest,
     ) -> Result<CompletionResponse, LlmError> {
-        if let Some(requested_model) = request.model.as_deref()
-            && requested_model != self.model_name.as_str()
-        {
-            tracing::warn!(
-                requested_model = requested_model,
-                active_model = %self.model_name,
-                "Per-request model override is not supported for this provider; using configured model"
-            );
-        }
+        let model_override = request.model.take();
 
         self.strip_unsupported_completion_params(&mut request);
 
@@ -647,7 +677,7 @@ where
         crate::llm::provider::sanitize_tool_messages(&mut messages);
         let (preamble, history) = convert_messages(&messages);
 
-        let rig_req = build_rig_request(
+        let mut rig_req = build_rig_request(
             preamble,
             history,
             Vec::new(),
@@ -656,6 +686,8 @@ where
             request.max_tokens,
             self.cache_retention,
         )?;
+
+        inject_model_override(&mut rig_req, model_override.as_deref());
 
         let response =
             self.model
@@ -694,15 +726,7 @@ where
         &self,
         mut request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        if let Some(requested_model) = request.model.as_deref()
-            && requested_model != self.model_name.as_str()
-        {
-            tracing::warn!(
-                requested_model = requested_model,
-                active_model = %self.model_name,
-                "Per-request model override is not supported for this provider; using configured model"
-            );
-        }
+        let model_override = request.model.take();
 
         self.strip_unsupported_tool_params(&mut request);
 
@@ -715,7 +739,7 @@ where
         let tools = convert_tools(&request.tools);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
 
-        let rig_req = build_rig_request(
+        let mut rig_req = build_rig_request(
             preamble,
             history,
             tools,
@@ -724,6 +748,8 @@ where
             request.max_tokens,
             self.cache_retention,
         )?;
+
+        inject_model_override(&mut rig_req, model_override.as_deref());
 
         let response =
             self.model
@@ -880,6 +906,7 @@ mod tests {
             id: "Xt7mK9pQ2".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
+            reasoning: None,
         };
         let msg = ChatMessage::assistant_with_tool_calls(Some("thinking".to_string()), vec![tc]);
         let messages = vec![msg];
@@ -997,6 +1024,7 @@ mod tests {
             id: "".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
+            reasoning: None,
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
         let (_preamble, history) = convert_messages(&messages);
@@ -1028,6 +1056,7 @@ mod tests {
             id: "   ".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
+            reasoning: None,
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
         let (_preamble, history) = convert_messages(&messages);
@@ -1061,6 +1090,7 @@ mod tests {
             id: "".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
+            reasoning: None,
         };
         let assistant_msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
         let tool_result_msg = ChatMessage {
@@ -1380,11 +1410,13 @@ mod tests {
             id: "call_a".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "rust"}),
+            reasoning: None,
         };
         let tc2 = IronToolCall {
             id: "call_b".to_string(),
             name: "fetch".to_string(),
             arguments: serde_json::json!({"url": "https://example.com"}),
+            reasoning: None,
         };
         let assistant = ChatMessage::assistant_with_tool_calls(None, vec![tc1, tc2]);
         let result_a = ChatMessage::tool_result("call_a", "search", "search results");
@@ -1432,6 +1464,70 @@ mod tests {
 
         // Should be 2 separate User messages (text user + tool result user)
         assert_eq!(history.len(), 2);
+    }
+
+    /// Empty user messages (e.g. after thinking-tag stripping) must be skipped.
+    /// Strict providers like Kimi return 400 when "content": "" is sent.
+    #[test]
+    fn test_empty_user_message_is_skipped() {
+        let empty = ChatMessage::user("");
+        let non_empty = ChatMessage::user("hello");
+        let messages = vec![empty, non_empty];
+        let (_preamble, history) = convert_messages(&messages);
+
+        assert_eq!(history.len(), 1, "empty user message must be dropped");
+        match &history[0] {
+            RigMessage::User { content } => {
+                assert_eq!(content.len(), 1);
+                let first = content.iter().next().expect("one content item");
+                match first {
+                    UserContent::Text(t) => assert_eq!(t.text, "hello"),
+                    other => panic!("expected Text, got {:?}", other),
+                }
+            }
+            other => panic!("expected User message, got {:?}", other),
+        }
+    }
+
+    /// Empty assistant messages (e.g. after thinking-tag stripping) must be skipped.
+    #[test]
+    fn test_empty_assistant_message_is_skipped() {
+        let empty_asst = ChatMessage {
+            role: crate::llm::Role::Assistant,
+            content: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            content_parts: vec![],
+        };
+        let non_empty = ChatMessage::user("hi");
+        let messages = vec![empty_asst, non_empty];
+        let (_preamble, history) = convert_messages(&messages);
+
+        assert_eq!(history.len(), 1, "empty assistant message must be dropped");
+        assert!(matches!(history[0], RigMessage::User { .. }));
+    }
+
+    /// A conversation mixing normal and empty messages: only non-empty ones survive.
+    #[test]
+    fn test_mixed_empty_and_non_empty_messages_filtered_correctly() {
+        let user1 = ChatMessage::user("first");
+        let empty_asst = ChatMessage {
+            role: crate::llm::Role::Assistant,
+            content: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            content_parts: vec![],
+        };
+        let user2 = ChatMessage::user("");
+        let asst = ChatMessage::assistant("response");
+        let messages = vec![user1, empty_asst, user2, asst];
+        let (_preamble, history) = convert_messages(&messages);
+
+        assert_eq!(history.len(), 2, "only non-empty messages should survive");
+        assert!(matches!(history[0], RigMessage::User { .. }));
+        assert!(matches!(history[1], RigMessage::Assistant { .. }));
     }
 
     // -- normalized_tool_call_id tests --
@@ -1495,5 +1591,52 @@ mod tests {
             id_a, id_b,
             "different raw IDs should produce different hashed IDs"
         );
+    }
+
+    fn make_rig_request(additional_params: Option<serde_json::Value>) -> RigRequest {
+        RigRequest {
+            preamble: None,
+            chat_history: OneOrMany::one(RigMessage::user("test")),
+            documents: Vec::new(),
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            tool_choice: None,
+            additional_params,
+        }
+    }
+
+    #[test]
+    fn test_inject_model_override_creates_params_when_none() {
+        let mut req = make_rig_request(None);
+        inject_model_override(&mut req, Some("test-model"));
+
+        let params = req
+            .additional_params
+            .expect("additional_params should be Some");
+        assert_eq!(params, serde_json::json!({ "model": "test-model" }));
+    }
+
+    #[test]
+    fn test_inject_model_override_preserves_existing_params() {
+        let mut req = make_rig_request(Some(serde_json::json!({
+            "cache_control": { "type": "ephemeral" },
+        })));
+        inject_model_override(&mut req, Some("override-model"));
+
+        let params = req.additional_params.expect("should remain Some");
+        let obj = params.as_object().expect("should be object");
+        assert_eq!(
+            obj.get("cache_control"),
+            Some(&serde_json::json!({ "type": "ephemeral" }))
+        );
+        assert_eq!(obj.get("model"), Some(&serde_json::json!("override-model")));
+    }
+
+    #[test]
+    fn test_inject_model_override_noop_when_none() {
+        let mut req = make_rig_request(None);
+        inject_model_override(&mut req, None);
+        assert!(req.additional_params.is_none());
     }
 }

@@ -333,6 +333,9 @@ async fn webhook_handler(
 
     let channel_name = channel.channel_name();
 
+    // Track whether any authentication was performed and passed.
+    let mut did_authenticate = false;
+
     // Check if secret is required
     if state.router.requires_secret(channel_name).await {
         // Get the secret header name for this channel (from capabilities or default)
@@ -382,6 +385,7 @@ async fn webhook_handler(
                     );
                 }
                 tracing::debug!(channel = %channel_name, "Webhook secret validated");
+                did_authenticate = true;
             }
             None => {
                 tracing::warn!(
@@ -433,6 +437,7 @@ async fn webhook_handler(
                     );
                 }
                 tracing::debug!(channel = %channel_name, "Ed25519 signature verified");
+                did_authenticate = true;
             }
             _ => {
                 tracing::warn!(
@@ -484,6 +489,7 @@ async fn webhook_handler(
                     );
                 }
                 tracing::debug!(channel = %channel_name, "HMAC-SHA256 signature verified");
+                did_authenticate = true;
             }
             _ => {
                 tracing::warn!(
@@ -510,8 +516,9 @@ async fn webhook_handler(
         })
         .collect();
 
-    // Call the WASM channel
-    let secret_validated = state.router.requires_secret(channel_name).await;
+    // Call the WASM channel. `did_authenticate` was set above by whichever
+    // auth guard (secret / Ed25519 / HMAC) successfully validated the request.
+    let secret_validated = did_authenticate;
 
     tracing::info!(
         channel = %channel_name,
@@ -674,7 +681,7 @@ mod tests {
             capabilities,
             "default",
             "{}".to_string(),
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
             None,
         ))
     }

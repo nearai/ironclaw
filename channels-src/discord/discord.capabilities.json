@@ -1,5 +1,5 @@
 {
-  "version": "0.2.0",
+  "version": "0.2.1",
   "wit_version": "0.3.0",
   "type": "channel",
   "name": "discord",
@@ -22,7 +22,8 @@
   "capabilities": {
     "http": {
       "allowlist": [
-        { "host": "discord.com", "path_prefix": "/api/v10" }
+        { "host": "discord.com", "path_prefix": "/api/v10" },
+        { "host": "gateway.discord.gg", "path_prefix": "/", "methods": ["GET"] }
       ],
       "credentials": {
         "discord_bot_token": {
@@ -34,6 +35,20 @@
       "rate_limit": {
         "requests_per_minute": 60,
         "requests_per_hour": 3600
+      }
+    },
+    "websocket": {
+      "url": "wss://gateway.discord.gg/?v=10&encoding=json",
+      "connect_on_start": true,
+      "identify_secret_name": "discord_bot_token",
+      "identify": {
+        "_intents_doc": "GUILDS(1) + GUILD_MESSAGES(512) + DIRECT_MESSAGES(4096)",
+        "intents": 4609,
+        "properties": {
+          "os": "linux",
+          "browser": "ironclaw",
+          "device": "ironclaw"
+        }
       }
     },
     "secrets": {

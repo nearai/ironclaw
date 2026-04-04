@@ -21,6 +21,9 @@ pub struct CostGuardConfig {
     pub max_cost_per_day_cents: Option<u64>,
     /// Maximum LLM calls per hour. None = unlimited.
     pub max_actions_per_hour: Option<u64>,
+    /// Maximum spend per user per day in cents. None = unlimited.
+    /// Applied independently per user alongside the global budget.
+    pub max_cost_per_user_per_day_cents: Option<u64>,
 }
 
 /// Error returned when a cost limit is exceeded.
@@ -30,6 +33,12 @@ pub enum CostLimitExceeded {
     DailyBudget { spent_cents: u64, limit_cents: u64 },
     /// Hourly action rate limit reached.
     HourlyRate { actions: u64, limit: u64 },
+    /// Per-user daily spending cap reached.
+    UserDailyBudget {
+        user_id: String,
+        spent_cents: u64,
+        limit_cents: u64,
+    },
 }
 
 impl std::fmt::Display for CostLimitExceeded {
@@ -48,6 +57,17 @@ impl std::fmt::Display for CostLimitExceeded {
                 f,
                 "Hourly action limit exceeded: {} actions of {} allowed per hour",
                 actions, limit
+            ),
+            Self::UserDailyBudget {
+                user_id,
+                spent_cents,
+                limit_cents,
+            } => write!(
+                f,
+                "User '{}' daily cost limit exceeded: spent ${:.2} of ${:.2} allowed",
+                user_id,
+                *spent_cents as f64 / 100.0,
+                *limit_cents as f64 / 100.0
             ),
         }
     }
@@ -78,6 +98,9 @@ pub struct CostGuard {
 
     /// Per-model token usage since startup.
     model_tokens: Mutex<HashMap<String, ModelTokens>>,
+
+    /// Per-user daily cost tracking. Each entry resets independently at midnight UTC.
+    per_user_daily_cost: Mutex<HashMap<String, DailyCost>>,
 }
 
 struct DailyCost {
@@ -97,6 +120,7 @@ impl CostGuard {
             action_window: Mutex::new(VecDeque::new()),
             budget_exceeded: AtomicBool::new(false),
             model_tokens: Mutex::new(HashMap::new()),
+            per_user_daily_cost: Mutex::new(HashMap::new()),
         }
     }
 
@@ -203,6 +227,11 @@ impl CostGuard {
                 daily.reset_date = today;
                 self.budget_exceeded.store(false, Ordering::Relaxed);
                 tracing::info!("Cost guard: daily counter reset for {}", today);
+
+                // Prune per-user entries from previous days to prevent
+                // unbounded HashMap growth in long-lived deployments.
+                let mut per_user = self.per_user_daily_cost.lock().await;
+                per_user.retain(|_, entry| entry.reset_date == today);
             }
             daily.total += cost;
 
@@ -248,6 +277,85 @@ impl CostGuard {
         cost
     }
 
+    /// Record an LLM call with per-user attribution.
+    ///
+    /// Delegates to `record_llm_call` for global tracking, then additionally
+    /// records the cost against the user's daily budget.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_llm_call_for_user(
+        &self,
+        user_id: &str,
+        model: &str,
+        input_tokens: u32,
+        output_tokens: u32,
+        cache_read_input_tokens: u32,
+        cache_creation_input_tokens: u32,
+        cache_read_discount: Decimal,
+        cache_write_multiplier: Decimal,
+        cost_per_token: Option<(Decimal, Decimal)>,
+    ) -> Decimal {
+        let cost = self
+            .record_llm_call(
+                model,
+                input_tokens,
+                output_tokens,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
+                cache_read_discount,
+                cache_write_multiplier,
+                cost_per_token,
+            )
+            .await;
+
+        // Track per-user daily cost
+        {
+            let today = chrono::Utc::now().date_naive();
+            let mut per_user = self.per_user_daily_cost.lock().await;
+            let entry = per_user
+                .entry(user_id.to_string())
+                .or_insert_with(|| DailyCost {
+                    total: Decimal::ZERO,
+                    reset_date: today,
+                });
+            if today != entry.reset_date {
+                entry.total = Decimal::ZERO;
+                entry.reset_date = today;
+            }
+            entry.total += cost;
+        }
+
+        cost
+    }
+
+    /// Check whether the next action is allowed for a specific user.
+    ///
+    /// Checks the global limits first (via `check_allowed`), then additionally
+    /// checks the per-user daily budget if configured.
+    pub async fn check_allowed_for_user(&self, user_id: &str) -> Result<(), CostLimitExceeded> {
+        // Check global limits first
+        self.check_allowed().await?;
+
+        // Check per-user daily budget
+        if let Some(limit_cents) = self.config.max_cost_per_user_per_day_cents {
+            let today = chrono::Utc::now().date_naive();
+            let per_user = self.per_user_daily_cost.lock().await;
+            if let Some(entry) = per_user.get(user_id)
+                && entry.reset_date == today
+            {
+                let spent_cents = to_cents(entry.total);
+                if spent_cents >= limit_cents {
+                    return Err(CostLimitExceeded::UserDailyBudget {
+                        user_id: user_id.to_string(),
+                        spent_cents,
+                        limit_cents,
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Current daily spend in USD (as Decimal).
     pub async fn daily_spend(&self) -> Decimal {
         let daily = self.daily_cost.lock().await;
@@ -256,6 +364,16 @@ impl CostGuard {
             Decimal::ZERO
         } else {
             daily.total
+        }
+    }
+
+    /// Current daily spend for a specific user in USD (as Decimal).
+    pub async fn daily_spend_for_user(&self, user_id: &str) -> Decimal {
+        let today = chrono::Utc::now().date_naive();
+        let per_user = self.per_user_daily_cost.lock().await;
+        match per_user.get(user_id) {
+            Some(entry) if entry.reset_date == today => entry.total,
+            _ => Decimal::ZERO,
         }
     }
 
@@ -314,7 +432,7 @@ mod tests {
     async fn test_daily_budget_enforcement() {
         let guard = CostGuard::new(CostGuardConfig {
             max_cost_per_day_cents: Some(1), // $0.01 limit
-            max_actions_per_hour: None,
+            ..CostGuardConfig::default()
         });
 
         // First call allowed
@@ -350,8 +468,8 @@ mod tests {
     #[tokio::test]
     async fn test_hourly_rate_enforcement() {
         let guard = CostGuard::new(CostGuardConfig {
-            max_cost_per_day_cents: None,
             max_actions_per_hour: Some(3),
+            ..CostGuardConfig::default()
         });
 
         // First 3 actions allowed
@@ -633,8 +751,8 @@ mod tests {
         // A fresh CostGuard with rate limits should not panic even if
         // checked_sub returns None (simulating short uptime).
         let guard = CostGuard::new(CostGuardConfig {
-            max_cost_per_day_cents: None,
             max_actions_per_hour: Some(100),
+            ..CostGuardConfig::default()
         });
 
         // These must not panic regardless of system uptime
@@ -655,5 +773,120 @@ mod tests {
         // Duration::MAX will always exceed uptime, so checked_sub must return None
         let result = Instant::now().checked_sub(std::time::Duration::MAX);
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_per_user_daily_budget_enforcement() {
+        let guard = CostGuard::new(CostGuardConfig {
+            max_cost_per_day_cents: None,
+            max_actions_per_hour: None,
+            max_cost_per_user_per_day_cents: Some(1), // $0.01 per user
+        });
+
+        // Both users initially allowed
+        assert!(guard.check_allowed_for_user("alice").await.is_ok());
+        assert!(guard.check_allowed_for_user("bob").await.is_ok());
+
+        // Alice makes an expensive call
+        guard
+            .record_llm_call_for_user(
+                "alice",
+                "gpt-4o",
+                10_000,
+                10_000,
+                0,
+                0,
+                Decimal::ONE,
+                Decimal::ONE,
+                None,
+            )
+            .await;
+
+        // Alice should be blocked, Bob should still be allowed
+        let result = guard.check_allowed_for_user("alice").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            CostLimitExceeded::UserDailyBudget {
+                user_id,
+                limit_cents,
+                ..
+            } => {
+                assert_eq!(user_id, "alice");
+                assert_eq!(limit_cents, 1);
+            }
+            other => panic!("Expected UserDailyBudget, got {:?}", other),
+        }
+        assert!(guard.check_allowed_for_user("bob").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_per_user_daily_spend_tracking() {
+        let guard = CostGuard::new(CostGuardConfig::default());
+
+        assert_eq!(guard.daily_spend_for_user("alice").await, Decimal::ZERO);
+        assert_eq!(guard.daily_spend_for_user("bob").await, Decimal::ZERO);
+
+        let cost = guard
+            .record_llm_call_for_user(
+                "alice",
+                "gpt-4o",
+                1000,
+                500,
+                0,
+                0,
+                Decimal::ONE,
+                Decimal::ONE,
+                None,
+            )
+            .await;
+
+        assert_eq!(guard.daily_spend_for_user("alice").await, cost);
+        assert_eq!(guard.daily_spend_for_user("bob").await, Decimal::ZERO);
+        // Global spend should also be tracked
+        assert_eq!(guard.daily_spend().await, cost);
+    }
+
+    #[tokio::test]
+    async fn test_per_user_budget_independent_of_global() {
+        let guard = CostGuard::new(CostGuardConfig {
+            max_cost_per_day_cents: Some(100_000), // $1000 global limit
+            max_actions_per_hour: None,
+            max_cost_per_user_per_day_cents: Some(1), // $0.01 per user
+        });
+
+        // User hits their personal limit
+        guard
+            .record_llm_call_for_user(
+                "alice",
+                "gpt-4o",
+                10_000,
+                10_000,
+                0,
+                0,
+                Decimal::ONE,
+                Decimal::ONE,
+                None,
+            )
+            .await;
+
+        // Alice blocked by per-user limit, not global
+        assert!(guard.check_allowed_for_user("alice").await.is_err());
+        // Global limit is far from reached
+        assert!(guard.check_allowed().await.is_ok());
+        // Bob is unaffected
+        assert!(guard.check_allowed_for_user("bob").await.is_ok());
+    }
+
+    #[test]
+    fn test_user_cost_limit_display() {
+        let limit = CostLimitExceeded::UserDailyBudget {
+            user_id: "alice".to_string(),
+            spent_cents: 150,
+            limit_cents: 100,
+        };
+        let msg = limit.to_string();
+        assert!(msg.contains("alice"));
+        assert!(msg.contains("$1.50"));
+        assert!(msg.contains("$1.00"));
     }
 }

@@ -8,8 +8,8 @@ use std::path::Path;
 use clap::Subcommand;
 
 use crate::config::SkillsConfig;
-use crate::skills::catalog::SkillCatalog;
-use crate::skills::{SkillRegistry, SkillSource};
+use ironclaw_skills::catalog::SkillCatalog;
+use ironclaw_skills::{SkillRegistry, SkillSource};
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum SkillsCommand {
@@ -69,7 +69,8 @@ pub async fn run_skills_command(
 /// Discover skills from all configured directories.
 async fn discover_skills(config: &SkillsConfig) -> SkillRegistry {
     let mut registry = SkillRegistry::new(config.local_dir.clone())
-        .with_installed_dir(config.installed_dir.clone());
+        .with_installed_dir(config.installed_dir.clone())
+        .with_max_scan_depth(config.max_scan_depth);
     registry.discover_all().await;
     registry
 }
@@ -79,6 +80,7 @@ fn format_source(source: &SkillSource) -> &str {
     match source {
         SkillSource::Workspace(_) => "workspace",
         SkillSource::User(_) => "user",
+        SkillSource::Installed(_) => "installed",
         SkillSource::Bundled(_) => "bundled",
     }
 }

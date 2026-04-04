@@ -2,7 +2,8 @@
 //!
 //! Builds a [`deadpool_postgres::Pool`] with the appropriate TLS connector
 //! based on the configured [`SslMode`].  Uses `rustls` with system root
-//! certificates — the same TLS stack that `reqwest` already uses for HTTP.
+//! certificates, falling back to Mozilla's bundled roots via `webpki-roots`
+//! when the system store is empty (common in minimal container images).
 
 use deadpool_postgres::{Pool, Runtime};
 use thiserror::Error;
@@ -19,9 +20,15 @@ pub enum CreatePoolError {
     TlsConfig(#[from] rustls::Error),
 }
 
-/// Build a rustls-based TLS connector using the platform's root certificate store.
+/// Build a rustls-based TLS connector.
+///
+/// Tries the platform's native certificate store first. If that yields zero
+/// certificates (slim container images, missing ca-certificates package),
+/// falls back to Mozilla's root certificates bundled via `webpki-roots`.
 fn make_rustls_connector() -> Result<MakeRustlsConnect, rustls::Error> {
     let mut root_store = rustls::RootCertStore::empty();
+
+    // Try native certs first.
     let native = rustls_native_certs::load_native_certs();
     for e in &native.errors {
         tracing::warn!("error loading system root certs: {e}");
@@ -31,11 +38,14 @@ fn make_rustls_connector() -> Result<MakeRustlsConnect, rustls::Error> {
             tracing::warn!("skipping invalid system root cert: {e}");
         }
     }
+
+    // Fall back to bundled Mozilla roots when the system store is empty.
     if root_store.is_empty() {
-        tracing::error!("no system root certificates found -- TLS connections will fail");
+        tracing::info!("no system root certificates found, using bundled Mozilla roots");
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
-    // `--all-features` brings in both aws-lc-rs and ring-backed rustls providers.
-    // Pick the same ring provider reqwest already uses so postgres TLS setup stays deterministic.
+
+    // Pick the ring crypto provider (same one reqwest uses).
     let config = rustls::ClientConfig::builder_with_provider(
         rustls::crypto::ring::default_provider().into(),
     )
@@ -48,7 +58,7 @@ fn make_rustls_connector() -> Result<MakeRustlsConnect, rustls::Error> {
 /// Create a [`deadpool_postgres::Pool`] with the appropriate TLS connector.
 ///
 /// - `Disable` → plain TCP (no TLS)
-/// - `Prefer` / `Require` → rustls with system root certificates
+/// - `Prefer` / `Require` → rustls with system or bundled root certificates
 ///
 /// **Note:** `Prefer` and `Require` currently behave identically — both
 /// provide a TLS connector and will fail if the server rejects the TLS
@@ -81,7 +91,6 @@ mod tests {
     fn create_pool_disable_mode() {
         let mut config = deadpool_postgres::Config::new();
         config.url = Some("postgres://localhost/test".to_string());
-        // Should succeed — pool is created lazily, no actual connection needed.
         let pool = create_pool(&config, SslMode::Disable);
         assert!(pool.is_ok());
     }

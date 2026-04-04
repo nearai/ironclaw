@@ -13,6 +13,7 @@ pub mod builtin;
 mod coercion;
 pub mod execute;
 pub mod mcp;
+pub mod permissions;
 pub mod rate_limiter;
 pub mod redaction;
 pub mod schema_validator;
@@ -35,5 +36,5 @@ pub use rate_limiter::RateLimiter;
 pub use registry::ToolRegistry;
 pub use tool::{
     ApprovalContext, ApprovalRequirement, RiskLevel, Tool, ToolDomain, ToolError, ToolOutput,
-    ToolRateLimitConfig, redact_params, validate_tool_schema,
+    ToolRateLimitConfig, check_approval_in_context, redact_params, validate_tool_schema,
 };
