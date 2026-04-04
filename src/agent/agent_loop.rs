@@ -315,6 +315,10 @@ impl Agent {
         &self.deps.llm
     }
 
+    pub(crate) fn config(&self) -> &AgentConfig {
+        &self.config
+    }
+
     /// Get the cheap/fast LLM provider, falling back to the main one.
     pub(crate) fn cheap_llm(&self) -> &Arc<dyn LlmProvider> {
         self.deps.cheap_llm.as_ref().unwrap_or(&self.deps.llm)
