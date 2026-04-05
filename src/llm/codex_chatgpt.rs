@@ -32,6 +32,8 @@ use super::provider::{
     Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 
+const CODEX_HTTP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+
 /// Provider that speaks the Responses API protocol against the ChatGPT backend.
 pub struct CodexChatGptProvider {
     client: Client,
@@ -188,6 +190,7 @@ impl CodexChatGptProvider {
         let resp = match client
             .get(&url)
             .bearer_auth(api_key.expose_secret())
+            .header("User-Agent", CODEX_HTTP_USER_AGENT)
             .timeout(Duration::from_secs(10))
             .send()
             .await
@@ -493,6 +496,7 @@ impl CodexChatGptProvider {
             .bearer_auth(api_key.expose_secret())
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
+            .header("User-Agent", CODEX_HTTP_USER_AGENT)
             .json(body)
             .timeout(timeout)
             .send()
