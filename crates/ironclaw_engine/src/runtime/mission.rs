@@ -96,15 +96,13 @@ impl MissionManager {
                 ref expression,
                 ref timezone,
             } = mission.cadence
+                && mission.next_fire_at.is_none()
+                && let Ok(Some(next)) = next_cron_fire(expression, timezone.as_ref())
             {
-                if mission.next_fire_at.is_none() {
-                    if let Ok(Some(next)) = next_cron_fire(expression, timezone.as_ref()) {
-                        let mut patched = mission.clone();
-                        patched.next_fire_at = Some(next);
-                        let _ = self.store.save_mission(&patched).await;
-                        debug!(mission_id = %mission.id, next = %next, "backfilled next_fire_at for legacy cron mission");
-                    }
-                }
+                let mut patched = mission.clone();
+                patched.next_fire_at = Some(next);
+                let _ = self.store.save_mission(&patched).await;
+                debug!(mission_id = %mission.id, next = %next, "backfilled next_fire_at for legacy cron mission");
             }
             active_ids.push(mission.id);
         }
