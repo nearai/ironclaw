@@ -161,6 +161,26 @@ impl PendingAuth {
     }
 }
 
+/// Auth prompt captured during a tool turn and persisted if that turn pauses
+/// for approval before the prompt can be surfaced to the user.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingAuthPrompt {
+    /// Extension name to authenticate.
+    pub extension_name: String,
+    /// Optional instructions shown alongside the auth prompt.
+    #[serde(default)]
+    pub instructions: Option<String>,
+    /// Optional OAuth/browser handoff URL.
+    #[serde(default)]
+    pub auth_url: Option<String>,
+    /// Optional extension setup URL.
+    #[serde(default)]
+    pub setup_url: Option<String>,
+    /// Whether the next user message should be intercepted as a token.
+    #[serde(default)]
+    pub awaiting_token: bool,
+}
+
 /// Pending tool approval request stored on a thread.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingApproval {
@@ -184,6 +204,10 @@ pub struct PendingApproval {
     /// executed yet when approval was requested.
     #[serde(default)]
     pub deferred_tool_calls: Vec<ToolCall>,
+    /// First actionable auth prompt already discovered in this turn. Persisted
+    /// so approval pauses do not drop the prompt before it can be surfaced.
+    #[serde(default)]
+    pub selected_auth_prompt: Option<PendingAuthPrompt>,
     /// User timezone at the time the approval was requested, so it persists
     /// through the approval flow even if the approval message lacks timezone.
     #[serde(default)]
@@ -1302,6 +1326,7 @@ mod tests {
             tool_call_id: "call_123".to_string(),
             context_messages: vec![ChatMessage::user("do it")],
             deferred_tool_calls: vec![],
+            selected_auth_prompt: None,
             user_timezone: None,
             allow_always: false,
         };
@@ -1329,6 +1354,7 @@ mod tests {
             tool_call_id: "call_456".to_string(),
             context_messages: vec![],
             deferred_tool_calls: vec![],
+            selected_auth_prompt: None,
             user_timezone: None,
             allow_always: true,
         };
@@ -1967,6 +1993,7 @@ mod tests {
             tool_call_id: "call_1".to_string(),
             context_messages: vec![],
             deferred_tool_calls: vec![],
+            selected_auth_prompt: None,
             user_timezone: None,
             allow_always: true,
         });

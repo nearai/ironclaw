@@ -10,7 +10,7 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::agent::Agent;
-use crate::agent::session::{PendingApproval, Session, ThreadState};
+use crate::agent::session::{PendingApproval, PendingAuthPrompt, Session, ThreadState};
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
@@ -1170,6 +1170,27 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             }
         }
 
+        // Approval pauses take precedence over surfacing auth prompts. Persist
+        // the first prompt found so it can be replayed safely after approval.
+        if let Some((approval_idx, tc, tool, allow_always)) = approval_needed {
+            let display_params = redact_params(&tc.arguments, tool.sensitive_params());
+            let pending = PendingApproval {
+                request_id: Uuid::new_v4(),
+                tool_name: tc.name.clone(),
+                parameters: tc.arguments.clone(),
+                display_parameters: display_params,
+                description: tool.description().to_string(),
+                tool_call_id: tc.id.clone(),
+                context_messages: reason_ctx.messages.clone(),
+                deferred_tool_calls: tool_calls[approval_idx + 1..].to_vec(),
+                selected_auth_prompt: persist_selected_auth_prompt(selected_auth_prompt.as_ref()),
+                user_timezone: Some(self.user_tz.name().to_string()),
+                allow_always,
+            };
+
+            return Ok(Some(LoopOutcome::NeedApproval(Box::new(pending))));
+        }
+
         if let Some((ext_name, auth_data)) = selected_auth_prompt {
             if auth_data.awaiting_token {
                 let instructions = auth_data
@@ -1215,25 +1236,6 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 .await;
         }
 
-        // Handle approval if a tool needed it
-        if let Some((approval_idx, tc, tool, allow_always)) = approval_needed {
-            let display_params = redact_params(&tc.arguments, tool.sensitive_params());
-            let pending = PendingApproval {
-                request_id: Uuid::new_v4(),
-                tool_name: tc.name.clone(),
-                parameters: tc.arguments.clone(),
-                display_parameters: display_params,
-                description: tool.description().to_string(),
-                tool_call_id: tc.id.clone(),
-                context_messages: reason_ctx.messages.clone(),
-                deferred_tool_calls: tool_calls[approval_idx + 1..].to_vec(),
-                user_timezone: Some(self.user_tz.name().to_string()),
-                allow_always,
-            };
-
-            return Ok(Some(LoopOutcome::NeedApproval(Box::new(pending))));
-        }
-
         Ok(None)
     }
 }
@@ -1268,6 +1270,39 @@ pub(super) struct ParsedAuthData {
     pub(super) auth_url: Option<String>,
     pub(super) setup_url: Option<String>,
     pub(super) awaiting_token: bool,
+}
+
+impl ParsedAuthData {
+    fn from_pending(prompt: PendingAuthPrompt) -> Self {
+        Self {
+            extension_name: Some(prompt.extension_name),
+            instructions: prompt.instructions,
+            auth_url: prompt.auth_url,
+            setup_url: prompt.setup_url,
+            awaiting_token: prompt.awaiting_token,
+        }
+    }
+}
+
+pub(super) fn persist_selected_auth_prompt(
+    selected: Option<&(String, ParsedAuthData)>,
+) -> Option<PendingAuthPrompt> {
+    selected.map(|(extension_name, auth_data)| PendingAuthPrompt {
+        extension_name: extension_name.clone(),
+        instructions: auth_data.instructions.clone(),
+        auth_url: auth_data.auth_url.clone(),
+        setup_url: auth_data.setup_url.clone(),
+        awaiting_token: auth_data.awaiting_token,
+    })
+}
+
+pub(super) fn restore_selected_auth_prompt(
+    pending: Option<PendingAuthPrompt>,
+) -> Option<(String, ParsedAuthData)> {
+    pending.map(|prompt| {
+        let extension_name = prompt.extension_name.clone();
+        (extension_name, ParsedAuthData::from_pending(prompt))
+    })
 }
 
 /// Extract auth prompt fields from a tool_auth/tool_activate result JSON string.
@@ -1561,18 +1596,19 @@ mod tests {
     use crate::agent::session::Session;
     use crate::channels::ChannelManager;
     use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
-    use crate::context::ContextManager;
+    use crate::context::{ContextManager, JobContext};
     use crate::error::Error;
     use crate::hooks::HookRegistry;
     use crate::llm::{
         CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ToolCall,
         ToolCompletionRequest, ToolCompletionResponse,
     };
-    use crate::tools::ToolRegistry;
+    use crate::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRegistry};
     use ironclaw_safety::SafetyLayer;
 
     use super::{
-        capture_auth_prompt, check_auth_required, extract_auth_prompt, selected_model_override,
+        capture_auth_prompt, check_auth_required, extract_auth_prompt,
+        persist_selected_auth_prompt, restore_selected_auth_prompt, selected_model_override,
     };
 
     /// Minimal LLM provider for unit tests that always returns a static response.
@@ -1657,6 +1693,144 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
+        }
+    }
+
+    struct AuthThenApprovalProvider;
+
+    #[async_trait]
+    impl LlmProvider for AuthThenApprovalProvider {
+        fn model_name(&self) -> &str {
+            "auth-then-approval"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            Ok(CompletionResponse {
+                content: "ok".to_string(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
+            if request.tools.is_empty() {
+                return Ok(ToolCompletionResponse {
+                    content: Some("ok".to_string()),
+                    tool_calls: Vec::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                });
+            }
+
+            Ok(ToolCompletionResponse {
+                content: None,
+                tool_calls: vec![
+                    ToolCall {
+                        id: crate::llm::generate_tool_call_id(0, 0),
+                        name: "tool_activate".to_string(),
+                        arguments: serde_json::json!({}),
+                        reasoning: None,
+                    },
+                    ToolCall {
+                        id: crate::llm::generate_tool_call_id(0, 1),
+                        name: "approval_tool".to_string(),
+                        arguments: serde_json::json!({"target": "danger"}),
+                        reasoning: None,
+                    },
+                ],
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    struct OAuthPromptTool;
+
+    #[async_trait]
+    impl Tool for OAuthPromptTool {
+        fn name(&self) -> &str {
+            "tool_activate"
+        }
+
+        fn description(&self) -> &str {
+            "Return an OAuth handoff URL"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {}
+            })
+        }
+
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({
+                    "name": "gmail",
+                    "instructions": "Authorize Gmail access.",
+                    "auth_url": "https://accounts.google.com/o/oauth2/auth",
+                    "awaiting_token": false,
+                }),
+                Duration::from_millis(1),
+            ))
+        }
+    }
+
+    struct ApprovalTool;
+
+    #[async_trait]
+    impl Tool for ApprovalTool {
+        fn name(&self) -> &str {
+            "approval_tool"
+        }
+
+        fn description(&self) -> &str {
+            "Requires approval"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string"}
+                },
+                "required": ["target"]
+            })
+        }
+
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::text("approved", Duration::from_millis(1)))
+        }
+
+        fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+            ApprovalRequirement::UnlessAutoApproved
         }
     }
 
@@ -1902,6 +2076,7 @@ mod tests {
             serde_json::from_str(&json).expect("should deserialize without deferred_tool_calls");
 
         assert!(parsed.deferred_tool_calls.is_empty());
+        assert!(parsed.selected_auth_prompt.is_none());
         assert_eq!(parsed.tool_name, "http");
         assert_eq!(parsed.tool_call_id, "call_123");
     }
@@ -1930,6 +2105,13 @@ mod tests {
                     reasoning: None,
                 },
             ],
+            selected_auth_prompt: Some(crate::agent::session::PendingAuthPrompt {
+                extension_name: "gmail".to_string(),
+                instructions: Some("Authorize Gmail".to_string()),
+                auth_url: Some("https://example.com/oauth".to_string()),
+                setup_url: None,
+                awaiting_token: false,
+            }),
             user_timezone: None,
             allow_always: true,
         };
@@ -1941,6 +2123,129 @@ mod tests {
         assert_eq!(parsed.deferred_tool_calls.len(), 2);
         assert_eq!(parsed.deferred_tool_calls[0].name, "http");
         assert_eq!(parsed.deferred_tool_calls[1].name, "echo");
+        let selected_auth_prompt = parsed
+            .selected_auth_prompt
+            .expect("selected auth prompt should roundtrip");
+        assert_eq!(selected_auth_prompt.extension_name, "gmail");
+        assert_eq!(
+            selected_auth_prompt.auth_url.as_deref(),
+            Some("https://example.com/oauth")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_need_approval_persists_first_auth_prompt_for_resume() {
+        use crate::agent::session::Session;
+        use crate::channels::IncomingMessage;
+        use crate::llm::ChatMessage;
+        use tokio::sync::Mutex;
+
+        let registry = Arc::new(ToolRegistry::new());
+        registry.register_sync(Arc::new(OAuthPromptTool));
+        registry.register_sync(Arc::new(ApprovalTool));
+
+        let deps = AgentDeps {
+            owner_id: "default".to_string(),
+            store: None,
+            llm: Arc::new(AuthThenApprovalProvider),
+            cheap_llm: None,
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+            })),
+            tools: registry,
+            workspace: None,
+            extension_manager: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skills_config: SkillsConfig::default(),
+            hooks: Arc::new(HookRegistry::new()),
+            cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            sse_tx: None,
+            http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            builder: None,
+            llm_backend: "nearai".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+        };
+
+        let agent = Agent::new(
+            AgentConfig {
+                name: "test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_cost_per_user_per_day_cents: None,
+                max_tool_iterations: 3,
+                auto_approve_tools: false,
+                default_timezone: "UTC".to_string(),
+                max_jobs_per_user: None,
+                max_tokens_per_job: 0,
+                multi_tenant: false,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
+                engine_v2: false,
+            },
+            deps,
+            Arc::new(ChannelManager::new()),
+            None,
+            None,
+            None,
+            Some(Arc::new(ContextManager::new(1))),
+            None,
+        );
+
+        let session = Arc::new(Mutex::new(Session::new("test-user")));
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread(Some("test")).id
+        };
+
+        let message = IncomingMessage::new("test", "test-user", "connect gmail");
+        let initial_messages = vec![ChatMessage::user("connect gmail")];
+        let tenant = agent.tenant_ctx("test-user").await;
+
+        let result = agent
+            .run_agentic_loop(&message, tenant, session, thread_id, initial_messages)
+            .await
+            .expect("dispatcher run should succeed");
+
+        let pending = match result {
+            super::AgenticLoopResult::NeedApproval { pending, .. } => pending,
+            super::AgenticLoopResult::Response { .. } => {
+                panic!("expected NeedApproval, got Response")
+            }
+            super::AgenticLoopResult::Failed { .. } => {
+                panic!("expected NeedApproval, got Failed")
+            }
+        };
+
+        assert_eq!(pending.tool_name, "approval_tool");
+        let selected_auth_prompt = pending
+            .selected_auth_prompt
+            .clone()
+            .expect("auth prompt should be preserved across approval pause");
+        assert_eq!(selected_auth_prompt.extension_name, "gmail");
+        assert_eq!(
+            selected_auth_prompt.auth_url.as_deref(),
+            Some("https://accounts.google.com/o/oauth2/auth")
+        );
+        assert!(!selected_auth_prompt.awaiting_token);
+
+        let restored = restore_selected_auth_prompt(pending.selected_auth_prompt);
+        assert_eq!(
+            persist_selected_auth_prompt(restored.as_ref()),
+            Some(selected_auth_prompt)
+        );
     }
 
     #[test]

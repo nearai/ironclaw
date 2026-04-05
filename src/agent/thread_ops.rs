@@ -13,7 +13,7 @@ use crate::agent::Agent;
 use crate::agent::compaction::ContextCompactor;
 use crate::agent::dispatcher::{
     AgenticLoopResult, TurnUsageSummary, capture_auth_prompt, execute_chat_tool_standalone,
-    parse_auth_result,
+    parse_auth_result, persist_selected_auth_prompt, restore_selected_auth_prompt,
 };
 use crate::agent::session::{MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState};
 use crate::agent::submission::SubmissionResult;
@@ -1196,6 +1196,9 @@ impl Agent {
                     .await;
             }
 
+            let mut selected_auth_prompt =
+                restore_selected_auth_prompt(pending.selected_auth_prompt.clone());
+
             // Build context including the tool result
             let mut context_messages = pending.context_messages;
             let deferred_tool_calls = pending.deferred_tool_calls;
@@ -1233,10 +1236,6 @@ impl Agent {
                 result_content,
             ));
 
-            let mut selected_auth_prompt: Option<(
-                String,
-                crate::agent::dispatcher::ParsedAuthData,
-            )> = None;
             capture_auth_prompt(&mut selected_auth_prompt, &pending.tool_name, &tool_result);
 
             // Replay deferred tool calls from the same assistant message so
@@ -1477,42 +1476,6 @@ impl Agent {
                 context_messages.push(ChatMessage::tool_result(&tc.id, &tc.name, deferred_content));
             }
 
-            if let Some((ext_name, auth_data)) = selected_auth_prompt {
-                if auth_data.awaiting_token {
-                    let instructions = auth_data
-                        .instructions
-                        .clone()
-                        .unwrap_or_else(|| "Please provide your API token/key.".to_string());
-                    let auth_result = Ok(serde_json::json!({
-                        "name": ext_name.clone(),
-                        "instructions": instructions.clone(),
-                        "auth_url": auth_data.auth_url,
-                        "setup_url": auth_data.setup_url,
-                        "awaiting_token": true,
-                    })
-                    .to_string());
-                    self.handle_auth_intercept(
-                        &session,
-                        thread_id,
-                        message,
-                        &auth_result,
-                        ext_name,
-                        instructions.clone(),
-                    )
-                    .await;
-                    return Ok(SubmissionResult::response(instructions));
-                }
-
-                self.emit_auth_prompt(
-                    message,
-                    ext_name,
-                    auth_data.instructions,
-                    auth_data.auth_url,
-                    auth_data.setup_url,
-                )
-                .await;
-            }
-
             // Handle approval if a tool needed it
             if let Some((approval_idx, tc, tool, allow_always)) = approval_needed {
                 let new_pending = PendingApproval {
@@ -1524,6 +1487,9 @@ impl Agent {
                     tool_call_id: tc.id.clone(),
                     context_messages: context_messages.clone(),
                     deferred_tool_calls: deferred_tool_calls[approval_idx + 1..].to_vec(),
+                    selected_auth_prompt: persist_selected_auth_prompt(
+                        selected_auth_prompt.as_ref(),
+                    ),
                     // Carry forward the resolved timezone from the original pending approval
                     user_timezone: pending.user_timezone.clone(),
                     allow_always,
@@ -1563,6 +1529,42 @@ impl Agent {
                     parameters,
                     allow_always,
                 });
+            }
+
+            if let Some((ext_name, auth_data)) = selected_auth_prompt {
+                if auth_data.awaiting_token {
+                    let instructions = auth_data
+                        .instructions
+                        .clone()
+                        .unwrap_or_else(|| "Please provide your API token/key.".to_string());
+                    let auth_result = Ok(serde_json::json!({
+                        "name": ext_name.clone(),
+                        "instructions": instructions.clone(),
+                        "auth_url": auth_data.auth_url,
+                        "setup_url": auth_data.setup_url,
+                        "awaiting_token": true,
+                    })
+                    .to_string());
+                    self.handle_auth_intercept(
+                        &session,
+                        thread_id,
+                        message,
+                        &auth_result,
+                        ext_name,
+                        instructions.clone(),
+                    )
+                    .await;
+                    return Ok(SubmissionResult::response(instructions));
+                }
+
+                self.emit_auth_prompt(
+                    message,
+                    ext_name,
+                    auth_data.instructions,
+                    auth_data.auth_url,
+                    auth_data.setup_url,
+                )
+                .await;
             }
 
             // Continue the agentic loop (a tool was already executed this turn)
@@ -2330,6 +2332,7 @@ mod tests {
             tool_call_id: "call_0".to_string(),
             context_messages: vec![],
             deferred_tool_calls: vec![],
+            selected_auth_prompt: None,
             user_timezone: None,
             allow_always: false,
         };
