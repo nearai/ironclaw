@@ -54,36 +54,35 @@ impl SafetyLayer {
     pub fn sanitize_tool_output(&self, tool_name: &str, output: &str) -> SanitizedOutput {
         // Check length limits — keep the beginning so the LLM has partial data.
         // Truncated content still flows through all safety checks below.
-        let (mut content, mut was_modified, mut extra_warnings) = if output.len()
-            > self.config.max_output_length
-        {
-            let mut cut = self.config.max_output_length;
-            while cut > 0 && !output.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            let truncated = &output[..cut];
-            let notice = format!(
-                "\n\n[... truncated: showing {}/{} bytes. Use the json tool with \
+        let (mut content, mut was_modified, mut extra_warnings) =
+            if output.len() > self.config.max_output_length {
+                let mut cut = self.config.max_output_length;
+                while cut > 0 && !output.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                let truncated = &output[..cut];
+                let notice = format!(
+                    "\n\n[... truncated: showing {}/{} bytes. Use the json tool with \
                  source_tool_call_id to query the full output.]",
-                cut,
-                output.len()
-            );
-            (
-                format!("{}{}", truncated, notice),
-                true,
-                vec![InjectionWarning {
-                    pattern: "output_too_large".to_string(),
-                    severity: Severity::Low,
-                    location: 0..output.len(),
-                    description: format!(
-                        "Output from tool '{}' was truncated due to size",
-                        tool_name
-                    ),
-                }],
-            )
-        } else {
-            (output.to_string(), false, vec![])
-        };
+                    cut,
+                    output.len()
+                );
+                (
+                    format!("{}{}", truncated, notice),
+                    true,
+                    vec![InjectionWarning {
+                        pattern: "output_too_large".to_string(),
+                        severity: Severity::Low,
+                        location: 0..output.len(),
+                        description: format!(
+                            "Output from tool '{}' was truncated due to size",
+                            tool_name
+                        ),
+                    }],
+                )
+            } else {
+                (output.to_string(), false, vec![])
+            };
 
         // Leak detection and redaction
         match self.leak_detector.scan_and_clean(&content) {
@@ -623,14 +622,19 @@ mod tests {
             // The injection scanner should have flagged/modified the content.
             // At minimum, warnings must include more than just the truncation
             // notice — the injection pattern must be detected.
-            let has_injection_warning = result.warnings.iter().any(|w| {
-                w.pattern != "output_too_large"
-            });
+            let has_injection_warning = result
+                .warnings
+                .iter()
+                .any(|w| w.pattern != "output_too_large");
             assert!(
                 has_injection_warning,
                 "truncated output must still be scanned for injection patterns; \
                  got warnings: {:?}",
-                result.warnings.iter().map(|w| &w.pattern).collect::<Vec<_>>()
+                result
+                    .warnings
+                    .iter()
+                    .map(|w| &w.pattern)
+                    .collect::<Vec<_>>()
             );
         }
 
