@@ -65,6 +65,7 @@ const WEBSOCKET_EVENT_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue";
 const WEBSOCKET_EVENT_PROCESSING_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue_processing";
 const WEBSOCKET_EVENT_QUEUE_MAX_ITEMS: usize = 100;
 const TELEGRAM_TEST_API_BASE_ENV: &str = "IRONCLAW_TEST_TELEGRAM_API_BASE_URL";
+const SLACK_TEST_API_BASE_ENV: &str = "IRONCLAW_TEST_SLACK_API_BASE_URL";
 
 // Generate component model bindings from the WIT file
 wasmtime::component::bindgen!({
@@ -383,12 +384,13 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         }
 
         let transport_url = rewrite_telegram_api_url_for_testing(&logical_url)
+            .or_else(|| rewrite_slack_api_url_for_testing(&logical_url))
             .unwrap_or_else(|| logical_url.clone());
         if transport_url != logical_url {
             tracing::info!(
                 logical_url = %logical_url,
                 transport_url = %transport_url,
-                "Rewriting Telegram API request to test base URL"
+                "Rewriting API request to test base URL"
             );
         }
 
@@ -3994,6 +3996,31 @@ fn rewrite_telegram_api_url_for_testing(url: &str) -> Option<String> {
     Some(rewritten)
 }
 
+fn rewrite_slack_api_url_for_testing(url: &str) -> Option<String> {
+    let override_base = std::env::var(SLACK_TEST_API_BASE_ENV)
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())?;
+
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+
+    let host = parsed.host_str()?;
+    if !host.eq_ignore_ascii_case("slack.com") && !host.eq_ignore_ascii_case("files.slack.com") {
+        return None;
+    }
+
+    let path = parsed.path().trim_start_matches('/');
+    let mut rewritten = format!("{override_base}/{path}");
+    if let Some(query) = parsed.query() {
+        rewritten.push('?');
+        rewritten.push_str(query);
+    }
+    Some(rewritten)
+}
+
 fn should_skip_response_leak_scan(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|parsed| {
         matches!(parsed.scheme(), "http" | "https")
@@ -4172,8 +4199,8 @@ mod tests {
         PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
     use crate::channels::wasm::wrapper::{
-        EmitDispatchContext, HttpResponse, TELEGRAM_TEST_API_BASE_ENV, WasmChannel,
-        WebsocketRuntimeConfig, build_discord_gateway_presence_update,
+        EmitDispatchContext, HttpResponse, SLACK_TEST_API_BASE_ENV, TELEGRAM_TEST_API_BASE_ENV,
+        WasmChannel, WebsocketRuntimeConfig, build_discord_gateway_presence_update,
         build_websocket_identify_message, build_websocket_resume_message,
         discord_gateway_presence_status, drain_guest_logs, parse_websocket_invalid_session,
         parse_websocket_ready_session, should_warn_on_heartbeat_interval,
@@ -5611,6 +5638,46 @@ mod tests {
                 std::env::set_var(TELEGRAM_TEST_API_BASE_ENV, value);
             } else {
                 std::env::remove_var(TELEGRAM_TEST_API_BASE_ENV);
+            }
+        }
+    }
+
+    #[test]
+    fn test_rewrite_slack_api_url_for_testing_uses_test_override() {
+        use super::rewrite_slack_api_url_for_testing;
+
+        let _guard = crate::config::helpers::lock_env();
+        let original = std::env::var(SLACK_TEST_API_BASE_ENV).ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var(SLACK_TEST_API_BASE_ENV, "http://127.0.0.1:19002/");
+        }
+
+        // slack.com API URL should rewrite
+        let rewritten = rewrite_slack_api_url_for_testing("https://slack.com/api/chat.postMessage")
+            .expect("Slack API URL should rewrite");
+        assert_eq!(rewritten, "http://127.0.0.1:19002/api/chat.postMessage");
+
+        // files.slack.com should also rewrite
+        let rewritten_file =
+            rewrite_slack_api_url_for_testing("https://files.slack.com/files-pri/F123/download")
+                .expect("Slack file URL should rewrite");
+        assert_eq!(
+            rewritten_file,
+            "http://127.0.0.1:19002/files-pri/F123/download"
+        );
+
+        // Non-Slack URL should NOT rewrite
+        assert!(
+            rewrite_slack_api_url_for_testing("https://api.telegram.org/bot/sendMessage").is_none()
+        );
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            if let Some(value) = original {
+                std::env::set_var(SLACK_TEST_API_BASE_ENV, value);
+            } else {
+                std::env::remove_var(SLACK_TEST_API_BASE_ENV);
             }
         }
     }
