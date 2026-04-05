@@ -113,8 +113,12 @@ fn normalize_hosted_callback_url(callback_url: &str) -> String {
     }
 }
 
-fn mcp_display_name(server: &McpServerConfig) -> Option<String> {
-    (server.name == NEARAI_MCP_SERVER_NAME).then(|| "NEAR AI".to_string())
+fn mcp_display_name(server: &McpServerConfig) -> String {
+    if server.name == NEARAI_MCP_SERVER_NAME {
+        "NEAR AI".to_string()
+    } else {
+        server.name.clone()
+    }
 }
 
 /// Runtime infrastructure needed for hot-activating WASM channels.
@@ -1500,7 +1504,7 @@ impl ExtensionManager {
                             .get_with_kind(&server.name, Some(ExtensionKind::McpServer))
                             .await
                             .map(|e| e.display_name)
-                            .or_else(|| mcp_display_name(server));
+                            .or_else(|| Some(mcp_display_name(server)));
                         extensions.push(InstalledExtension {
                             name: server.name.clone(),
                             kind: ExtensionKind::McpServer,
@@ -2974,7 +2978,7 @@ impl ExtensionManager {
 
             let flow = oauth_defaults::PendingOAuthFlow {
                 extension_name: name.to_string(),
-                display_name: mcp_display_name(server).unwrap_or_else(|| server.name.clone()),
+                display_name: mcp_display_name(server),
                 token_url: metadata.token_endpoint,
                 client_id,
                 client_secret,
