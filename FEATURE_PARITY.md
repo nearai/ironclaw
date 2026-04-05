@@ -350,6 +350,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | MMR re-ranking | ✅ | ❌ | Maximal marginal relevance for result diversity |
 | LLM-based query expansion | ✅ | ❌ | Expand FTS queries via LLM |
 | OpenAI embeddings | ✅ | ✅ | |
+| Bedrock embeddings | ❌ | ✅ | Reuses Bedrock region/profile auth for Titan Text Embeddings V2 |
 | Gemini embeddings | ✅ | ❌ | |
 | Local embeddings | ✅ | ❌ | |
 | SQLite-vec backend | ✅ | ❌ | IronClaw uses PostgreSQL |
