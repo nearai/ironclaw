@@ -14,6 +14,7 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::RwLock;
 
 use crate::context::JobContext;
+use crate::tools::builtin::file_edit_guard::{self, MatchMethod, SharedReadFileState};
 use crate::tools::builtin::file_history::FileHistory;
 use crate::tools::builtin::path_utils::{DEFAULT_EXCLUDED_DIRS, validate_path};
 use crate::tools::tool::{
@@ -80,6 +81,7 @@ const MAX_DIR_ENTRIES: usize = 500;
 #[derive(Debug, Default)]
 pub struct ReadFileTool {
     base_dir: Option<PathBuf>,
+    read_state: Option<SharedReadFileState>,
 }
 
 impl ReadFileTool {
@@ -89,6 +91,11 @@ impl ReadFileTool {
 
     pub fn with_base_dir(mut self, dir: PathBuf) -> Self {
         self.base_dir = Some(dir);
+        self
+    }
+
+    pub fn with_read_state(mut self, state: SharedReadFileState) -> Self {
+        self.read_state = Some(state);
         self
     }
 }
@@ -220,6 +227,14 @@ impl Tool for ReadFileTool {
             .map(|(i, line)| format!("{:>6}│ {}", start_line + i + 1, line))
             .collect();
 
+        // Record the read for staleness detection
+        if let Some(ref read_state) = self.read_state {
+            let mtime = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
+            let partial = has_explicit_range;
+            let mut state = read_state.write().await;
+            state.record_read(&path, mtime, partial);
+        }
+
         let result = serde_json::json!({
             "content": selected_lines.join("\n"),
             "total_lines": total_lines,
@@ -249,6 +264,7 @@ impl Tool for ReadFileTool {
 pub struct WriteFileTool {
     base_dir: Option<PathBuf>,
     file_history: Option<Arc<RwLock<FileHistory>>>,
+    read_state: Option<SharedReadFileState>,
 }
 
 impl WriteFileTool {
@@ -263,6 +279,11 @@ impl WriteFileTool {
 
     pub fn with_file_history(mut self, history: Arc<RwLock<FileHistory>>) -> Self {
         self.file_history = Some(history);
+        self
+    }
+
+    pub fn with_read_state(mut self, state: SharedReadFileState) -> Self {
+        self.read_state = Some(state);
         self
     }
 }
@@ -328,6 +349,18 @@ impl Tool for WriteFileTool {
 
         let path = validate_path(path_str, self.base_dir.as_deref())?;
 
+        // Check read-before-write guard (only for existing files — new files are fine)
+        if path.exists()
+            && let Some(ref read_state) = self.read_state
+        {
+            let current_mtime = fs::metadata(&path)
+                .await
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            let state = read_state.read().await;
+            state.check_before_edit(&path, current_mtime)?;
+        }
+
         // Snapshot existing file before overwriting (for file_undo)
         if let Some(ref history) = self.file_history {
             let mut h = history.write().await;
@@ -347,6 +380,15 @@ impl Tool for WriteFileTool {
         fs::write(&path, content)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to write file: {}", e)))?;
+
+        // Update read state mtime so subsequent edits don't see stale timestamps
+        if let Some(ref read_state) = self.read_state
+            && let Ok(m) = fs::metadata(&path).await
+            && let Ok(mtime) = m.modified()
+        {
+            let mut state = read_state.write().await;
+            state.update_mtime(&path, mtime);
+        }
 
         let result = serde_json::json!({
             "path": path.display().to_string(),
@@ -569,6 +611,7 @@ fn format_size(bytes: u64) -> String {
 pub struct ApplyPatchTool {
     base_dir: Option<PathBuf>,
     file_history: Option<Arc<RwLock<FileHistory>>>,
+    read_state: Option<SharedReadFileState>,
 }
 
 impl ApplyPatchTool {
@@ -585,6 +628,11 @@ impl ApplyPatchTool {
         self.file_history = Some(history);
         self
     }
+
+    pub fn with_read_state(mut self, state: SharedReadFileState) -> Self {
+        self.read_state = Some(state);
+        self
+    }
 }
 
 #[async_trait]
@@ -597,7 +645,10 @@ impl Tool for ApplyPatchTool {
         "Apply targeted edits to a file using search/replace. **Prefer this over write_file** \
          for modifying existing files — it sends only the changed portion. \
          The old_string must match exactly (including whitespace and indentation). \
-         For multiple occurrences, set replace_all=true."
+         The edit will FAIL if old_string is not unique — provide more context to make it unique, \
+         or set replace_all=true. **You must read_file before editing.** \
+         When editing text from read_file output, preserve the exact indentation (tabs/spaces) \
+         as it appears after the line number prefix."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -610,11 +661,11 @@ impl Tool for ApplyPatchTool {
                 },
                 "old_string": {
                     "type": "string",
-                    "description": "The exact string to find and replace"
+                    "description": "The exact string to find and replace (must be unique in the file unless replace_all=true)"
                 },
                 "new_string": {
                     "type": "string",
-                    "description": "The string to replace it with"
+                    "description": "The string to replace it with (must differ from old_string)"
                 },
                 "replace_all": {
                     "type": "boolean",
@@ -641,8 +692,14 @@ impl Tool for ApplyPatchTool {
         }
 
         let old_string = require_str(&params, "old_string")?;
-
         let new_string = require_str(&params, "new_string")?;
+
+        // Reject no-op edits
+        if old_string == new_string {
+            return Err(ToolError::InvalidParameters(
+                "old_string and new_string are identical. No edit needed.".to_string(),
+            ));
+        }
 
         let replace_all = params
             .get("replace_all")
@@ -666,21 +723,49 @@ impl Tool for ApplyPatchTool {
             )));
         }
 
-        // Read current content
-        let content = fs::read_to_string(&path)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read file: {}", e)))?;
-
-        // Check if old_string exists
-        if !content.contains(old_string) {
-            return Err(ToolError::ExecutionFailed(format!(
-                "Could not find the specified text in {}. Make sure old_string matches exactly.",
-                path.display()
-            )));
+        // Check read-before-edit guard and staleness
+        if let Some(ref read_state) = self.read_state {
+            let current_mtime = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
+            let state = read_state.read().await;
+            state.check_before_edit(&path, current_mtime)?;
         }
 
-        // Uniqueness validation: when replace_all=false, check for ambiguous matches
-        let match_count = content.matches(old_string).count();
+        // Read current content with encoding detection
+        let (content, encoding, line_ending) =
+            file_edit_guard::read_file_with_encoding(&path).await?;
+
+        // Try to find the old_string, with fuzzy matching fallbacks
+        let (match_count, actual_old_string, match_method) = {
+            let (count, method) = file_edit_guard::count_matches(&content, old_string);
+            if count > 0 {
+                // Determine the actual string to replace
+                let actual = if method == MatchMethod::Exact {
+                    old_string.to_string()
+                } else if let Some(m) = file_edit_guard::find_match(&content, old_string) {
+                    m.actual
+                } else {
+                    old_string.to_string()
+                };
+                (count, actual, method)
+            } else {
+                // Provide a helpful error with the old_string included
+                let preview = if old_string.len() > 200 {
+                    format!("{}...", &old_string[..200])
+                } else {
+                    old_string.to_string()
+                };
+                return Err(ToolError::ExecutionFailed(format!(
+                    "String to replace not found in {}.\n\
+                     old_string:\n{}\n\n\
+                     Make sure old_string matches the file content exactly, \
+                     including whitespace and indentation.",
+                    path.display(),
+                    preview
+                )));
+            }
+        };
+
+        // Uniqueness validation
         if !replace_all && match_count > 1 {
             return Err(ToolError::ExecutionFailed(format!(
                 "Found {} matches for the specified text in {}. \
@@ -698,26 +783,36 @@ impl Tool for ApplyPatchTool {
             }
         }
 
-        // Apply replacement
+        // Apply replacement using the actual matched string
         let new_content = if replace_all {
-            content.replace(old_string, new_string)
+            content.replace(&actual_old_string, new_string)
         } else {
-            content.replacen(old_string, new_string, 1)
+            content.replacen(&actual_old_string, new_string, 1)
         };
 
-        // Count replacements
         let replacements = if replace_all { match_count } else { 1 };
 
-        // Write back
-        fs::write(&path, &new_content)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to write file: {}", e)))?;
+        // Write back with original encoding and line endings
+        file_edit_guard::write_file_with_encoding(&path, &new_content, encoding, line_ending)
+            .await?;
 
-        let result = serde_json::json!({
+        // Update read state mtime
+        if let Some(ref read_state) = self.read_state
+            && let Ok(m) = fs::metadata(&path).await
+            && let Ok(mtime) = m.modified()
+        {
+            let mut state = read_state.write().await;
+            state.update_mtime(&path, mtime);
+        }
+
+        let mut result = serde_json::json!({
             "path": path.display().to_string(),
             "replacements": replacements,
             "success": true
         });
+        if match_method != MatchMethod::Exact {
+            result["match_method"] = serde_json::json!(format!("{:?}", match_method));
+        }
 
         Ok(ToolOutput::success(result, start.elapsed()))
     }

@@ -21,7 +21,7 @@ use crate::tools::builtin::{
     PlanUpdateTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool, SkillListTool,
     SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
     ToolListTool, ToolPermissionSetTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
-    WriteFileTool, shared_file_history,
+    WriteFileTool, shared_file_history, shared_read_file_state,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolDiscoverySummary, ToolDomain};
@@ -405,15 +405,22 @@ impl ToolRegistry {
     /// `register_builtin_tools()` to enable code generation features.
     pub fn register_dev_tools(&self) {
         let file_history = shared_file_history();
+        let read_state = shared_read_file_state();
 
         self.register_sync(Arc::new(ShellTool::new()));
-        self.register_sync(Arc::new(ReadFileTool::new()));
         self.register_sync(Arc::new(
-            WriteFileTool::new().with_file_history(Arc::clone(&file_history)),
+            ReadFileTool::new().with_read_state(Arc::clone(&read_state)),
+        ));
+        self.register_sync(Arc::new(
+            WriteFileTool::new()
+                .with_file_history(Arc::clone(&file_history))
+                .with_read_state(Arc::clone(&read_state)),
         ));
         self.register_sync(Arc::new(ListDirTool::new()));
         self.register_sync(Arc::new(
-            ApplyPatchTool::new().with_file_history(Arc::clone(&file_history)),
+            ApplyPatchTool::new()
+                .with_file_history(Arc::clone(&file_history))
+                .with_read_state(Arc::clone(&read_state)),
         ));
         self.register_sync(Arc::new(GlobTool::new()));
         self.register_sync(Arc::new(GrepTool::new()));
