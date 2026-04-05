@@ -514,6 +514,14 @@ impl EmbeddingProvider for BedrockEmbeddings {
                 EmbeddingError::InvalidResponse(format!("Failed to parse response: {}", e))
             })?;
 
+        if result.embedding.len() != self.dimension {
+            return Err(EmbeddingError::InvalidResponse(format!(
+                "Bedrock returned embedding of dimension {}, expected {}",
+                result.embedding.len(),
+                self.dimension,
+            )));
+        }
+
         Ok(result.embedding)
     }
 }

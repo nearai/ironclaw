@@ -84,13 +84,16 @@ impl EmbeddingsConfig {
             "EMBEDDING_PROVIDER",
         )?;
 
-        let model = optional_env("EMBEDDING_MODEL")?.unwrap_or_else(|| {
-            if provider == "bedrock" {
-                "amazon.titan-embed-text-v2:0".to_string()
-            } else {
-                settings.embeddings.model.clone()
-            }
-        });
+        let model = if provider == "bedrock" {
+            optional_env("EMBEDDING_MODEL")?
+                .unwrap_or_else(|| "amazon.titan-embed-text-v2:0".to_string())
+        } else {
+            db_first_or_default(
+                &settings.embeddings.model,
+                &defaults.model,
+                "EMBEDDING_MODEL",
+            )?
+        };
 
         // ollama_base_url lives on the top-level Settings, not the embeddings
         // sub-struct. Use a manual DB > env > default chain.
@@ -468,7 +471,7 @@ mod tests {
     #[cfg(feature = "bedrock")]
     #[test]
     fn bedrock_provider_defaults_to_titan_v2() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_embedding_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -492,7 +495,7 @@ mod tests {
     #[cfg(feature = "bedrock")]
     #[test]
     fn bedrock_dimension_validation_rejects_unsupported_values() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_embedding_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
