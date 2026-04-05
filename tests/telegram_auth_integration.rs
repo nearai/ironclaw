@@ -12,14 +12,17 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(feature = "integration")]
+use std::sync::{Mutex, OnceLock};
 
 #[cfg(feature = "integration")]
 use futures::StreamExt;
 #[cfg(feature = "integration")]
 use ironclaw::channels::Channel;
+#[cfg(feature = "integration")]
+use ironclaw::channels::OutgoingResponse;
 use ironclaw::channels::wasm::{
-    ChannelCapabilities, PreparedChannelModule, WasmChannel, WasmChannelRuntime,
-    WasmChannelRuntimeConfig,
+    PreparedChannelModule, WasmChannel, WasmChannelRuntime, WasmChannelRuntimeConfig,
 };
 use ironclaw::pairing::PairingStore;
 #[cfg(feature = "integration")]
@@ -74,6 +77,33 @@ fn telegram_wasm_path() -> std::path::PathBuf {
     local
 }
 
+fn telegram_capabilities_path() -> std::path::PathBuf {
+    let local = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("channels-src/telegram/telegram.capabilities.json");
+    if local.exists() {
+        return local;
+    }
+
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        && output.status.success()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if let Some(path) = line.strip_prefix("worktree ") {
+                let candidate = std::path::PathBuf::from(path)
+                    .join("channels-src/telegram/telegram.capabilities.json");
+                if candidate.exists() {
+                    return candidate;
+                }
+            }
+        }
+    }
+
+    local
+}
+
 /// Create a test runtime for WASM channel operations.
 fn create_test_runtime() -> Arc<WasmChannelRuntime> {
     let config = WasmChannelRuntimeConfig::for_testing();
@@ -118,15 +148,25 @@ async fn create_telegram_channel_with_store(
         .await
         .expect("Failed to load Telegram WASM module");
 
-    WasmChannel::new(
+    let capabilities_bytes = std::fs::read(telegram_capabilities_path())
+        .unwrap_or_else(|err| panic!("Failed to read Telegram capabilities file: {err}"));
+    let capabilities_file =
+        ironclaw::channels::wasm::ChannelCapabilitiesFile::from_bytes(&capabilities_bytes)
+            .unwrap_or_else(|err| panic!("Failed to parse Telegram capabilities file: {err}"));
+
+    let channel = WasmChannel::new(
         runtime,
         module,
-        ChannelCapabilities::for_channel("telegram").with_path("/webhook/telegram"),
+        capabilities_file.to_capabilities(),
         "default",
         config_json.to_string(),
         pairing_store,
         None,
-    )
+    );
+    channel
+        .set_credential("TELEGRAM_BOT_TOKEN", "123456:ABCDEF".to_string())
+        .await;
+    channel
 }
 
 /// Build a Telegram Update JSON payload for a message.
@@ -158,6 +198,64 @@ fn build_telegram_update(
     })
     .to_string()
     .into_bytes()
+}
+
+fn build_telegram_update_value(update_id: i64, message: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "update_id": update_id,
+        "message": message
+    })
+}
+
+#[cfg(feature = "integration")]
+struct ScopedEnvVar {
+    key: &'static str,
+    original: Option<String>,
+    _mutex: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(feature = "integration")]
+impl ScopedEnvVar {
+    fn set(key: &'static str, value: &str) -> Self {
+        static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+        let guard = ENV_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env mutex poisoned");
+        let original = std::env::var(key).ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self {
+            key,
+            original,
+            _mutex: guard,
+        }
+    }
+}
+
+#[cfg(feature = "integration")]
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        // SAFETY: Under ENV_MUTEX (still held by _mutex), no concurrent env access.
+        unsafe {
+            if let Some(ref value) = self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "integration")]
+async fn expect_no_message(stream: &mut ironclaw::channels::MessageStream, timeout_ms: u64) {
+    let result = timeout(Duration::from_millis(timeout_ms), stream.next()).await;
+    assert!(
+        result.is_err(),
+        "expected no message, but stream produced one"
+    );
 }
 
 #[tokio::test]
@@ -370,6 +468,143 @@ async fn test_private_messages_use_chat_id_as_thread_scope() {
 }
 
 #[tokio::test]
+#[cfg(feature = "integration")]
+async fn test_private_dm_webhook_and_reply_use_fake_telegram_api() {
+    use axum::{
+        Router, body::Bytes, extract::State, http::Uri, response::IntoResponse, routing::any,
+    };
+
+    #[derive(Clone)]
+    struct FakeTelegramState {
+        requests: Arc<tokio::sync::Mutex<Vec<String>>>,
+        send_message_payloads: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
+    }
+
+    async fn handler(
+        State(state): State<FakeTelegramState>,
+        uri: Uri,
+        body: Bytes,
+    ) -> impl IntoResponse {
+        state.requests.lock().await.push(uri.to_string());
+
+        if uri.path().ends_with("/sendMessage") {
+            let payload = serde_json::from_slice::<serde_json::Value>(&body)
+                .unwrap_or_else(|err| panic!("invalid sendMessage payload: {err}"));
+            state.send_message_payloads.lock().await.push(payload);
+            return axum::Json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 999 }
+            }))
+            .into_response();
+        }
+
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            format!("Unhandled fake Telegram path: {}", uri.path()),
+        )
+            .into_response()
+    }
+
+    require_telegram_wasm!();
+    let runtime = create_test_runtime();
+
+    let state = FakeTelegramState {
+        requests: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        send_message_payloads: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+
+    let app = Router::new()
+        .route("/{*path}", any(handler))
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake telegram");
+    let addr = listener.local_addr().expect("fake telegram addr");
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let _guard = ScopedEnvVar::set(
+        "IRONCLAW_TEST_TELEGRAM_API_BASE_URL",
+        &format!("http://{addr}"),
+    );
+
+    let config = serde_json::json!({
+        "bot_username": "test_bot",
+        "owner_id": null,
+        "dm_policy": "open",
+        "allow_from": [],
+        "respond_to_all_group_messages": false
+    })
+    .to_string();
+
+    let channel = create_telegram_channel(runtime, &config).await;
+    let mut stream = channel
+        .start_message_stream_for_test()
+        .await
+        .expect("Failed to bootstrap test message stream");
+
+    let update = build_telegram_update(
+        9,
+        201,
+        999,
+        "private",
+        999,
+        "DirectUser",
+        "hello from telegram dm",
+    );
+
+    let http_response = channel
+        .call_on_http_request(
+            "POST",
+            "/webhook/telegram",
+            &HashMap::new(),
+            &HashMap::new(),
+            &update,
+            true,
+        )
+        .await
+        .expect("HTTP callback failed");
+    assert_eq!(http_response.status, 200);
+
+    let incoming = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("message should arrive")
+        .expect("stream should yield a message");
+    assert_eq!(incoming.content, "hello from telegram dm");
+    assert_eq!(incoming.thread_id.as_deref(), Some("999"));
+
+    channel
+        .respond(
+            &incoming,
+            OutgoingResponse::text("hello back from ironclaw"),
+        )
+        .await
+        .expect("telegram respond should succeed");
+
+    let payloads = timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = state.send_message_payloads.lock().await.clone();
+            if !snapshot.is_empty() {
+                break snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("sendMessage should be captured");
+
+    server.abort();
+
+    assert_eq!(payloads.len(), 1);
+    assert_eq!(payloads[0]["chat_id"], serde_json::json!(999));
+    assert_eq!(
+        payloads[0]["text"],
+        serde_json::json!("hello back from ironclaw")
+    );
+    assert_eq!(payloads[0]["reply_to_message_id"], serde_json::json!(201));
+}
+
+#[tokio::test]
 async fn test_private_message_without_owner_id_with_pairing_policy() {
     require_telegram_wasm!();
     let runtime = create_test_runtime();
@@ -470,6 +705,10 @@ async fn test_bot_mention_detection_case_insensitive() {
     .to_string();
 
     let channel = create_telegram_channel(runtime, &config).await;
+    let mut stream = channel
+        .start_message_stream_for_test()
+        .await
+        .expect("Failed to bootstrap test message stream");
 
     // Test case-insensitive mention detection
     let update = build_telegram_update(
@@ -496,6 +735,400 @@ async fn test_bot_mention_detection_case_insensitive() {
 
     assert_eq!(response.status, 200);
 
-    // REGRESSION TEST: Bot mentions should be case-insensitive
-    // Case-insensitive detection allows @mybot and @MyBot to both trigger the bot
+    let msg = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("message should arrive")
+        .expect("stream should yield a message");
+    assert_eq!(msg.content, "Hey @mybot how are you");
+}
+
+#[tokio::test]
+#[cfg(feature = "integration")]
+async fn test_group_message_without_bot_mention_is_dropped() {
+    require_telegram_wasm!();
+    let runtime = create_test_runtime();
+
+    let config = serde_json::json!({
+        "bot_username": "MyBot",
+        "owner_id": null,
+        "dm_policy": "open",
+        "allow_from": [],
+        "respond_to_all_group_messages": false
+    })
+    .to_string();
+
+    let channel = create_telegram_channel(runtime, &config).await;
+    let mut stream = channel
+        .start_message_stream_for_test()
+        .await
+        .expect("Failed to bootstrap test message stream");
+
+    let update = build_telegram_update(7, 106, -123456789, "group", 700, "User", "hello everyone");
+
+    let response = channel
+        .call_on_http_request(
+            "POST",
+            "/webhook/telegram",
+            &HashMap::new(),
+            &HashMap::new(),
+            &update,
+            true,
+        )
+        .await
+        .expect("HTTP callback failed");
+
+    assert_eq!(response.status, 200);
+    expect_no_message(&mut stream, 300).await;
+}
+
+#[tokio::test]
+#[cfg(feature = "integration")]
+async fn test_group_message_with_bot_mention_emits_cleaned_content() {
+    require_telegram_wasm!();
+    let runtime = create_test_runtime();
+
+    let config = serde_json::json!({
+        "bot_username": "MyBot",
+        "owner_id": null,
+        "dm_policy": "open",
+        "allow_from": [],
+        "respond_to_all_group_messages": false
+    })
+    .to_string();
+
+    let channel = create_telegram_channel(runtime, &config).await;
+    let mut stream = channel
+        .start_message_stream_for_test()
+        .await
+        .expect("Failed to bootstrap test message stream");
+
+    let update = build_telegram_update(
+        8,
+        107,
+        -123456789,
+        "group",
+        701,
+        "User",
+        "@MyBot status please",
+    );
+
+    let response = channel
+        .call_on_http_request(
+            "POST",
+            "/webhook/telegram",
+            &HashMap::new(),
+            &HashMap::new(),
+            &update,
+            true,
+        )
+        .await
+        .expect("HTTP callback failed");
+
+    assert_eq!(response.status, 200);
+    let msg = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("message should arrive")
+        .expect("stream should yield a message");
+    assert_eq!(msg.content, "status please");
+    assert_eq!(msg.thread_id.as_deref(), Some("-123456789"));
+}
+
+#[tokio::test]
+#[cfg(feature = "integration")]
+async fn test_edited_message_emits_like_regular_message() {
+    require_telegram_wasm!();
+    let runtime = create_test_runtime();
+
+    let config = serde_json::json!({
+        "bot_username": null,
+        "owner_id": null,
+        "dm_policy": "open",
+        "allow_from": [],
+        "respond_to_all_group_messages": false
+    })
+    .to_string();
+
+    let channel = create_telegram_channel(runtime, &config).await;
+    let mut stream = channel
+        .start_message_stream_for_test()
+        .await
+        .expect("Failed to bootstrap test message stream");
+
+    let update = serde_json::json!({
+        "update_id": 9,
+        "edited_message": {
+            "message_id": 205,
+            "date": 1234567890,
+            "chat": {
+                "id": 999,
+                "type": "private"
+            },
+            "from": {
+                "id": 999,
+                "is_bot": false,
+                "first_name": "EditedUser"
+            },
+            "text": "edited telegram message"
+        }
+    })
+    .to_string()
+    .into_bytes();
+
+    let response = channel
+        .call_on_http_request(
+            "POST",
+            "/webhook/telegram",
+            &HashMap::new(),
+            &HashMap::new(),
+            &update,
+            true,
+        )
+        .await
+        .expect("HTTP callback failed");
+
+    assert_eq!(response.status, 200);
+    let msg = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("message should arrive")
+        .expect("stream should yield a message");
+    assert_eq!(msg.content, "edited telegram message");
+    assert_eq!(msg.thread_id.as_deref(), Some("999"));
+}
+
+#[tokio::test]
+#[cfg(feature = "integration")]
+async fn test_duplicate_webhook_update_is_dropped() {
+    require_telegram_wasm!();
+    let runtime = create_test_runtime();
+
+    let config = serde_json::json!({
+        "bot_username": null,
+        "owner_id": null,
+        "dm_policy": "open",
+        "allow_from": [],
+        "respond_to_all_group_messages": false
+    })
+    .to_string();
+
+    let channel = create_telegram_channel(runtime, &config).await;
+    let mut stream = channel
+        .start_message_stream_for_test()
+        .await
+        .expect("Failed to bootstrap test message stream");
+
+    let duplicate_update =
+        build_telegram_update(50, 501, 999, "private", 999, "RepeatUser", "deliver once");
+
+    let first_response = channel
+        .call_on_http_request(
+            "POST",
+            "/webhook/telegram",
+            &HashMap::new(),
+            &HashMap::new(),
+            &duplicate_update,
+            true,
+        )
+        .await
+        .expect("first webhook callback failed");
+    assert_eq!(first_response.status, 200);
+
+    let first_msg = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("first message should arrive")
+        .expect("stream should yield the first message");
+    assert_eq!(first_msg.content, "deliver once");
+
+    let second_response = channel
+        .call_on_http_request(
+            "POST",
+            "/webhook/telegram",
+            &HashMap::new(),
+            &HashMap::new(),
+            &duplicate_update,
+            true,
+        )
+        .await
+        .expect("duplicate webhook callback failed");
+    assert_eq!(second_response.status, 200);
+    expect_no_message(&mut stream, 300).await;
+
+    let next_update = build_telegram_update(
+        51,
+        502,
+        999,
+        "private",
+        999,
+        "RepeatUser",
+        "deliver twice only when new",
+    );
+
+    let third_response = channel
+        .call_on_http_request(
+            "POST",
+            "/webhook/telegram",
+            &HashMap::new(),
+            &HashMap::new(),
+            &next_update,
+            true,
+        )
+        .await
+        .expect("next webhook callback failed");
+    assert_eq!(third_response.status, 200);
+
+    let second_msg = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("next message should arrive")
+        .expect("stream should yield the next message");
+    assert_eq!(second_msg.content, "deliver twice only when new");
+}
+
+#[tokio::test]
+#[cfg(feature = "integration")]
+async fn test_document_attachment_downloads_via_fake_telegram_api() {
+    use axum::{
+        Router, body::Bytes, extract::State, http::Uri, response::IntoResponse, routing::any,
+    };
+
+    #[derive(Clone)]
+    struct FakeTelegramState {
+        requests: Arc<tokio::sync::Mutex<Vec<String>>>,
+    }
+
+    async fn handler(
+        State(state): State<FakeTelegramState>,
+        uri: Uri,
+        _body: Bytes,
+    ) -> impl IntoResponse {
+        state.requests.lock().await.push(uri.to_string());
+
+        if uri.path().ends_with("/getFile") {
+            return axum::Json(serde_json::json!({
+                "ok": true,
+                "result": {
+                    "file_id": "doc_1",
+                    "file_path": "documents/doc_1.pdf"
+                }
+            }))
+            .into_response();
+        }
+
+        if uri
+            .path()
+            .ends_with("/file/bot123456:ABCDEF/documents/doc_1.pdf")
+        {
+            return (
+                axum::http::StatusCode::OK,
+                [("content-type", "application/pdf")],
+                b"%PDF-1.4 fake test pdf".to_vec(),
+            )
+                .into_response();
+        }
+
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            format!("Unhandled fake Telegram path: {}", uri.path()),
+        )
+            .into_response()
+    }
+
+    require_telegram_wasm!();
+    let runtime = create_test_runtime();
+
+    let state = FakeTelegramState {
+        requests: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+
+    let app = Router::new()
+        .route("/{*path}", any(handler))
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake telegram");
+    let addr = listener.local_addr().expect("fake telegram addr");
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let _guard = ScopedEnvVar::set(
+        "IRONCLAW_TEST_TELEGRAM_API_BASE_URL",
+        &format!("http://{addr}"),
+    );
+
+    let config = serde_json::json!({
+        "bot_username": null,
+        "owner_id": null,
+        "dm_policy": "open",
+        "allow_from": [],
+        "respond_to_all_group_messages": false
+    })
+    .to_string();
+
+    let channel = create_telegram_channel(runtime, &config).await;
+    let mut stream = channel
+        .start_message_stream_for_test()
+        .await
+        .expect("Failed to bootstrap test message stream");
+
+    let update = build_telegram_update_value(
+        10,
+        serde_json::json!({
+            "message_id": 301,
+            "date": 1234567890,
+            "chat": { "id": 999, "type": "private" },
+            "from": {
+                "id": 999,
+                "is_bot": false,
+                "first_name": "DocUser"
+            },
+            "caption": "please read this",
+            "document": {
+                "file_id": "doc_1",
+                "file_unique_id": "uniq_doc_1",
+                "file_name": "report.pdf",
+                "mime_type": "application/pdf",
+                "file_size": 21
+            }
+        }),
+    )
+    .to_string()
+    .into_bytes();
+
+    let response = channel
+        .call_on_http_request(
+            "POST",
+            "/webhook/telegram",
+            &HashMap::new(),
+            &HashMap::new(),
+            &update,
+            true,
+        )
+        .await
+        .expect("HTTP callback failed");
+
+    assert_eq!(response.status, 200);
+
+    let msg = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("message should arrive")
+        .expect("stream should yield a message");
+
+    server.abort();
+
+    assert_eq!(msg.content, "please read this");
+    assert_eq!(msg.attachments.len(), 1);
+    assert_eq!(msg.attachments[0].id, "doc_1");
+    assert_eq!(msg.attachments[0].mime_type, "application/pdf");
+    assert_eq!(msg.attachments[0].filename.as_deref(), Some("report.pdf"));
+    assert_eq!(msg.attachments[0].data, b"%PDF-1.4 fake test pdf".to_vec());
+
+    let requests = state.requests.lock().await.clone();
+    assert!(
+        requests
+            .iter()
+            .any(|path| path.contains("/bot123456:ABCDEF/getFile"))
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|path| path.contains("/file/bot123456:ABCDEF/documents/doc_1.pdf"))
+    );
 }
