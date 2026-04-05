@@ -28,6 +28,9 @@ class FakeTelegramState:
         self._update_queue: list[dict] = []
         self._next_update_id = 1
         self._update_event = asyncio.Event()
+        self.reject_markdown = False
+        self.rate_limit_count = 0
+        self.fail_downloads = False
 
     def queue_update(self, update: dict) -> int:
         update_id = self._next_update_id
@@ -118,6 +121,28 @@ async def send_message(request: web.Request) -> web.Response:
     state.api_calls.append(
         {"method": "sendMessage", "body": body, "time": time.time()}
     )
+    # Simulate Telegram 429 rate limiting
+    if state.rate_limit_count > 0:
+        state.rate_limit_count -= 1
+        return web.json_response(
+            {
+                "ok": False,
+                "error_code": 429,
+                "description": "Too Many Requests: retry after 1",
+                "parameters": {"retry_after": 1},
+            },
+            status=429,
+        )
+    # Simulate Telegram rejecting Markdown when the flag is set
+    if state.reject_markdown and "parse_mode" in body:
+        return web.json_response(
+            {
+                "ok": False,
+                "error_code": 400,
+                "description": "Bad Request: can't parse entities",
+            },
+            status=400,
+        )
     state.sent_messages.append(body)
     msg_id = len(state.sent_messages) + 1000
     return web.json_response(
@@ -153,6 +178,16 @@ async def get_file(request: web.Request) -> web.Response:
     state: FakeTelegramState = request.app["state"]
     body = dict(request.query)
     state.api_calls.append({"method": "getFile", "body": body, "time": time.time()})
+    # Simulate download failures
+    if state.fail_downloads:
+        return web.json_response(
+            {
+                "ok": False,
+                "error_code": 500,
+                "description": "Internal Server Error",
+            },
+            status=500,
+        )
     file_id = body.get("file_id", "test_file_id")
     return web.json_response(
         {
@@ -207,6 +242,27 @@ async def mock_reset(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def mock_set_reject_markdown(request: web.Request) -> web.Response:
+    state: FakeTelegramState = request.app["state"]
+    body = await request.json()
+    state.reject_markdown = bool(body.get("reject", False))
+    return web.json_response({"ok": True, "reject_markdown": state.reject_markdown})
+
+
+async def mock_set_rate_limit(request: web.Request) -> web.Response:
+    state: FakeTelegramState = request.app["state"]
+    body = await request.json()
+    state.rate_limit_count = int(body.get("count", 0))
+    return web.json_response({"ok": True, "rate_limit_count": state.rate_limit_count})
+
+
+async def mock_set_fail_downloads(request: web.Request) -> web.Response:
+    state: FakeTelegramState = request.app["state"]
+    body = await request.json()
+    state.fail_downloads = bool(body.get("fail", False))
+    return web.json_response({"ok": True, "fail_downloads": state.fail_downloads})
+
+
 # ── Server entry point ───────────────────────────────────────────────────
 
 
@@ -234,6 +290,9 @@ def main():
     app.router.add_get("/__mock/chat_actions", mock_chat_actions)
     app.router.add_get("/__mock/api_calls", mock_api_calls)
     app.router.add_post("/__mock/reset", mock_reset)
+    app.router.add_post("/__mock/set_reject_markdown", mock_set_reject_markdown)
+    app.router.add_post("/__mock/set_rate_limit", mock_set_rate_limit)
+    app.router.add_post("/__mock/set_fail_downloads", mock_set_fail_downloads)
 
     async def start():
         runner = web.AppRunner(app)

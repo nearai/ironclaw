@@ -201,6 +201,23 @@ async def wait_for_sent_messages(
     )
 
 
+async def get_api_calls(fake_tg_url: str) -> list[dict]:
+    """Fetch all recorded API calls from the fake Telegram server."""
+    async with httpx.AsyncClient() as c:
+        r = await c.get(f"{fake_tg_url}/__mock/api_calls", timeout=5)
+        return r.json().get("calls", [])
+
+
+async def set_reject_markdown(fake_tg_url: str, reject: bool):
+    """Toggle the markdown rejection flag on the fake Telegram server."""
+    async with httpx.AsyncClient() as c:
+        await c.post(
+            f"{fake_tg_url}/__mock/set_reject_markdown",
+            json={"reject": reject},
+            timeout=5,
+        )
+
+
 # ── tests ────────────────────────────────────────────────────────────────
 
 
@@ -345,4 +362,482 @@ async def test_telegram_invalid_webhook_secret_rejected(telegram_e2e_server):
     )
     assert resp.status_code in (401, 403), (
         f"Expected 401/403, got {resp.status_code}: {resp.text}"
+    )
+
+
+async def test_telegram_group_mention_filtering(telegram_e2e_server):
+    """Group messages without a bot mention are ignored; mentioned messages get a reply."""
+    http_url = telegram_e2e_server["http_url"]
+    fake_tg_url = telegram_e2e_server["fake_tg_url"]
+
+    # Part 1: group message WITHOUT bot mention → no reply
+    await reset_fake_tg(fake_tg_url)
+
+    resp = await post_telegram_webhook(
+        http_url,
+        {
+            "update_id": 500,
+            "message": {
+                "message_id": 50,
+                "from": {
+                    "id": OWNER_USER_ID,
+                    "is_bot": False,
+                    "first_name": "E2E Tester",
+                },
+                "chat": {"id": -1001, "type": "group", "title": "Test Group"},
+                "date": int(time.time()),
+                "text": "hello everyone",
+            },
+        },
+        secret=WEBHOOK_SECRET,
+    )
+    assert resp.status_code == 200
+
+    # Wait a few seconds and verify no reply was sent to the group
+    await asyncio.sleep(3)
+    async with httpx.AsyncClient() as c:
+        r = await c.get(f"{fake_tg_url}/__mock/sent_messages", timeout=5)
+    messages = r.json().get("messages", [])
+    group_replies = [m for m in messages if m.get("chat_id") == -1001]
+    assert len(group_replies) == 0, (
+        f"Expected no replies to group without mention, got: {group_replies}"
+    )
+
+    # Part 2: group message WITH bot mention → reply expected
+    await reset_fake_tg(fake_tg_url)
+
+    resp = await post_telegram_webhook(
+        http_url,
+        {
+            "update_id": 501,
+            "message": {
+                "message_id": 51,
+                "from": {
+                    "id": OWNER_USER_ID,
+                    "is_bot": False,
+                    "first_name": "E2E Tester",
+                },
+                "chat": {"id": -1001, "type": "group", "title": "Test Group"},
+                "date": int(time.time()),
+                "text": "@e2e_test_bot hello",
+                "entities": [
+                    {
+                        "offset": 0,
+                        "length": len("@e2e_test_bot"),
+                        "type": "mention",
+                    }
+                ],
+            },
+        },
+        secret=WEBHOOK_SECRET,
+    )
+    assert resp.status_code == 200
+
+    messages = await wait_for_sent_messages(fake_tg_url, min_count=1, timeout=30)
+    group_replies = [m for m in messages if m.get("chat_id") == -1001]
+    assert len(group_replies) >= 1, (
+        f"Expected at least one reply to group with mention, got: {messages}"
+    )
+
+
+async def test_telegram_long_message_chunking(telegram_e2e_server):
+    """Long LLM responses are split into multiple Telegram messages (<=4096 chars each)."""
+    http_url = telegram_e2e_server["http_url"]
+    fake_tg_url = telegram_e2e_server["fake_tg_url"]
+
+    await reset_fake_tg(fake_tg_url)
+
+    # "long response" triggers the ~7400-char canned response in mock_llm.py
+    resp = await post_telegram_webhook(
+        http_url,
+        {
+            "update_id": 600,
+            "message": {
+                "message_id": 60,
+                "from": {
+                    "id": OWNER_USER_ID,
+                    "is_bot": False,
+                    "first_name": "E2E Tester",
+                },
+                "chat": {"id": OWNER_USER_ID, "type": "private"},
+                "date": int(time.time()),
+                "text": "long response",
+            },
+        },
+        secret=WEBHOOK_SECRET,
+    )
+    assert resp.status_code == 200
+
+    # Wait for at least 2 chunks
+    messages = await wait_for_sent_messages(fake_tg_url, min_count=2, timeout=30)
+
+    # Verify each chunk is within Telegram's 4096 char limit
+    for i, msg in enumerate(messages):
+        text = msg.get("text", "")
+        assert len(text) <= 4096, (
+            f"Chunk {i} exceeds 4096 chars: {len(text)} chars"
+        )
+
+    # Verify all chunks target the correct chat_id
+    for msg in messages:
+        assert msg["chat_id"] == OWNER_USER_ID
+
+    # Verify total text across all chunks exceeds the single-message limit
+    total_text = "".join(m.get("text", "") for m in messages)
+    assert len(total_text) > 4096, (
+        f"Total text ({len(total_text)} chars) should exceed 4096"
+    )
+
+
+async def test_telegram_polling_mode_roundtrip(telegram_e2e_server):
+    """Updates queued via the mock API are picked up by the polling loop."""
+    fake_tg_url = telegram_e2e_server["fake_tg_url"]
+
+    await reset_fake_tg(fake_tg_url)
+
+    # Queue an update via the mock control endpoint (simulates polling mode)
+    async with httpx.AsyncClient() as c:
+        await c.post(
+            f"{fake_tg_url}/__mock/queue_update",
+            json={
+                "message": {
+                    "message_id": 70,
+                    "from": {
+                        "id": OWNER_USER_ID,
+                        "is_bot": False,
+                        "first_name": "E2E Tester",
+                    },
+                    "chat": {"id": OWNER_USER_ID, "type": "private"},
+                    "date": int(time.time()),
+                    "text": "hello",
+                },
+            },
+            timeout=5,
+        )
+
+    # Wait for the host polling loop to pick up the update and reply
+    messages = await wait_for_sent_messages(fake_tg_url, min_count=1, timeout=30)
+    assert len(messages) >= 1, f"Expected at least one reply, got: {messages}"
+    assert messages[-1]["chat_id"] == OWNER_USER_ID
+
+    # Verify getUpdates calls were made with advancing offsets
+    api_calls = await get_api_calls(fake_tg_url)
+    get_updates_calls = [c for c in api_calls if c["method"] == "getUpdates"]
+    assert len(get_updates_calls) >= 1, (
+        f"Expected getUpdates calls, got: {[c['method'] for c in api_calls]}"
+    )
+
+
+async def test_telegram_markdown_fallback(telegram_e2e_server):
+    """When Telegram rejects Markdown formatting, the bot retries as plain text."""
+    http_url = telegram_e2e_server["http_url"]
+    fake_tg_url = telegram_e2e_server["fake_tg_url"]
+
+    await reset_fake_tg(fake_tg_url)
+    await set_reject_markdown(fake_tg_url, True)
+
+    try:
+        resp = await post_telegram_webhook(
+            http_url,
+            {
+                "update_id": 800,
+                "message": {
+                    "message_id": 80,
+                    "from": {
+                        "id": OWNER_USER_ID,
+                        "is_bot": False,
+                        "first_name": "E2E Tester",
+                    },
+                    "chat": {"id": OWNER_USER_ID, "type": "private"},
+                    "date": int(time.time()),
+                    "text": "hello",
+                },
+            },
+            secret=WEBHOOK_SECRET,
+        )
+        assert resp.status_code == 200
+
+        # Wait for the plain-text retry to succeed (appears in sent_messages)
+        messages = await wait_for_sent_messages(fake_tg_url, min_count=1, timeout=30)
+        assert len(messages) >= 1, f"Expected at least one message, got: {messages}"
+
+        # Verify the retry sequence in api_calls:
+        # First sendMessage has parse_mode (rejected with 400),
+        # second sendMessage has no parse_mode (success)
+        api_calls = await get_api_calls(fake_tg_url)
+        send_calls = [c for c in api_calls if c["method"] == "sendMessage"]
+        assert len(send_calls) >= 2, (
+            f"Expected at least 2 sendMessage calls (rejected + retry), "
+            f"got {len(send_calls)}: {send_calls}"
+        )
+
+        # First call should have parse_mode (was rejected)
+        assert "parse_mode" in send_calls[0].get("body", {}), (
+            f"First sendMessage should have parse_mode: {send_calls[0]}"
+        )
+        # Second call should NOT have parse_mode (plain-text fallback)
+        assert "parse_mode" not in send_calls[1].get("body", {}), (
+            f"Retry sendMessage should not have parse_mode: {send_calls[1]}"
+        )
+    finally:
+        await set_reject_markdown(fake_tg_url, False)
+
+
+async def set_rate_limit(fake_tg_url: str, count: int):
+    """Set the number of sendMessage calls that should return 429."""
+    async with httpx.AsyncClient() as c:
+        await c.post(
+            f"{fake_tg_url}/__mock/set_rate_limit",
+            json={"count": count},
+            timeout=5,
+        )
+
+
+async def set_fail_downloads(fake_tg_url: str, fail: bool):
+    """Toggle download failure mode on the fake Telegram server."""
+    async with httpx.AsyncClient() as c:
+        await c.post(
+            f"{fake_tg_url}/__mock/set_fail_downloads",
+            json={"fail": fail},
+            timeout=5,
+        )
+
+
+async def wait_for_api_call(
+    fake_tg_url: str,
+    method: str,
+    *,
+    timeout: float = 15,
+) -> list[dict]:
+    """Poll until at least one API call with the given method appears."""
+    deadline = time.monotonic() + timeout
+    async with httpx.AsyncClient() as c:
+        while time.monotonic() < deadline:
+            r = await c.get(f"{fake_tg_url}/__mock/api_calls", timeout=5)
+            calls = r.json().get("calls", [])
+            matching = [call for call in calls if call["method"] == method]
+            if matching:
+                return matching
+            await asyncio.sleep(0.5)
+    raise TimeoutError(
+        f"Expected at least one '{method}' API call within {timeout}s"
+    )
+
+
+async def test_telegram_missing_webhook_secret_rejected(telegram_e2e_server):
+    """Webhook with no secret header at all is rejected with 401."""
+    http_url = telegram_e2e_server["http_url"]
+
+    # POST without any secret header (secret=None means no header is sent)
+    resp = await post_telegram_webhook(
+        http_url,
+        {
+            "update_id": 900,
+            "message": {
+                "message_id": 90,
+                "from": {"id": OWNER_USER_ID, "is_bot": False, "first_name": "E2E"},
+                "chat": {"id": OWNER_USER_ID, "type": "private"},
+                "date": int(time.time()),
+                "text": "should be rejected",
+            },
+        },
+        secret=None,
+    )
+    assert resp.status_code in (401, 403), (
+        f"Expected 401/403 for missing secret, got {resp.status_code}: {resp.text}"
+    )
+
+
+async def test_telegram_rate_limit_resilience(telegram_e2e_server):
+    """Bot survives Telegram 429 rate limiting and can send after it clears."""
+    http_url = telegram_e2e_server["http_url"]
+    fake_tg_url = telegram_e2e_server["fake_tg_url"]
+
+    await reset_fake_tg(fake_tg_url)
+
+    # Make the next 5 sendMessage calls return 429 (covers Markdown + plain retry)
+    await set_rate_limit(fake_tg_url, 5)
+
+    try:
+        # Send a webhook — the bot will process it but sendMessage will get 429
+        resp = await post_telegram_webhook(
+            http_url,
+            {
+                "update_id": 1000,
+                "message": {
+                    "message_id": 100,
+                    "from": {
+                        "id": OWNER_USER_ID,
+                        "is_bot": False,
+                        "first_name": "E2E Tester",
+                    },
+                    "chat": {"id": OWNER_USER_ID, "type": "private"},
+                    "date": int(time.time()),
+                    "text": "hello",
+                },
+            },
+            secret=WEBHOOK_SECRET,
+        )
+        assert resp.status_code == 200
+
+        # Wait for the bot to attempt sendMessage (it will be rejected with 429)
+        send_calls = await wait_for_api_call(fake_tg_url, "sendMessage", timeout=15)
+        assert len(send_calls) >= 1, f"Expected sendMessage attempt, got: {send_calls}"
+
+        # Verify no messages were actually delivered (all got 429)
+        async with httpx.AsyncClient() as c:
+            r = await c.get(f"{fake_tg_url}/__mock/sent_messages", timeout=5)
+        messages = r.json().get("messages", [])
+        assert len(messages) == 0, (
+            f"Expected no delivered messages during rate limit, got: {messages}"
+        )
+
+        # Now clear rate limiting and send another message
+        await set_rate_limit(fake_tg_url, 0)
+        await reset_fake_tg(fake_tg_url)
+
+        resp2 = await post_telegram_webhook(
+            http_url,
+            {
+                "update_id": 1001,
+                "message": {
+                    "message_id": 101,
+                    "from": {
+                        "id": OWNER_USER_ID,
+                        "is_bot": False,
+                        "first_name": "E2E Tester",
+                    },
+                    "chat": {"id": OWNER_USER_ID, "type": "private"},
+                    "date": int(time.time()),
+                    "text": "hello",
+                },
+            },
+            secret=WEBHOOK_SECRET,
+        )
+        assert resp2.status_code == 200
+
+        # Verify the bot recovered and sent a reply
+        messages = await wait_for_sent_messages(fake_tg_url, min_count=1, timeout=30)
+        assert len(messages) >= 1, (
+            f"Expected bot to recover after rate limit, got: {messages}"
+        )
+        assert messages[-1]["chat_id"] == OWNER_USER_ID
+    finally:
+        await set_rate_limit(fake_tg_url, 0)
+
+
+async def test_telegram_document_download_failure_graceful(telegram_e2e_server):
+    """Bot still replies to message text when document download fails."""
+    http_url = telegram_e2e_server["http_url"]
+    fake_tg_url = telegram_e2e_server["fake_tg_url"]
+
+    await reset_fake_tg(fake_tg_url)
+    await set_fail_downloads(fake_tg_url, True)
+
+    try:
+        # Send a webhook with a document attachment AND text content
+        resp = await post_telegram_webhook(
+            http_url,
+            {
+                "update_id": 1100,
+                "message": {
+                    "message_id": 110,
+                    "from": {
+                        "id": OWNER_USER_ID,
+                        "is_bot": False,
+                        "first_name": "E2E Tester",
+                    },
+                    "chat": {"id": OWNER_USER_ID, "type": "private"},
+                    "date": int(time.time()),
+                    "text": "hello",
+                    "document": {
+                        "file_id": "test_doc_fail_123",
+                        "file_unique_id": "unique_test_doc_fail_123",
+                        "file_name": "report.pdf",
+                        "mime_type": "application/pdf",
+                        "file_size": 2048,
+                    },
+                },
+            },
+            secret=WEBHOOK_SECRET,
+        )
+        assert resp.status_code == 200
+
+        # Verify the bot still replies to the text content despite download failure
+        messages = await wait_for_sent_messages(fake_tg_url, min_count=1, timeout=30)
+        assert len(messages) >= 1, (
+            f"Expected bot to reply despite download failure, got: {messages}"
+        )
+        assert messages[-1]["chat_id"] == OWNER_USER_ID
+
+        # Verify getFile was attempted (and failed)
+        api_calls = await get_api_calls(fake_tg_url)
+        get_file_calls = [c for c in api_calls if c["method"] == "getFile"]
+        assert len(get_file_calls) >= 1, (
+            f"Expected getFile attempt, got: {[c['method'] for c in api_calls]}"
+        )
+    finally:
+        await set_fail_downloads(fake_tg_url, False)
+
+
+async def test_telegram_malformed_payload_resilience(telegram_e2e_server):
+    """Malformed JSON webhook is accepted gracefully; bot continues working after."""
+    http_url = telegram_e2e_server["http_url"]
+    fake_tg_url = telegram_e2e_server["fake_tg_url"]
+
+    await reset_fake_tg(fake_tg_url)
+
+    # Send a completely malformed payload (not valid Telegram update JSON)
+    headers = {
+        "Content-Type": "application/json",
+        "X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET,
+    }
+    async with httpx.AsyncClient() as c:
+        resp = await c.post(
+            f"{http_url}/webhook/telegram",
+            content=b'{"not_a_valid_update": true}',
+            headers=headers,
+            timeout=10,
+        )
+    # The WASM channel returns 200 for malformed payloads to prevent
+    # Telegram from retrying the same broken update forever.
+    assert resp.status_code == 200, (
+        f"Expected 200 for malformed payload, got {resp.status_code}: {resp.text}"
+    )
+
+    # Wait a moment, verify no replies were sent
+    await asyncio.sleep(2)
+    async with httpx.AsyncClient() as c:
+        r = await c.get(f"{fake_tg_url}/__mock/sent_messages", timeout=5)
+    messages = r.json().get("messages", [])
+    assert len(messages) == 0, (
+        f"Expected no replies for malformed payload, got: {messages}"
+    )
+
+    # Verify the bot still works after receiving the bad payload
+    await reset_fake_tg(fake_tg_url)
+
+    resp2 = await post_telegram_webhook(
+        http_url,
+        {
+            "update_id": 1200,
+            "message": {
+                "message_id": 120,
+                "from": {
+                    "id": OWNER_USER_ID,
+                    "is_bot": False,
+                    "first_name": "E2E Tester",
+                },
+                "chat": {"id": OWNER_USER_ID, "type": "private"},
+                "date": int(time.time()),
+                "text": "hello",
+            },
+        },
+        secret=WEBHOOK_SECRET,
+    )
+    assert resp2.status_code == 200
+
+    messages = await wait_for_sent_messages(fake_tg_url, min_count=1, timeout=30)
+    assert len(messages) >= 1, (
+        f"Expected bot to work after malformed payload, got: {messages}"
     )
