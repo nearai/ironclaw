@@ -401,7 +401,7 @@ impl EffectBridgeAdapter {
         let start = Instant::now();
 
         let resolved_name = self.tools.resolve_name(action_name).await;
-        let lookup_name = resolved_name.as_deref().unwrap_or(action_name);
+        let mut lookup_name = resolved_name.as_deref().unwrap_or(action_name).to_string();
 
         // ── Per-step call limit (prevent amplification loops) ──
         const MAX_CALLS_PER_STEP: u32 = 50;
@@ -427,7 +427,7 @@ impl EffectBridgeAdapter {
             });
         }
 
-        if is_v1_only_tool(lookup_name) {
+        if is_v1_only_tool(&lookup_name) {
             return Err(EngineError::Effect {
                 reason: format!(
                     "Tool '{}' is not available in engine v2. \
@@ -437,7 +437,7 @@ impl EffectBridgeAdapter {
             });
         }
 
-        if is_v1_auth_tool(lookup_name) {
+        if is_v1_auth_tool(&lookup_name) {
             return Err(EngineError::Effect {
                 reason: format!(
                     "Tool '{}' is not available in engine v2. \
@@ -447,7 +447,64 @@ impl EffectBridgeAdapter {
             });
         }
 
-        if let Some((_, tool)) = self.tools.get_resolved(action_name).await {
+        if resolved_name.is_none()
+            && let Some(auth_mgr) = self.auth_manager.read().await.as_ref()
+            && let Some(latent_execution) = auth_mgr
+                .execute_latent_extension_action(action_name, &context.user_id)
+                .await
+        {
+            match latent_execution {
+                Ok(crate::bridge::auth_manager::LatentActionExecution::RetryRegisteredAction {
+                    resolved_action,
+                }) => {
+                    lookup_name = resolved_action;
+                }
+                Ok(crate::bridge::auth_manager::LatentActionExecution::ProviderReady {
+                    provider_extension,
+                    available_actions,
+                }) => {
+                    return Ok(ActionResult {
+                        call_id: String::new(),
+                        action_name: action_name.to_string(),
+                        output: serde_json::json!({
+                            "provider_extension": provider_extension,
+                            "available_actions": available_actions,
+                            "message": "Provider is ready. Use one of the available provider actions next."
+                        }),
+                        is_error: false,
+                        duration: start.elapsed(),
+                    });
+                }
+                Ok(crate::bridge::auth_manager::LatentActionExecution::NeedsAuth {
+                    credential_name,
+                    instructions,
+                    auth_url,
+                }) => {
+                    return Err(Self::gate_paused(
+                        "authentication",
+                        action_name,
+                        context.current_call_id.as_deref(),
+                        parameters,
+                        ironclaw_engine::ResumeKind::Authentication {
+                            credential_name,
+                            instructions,
+                            auth_url,
+                        },
+                        None,
+                    ));
+                }
+                Ok(crate::bridge::auth_manager::LatentActionExecution::NeedsSetup { message }) => {
+                    return Err(EngineError::Effect { reason: message });
+                }
+                Err(err) => {
+                    return Err(EngineError::Effect {
+                        reason: err.to_string(),
+                    });
+                }
+            }
+        }
+
+        if let Some((_, tool)) = self.tools.get_resolved(&lookup_name).await {
             let requirement = tool.requires_approval(&parameters);
             match requirement {
                 ApprovalRequirement::Always => {
@@ -460,7 +517,7 @@ impl EffectBridgeAdapter {
                     });
                 }
                 ApprovalRequirement::UnlessAutoApproved => {
-                    let is_approved = self.auto_approved.read().await.contains(lookup_name);
+                    let is_approved = self.auto_approved.read().await.contains(&lookup_name);
                     if !is_approved && !approval_already_granted {
                         // Credential presence alone does NOT bypass approval.
                         // Credentials indicate the call *can* be authenticated,
@@ -479,12 +536,12 @@ impl EffectBridgeAdapter {
             }
         }
 
-        if let Some(tool) = self.tools.get(lookup_name).await
+        if let Some(tool) = self.tools.get(&lookup_name).await
             && let Some(rl_config) = tool.rate_limit_config()
         {
             let result = self
                 .rate_limiter
-                .check_and_record(&context.user_id, lookup_name, &rl_config)
+                .check_and_record(&context.user_id, &lookup_name, &rl_config)
                 .await;
             if let crate::tools::rate_limiter::RateLimitResult::Limited { retry_after, .. } = result
             {
@@ -514,7 +571,7 @@ impl EffectBridgeAdapter {
             && let Some(registry) = self.tools.credential_registry()
         {
             match auth_mgr
-                .check_action_auth(lookup_name, &parameters, &context.user_id, registry)
+                .check_action_auth(&lookup_name, &parameters, &context.user_id, registry)
                 .await
             {
                 AuthCheckResult::MissingCredentials(missing) => {
@@ -547,7 +604,53 @@ impl EffectBridgeAdapter {
             }
         }
 
-        let redacted_params = if let Some(tool) = self.tools.get(lookup_name).await {
+        if let Some(provider_extension) = self.tools.provider_extension_for_tool(&lookup_name).await
+            && let Some(auth_mgr) = self.auth_manager.read().await.as_ref()
+        {
+            use crate::bridge::auth_manager::ToolReadiness;
+            match auth_mgr
+                .check_tool_readiness(&provider_extension, &context.user_id)
+                .await
+            {
+                ToolReadiness::NeedsAuth {
+                    credential_name,
+                    instructions,
+                    auth_url,
+                } => {
+                    debug!(
+                        provider_extension = %provider_extension,
+                        action = %lookup_name,
+                        credential = %credential_name,
+                        "Pre-flight extension readiness: authentication required"
+                    );
+                    return Err(Self::gate_paused(
+                        "authentication",
+                        action_name,
+                        context.current_call_id.as_deref(),
+                        parameters,
+                        ironclaw_engine::ResumeKind::Authentication {
+                            credential_name,
+                            instructions: instructions.unwrap_or_else(|| {
+                                format!("Authenticate '{}' to continue.", provider_extension)
+                            }),
+                            auth_url,
+                        },
+                        None,
+                    ));
+                }
+                ToolReadiness::NeedsSetup { message } => {
+                    return Err(EngineError::Effect {
+                        reason: format!(
+                            "Extension '{}' is not ready: {}",
+                            provider_extension, message
+                        ),
+                    });
+                }
+                ToolReadiness::Ready => {}
+            }
+        }
+
+        let redacted_params = if let Some(tool) = self.tools.get(&lookup_name).await {
             crate::tools::redact_params(&parameters, tool.sensitive_params())
         } else {
             parameters.clone()
@@ -586,7 +689,7 @@ impl EffectBridgeAdapter {
         let result = crate::tools::execute::execute_tool_with_safety(
             &self.tools,
             &self.safety,
-            lookup_name,
+            &lookup_name,
             parameters.clone(),
             &job_ctx,
         )
@@ -596,8 +699,8 @@ impl EffectBridgeAdapter {
 
         match result {
             Ok(output) => {
-                let sanitized = self.safety.sanitize_tool_output(lookup_name, &output);
-                let wrapped = self.safety.wrap_for_llm(lookup_name, &sanitized.content);
+                let sanitized = self.safety.sanitize_tool_output(&lookup_name, &output);
+                let wrapped = self.safety.wrap_for_llm(&lookup_name, &sanitized.content);
                 let output_value = serde_json::from_str::<serde_json::Value>(&output)
                     .unwrap_or(serde_json::Value::String(wrapped));
 
@@ -712,7 +815,7 @@ impl EffectBridgeAdapter {
                     ));
                 }
 
-                let sanitized = self.safety.sanitize_tool_output(lookup_name, &error_msg);
+                let sanitized = self.safety.sanitize_tool_output(&lookup_name, &error_msg);
 
                 Ok(ActionResult {
                     call_id: String::new(),
@@ -773,6 +876,26 @@ impl EffectExecutor for EffectBridgeAdapter {
                 requires_approval: false,
             });
         }
+
+        if let Some(auth_mgr) = self.auth_manager.read().await.as_ref() {
+            for latent in auth_mgr.latent_extension_actions().await {
+                if actions
+                    .iter()
+                    .any(|action| action.name == latent.action_name)
+                {
+                    continue;
+                }
+                actions.push(ActionDef {
+                    name: latent.action_name,
+                    description: latent.description,
+                    parameters_schema: latent.parameters_schema,
+                    effects: vec![],
+                    requires_approval: false,
+                });
+            }
+        }
+
+        actions.sort_by(|a, b| a.name.cmp(&b.name));
 
         Ok(actions)
     }
@@ -990,7 +1113,7 @@ mod tests {
         tools.register(Arc::new(ApprovalTestTool)).await;
 
         let adapter = EffectBridgeAdapter::new(
-            tools,
+            Arc::clone(&tools),
             Arc::new(SafetyLayer::new(&SafetyConfig {
                 max_output_length: 10_000,
                 injection_check_enabled: false,
@@ -1164,7 +1287,7 @@ mod tests {
 
         use ironclaw_safety::SafetyConfig;
         let adapter = EffectBridgeAdapter::new(
-            tools,
+            Arc::clone(&tools),
             Arc::new(SafetyLayer::new(&SafetyConfig {
                 max_output_length: 10_000,
                 injection_check_enabled: false,
@@ -1173,7 +1296,12 @@ mod tests {
         );
 
         // Set auth manager
-        let auth_mgr = Arc::new(AuthManager::new(secrets, None, None));
+        let auth_mgr = Arc::new(AuthManager::new(
+            secrets,
+            None,
+            None,
+            Some(Arc::clone(&tools)),
+        ));
         adapter.set_auth_manager(auth_mgr).await;
 
         // Verify adapter has both dependencies
@@ -1336,5 +1464,69 @@ mod tests {
             }
             other => panic!("expected auth gate pause, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn available_actions_include_latent_inactive_provider_actions() {
+        use crate::secrets::InMemorySecretsStore;
+        use crate::secrets::SecretsCrypto;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("tools")).expect("tools dir");
+        std::fs::write(
+            dir.path().join("tools").join("latent_tool.wasm"),
+            b"fake-wasm",
+        )
+        .expect("write wasm");
+        std::fs::write(
+            dir.path()
+                .join("tools")
+                .join("latent_tool.capabilities.json"),
+            r#"{"description":"latent adapter test"}"#,
+        )
+        .expect("write capabilities");
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let tools = Arc::new(ToolRegistry::new());
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tools),
+            None,
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            "test_user".to_string(),
+            None,
+            vec![],
+        ));
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        adapter
+            .set_auth_manager(Arc::new(AuthManager::new(
+                secrets,
+                None,
+                Some(ext_mgr),
+                Some(Arc::clone(&tools)),
+            )))
+            .await;
+
+        let actions = adapter.available_actions(&[]).await.expect("actions");
+        assert!(actions.iter().any(|action| action.name == "latent_tool"));
     }
 }

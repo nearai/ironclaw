@@ -454,6 +454,92 @@ pub struct ActivateResult {
     pub message: String,
 }
 
+/// Canonical kernel-owned readiness phase for an installed extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionPhase {
+    Installed,
+    NeedsSetup,
+    NeedsAuth,
+    NeedsActivation,
+    Activating,
+    Ready,
+    Error,
+}
+
+/// Why the runtime is checking extension readiness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnsureReadyIntent {
+    /// A normal engine/tool execution wants to use an extension-backed capability.
+    UseCapability,
+    /// A follow-up readiness check immediately after installation.
+    PostInstall,
+    /// A direct explicit user request to authenticate the extension.
+    ExplicitAuth,
+    /// A direct explicit user request to activate the extension.
+    ExplicitActivate,
+}
+
+/// Single typed result for kernel-owned extension readiness checks.
+#[derive(Debug, Clone)]
+pub enum EnsureReadyOutcome {
+    Ready {
+        name: String,
+        kind: ExtensionKind,
+        phase: ExtensionPhase,
+        activation: Option<ActivateResult>,
+    },
+    NeedsAuth {
+        name: String,
+        kind: ExtensionKind,
+        phase: ExtensionPhase,
+        auth: AuthResult,
+        credential_name: Option<String>,
+    },
+    NeedsSetup {
+        name: String,
+        kind: ExtensionKind,
+        phase: ExtensionPhase,
+        instructions: String,
+        setup_url: Option<String>,
+    },
+}
+
+impl EnsureReadyOutcome {
+    pub fn phase(&self) -> ExtensionPhase {
+        match self {
+            EnsureReadyOutcome::Ready { phase, .. }
+            | EnsureReadyOutcome::NeedsAuth { phase, .. }
+            | EnsureReadyOutcome::NeedsSetup { phase, .. } => *phase,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            EnsureReadyOutcome::Ready { name, .. }
+            | EnsureReadyOutcome::NeedsAuth { name, .. }
+            | EnsureReadyOutcome::NeedsSetup { name, .. } => name,
+        }
+    }
+
+    pub fn kind(&self) -> ExtensionKind {
+        match self {
+            EnsureReadyOutcome::Ready { kind, .. }
+            | EnsureReadyOutcome::NeedsAuth { kind, .. }
+            | EnsureReadyOutcome::NeedsSetup { kind, .. } => *kind,
+        }
+    }
+}
+
+/// Synthetic action advertised for an installed provider that is not yet ready.
+#[derive(Debug, Clone)]
+pub struct LatentProviderAction {
+    pub action_name: String,
+    pub provider_extension: String,
+    pub description: String,
+    pub parameters_schema: serde_json::Value,
+}
+
 /// Result of configuring secrets for an extension.
 ///
 /// Returned by `ExtensionManager::configure()`, the single entrypoint

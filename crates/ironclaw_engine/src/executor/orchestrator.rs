@@ -31,6 +31,7 @@ use tracing::debug;
 use crate::capability::lease::LeaseManager;
 use crate::capability::policy::PolicyEngine;
 use crate::memory::RetrievalEngine;
+use crate::runtime::lease_refresh::reconcile_dynamic_tool_lease;
 use crate::runtime::messaging::{SignalReceiver, ThreadOutcome, ThreadSignal};
 use crate::traits::effect::{EffectExecutor, ThreadExecutionContext};
 use crate::traits::llm::{LlmBackend, LlmCallConfig};
@@ -397,6 +398,7 @@ pub async fn execute_orchestrator(
                             llm,
                             effects,
                             leases,
+                            store,
                             &mut total_tokens,
                         )
                         .await
@@ -447,7 +449,7 @@ pub async fn execute_orchestrator(
                     "__check_budget__" => handle_check_budget(thread),
 
                     // __get_actions__()
-                    "__get_actions__" => handle_get_actions(thread, effects, leases).await,
+                    "__get_actions__" => handle_get_actions(thread, effects, leases, store).await,
 
                     // __list_skills__(max_candidates, max_tokens)
                     "__list_skills__" => handle_list_skills(args, thread, store).await,
@@ -535,6 +537,7 @@ async fn handle_llm_complete(
     llm: &Arc<dyn LlmBackend>,
     effects: &Arc<dyn EffectExecutor>,
     leases: &Arc<LeaseManager>,
+    store: Option<&Arc<dyn Store>>,
     total_tokens: &mut TokenUsage,
 ) -> ExtFunctionResult {
     use crate::types::step::LlmResponse;
@@ -545,6 +548,13 @@ async fn handle_llm_complete(
         .as_ref()
         .and_then(json_to_thread_messages)
         .unwrap_or_else(|| thread.messages.clone());
+
+    if let Err(e) =
+        reconcile_dynamic_tool_lease(thread, effects, leases, store, &crate::LeasePlanner::new())
+            .await
+    {
+        debug!("llm_complete lease refresh failed: {e}");
+    }
 
     let active_leases = leases.active_for_thread(thread.id).await;
     let actions = effects
@@ -1654,10 +1664,18 @@ fn handle_check_budget(thread: &Thread) -> ExtFunctionResult {
 
 /// Handle `__get_actions__()`.
 async fn handle_get_actions(
-    thread: &Thread,
+    thread: &mut Thread,
     effects: &Arc<dyn EffectExecutor>,
     leases: &Arc<LeaseManager>,
+    store: Option<&Arc<dyn Store>>,
 ) -> ExtFunctionResult {
+    if let Err(e) =
+        reconcile_dynamic_tool_lease(thread, effects, leases, store, &crate::LeasePlanner::new())
+            .await
+    {
+        debug!("get_actions lease refresh failed: {e}");
+    }
+
     let active_leases = leases.active_for_thread(thread.id).await;
     match effects.available_actions(&active_leases).await {
         Ok(actions) => {

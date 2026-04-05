@@ -11,6 +11,7 @@ use crate::capability::planner::LeasePlanner;
 use crate::capability::policy::PolicyEngine;
 use crate::capability::registry::CapabilityRegistry;
 use crate::executor::ExecutionLoop;
+use crate::runtime::lease_refresh::reconcile_dynamic_tool_lease;
 use crate::runtime::messaging::{self, SignalSender, ThreadOutcome, ThreadSignal};
 use crate::runtime::tree::ThreadTree;
 use crate::traits::effect::EffectExecutor;
@@ -241,11 +242,20 @@ impl ThreadManager {
 
     async fn start_thread(
         &self,
-        thread: Thread,
+        mut thread: Thread,
         user_id: String,
         is_resume: bool,
     ) -> Result<ThreadId, EngineError> {
         let thread_id = thread.id;
+
+        reconcile_dynamic_tool_lease(
+            &mut thread,
+            &self.effects,
+            &self.leases,
+            Some(&self.store),
+            &self.lease_planner,
+        )
+        .await?;
 
         // Create signal channel
         let (tx, rx) = messaging::signal_channel(32);
@@ -652,6 +662,34 @@ mod tests {
 
     struct MockEffects;
 
+    struct DynamicEffects {
+        actions: RwLock<Vec<ActionDef>>,
+        calls: RwLock<Vec<String>>,
+        install_reveals: RwLock<Option<Vec<ActionDef>>>,
+    }
+
+    impl DynamicEffects {
+        fn new(actions: Vec<ActionDef>) -> Arc<Self> {
+            Arc::new(Self {
+                actions: RwLock::new(actions),
+                calls: RwLock::new(Vec::new()),
+                install_reveals: RwLock::new(None),
+            })
+        }
+
+        async fn set_actions(&self, actions: Vec<ActionDef>) {
+            *self.actions.write().await = actions;
+        }
+
+        async fn set_install_reveals(&self, actions: Vec<ActionDef>) {
+            *self.install_reveals.write().await = Some(actions);
+        }
+
+        async fn recorded_calls(&self) -> Vec<String> {
+            self.calls.read().await.clone()
+        }
+    }
+
     #[async_trait::async_trait]
     impl EffectExecutor for MockEffects {
         async fn execute_action(
@@ -678,9 +716,42 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl EffectExecutor for DynamicEffects {
+        async fn execute_action(
+            &self,
+            action_name: &str,
+            _: serde_json::Value,
+            _: &CapabilityLease,
+            _: &crate::traits::effect::ThreadExecutionContext,
+        ) -> Result<ActionResult, EngineError> {
+            self.calls.write().await.push(action_name.to_string());
+            if action_name == "tool_install"
+                && let Some(actions) = self.install_reveals.read().await.clone()
+            {
+                *self.actions.write().await = actions;
+            }
+            Ok(ActionResult {
+                call_id: String::new(),
+                action_name: action_name.to_string(),
+                output: serde_json::json!({}),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _: &[CapabilityLease],
+        ) -> Result<Vec<ActionDef>, EngineError> {
+            Ok(self.actions.read().await.clone())
+        }
+    }
+
     struct MockStore {
         threads: RwLock<HashMap<ThreadId, Thread>>,
         events: RwLock<HashMap<ThreadId, Vec<ThreadEvent>>>,
+        leases: RwLock<HashMap<crate::types::capability::LeaseId, CapabilityLease>>,
     }
 
     impl MockStore {
@@ -688,6 +759,7 @@ mod tests {
             Self {
                 threads: RwLock::new(HashMap::new()),
                 events: RwLock::new(HashMap::new()),
+                leases: RwLock::new(HashMap::new()),
             }
         }
     }
@@ -779,20 +851,31 @@ mod tests {
         ) -> Result<Vec<MemoryDoc>, EngineError> {
             Ok(vec![])
         }
-        async fn save_lease(&self, _: &CapabilityLease) -> Result<(), EngineError> {
+        async fn save_lease(&self, lease: &CapabilityLease) -> Result<(), EngineError> {
+            self.leases.write().await.insert(lease.id, lease.clone());
             Ok(())
         }
         async fn load_active_leases(
             &self,
-            _: ThreadId,
+            thread_id: ThreadId,
         ) -> Result<Vec<CapabilityLease>, EngineError> {
-            Ok(vec![])
+            Ok(self
+                .leases
+                .read()
+                .await
+                .values()
+                .filter(|lease| lease.thread_id == thread_id && lease.is_valid())
+                .cloned()
+                .collect())
         }
         async fn revoke_lease(
             &self,
-            _: crate::types::capability::LeaseId,
+            lease_id: crate::types::capability::LeaseId,
             _: &str,
         ) -> Result<(), EngineError> {
+            if let Some(lease) = self.leases.write().await.get_mut(&lease_id) {
+                lease.revoked = true;
+            }
             Ok(())
         }
         async fn save_mission(
@@ -875,6 +958,36 @@ mod tests {
         )
     }
 
+    fn make_manager_with_effects(
+        llm: Arc<dyn LlmBackend>,
+        store: Arc<MockStore>,
+        effects: Arc<dyn EffectExecutor>,
+    ) -> ThreadManager {
+        let mut caps = CapabilityRegistry::new();
+        caps.register(Capability {
+            name: "tools".into(),
+            description: "Tools".into(),
+            actions: vec![ActionDef {
+                name: "tool_install".into(),
+                description: "Install a tool".into(),
+                parameters_schema: serde_json::json!({}),
+                effects: vec![EffectType::WriteLocal],
+                requires_approval: false,
+            }],
+            knowledge: vec![],
+            policies: vec![],
+        });
+
+        ThreadManager::new(
+            llm,
+            effects,
+            store,
+            Arc::new(caps),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        )
+    }
+
     // ── Tests ───────────────────────────────────────────────
 
     #[tokio::test]
@@ -896,6 +1009,200 @@ mod tests {
 
         let outcome = mgr.join_thread(tid).await.unwrap();
         assert!(matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "Hello!"));
+    }
+
+    #[tokio::test]
+    async fn resume_reconciles_tool_lease_with_newly_available_actions() {
+        let store = Arc::new(MockStore::new());
+        let effects = DynamicEffects::new(vec![ActionDef {
+            name: "tool_install".into(),
+            description: "Install a tool".into(),
+            parameters_schema: serde_json::json!({}),
+            effects: vec![EffectType::WriteLocal],
+            requires_approval: false,
+        }]);
+        let mgr = make_manager_with_effects(MockLlm::text("done"), store, effects.clone());
+
+        let thread_id = ThreadId::new();
+        let mut thread = Thread::new(
+            "use notion",
+            ThreadType::Foreground,
+            ProjectId::new(),
+            "user",
+            ThreadConfig::default(),
+        );
+        thread.id = thread_id;
+        thread.state = ThreadState::Waiting;
+        mgr.store.save_thread(&thread).await.unwrap();
+
+        let lease = mgr
+            .leases
+            .grant(
+                thread_id,
+                "tools",
+                crate::types::capability::GrantedActions::Specific(vec!["tool_install".into()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        mgr.store.save_lease(&lease).await.unwrap();
+
+        effects
+            .set_actions(vec![
+                ActionDef {
+                    name: "tool_install".into(),
+                    description: "Install a tool".into(),
+                    parameters_schema: serde_json::json!({}),
+                    effects: vec![EffectType::WriteLocal],
+                    requires_approval: false,
+                },
+                ActionDef {
+                    name: "notion_search".into(),
+                    description: "Search Notion".into(),
+                    parameters_schema: serde_json::json!({}),
+                    effects: vec![EffectType::ReadExternal],
+                    requires_approval: false,
+                },
+            ])
+            .await;
+
+        mgr.resume_thread(thread_id, "user", None, None, None)
+            .await
+            .unwrap();
+        let _ = mgr.join_thread(thread_id).await.unwrap();
+
+        let refreshed = mgr
+            .leases
+            .find_lease_for_action(thread_id, "notion_search")
+            .await;
+        assert!(
+            refreshed.is_some(),
+            "resume should refresh tools lease for newly available actions"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_reconciles_tool_lease_with_stale_capability_snapshot() {
+        let store = Arc::new(MockStore::new());
+        let effects = DynamicEffects::new(vec![
+            ActionDef {
+                name: "tool_install".into(),
+                description: "Install a tool".into(),
+                parameters_schema: serde_json::json!({}),
+                effects: vec![EffectType::WriteLocal],
+                requires_approval: false,
+            },
+            ActionDef {
+                name: "notion_search".into(),
+                description: "Search Notion".into(),
+                parameters_schema: serde_json::json!({}),
+                effects: vec![EffectType::ReadExternal],
+                requires_approval: false,
+            },
+        ]);
+        let mgr = make_manager_with_effects(MockLlm::text("done"), store, effects);
+
+        let tid = mgr
+            .spawn_thread(
+                "use notion",
+                ThreadType::Foreground,
+                ProjectId::new(),
+                ThreadConfig::default(),
+                None,
+                "user",
+            )
+            .await
+            .unwrap();
+
+        let lease = mgr.leases.find_lease_for_action(tid, "notion_search").await;
+        assert!(
+            lease.is_some(),
+            "spawn should refresh tools lease for actions exposed after the capability snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn running_thread_can_install_then_use_new_tool_without_user_bounce() {
+        let store = Arc::new(MockStore::new());
+        let initial_actions = vec![ActionDef {
+            name: "tool_install".into(),
+            description: "Install a tool".into(),
+            parameters_schema: serde_json::json!({}),
+            effects: vec![EffectType::WriteLocal],
+            requires_approval: false,
+        }];
+        let revealed_actions = vec![
+            ActionDef {
+                name: "tool_install".into(),
+                description: "Install a tool".into(),
+                parameters_schema: serde_json::json!({}),
+                effects: vec![EffectType::WriteLocal],
+                requires_approval: false,
+            },
+            ActionDef {
+                name: "notion_search".into(),
+                description: "Search Notion".into(),
+                parameters_schema: serde_json::json!({}),
+                effects: vec![EffectType::ReadExternal],
+                requires_approval: false,
+            },
+        ];
+        let effects = DynamicEffects::new(initial_actions);
+        effects.set_install_reveals(revealed_actions).await;
+        let llm = Arc::new(MockLlm {
+            responses: Mutex::new(vec![
+                LlmOutput {
+                    response: LlmResponse::ActionCalls {
+                        calls: vec![crate::types::step::ActionCall {
+                            id: "call_install".into(),
+                            action_name: "tool_install".into(),
+                            parameters: serde_json::json!({"name": "notion"}),
+                        }],
+                        content: None,
+                    },
+                    usage: TokenUsage::default(),
+                },
+                LlmOutput {
+                    response: LlmResponse::ActionCalls {
+                        calls: vec![crate::types::step::ActionCall {
+                            id: "call_search".into(),
+                            action_name: "notion_search".into(),
+                            parameters: serde_json::json!({"query": "latest meeting note"}),
+                        }],
+                        content: None,
+                    },
+                    usage: TokenUsage::default(),
+                },
+                LlmOutput {
+                    response: LlmResponse::Text("done".into()),
+                    usage: TokenUsage::default(),
+                },
+            ]),
+        });
+        let mgr = make_manager_with_effects(llm, store, effects.clone());
+
+        let tid = mgr
+            .spawn_thread(
+                "install notion and get the latest meeting note",
+                ThreadType::Foreground,
+                ProjectId::new(),
+                ThreadConfig::default(),
+                None,
+                "user",
+            )
+            .await
+            .unwrap();
+
+        let outcome = mgr.join_thread(tid).await.unwrap();
+        assert!(matches!(outcome, ThreadOutcome::Completed { .. }));
+
+        let calls = effects.recorded_calls().await;
+        assert_eq!(
+            calls,
+            vec!["tool_install".to_string(), "notion_search".to_string()],
+            "thread should continue from install into the newly exposed tool without pausing for a new user turn"
+        );
     }
 
     #[tokio::test]

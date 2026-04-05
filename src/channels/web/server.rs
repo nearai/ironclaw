@@ -1216,8 +1216,24 @@ async fn oauth_callback_handler(
     // OAuth success is independent of activation — tokens are already stored.
     // Report auth as successful and attempt activation as a bonus step.
     let final_message = if success && flow.auto_activate_extension {
-        match ext_mgr.activate(&flow.extension_name, &flow.user_id).await {
-            Ok(result) => result.message,
+        match ext_mgr
+            .ensure_extension_ready(
+                &flow.extension_name,
+                &flow.user_id,
+                crate::extensions::EnsureReadyIntent::ExplicitActivate,
+            )
+            .await
+        {
+            Ok(crate::extensions::EnsureReadyOutcome::Ready { activation, .. }) => activation
+                .map(|result| result.message)
+                .unwrap_or_else(|| format!("{} authenticated successfully", flow.display_name)),
+            Ok(crate::extensions::EnsureReadyOutcome::NeedsAuth { auth, .. }) => auth
+                .instructions()
+                .map(String::from)
+                .unwrap_or_else(|| format!("{} authenticated successfully", flow.display_name)),
+            Ok(crate::extensions::EnsureReadyOutcome::NeedsSetup { instructions, .. }) => {
+                instructions
+            }
             Err(e) => {
                 tracing::warn!(
                     extension = %flow.extension_name,
@@ -2659,33 +2675,71 @@ async fn extensions_install_handler(
     {
         Ok(result) => {
             let mut resp = ActionResponse::ok(result.message);
-
-            // Auto-activate WASM tools after install (install = active).
-            if result.kind == crate::extensions::ExtensionKind::WasmTool {
-                if let Err(e) = ext_mgr.activate(&req.name, &user.user_id).await {
+            match ext_mgr
+                .ensure_extension_ready(
+                    &req.name,
+                    &user.user_id,
+                    crate::extensions::EnsureReadyIntent::PostInstall,
+                )
+                .await
+            {
+                Ok(readiness) => apply_extension_readiness_to_response(&mut resp, readiness, true),
+                Err(e) => {
                     tracing::debug!(
                         extension = %req.name,
                         error = %e,
-                        "Auto-activation after install failed"
+                        "Post-install readiness follow-through failed"
                     );
-                }
-
-                // Check auth after activation. This may initiate OAuth both for scope
-                // expansion and for first-time auth when credentials are already
-                // configured (e.g., built-in providers). We only surface an auth_url
-                // when the extension reports it is awaiting authorization.
-                match ext_mgr.auth(&req.name, &user.user_id).await {
-                    Ok(auth_result) if auth_result.auth_url().is_some() => {
-                        // Scope expansion or initial OAuth: user needs to authorize
-                        resp.auth_url = auth_result.auth_url().map(String::from);
-                    }
-                    _ => {}
                 }
             }
 
             Ok(Json(resp))
         }
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+    }
+}
+
+fn apply_extension_readiness_to_response(
+    resp: &mut ActionResponse,
+    readiness: crate::extensions::EnsureReadyOutcome,
+    preserve_success: bool,
+) {
+    match readiness {
+        crate::extensions::EnsureReadyOutcome::Ready { activation, .. } => {
+            if let Some(activation) = activation {
+                resp.message = activation.message;
+                resp.activated = Some(true);
+            }
+        }
+        crate::extensions::EnsureReadyOutcome::NeedsAuth { auth, .. } => {
+            let fallback = format!("'{}' requires authentication.", auth.name);
+            if !preserve_success {
+                resp.success = false;
+                resp.message = auth
+                    .instructions()
+                    .map(String::from)
+                    .unwrap_or_else(|| fallback.clone());
+            } else if let Some(instructions) = auth.instructions() {
+                resp.message = format!("{}. {}", resp.message, instructions);
+            }
+            resp.auth_url = auth.auth_url().map(String::from);
+            resp.awaiting_token = Some(auth.is_awaiting_token());
+            resp.instructions = auth.instructions().map(String::from);
+        }
+        crate::extensions::EnsureReadyOutcome::NeedsSetup {
+            instructions,
+            setup_url,
+            ..
+        } => {
+            if !preserve_success {
+                resp.success = false;
+                resp.message = instructions.clone();
+            } else {
+                resp.message = format!("{}. {}", resp.message, instructions);
+            }
+            resp.instructions = Some(instructions);
+            resp.auth_url = setup_url;
+        }
     }
 }
 
@@ -2704,80 +2758,20 @@ async fn extensions_activate_handler(
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
-    match ext_mgr.activate(&name, &user.user_id).await {
-        Ok(result) => {
-            tracing::info!(
-                extension = %name,
-                "extensions_activate_handler: activation succeeded"
-            );
-            // Activation loaded the WASM module. Check if the tool needs
-            // OAuth scope expansion (e.g., adding google-docs when gmail
-            // already has a token but missing the documents scope).
-            // Initial OAuth setup is triggered via configure.
-            let mut resp = ActionResponse::ok(result.message);
-            if let Ok(auth_result) = ext_mgr.auth(&name, &user.user_id).await
-                && auth_result.auth_url().is_some()
-            {
-                resp.auth_url = auth_result.auth_url().map(String::from);
-            }
+    match ext_mgr
+        .ensure_extension_ready(
+            &name,
+            &user.user_id,
+            crate::extensions::EnsureReadyIntent::ExplicitActivate,
+        )
+        .await
+    {
+        Ok(readiness) => {
+            let mut resp = ActionResponse::ok(format!("Extension '{}' is ready.", name));
+            apply_extension_readiness_to_response(&mut resp, readiness, false);
             Ok(Json(resp))
         }
-        Err(activate_err) => {
-            let needs_auth = matches!(
-                &activate_err,
-                crate::extensions::ExtensionError::AuthRequired
-            );
-
-            tracing::trace!(
-                extension = %name,
-                error = %activate_err,
-                needs_auth = needs_auth,
-                "extensions_activate_handler: activation failed, attempting auth fallback"
-            );
-
-            if !needs_auth {
-                return Ok(Json(ActionResponse::fail(activate_err.to_string())));
-            }
-
-            // Activation failed due to auth; try authenticating first.
-            match ext_mgr.auth(&name, &user.user_id).await {
-                Ok(auth_result) if auth_result.is_authenticated() => {
-                    tracing::trace!(
-                        extension = %name,
-                        "extensions_activate_handler: auth reports authenticated, retrying activate"
-                    );
-                    // Auth succeeded, retry activation.
-                    match ext_mgr.activate(&name, &user.user_id).await {
-                        Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
-                        Err(e) => {
-                            tracing::warn!(
-                                extension = %name,
-                                error = %e,
-                                "extensions_activate_handler: retry after auth still failed"
-                            );
-                            Ok(Json(ActionResponse::fail(e.to_string())))
-                        }
-                    }
-                }
-                Ok(auth_result) => {
-                    // Auth in progress (OAuth URL or awaiting manual token).
-                    let mut resp = ActionResponse::fail(
-                        auth_result
-                            .instructions()
-                            .map(String::from)
-                            .unwrap_or_else(|| format!("'{}' requires authentication.", name)),
-                    );
-                    resp.auth_url = auth_result.auth_url().map(String::from);
-                    resp.awaiting_token = Some(auth_result.is_awaiting_token());
-                    resp.instructions = auth_result.instructions().map(String::from);
-                    Ok(Json(resp))
-                }
-                Err(auth_err) => Ok(Json(ActionResponse::fail(format!(
-                    "Authentication failed: {}",
-                    auth_err
-                )))),
-            }
-        }
+        Err(err) => Ok(Json(ActionResponse::fail(err.to_string()))),
     }
 }
 
@@ -3791,6 +3785,60 @@ mod tests {
     fn expired_flow_created_at() -> Option<std::time::Instant> {
         std::time::Instant::now()
             .checked_sub(oauth_defaults::OAUTH_FLOW_EXPIRY + std::time::Duration::from_secs(1))
+    }
+
+    #[test]
+    fn apply_extension_readiness_preserves_install_success_for_auth_followup() {
+        let mut resp = ActionResponse::ok("Installed notion");
+        apply_extension_readiness_to_response(
+            &mut resp,
+            crate::extensions::EnsureReadyOutcome::NeedsAuth {
+                name: "notion".to_string(),
+                kind: crate::extensions::ExtensionKind::McpServer,
+                phase: crate::extensions::ExtensionPhase::NeedsAuth,
+                credential_name: Some("notion_api_token".to_string()),
+                auth: crate::extensions::AuthResult::awaiting_authorization(
+                    "notion",
+                    crate::extensions::ExtensionKind::McpServer,
+                    "https://example.com/oauth".to_string(),
+                    "gateway".to_string(),
+                ),
+            },
+            true,
+        );
+
+        assert!(resp.success);
+        assert_eq!(resp.auth_url.as_deref(), Some("https://example.com/oauth"));
+        assert_eq!(resp.awaiting_token, Some(false));
+    }
+
+    #[test]
+    fn apply_extension_readiness_fails_activate_when_auth_is_required() {
+        let mut resp = ActionResponse::ok("placeholder");
+        apply_extension_readiness_to_response(
+            &mut resp,
+            crate::extensions::EnsureReadyOutcome::NeedsAuth {
+                name: "notion".to_string(),
+                kind: crate::extensions::ExtensionKind::McpServer,
+                phase: crate::extensions::ExtensionPhase::NeedsAuth,
+                credential_name: Some("notion_api_token".to_string()),
+                auth: crate::extensions::AuthResult::awaiting_token(
+                    "notion",
+                    crate::extensions::ExtensionKind::McpServer,
+                    "Paste your Notion token".to_string(),
+                    None,
+                ),
+            },
+            false,
+        );
+
+        assert!(!resp.success);
+        assert_eq!(resp.awaiting_token, Some(true));
+        assert_eq!(
+            resp.instructions.as_deref(),
+            Some("Paste your Notion token")
+        );
+        assert_eq!(resp.message, "Paste your Notion token");
     }
 
     #[tokio::test]

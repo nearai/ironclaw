@@ -5,6 +5,7 @@
 //! - [`messaging`] — inter-thread signal channel
 
 pub mod conversation;
+pub mod lease_refresh;
 pub mod manager;
 pub mod messaging;
 pub mod mission;

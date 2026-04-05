@@ -567,6 +567,7 @@ impl McpClient {
                 Arc::new(McpToolWrapper {
                     tool: t,
                     prefixed_name,
+                    provider_extension: self.server_name.clone(),
                     client: client.clone(),
                 }) as Arc<dyn Tool>
             })
@@ -617,6 +618,7 @@ fn extract_server_name(url: &str) -> String {
 struct McpToolWrapper {
     tool: McpTool,
     prefixed_name: String,
+    provider_extension: String,
     client: Arc<McpClient>,
 }
 
@@ -630,6 +632,10 @@ impl Tool for McpToolWrapper {
     }
     fn parameters_schema(&self) -> serde_json::Value {
         self.tool.input_schema.clone()
+    }
+
+    fn provider_extension(&self) -> Option<&str> {
+        Some(&self.provider_extension)
     }
 
     async fn execute(
@@ -1266,6 +1272,7 @@ mod tests {
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(false),
             prefixed_name: "mcp__myserver__do_thing".to_string(),
+            provider_extension: "myserver".to_string(),
             client,
         };
         assert_eq!(wrapper.name(), "mcp__myserver__do_thing");
@@ -1277,6 +1284,7 @@ mod tests {
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(false),
             prefixed_name: "mcp__s__do_thing".to_string(),
+            provider_extension: "s".to_string(),
             client,
         };
         assert_eq!(wrapper.description(), "Does a thing");
@@ -1288,6 +1296,7 @@ mod tests {
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(false),
             prefixed_name: "mcp__s__do_thing".to_string(),
+            provider_extension: "s".to_string(),
             client,
         };
         let schema = wrapper.parameters_schema();
@@ -1301,6 +1310,7 @@ mod tests {
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(false),
             prefixed_name: "mcp__s__do_thing".to_string(),
+            provider_extension: "s".to_string(),
             client,
         };
         assert!(
@@ -1315,6 +1325,7 @@ mod tests {
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(true),
             prefixed_name: "mcp__s__do_thing".to_string(),
+            provider_extension: "s".to_string(),
             client,
         };
         let approval = wrapper.requires_approval(&serde_json::json!({}));
@@ -1327,6 +1338,7 @@ mod tests {
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(false),
             prefixed_name: "mcp__s__do_thing".to_string(),
+            provider_extension: "s".to_string(),
             client,
         };
         let approval = wrapper.requires_approval(&serde_json::json!({}));

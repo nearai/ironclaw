@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 use crate::bootstrap::ironclaw_base_dir;
+use crate::tools::mcp::McpTool;
 use crate::tools::tool::ToolError;
 
 /// Transport configuration for an MCP server.
@@ -58,6 +59,13 @@ pub struct McpServerConfig {
     /// Optional description for the server.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+
+    /// Last successfully discovered MCP tool catalog.
+    ///
+    /// This lets the runtime advertise concrete latent provider actions even
+    /// while the server is currently inactive.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cached_tools: Vec<McpTool>,
 }
 
 fn default_true() -> bool {
@@ -75,6 +83,7 @@ impl McpServerConfig {
             oauth: None,
             enabled: true,
             description: None,
+            cached_tools: Vec::new(),
         }
     }
 
@@ -97,6 +106,7 @@ impl McpServerConfig {
             oauth: None,
             enabled: true,
             description: None,
+            cached_tools: Vec::new(),
         }
     }
 
@@ -112,6 +122,7 @@ impl McpServerConfig {
             oauth: None,
             enabled: true,
             description: None,
+            cached_tools: Vec::new(),
         }
     }
 
@@ -1156,6 +1167,33 @@ mod tests {
         assert_eq!(parsed.name, "http-server");
         assert!(parsed.transport.is_none());
         assert_eq!(parsed.headers.get("X-Custom").unwrap(), "value");
+    }
+
+    #[test]
+    fn test_config_roundtrip_preserves_cached_tools() {
+        let mut config = McpServerConfig::new("notion", "https://mcp.notion.com");
+        config.cached_tools = vec![crate::tools::mcp::McpTool {
+            name: "search".to_string(),
+            description: "Search Notion content".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"}
+                }
+            }),
+            annotations: None,
+        }];
+
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let parsed: McpServerConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.cached_tools.len(), 1);
+        assert_eq!(parsed.cached_tools[0].name, "search");
+        assert_eq!(parsed.cached_tools[0].description, "Search Notion content");
+        assert_eq!(
+            parsed.cached_tools[0].input_schema["properties"]["query"]["type"],
+            "string"
+        );
     }
 
     // --- Issue 3 regression: is_localhost_url rejects attacker subdomains ---

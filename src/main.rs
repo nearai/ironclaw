@@ -883,12 +883,38 @@ async fn async_main() -> anyhow::Result<()> {
             {
                 continue;
             }
-            match ext_mgr.activate(name, &ext_user_id).await {
-                Ok(result) => {
+            match ext_mgr
+                .ensure_extension_ready(
+                    name,
+                    &ext_user_id,
+                    ironclaw::extensions::EnsureReadyIntent::ExplicitActivate,
+                )
+                .await
+            {
+                Ok(ironclaw::extensions::EnsureReadyOutcome::Ready { activation, .. }) => {
+                    let message = activation
+                        .map(|result| result.message)
+                        .unwrap_or_else(|| format!("Channel '{}' already ready", name));
                     tracing::debug!(
                         channel = %name,
-                        message = %result.message,
+                        message = %message,
                         "Auto-activated persisted WASM channel"
+                    );
+                }
+                Ok(ironclaw::extensions::EnsureReadyOutcome::NeedsAuth { auth, .. }) => {
+                    tracing::warn!(
+                        channel = %name,
+                        instructions = ?auth.instructions(),
+                        "Persisted WASM channel still needs authentication"
+                    );
+                }
+                Ok(ironclaw::extensions::EnsureReadyOutcome::NeedsSetup {
+                    instructions, ..
+                }) => {
+                    tracing::warn!(
+                        channel = %name,
+                        instructions = %instructions,
+                        "Persisted WASM channel still needs setup"
                     );
                 }
                 Err(e) => {

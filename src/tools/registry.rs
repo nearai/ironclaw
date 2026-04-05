@@ -201,6 +201,16 @@ impl ToolRegistry {
         Some((resolved, tool))
     }
 
+    /// Resolve a tool/action name to its owning provider extension, when the
+    /// action is extension-backed.
+    pub async fn provider_extension_for_tool(&self, name: &str) -> Option<String> {
+        let resolved = self.resolve_name(name).await?;
+        let tools = self.tools.read().await;
+        tools
+            .get(&resolved)
+            .and_then(|tool| tool.provider_extension().map(ToOwned::to_owned))
+    }
+
     /// Check if a tool exists.
     pub async fn has(&self, name: &str) -> bool {
         self.tools.read().await.contains_key(name)
@@ -924,6 +934,46 @@ mod tests {
         assert_eq!(
             registry.resolve_name("web_search").await.as_deref(),
             Some("web-search")
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_extension_lookup_uses_tool_metadata() {
+        struct ProviderTool;
+
+        #[async_trait::async_trait]
+        impl Tool for ProviderTool {
+            fn name(&self) -> &str {
+                "notion_search"
+            }
+
+            fn description(&self) -> &str {
+                "provider tool"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+
+            fn provider_extension(&self) -> Option<&str> {
+                Some("notion")
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(ProviderTool)).await;
+
+        assert_eq!(
+            registry.provider_extension_for_tool("notion_search").await,
+            Some("notion".to_string())
         );
     }
 

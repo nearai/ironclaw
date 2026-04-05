@@ -495,6 +495,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
             ss,
             agent.deps.skill_registry.clone(),
             agent.deps.extension_manager.clone(),
+            Some(Arc::clone(agent.tools())),
         ));
         effect_adapter.set_auth_manager(Arc::clone(&mgr)).await;
         debug!("engine v2: auth manager set on effect adapter");

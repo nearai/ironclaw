@@ -1111,6 +1111,10 @@ impl Tool for WasmToolWrapper {
         self.discovery_summary.clone()
     }
 
+    fn provider_extension(&self) -> Option<&str> {
+        Some(&self.prepared.name)
+    }
+
     /// Compose the tool schema for LLM function calling.
     ///
     /// When the advertised schema is permissive (no typed properties), appends

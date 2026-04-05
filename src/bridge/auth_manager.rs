@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use crate::extensions::naming::canonicalize_extension_name;
 use crate::secrets::SecretsStore;
+use crate::tools::ToolRegistry;
 use crate::tools::builtin::extract_host_from_params;
 use crate::tools::wasm::SharedCredentialRegistry;
 use ironclaw_skills::{SkillCredentialSpec, SkillRegistry};
@@ -54,6 +55,32 @@ pub enum ToolReadiness {
     NeedsSetup { message: String },
 }
 
+#[derive(Debug, Clone)]
+pub struct LatentActionDef {
+    pub action_name: String,
+    pub description: String,
+    pub parameters_schema: serde_json::Value,
+}
+
+#[derive(Debug)]
+pub enum LatentActionExecution {
+    RetryRegisteredAction {
+        resolved_action: String,
+    },
+    ProviderReady {
+        provider_extension: String,
+        available_actions: Vec<String>,
+    },
+    NeedsAuth {
+        credential_name: String,
+        instructions: String,
+        auth_url: Option<String>,
+    },
+    NeedsSetup {
+        message: String,
+    },
+}
+
 /// Centralized auth state for the engine v2 bridge layer.
 ///
 /// Provides pre-flight credential checking, setup instruction lookup,
@@ -63,6 +90,7 @@ pub struct AuthManager {
     secrets_store: Arc<dyn SecretsStore + Send + Sync>,
     skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
     extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
+    tools: Option<Arc<ToolRegistry>>,
 }
 
 impl AuthManager {
@@ -70,11 +98,13 @@ impl AuthManager {
         secrets_store: Arc<dyn SecretsStore + Send + Sync>,
         skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
         extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
+        tools: Option<Arc<ToolRegistry>>,
     ) -> Self {
         Self {
             secrets_store,
             skill_registry,
             extension_manager,
+            tools,
         }
     }
 
@@ -188,55 +218,62 @@ impl AuthManager {
             None => return ToolReadiness::Ready,
         };
 
-        let ext_name = match canonicalize_extension_name(tool_name) {
-            Ok(name) => name,
-            Err(_) => return ToolReadiness::Ready,
+        let ext_name = if let Some(tools) = self.tools.as_ref() {
+            if let Some(name) = tools.provider_extension_for_tool(tool_name).await {
+                name
+            } else {
+                match canonicalize_extension_name(tool_name) {
+                    Ok(name) => name,
+                    Err(_) => return ToolReadiness::Ready,
+                }
+            }
+        } else {
+            match canonicalize_extension_name(tool_name) {
+                Ok(name) => name,
+                Err(_) => return ToolReadiness::Ready,
+            }
         };
-        match ext_mgr.auth(&ext_name, user_id).await {
-            Ok(auth_result) => match auth_result.status {
-                crate::extensions::AuthStatus::Authenticated
-                | crate::extensions::AuthStatus::NoAuthRequired => ToolReadiness::Ready,
-                crate::extensions::AuthStatus::AwaitingAuthorization { auth_url, .. } => {
-                    let credential_name = ext_mgr
-                        .first_missing_auth_secret_pub(&ext_name, user_id)
-                        .await
-                        .unwrap_or_else(|| ext_name.clone());
-                    ToolReadiness::NeedsAuth {
-                        credential_name,
-                        instructions: Some(format!(
-                            "Authenticate '{}' to finish setup.",
-                            auth_result.name
-                        )),
-                        auth_url: Some(auth_url),
+        match ext_mgr
+            .ensure_extension_ready(
+                &ext_name,
+                user_id,
+                crate::extensions::EnsureReadyIntent::UseCapability,
+            )
+            .await
+        {
+            Ok(crate::extensions::EnsureReadyOutcome::Ready { .. }) => ToolReadiness::Ready,
+            Ok(crate::extensions::EnsureReadyOutcome::NeedsAuth {
+                auth,
+                credential_name,
+                ..
+            }) => {
+                let credential_name = credential_name.unwrap_or_else(|| ext_name.clone());
+                let described = self
+                    .describe_missing_credential(&credential_name, user_id)
+                    .await;
+                let instructions = match &auth.status {
+                    crate::extensions::AuthStatus::AwaitingAuthorization { .. } => described
+                        .setup_instructions
+                        .or_else(|| Some(format!("Authenticate '{}' to finish setup.", auth.name))),
+                    crate::extensions::AuthStatus::AwaitingToken { instructions, .. } => {
+                        described.setup_instructions.or(Some(instructions.clone()))
                     }
+                    _ => described.setup_instructions,
+                };
+                ToolReadiness::NeedsAuth {
+                    credential_name: described.credential_name,
+                    instructions,
+                    auth_url: auth
+                        .auth_url()
+                        .map(ToOwned::to_owned)
+                        .or(described.auth_url),
                 }
-                crate::extensions::AuthStatus::AwaitingToken { instructions, .. } => {
-                    if let Some(secret_name) = ext_mgr
-                        .first_missing_auth_secret_pub(&ext_name, user_id)
-                        .await
-                    {
-                        let described = self
-                            .describe_missing_credential(&secret_name, user_id)
-                            .await;
-                        ToolReadiness::NeedsAuth {
-                            credential_name: described.credential_name,
-                            instructions: described.setup_instructions.or(Some(instructions)),
-                            auth_url: described.auth_url,
-                        }
-                    } else {
-                        ToolReadiness::NeedsAuth {
-                            credential_name: ext_name.clone(),
-                            instructions: Some(instructions),
-                            auth_url: None,
-                        }
-                    }
+            }
+            Ok(crate::extensions::EnsureReadyOutcome::NeedsSetup { instructions, .. }) => {
+                ToolReadiness::NeedsSetup {
+                    message: instructions,
                 }
-                crate::extensions::AuthStatus::NeedsSetup { instructions, .. } => {
-                    ToolReadiness::NeedsSetup {
-                        message: instructions,
-                    }
-                }
-            },
+            }
             Err(e) => {
                 tracing::debug!(
                     tool = %ext_name,
@@ -247,6 +284,77 @@ impl AuthManager {
                 ToolReadiness::Ready
             }
         }
+    }
+
+    pub async fn latent_extension_actions(&self) -> Vec<LatentActionDef> {
+        let Some(ext_mgr) = self.extension_manager.as_ref() else {
+            return Vec::new();
+        };
+
+        ext_mgr
+            .latent_provider_actions_default_user()
+            .await
+            .into_iter()
+            .map(|action| LatentActionDef {
+                action_name: action.action_name,
+                description: action.description,
+                parameters_schema: action.parameters_schema,
+            })
+            .collect()
+    }
+
+    pub async fn execute_latent_extension_action(
+        &self,
+        action_name: &str,
+        user_id: &str,
+    ) -> Option<Result<LatentActionExecution, crate::extensions::ExtensionError>> {
+        let ext_mgr = self.extension_manager.as_ref()?;
+        let latent = ext_mgr.latent_provider_action(action_name, user_id).await?;
+
+        Some(
+            match ext_mgr
+                .ensure_extension_ready(
+                    &latent.provider_extension,
+                    user_id,
+                    crate::extensions::EnsureReadyIntent::UseCapability,
+                )
+                .await
+            {
+                Ok(crate::extensions::EnsureReadyOutcome::Ready { .. }) => {
+                    let available_actions = ext_mgr
+                        .provider_action_names(&latent.provider_extension)
+                        .await;
+                    if available_actions.contains(&latent.action_name) {
+                        Ok(LatentActionExecution::RetryRegisteredAction {
+                            resolved_action: latent.action_name,
+                        })
+                    } else {
+                        Ok(LatentActionExecution::ProviderReady {
+                            provider_extension: latent.provider_extension,
+                            available_actions,
+                        })
+                    }
+                }
+                Ok(crate::extensions::EnsureReadyOutcome::NeedsAuth {
+                    auth,
+                    credential_name,
+                    ..
+                }) => Ok(LatentActionExecution::NeedsAuth {
+                    credential_name: credential_name.unwrap_or_else(|| latent.provider_extension),
+                    instructions: auth
+                        .instructions()
+                        .unwrap_or("Complete authentication to continue.")
+                        .to_string(),
+                    auth_url: auth.auth_url().map(ToOwned::to_owned),
+                }),
+                Ok(crate::extensions::EnsureReadyOutcome::NeedsSetup { instructions, .. }) => {
+                    Ok(LatentActionExecution::NeedsSetup {
+                        message: instructions,
+                    })
+                }
+                Err(err) => Err(err),
+            },
+        )
     }
 
     async fn describe_missing_credential(
@@ -488,7 +596,7 @@ mod tests {
     }
 
     fn make_auth_manager(secrets_store: Arc<dyn SecretsStore + Send + Sync>) -> AuthManager {
-        AuthManager::new(secrets_store, None, None)
+        AuthManager::new(secrets_store, None, None, None)
     }
 
     fn make_extension_manager(
@@ -496,11 +604,25 @@ mod tests {
         wasm_tools_dir: &Path,
         wasm_channels_dir: &Path,
     ) -> Arc<crate::extensions::ExtensionManager> {
+        make_extension_manager_with_registry(
+            secrets_store,
+            wasm_tools_dir,
+            wasm_channels_dir,
+            Arc::new(ToolRegistry::new()),
+        )
+    }
+
+    fn make_extension_manager_with_registry(
+        secrets_store: Arc<dyn SecretsStore + Send + Sync>,
+        wasm_tools_dir: &Path,
+        wasm_channels_dir: &Path,
+        tools: Arc<ToolRegistry>,
+    ) -> Arc<crate::extensions::ExtensionManager> {
         Arc::new(crate::extensions::ExtensionManager::new(
             Arc::new(crate::tools::mcp::session::McpSessionManager::new()),
             Arc::new(crate::tools::mcp::process::McpProcessManager::new()),
             secrets_store,
-            Arc::new(ToolRegistry::new()),
+            tools,
             None,
             None,
             wasm_tools_dir.to_path_buf(),
@@ -622,6 +744,7 @@ Test skill
             Arc::clone(&store),
             Some(skill_registry),
             Some(Arc::clone(&ext_mgr)),
+            None,
         );
         let registry = make_registry_with_mapping("google_oauth_token", "gmail.googleapis.com");
         let params =
@@ -700,7 +823,7 @@ Test skill
             wasm_tools_dir.path(),
             wasm_channels_dir.path(),
         );
-        let mgr = AuthManager::new(store, Some(skill_registry), Some(ext_mgr));
+        let mgr = AuthManager::new(store, Some(skill_registry), Some(ext_mgr), None);
 
         let readiness = mgr.check_tool_readiness("gmail-channel", "user1").await;
         match readiness {
@@ -718,6 +841,95 @@ Test skill
                 );
             }
             other => panic!("expected auth gate for wasm channel, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn check_tool_readiness_resolves_action_to_provider_extension() {
+        struct ProviderActionTool;
+
+        #[async_trait::async_trait]
+        impl crate::tools::Tool for ProviderActionTool {
+            fn name(&self) -> &str {
+                "gmail_send"
+            }
+
+            fn description(&self) -> &str {
+                "gmail action"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+
+            fn provider_extension(&self) -> Option<&str> {
+                Some("gmail_channel")
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::ToolOutput, crate::tools::ToolError> {
+                unreachable!()
+            }
+        }
+
+        let _env_guard = crate::config::helpers::lock_env();
+        let _callback_guard = set_test_env_var(
+            "IRONCLAW_OAUTH_CALLBACK_URL",
+            Some("https://example.com/oauth/callback"),
+        );
+
+        let store = test_store();
+        let skills_dir = tempfile::tempdir().expect("skills dir");
+        let skill_registry = make_skill_registry_with_google_oauth(skills_dir.path()).await;
+        let wasm_tools_dir = tempfile::tempdir().expect("wasm tools dir");
+        let wasm_channels_dir = tempfile::tempdir().expect("wasm channels dir");
+        std::fs::write(
+            wasm_channels_dir.path().join("gmail_channel.wasm"),
+            b"fake-channel",
+        )
+        .expect("write channel wasm");
+        std::fs::write(
+            wasm_channels_dir
+                .path()
+                .join("gmail_channel.capabilities.json"),
+            serde_json::json!({
+                "name": "gmail_channel",
+                "description": "gmail test channel",
+                "setup": {
+                    "required_secrets": [
+                        {"name": "google_oauth_token", "prompt": "Google OAuth token"}
+                    ]
+                }
+            })
+            .to_string(),
+        )
+        .expect("write channel caps");
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(ProviderActionTool)).await;
+        let ext_mgr = make_extension_manager_with_registry(
+            Arc::clone(&store),
+            wasm_tools_dir.path(),
+            wasm_channels_dir.path(),
+            Arc::clone(&tools),
+        );
+        let mgr = AuthManager::new(store, Some(skill_registry), Some(ext_mgr), Some(tools));
+
+        let readiness = mgr.check_tool_readiness("gmail_send", "user1").await;
+        match readiness {
+            ToolReadiness::NeedsAuth {
+                credential_name,
+                auth_url,
+                ..
+            } => {
+                assert_eq!(credential_name, "google_oauth_token");
+                assert!(auth_url.is_some());
+            }
+            other => panic!("expected provider-mapped auth gate, got {other:?}"),
         }
     }
 

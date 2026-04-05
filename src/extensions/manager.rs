@@ -18,9 +18,10 @@ use crate::channels::{ChannelManager, OutgoingResponse};
 use crate::extensions::discovery::OnlineDiscovery;
 use crate::extensions::registry::ExtensionRegistry;
 use crate::extensions::{
-    ActivateResult, AuthResult, ConfigureResult, ExtensionError, ExtensionKind, ExtensionSource,
-    InstallResult, InstalledExtension, RegistryEntry, ResultSource, SearchResult, ToolAuthState,
-    UpgradeOutcome, UpgradeResult, VerificationChallenge,
+    ActivateResult, AuthResult, ConfigureResult, EnsureReadyIntent, EnsureReadyOutcome,
+    ExtensionError, ExtensionKind, ExtensionPhase, ExtensionSource, InstallResult,
+    InstalledExtension, LatentProviderAction, RegistryEntry, ResultSource, SearchResult,
+    ToolAuthState, UpgradeOutcome, UpgradeResult, VerificationChallenge,
     naming::{canonicalize_extension_name, legacy_extension_alias},
 };
 use crate::hooks::HookRegistry;
@@ -1424,6 +1425,203 @@ impl ExtensionManager {
         }
     }
 
+    /// Canonical kernel-owned readiness check for an installed extension.
+    pub async fn ensure_extension_ready(
+        &self,
+        name: &str,
+        user_id: &str,
+        intent: EnsureReadyIntent,
+    ) -> Result<EnsureReadyOutcome, ExtensionError> {
+        let name = canonicalize_extension_name(name)?;
+        let kind = self.determine_installed_kind(&name, user_id).await?;
+
+        match self.auth(&name, user_id).await? {
+            auth_result @ AuthResult {
+                status:
+                    crate::extensions::AuthStatus::AwaitingAuthorization { .. }
+                    | crate::extensions::AuthStatus::AwaitingToken { .. },
+                ..
+            } => {
+                return Ok(EnsureReadyOutcome::NeedsAuth {
+                    name,
+                    kind,
+                    phase: ExtensionPhase::NeedsAuth,
+                    credential_name: self
+                        .first_missing_auth_secret_pub(&auth_result.name, user_id)
+                        .await,
+                    auth: auth_result,
+                });
+            }
+            AuthResult {
+                status:
+                    crate::extensions::AuthStatus::NeedsSetup {
+                        instructions,
+                        setup_url,
+                    },
+                ..
+            } => {
+                return Ok(EnsureReadyOutcome::NeedsSetup {
+                    name,
+                    kind,
+                    phase: ExtensionPhase::NeedsSetup,
+                    instructions,
+                    setup_url,
+                });
+            }
+            AuthResult {
+                status:
+                    crate::extensions::AuthStatus::Authenticated
+                    | crate::extensions::AuthStatus::NoAuthRequired,
+                ..
+            } => {}
+        }
+
+        if self.is_extension_active(&name, kind).await {
+            return Ok(EnsureReadyOutcome::Ready {
+                name,
+                kind,
+                phase: ExtensionPhase::Ready,
+                activation: None,
+            });
+        }
+
+        match intent {
+            EnsureReadyIntent::ExplicitAuth => {
+                return Ok(EnsureReadyOutcome::Ready {
+                    name,
+                    kind,
+                    phase: ExtensionPhase::NeedsActivation,
+                    activation: None,
+                });
+            }
+            EnsureReadyIntent::UseCapability
+            | EnsureReadyIntent::PostInstall
+            | EnsureReadyIntent::ExplicitActivate => {}
+        }
+
+        match self.activate(&name, user_id).await {
+            Ok(activation) => Ok(EnsureReadyOutcome::Ready {
+                name,
+                kind,
+                phase: ExtensionPhase::Ready,
+                activation: Some(activation),
+            }),
+            Err(ExtensionError::AuthRequired) => match self.auth(&name, user_id).await? {
+                auth_result @ AuthResult {
+                    status:
+                        crate::extensions::AuthStatus::AwaitingAuthorization { .. }
+                        | crate::extensions::AuthStatus::AwaitingToken { .. },
+                    ..
+                } => Ok(EnsureReadyOutcome::NeedsAuth {
+                    name,
+                    kind,
+                    phase: ExtensionPhase::NeedsAuth,
+                    credential_name: self
+                        .first_missing_auth_secret_pub(&auth_result.name, user_id)
+                        .await,
+                    auth: auth_result,
+                }),
+                AuthResult {
+                    status:
+                        crate::extensions::AuthStatus::NeedsSetup {
+                            instructions,
+                            setup_url,
+                        },
+                    ..
+                } => Ok(EnsureReadyOutcome::NeedsSetup {
+                    name,
+                    kind,
+                    phase: ExtensionPhase::NeedsSetup,
+                    instructions,
+                    setup_url,
+                }),
+                _ => Err(ExtensionError::AuthRequired),
+            },
+            Err(err) => Err(err),
+        }
+    }
+
+    pub async fn latent_provider_actions_default_user(&self) -> Vec<LatentProviderAction> {
+        self.latent_provider_actions(&self.user_id).await
+    }
+
+    pub async fn latent_provider_action(
+        &self,
+        action_name: &str,
+        user_id: &str,
+    ) -> Option<LatentProviderAction> {
+        self.latent_provider_actions(user_id)
+            .await
+            .into_iter()
+            .find(|action| action.action_name == action_name)
+    }
+
+    pub async fn latent_provider_actions(&self, user_id: &str) -> Vec<LatentProviderAction> {
+        let mut actions = Vec::new();
+
+        if let Ok(servers) = self.load_mcp_servers(user_id).await {
+            for server in servers.servers {
+                if !self
+                    .is_extension_active(&server.name, ExtensionKind::McpServer)
+                    .await
+                {
+                    actions.extend(self.latent_actions_for_mcp_server(&server));
+                }
+            }
+        }
+
+        if self.wasm_tools_dir.exists()
+            && let Ok(tools) = discover_tools(&self.wasm_tools_dir).await
+        {
+            for (name, _) in tools {
+                if self
+                    .is_extension_active(&name, ExtensionKind::WasmTool)
+                    .await
+                {
+                    continue;
+                }
+                let description = self
+                    .load_tool_capabilities(&name)
+                    .await
+                    .and_then(|cap| cap.description);
+                let description = if let Some(description) = description {
+                    description
+                } else {
+                    self.registry
+                        .get_with_kind(&name, Some(ExtensionKind::WasmTool))
+                        .await
+                        .map(|entry| entry.description)
+                        .unwrap_or_else(|| format!("Use the '{}' tool provider.", name))
+                };
+                actions.push(LatentProviderAction {
+                    action_name: name.clone(),
+                    provider_extension: name.clone(),
+                    description: format!(
+                        "{} The runtime will activate/authenticate this provider automatically before use.",
+                        description
+                    ),
+                    parameters_schema: serde_json::json!({"type":"object"}),
+                });
+            }
+        }
+
+        actions.sort_by(|a, b| a.action_name.cmp(&b.action_name));
+        actions
+    }
+
+    pub async fn provider_action_names(&self, provider_extension: &str) -> Vec<String> {
+        let prefix = format!("{}_", provider_extension);
+        let mut actions: Vec<String> = self
+            .tool_registry
+            .list()
+            .await
+            .into_iter()
+            .filter(|name| name == provider_extension || name.starts_with(&prefix))
+            .collect();
+        actions.sort();
+        actions
+    }
+
     /// List extensions with their status.
     ///
     /// When `include_available` is `true`, registry entries that are not yet
@@ -2235,6 +2433,22 @@ impl ExtensionManager {
             crate::tools::mcp::config::add_mcp_server_db(store.as_ref(), user_id, config).await
         } else {
             crate::tools::mcp::config::add_mcp_server(config).await
+        }
+    }
+
+    async fn update_mcp_server(
+        &self,
+        config: McpServerConfig,
+        user_id: &str,
+    ) -> Result<(), crate::tools::mcp::config::ConfigError> {
+        config.validate()?;
+        let mut servers = self.load_mcp_servers(user_id).await?;
+        servers.upsert(config);
+        if let Some(ref store) = self.store {
+            crate::tools::mcp::config::save_mcp_servers_to_db(store.as_ref(), user_id, &servers)
+                .await
+        } else {
+            crate::tools::mcp::config::save_mcp_servers(&servers).await
         }
     }
 
@@ -3958,6 +4172,17 @@ impl ExtensionManager {
         }
     }
 
+    async fn is_extension_active(&self, name: &str, kind: ExtensionKind) -> bool {
+        match kind {
+            ExtensionKind::McpServer => self.mcp_clients.read().await.contains_key(name),
+            ExtensionKind::WasmTool => self.tool_registry.has(name).await,
+            ExtensionKind::WasmChannel | ExtensionKind::ChannelRelay => {
+                self.active_channel_names.read().await.contains(name)
+            }
+            ExtensionKind::AcpAgent => true,
+        }
+    }
+
     /// Determine the auth readiness of a WASM tool.
     async fn check_tool_auth_status(&self, name: &str, user_id: &str) -> ToolAuthState {
         let Some(cap_file) = self.load_tool_capabilities(name).await else {
@@ -4186,6 +4411,12 @@ impl ExtensionManager {
             }
         })?;
 
+        let mut updated_server = server.clone();
+        updated_server.cached_tools = mcp_tools.clone();
+        self.update_mcp_server(updated_server, user_id)
+            .await
+            .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
+
         let tool_impls = client
             .create_tools()
             .await
@@ -4218,6 +4449,46 @@ impl ExtensionManager {
             tools_loaded: tool_names,
             message: format!("Connected to '{}' and loaded tools", name),
         })
+    }
+
+    fn latent_actions_for_mcp_server(&self, server: &McpServerConfig) -> Vec<LatentProviderAction> {
+        let mut actions = Vec::new();
+
+        actions.push(LatentProviderAction {
+            action_name: server.name.clone(),
+            provider_extension: server.name.clone(),
+            description: format!(
+                "{} The runtime will connect/authenticate this provider automatically before concrete provider actions become available.",
+                server
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| format!("Use the '{}' MCP provider.", server.name))
+            ),
+            parameters_schema: serde_json::json!({"type":"object"}),
+        });
+
+        actions.extend(server.cached_tools.iter().map(|tool| {
+            let description = if tool.description.trim().is_empty() {
+                format!(
+                    "Use the '{}' action from the '{}' MCP provider.",
+                    tool.name, server.name
+                )
+            } else {
+                tool.description.clone()
+            };
+
+            LatentProviderAction {
+                action_name: format!("{}_{}", server.name, tool.name),
+                provider_extension: server.name.clone(),
+                description: format!(
+                    "{} The runtime will connect/authenticate this provider automatically before use.",
+                    description
+                ),
+                parameters_schema: tool.input_schema.clone(),
+            }
+        }));
+
+        actions
     }
 
     async fn activate_wasm_tool(
@@ -6912,6 +7183,174 @@ mod tests {
             .create("test", CreateSecretParams::new(name, value))
             .await
             .expect("store secret");
+    }
+
+    #[tokio::test]
+    async fn ensure_extension_ready_reports_needs_auth_for_wasm_channel() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let channels_dir = write_test_channel(
+            dir.path(),
+            "gmail_channel",
+            &serde_json::json!({
+                "setup": {
+                    "required_secrets": [
+                        {"name": "google_oauth_token", "prompt": "Google OAuth token"}
+                    ]
+                }
+            })
+            .to_string(),
+        );
+        let manager =
+            make_test_manager_with_dirs(None, dir.path().join("tools"), channels_dir, None);
+
+        let outcome = manager
+            .ensure_extension_ready(
+                "gmail_channel",
+                "test",
+                crate::extensions::EnsureReadyIntent::UseCapability,
+            )
+            .await
+            .expect("ensure ready");
+
+        match outcome {
+            crate::extensions::EnsureReadyOutcome::NeedsAuth {
+                credential_name,
+                auth,
+                ..
+            } => {
+                assert_eq!(credential_name.as_deref(), Some("google_oauth_token"));
+                assert_eq!(auth.status_str(), "awaiting_token");
+            }
+            other => panic!("expected needs auth outcome, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_extension_ready_explicit_auth_leaves_activation_to_later() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "ready_tool",
+            r#"{
+                "auth": {
+                    "secret_name": "ready_tool_token"
+                }
+            }"#,
+        );
+        let manager =
+            make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+        store_test_secret(&manager, "ready_tool_token", "token").await;
+
+        let outcome = manager
+            .ensure_extension_ready(
+                "ready_tool",
+                "test",
+                crate::extensions::EnsureReadyIntent::ExplicitAuth,
+            )
+            .await
+            .expect("ensure ready");
+
+        match outcome {
+            crate::extensions::EnsureReadyOutcome::Ready {
+                phase, activation, ..
+            } => {
+                assert_eq!(phase, crate::extensions::ExtensionPhase::NeedsActivation);
+                assert!(activation.is_none());
+            }
+            other => panic!("expected ready outcome, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn latent_provider_actions_include_inactive_wasm_tool() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "latent_tool",
+            r#"{
+                "description": "latent test tool"
+            }"#,
+        );
+        let manager =
+            make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+
+        let actions = manager.latent_provider_actions("test").await;
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.action_name == "latent_tool")
+        );
+    }
+
+    #[tokio::test]
+    async fn latent_provider_actions_include_cached_inactive_mcp_tools() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let manager = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+        );
+
+        let mut server = McpServerConfig::new("notion", "https://mcp.notion.com/mcp");
+        server.description = Some("Notion MCP".to_string());
+        server.cached_tools = vec![crate::tools::mcp::McpTool {
+            name: "search".to_string(),
+            description: "Search Notion pages".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"}
+                }
+            }),
+            annotations: None,
+        }];
+        manager
+            .add_mcp_server(server, "test")
+            .await
+            .expect("add mcp server");
+
+        let actions = manager.latent_provider_actions("test").await;
+        assert!(actions.iter().any(|action| action.action_name == "notion"));
+        let search = actions
+            .iter()
+            .find(|action| action.action_name == "notion_search")
+            .expect("cached latent mcp action");
+        assert_eq!(search.provider_extension, "notion");
+        assert_eq!(
+            search.parameters_schema["properties"]["query"]["type"],
+            "string"
+        );
+    }
+
+    #[tokio::test]
+    async fn latent_provider_action_resolves_cached_inactive_mcp_subtool_by_exact_name() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let manager = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+        );
+
+        let mut server = McpServerConfig::new("notion", "https://mcp.notion.com/mcp");
+        server.cached_tools = vec![crate::tools::mcp::McpTool {
+            name: "search".to_string(),
+            description: "Search Notion pages".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            annotations: None,
+        }];
+        manager
+            .add_mcp_server(server, "test")
+            .await
+            .expect("add mcp server");
+
+        let action = manager
+            .latent_provider_action("notion_search", "test")
+            .await
+            .expect("latent provider action");
+        assert_eq!(action.provider_extension, "notion");
+        assert_eq!(action.action_name, "notion_search");
     }
 
     #[test]

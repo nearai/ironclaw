@@ -412,6 +412,16 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// Canonical provider extension that owns this action, when one exists.
+    ///
+    /// This lets the runtime resolve `action -> provider extension` without
+    /// inferring ownership from the action name. MCP subtools should report the
+    /// server extension name, and extension-backed WASM tools should report
+    /// their extension id.
+    fn provider_extension(&self) -> Option<&str> {
+        None
+    }
+
     /// Get the tool schema for LLM function calling.
     fn schema(&self) -> ToolSchema {
         let parameters = self.parameters_schema();
