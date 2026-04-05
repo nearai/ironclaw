@@ -554,7 +554,8 @@ impl HybridStore {
         let content = if is_orchestrator_code_path(&new_path) {
             // Orchestrator Python: store raw content (the Python source code)
             doc.content.clone()
-        } else if new_path.to_ascii_lowercase().ends_with(".md") { // safety: case-insensitive for macOS/Windows
+        } else if new_path.to_ascii_lowercase().ends_with(".md") {
+            // safety: case-insensitive for macOS/Windows
             // Knowledge docs and prompt overlays: frontmatter + content
             serialize_knowledge_doc(doc)
         } else {
