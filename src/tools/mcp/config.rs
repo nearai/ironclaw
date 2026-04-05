@@ -408,7 +408,7 @@ impl From<ConfigError> for ToolError {
     }
 }
 
-pub const NEARAI_MCP_SERVER_NAME: &str = "nearai-mcp";
+pub const NEARAI_MCP_SERVER_NAME: &str = "nearai_mcp";
 const NEARAI_MCP_DESCRIPTION: &str = "Hosted tools from NEAR AI";
 
 fn derive_nearai_mcp_url(base_url: &str) -> String {
