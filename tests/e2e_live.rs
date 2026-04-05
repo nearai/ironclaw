@@ -80,7 +80,7 @@ mod live_tests {
     async fn zizmor_scan() {
         let harness = LiveTestHarnessBuilder::new("zizmor_scan")
             .with_max_tool_iterations(40)
-            .with_timeout(Duration::from_secs(300))
+            .with_auto_approve_tools(true)
             .build()
             .await;
 
@@ -101,7 +101,6 @@ mod live_tests {
         let harness = LiveTestHarnessBuilder::new("zizmor_scan_v2")
             .with_engine_v2(true)
             .with_max_tool_iterations(40)
-            .with_timeout(Duration::from_secs(300))
             .build()
             .await;
 

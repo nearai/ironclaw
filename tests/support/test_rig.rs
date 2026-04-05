@@ -705,7 +705,11 @@ impl TestRigBuilder {
             if let Some(v) = auto_approve_tools {
                 components.config.agent.auto_approve_tools = v;
             }
-            // allow_local_tools and engine_v2 come from the provided config.
+            // allow_local_tools comes from the provided config.
+            // engine_v2: honour the builder's explicit override if set.
+            if engine_v2 {
+                components.config.agent.engine_v2 = true;
+            }
         } else {
             components.config.agent.auto_approve_tools = auto_approve_tools.unwrap_or(true);
             components.config.agent.allow_local_tools = true;

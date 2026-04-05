@@ -11,12 +11,11 @@
 //! ```rust,ignore
 //! let harness = LiveTestHarnessBuilder::new("my_test")
 //!     .with_max_tool_iterations(30)
-//!     .with_timeout(Duration::from_secs(120))
 //!     .build()
 //!     .await;
 //!
 //! harness.rig().send_message("do something").await;
-//! let responses = harness.rig().wait_for_responses(1, Duration::from_secs(120)).await;
+//! let responses = harness.rig().wait_for_responses(1, std::time::Duration::from_secs(120)).await;
 //!
 //! // LLM judge (live mode only, returns None in replay)
 //! if let Some(verdict) = harness.judge(&texts, "criteria here").await {
@@ -30,7 +29,6 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use ironclaw::llm::recording::RecordingLlm;
 use ironclaw::llm::{ChatMessage, CompletionRequest, LlmProvider, SessionConfig, SessionManager};
@@ -167,7 +165,14 @@ impl LiveTestHarness {
                 }
                 StatusUpdate::ToolResult { name, preview } => {
                     let short = if preview.len() > 200 {
-                        format!("{}…", &preview[..200])
+                        // Find a safe char boundary to avoid panicking on multi-byte UTF-8.
+                        let end = preview
+                            .char_indices()
+                            .map(|(i, _)| i)
+                            .take_while(|&i| i <= 200)
+                            .last()
+                            .unwrap_or(0);
+                        format!("{}…", &preview[..end])
                     } else {
                         preview
                     };
@@ -213,8 +218,8 @@ impl LiveTestHarness {
 pub struct LiveTestHarnessBuilder {
     test_name: String,
     max_tool_iterations: usize,
-    timeout: Duration,
     engine_v2: Option<bool>,
+    auto_approve_tools: Option<bool>,
 }
 
 impl LiveTestHarnessBuilder {
@@ -226,8 +231,8 @@ impl LiveTestHarnessBuilder {
         Self {
             test_name: test_name.into(),
             max_tool_iterations: 30,
-            timeout: Duration::from_secs(120),
             engine_v2: None,
+            auto_approve_tools: None,
         }
     }
 
@@ -237,16 +242,16 @@ impl LiveTestHarnessBuilder {
         self
     }
 
-    /// Set the default timeout for the test (used as a hint; callers still
-    /// pass timeout to `wait_for_responses`).
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
-        self
-    }
-
     /// Force engine v2 on or off, overriding the env-resolved value.
     pub fn with_engine_v2(mut self, enabled: bool) -> Self {
         self.engine_v2 = Some(enabled);
+        self
+    }
+
+    /// Override auto-approve tools setting. When not called, the value from
+    /// `Config::from_env()` is used in live mode (default: false).
+    pub fn with_auto_approve_tools(mut self, enabled: bool) -> Self {
+        self.auto_approve_tools = Some(enabled);
         self
     }
 
@@ -288,6 +293,9 @@ impl LiveTestHarnessBuilder {
         if let Some(v2) = self.engine_v2 {
             config.agent.engine_v2 = v2;
         }
+        if let Some(aa) = self.auto_approve_tools {
+            config.agent.auto_approve_tools = aa;
+        }
 
         eprintln!(
             "[LiveTest] Config: engine_v2={}, allow_local_tools={}, auto_approve={}",
@@ -308,13 +316,13 @@ impl LiveTestHarnessBuilder {
         // Pass the real config so TestRig mirrors real binary behavior:
         // - allow_local_tools controls shell/file tool availability
         // - engine_v2 controls which agentic loop path is used
-        // - auto_approve_tools controls approval gates
+        // - auto_approve_tools comes from the env/config (tests can override
+        //   via LiveTestHarnessBuilder if needed)
         let rig = TestRigBuilder::new()
             .with_config(config)
             .with_llm(llm)
             .with_http_interceptor(http_interceptor)
             .with_max_tool_iterations(self.max_tool_iterations)
-            .with_auto_approve_tools(true)
             .build()
             .await;
 
@@ -390,10 +398,24 @@ pub async fn judge_response(
     match provider.complete(request).await {
         Ok(response) => {
             let trimmed = response.content.trim();
-            let pass = trimmed.starts_with("PASS");
-            JudgeVerdict {
-                pass,
-                reasoning: trimmed.to_string(),
+            // Expect exactly "PASS: <reason>" or "FAIL: <reason>".
+            if let Some(reason) = trimmed.strip_prefix("PASS:") {
+                JudgeVerdict {
+                    pass: true,
+                    reasoning: reason.trim().to_string(),
+                }
+            } else if let Some(reason) = trimmed.strip_prefix("FAIL:") {
+                JudgeVerdict {
+                    pass: false,
+                    reasoning: reason.trim().to_string(),
+                }
+            } else {
+                JudgeVerdict {
+                    pass: false,
+                    reasoning: format!(
+                        "Judge returned unexpected format (expected PASS:/FAIL:): {trimmed}"
+                    ),
+                }
             }
         }
         Err(e) => JudgeVerdict {
