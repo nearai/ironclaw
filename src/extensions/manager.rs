@@ -33,7 +33,7 @@ use crate::tools::mcp::auth::{
     authorize_mcp_server, canonical_resource_uri, discover_full_oauth_metadata,
     find_available_port, is_authenticated, register_client,
 };
-use crate::tools::mcp::config::{McpServerConfig, NEARAI_MCP_SERVER_NAME};
+use crate::tools::mcp::config::{McpServerConfig, NEARAI_MCP_SERVER_NAME, nearai_mcp_display_title};
 use crate::tools::mcp::session::McpSessionManager;
 use crate::tools::wasm::{WasmToolLoader, WasmToolRuntime, discover_tools};
 
@@ -115,7 +115,7 @@ fn normalize_hosted_callback_url(callback_url: &str) -> String {
 
 fn mcp_display_name(server: &McpServerConfig) -> String {
     if server.name == NEARAI_MCP_SERVER_NAME {
-        "NEAR AI".to_string()
+        nearai_mcp_display_title()
     } else {
         server.name.clone()
     }

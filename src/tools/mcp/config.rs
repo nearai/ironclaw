@@ -408,8 +408,19 @@ impl From<ConfigError> for ToolError {
     }
 }
 
-pub const NEARAI_MCP_SERVER_NAME: &str = "nearai_mcp";
-const NEARAI_MCP_DESCRIPTION: &str = "Hosted tools from NEAR AI";
+/// MCP server id (`registry/mcp-servers/nearai.json` → `name`, or this if the catalog is empty).
+pub const NEARAI_MCP_SERVER_NAME: &str = "nearai";
+
+const NEARAI_MCP_REGISTRY_KEY: &str = "mcp-servers/nearai";
+
+/// Human-readable title for extension lists (from the embedded manifest when present).
+pub fn nearai_mcp_display_title() -> String {
+    crate::registry::embedded::load_embedded()
+        .get(NEARAI_MCP_REGISTRY_KEY)
+        .map(|m| m.display_name.clone())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "NEAR AI".to_string())
+}
 
 fn derive_nearai_mcp_url(base_url: &str) -> String {
     let base = base_url.trim_end_matches('/');
@@ -421,10 +432,20 @@ fn nearai_mcp_server_from_env() -> Option<McpServerConfig> {
     let base_url = crate::config::helpers::env_or_override("NEARAI_BASE_URL")?;
     let api_key = crate::config::helpers::env_or_override("NEARAI_API_KEY")?;
 
+    let manifest = crate::registry::embedded::load_embedded().get(NEARAI_MCP_REGISTRY_KEY);
+    let name = manifest
+        .map(|m| m.name.as_str())
+        .filter(|n| !n.is_empty())
+        .unwrap_or(NEARAI_MCP_SERVER_NAME)
+        .to_string();
+    let description = manifest
+        .and_then(|m| (!m.description.is_empty()).then_some(m.description.clone()))
+        .unwrap_or_else(|| "Hosted tools from NEAR AI".to_string());
+
     let headers = HashMap::from([("Authorization".to_string(), format!("Bearer {}", api_key))]);
-    let server = McpServerConfig::new(NEARAI_MCP_SERVER_NAME, derive_nearai_mcp_url(&base_url))
+    let server = McpServerConfig::new(name, derive_nearai_mcp_url(&base_url))
         .with_headers(headers)
-        .with_description(NEARAI_MCP_DESCRIPTION);
+        .with_description(description);
 
     match server.validate() {
         Ok(()) => Some(server),
@@ -1268,6 +1289,10 @@ mod tests {
 
         let server = nearai_mcp_server_from_env().expect("server from env");
         assert_eq!(server.name, NEARAI_MCP_SERVER_NAME);
+        assert!(
+            server.description.as_ref().is_some_and(|d| !d.is_empty()),
+            "description from embedded manifest or fallback"
+        );
         assert_eq!(server.url, "https://cloud-api.near.ai/mcp");
         assert_eq!(
             server.headers.get("Authorization").map(String::as_str),
