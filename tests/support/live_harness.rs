@@ -33,9 +33,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ironclaw::llm::recording::RecordingLlm;
-use ironclaw::llm::{
-    ChatMessage, CompletionRequest, LlmProvider, SessionConfig, SessionManager,
-};
+use ironclaw::llm::{ChatMessage, CompletionRequest, LlmProvider, SessionConfig, SessionManager};
 
 use crate::support::test_rig::{TestRig, TestRigBuilder};
 use crate::support::trace_llm::LlmTrace;
@@ -216,6 +214,7 @@ pub struct LiveTestHarnessBuilder {
     test_name: String,
     max_tool_iterations: usize,
     timeout: Duration,
+    engine_v2: Option<bool>,
 }
 
 impl LiveTestHarnessBuilder {
@@ -228,6 +227,7 @@ impl LiveTestHarnessBuilder {
             test_name: test_name.into(),
             max_tool_iterations: 30,
             timeout: Duration::from_secs(120),
+            engine_v2: None,
         }
     }
 
@@ -241,6 +241,12 @@ impl LiveTestHarnessBuilder {
     /// pass timeout to `wait_for_responses`).
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Force engine v2 on or off, overriding the env-resolved value.
+    pub fn with_engine_v2(mut self, enabled: bool) -> Self {
+        self.engine_v2 = Some(enabled);
         self
     }
 
@@ -273,25 +279,25 @@ impl LiveTestHarnessBuilder {
 
         // Resolve full config (reads LLM_BACKEND, ENGINE_V2, ALLOW_LOCAL_TOOLS, etc.)
         // This mirrors the exact config the real `ironclaw` binary would use.
-        let config = ironclaw::config::Config::from_env()
-            .await
-            .expect(
-                "Failed to load config for live test. \
+        let mut config = ironclaw::config::Config::from_env().await.expect(
+            "Failed to load config for live test. \
                  Ensure ~/.ironclaw/.env has valid LLM credentials.",
-            );
+        );
+
+        // Apply builder overrides.
+        if let Some(v2) = self.engine_v2 {
+            config.agent.engine_v2 = v2;
+        }
 
         eprintln!(
             "[LiveTest] Config: engine_v2={}, allow_local_tools={}, auto_approve={}",
-            config.agent.engine_v2,
-            config.agent.allow_local_tools,
-            config.agent.auto_approve_tools,
+            config.agent.engine_v2, config.agent.allow_local_tools, config.agent.auto_approve_tools,
         );
 
         let session = Arc::new(SessionManager::new(SessionConfig::default()));
-        let (provider, cheap_llm, _) =
-            ironclaw::llm::build_provider_chain(&config.llm, session)
-                .await
-                .expect("Failed to build LLM provider chain for live test");
+        let (provider, cheap_llm, _) = ironclaw::llm::build_provider_chain(&config.llm, session)
+            .await
+            .expect("Failed to build LLM provider chain for live test");
 
         // Wrap with RecordingLlm to capture the trace.
         let model_name = format!("live-{}", self.test_name);

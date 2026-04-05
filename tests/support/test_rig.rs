@@ -722,24 +722,22 @@ impl TestRigBuilder {
 
         // Build HTTP interceptor once — shared by both AgentDeps and WASM tools.
         // Direct override takes priority (e.g. RecordingHttpInterceptor for live tests).
-        let http_interceptor: Option<Arc<dyn HttpInterceptor>> =
-            if let Some(override_interceptor) = http_interceptor_override {
-                Some(override_interceptor)
+        let http_interceptor: Option<Arc<dyn HttpInterceptor>> = if let Some(override_interceptor) =
+            http_interceptor_override
+        {
+            Some(override_interceptor)
+        } else {
+            let exchanges = if explicit_http_exchanges.is_empty() {
+                trace_http_exchanges
             } else {
-                let exchanges = if explicit_http_exchanges.is_empty() {
-                    trace_http_exchanges
-                } else {
-                    explicit_http_exchanges
-                };
-                if exchanges.is_empty() {
-                    None
-                } else {
-                    Some(
-                        Arc::new(ReplayingHttpInterceptor::new(exchanges))
-                            as Arc<dyn HttpInterceptor>,
-                    )
-                }
+                explicit_http_exchanges
             };
+            if exchanges.is_empty() {
+                None
+            } else {
+                Some(Arc::new(ReplayingHttpInterceptor::new(exchanges)) as Arc<dyn HttpInterceptor>)
+            }
+        };
 
         // 6. Register job tools, routine tools, and extra tools.
         {
