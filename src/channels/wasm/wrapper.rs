@@ -61,6 +61,8 @@ use crate::tools::wasm::credential_injector::{
 };
 use ironclaw_safety::LeakDetector;
 
+const SLACK_TEST_API_BASE_ENV: &str = "IRONCLAW_TEST_SLACK_API_BASE_URL";
+
 const WEBSOCKET_EVENT_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue";
 const WEBSOCKET_EVENT_PROCESSING_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue_processing";
 const WEBSOCKET_EVENT_QUEUE_MAX_ITEMS: usize = 100;
@@ -379,6 +381,18 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         // after the leak scan so host-injected secrets don't trigger false positives.
         if let Some(host) = extract_host_from_url(&url) {
             self.inject_host_credentials(&host, &mut headers, &mut url);
+        }
+
+        // Rewrite Slack API URLs to point at a test server when the override
+        // env var is set. This must happen after credential injection so that
+        // the real host pattern still matches for token lookup.
+        if let Some(rewritten) = rewrite_slack_api_url_for_testing(&url) {
+            tracing::info!(
+                original_url = %url,
+                rewritten_url = %rewritten,
+                "Rewriting Slack API request to test base URL"
+            );
+            url = rewritten;
         }
 
         // Get the max response size from capabilities (default 10MB).
@@ -3958,6 +3972,36 @@ fn extract_host_from_url(url: &str) -> Option<String> {
     })
 }
 
+/// Rewrite Slack API URLs for testing.
+///
+/// When `IRONCLAW_TEST_SLACK_API_BASE_URL` is set, redirects requests to
+/// `slack.com` and `files.slack.com` to the test server. This enables E2E
+/// tests to run against a fake Slack API without touching the real one.
+fn rewrite_slack_api_url_for_testing(url: &str) -> Option<String> {
+    let override_base = std::env::var(SLACK_TEST_API_BASE_ENV)
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())?;
+
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+
+    let host = parsed.host_str()?;
+    if !host.eq_ignore_ascii_case("slack.com") && !host.eq_ignore_ascii_case("files.slack.com") {
+        return None;
+    }
+
+    let path = parsed.path().trim_start_matches('/');
+    let mut rewritten = format!("{override_base}/{path}");
+    if let Some(query) = parsed.query() {
+        rewritten.push('?');
+        rewritten.push_str(query);
+    }
+    Some(rewritten)
+}
+
 fn should_skip_response_leak_scan(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|parsed| {
         matches!(parsed.scheme(), "http" | "https")
@@ -4136,10 +4180,11 @@ mod tests {
         PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
     use crate::channels::wasm::wrapper::{
-        EmitDispatchContext, HttpResponse, WasmChannel, WebsocketRuntimeConfig,
-        build_discord_gateway_presence_update, build_websocket_identify_message,
-        build_websocket_resume_message, discord_gateway_presence_status, drain_guest_logs,
-        parse_websocket_invalid_session, parse_websocket_ready_session,
+        EmitDispatchContext, HttpResponse, SLACK_TEST_API_BASE_ENV, WasmChannel,
+        WebsocketRuntimeConfig, build_discord_gateway_presence_update,
+        build_websocket_identify_message, build_websocket_resume_message,
+        discord_gateway_presence_status, drain_guest_logs, parse_websocket_invalid_session,
+        parse_websocket_ready_session, rewrite_slack_api_url_for_testing,
         should_warn_on_heartbeat_interval, uses_owner_broadcast_target,
         websocket_heartbeat_sleep_duration, websocket_reconnect_backoff,
     };
@@ -5937,5 +5982,28 @@ mod tests {
             mime_from_extension("/home/user/.ironclaw/screenshot.png"),
             "image/png"
         );
+    }
+
+    #[test]
+    fn test_rewrite_slack_api_url_for_testing_uses_test_override() {
+        std::env::set_var(SLACK_TEST_API_BASE_ENV, "http://localhost:9999");
+        // slack.com API call
+        let result = rewrite_slack_api_url_for_testing("https://slack.com/api/chat.postMessage");
+        assert_eq!(
+            result.as_deref(),
+            Some("http://localhost:9999/api/chat.postMessage")
+        );
+        // files.slack.com file download
+        let result = rewrite_slack_api_url_for_testing(
+            "https://files.slack.com/files-pri/T123/download/test.txt",
+        );
+        assert_eq!(
+            result.as_deref(),
+            Some("http://localhost:9999/files-pri/T123/download/test.txt")
+        );
+        // Non-Slack URL should not be rewritten
+        let result = rewrite_slack_api_url_for_testing("https://api.telegram.org/bot123/getMe");
+        assert!(result.is_none());
+        std::env::remove_var(SLACK_TEST_API_BASE_ENV);
     }
 }
