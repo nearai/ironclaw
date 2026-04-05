@@ -103,28 +103,31 @@ impl AcpBridgeRuntime {
             })
             .await?;
 
-        // Run the ACP session
-        match self.run_acp_session(&job.description, &extra_env).await {
-            Ok(()) => {
-                self.client
-                    .report_complete(&CompletionReport {
-                        success: true,
-                        message: Some("ACP agent session completed".to_string()),
-                        iterations: 1,
-                    })
-                    .await?;
-            }
+        // Run the ACP session, then emit exactly one terminal "result" event
+        // (so job monitors transition state) followed by a completion report.
+        let (success, message) = match self.run_acp_session(&job.description, &extra_env).await {
+            Ok(()) => (true, "ACP agent session completed".to_string()),
             Err(e) => {
                 tracing::error!(job_id = %self.config.job_id, "ACP session failed: {}", e);
-                self.client
-                    .report_complete(&CompletionReport {
-                        success: false,
-                        message: Some(format!("ACP agent failed: {}", e)),
-                        iterations: 1,
-                    })
-                    .await?;
+                (false, format!("ACP agent failed: {e}"))
             }
-        }
+        };
+        self.client
+            .post_event(&JobEventPayload {
+                event_type: "result".to_string(),
+                data: json!({
+                    "status": if success { "completed" } else { "error" },
+                    "message": &message,
+                }),
+            })
+            .await;
+        self.client
+            .report_complete(&CompletionReport {
+                success,
+                message: Some(message),
+                iterations: 1,
+            })
+            .await?;
 
         Ok(())
     }
@@ -259,8 +262,10 @@ impl AcpBridgeRuntime {
                 };
 
                 // Report prompt result
-                let result_payload =
-                    stop_reason_to_result(&prompt_response.stop_reason, &session_id.to_string());
+                let result_payload = stop_reason_to_turn_event(
+                    &prompt_response.stop_reason,
+                    &session_id.to_string(),
+                );
                 client_for_acp.post_event(&result_payload).await;
 
                 // Follow-up loop: poll for prompts, send additional prompt() calls.
@@ -427,6 +432,9 @@ impl<C: acp::Agent + 'static> AcpPromptSender for ConnPromptSender<'_, C> {
     }
 }
 
+/// Maximum consecutive transient poll errors before giving up.
+const MAX_CONSECUTIVE_POLL_ERRORS: u32 = 5;
+
 /// Run the follow-up prompt loop.
 ///
 /// Polls for follow-up prompts from the orchestrator, sends them to the ACP
@@ -441,6 +449,7 @@ async fn run_follow_up_loop(
     job_id: Uuid,
 ) -> Result<(), WorkerError> {
     let session_id_str = session_id.to_string();
+    let mut consecutive_poll_errors: u32 = 0;
     loop {
         // Race poll_prompt against child exit so we detect process death
         // even during a long-poll HTTP request to the orchestrator.
@@ -455,6 +464,7 @@ async fn run_follow_up_loop(
 
         let backoff = match poll_result {
             Ok(Some(follow_up)) => {
+                consecutive_poll_errors = 0;
                 if follow_up.done {
                     tracing::debug!(job_id = %job_id, "Orchestrator signaled done");
                     break;
@@ -467,25 +477,44 @@ async fn run_follow_up_loop(
 
                 match follow_result {
                     Ok(resp) => {
-                        let payload = stop_reason_to_result(&resp.stop_reason, &session_id_str);
+                        let payload = stop_reason_to_turn_event(&resp.stop_reason, &session_id_str);
                         sink.emit_event(&payload).await;
                     }
                     Err(e) => {
                         let msg = format!("Follow-up prompt failed: {e}");
                         tracing::error!(job_id = %job_id, "{}", msg);
-                        sink.emit_event(&JobEventPayload {
-                            event_type: "status".to_string(),
-                            data: json!({ "message": msg }),
-                        })
-                        .await;
                         return Err(WorkerError::ExecutionFailed { reason: msg });
                     }
                 }
                 continue;
             }
-            Ok(None) => Duration::from_secs(2),
+            Ok(None) => {
+                consecutive_poll_errors = 0;
+                Duration::from_secs(2)
+            }
             Err(e) => {
-                tracing::warn!(job_id = %job_id, "Prompt polling error: {}", e);
+                // Permanent errors fail immediately; transient errors retry
+                // with a cap. Follows the is_retryable pattern from llm/retry.rs.
+                let is_retryable = matches!(&e, WorkerError::ConnectionFailed { .. });
+                if !is_retryable {
+                    let msg = format!("Prompt polling failed (permanent): {e}");
+                    tracing::error!(job_id = %job_id, "{}", msg);
+                    return Err(WorkerError::ExecutionFailed { reason: msg });
+                }
+                consecutive_poll_errors += 1;
+                if consecutive_poll_errors >= MAX_CONSECUTIVE_POLL_ERRORS {
+                    let msg = format!(
+                        "Prompt polling exhausted {} retries: {e}",
+                        MAX_CONSECUTIVE_POLL_ERRORS,
+                    );
+                    tracing::error!(job_id = %job_id, "{}", msg);
+                    return Err(WorkerError::ExecutionFailed { reason: msg });
+                }
+                tracing::warn!(
+                    job_id = %job_id,
+                    attempt = consecutive_poll_errors,
+                    "Transient poll error: {}", e,
+                );
                 Duration::from_secs(5)
             }
         };
@@ -551,8 +580,12 @@ fn text_from_content_block(block: &acp::ContentBlock) -> Option<&str> {
     }
 }
 
-/// Convert an ACP `StopReason` into a "result" `JobEventPayload`.
-fn stop_reason_to_result(reason: &acp::StopReason, session_id: &str) -> JobEventPayload {
+/// Convert an ACP `StopReason` into a non-terminal per-turn event.
+///
+/// Uses `event_type: "turn_result"` so the orchestrator maps it to
+/// `AppEvent::JobStatus` (not `JobResult`). The terminal `"result"` event
+/// is emitted exactly once by `run()` after the entire session ends.
+fn stop_reason_to_turn_event(reason: &acp::StopReason, session_id: &str) -> JobEventPayload {
     let (status, message) = match reason {
         acp::StopReason::EndTurn => ("completed", "Agent completed successfully"),
         acp::StopReason::MaxTokens => ("error", "Agent reached max tokens"),
@@ -562,7 +595,7 @@ fn stop_reason_to_result(reason: &acp::StopReason, session_id: &str) -> JobEvent
         _ => ("completed", "Agent finished"),
     };
     JobEventPayload {
-        event_type: "result".to_string(),
+        event_type: "turn_result".to_string(),
         data: json!({
             "status": status,
             "session_id": session_id,
@@ -619,26 +652,26 @@ mod tests {
 
     #[test]
     fn test_stop_reason_end_turn() {
-        let payload = stop_reason_to_result(&acp::StopReason::EndTurn, "sid-1");
-        assert_eq!(payload.event_type, "result");
+        let payload = stop_reason_to_turn_event(&acp::StopReason::EndTurn, "sid-1");
+        assert_eq!(payload.event_type, "turn_result");
         assert_eq!(payload.data["status"], "completed");
     }
 
     #[test]
     fn test_stop_reason_max_tokens() {
-        let payload = stop_reason_to_result(&acp::StopReason::MaxTokens, "sid-1");
+        let payload = stop_reason_to_turn_event(&acp::StopReason::MaxTokens, "sid-1");
         assert_eq!(payload.data["status"], "error");
     }
 
     #[test]
     fn test_stop_reason_cancelled() {
-        let payload = stop_reason_to_result(&acp::StopReason::Cancelled, "sid-1");
+        let payload = stop_reason_to_turn_event(&acp::StopReason::Cancelled, "sid-1");
         assert_eq!(payload.data["status"], "cancelled");
     }
 
     #[test]
     fn test_stop_reason_refusal() {
-        let payload = stop_reason_to_result(&acp::StopReason::Refusal, "sid-1");
+        let payload = stop_reason_to_turn_event(&acp::StopReason::Refusal, "sid-1");
         assert_eq!(payload.data["status"], "error");
         assert_eq!(payload.data["message"], "Agent refused to continue");
     }
@@ -671,14 +704,14 @@ mod tests {
 
     #[test]
     fn test_stop_reason_max_turn_requests() {
-        let payload = stop_reason_to_result(&acp::StopReason::MaxTurnRequests, "sid-1");
+        let payload = stop_reason_to_turn_event(&acp::StopReason::MaxTurnRequests, "sid-1");
         assert_eq!(payload.data["status"], "error");
         assert_eq!(payload.data["message"], "Agent reached max turn requests");
     }
 
     #[test]
     fn test_stop_reason_includes_session_id() {
-        let payload = stop_reason_to_result(&acp::StopReason::EndTurn, "my-session-42");
+        let payload = stop_reason_to_turn_event(&acp::StopReason::EndTurn, "my-session-42");
         assert_eq!(payload.data["session_id"], "my-session-42");
     }
 
@@ -814,15 +847,12 @@ mod tests {
             "Error must be ExecutionFailed, got: {err}"
         );
 
-        // Status event should still have been posted before the error
+        // No per-turn events should be emitted on failure — the terminal
+        // "result" event is emitted by run(), not the follow-up loop.
         let events = sink.events();
         assert!(
-            events.iter().any(|e| e.event_type == "status"
-                && e.data["message"]
-                    .as_str()
-                    .unwrap_or("")
-                    .contains("Follow-up prompt failed")),
-            "Should post status event before returning error"
+            events.is_empty(),
+            "Follow-up loop should not emit events on failure (terminal event comes from run())"
         );
     }
 
@@ -859,8 +889,12 @@ mod tests {
 
         let events = sink.events();
         assert!(
-            events.iter().any(|e| e.event_type == "result"),
-            "Should emit result event for successful prompt"
+            events.iter().any(|e| e.event_type == "turn_result"),
+            "Should emit turn_result (non-terminal) event for successful prompt"
+        );
+        assert!(
+            !events.iter().any(|e| e.event_type == "result"),
+            "Must NOT emit terminal result event (that comes from run())"
         );
     }
 
@@ -989,8 +1023,104 @@ mod tests {
 
         let events = sink.events();
         assert!(
-            events.iter().any(|e| e.event_type == "result"),
-            "Should emit result event after recovery"
+            events.iter().any(|e| e.event_type == "turn_result"),
+            "Should emit turn_result event after recovery"
+        );
+    }
+
+    /// Regression test for #1981: successful follow-up must emit "turn_result"
+    /// (non-terminal), not "result" (terminal). Terminal events are emitted
+    /// by run() so the job monitor sees exactly one completion signal.
+    #[tokio::test]
+    async fn follow_up_success_emits_turn_event_not_terminal() {
+        let sink = CollectingSink::new();
+
+        let prompt_source = StubPromptSource::new(vec![
+            Ok(Some(PromptResponse {
+                content: "do work".to_string(),
+                done: false,
+            })),
+            Ok(Some(PromptResponse {
+                content: String::new(),
+                done: true,
+            })),
+        ]);
+
+        let agent =
+            StubAcpPromptSender::new(vec![Ok(acp::PromptResponse::new(acp::StopReason::EndTurn))]);
+
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let session_id = acp::SessionId::new("test-session");
+
+        let result =
+            run_follow_up_loop(&prompt_source, &agent, &sink, &session_id, rx, Uuid::nil()).await;
+        assert!(result.is_ok());
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1, "Exactly one per-turn event expected");
+        assert_eq!(events[0].event_type, "turn_result");
+        assert_eq!(events[0].data["status"], "completed");
+    }
+
+    /// Regression test for #1981: permanent poll errors (OrchestratorRejected,
+    /// LlmProxyFailed) must fail immediately without retry.
+    #[tokio::test]
+    async fn follow_up_loop_fails_on_permanent_poll_error() {
+        let sink = CollectingSink::new();
+
+        let prompt_source = StubPromptSource::new(vec![Err(WorkerError::OrchestratorRejected {
+            job_id: Uuid::nil(),
+            reason: "prompt endpoint returned 404 Not Found".to_string(),
+        })]);
+
+        let agent = StubAcpPromptSender::new(vec![]);
+
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let session_id = acp::SessionId::new("test-session");
+
+        let result =
+            run_follow_up_loop(&prompt_source, &agent, &sink, &session_id, rx, Uuid::nil()).await;
+
+        assert!(result.is_err(), "Permanent error must fail immediately");
+        let err = result.unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("permanent"),
+            "Error message should indicate permanent failure, got: {msg}"
+        );
+    }
+
+    /// Regression test for #1981: repeated transient poll errors must eventually
+    /// give up after MAX_CONSECUTIVE_POLL_ERRORS retries.
+    #[tokio::test(start_paused = true)]
+    async fn follow_up_loop_exhausts_transient_retries() {
+        let sink = CollectingSink::new();
+
+        // Generate more errors than the retry cap
+        let errors: Vec<Result<Option<PromptResponse>, WorkerError>> = (0
+            ..MAX_CONSECUTIVE_POLL_ERRORS + 1)
+            .map(|_| {
+                Err(WorkerError::ConnectionFailed {
+                    url: "http://test".to_string(),
+                    reason: "connection refused".to_string(),
+                })
+            })
+            .collect();
+        let prompt_source = StubPromptSource::new(errors);
+
+        let agent = StubAcpPromptSender::new(vec![]);
+
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let session_id = acp::SessionId::new("test-session");
+
+        let result =
+            run_follow_up_loop(&prompt_source, &agent, &sink, &session_id, rx, Uuid::nil()).await;
+
+        assert!(result.is_err(), "Should fail after exhausting retries");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("exhausted"),
+            "Error should mention retry exhaustion, got: {msg}"
         );
     }
 }
