@@ -23,6 +23,7 @@
 //! ```
 
 mod channels;
+mod codex_local;
 pub mod profile_evolution;
 mod prompts;
 #[cfg(any(feature = "postgres", feature = "libsql"))]
