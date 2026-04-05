@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::agent::Agent;
 use crate::agent::compaction::ContextCompactor;
 use crate::agent::dispatcher::{
-    AgenticLoopResult, TurnUsageSummary, execute_chat_tool_standalone, extract_auth_prompt,
+    AgenticLoopResult, TurnUsageSummary, capture_auth_prompt, execute_chat_tool_standalone,
     parse_auth_result,
 };
 use crate::agent::session::{MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState};
@@ -1227,43 +1227,17 @@ impl Agent {
                 }
             }
 
-            // Surface OAuth auth prompts immediately; only awaiting_token
-            // flows enter auth mode and short-circuit the turn.
-            if let Some(auth_data) = extract_auth_prompt(&pending.tool_name, &tool_result)
-                && let Some(ext_name) = auth_data.extension_name.clone()
-            {
-                if auth_data.awaiting_token {
-                    let instructions = auth_data
-                        .instructions
-                        .clone()
-                        .unwrap_or_else(|| "Please provide your API token/key.".to_string());
-                    self.handle_auth_intercept(
-                        &session,
-                        thread_id,
-                        message,
-                        &tool_result,
-                        ext_name,
-                        instructions.clone(),
-                    )
-                    .await;
-                    return Ok(SubmissionResult::response(instructions));
-                }
-
-                self.emit_auth_prompt(
-                    message,
-                    ext_name,
-                    auth_data.instructions.clone(),
-                    auth_data.auth_url.clone(),
-                    auth_data.setup_url.clone(),
-                )
-                .await;
-            }
-
             context_messages.push(ChatMessage::tool_result(
                 &pending.tool_call_id,
                 &pending.tool_name,
                 result_content,
             ));
+
+            let mut selected_auth_prompt: Option<(
+                String,
+                crate::agent::dispatcher::ParsedAuthData,
+            )> = None;
+            capture_auth_prompt(&mut selected_auth_prompt, &pending.tool_name, &tool_result);
 
             // Replay deferred tool calls from the same assistant message so
             // every tool_use ID gets a matching tool_result before the next
@@ -1453,7 +1427,6 @@ impl Agent {
             // === Phase 3: Post-flight (sequential, in original order) ===
             // Process all results before any conditional return so every
             // tool result is recorded in the session audit trail.
-            let mut deferred_auth: Option<String> = None;
 
             for (tc, deferred_result) in exec_results {
                 if let Ok(ref output) = deferred_result
@@ -1499,44 +1472,45 @@ impl Agent {
                     }
                 }
 
-                // Auth detection — surface OAuth prompts immediately, but only
-                // awaiting_token flows interrupt the turn.
-                if let Some(auth_data) = extract_auth_prompt(&tc.name, &deferred_result)
-                    && let Some(ext_name) = auth_data.extension_name.clone()
-                {
-                    if deferred_auth.is_none() && auth_data.awaiting_token {
-                        let instructions = auth_data
-                            .instructions
-                            .clone()
-                            .unwrap_or_else(|| "Please provide your API token/key.".to_string());
-                        self.handle_auth_intercept(
-                            &session,
-                            thread_id,
-                            message,
-                            &deferred_result,
-                            ext_name,
-                            instructions.clone(),
-                        )
-                        .await;
-                        deferred_auth = Some(instructions);
-                    } else {
-                        self.emit_auth_prompt(
-                            message,
-                            ext_name,
-                            auth_data.instructions.clone(),
-                            auth_data.auth_url.clone(),
-                            auth_data.setup_url.clone(),
-                        )
-                        .await;
-                    }
-                }
+                capture_auth_prompt(&mut selected_auth_prompt, &tc.name, &deferred_result);
 
                 context_messages.push(ChatMessage::tool_result(&tc.id, &tc.name, deferred_content));
             }
 
-            // Return auth response after all results are recorded
-            if let Some(instructions) = deferred_auth {
-                return Ok(SubmissionResult::response(instructions));
+            if let Some((ext_name, auth_data)) = selected_auth_prompt {
+                if auth_data.awaiting_token {
+                    let instructions = auth_data
+                        .instructions
+                        .clone()
+                        .unwrap_or_else(|| "Please provide your API token/key.".to_string());
+                    let auth_result = Ok(serde_json::json!({
+                        "name": ext_name.clone(),
+                        "instructions": instructions.clone(),
+                        "auth_url": auth_data.auth_url,
+                        "setup_url": auth_data.setup_url,
+                        "awaiting_token": true,
+                    })
+                    .to_string());
+                    self.handle_auth_intercept(
+                        &session,
+                        thread_id,
+                        message,
+                        &auth_result,
+                        ext_name,
+                        instructions.clone(),
+                    )
+                    .await;
+                    return Ok(SubmissionResult::response(instructions));
+                }
+
+                self.emit_auth_prompt(
+                    message,
+                    ext_name,
+                    auth_data.instructions,
+                    auth_data.auth_url,
+                    auth_data.setup_url,
+                )
+                .await;
             }
 
             // Handle approval if a tool needed it

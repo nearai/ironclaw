@@ -1038,7 +1038,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         }
 
         // === Phase 3: Post-flight (sequential, in original order) ===
-        let mut deferred_auth: Option<String> = None;
+        let mut selected_auth_prompt: Option<(String, ParsedAuthData)> = None;
 
         for (pf_idx, (tc, outcome)) in preflight.into_iter().enumerate() {
             match outcome {
@@ -1127,41 +1127,9 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                             .await;
                     }
 
-                    // Surface auth prompts immediately so the UI can show
-                    // OAuth links on the first attempt. Only awaiting_token
-                    // flows enter thread auth mode.
-                    if let Some(auth_data) = extract_auth_prompt(&tc.name, &tool_result)
-                        && let Some(ext_name) = auth_data.extension_name.clone()
-                    {
-                        if deferred_auth.is_none() && auth_data.awaiting_token {
-                            let instructions =
-                                auth_data.instructions.clone().unwrap_or_else(|| {
-                                    "Please provide your API token/key.".to_string()
-                                });
-                            {
-                                let mut sess = self.session.lock().await;
-                                if let Some(thread) = sess.threads.get_mut(&self.thread_id) {
-                                    thread.enter_auth_mode(ext_name.clone());
-                                }
-                            }
-                            deferred_auth = Some(instructions);
-                        }
-
-                        let _ = self
-                            .agent
-                            .channels
-                            .send_status(
-                                &self.message.channel,
-                                StatusUpdate::AuthRequired {
-                                    extension_name: ext_name,
-                                    instructions: auth_data.instructions.clone(),
-                                    auth_url: auth_data.auth_url.clone(),
-                                    setup_url: auth_data.setup_url.clone(),
-                                },
-                                &self.message.metadata,
-                            )
-                            .await;
-                    }
+                    // Keep exactly one auth prompt per turn so the backend
+                    // state and the single global auth card stay aligned.
+                    capture_auth_prompt(&mut selected_auth_prompt, &tc.name, &tool_result);
 
                     // Stash full output so subsequent tools can reference it
                     if let Ok(ref output) = tool_result {
@@ -1202,9 +1170,49 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             }
         }
 
-        // Return auth response after all results are recorded
-        if let Some(instructions) = deferred_auth {
-            return Ok(Some(LoopOutcome::Response(instructions)));
+        if let Some((ext_name, auth_data)) = selected_auth_prompt {
+            if auth_data.awaiting_token {
+                let instructions = auth_data
+                    .instructions
+                    .clone()
+                    .unwrap_or_else(|| "Please provide your API token/key.".to_string());
+                {
+                    let mut sess = self.session.lock().await;
+                    if let Some(thread) = sess.threads.get_mut(&self.thread_id) {
+                        thread.enter_auth_mode(ext_name.clone());
+                    }
+                }
+                let _ = self
+                    .agent
+                    .channels
+                    .send_status(
+                        &self.message.channel,
+                        StatusUpdate::AuthRequired {
+                            extension_name: ext_name,
+                            instructions: Some(instructions.clone()),
+                            auth_url: auth_data.auth_url,
+                            setup_url: auth_data.setup_url,
+                        },
+                        &self.message.metadata,
+                    )
+                    .await;
+                return Ok(Some(LoopOutcome::Response(instructions)));
+            }
+
+            let _ = self
+                .agent
+                .channels
+                .send_status(
+                    &self.message.channel,
+                    StatusUpdate::AuthRequired {
+                        extension_name: ext_name,
+                        instructions: auth_data.instructions,
+                        auth_url: auth_data.auth_url,
+                        setup_url: auth_data.setup_url,
+                    },
+                    &self.message.metadata,
+                )
+                .await;
         }
 
         // Handle approval if a tool needed it
@@ -1253,6 +1261,7 @@ pub(super) async fn execute_chat_tool_standalone(
 }
 
 /// Parsed auth result fields for emitting StatusUpdate::AuthRequired.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ParsedAuthData {
     pub(super) extension_name: Option<String>,
     pub(super) instructions: Option<String>,
@@ -1314,6 +1323,22 @@ pub(super) fn extract_auth_prompt(
         Some(auth_data)
     } else {
         None
+    }
+}
+
+/// Keep only the first actionable auth prompt seen in a turn.
+pub(super) fn capture_auth_prompt(
+    selected: &mut Option<(String, ParsedAuthData)>,
+    tool_name: &str,
+    result: &Result<String, Error>,
+) {
+    if selected.is_some() {
+        return;
+    }
+    if let Some(auth_data) = extract_auth_prompt(tool_name, result)
+        && let Some(ext_name) = auth_data.extension_name.clone()
+    {
+        *selected = Some((ext_name, auth_data));
     }
 }
 
@@ -1546,7 +1571,9 @@ mod tests {
     use crate::tools::ToolRegistry;
     use ironclaw_safety::SafetyLayer;
 
-    use super::{check_auth_required, extract_auth_prompt, selected_model_override};
+    use super::{
+        capture_auth_prompt, check_auth_required, extract_auth_prompt, selected_model_override,
+    };
 
     /// Minimal LLM provider for unit tests that always returns a static response.
     struct StaticLlmProvider;
@@ -1965,6 +1992,65 @@ mod tests {
         );
         assert!(!auth_data.awaiting_token);
         assert!(check_auth_required("tool_activate", &result).is_none());
+    }
+
+    #[test]
+    fn test_capture_auth_prompt_keeps_first_oauth_prompt() {
+        let first: Result<String, Error> = Ok(serde_json::json!({
+            "name": "gmail",
+            "status": "awaiting_authorization",
+            "auth_url": "https://accounts.google.com/o/oauth2/v2/auth?client_id=gmail"
+        })
+        .to_string());
+        let second: Result<String, Error> = Ok(serde_json::json!({
+            "name": "notion",
+            "status": "awaiting_token",
+            "awaiting_token": true,
+            "instructions": "Paste your Notion token."
+        })
+        .to_string());
+
+        let mut selected = None;
+        capture_auth_prompt(&mut selected, "tool_activate", &first);
+        capture_auth_prompt(&mut selected, "tool_auth", &second);
+
+        let (ext_name, auth_data) = selected.expect("selected auth prompt");
+        assert_eq!(ext_name, "gmail");
+        assert_eq!(
+            auth_data.auth_url.as_deref(),
+            Some("https://accounts.google.com/o/oauth2/v2/auth?client_id=gmail")
+        );
+        assert!(!auth_data.awaiting_token);
+    }
+
+    #[test]
+    fn test_capture_auth_prompt_keeps_first_manual_prompt() {
+        let first: Result<String, Error> = Ok(serde_json::json!({
+            "name": "notion",
+            "status": "awaiting_token",
+            "awaiting_token": true,
+            "instructions": "Paste your Notion token."
+        })
+        .to_string());
+        let second: Result<String, Error> = Ok(serde_json::json!({
+            "name": "gmail",
+            "status": "awaiting_authorization",
+            "auth_url": "https://accounts.google.com/o/oauth2/v2/auth?client_id=gmail"
+        })
+        .to_string());
+
+        let mut selected = None;
+        capture_auth_prompt(&mut selected, "tool_auth", &first);
+        capture_auth_prompt(&mut selected, "tool_activate", &second);
+
+        let (ext_name, auth_data) = selected.expect("selected auth prompt");
+        assert_eq!(ext_name, "notion");
+        assert!(auth_data.awaiting_token);
+        assert_eq!(
+            auth_data.instructions.as_deref(),
+            Some("Paste your Notion token.")
+        );
+        assert!(auth_data.auth_url.is_none());
     }
 
     #[test]
