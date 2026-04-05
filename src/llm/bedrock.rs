@@ -94,6 +94,20 @@ impl BedrockProvider {
         })
     }
 
+    /// Compute effective cache retention for the active model, logging if adjusted.
+    fn resolve_retention(&self, model_id: &str) -> CacheRetention {
+        let retention = effective_cache_retention(self.cache_retention, model_id);
+        if retention != self.cache_retention {
+            tracing::debug!(
+                configured = %self.cache_retention,
+                effective = %retention,
+                model = %model_id,
+                "Cache retention adjusted for active model"
+            );
+        }
+        retention
+    }
+
     /// Get the currently active model ID (with cross-region prefix).
     fn current_model_id(&self) -> String {
         match self.active_model.read() {
@@ -138,9 +152,10 @@ impl LlmProvider for BedrockProvider {
 
         // Inject cache points (CP1: system, CP3: last user message).
         // No CP2 because complete() has no tool config.
+        let retention = self.resolve_retention(&model_id);
         let mut empty_tools = Vec::new();
         inject_cache_points(
-            self.cache_retention,
+            retention,
             &mut system_blocks,
             &mut empty_tools,
             &mut bedrock_messages,
@@ -211,13 +226,14 @@ impl LlmProvider for BedrockProvider {
             });
         }
 
-        // Inject cache points into system, tools, and last user message.
+        // Compute effective retention for the active model and inject cache points.
         // Nova models don't support caching in toolConfig — skip CP2 for them.
-        let enable_tool_cache = supports_tool_cache(&self.display_model);
+        let retention = self.resolve_retention(&model_id);
+        let enable_tool_cache = supports_tool_cache(&model_id);
         let tool_config = if let Some((mut tools, choice)) = tool_specs {
             let mut no_tools = Vec::new();
             inject_cache_points(
-                self.cache_retention,
+                retention,
                 &mut system_blocks,
                 if enable_tool_cache {
                     &mut tools
@@ -230,7 +246,7 @@ impl LlmProvider for BedrockProvider {
         } else {
             let mut empty_tools = Vec::new();
             inject_cache_points(
-                self.cache_retention,
+                retention,
                 &mut system_blocks,
                 &mut empty_tools,
                 &mut bedrock_messages,
@@ -357,6 +373,38 @@ fn supports_bedrock_cache(model: &str) -> bool {
 /// not in `toolConfig`. Claude models support all three.
 fn supports_tool_cache(model: &str) -> bool {
     !strip_cross_region_prefix(model).starts_with("amazon.nova-")
+}
+
+/// Check if a Bedrock model supports 1-hour cache TTL.
+///
+/// Per AWS docs, only the Claude 4.5 family (Opus 4.5, Sonnet 4.5, Haiku 4.5)
+/// supports `CacheTtl::OneHour`. All other models only support the default
+/// 5-minute TTL.
+fn supports_long_ttl(model: &str) -> bool {
+    let base = strip_cross_region_prefix(model);
+    base.starts_with("anthropic.claude-opus-4-5")
+        || base.starts_with("anthropic.claude-sonnet-4-5")
+        || base.starts_with("anthropic.claude-haiku-4-5")
+}
+
+/// Compute the effective cache retention for a request given the configured
+/// preference and the active model.
+///
+/// - `None` configured → always `None`.
+/// - Model doesn't support caching → `None`.
+/// - `Long` configured but model doesn't support 1h TTL → downgraded to `Short`.
+/// - Otherwise → configured preference unchanged.
+fn effective_cache_retention(configured: CacheRetention, model: &str) -> CacheRetention {
+    if configured == CacheRetention::None {
+        return CacheRetention::None;
+    }
+    if !supports_bedrock_cache(model) {
+        return CacheRetention::None;
+    }
+    if configured == CacheRetention::Long && !supports_long_ttl(model) {
+        return CacheRetention::Short;
+    }
+    configured
 }
 
 /// Build a `CachePointBlock` from the given retention policy.
@@ -2034,5 +2082,147 @@ mod tests {
             let parsed: CacheRetention = s.parse().unwrap();
             assert_eq!(parsed, variant);
         }
+    }
+
+    // ── Dynamic model-aware retention tests ─────────────────────────
+
+    #[test]
+    fn test_supports_long_ttl_45_models() {
+        assert!(supports_long_ttl("anthropic.claude-opus-4-5-20260101-v1:0"));
+        assert!(supports_long_ttl(
+            "anthropic.claude-sonnet-4-5-20260101-v1:0"
+        ));
+        assert!(supports_long_ttl(
+            "anthropic.claude-haiku-4-5-20251001-v1:0"
+        ));
+        // Cross-region
+        assert!(supports_long_ttl(
+            "us.anthropic.claude-opus-4-5-20260101-v1:0"
+        ));
+        assert!(supports_long_ttl(
+            "eu.anthropic.claude-sonnet-4-5-20260101-v1:0"
+        ));
+        assert!(supports_long_ttl(
+            "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+        ));
+    }
+
+    #[test]
+    fn test_supports_long_ttl_non_45_models() {
+        // Claude 4 (non-4.5) — no 1h TTL
+        assert!(!supports_long_ttl("anthropic.claude-opus-4-20250514-v1:0"));
+        assert!(!supports_long_ttl(
+            "anthropic.claude-sonnet-4-20250514-v1:0"
+        ));
+        // Claude 3.x — no 1h TTL
+        assert!(!supports_long_ttl(
+            "anthropic.claude-3-5-sonnet-20241022-v2:0"
+        ));
+        assert!(!supports_long_ttl(
+            "anthropic.claude-3-7-sonnet-20250219-v1:0"
+        ));
+        // Nova — no 1h TTL
+        assert!(!supports_long_ttl("amazon.nova-pro-v1:0"));
+        // Unsupported
+        assert!(!supports_long_ttl("meta.llama3-70b-instruct-v1:0"));
+    }
+
+    #[test]
+    fn test_effective_cache_retention_none_passthrough() {
+        assert_eq!(
+            effective_cache_retention(
+                CacheRetention::None,
+                "anthropic.claude-opus-4-5-20260101-v1:0"
+            ),
+            CacheRetention::None
+        );
+        assert_eq!(
+            effective_cache_retention(CacheRetention::None, "meta.llama3-70b-instruct-v1:0"),
+            CacheRetention::None
+        );
+    }
+
+    #[test]
+    fn test_effective_cache_retention_unsupported_model() {
+        assert_eq!(
+            effective_cache_retention(CacheRetention::Short, "meta.llama3-70b-instruct-v1:0"),
+            CacheRetention::None
+        );
+        assert_eq!(
+            effective_cache_retention(CacheRetention::Long, "cohere.command-r-plus-v1:0"),
+            CacheRetention::None
+        );
+    }
+
+    #[test]
+    fn test_effective_cache_retention_long_downgrades_for_non_45() {
+        // Long on non-4.5 Claude → Short
+        assert_eq!(
+            effective_cache_retention(
+                CacheRetention::Long,
+                "anthropic.claude-opus-4-20250514-v1:0"
+            ),
+            CacheRetention::Short
+        );
+        assert_eq!(
+            effective_cache_retention(
+                CacheRetention::Long,
+                "anthropic.claude-3-5-sonnet-20241022-v2:0"
+            ),
+            CacheRetention::Short
+        );
+        // Long on Nova → Short
+        assert_eq!(
+            effective_cache_retention(CacheRetention::Long, "amazon.nova-pro-v1:0"),
+            CacheRetention::Short
+        );
+    }
+
+    #[test]
+    fn test_effective_cache_retention_long_preserved_for_45() {
+        assert_eq!(
+            effective_cache_retention(
+                CacheRetention::Long,
+                "anthropic.claude-opus-4-5-20260101-v1:0"
+            ),
+            CacheRetention::Long
+        );
+        assert_eq!(
+            effective_cache_retention(
+                CacheRetention::Long,
+                "us.anthropic.claude-sonnet-4-5-20260101-v1:0"
+            ),
+            CacheRetention::Long
+        );
+        assert_eq!(
+            effective_cache_retention(
+                CacheRetention::Long,
+                "anthropic.claude-haiku-4-5-20251001-v1:0"
+            ),
+            CacheRetention::Long
+        );
+    }
+
+    #[test]
+    fn test_effective_cache_retention_short_unchanged() {
+        // Short on any supported model → stays Short
+        assert_eq!(
+            effective_cache_retention(
+                CacheRetention::Short,
+                "anthropic.claude-opus-4-20250514-v1:0"
+            ),
+            CacheRetention::Short
+        );
+        assert_eq!(
+            effective_cache_retention(
+                CacheRetention::Short,
+                "anthropic.claude-opus-4-5-20260101-v1:0"
+            ),
+            CacheRetention::Short
+        );
+        assert_eq!(
+            effective_cache_retention(CacheRetention::Short, "amazon.nova-pro-v1:0"),
+            CacheRetention::Short
+        );
     }
 }
