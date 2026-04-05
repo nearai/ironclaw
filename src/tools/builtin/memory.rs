@@ -52,12 +52,16 @@ impl WorkspaceResolver for FixedWorkspaceResolver {
 
 /// Check if a path controls the execution loop or system prompt.
 /// Writes are blocked when `ORCHESTRATOR_SELF_MODIFY` is disabled.
+///
+/// Covers both the logical aliases (`orchestrator:*`, `prompt:*`) used by the
+/// engine and the physical workspace paths where these docs are persisted.
 fn is_protected_orchestrator_path(path: &str) -> bool {
-    matches!(
-        path,
-        "orchestrator:main" | "prompt:codeact_preamble" | "orchestrator:failures"
-    ) || path.starts_with("orchestrator:")
+    // Logical engine aliases
+    path.starts_with("orchestrator:")
         || path.starts_with("prompt:")
+        // Physical workspace paths (match the paths in store_adapter::doc_workspace_path)
+        || path.starts_with("engine/orchestrator/")
+        || path == "engine/orchestrator"
 }
 
 /// Detect paths that are clearly local filesystem references, not workspace-memory docs.
@@ -281,15 +285,16 @@ impl Tool for MemoryWriteTool {
 
     fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
         // When orchestrator self-modification is enabled, writing to protected
-        // paths (orchestrator code, prompt overlays) always requires explicit
-        // human approval — even if the session has auto-approve enabled.
+        // paths (orchestrator code, prompt overlays) requires human approval.
+        // Uses UnlessAutoApproved (not Always) so the v2 engine gate system
+        // can pause for approval rather than hard-denying the call.
         let target = params.get("target").and_then(|v| v.as_str()).unwrap_or("");
         if is_protected_orchestrator_path(target) {
             let self_modify_enabled = std::env::var("ORCHESTRATOR_SELF_MODIFY")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false);
             if self_modify_enabled {
-                return ApprovalRequirement::Always;
+                return ApprovalRequirement::UnlessAutoApproved;
             }
             // When disabled, execute() returns NotAuthorized before any write.
         }

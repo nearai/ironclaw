@@ -55,12 +55,24 @@ fn default_limits() -> ResourceLimits {
 
 // ── Validation ─────────────────────────────────────────────
 
+/// Maximum orchestrator source size accepted for syntax validation (256 KB).
+/// The compiled-in default is ~2 KB; this cap is generous but prevents
+/// pathological inputs from causing avoidable CPU/memory pressure on the
+/// store write path.
+const MAX_ORCHESTRATOR_SOURCE_BYTES: usize = 256 * 1024;
+
 /// Check whether `code` is syntactically valid Python without executing it.
 ///
 /// Uses Monty's parser (same as execution) so the syntax check is identical
 /// to what would happen at runtime. Returns `Ok(())` if valid, or an error
 /// message describing the syntax problem.
 pub fn validate_python_syntax(code: &str) -> Result<(), String> {
+    if code.len() > MAX_ORCHESTRATOR_SOURCE_BYTES {
+        return Err(format!(
+            "orchestrator source too large: {} bytes (limit: {MAX_ORCHESTRATOR_SOURCE_BYTES})",
+            code.len()
+        ));
+    }
     let code_owned = code.to_string();
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         MontyRun::new(code_owned, "validate.py", vec![])
@@ -2311,6 +2323,11 @@ except Exception as e:
         assert!(
             !answer.starts_with("ESCAPED"),
             "dynamic name construction should not bypass leases, got: {answer}",
+        );
+        // Verify the expected outcome: name lookup found nothing callable.
+        assert!(
+            answer == "not_found" || answer.starts_with("blocked:"),
+            "expected 'not_found' or 'blocked:*', got: {answer}",
         );
     }
 

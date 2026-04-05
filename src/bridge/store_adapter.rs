@@ -313,8 +313,8 @@ impl HybridStore {
     // ── Internal helpers ────────────────────────────────────
 
     async fn load_knowledge_docs(&self, ws: &Workspace) {
-        // Knowledge docs can be .md (frontmatter) or .json (legacy).
-        // Also load special docs from orchestrator/ and prompts/ paths.
+        // Knowledge docs can be .md (frontmatter), .json (legacy/runtime),
+        // or .py (orchestrator versions persisted as raw Python).
         let search_prefixes = [KNOWLEDGE_PREFIX, ORCHESTRATOR_PREFIX];
 
         for prefix in search_prefixes {
@@ -324,9 +324,12 @@ impl HybridStore {
             {
                 match ws.read(&entry.path).await {
                     Ok(doc) => {
-                        // Try frontmatter format first, then JSON
+                        // Try frontmatter format first, then JSON, then raw .py
                         let parsed = deserialize_knowledge_doc(&doc.content)
-                            .or_else(|| serde_json::from_str::<MemoryDoc>(&doc.content).ok());
+                            .or_else(|| serde_json::from_str::<MemoryDoc>(&doc.content).ok())
+                            .or_else(|| {
+                                synthesize_orchestrator_doc_from_py(&entry.path, &doc.content)
+                            });
                         if let Some(memory_doc) = parsed {
                             self.doc_paths
                                 .write()
@@ -624,6 +627,42 @@ fn is_orchestrator_code_path(path: &str) -> bool {
     path.starts_with(ORCHESTRATOR_PREFIX) && path.ends_with(".py")
 }
 
+/// Synthesize a MemoryDoc from a raw `.py` orchestrator file found on disk.
+///
+/// Orchestrator versions are persisted as `engine/orchestrator/v{N}.py` (raw
+/// Python). On restart, these need to be reconstituted as MemoryDocs so
+/// `load_orchestrator_from_docs()` can find them. The version number is
+/// extracted from the filename.
+fn synthesize_orchestrator_doc_from_py(path: &str, content: &str) -> Option<MemoryDoc> {
+    if !is_orchestrator_code_path(path) {
+        return None;
+    }
+    // Extract version from filename: engine/orchestrator/v3.py → 3
+    let filename = path.rsplit('/').next()?;
+    let version: u64 = filename
+        .strip_prefix('v')?
+        .strip_suffix(".py")?
+        .parse()
+        .ok()?;
+
+    Some(MemoryDoc {
+        id: DocId(uuid::Uuid::new_v4()),
+        project_id: ProjectId(uuid::Uuid::nil()),
+        user_id: ironclaw_engine::types::shared_owner_id().to_string(),
+        doc_type: DocType::Note,
+        title: ORCHESTRATOR_MAIN_TITLE.to_string(),
+        content: content.to_string(),
+        source_thread_id: None,
+        tags: vec![ORCHESTRATOR_CODE_TAG.to_string()],
+        metadata: serde_json::json!({
+            "version": version,
+            "source": "persisted_py",
+        }),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    })
+}
+
 /// Check if a MemoryDoc is a protected orchestrator or prompt overlay document.
 fn is_protected_orchestrator_doc(doc: &MemoryDoc) -> bool {
     doc.title.starts_with("orchestrator:") || doc.title.starts_with("prompt:")
@@ -749,6 +788,11 @@ fn serialize_knowledge_doc(doc: &MemoryDoc) -> String {
     frontmatter.push_str(&format!("id: \"{}\"\n", doc.id.0));
     frontmatter.push_str(&format!("doc_type: \"{:?}\"\n", doc.doc_type));
     frontmatter.push_str(&format!("title: \"{}\"\n", doc.title.replace('"', "\\\"")));
+    frontmatter.push_str(&format!("project_id: \"{}\"\n", doc.project_id.0));
+    frontmatter.push_str(&format!(
+        "user_id: \"{}\"\n",
+        doc.user_id.replace('"', "\\\"")
+    ));
     if !doc.tags.is_empty() {
         frontmatter.push_str(&format!(
             "tags: [{}]\n",
@@ -847,11 +891,23 @@ fn deserialize_knowledge_doc(content: &str) -> Option<MemoryDoc> {
         .cloned()
         .unwrap_or(serde_json::json!({}));
 
-    // project_id is not in frontmatter — use nil UUID (assigned at load time)
+    let project_id = yaml
+        .get("project_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        .map(ProjectId)
+        .unwrap_or(ProjectId(uuid::Uuid::nil()));
+
+    let user_id = yaml
+        .get("user_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("legacy")
+        .to_string();
+
     Some(MemoryDoc {
         id: DocId(id),
-        project_id: ProjectId(uuid::Uuid::nil()),
-        user_id: "legacy".to_string(),
+        project_id,
+        user_id,
         doc_type,
         title,
         content: body.to_string(),
@@ -1161,7 +1217,7 @@ impl Store for HybridStore {
             if !allow {
                 // Allow system-internal writes (v0 seeding, failure tracking) but
                 // block LLM-authored patches (version > 0, non-meta titles).
-                let is_system_internal = doc.title == "orchestrator:failures"
+                let is_system_internal = doc.title == ORCHESTRATOR_FAILURES_TITLE
                     || doc
                         .metadata
                         .get("source")
@@ -1196,6 +1252,9 @@ impl Store for HybridStore {
         if is_protected_orchestrator_doc(doc) {
             use sha2::{Digest, Sha256};
             let hash = format!("{:x}", Sha256::digest(doc.content.as_bytes()));
+            if !stamped.metadata.is_object() {
+                stamped.metadata = serde_json::json!({});
+            }
             stamped
                 .metadata
                 .as_object_mut()
