@@ -281,65 +281,6 @@ pub async fn skills_install_handler(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn catalog_entry_matches_installed_slug_suffix() {
-        let installed = vec!["mortgage-calculator".to_string()];
-
-        assert!(ironclaw_skills::catalog::catalog_entry_is_installed(
-            "finance/mortgage-calculator",
-            "Mortgage Calculator",
-            &installed,
-        ));
-    }
-
-    #[test]
-    fn catalog_entry_matches_installed_display_name() {
-        let installed = vec!["Mortgage Calculator".to_string()];
-
-        assert!(ironclaw_skills::catalog::catalog_entry_is_installed(
-            "finance/mortgage-calculator",
-            "Mortgage Calculator",
-            &installed,
-        ));
-    }
-
-    #[test]
-    fn catalog_entry_does_not_match_unrelated_installed_skill() {
-        let installed = vec!["budget-planner".to_string()];
-
-        assert!(!ironclaw_skills::catalog::catalog_entry_is_installed(
-            "finance/mortgage-calculator",
-            "Mortgage Calculator",
-            &installed,
-        ));
-    }
-
-    #[test]
-    fn catalog_entry_matches_owner_aware_normalized_install_name() {
-        let installed = vec!["finance-mortgage-calculator".to_string()];
-
-        assert!(ironclaw_skills::catalog::catalog_entry_is_installed(
-            "finance/mortgage-calculator",
-            "Mortgage Calculator",
-            &installed,
-        ));
-    }
-
-    #[test]
-    fn install_requested_identifier_prefers_resolved_slug_for_manual_name_installs() {
-        assert_eq!(
-            super::install_requested_identifier(
-                "Mortgage Calculator",
-                None,
-                Some("finance/mortgage-calculator"),
-            ),
-            "finance/mortgage-calculator"
-        );
-    }
-}
-
 pub async fn skills_remove_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -397,5 +338,64 @@ pub async fn skills_remove_handler(
             name
         )))),
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn catalog_entry_matches_installed_slug_suffix() {
+        let installed = vec!["mortgage-calculator".to_string()];
+
+        assert!(ironclaw_skills::catalog::catalog_entry_is_installed(
+            "finance/mortgage-calculator",
+            "Mortgage Calculator",
+            &installed,
+        ));
+    }
+
+    #[test]
+    fn catalog_entry_matches_installed_display_name() {
+        let installed = vec!["Mortgage Calculator".to_string()];
+
+        assert!(ironclaw_skills::catalog::catalog_entry_is_installed(
+            "finance/mortgage-calculator",
+            "Mortgage Calculator",
+            &installed,
+        ));
+    }
+
+    #[test]
+    fn catalog_entry_does_not_match_unrelated_installed_skill() {
+        let installed = vec!["budget-planner".to_string()];
+
+        assert!(!ironclaw_skills::catalog::catalog_entry_is_installed(
+            "finance/mortgage-calculator",
+            "Mortgage Calculator",
+            &installed,
+        ));
+    }
+
+    #[test]
+    fn catalog_entry_matches_owner_aware_normalized_install_name() {
+        let installed = vec!["finance-mortgage-calculator".to_string()];
+
+        assert!(ironclaw_skills::catalog::catalog_entry_is_installed(
+            "finance/mortgage-calculator",
+            "Mortgage Calculator",
+            &installed,
+        ));
+    }
+
+    #[test]
+    fn install_requested_identifier_prefers_resolved_slug_for_manual_name_installs() {
+        assert_eq!(
+            super::install_requested_identifier(
+                "Mortgage Calculator",
+                None,
+                Some("finance/mortgage-calculator"),
+            ),
+            "finance/mortgage-calculator"
+        );
     }
 }
