@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use ironclaw_common::truncate_preview;
 use uuid::Uuid;
 
 use crate::agent::context_monitor::{CompactionStrategy, ContextBreakdown};
@@ -26,6 +25,7 @@ const WORKSPACE_RULES_BLOCK: &str = concat!(
     "- When uncertain, ask for clarification instead of guessing hidden historical details."
 );
 const WORKSPACE_AUDIT_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const WORKSPACE_SUMMARY_PROBE_MAX_CHARS: usize = 120;
 
 /// Result of a compaction operation.
 #[derive(Debug, Clone)]
@@ -408,12 +408,7 @@ Be brief but capture all important details. Use bullet points."#,
             );
         }
         if let Some(summary) = summary_probe {
-            let probe = summary
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .map(|line| truncate_preview(line, 120))
-                .unwrap_or_default();
+            let probe = summary_probe_prefix(summary, WORKSPACE_SUMMARY_PROBE_MAX_CHARS);
             if !probe.is_empty() && !entry_block.contains(probe.as_str()) {
                 return (
                     false,
@@ -511,6 +506,15 @@ fn compaction_entry_block<'a>(content: &'a str, marker_tag: &str) -> Option<&'a 
         .map(|next| search_start + next)
         .unwrap_or(content.len());
     Some(&content[block_start..block_end])
+}
+
+fn summary_probe_prefix(summary: &str, max_chars: usize) -> String {
+    summary
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().take(max_chars).collect::<String>())
+        .unwrap_or_default()
 }
 
 /// Format turns for storage in workspace.
@@ -1044,6 +1048,22 @@ mod tests {
             .expect("new marker should resolve to scoped block");
         assert!(block.contains("Newest decision"));
         assert!(!block.contains("Old decision"));
+    }
+
+    #[test]
+    fn test_summary_probe_prefix_uses_first_non_empty_line() {
+        let summary = "\n\n  First line stays  \nSecond line";
+        let probe = summary_probe_prefix(summary, WORKSPACE_SUMMARY_PROBE_MAX_CHARS);
+        assert_eq!(probe, "First line stays");
+    }
+
+    #[test]
+    fn test_summary_probe_prefix_truncates_without_ellipsis() {
+        let summary = format!("{}\nnext", "a".repeat(160));
+        let probe = summary_probe_prefix(&summary, WORKSPACE_SUMMARY_PROBE_MAX_CHARS);
+        assert_eq!(probe.chars().count(), WORKSPACE_SUMMARY_PROBE_MAX_CHARS);
+        assert!(!probe.ends_with("..."));
+        assert!(probe.chars().all(|c| c == 'a'));
     }
 
     #[test]
