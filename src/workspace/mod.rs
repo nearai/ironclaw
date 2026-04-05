@@ -78,6 +78,13 @@ pub struct WriteResult {
     pub actual_layer: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct AppendLockKey {
+    scope: String,
+    agent: String,
+    path: String,
+}
+
 use std::sync::Arc;
 
 use chrono::{NaiveDate, Utc};
@@ -520,7 +527,7 @@ pub struct Workspace {
     /// Keyed by `(scope, agent_id, path)` so unrelated append targets can proceed concurrently.
     append_locks: Arc<
         tokio::sync::Mutex<
-            std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
+            std::collections::HashMap<AppendLockKey, std::sync::Weak<tokio::sync::Mutex<()>>>,
         >,
     >,
 }
@@ -1052,15 +1059,19 @@ impl Workspace {
         self.storage.get_document_by_id(doc.id).await
     }
 
-    fn append_lock_key(&self, scope: &str, path: &str) -> String {
+    fn append_lock_key(&self, scope: &str, path: &str) -> AppendLockKey {
         let agent = self
             .agent_id
             .map(|id| id.to_string())
             .unwrap_or_else(|| "none".to_string());
-        format!("{scope}|{agent}|{path}")
+        AppendLockKey {
+            scope: scope.to_string(),
+            agent,
+            path: path.to_string(),
+        }
     }
 
-    async fn append_path_lock(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+    async fn append_path_lock(&self, key: &AppendLockKey) -> Arc<tokio::sync::Mutex<()>> {
         let mut locks = self.append_locks.lock().await;
         // Opportunistically prune stale entries so lock-key cardinality does not
         // grow forever when paths are used once and never touched again.
@@ -1071,7 +1082,7 @@ impl Workspace {
         }
 
         let new_lock = Arc::new(tokio::sync::Mutex::new(()));
-        locks.insert(key.to_string(), Arc::downgrade(&new_lock));
+        locks.insert(key.clone(), Arc::downgrade(&new_lock));
         new_lock
     }
 
@@ -2795,6 +2806,25 @@ mod versioning_tests {
         assert!(
             locks.contains_key(&key_b),
             "active append lock entry should remain in map"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_lock_key_structured_shape_avoids_delimiter_collisions() {
+        let (ws, _dir) = create_test_workspace().await;
+        let agent = ws
+            .agent_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "none".to_string());
+
+        // These two key triples can collapse to the same string when using
+        // naive "{scope}|{agent}|{path}" concatenation.
+        let key_a = ws.append_lock_key(&format!("alpha|{}|beta", agent), "gamma");
+        let key_b = ws.append_lock_key("alpha", &format!("beta|{}|gamma", agent));
+
+        assert_ne!(
+            key_a, key_b,
+            "structured append lock keys must stay distinct even when fields contain delimiters"
         );
     }
 
