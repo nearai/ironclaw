@@ -179,6 +179,7 @@ fn create_registry_provider(
 
     match config.protocol {
         ProviderProtocol::OpenAiCompletions => create_openai_compat_from_registry(config),
+        ProviderProtocol::Responses => create_responses_from_registry(config, request_timeout_secs),
         ProviderProtocol::Anthropic => create_anthropic_from_registry(config),
         ProviderProtocol::Ollama => create_ollama_from_registry(config),
         ProviderProtocol::GithubCopilot => {
@@ -193,6 +194,35 @@ fn create_registry_provider(
             Ok(Arc::new(provider))
         }
     }
+}
+
+fn create_responses_from_registry(
+    config: &RegistryProviderConfig,
+    request_timeout_secs: u64,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let api_key = config
+        .api_key
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: config.provider_id.clone(),
+        })?;
+
+    tracing::debug!(
+        provider = %config.provider_id,
+        model = %config.model,
+        base_url = %config.base_url,
+        "Using generic Responses API provider"
+    );
+
+    let provider = codex_chatgpt::CodexChatGptProvider::for_responses_api(
+        &config.base_url,
+        api_key,
+        &config.model,
+        request_timeout_secs,
+    );
+
+    Ok(Arc::new(provider))
 }
 
 fn create_codex_chatgpt_from_registry(
@@ -753,6 +783,30 @@ mod tests {
         let result = create_cheap_llm_provider(&config, session);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_create_registry_provider_responses_protocol() {
+        let config = RegistryProviderConfig {
+            protocol: ProviderProtocol::Responses,
+            provider_id: "codex_local".to_string(),
+            api_key: Some(secrecy::SecretString::from(
+                "sk-test-codex-local".to_string(),
+            )),
+            base_url: "https://codex-api.packycode.com/v1".to_string(),
+            model: "gpt-5.3-codex".to_string(),
+            extra_headers: Vec::new(),
+            oauth_token: None,
+            is_codex_chatgpt: false,
+            refresh_token: None,
+            auth_path: None,
+            cache_retention: Default::default(),
+            unsupported_params: Vec::new(),
+        };
+
+        let provider =
+            create_registry_provider(&config, 30).expect("responses provider should construct");
+        assert_eq!(provider.model_name(), "gpt-5.3-codex");
     }
 
     #[test]

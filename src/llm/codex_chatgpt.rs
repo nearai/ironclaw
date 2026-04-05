@@ -106,6 +106,29 @@ impl CodexChatGptProvider {
         }
     }
 
+    /// Create a generic Responses API provider from registry config.
+    ///
+    /// Unlike [`with_lazy_model`], this constructor does not emit the private
+    /// ChatGPT-backend warning and does not configure token refresh metadata.
+    pub fn for_responses_api(
+        base_url: &str,
+        api_key: SecretString,
+        configured_model: &str,
+        request_timeout_secs: u64,
+    ) -> Self {
+        Self {
+            client: Client::new(),
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key: RwLock::new(api_key),
+            configured_model: configured_model.to_string(),
+            resolved_model: tokio::sync::OnceCell::const_new(),
+            refresh_token: None,
+            auth_path: None,
+            request_timeout: Duration::from_secs(request_timeout_secs),
+            refresh_lock: Mutex::new(()),
+        }
+    }
+
     /// Resolve the model to use, lazily on first call.
     ///
     /// Uses `OnceCell` so the `/models` fetch happens at most once.

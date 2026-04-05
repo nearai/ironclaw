@@ -1471,6 +1471,17 @@ mod tests {
 
     // ── OpenAI Codex tests ──────────────────────────────────────────
 
+    /// Clear all codex-local-related env vars.
+    fn clear_codex_local_env() {
+        // SAFETY: Only called under ENV_MUTEX in tests.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("CODEX_LOCAL_BASE_URL");
+            std::env::remove_var("CODEX_LOCAL_API_KEY");
+            std::env::remove_var("CODEX_LOCAL_MODEL");
+        }
+    }
+
     /// Clear all openai-codex-related env vars.
     fn clear_openai_codex_env() {
         // SAFETY: Only called under ENV_MUTEX in tests.
@@ -1479,6 +1490,36 @@ mod tests {
             std::env::remove_var("OPENAI_CODEX_MODEL");
             std::env::remove_var("OPENAI_MODEL");
         }
+    }
+
+    #[test]
+    fn codex_local_resolves_responses_provider_config() {
+        let _guard = lock_env();
+        clear_codex_local_env();
+
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "codex_local".to_string(),
+            crate::settings::LlmBuiltinOverride {
+                api_key: None,
+                model: Some("gpt-5.3-codex".to_string()),
+                base_url: Some("https://codex-api.packycode.com/v1".to_string()),
+            },
+        );
+
+        let settings = Settings {
+            llm_backend: Some("codex_local".to_string()),
+            llm_builtin_overrides: overrides,
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(cfg.backend, "codex_local");
+        let provider = cfg.provider.expect("provider config should be present");
+        assert_eq!(provider.provider_id, "codex_local");
+        assert_eq!(provider.protocol, ProviderProtocol::Responses);
+        assert_eq!(provider.base_url, "https://codex-api.packycode.com/v1");
+        assert_eq!(provider.model, "gpt-5.3-codex");
     }
 
     #[test]

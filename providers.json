@@ -78,6 +78,27 @@
     }
   },
   {
+    "id": "codex_local",
+    "aliases": [
+      "codex-local"
+    ],
+    "protocol": "responses",
+    "default_base_url": "https://api.openai.com/v1",
+    "base_url_env": "CODEX_LOCAL_BASE_URL",
+    "base_url_required": true,
+    "api_key_env": "CODEX_LOCAL_API_KEY",
+    "api_key_required": true,
+    "model_env": "CODEX_LOCAL_MODEL",
+    "default_model": "gpt-5.3-codex",
+    "description": "Local Codex profile (API key + Responses API)",
+    "setup": {
+      "kind": "api_key",
+      "secret_name": "llm_builtin_codex_local_api_key",
+      "display_name": "Codex Local",
+      "can_list_models": false
+    }
+  },
+  {
     "id": "github_copilot",
     "aliases": [
       "github-copilot",
