@@ -222,6 +222,7 @@ env-var mode or skipped secrets.
 | Ollama | None | - | - |
 | OpenRouter | API key | `llm_openrouter_api_key` | `OPENROUTER_API_KEY` |
 | OpenAI-compatible | Optional API key | `llm_compatible_api_key` | `LLM_API_KEY` |
+| Codex Local | API key (from `~/.codex/auth.json`) | `llm_builtin_codex_local_api_key` | `CODEX_LOCAL_API_KEY` |
 | AWS Bedrock | AWS credentials (IAM, SSO, instance roles) | - | - |
 
 **OpenRouter** is a standalone registry provider (`providers.json` id `"openrouter"`)
@@ -232,6 +233,14 @@ with its own secret name and env var. It is **not** stored as `openai_compatible
 - Delegates to `setup_api_key_provider()` with display name "OpenRouter"
 - API key is required (`api_key_required: true`)
 - Default model: `openai/gpt-4o`
+
+**Codex Local** (`setup_codex_local`):
+- Reads local profile from `$CODEX_HOME` (fallback: `~/.codex`)
+- Requires both `auth.json` and `config.toml`
+- Accepts API key mode only (`OPENAI_API_KEY` in `auth.json`)
+- Rejects ChatGPT token mode and guides users to `openai_codex`
+- Requires `wire_api = "responses"` in `config.toml`
+- Stores base URL/model in provider override settings and API key in encrypted secrets (`llm_builtin_codex_local_api_key`)
 
 **API-key providers** (`setup_api_key_provider`):
 1. Check env var → if set, ask to reuse, persist to secrets store
@@ -538,7 +547,7 @@ pub struct Settings {
     pub secrets_master_key_source: KeySource, // Keychain | Env | None
 
     // Step 3: Inference
-    pub llm_backend: Option<String>,         // "nearai" | "anthropic" | "openai" | "github_copilot" | "ollama" | "openai_compatible" | "bedrock"
+    pub llm_backend: Option<String>,         // "nearai" | "anthropic" | "openai" | "github_copilot" | "ollama" | "openai_compatible" | "bedrock" | "gemini_oauth" | "openai_codex" | "codex_local"
     pub ollama_base_url: Option<String>,
     pub openai_compatible_base_url: Option<String>,
 

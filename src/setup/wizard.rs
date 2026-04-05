@@ -3,7 +3,7 @@
 //! The wizard guides users through:
 //! 1. Database connection
 //! 2. Security (secrets master key)
-//! 3. Inference provider (NEAR AI, Anthropic, OpenAI, GitHub Copilot, OpenAI Codex, Ollama, OpenAI-compatible)
+//! 3. Inference provider (NEAR AI, Anthropic, OpenAI, GitHub Copilot, OpenAI Codex, Codex Local, Ollama, OpenAI-compatible)
 //! 4. Model selection
 //! 5. Embeddings
 //! 6. Channel configuration
@@ -1249,6 +1249,10 @@ impl SetupWizard {
                     print_info("Keeping existing OpenAI Codex configuration.");
                     return Ok(());
                 }
+                if current == "codex_local" {
+                    print_info("Keeping existing Codex Local configuration.");
+                    return Ok(());
+                }
                 return self.run_provider_setup(&current, &registry).await;
             }
 
@@ -1276,6 +1280,11 @@ impl SetupWizard {
             ),
             ("openai", std::env::var("OPENAI_API_KEY").is_ok()),
             ("openrouter", std::env::var("OPENROUTER_API_KEY").is_ok()),
+            (
+                "codex_local",
+                std::env::var(crate::setup::codex_local::CODEX_LOCAL_API_KEY_ENV).is_ok()
+                    || crate::setup::codex_local::has_local_codex_files(),
+            ),
         ]
         .into_iter()
         .collect();
@@ -1388,6 +1397,9 @@ impl SetupWizard {
 
         if provider_id == "openai_codex" {
             return self.setup_openai_codex().await;
+        }
+        if provider_id == crate::setup::codex_local::CODEX_LOCAL_BACKEND {
+            return self.setup_codex_local().await;
         }
 
         let def = registry
@@ -1858,6 +1870,74 @@ impl SetupWizard {
         })?;
 
         print_success("OpenAI Codex configured (ChatGPT subscription)");
+        Ok(())
+    }
+
+    /// Codex Local setup: read API key + responses endpoint from ~/.codex.
+    async fn setup_codex_local(&mut self) -> Result<(), SetupError> {
+        let profile = crate::setup::codex_local::load_local_profile().map_err(|e| {
+            SetupError::Config(format!("Failed to load local Codex profile: {}", e))
+        })?;
+
+        self.set_llm_backend_preserving_model(crate::setup::codex_local::CODEX_LOCAL_BACKEND);
+
+        let override_entry = self
+            .settings
+            .llm_builtin_overrides
+            .entry(crate::setup::codex_local::CODEX_LOCAL_BACKEND.to_string())
+            .or_default();
+        override_entry.base_url = Some(profile.base_url.clone());
+        override_entry.model = profile.model.clone();
+        // API key is persisted in encrypted secrets storage, not plaintext settings.
+        override_entry.api_key = None;
+
+        if let Some(ref model) = profile.model {
+            self.settings.selected_model = Some(model.clone());
+        }
+
+        let secret_name =
+            crate::settings::builtin_secret_name(crate::setup::codex_local::CODEX_LOCAL_BACKEND);
+        if let Ok(ctx) = self.init_secrets_context().await {
+            ctx.save_secret(&secret_name, &profile.api_key)
+                .await
+                .map_err(|e| {
+                    SetupError::Config(format!("Failed to save Codex Local API key: {e}"))
+                })?;
+            print_success("API key encrypted and saved");
+        } else {
+            print_info(&format!(
+                "Secrets not available. Set {} in your environment.",
+                crate::setup::codex_local::CODEX_LOCAL_API_KEY_ENV
+            ));
+        }
+
+        crate::config::inject_single_var(
+            crate::setup::codex_local::CODEX_LOCAL_API_KEY_ENV,
+            profile.api_key.expose_secret(),
+        );
+        crate::config::inject_single_var(
+            crate::setup::codex_local::CODEX_LOCAL_BASE_URL_ENV,
+            &profile.base_url,
+        );
+        if let Some(ref model) = profile.model {
+            crate::config::inject_single_var(
+                crate::setup::codex_local::CODEX_LOCAL_MODEL_ENV,
+                model,
+            );
+        }
+
+        self.llm_api_key = Some(profile.api_key.clone());
+
+        print_info(&format!(
+            "Using local Codex profile: {}",
+            profile.codex_home.display()
+        ));
+        print_info(&format!(
+            "Auth file: {}, Config file: {}",
+            profile.auth_path.display(),
+            profile.config_path.display()
+        ));
+        print_success(&format!("Codex Local configured ({})", profile.base_url));
         Ok(())
     }
 
@@ -3488,6 +3568,7 @@ impl SetupWizard {
             Some("openai_compatible") => "OpenAI-compatible".to_string(),
             Some("bedrock") => "AWS Bedrock".to_string(),
             Some("openai_codex") => "OpenAI Codex".to_string(),
+            Some("codex_local") => "Codex Local".to_string(),
             Some("gemini_oauth") => "Gemini CLI".to_string(),
             Some(other) => other.to_string(),
             None => "unknown".to_string(),
@@ -4192,6 +4273,36 @@ mod tests {
         }
     }
 
+    fn write_codex_local_fixture(home: &std::path::Path, wire_api: &str, chatgpt_mode: bool) {
+        let auth_path = home.join("auth.json");
+        let config_path = home.join("config.toml");
+
+        let auth = if chatgpt_mode {
+            r#"{
+  "auth_mode":"chatgpt",
+  "tokens":{
+    "access_token":"test-access-token",
+    "refresh_token":"test-refresh-token"
+  }
+}"#
+        } else {
+            r#"{"OPENAI_API_KEY":"sk-test-codex-local-key"}"#
+        };
+        std::fs::write(&auth_path, auth).unwrap();
+
+        let config = format!(
+            r#"
+model_provider = "packycode"
+model = "gpt-5.3-codex"
+
+[model_providers.packycode]
+base_url = "https://codex-api.packycode.com/v1"
+wire_api = "{wire_api}"
+"#
+        );
+        std::fs::write(&config_path, config).unwrap();
+    }
+
     #[test]
     fn test_set_llm_backend_preserves_model_when_backend_unchanged() {
         let mut wizard = SetupWizard::new();
@@ -4365,6 +4476,63 @@ mod tests {
             wizard.settings.llm_backend.as_deref(),
             Some("custom_no_setup"),
             "backend should be set even without setup hint"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_provider_setup_codex_local_success() {
+        let _lock = lock_env();
+        let dir = tempdir().unwrap();
+        let codex_home = dir.path().join(".codex-local");
+        std::fs::create_dir_all(&codex_home).unwrap();
+        write_codex_local_fixture(&codex_home, "responses", false);
+        let _home = EnvGuard::set("CODEX_HOME", codex_home.to_string_lossy().as_ref());
+
+        let mut wizard = SetupWizard::new();
+        let registry = crate::llm::ProviderRegistry::load();
+        let result = wizard.run_provider_setup("codex_local", &registry).await;
+
+        assert!(
+            result.is_ok(),
+            "codex_local setup should succeed: {result:?}"
+        );
+        assert_eq!(wizard.settings.llm_backend.as_deref(), Some("codex_local"));
+        assert_eq!(
+            wizard.settings.selected_model.as_deref(),
+            Some("gpt-5.3-codex")
+        );
+        let codex_override = wizard
+            .settings
+            .llm_builtin_overrides
+            .get("codex_local")
+            .expect("codex_local override should be set");
+        assert_eq!(
+            codex_override.base_url.as_deref(),
+            Some("https://codex-api.packycode.com/v1")
+        );
+        assert!(wizard.llm_api_key.is_some(), "wizard should cache API key");
+    }
+
+    #[tokio::test]
+    async fn test_run_provider_setup_codex_local_rejects_chatgpt_mode() {
+        let _lock = lock_env();
+        let dir = tempdir().unwrap();
+        let codex_home = dir.path().join(".codex-local");
+        std::fs::create_dir_all(&codex_home).unwrap();
+        write_codex_local_fixture(&codex_home, "responses", true);
+        let _home = EnvGuard::set("CODEX_HOME", codex_home.to_string_lossy().as_ref());
+
+        let mut wizard = SetupWizard::new();
+        let registry = crate::llm::ProviderRegistry::load();
+        let err = wizard
+            .run_provider_setup("codex_local", &registry)
+            .await
+            .expect_err("chatgpt token mode should be rejected");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("openai_codex"),
+            "error should guide user to openai_codex path: {msg}"
         );
     }
 
