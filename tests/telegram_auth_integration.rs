@@ -200,6 +200,7 @@ fn build_telegram_update(
     .into_bytes()
 }
 
+#[cfg(feature = "integration")]
 fn build_telegram_update_value(update_id: i64, message: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "update_id": update_id,
@@ -691,6 +692,7 @@ async fn test_open_dm_policy_allows_all_users() {
 }
 
 #[tokio::test]
+#[cfg(feature = "integration")]
 async fn test_bot_mention_detection_case_insensitive() {
     require_telegram_wasm!();
     let runtime = create_test_runtime();
@@ -1529,9 +1531,7 @@ async fn test_long_message_splits_into_multiple_send_message_calls() {
         .expect("Failed to bootstrap test message stream");
 
     // Send an inbound message first so we have metadata for the response
-    let update = build_telegram_update(
-        30, 501, 999, "private", 999, "LongUser", "tell me a story",
-    );
+    let update = build_telegram_update(30, 501, 999, "private", 999, "LongUser", "tell me a story");
 
     let http_response = channel
         .call_on_http_request(
@@ -1556,10 +1556,7 @@ async fn test_long_message_splits_into_multiple_send_message_calls() {
     let long_text = "A".repeat(5000);
 
     channel
-        .respond(
-            &incoming,
-            OutgoingResponse::text(&long_text),
-        )
+        .respond(&incoming, OutgoingResponse::text(&long_text))
         .await
         .expect("telegram respond should succeed");
 
@@ -1695,9 +1692,7 @@ async fn test_markdown_parse_error_falls_back_to_plain_text() {
         .expect("Failed to bootstrap test message stream");
 
     // Send an inbound message to get metadata
-    let update = build_telegram_update(
-        31, 601, 999, "private", 999, "MdUser", "test markdown",
-    );
+    let update = build_telegram_update(31, 601, 999, "private", 999, "MdUser", "test markdown");
 
     let http_response = channel
         .call_on_http_request(
@@ -1750,8 +1745,7 @@ async fn test_markdown_parse_error_falls_back_to_plain_text() {
 
     // Second attempt (retry) should not have parse_mode
     assert!(
-        payloads[1].get("parse_mode").is_none()
-            || payloads[1]["parse_mode"].is_null(),
+        payloads[1].get("parse_mode").is_none() || payloads[1]["parse_mode"].is_null(),
         "retry should not have parse_mode, got: {:?}",
         payloads[1].get("parse_mode")
     );
@@ -1780,11 +1774,7 @@ async fn test_send_chat_action_typing_on_status_thinking() {
         body: Bytes,
     ) -> impl IntoResponse {
         let payload = serde_json::from_slice::<serde_json::Value>(&body).unwrap_or_default();
-        state
-            .requests
-            .lock()
-            .await
-            .push((uri.to_string(), payload));
+        state.requests.lock().await.push((uri.to_string(), payload));
 
         axum::Json(serde_json::json!({
             "ok": true,

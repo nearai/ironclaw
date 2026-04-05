@@ -218,6 +218,47 @@ async def set_reject_markdown(fake_tg_url: str, reject: bool):
         )
 
 
+async def set_rate_limit(fake_tg_url: str, count: int):
+    """Set the number of sendMessage calls that should return 429."""
+    async with httpx.AsyncClient() as c:
+        await c.post(
+            f"{fake_tg_url}/__mock/set_rate_limit",
+            json={"count": count},
+            timeout=5,
+        )
+
+
+async def set_fail_downloads(fake_tg_url: str, fail: bool):
+    """Toggle download failure mode on the fake Telegram server."""
+    async with httpx.AsyncClient() as c:
+        await c.post(
+            f"{fake_tg_url}/__mock/set_fail_downloads",
+            json={"fail": fail},
+            timeout=5,
+        )
+
+
+async def wait_for_api_call(
+    fake_tg_url: str,
+    method: str,
+    *,
+    timeout: float = 15,
+) -> list[dict]:
+    """Poll until at least one API call with the given method appears."""
+    deadline = time.monotonic() + timeout
+    async with httpx.AsyncClient() as c:
+        while time.monotonic() < deadline:
+            r = await c.get(f"{fake_tg_url}/__mock/api_calls", timeout=5)
+            calls = r.json().get("calls", [])
+            matching = [call for call in calls if call["method"] == method]
+            if matching:
+                return matching
+            await asyncio.sleep(0.5)
+    raise TimeoutError(
+        f"Expected at least one '{method}' API call within {timeout}s"
+    )
+
+
 # ── tests ────────────────────────────────────────────────────────────────
 
 
@@ -583,47 +624,6 @@ async def test_telegram_markdown_fallback(telegram_e2e_server):
         await set_reject_markdown(fake_tg_url, False)
 
 
-async def set_rate_limit(fake_tg_url: str, count: int):
-    """Set the number of sendMessage calls that should return 429."""
-    async with httpx.AsyncClient() as c:
-        await c.post(
-            f"{fake_tg_url}/__mock/set_rate_limit",
-            json={"count": count},
-            timeout=5,
-        )
-
-
-async def set_fail_downloads(fake_tg_url: str, fail: bool):
-    """Toggle download failure mode on the fake Telegram server."""
-    async with httpx.AsyncClient() as c:
-        await c.post(
-            f"{fake_tg_url}/__mock/set_fail_downloads",
-            json={"fail": fail},
-            timeout=5,
-        )
-
-
-async def wait_for_api_call(
-    fake_tg_url: str,
-    method: str,
-    *,
-    timeout: float = 15,
-) -> list[dict]:
-    """Poll until at least one API call with the given method appears."""
-    deadline = time.monotonic() + timeout
-    async with httpx.AsyncClient() as c:
-        while time.monotonic() < deadline:
-            r = await c.get(f"{fake_tg_url}/__mock/api_calls", timeout=5)
-            calls = r.json().get("calls", [])
-            matching = [call for call in calls if call["method"] == method]
-            if matching:
-                return matching
-            await asyncio.sleep(0.5)
-    raise TimeoutError(
-        f"Expected at least one '{method}' API call within {timeout}s"
-    )
-
-
 async def test_telegram_missing_webhook_secret_rejected(telegram_e2e_server):
     """Webhook with no secret header at all is rejected with 401."""
     http_url = telegram_e2e_server["http_url"]
@@ -655,8 +655,10 @@ async def test_telegram_rate_limit_resilience(telegram_e2e_server):
 
     await reset_fake_tg(fake_tg_url)
 
-    # Make the next 5 sendMessage calls return 429 (covers Markdown + plain retry)
-    await set_rate_limit(fake_tg_url, 5)
+    # Make the next 20 sendMessage calls return 429. Using a high count
+    # so the test is resilient to changes in the WASM channel's retry
+    # strategy (e.g., Markdown attempt + plain-text fallback + future retries).
+    await set_rate_limit(fake_tg_url, 20)
 
     try:
         # Send a webhook — the bot will process it but sendMessage will get 429

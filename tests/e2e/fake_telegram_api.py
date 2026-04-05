@@ -41,6 +41,9 @@ class FakeTelegramState:
         return update_id
 
     async def get_updates(self, offset: int = 0, timeout: float = 0) -> list:
+        # Filter once, then snapshot. The snapshot avoids a TOCTOU race where
+        # queue_update() could append between filtering and returning (the
+        # await below yields control to the event loop).
         self._update_queue = [u for u in self._update_queue if u["update_id"] >= offset]
         if self._update_queue:
             return list(self._update_queue)
@@ -52,10 +55,10 @@ class FakeTelegramState:
                 )
             except asyncio.TimeoutError:
                 pass
-            self._update_queue = [
-                u for u in self._update_queue if u["update_id"] >= offset
-            ]
-            return list(self._update_queue)
+            # Re-filter and snapshot after the await.
+            filtered = [u for u in self._update_queue if u["update_id"] >= offset]
+            self._update_queue = filtered
+            return list(filtered)
         return []
 
 
@@ -118,6 +121,9 @@ async def get_updates(request: web.Request) -> web.Response:
 async def send_message(request: web.Request) -> web.Response:
     state: FakeTelegramState = request.app["state"]
     body = await request.json()
+    # Record every attempt in api_calls (including rejected ones) so tests can
+    # inspect the full request sequence. Only successful calls are appended to
+    # sent_messages below.
     state.api_calls.append(
         {"method": "sendMessage", "body": body, "time": time.time()}
     )
