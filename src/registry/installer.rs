@@ -715,6 +715,12 @@ fn extract_tar_gz(
 
     let wasm_filename = format!("{}.wasm", name);
     let caps_filename = format!("{}.capabilities.json", name);
+    // Pre-v0.23 archives used hyphenated filenames (e.g. "google-calendar.wasm")
+    // while the canonical name uses underscores ("google_calendar"). Accept both
+    // so existing release artifacts remain installable.
+    let alias = crate::extensions::naming::legacy_extension_alias(name);
+    let alias_wasm = alias.as_ref().map(|a| format!("{}.wasm", a));
+    let alias_caps = alias.as_ref().map(|a| format!("{}.capabilities.json", a));
     let mut found_wasm = false;
     let mut found_caps = false;
 
@@ -756,7 +762,9 @@ fn extract_tar_gz(
             .and_then(|n| n.to_str())
             .unwrap_or("");
 
-        if filename == wasm_filename {
+        let is_wasm =
+            filename == wasm_filename || alias_wasm.as_deref().is_some_and(|a| filename == a);
+        if is_wasm {
             let mut data = Vec::with_capacity(entry.size() as usize);
             std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                 .map_err(|e| RegistryError::DownloadFailed {
@@ -765,7 +773,9 @@ fn extract_tar_gz(
                 })?;
             std::fs::write(target_wasm, &data).map_err(RegistryError::Io)?;
             found_wasm = true;
-        } else if filename == caps_filename {
+        } else if filename == caps_filename
+            || alias_caps.as_deref().is_some_and(|a| filename == a)
+        {
             let mut data = Vec::with_capacity(entry.size() as usize);
             std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                 .map_err(|e| RegistryError::DownloadFailed {
@@ -1275,6 +1285,34 @@ mod tests {
 
         assert!(wasm_path.exists());
         assert!(caps_path.exists());
+        assert!(result.has_capabilities);
+    }
+
+    #[test]
+    fn test_extract_tar_gz_matches_hyphenated_alias() {
+        // Regression: archives contain hyphenated filenames (e.g. "google-calendar.wasm")
+        // but the canonical name uses underscores ("google_calendar"). The extractor
+        // must accept the hyphenated form when the canonical name is passed.
+        let gz_bytes = build_test_tar_gz(
+            "google-calendar.wasm",
+            Some("google-calendar.capabilities.json"),
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wasm_path = tmp.path().join("google_calendar.wasm");
+        let caps_path = tmp.path().join("google_calendar.capabilities.json");
+
+        let result = extract_tar_gz(
+            &gz_bytes,
+            "google_calendar",
+            &wasm_path,
+            &caps_path,
+            "test://url",
+        )
+        .unwrap();
+
+        assert!(wasm_path.exists(), "wasm file should be extracted");
+        assert!(caps_path.exists(), "capabilities file should be extracted");
         assert!(result.has_capabilities);
     }
 

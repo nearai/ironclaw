@@ -2667,6 +2667,12 @@ impl ExtensionManager {
 
         let wasm_filename = format!("{}.wasm", name);
         let caps_filename = format!("{}.capabilities.json", name);
+        // Pre-v0.23 archives used hyphenated filenames (e.g. "google-calendar.wasm")
+        // while the canonical name uses underscores ("google_calendar"). Accept both
+        // so existing release artifacts remain installable.
+        let alias = crate::extensions::naming::legacy_extension_alias(name);
+        let alias_wasm = alias.as_ref().map(|a| format!("{}.wasm", a));
+        let alias_caps = alias.as_ref().map(|a| format!("{}.capabilities.json", a));
         let mut found_wasm = false;
 
         let entries = archive
@@ -2697,14 +2703,18 @@ impl ExtensionManager {
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
 
-            if filename == wasm_filename {
+            let is_wasm = filename == wasm_filename
+                || alias_wasm.as_deref().is_some_and(|a| filename == a);
+            if is_wasm {
                 let mut data = Vec::with_capacity(entry.size() as usize);
                 std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 std::fs::write(target_wasm, &data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 found_wasm = true;
-            } else if filename == caps_filename {
+            } else if filename == caps_filename
+                || alias_caps.as_deref().is_some_and(|a| filename == a)
+            {
                 let mut data = Vec::with_capacity(entry.size() as usize);
                 std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
