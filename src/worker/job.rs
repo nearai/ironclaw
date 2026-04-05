@@ -26,8 +26,7 @@ use crate::llm::{
     ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult,
     ResponseMetadata, ToolCall, ToolSelection,
 };
-use crate::safety::SafetyLayer;
-use crate::tenant::AdminScope;
+use crate::tenant::SystemScope;
 use crate::tools::execute::process_tool_result;
 use crate::tools::rate_limiter::RateLimitResult;
 use crate::tools::{ApprovalContext, ToolRegistry, prepare_tool_params, redact_params};
@@ -36,6 +35,7 @@ use crate::worker::autonomous_recovery::{
     EMPTY_TOOL_COMPLETION_NUDGE, FORCE_TEXT_RECOVERY_PROMPT,
 };
 use ironclaw_common::AppEvent;
+use ironclaw_safety::SafetyLayer;
 
 /// Shared dependencies for worker execution.
 ///
@@ -47,7 +47,7 @@ pub struct WorkerDeps {
     pub llm: Arc<dyn LlmProvider>,
     pub safety: Arc<SafetyLayer>,
     pub tools: Arc<ToolRegistry>,
-    pub store: Option<AdminScope>,
+    pub store: Option<SystemScope>,
     pub hooks: Arc<HookRegistry>,
     pub timeout: Duration,
     pub use_planning: bool,
@@ -96,7 +96,7 @@ impl Worker {
         &self.deps.tools
     }
 
-    fn store(&self) -> Option<&AdminScope> {
+    fn store(&self) -> Option<&SystemScope> {
         self.deps.store.as_ref()
     }
 
@@ -1739,10 +1739,10 @@ mod tests {
         CompletionRequest, CompletionResponse, LlmProvider, ToolCompletionRequest,
         ToolCompletionResponse,
     };
-    use crate::safety::SafetyLayer;
     use crate::testing::{BroadcastCapture, RecordingBroadcastChannel};
     use crate::tools::builtin::MessageTool;
     use crate::tools::{Tool, ToolError as ToolExecError, ToolOutput};
+    use ironclaw_safety::SafetyLayer;
 
     /// A test tool that sleeps for a configurable duration before returning.
     struct SlowTool {

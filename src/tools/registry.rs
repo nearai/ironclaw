@@ -11,18 +11,16 @@ use crate::extensions::ExtensionManager;
 use crate::llm::{LlmProvider, ToolDefinition};
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::secrets::SecretsStore;
-use crate::skills::catalog::SkillCatalog;
-use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{
     BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder, SoftwareBuilder,
 };
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
     JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
-    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool,
-    ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool,
-    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
-    ToolUpgradeTool, WriteFileTool,
+    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PlanUpdateTool, PromptQueue,
+    ReadFileTool, ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool,
+    TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolPermissionSetTool,
+    ToolRemoveTool, ToolSearchTool, ToolUpgradeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolDiscoverySummary, ToolDomain};
@@ -31,28 +29,45 @@ use crate::tools::wasm::{
     WasmStorageError, WasmToolRuntime, WasmToolStore, WasmToolWrapper,
 };
 use crate::workspace::Workspace;
+use ironclaw_skills::catalog::SkillCatalog;
+use ironclaw_skills::registry::SkillRegistry;
 
-/// Names of built-in tools that cannot be shadowed by dynamic registrations.
-/// This prevents a dynamically built or installed tool from replacing a
-/// security-critical built-in like "shell" or "memory_write".
+/// Names of built-in tools that cannot be shadowed by dynamic registrations
+/// and should not be rebuilt by the self-repair system. Protected tools are
+/// authored as part of the ironclaw binary — errors on them are caller-side
+/// issues (bad LLM parameters), not tool defects.
+///
+/// Keep this list in sync with all `fn name() -> &str` implementations in
+/// `src/tools/builtin/` and `src/tools/builder/` (for `build_software`).
+/// Aliases like `web_fetch` are included for completeness. When adding a
+/// new built-in tool, add its name here too.
 const PROTECTED_TOOL_NAMES: &[&str] = &[
+    // Core tools
     "echo",
     "time",
     "json",
     "http",
     "shell",
+    "restart",
+    "message",
+    // File tools
     "read_file",
     "write_file",
     "list_dir",
     "apply_patch",
+    // Memory tools
     "memory_search",
     "memory_write",
     "memory_read",
     "memory_tree",
+    // Job tools
     "create_job",
     "list_jobs",
     "job_status",
+    "job_events",
+    "job_prompt",
     "cancel_job",
+    // Extension/tool management
     "build_software",
     "tool_search",
     "tool_install",
@@ -60,6 +75,10 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "tool_activate",
     "tool_list",
     "tool_remove",
+    "tool_upgrade",
+    "tool_info",
+    "extension_info",
+    // Routine tools
     "routine_create",
     "routine_list",
     "routine_update",
@@ -67,18 +86,33 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "routine_fire",
     "routine_history",
     "event_emit",
+    // Skill tools
     "skill_list",
     "skill_search",
     "skill_install",
     "skill_remove",
-    "message",
-    "web_fetch",
-    "restart",
+    // Secret tools
+    "secret_list",
+    "secret_delete",
+    // Image tools
     "image_generate",
     "image_edit",
     "image_analyze",
-    "tool_info",
+    // Plan tools
+    "plan_update",
+    // Permission tools
+    "tool_permission_set",
+    // Aliases (web_fetch is an alias for http in some contexts)
+    "web_fetch",
 ];
+
+/// Check if a tool name is a protected built-in that should not be rebuilt
+/// by the self-repair system. Protected tools are authored as part of the
+/// ironclaw binary; errors in these tools are caller-side issues (bad
+/// parameters from the LLM), not tool defects.
+pub fn is_protected_tool_name(name: &str) -> bool {
+    PROTECTED_TOOL_NAMES.contains(&name)
+}
 
 /// Registry of available tools.
 pub struct ToolRegistry {
@@ -133,14 +167,27 @@ impl ToolRegistry {
         self.credential_registry.as_ref()
     }
 
+    /// Get a reference to the secrets store (for credential storage during auth flows).
+    pub fn secrets_store(&self) -> Option<&Arc<dyn SecretsStore + Send + Sync>> {
+        self.secrets_store.as_ref()
+    }
+
     /// Get the shared rate limiter for checking built-in tool limits.
     pub fn rate_limiter(&self) -> &RateLimiter {
         &self.rate_limiter
     }
 
     /// Register a tool. Rejects dynamic tools that try to shadow a protected built-in name.
+    /// Also rejects tool names containing `.` which conflicts with settings path parsing.
     pub async fn register(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
+        if name.contains('.') {
+            tracing::warn!(
+                tool = %name,
+                "Rejecting tool registration: name contains '.' which conflicts with settings path parsing"
+            );
+            return;
+        }
         if PROTECTED_TOOL_NAMES.contains(&name.as_str())
             && self.builtin_names.read().await.contains(&name)
         {
@@ -155,8 +202,16 @@ impl ToolRegistry {
     }
 
     /// Register a tool (sync version for startup, marks as built-in).
+    /// Also rejects tool names containing `.` which conflicts with settings path parsing.
     pub fn register_sync(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
+        if name.contains('.') {
+            tracing::warn!(
+                tool = %name,
+                "Rejecting tool registration: name contains '.' which conflicts with settings path parsing"
+            );
+            return;
+        }
         if let Ok(mut tools) = self.tools.try_write() {
             tools.insert(name.clone(), tool);
             if let Ok(mut builtins) = self.builtin_names.try_write() {
@@ -175,6 +230,25 @@ impl ToolRegistry {
     pub async fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         let tools = self.tools.read().await;
         tools.get(name).map(Arc::clone)
+    }
+
+    /// Resolve a caller-provided action/tool name to the registered tool id.
+    ///
+    /// The runtime is converging on `snake_case` names. Hyphenated names remain
+    /// accepted here only as a compatibility alias for older installed tools.
+    pub async fn resolve_name(&self, name: &str) -> Option<String> {
+        let tools = self.tools.read().await;
+        if tools.contains_key(name) {
+            return Some(name.to_string());
+        }
+        crate::extensions::naming::legacy_extension_alias(name)
+            .filter(|alias| tools.contains_key(alias))
+    }
+
+    pub async fn get_resolved(&self, name: &str) -> Option<(String, Arc<dyn Tool>)> {
+        let resolved = self.resolve_name(name).await?;
+        let tool = self.get(&resolved).await?;
+        Some((resolved, tool))
     }
 
     /// Check if a tool exists.
@@ -241,6 +315,7 @@ impl ToolRegistry {
         self.register_sync(Arc::new(EchoTool));
         self.register_sync(Arc::new(TimeTool));
         self.register_sync(Arc::new(JsonTool));
+        self.register_sync(Arc::new(PlanUpdateTool::new()));
 
         let mut http = HttpTool::new();
         if let (Some(cr), Some(ss)) = (&self.credential_registry, &self.secrets_store) {
@@ -467,6 +542,38 @@ impl ToolRegistry {
         tracing::debug!("Registered 8 extension management tools");
     }
 
+    /// Register the permission management tool (`tool_permission_set`).
+    ///
+    /// This tool allows users or the LLM to view and modify tool permissions,
+    /// subject to approval.
+    pub fn register_permission_tools(
+        self: &Arc<Self>,
+        settings_store: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
+    ) {
+        self.register_sync(Arc::new(ToolPermissionSetTool::new(
+            Arc::clone(self),
+            settings_store.clone(),
+        )));
+        tracing::debug!("Registered tool_permission_set");
+    }
+
+    /// Upgrade `tool_list` to include built-in tool listings and per-user permission states.
+    ///
+    /// Call this after `register_extension_tools()` and after the registry itself
+    /// is behind an `Arc`.
+    pub fn upgrade_tool_list(
+        self: &Arc<Self>,
+        manager: Arc<ExtensionManager>,
+        settings_store: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
+    ) {
+        let mut list_tool = ToolListTool::new(manager).with_registry(Arc::clone(self));
+        if let Some(store) = settings_store {
+            list_tool = list_tool.with_settings_store(store);
+        }
+        self.register_sync(Arc::new(list_tool));
+        tracing::debug!("Upgraded tool_list with builtin registry support");
+    }
+
     /// Register skill management tools (list, search, install, remove).
     ///
     /// These allow the LLM to manage prompt-level skills through conversation.
@@ -521,6 +628,20 @@ impl ToolRegistry {
         self.register_sync(Arc::new(RoutineHistoryTool::new(store)));
         self.register_sync(Arc::new(EventEmitTool::new(engine)));
         tracing::debug!("Registered 7 routine management tools");
+    }
+
+    /// Register plan management tools.
+    ///
+    /// The plan_update tool lets the LLM emit structured plan progress
+    /// checklist events via SSE. Works without SSE (no broadcast), but
+    /// pass the `SseManager` for real-time UI updates.
+    pub fn register_plan_tools(&self, sse: Option<Arc<crate::channels::web::sse::SseManager>>) {
+        let mut tool = PlanUpdateTool::new();
+        if let Some(sse) = sse {
+            tool = tool.with_sse(sse);
+        }
+        self.register_sync(Arc::new(tool));
+        tracing::debug!("Registered plan_update tool");
     }
 
     /// Register message tool for sending messages to channels.
@@ -850,6 +971,42 @@ mod tests {
         let defs = registry.tool_definitions().await;
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "echo");
+    }
+
+    #[tokio::test]
+    async fn resolve_name_accepts_legacy_hyphen_alias() {
+        struct LegacyTool;
+
+        #[async_trait::async_trait]
+        impl Tool for LegacyTool {
+            fn name(&self) -> &str {
+                "web-search"
+            }
+
+            fn description(&self) -> &str {
+                "legacy"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(LegacyTool)).await;
+
+        assert_eq!(
+            registry.resolve_name("web_search").await.as_deref(),
+            Some("web-search")
+        );
     }
 
     #[tokio::test]

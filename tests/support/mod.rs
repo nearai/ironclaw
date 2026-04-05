@@ -3,6 +3,8 @@ pub mod cleanup;
 #[cfg(feature = "libsql")]
 pub mod gateway_workflow_harness;
 pub mod instrumented_llm;
+#[cfg(feature = "libsql")]
+pub mod live_harness;
 pub mod metrics;
 pub mod mock_mcp_server;
 pub mod mock_openai_server;

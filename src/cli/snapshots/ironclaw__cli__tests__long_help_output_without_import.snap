@@ -1,5 +1,6 @@
 ---
 source: src/cli/mod.rs
+assertion_line: 438
 expression: help
 ---
 IronClaw is a secure AI assistant. Use 'ironclaw <subcommand> --help' for details.
@@ -29,6 +30,7 @@ Commands:
   status      Show system status
   completion  Generate completions
   login       Authenticate with a provider
+  acp         Manage ACP agents
   help        Print this message or the help of the given subcommand(s)
 
 Options:
@@ -46,6 +48,11 @@ Options:
 
       --no-onboard
           Skip first-run onboarding check
+
+      --auto-approve
+          Auto-approve tool execution (shell, file writes, HTTP, etc.)
+          
+          Skips interactive approval prompts for standard tools. Destructive operations still require explicit approval. Other safeguards remain active: rate limits, hooks, authentication gates.
 
   -h, --help
           Print help (see a summary with '-h')

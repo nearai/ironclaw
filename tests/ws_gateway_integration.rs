@@ -58,7 +58,7 @@ async fn start_test_server() -> (
         skill_registry: None,
         skill_catalog: None,
         chat_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(30, 60),
-        oauth_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),
+        oauth_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(20, 60),
         webhook_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
@@ -67,6 +67,15 @@ async fn start_test_server() -> (
         active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
         secrets_store: None,
         db_auth: None,
+        pairing_store: None,
+        oauth_providers: None,
+        oauth_state_store: None,
+        oauth_base_url: None,
+        oauth_allowed_domains: Vec::new(),
+        near_nonce_store: None,
+        near_rpc_url: None,
+        near_network: None,
+        oauth_sweep_shutdown: None,
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(

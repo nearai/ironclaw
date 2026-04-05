@@ -135,7 +135,7 @@ impl ChannelsConfig {
         let http = if http_enabled_by_env || http_enabled_by_db {
             Some(HttpConfig {
                 host: db_first_optional_string(&cs.http_host, "HTTP_HOST")?
-                    .unwrap_or_else(|| "0.0.0.0".to_string()),
+                    .unwrap_or_else(|| "127.0.0.1".to_string()),
                 port: {
                     // defaults.http_port is None, so any Some(..) is an explicit DB override.
                     if let Some(ref db_port) = cs.http_port {
@@ -431,12 +431,12 @@ mod tests {
     #[test]
     fn http_config_fields() {
         let cfg = HttpConfig {
-            host: "0.0.0.0".to_string(),
+            host: "127.0.0.1".to_string(),
             port: 8080,
             webhook_secret: None,
             user_id: "http".to_string(),
         };
-        assert_eq!(cfg.host, "0.0.0.0");
+        assert_eq!(cfg.host, "127.0.0.1");
         assert_eq!(cfg.port, 8080);
         assert!(cfg.webhook_secret.is_none());
         assert_eq!(cfg.user_id, "http");

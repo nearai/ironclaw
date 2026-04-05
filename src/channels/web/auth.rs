@@ -56,6 +56,11 @@ use tokio::sync::RwLock;
 
 use crate::config::GatewayOidcConfig;
 use crate::db::Database;
+use crate::ownership::{Identity, OwnerId, UserRole};
+
+/// Cookie name for OAuth browser sessions. Shared between the auth middleware
+/// (cookie extraction) and the auth handlers (cookie set/clear).
+pub const SESSION_COOKIE_NAME: &str = "ironclaw_session";
 
 // ── User identity ────────────────────────────────────────────────────────
 
@@ -67,6 +72,16 @@ pub struct UserIdentity {
     pub role: String,
     /// Additional user scopes this identity can read from.
     pub workspace_read_scopes: Vec<String>,
+}
+
+/// Convert an authenticated web user into the ownership-layer identity type.
+pub(crate) fn ownership_identity(user: &UserIdentity) -> Identity {
+    let role = if user.role.eq_ignore_ascii_case("admin") {
+        UserRole::Admin
+    } else {
+        UserRole::Member
+    };
+    Identity::new(OwnerId::from(user.user_id.clone()), role)
 }
 
 /// Hash a token with SHA-256 for constant-size, timing-safe storage.
@@ -271,7 +286,7 @@ impl DbAuthenticator {
     }
 }
 
-// ── Combined auth state ─────────────────────────────────────────────────���
+// ── Combined auth state ────────────────────────────────────────────────────
 
 /// Combined auth state: tries env-var tokens first, then DB-backed tokens,
 /// then OIDC JWT (if configured).
@@ -283,6 +298,8 @@ pub struct CombinedAuthState {
     pub db_auth: Option<DbAuthenticator>,
     /// OIDC JWT auth state (None when OIDC is disabled).
     pub oidc: Option<OidcState>,
+    /// Email domains allowed for OIDC login. Empty means allow all.
+    pub oidc_allowed_domains: Vec<String>,
 }
 
 impl From<MultiAuthState> for CombinedAuthState {
@@ -291,6 +308,7 @@ impl From<MultiAuthState> for CombinedAuthState {
             env_auth,
             db_auth: None,
             oidc: None,
+            oidc_allowed_domains: Vec::new(),
         }
     }
 }
@@ -841,14 +859,22 @@ async fn validate_oidc_jwt(oidc: &OidcState, jwt: &str) -> Result<String, OidcEr
     let mut validation = Validation::new(resolved_alg);
     validation.insecure_disable_signature_validation();
 
+    // Build the set of required claims. `exp` is required by default.
+    // When issuer/audience are configured, require their presence in the
+    // JWT — not just mismatch rejection — to prevent tokens that omit
+    // these claims entirely from passing validation.
+    let mut required = vec!["exp".to_string()];
     if let Some(ref iss) = oidc.config.issuer {
         validation.set_issuer(&[iss]);
+        required.push("iss".to_string());
     }
     if let Some(ref aud) = oidc.config.audience {
         validation.set_audience(&[aud]);
+        required.push("aud".to_string());
     } else {
         validation.validate_aud = false;
     }
+    validation.set_required_spec_claims(&required);
 
     let data = jsonwebtoken::decode::<serde_json::Value>(&normalized, &key, &validation)
         .map_err(|e| OidcError::InvalidClaims(format!("{e}")))?;
@@ -861,6 +887,43 @@ async fn validate_oidc_jwt(oidc: &OidcState, jwt: &str) -> Result<String, OidcEr
         .ok_or_else(|| OidcError::InvalidClaims("missing `sub` claim".to_string()))?;
 
     Ok(sub)
+}
+
+/// Extract `email` and `email_verified` claims from an OIDC JWT without
+/// signature validation.
+///
+/// Used only after signature has been validated by `validate_oidc_jwt()` to
+/// enforce domain restrictions.
+fn extract_oidc_email_claims(jwt: &str) -> (Option<String>, bool) {
+    let normalized = normalize_jwt_for_claims(jwt);
+    let mut validation = Validation::default();
+    validation.insecure_disable_signature_validation();
+    validation.validate_aud = false;
+    validation.validate_exp = false;
+
+    let data = match jsonwebtoken::decode::<serde_json::Value>(
+        &normalized,
+        &DecodingKey::from_secret(&[]),
+        &validation,
+    ) {
+        Ok(d) => d,
+        Err(_) => return (None, false),
+    };
+
+    let email = data
+        .claims
+        .get("email")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // email_verified may be a boolean or a string "true"/"false".
+    let verified = match data.claims.get("email_verified") {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::String(s)) => s == "true",
+        _ => false,
+    };
+
+    (email, verified)
 }
 
 // ── Token extraction helpers ─────────────────────────────────────────────
@@ -888,15 +951,37 @@ fn allows_query_token_auth(request: &Request) -> bool {
 }
 
 /// Extract the `token` query parameter value, URL-decoded.
+/// Returns `None` for empty/whitespace-only tokens so they don't override
+/// a valid session cookie.
 fn query_token(request: &Request) -> Option<String> {
     let query = request.uri().query()?;
     url::form_urlencoded::parse(query.as_bytes()).find_map(|(k, v)| {
         if k == "token" {
-            Some(v.into_owned())
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
         } else {
             None
         }
     })
+}
+
+pub(crate) fn extract_cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let cookie_header = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
+    cookie::Cookie::split_parse(cookie_header)
+        .filter_map(Result::ok)
+        .find(|cookie| cookie.name() == name)
+        .and_then(|cookie| {
+            let value = cookie.value_trimmed();
+            if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        })
 }
 
 /// Extract a bearer token from the Authorization header or query parameter.
@@ -910,12 +995,16 @@ fn extract_token(headers: &HeaderMap, request: &Request) -> Option<String> {
         return Some(value[7..].to_string());
     }
 
-    // Fall back to query parameter for SSE/WS endpoints.
-    if allows_query_token_auth(request) {
-        return query_token(request);
+    // Try query parameter for SSE/WS endpoints (explicit token always wins
+    // over cookie so `?token=B` is not silently overridden by cookie A).
+    if allows_query_token_auth(request)
+        && let Some(t) = query_token(request)
+    {
+        return Some(t);
     }
 
-    None
+    // Fall back to session cookie (for OAuth-authenticated browser sessions).
+    extract_cookie_value(headers, SESSION_COOKIE_NAME)
 }
 
 // ── Middleware ────────────────────────────────────────────────────────────
@@ -968,6 +1057,28 @@ pub async fn auth_middleware(
     {
         match validate_oidc_jwt(oidc, jwt).await {
             Ok(sub) => {
+                // Enforce email domain restriction if configured.
+                // Require a verified email — an unverified email could be
+                // set to any value and bypass the domain allowlist.
+                if !auth.oidc_allowed_domains.is_empty() {
+                    let (email, email_verified) = extract_oidc_email_claims(jwt);
+                    if !email_verified {
+                        tracing::warn!(sub = %sub, email = ?email, "OIDC login rejected: domain restriction requires verified email");
+                        return (
+                            StatusCode::FORBIDDEN,
+                            "Login requires a verified email address from an authorized domain."
+                                .to_string(),
+                        )
+                            .into_response();
+                    }
+                    if let Err(msg) = crate::channels::web::handlers::auth::check_email_domain(
+                        email.as_deref(),
+                        &auth.oidc_allowed_domains,
+                    ) {
+                        tracing::warn!(sub = %sub, error = %msg, "OIDC login rejected by domain restriction");
+                        return (StatusCode::FORBIDDEN, msg).into_response();
+                    }
+                }
                 tracing::debug!(sub = %sub, "OIDC auth succeeded");
                 let identity = UserIdentity {
                     user_id: sub,
@@ -1050,8 +1161,23 @@ mod tests {
         assert_eq!(identity.user_id, "user1");
     }
 
+    #[test]
+    fn test_extract_cookie_value_uses_cookie_parser() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            HeaderValue::from_static("other=\"quoted;value\"; ironclaw_session=abc123"),
+        );
+
+        assert_eq!(
+            extract_cookie_value(&headers, SESSION_COOKIE_NAME),
+            Some("abc123".to_string())
+        );
+    }
+
     use axum::Router;
     use axum::body::Body;
+    use axum::http::HeaderValue;
     use axum::middleware;
     use axum::routing::{get, post};
     use tower::ServiceExt;
@@ -1264,7 +1390,77 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    // ── OIDC unit tests ───────────────────────────────────────────���──────
+    // ── Cookie session tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_cookie_session_authenticates() {
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
+        let req = Request::builder()
+            .uri("/api/chat/history")
+            .header(
+                "Cookie",
+                format!("ironclaw_session={TEST_AUTH_SECRET_TOKEN}"),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_bearer_header_takes_priority_over_cookie() {
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
+        // Valid bearer header + invalid cookie → should succeed (header wins)
+        let req = Request::builder()
+            .uri("/api/chat/history")
+            .header("Authorization", format!("Bearer {TEST_AUTH_SECRET_TOKEN}"))
+            .header("Cookie", "ironclaw_session=wrong-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_empty_cookie_ignored() {
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
+        let req = Request::builder()
+            .uri("/api/chat/history")
+            .header("Cookie", "ironclaw_session=")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_cookie_among_multiple() {
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
+        let req = Request::builder()
+            .uri("/api/chat/history")
+            .header(
+                "Cookie",
+                format!("other=foo; ironclaw_session={TEST_AUTH_SECRET_TOKEN}; bar=baz"),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_wrong_cookie_name_ignored() {
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
+        let req = Request::builder()
+            .uri("/api/chat/history")
+            .header("Cookie", format!("other_cookie={TEST_AUTH_SECRET_TOKEN}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ── OIDC unit tests ──────────────────────────────────────────────────
 
     #[test]
     fn test_normalize_jwt_noop_for_rfc_compliant() {
@@ -1754,6 +1950,7 @@ mod tests {
             ),
             db_auth: None,
             oidc: Some(test_oidc_state().await),
+            oidc_allowed_domains: Vec::new(),
         }
     }
 
@@ -2065,14 +2262,12 @@ mod tests {
         assert!(result.is_err(), "wrong issuer should be rejected");
     }
 
-    /// Issuer configured but JWT omits `iss` entirely.
+    /// Issuer configured but JWT omits `iss` entirely → rejected.
     ///
-    /// Note: `jsonwebtoken` v9 only validates `iss` when present; a missing
-    /// `iss` claim passes validation. This test documents that behavior.
-    /// If we decide to enforce presence, add an explicit check in
-    /// `validate_oidc_jwt` after claim extraction.
+    /// We add `iss` to `required_spec_claims` when configured, so a JWT
+    /// missing the claim entirely is now rejected (not just mismatches).
     #[tokio::test]
-    async fn test_oidc_issuer_configured_but_missing_in_jwt_passes() {
+    async fn test_oidc_issuer_configured_but_missing_in_jwt_rejected() {
         let mut config = test_oidc_config();
         config.issuer = Some("https://idp.example.com".to_string());
         let oidc = test_oidc_state_with_config(config).await;
@@ -2081,10 +2276,9 @@ mod tests {
             Some(OIDC_KID),
         );
         let result = validate_oidc_jwt(&oidc, &jwt).await;
-        // jsonwebtoken allows missing iss — only rejects mismatches.
         assert!(
-            result.is_ok(),
-            "missing iss is not rejected by jsonwebtoken: {result:?}"
+            result.is_err(),
+            "missing iss should be rejected when issuer is configured"
         );
     }
 
@@ -2124,14 +2318,12 @@ mod tests {
         assert!(result.is_err(), "wrong audience should be rejected");
     }
 
-    /// Audience configured but JWT omits `aud` entirely.
+    /// Audience configured but JWT omits `aud` entirely → rejected.
     ///
-    /// Note: `jsonwebtoken` v9 only validates `aud` when present; a missing
-    /// `aud` claim passes validation even with `set_audience` called. This
-    /// test documents that behavior. If we need to enforce `aud` presence,
-    /// add an explicit check in `validate_oidc_jwt` after claim extraction.
+    /// We add `aud` to `required_spec_claims` when configured, so a JWT
+    /// missing the claim entirely is now rejected (not just mismatches).
     #[tokio::test]
-    async fn test_oidc_audience_configured_but_missing_in_jwt_passes() {
+    async fn test_oidc_audience_configured_but_missing_in_jwt_rejected() {
         let mut config = test_oidc_config();
         config.audience = Some("my-client-id".to_string());
         let oidc = test_oidc_state_with_config(config).await;
@@ -2140,10 +2332,9 @@ mod tests {
             Some(OIDC_KID),
         );
         let result = validate_oidc_jwt(&oidc, &jwt).await;
-        // jsonwebtoken allows missing aud — only rejects mismatches.
         assert!(
-            result.is_ok(),
-            "missing aud is not rejected by jsonwebtoken: {result:?}"
+            result.is_err(),
+            "missing aud should be rejected when audience is configured"
         );
     }
 
