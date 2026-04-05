@@ -15,10 +15,7 @@ on:
         default: false
 
 permissions:
-  contents: write
-  issues: write
-  pull-requests: write
-  checks: read
+  contents: read
 
 concurrency:
   group: staging-ci
@@ -29,6 +26,8 @@ jobs:
   resolve-promotion-base:
     name: Resolve promotion base
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       promotion_base: ${{ steps.resolve.outputs.promotion_base }}
     steps:
@@ -55,6 +54,8 @@ jobs:
     name: Check for new commits
     needs: resolve-promotion-base
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       has_changes: ${{ steps.check.outputs.has_changes }}
       current_head: ${{ steps.check.outputs.current_head }}
@@ -65,6 +66,7 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - name: Check for changes since last tested
         id: check
@@ -135,6 +137,9 @@ jobs:
     needs: [resolve-promotion-base, check-changes]
     if: needs.check-changes.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     outputs:
       pr_number: ${{ steps.create-pr.outputs.pr_number }}
       promotion_branch: ${{ steps.branch.outputs.branch }}
@@ -143,6 +148,7 @@ jobs:
         with:
           ref: ${{ needs.check-changes.outputs.current_head }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Generate GitHub App token
         id: app-token
@@ -251,6 +257,10 @@ jobs:
       needs.create-promotion-pr.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
     outputs:
       gate_passed: ${{ steps.evaluate.outputs.passed }}
     steps:
@@ -259,6 +269,7 @@ jobs:
           ref: staging
           # Need full history to recompute the final promoted range before merge.
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Generate GitHub App token
         id: app-token
@@ -493,11 +504,14 @@ jobs:
       needs.e2e.result == 'success' &&
       needs.create-promotion-pr.result == 'success'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: staging
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Update staging-tested tag
         run: |
@@ -511,6 +525,8 @@ jobs:
     needs: [check-changes, tests, e2e, create-promotion-pr, gate, update-tag]
     if: always() && needs.check-changes.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Summary
         run: |

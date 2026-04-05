@@ -34,6 +34,7 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.event.pull_request.base.ref }}
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - name: Update release-plz PR body with staging batch summary
         env:
