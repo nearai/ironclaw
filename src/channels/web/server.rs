@@ -33,7 +33,7 @@ use crate::channels::relay::DEFAULT_RELAY_NAME;
 use crate::channels::web::auth::{
     AuthenticatedUser, CombinedAuthState, UserIdentity, auth_middleware,
 };
-use crate::channels::web::handlers::chat::{ChatEventsQuery, extract_last_event_id};
+use crate::channels::web::handlers::chat::chat_events_handler;
 use crate::channels::web::handlers::jobs::{
     job_files_list_handler, job_files_read_handler, jobs_cancel_handler, jobs_detail_handler,
     jobs_events_handler, jobs_list_handler, jobs_prompt_handler, jobs_restart_handler,
@@ -1717,25 +1717,6 @@ pub async fn clear_auth_mode(state: &GatewayState, user_id: &str) {
             thread.pending_auth = None;
         }
     }
-}
-
-async fn chat_events_handler(
-    Query(params): Query<ChatEventsQuery>,
-    headers: axum::http::HeaderMap,
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let sse = state
-        .sse
-        .subscribe(Some(user.user_id), extract_last_event_id(&params, &headers))
-        .ok_or((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Too many connections".to_string(),
-        ))?;
-    Ok((
-        [("X-Accel-Buffering", "no"), ("Cache-Control", "no-cache")],
-        sse,
-    ))
 }
 
 /// Check whether an Origin header value points to a local address.

@@ -68,10 +68,12 @@ impl SseManager {
     /// This preserves the broadcast channel across `rebuild_state` calls so
     /// that sender handles captured by other components remain valid.
     ///
-    /// **Important:** The connection counter is reset to zero. This method must
-    /// only be called before the server starts accepting connections (i.e.,
-    /// during startup wiring). Calling it after connections are established
-    /// will break connection tracking and allow exceeding `MAX_CONNECTIONS`.
+    /// **Important:** The connection counter is reset to zero and a fresh
+    /// `boot_id` is generated (resetting the event-ID sequence). This method
+    /// must only be called before the server starts accepting connections
+    /// (i.e., during startup wiring). Calling it after connections are
+    /// established will break connection tracking, allow exceeding
+    /// `max_connections`, and invalidate event-ID dedup for connected clients.
     pub(crate) fn from_sender(tx: broadcast::Sender<ScopedEvent>, max_connections: u64) -> Self {
         Self {
             tx,
