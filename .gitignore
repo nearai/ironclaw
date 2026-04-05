@@ -1,4 +1,6 @@
 
+docs
+.tools
 .env
 .env.local
 .env.*
