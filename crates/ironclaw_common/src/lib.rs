@@ -5,7 +5,7 @@ mod timezone;
 mod util;
 
 pub use event::{AppEvent, PlanStepDto, ToolDecisionDto};
-pub use timezone::ValidTimezone;
+pub use timezone::{ValidTimezone, deserialize_option_lenient};
 pub use util::truncate_preview;
 
 /// Maximum worker agent loop iterations. Used by the orchestrator (server-side

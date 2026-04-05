@@ -78,14 +78,36 @@ impl MissionManager {
     }
 
     /// Populate the active mission index from persisted mission state.
+    ///
+    /// Also backfills `next_fire_at` for active cron missions created before
+    /// the scheduling fix — without this, legacy cron missions would remain
+    /// stuck with `next_fire_at = None` and never fire.
     pub async fn bootstrap_project(&self, project_id: ProjectId) -> Result<usize, EngineError> {
         // System operation: load all missions for the project regardless of user.
         let missions = self.store.list_all_missions(project_id).await?;
-        let active_ids: Vec<MissionId> = missions
-            .into_iter()
-            .filter(|mission| mission.status == MissionStatus::Active)
-            .map(|mission| mission.id)
-            .collect();
+        let mut active_ids = Vec::new();
+
+        for mission in missions {
+            if mission.status != MissionStatus::Active {
+                continue;
+            }
+            // Backfill next_fire_at for cron missions that predate the scheduling fix.
+            if let MissionCadence::Cron {
+                ref expression,
+                ref timezone,
+            } = mission.cadence
+            {
+                if mission.next_fire_at.is_none() {
+                    if let Ok(Some(next)) = next_cron_fire(expression, timezone.as_ref()) {
+                        let mut patched = mission.clone();
+                        patched.next_fire_at = Some(next);
+                        let _ = self.store.save_mission(&patched).await;
+                        debug!(mission_id = %mission.id, next = %next, "backfilled next_fire_at for legacy cron mission");
+                    }
+                }
+            }
+            active_ids.push(mission.id);
+        }
 
         let count = active_ids.len();
         *self.active.write().await = active_ids;

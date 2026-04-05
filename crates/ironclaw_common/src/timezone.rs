@@ -51,6 +51,18 @@ impl<'de> Deserialize<'de> for ValidTimezone {
     }
 }
 
+/// Lenient deserializer for `Option<ValidTimezone>`.
+///
+/// Use with `#[serde(default, deserialize_with = "...")]` on fields that may
+/// contain invalid timezone strings from historical data. Invalid or empty
+/// values deserialize as `None` instead of failing the whole record.
+pub fn deserialize_option_lenient<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ValidTimezone>, D::Error> {
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(opt.as_deref().and_then(ValidTimezone::parse))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +104,49 @@ mod tests {
     fn deserialize_invalid_fails() {
         let result: Result<ValidTimezone, _> = serde_json::from_str("\"NotReal\"");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn lenient_deserialize_valid() {
+        #[derive(serde::Deserialize)]
+        struct T {
+            #[serde(default, deserialize_with = "super::deserialize_option_lenient")]
+            tz: Option<ValidTimezone>,
+        }
+        let t: T = serde_json::from_str(r#"{"tz":"America/Chicago"}"#).unwrap();
+        assert_eq!(t.tz.unwrap().name(), "America/Chicago");
+    }
+
+    #[test]
+    fn lenient_deserialize_invalid_becomes_none() {
+        #[derive(serde::Deserialize)]
+        struct T {
+            #[serde(default, deserialize_with = "super::deserialize_option_lenient")]
+            tz: Option<ValidTimezone>,
+        }
+        let t: T = serde_json::from_str(r#"{"tz":"NotReal"}"#).unwrap();
+        assert!(t.tz.is_none(), "invalid timezone should become None");
+    }
+
+    #[test]
+    fn lenient_deserialize_null_becomes_none() {
+        #[derive(serde::Deserialize)]
+        struct T {
+            #[serde(default, deserialize_with = "super::deserialize_option_lenient")]
+            tz: Option<ValidTimezone>,
+        }
+        let t: T = serde_json::from_str(r#"{"tz":null}"#).unwrap();
+        assert!(t.tz.is_none());
+    }
+
+    #[test]
+    fn lenient_deserialize_missing_becomes_none() {
+        #[derive(serde::Deserialize)]
+        struct T {
+            #[serde(default, deserialize_with = "super::deserialize_option_lenient")]
+            tz: Option<ValidTimezone>,
+        }
+        let t: T = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(t.tz.is_none());
     }
 }

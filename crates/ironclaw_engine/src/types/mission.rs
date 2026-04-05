@@ -63,6 +63,10 @@ pub enum MissionCadence {
     /// Spawn on a cron schedule (e.g., "0 */6 * * *" for every 6 hours).
     Cron {
         expression: String,
+        #[serde(
+            default,
+            deserialize_with = "ironclaw_common::deserialize_option_lenient"
+        )]
         timezone: Option<ValidTimezone>,
     },
     /// Spawn in response to a channel message matching a pattern.
