@@ -2703,8 +2703,8 @@ impl ExtensionManager {
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
 
-            let is_wasm = filename == wasm_filename
-                || alias_wasm.as_deref().is_some_and(|a| filename == a);
+            let is_wasm =
+                filename == wasm_filename || alias_wasm.as_deref().is_some_and(|a| filename == a);
             if is_wasm {
                 let mut data = Vec::with_capacity(entry.size() as usize);
                 std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)

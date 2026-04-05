@@ -773,8 +773,7 @@ fn extract_tar_gz(
                 })?;
             std::fs::write(target_wasm, &data).map_err(RegistryError::Io)?;
             found_wasm = true;
-        } else if filename == caps_filename
-            || alias_caps.as_deref().is_some_and(|a| filename == a)
+        } else if filename == caps_filename || alias_caps.as_deref().is_some_and(|a| filename == a)
         {
             let mut data = Vec::with_capacity(entry.size() as usize);
             std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
