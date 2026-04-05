@@ -81,7 +81,6 @@ impl From<ContainerOutput> for ExecOutput {
     }
 }
 
-/// Main sandbox manager.
 /// State for a persistent session container.
 #[derive(Clone)]
 struct SessionContainer {
@@ -90,6 +89,7 @@ struct SessionContainer {
     base_cwd: PathBuf,
 }
 
+/// Main sandbox manager.
 pub struct SandboxManager {
     config: SandboxConfig,
     proxy: Arc<RwLock<Option<HttpProxy>>>,
@@ -263,46 +263,14 @@ impl SandboxManager {
 
         // Persistent mode: reuse a long-lived session container.
         if self.config.persistent {
-            return self.execute_in_session_container(command, cwd, env).await;
+            return self
+                .retry_transient(|| self.execute_in_session_container(command, cwd, env.clone()))
+                .await;
         }
 
-        // Retry transient container failures (Docker daemon glitches, container
-        // creation races) up to MAX_SANDBOX_RETRIES times with exponential backoff.
-        const MAX_SANDBOX_RETRIES: u32 = 2;
-        let mut last_err: Option<SandboxError> = None;
-
-        for attempt in 0..=MAX_SANDBOX_RETRIES {
-            if attempt > 0 {
-                let delay = std::time::Duration::from_secs(1 << attempt); // 2s, 4s
-                tracing::warn!(
-                    attempt = attempt + 1,
-                    max_attempts = MAX_SANDBOX_RETRIES + 1,
-                    delay_secs = delay.as_secs(),
-                    "Retrying sandbox execution after transient failure"
-                );
-                tokio::time::sleep(delay).await;
-            }
-
-            match self
-                .try_execute_in_container(command, cwd, policy, env.clone())
-                .await
-            {
-                Ok(output) => return Ok(output),
-                Err(e) if is_transient_sandbox_error(&e) => {
-                    tracing::warn!(
-                        attempt = attempt + 1,
-                        error = %e,
-                        "Transient sandbox error, will retry"
-                    );
-                    last_err = Some(e);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        Err(last_err.unwrap_or_else(|| SandboxError::ExecutionFailed {
-            reason: "all retry attempts exhausted".to_string(),
-        }))
+        // Ephemeral mode: one container per command, with transient retry.
+        self.retry_transient(|| self.try_execute_in_container(command, cwd, policy, env.clone()))
+            .await
     }
 
     /// Single attempt at container execution (no retry logic).
@@ -443,6 +411,46 @@ impl SandboxManager {
         }
     }
 
+    /// Retry an async operation on transient sandbox errors with exponential backoff.
+    async fn retry_transient<F, Fut>(&self, mut op: F) -> Result<ExecOutput>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<ExecOutput>>,
+    {
+        const MAX_RETRIES: u32 = 2;
+        let mut last_err: Option<SandboxError> = None;
+
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                let delay = Duration::from_secs(1 << attempt); // 2s, 4s
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    max_attempts = MAX_RETRIES + 1,
+                    delay_secs = delay.as_secs(),
+                    "Retrying sandbox execution after transient failure"
+                );
+                tokio::time::sleep(delay).await;
+            }
+
+            match op().await {
+                Ok(output) => return Ok(output),
+                Err(e) if is_transient_sandbox_error(&e) => {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        error = %e,
+                        "Transient sandbox error, will retry"
+                    );
+                    last_err = Some(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| SandboxError::ExecutionFailed {
+            reason: "all retry attempts exhausted".to_string(),
+        }))
+    }
+
     async fn make_runner(&self) -> Result<ContainerRunner> {
         let docker = self.require_docker().await?;
         let proxy_port = self.proxy_port().await.unwrap_or(0);
@@ -558,18 +566,30 @@ impl SandboxManager {
         let runner = self.make_runner().await?;
         let limits = self.resource_limits();
 
-        // Map host cwd to container path. The container mounts base_cwd at /workspace,
-        // so a host path like /home/user/project/src becomes /workspace/src.
-        let working_dir = cwd
-            .strip_prefix(&session.base_cwd)
-            .map(|rel| format!("/workspace/{}", rel.display()))
-            .unwrap_or_else(|_| "/workspace".to_string());
+        let working_dir = map_host_to_container_path(cwd, &session.base_cwd);
 
         let container_output = runner
             .exec_in_container(&session.id, command, &working_dir, &limits, &env_vec)
             .await?;
         Ok(container_output.into())
     }
+}
+
+/// Map a host cwd to a container working directory relative to `/workspace`.
+///
+/// The container mounts `base_cwd` at `/workspace`, so a host path like
+/// `/home/user/project/src` becomes `/workspace/src`. Paths outside `base_cwd`
+/// fall back to `/workspace`.
+fn map_host_to_container_path(cwd: &Path, base_cwd: &Path) -> String {
+    cwd.strip_prefix(base_cwd)
+        .map(|rel| {
+            if rel.as_os_str().is_empty() {
+                "/workspace".to_string()
+            } else {
+                format!("/workspace/{}", rel.display())
+            }
+        })
+        .unwrap_or_else(|_| "/workspace".to_string())
 }
 
 impl Drop for SandboxManager {
@@ -919,33 +939,24 @@ mod tests {
     fn working_dir_mapping_subdirectory() {
         let base = PathBuf::from("/home/user/project");
         let cwd = PathBuf::from("/home/user/project/src/lib");
-        let working_dir = cwd
-            .strip_prefix(&base)
-            .map(|rel| format!("/workspace/{}", rel.display()))
-            .unwrap_or_else(|_| "/workspace".to_string());
-        assert_eq!(working_dir, "/workspace/src/lib");
+        assert_eq!(
+            super::map_host_to_container_path(&cwd, &base),
+            "/workspace/src/lib"
+        );
     }
 
     #[test]
     fn working_dir_mapping_exact_match() {
         let base = PathBuf::from("/home/user/project");
         let cwd = PathBuf::from("/home/user/project");
-        let working_dir = cwd
-            .strip_prefix(&base)
-            .map(|rel| format!("/workspace/{}", rel.display()))
-            .unwrap_or_else(|_| "/workspace".to_string());
-        assert_eq!(working_dir, "/workspace/");
+        assert_eq!(super::map_host_to_container_path(&cwd, &base), "/workspace");
     }
 
     #[test]
     fn working_dir_mapping_outside_base() {
         let base = PathBuf::from("/home/user/project");
         let cwd = PathBuf::from("/tmp/other");
-        let working_dir = cwd
-            .strip_prefix(&base)
-            .map(|rel| format!("/workspace/{}", rel.display()))
-            .unwrap_or_else(|_| "/workspace".to_string());
-        assert_eq!(working_dir, "/workspace");
+        assert_eq!(super::map_host_to_container_path(&cwd, &base), "/workspace");
     }
 
     #[test]

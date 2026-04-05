@@ -121,12 +121,7 @@ impl SandboxModeConfig {
             });
 
         let extra_env = optional_env("SANDBOX_EXTRA_ENV")?
-            .map(|s| {
-                s.split(',')
-                    .map(|e| e.trim().to_string())
-                    .filter(|e| !e.is_empty())
-                    .collect()
-            })
+            .map(|s| split_env_entries(&s))
             .unwrap_or_else(|| ss.extra_env.clone());
 
         Ok(Self {
@@ -392,6 +387,33 @@ impl ClaudeCodeConfig {
                 .unwrap_or(defaults.allowed_tools),
         })
     }
+}
+
+/// Split an env-var list on commas, but only when the comma separates
+/// two `KEY=value` entries. A comma inside a value (e.g., `FOO=a,b`)
+/// is preserved.
+fn split_env_entries(input: &str) -> Vec<String> {
+    let mut entries = Vec::new();
+    let mut current = String::new();
+
+    let mut push_trimmed = |s: &str| {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            entries.push(trimmed.to_string());
+        }
+    };
+
+    for part in input.split(',') {
+        if current.is_empty() || part.contains('=') {
+            push_trimmed(&current);
+            current = part.to_string();
+        } else {
+            current.push(',');
+            current.push_str(part);
+        }
+    }
+    push_trimmed(&current);
+    entries
 }
 
 /// Expand leading `~` in a volume spec to the given home directory.
@@ -949,5 +971,35 @@ mod tests {
     fn expand_tilde_ignores_tilde_user_syntax() {
         let spec = "~otheruser/.ssh:/data:ro";
         assert_eq!(expand_tilde(spec, "/home/me"), spec);
+    }
+
+    // ── split_env_entries tests ────────────────────────────────────
+
+    #[test]
+    fn split_env_entries_basic() {
+        assert_eq!(
+            split_env_entries("FOO=bar,BAZ=qux"),
+            vec!["FOO=bar", "BAZ=qux"]
+        );
+    }
+
+    #[test]
+    fn split_env_entries_comma_in_value() {
+        assert_eq!(split_env_entries("FOO=a,b,BAZ=c"), vec!["FOO=a,b", "BAZ=c"]);
+    }
+
+    #[test]
+    fn split_env_entries_trailing_commas_in_value() {
+        assert_eq!(split_env_entries("FOO=a,b,c"), vec!["FOO=a,b,c"]);
+    }
+
+    #[test]
+    fn split_env_entries_empty() {
+        assert!(split_env_entries("").is_empty());
+    }
+
+    #[test]
+    fn split_env_entries_single() {
+        assert_eq!(split_env_entries("SINGLE=val"), vec!["SINGLE=val"]);
     }
 }

@@ -388,7 +388,48 @@ impl ContainerRunner {
                 Ok(output)
             }
             Ok(Err(e)) => Err(e),
-            Err(_) => Err(SandboxError::Timeout(limits.timeout)),
+            Err(_) => {
+                // Best-effort: kill the orphaned exec process.
+                self.try_kill_exec(container_id, &exec.id).await;
+                Err(SandboxError::Timeout(limits.timeout))
+            }
+        }
+    }
+
+    /// Best-effort cleanup of a timed-out exec process.
+    ///
+    /// Docker has no "kill exec" API, so we inspect the exec to get its
+    /// PID inside the container, then send SIGKILL via a lightweight exec.
+    async fn try_kill_exec(&self, container_id: &str, exec_id: &str) {
+        let pid = match self.docker.inspect_exec(exec_id).await {
+            Ok(info) => info.pid.unwrap_or(0),
+            Err(e) => {
+                tracing::warn!(exec_id, error = %e, "Failed to inspect timed-out exec");
+                return;
+            }
+        };
+        if pid == 0 {
+            return; // Already exited or PID not available
+        }
+        let pid_str = pid.to_string();
+        let kill_exec = self
+            .docker
+            .create_exec(
+                container_id,
+                CreateExecOptions {
+                    cmd: Some(vec!["kill", "-9", &pid_str]),
+                    ..Default::default()
+                },
+            )
+            .await;
+        match kill_exec {
+            Ok(exec) => {
+                let _ = self.docker.start_exec(&exec.id, None).await;
+                tracing::warn!(exec_id, pid, "Killed orphaned exec process after timeout");
+            }
+            Err(e) => {
+                tracing::warn!(exec_id, pid, error = %e, "Failed to kill orphaned exec process");
+            }
         }
     }
 
