@@ -150,7 +150,7 @@ static NEVER_AUTO_APPROVE_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(
 /// prevent API keys and secrets from leaking through `env`, `printenv`, or child
 /// process inheritance (CWE-200). Only these well-known OS/toolchain variables
 /// are forwarded.
-const SAFE_ENV_VARS: &[&str] = &[
+pub(crate) const SAFE_ENV_VARS: &[&str] = &[
     // Core OS
     "PATH",
     "HOME",

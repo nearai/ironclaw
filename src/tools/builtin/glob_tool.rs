@@ -101,9 +101,13 @@ impl Tool for GlobTool {
                 "Absolute glob patterns are not allowed. Use the 'path' parameter to set the search root.".to_string(),
             ));
         }
-        if pattern.contains("..") {
+        if std::path::Path::new(pattern)
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
             return Err(ToolError::InvalidParameters(
-                "Glob patterns containing '..' are not allowed.".to_string(),
+                "Glob patterns containing parent directory traversal ('..') are not allowed."
+                    .to_string(),
             ));
         }
 

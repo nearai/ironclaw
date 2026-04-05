@@ -27,6 +27,8 @@ const DEFAULT_MAX_SNAPSHOTS: usize = 50;
 pub struct FileSnapshot {
     /// Unique snapshot ID.
     pub id: Uuid,
+    /// Job/session that created this snapshot.
+    pub job_id: Uuid,
     /// Absolute path to the file.
     pub path: PathBuf,
     /// File content before the modification (raw bytes for binary support).
@@ -75,6 +77,7 @@ impl FileHistory {
     /// exist, no snapshot is created (returns `Ok(None)`).
     pub async fn snapshot(
         &mut self,
+        job_id: Uuid,
         path: &Path,
         tool_name: &str,
         turn_number: usize,
@@ -95,6 +98,7 @@ impl FileHistory {
         let id = Uuid::new_v4();
         let snapshot = FileSnapshot {
             id,
+            job_id,
             path: path.to_path_buf(),
             content_before: content,
             timestamp: Utc::now(),
@@ -112,23 +116,37 @@ impl FileHistory {
         Ok(Some(id))
     }
 
-    /// Get the most recent snapshot for a file path.
-    pub fn latest_snapshot_for(&self, path: &Path) -> Option<&FileSnapshot> {
-        self.snapshots.iter().rev().find(|s| s.path == path)
+    /// Get the most recent snapshot for a file path within a specific job.
+    pub fn latest_snapshot_for(&self, job_id: Uuid, path: &Path) -> Option<&FileSnapshot> {
+        self.snapshots
+            .iter()
+            .rev()
+            .find(|s| s.job_id == job_id && s.path == path)
     }
 
-    /// Get all snapshots for a file path, newest first.
-    pub fn snapshots_for(&self, path: &Path) -> Vec<&FileSnapshot> {
-        let mut result: Vec<_> = self.snapshots.iter().filter(|s| s.path == path).collect();
+    /// Get all snapshots for a file path within a specific job, newest first.
+    pub fn snapshots_for(&self, job_id: Uuid, path: &Path) -> Vec<&FileSnapshot> {
+        let mut result: Vec<_> = self
+            .snapshots
+            .iter()
+            .filter(|s| s.job_id == job_id && s.path == path)
+            .collect();
         result.reverse();
         result
     }
 
-    /// Restore a file to its most recent snapshot and remove that snapshot.
+    /// Restore a file to its most recent snapshot within the given job and remove it.
     ///
     /// Returns the snapshot that was restored, or `None` if no snapshot exists.
-    pub async fn restore_latest(&mut self, path: &Path) -> Result<Option<FileSnapshot>, ToolError> {
-        let idx = self.snapshots.iter().rposition(|s| s.path == path);
+    pub async fn restore_latest(
+        &mut self,
+        job_id: Uuid,
+        path: &Path,
+    ) -> Result<Option<FileSnapshot>, ToolError> {
+        let idx = self
+            .snapshots
+            .iter()
+            .rposition(|s| s.job_id == job_id && s.path == path);
 
         let Some(idx) = idx else {
             return Ok(None);
@@ -219,7 +237,7 @@ impl Tool for FileUndoTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let path_str = require_str(&params, "path")?;
         let start = std::time::Instant::now();
@@ -227,7 +245,7 @@ impl Tool for FileUndoTool {
         let path = validate_path(path_str, self.base_dir.as_deref())?;
 
         let mut history = self.history.write().await;
-        let restored = history.restore_latest(&path).await?;
+        let restored = history.restore_latest(ctx.job_id, &path).await?;
 
         match restored {
             Some(snapshot) => {
@@ -270,17 +288,22 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn test_job_id() -> Uuid {
+        Uuid::new_v4()
+    }
+
     #[tokio::test]
     async fn test_snapshot_and_restore() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("test.txt");
         std::fs::write(&file_path, "original content").unwrap();
+        let job = test_job_id();
 
         let mut history = FileHistory::new();
 
         // Take snapshot
         let id = history
-            .snapshot(&file_path, "apply_patch", 1)
+            .snapshot(job, &file_path, "apply_patch", 1)
             .await
             .unwrap();
         assert!(id.is_some());
@@ -289,7 +312,7 @@ mod tests {
         std::fs::write(&file_path, "modified content").unwrap();
 
         // Restore
-        let restored = history.restore_latest(&file_path).await.unwrap();
+        let restored = history.restore_latest(job, &file_path).await.unwrap();
         assert!(restored.is_some());
         let snapshot = restored.unwrap();
         assert_eq!(snapshot.tool_name, "apply_patch");
@@ -305,29 +328,30 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("test.txt");
         std::fs::write(&file_path, "v1").unwrap();
+        let job = test_job_id();
 
         let mut history = FileHistory::new();
         history
-            .snapshot(&file_path, "apply_patch", 1)
+            .snapshot(job, &file_path, "apply_patch", 1)
             .await
             .unwrap();
 
         std::fs::write(&file_path, "v2").unwrap();
         history
-            .snapshot(&file_path, "apply_patch", 2)
+            .snapshot(job, &file_path, "apply_patch", 2)
             .await
             .unwrap();
 
         std::fs::write(&file_path, "v3").unwrap();
 
         // Restore should go to v2 (latest snapshot)
-        let restored = history.restore_latest(&file_path).await.unwrap();
+        let restored = history.restore_latest(job, &file_path).await.unwrap();
         assert!(restored.is_some());
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "v2");
 
         // Restore again should go to v1
-        let restored = history.restore_latest(&file_path).await.unwrap();
+        let restored = history.restore_latest(job, &file_path).await.unwrap();
         assert!(restored.is_some());
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "v1");
@@ -337,11 +361,15 @@ mod tests {
     async fn test_max_snapshots_eviction() {
         let dir = TempDir::new().unwrap();
         let mut history = FileHistory::with_max_snapshots(3);
+        let job = test_job_id();
 
         for i in 0..5 {
             let file_path = dir.path().join(format!("file{}.txt", i));
             std::fs::write(&file_path, format!("content {}", i)).unwrap();
-            history.snapshot(&file_path, "write_file", i).await.unwrap();
+            history
+                .snapshot(job, &file_path, "write_file", i)
+                .await
+                .unwrap();
         }
 
         // Should only keep 3 most recent
@@ -349,20 +377,24 @@ mod tests {
 
         // Oldest (file0, file1) should be gone
         let file0 = dir.path().join("file0.txt");
-        assert!(history.latest_snapshot_for(&file0).is_none());
+        assert!(history.latest_snapshot_for(job, &file0).is_none());
 
         // Newest (file4) should still be there
         let file4 = dir.path().join("file4.txt");
-        assert!(history.latest_snapshot_for(&file4).is_some());
+        assert!(history.latest_snapshot_for(job, &file4).is_some());
     }
 
     #[tokio::test]
     async fn test_snapshot_nonexistent_file() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("does_not_exist.txt");
+        let job = test_job_id();
 
         let mut history = FileHistory::new();
-        let id = history.snapshot(&file_path, "write_file", 1).await.unwrap();
+        let id = history
+            .snapshot(job, &file_path, "write_file", 1)
+            .await
+            .unwrap();
 
         // No snapshot created for non-existent files
         assert!(id.is_none());
@@ -373,24 +405,25 @@ mod tests {
     async fn test_restore_to_specific_turn() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("test.txt");
+        let job = test_job_id();
 
         std::fs::write(&file_path, "turn1").unwrap();
         let mut history = FileHistory::new();
         history
-            .snapshot(&file_path, "apply_patch", 1)
+            .snapshot(job, &file_path, "apply_patch", 1)
             .await
             .unwrap();
 
         std::fs::write(&file_path, "turn2").unwrap();
         history
-            .snapshot(&file_path, "apply_patch", 2)
+            .snapshot(job, &file_path, "apply_patch", 2)
             .await
             .unwrap();
 
         std::fs::write(&file_path, "turn3").unwrap();
 
         // Get all snapshots for the file
-        let snapshots = history.snapshots_for(&file_path);
+        let snapshots = history.snapshots_for(job, &file_path);
         assert_eq!(snapshots.len(), 2);
         assert_eq!(snapshots[0].turn_number, 2); // newest first
         assert_eq!(snapshots[1].turn_number, 1);
@@ -403,17 +436,20 @@ mod tests {
         std::fs::write(&file_path, "fn main() {}").unwrap();
 
         let history = shared_file_history();
+        let ctx = JobContext::default();
 
         // Simulate a modification with snapshot
         {
             let mut h = history.write().await;
-            h.snapshot(&file_path, "apply_patch", 1).await.unwrap();
+            h.snapshot(ctx.job_id, &file_path, "apply_patch", 1)
+                .await
+                .unwrap();
         }
         std::fs::write(&file_path, "fn main() { println!(\"hello\"); }").unwrap();
 
         let tool = FileUndoTool::new(Arc::clone(&history)).with_base_dir(dir.path().to_path_buf());
-        let ctx = JobContext::default();
 
+        // Reuse the same ctx so file_undo sees the same job_id as the snapshot
         let result = tool
             .execute(
                 serde_json::json!({"path": file_path.to_str().unwrap()}),
@@ -456,11 +492,14 @@ mod tests {
         std::fs::write(&file_path, original).unwrap();
 
         let history = shared_file_history();
+        let ctx = JobContext::default();
 
         // Step 1: Snapshot before "patching"
         {
             let mut h = history.write().await;
-            h.snapshot(&file_path, "apply_patch", 1).await.unwrap();
+            h.snapshot(ctx.job_id, &file_path, "apply_patch", 1)
+                .await
+                .unwrap();
         }
 
         // Step 2: Simulate patch
@@ -471,9 +510,8 @@ mod tests {
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, modified);
 
-        // Step 4: Undo via tool
+        // Step 4: Undo via tool (reuse same ctx so job_id matches)
         let tool = FileUndoTool::new(Arc::clone(&history)).with_base_dir(dir.path().to_path_buf());
-        let ctx = JobContext::default();
 
         let result = tool
             .execute(

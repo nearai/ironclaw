@@ -137,7 +137,7 @@ impl Tool for ReadFileTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let path_str = require_str(&params, "path")?;
 
@@ -176,7 +176,8 @@ impl Tool for ReadFileTool {
             )));
         }
 
-        // Binary file detection: read first 8KB and check for null bytes
+        // Binary file detection: read first 8KB and check for null bytes,
+        // but skip the check for UTF-16LE files (which legitimately contain null bytes).
         {
             let probe_size = 8192u64.min(metadata.len()) as usize;
             if probe_size > 0 {
@@ -188,7 +189,8 @@ impl Tool for ReadFileTool {
                     .read(&mut probe)
                     .await
                     .map_err(|e| ToolError::ExecutionFailed(format!("Cannot read file: {}", e)))?;
-                if probe[..n].contains(&0) {
+                let is_utf16le = n >= 2 && probe[0] == 0xFF && probe[1] == 0xFE;
+                if !is_utf16le && probe[..n].contains(&0) {
                     return Err(ToolError::ExecutionFailed(format!(
                         "File appears to be binary (contains null bytes): {}",
                         path.display()
@@ -197,10 +199,9 @@ impl Tool for ReadFileTool {
             }
         }
 
-        // Read file
-        let content = fs::read_to_string(&path)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read file: {}", e)))?;
+        // Read file using encoding-aware path (handles UTF-16LE with BOM)
+        let (content, _encoding, _line_ending) =
+            file_edit_guard::read_file_with_encoding(&path).await?;
 
         // Apply offset and limit
         let lines: Vec<&str> = content.lines().collect();
@@ -227,12 +228,15 @@ impl Tool for ReadFileTool {
             .map(|(i, line)| format!("{:>6}│ {}", start_line + i + 1, line))
             .collect();
 
-        // Record the read for staleness detection
+        // Record the read for staleness detection.
+        // Mark as partial when the user provided an explicit range OR the default
+        // 2000-line cap truncated the output — either way the caller hasn't seen
+        // the full file, so edits should require a full read first.
         if let Some(ref read_state) = self.read_state {
             let mtime = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
-            let partial = has_explicit_range;
+            let partial = has_explicit_range || truncated_by_default;
             let mut state = read_state.write().await;
-            state.record_read(&path, mtime, partial);
+            state.record_read(ctx.job_id, &path, mtime, partial);
         }
 
         let result = serde_json::json!({
@@ -321,7 +325,7 @@ impl Tool for WriteFileTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let path_str = require_str(&params, "path")?;
 
@@ -349,7 +353,9 @@ impl Tool for WriteFileTool {
 
         let path = validate_path(path_str, self.base_dir.as_deref())?;
 
-        // Check read-before-write guard (only for existing files — new files are fine)
+        // Staleness check for existing files — log a warning but don't hard-fail.
+        // write_file replaces the entire file content, so the risk of overwriting
+        // unseen content is lower than apply_patch (which does substring replacement).
         if path.exists()
             && let Some(ref read_state) = self.read_state
         {
@@ -358,13 +364,15 @@ impl Tool for WriteFileTool {
                 .and_then(|m| m.modified())
                 .unwrap_or(std::time::UNIX_EPOCH);
             let state = read_state.read().await;
-            state.check_before_edit(&path, current_mtime)?;
+            if let Err(e) = state.check_before_edit(ctx.job_id, &path, current_mtime) {
+                tracing::debug!("write_file staleness warning: {}", e);
+            }
         }
 
         // Snapshot existing file before overwriting (for file_undo)
         if let Some(ref history) = self.file_history {
             let mut h = history.write().await;
-            if let Err(e) = h.snapshot(&path, "write_file", 0).await {
+            if let Err(e) = h.snapshot(ctx.job_id, &path, "write_file", 0).await {
                 tracing::debug!("file_history snapshot failed before write_file: {}", e);
             }
         }
@@ -387,7 +395,7 @@ impl Tool for WriteFileTool {
             && let Ok(mtime) = m.modified()
         {
             let mut state = read_state.write().await;
-            state.update_mtime(&path, mtime);
+            state.update_mtime(ctx.job_id, &path, mtime);
         }
 
         let result = serde_json::json!({
@@ -679,7 +687,7 @@ impl Tool for ApplyPatchTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let path_str = require_str(&params, "path")?;
 
@@ -727,7 +735,7 @@ impl Tool for ApplyPatchTool {
         if let Some(ref read_state) = self.read_state {
             let current_mtime = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
             let state = read_state.read().await;
-            state.check_before_edit(&path, current_mtime)?;
+            state.check_before_edit(ctx.job_id, &path, current_mtime)?;
         }
 
         // Read current content with encoding detection
@@ -778,7 +786,7 @@ impl Tool for ApplyPatchTool {
         // Snapshot before modification (for file_undo)
         if let Some(ref history) = self.file_history {
             let mut h = history.write().await;
-            if let Err(e) = h.snapshot(&path, "apply_patch", 0).await {
+            if let Err(e) = h.snapshot(ctx.job_id, &path, "apply_patch", 0).await {
                 tracing::debug!("file_history snapshot failed before apply_patch: {}", e);
             }
         }
@@ -802,7 +810,7 @@ impl Tool for ApplyPatchTool {
             && let Ok(mtime) = m.modified()
         {
             let mut state = read_state.write().await;
-            state.update_mtime(&path, mtime);
+            state.update_mtime(ctx.job_id, &path, mtime);
         }
 
         let mut result = serde_json::json!({

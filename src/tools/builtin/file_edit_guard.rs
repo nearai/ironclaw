@@ -13,16 +13,20 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use crate::tools::tool::ToolError;
 
 // ── Read-state tracker ───────────────────────────────────────────────
 
-/// Tracks files that have been read, along with their mtime at read time.
+/// Tracks files that have been read per job/session, along with their mtime.
+///
+/// State is keyed by `job_id` so that concurrent sessions sharing the same
+/// registry do not leak read-state across job boundaries.
 #[derive(Debug, Default)]
 pub struct ReadFileState {
-    /// Maps canonical path → mtime at read time.
-    entries: HashMap<PathBuf, ReadEntry>,
+    /// Maps (job_id, canonical path) → mtime at read time.
+    entries: HashMap<(Uuid, PathBuf), ReadEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -38,20 +42,22 @@ impl ReadFileState {
         Self::default()
     }
 
-    /// Record that a file was read.
-    pub fn record_read(&mut self, path: &Path, mtime: SystemTime, partial: bool) {
+    /// Record that a file was read within a specific job.
+    pub fn record_read(&mut self, job_id: Uuid, path: &Path, mtime: SystemTime, partial: bool) {
         self.entries
-            .insert(path.to_path_buf(), ReadEntry { mtime, partial });
+            .insert((job_id, path.to_path_buf()), ReadEntry { mtime, partial });
     }
 
-    /// Check whether the file was read before editing.
+    /// Check whether the file was read before editing within the given job.
     /// Returns an appropriate error if not read, or if the file is stale.
     pub fn check_before_edit(
         &self,
+        job_id: Uuid,
         path: &Path,
         current_mtime: SystemTime,
     ) -> Result<(), ToolError> {
-        let Some(entry) = self.entries.get(path) else {
+        let key = (job_id, path.to_path_buf());
+        let Some(entry) = self.entries.get(&key) else {
             return Err(ToolError::ExecutionFailed(format!(
                 "File has not been read yet: {}. Use read_file first before editing.",
                 path.display()
@@ -82,8 +88,9 @@ impl ReadFileState {
 
     /// Update the mtime after a successful write (so subsequent edits don't
     /// falsely report staleness).
-    pub fn update_mtime(&mut self, path: &Path, mtime: SystemTime) {
-        if let Some(entry) = self.entries.get_mut(path) {
+    pub fn update_mtime(&mut self, job_id: Uuid, path: &Path, mtime: SystemTime) {
+        let key = (job_id, path.to_path_buf());
+        if let Some(entry) = self.entries.get_mut(&key) {
             entry.mtime = mtime;
             entry.partial = false;
         }
@@ -427,12 +434,17 @@ mod tests {
 
     // ── ReadFileState tests ──────────────────────────────────────
 
+    fn test_job_id() -> Uuid {
+        Uuid::new_v4()
+    }
+
     #[test]
     fn test_read_state_unread_file_rejected() {
         let state = ReadFileState::new();
+        let job = test_job_id();
         let path = Path::new("/tmp/test.rs");
         let err = state
-            .check_before_edit(path, SystemTime::now())
+            .check_before_edit(job, path, SystemTime::now())
             .unwrap_err();
         assert!(err.to_string().contains("has not been read yet"));
     }
@@ -440,43 +452,63 @@ mod tests {
     #[test]
     fn test_read_state_fresh_file_allowed() {
         let mut state = ReadFileState::new();
+        let job = test_job_id();
         let path = Path::new("/tmp/test.rs");
         let now = SystemTime::now();
-        state.record_read(path, now, false);
-        assert!(state.check_before_edit(path, now).is_ok());
+        state.record_read(job, path, now, false);
+        assert!(state.check_before_edit(job, path, now).is_ok());
     }
 
     #[test]
     fn test_read_state_stale_file_rejected() {
         let mut state = ReadFileState::new();
+        let job = test_job_id();
         let path = Path::new("/tmp/test.rs");
         let read_time = SystemTime::now();
-        state.record_read(path, read_time, false);
+        state.record_read(job, path, read_time, false);
         let stale_time = read_time + Duration::from_secs(5);
-        let err = state.check_before_edit(path, stale_time).unwrap_err();
+        let err = state.check_before_edit(job, path, stale_time).unwrap_err();
         assert!(err.to_string().contains("has been modified since"));
     }
 
     #[test]
     fn test_read_state_partial_read_rejected() {
         let mut state = ReadFileState::new();
+        let job = test_job_id();
         let path = Path::new("/tmp/test.rs");
         let now = SystemTime::now();
-        state.record_read(path, now, true);
-        let err = state.check_before_edit(path, now).unwrap_err();
+        state.record_read(job, path, now, true);
+        let err = state.check_before_edit(job, path, now).unwrap_err();
         assert!(err.to_string().contains("partial view"));
     }
 
     #[test]
     fn test_read_state_mtime_updated_after_write() {
         let mut state = ReadFileState::new();
+        let job = test_job_id();
         let path = Path::new("/tmp/test.rs");
         let t1 = SystemTime::now();
-        state.record_read(path, t1, false);
+        state.record_read(job, path, t1, false);
         let t2 = t1 + Duration::from_secs(3);
-        state.update_mtime(path, t2);
+        state.update_mtime(job, path, t2);
         // Now the file at t2 should be considered fresh
-        assert!(state.check_before_edit(path, t2).is_ok());
+        assert!(state.check_before_edit(job, path, t2).is_ok());
+    }
+
+    #[test]
+    fn test_read_state_isolated_across_jobs() {
+        let mut state = ReadFileState::new();
+        let job_a = test_job_id();
+        let job_b = test_job_id();
+        let path = Path::new("/tmp/test.rs");
+        let now = SystemTime::now();
+        // Job A reads the file
+        state.record_read(job_a, path, now, false);
+        // Job B should NOT be able to edit (hasn't read)
+        let err = state.check_before_edit(job_b, path, now).unwrap_err();
+        assert!(err.to_string().contains("has not been read yet"));
+        // Job A can still edit
+        assert!(state.check_before_edit(job_a, path, now).is_ok());
     }
 
     // ── Fuzzy matching tests ─────────────────────────────────────

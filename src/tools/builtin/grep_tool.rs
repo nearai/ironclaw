@@ -13,6 +13,7 @@ use tokio::process::Command;
 
 use crate::context::JobContext;
 use crate::tools::builtin::path_utils::validate_path;
+use crate::tools::builtin::shell::SAFE_ENV_VARS;
 use crate::tools::tool::{
     ApprovalRequirement, Tool, ToolDiscoverySummary, ToolDomain, ToolError, ToolOutput, require_str,
 };
@@ -22,12 +23,6 @@ const MAX_OUTPUT_SIZE: usize = 64 * 1024;
 
 /// Default head limit for output lines/entries.
 const DEFAULT_HEAD_LIMIT: usize = 250;
-
-/// Safe environment variables forwarded to rg (same policy as ShellTool).
-const SAFE_ENV_VARS: &[&str] = &[
-    "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER", "LOGNAME", "TMPDIR", "TMP",
-    "TEMP",
-];
 
 /// Grep tool for searching file contents using ripgrep.
 #[derive(Debug, Default)]
@@ -297,24 +292,55 @@ impl Tool for GrepTool {
         // Build output based on mode
         let result = match output_mode {
             "files_with_matches" => {
-                // Collect all file entries with mtime, sort globally, then paginate
-                let all_lines = &lines;
+                // Collect all file entries with mtime using bounded parallelism,
+                // then sort globally by mtime and paginate.
+                let all_paths: Vec<String> = lines
+                    .iter()
+                    .map(|line| line.trim().to_string())
+                    .filter(|p| !p.is_empty())
+                    .collect();
+
                 let mut file_entries: Vec<(String, SystemTime)> =
-                    Vec::with_capacity(all_lines.len());
-                for line in all_lines {
-                    let path = line.trim();
-                    if path.is_empty() {
-                        continue;
+                    Vec::with_capacity(all_paths.len());
+                let mut join_set = tokio::task::JoinSet::new();
+                let mut pending = all_paths.into_iter();
+                let max_concurrency = 64usize;
+
+                // Seed initial batch
+                for path in pending.by_ref().take(max_concurrency) {
+                    let sp = search_path.clone();
+                    join_set.spawn(async move {
+                        let mtime = tokio::fs::metadata(&path)
+                            .await
+                            .and_then(|m| m.modified())
+                            .unwrap_or(UNIX_EPOCH);
+                        let relative = std::path::Path::new(&path)
+                            .strip_prefix(&sp)
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|_| path.clone());
+                        (relative, mtime)
+                    });
+                }
+
+                // Drain results, refilling to maintain concurrency
+                while let Some(join_result) = join_set.join_next().await {
+                    if let Ok(entry) = join_result {
+                        file_entries.push(entry);
                     }
-                    let mtime = tokio::fs::metadata(path)
-                        .await
-                        .and_then(|m| m.modified())
-                        .unwrap_or(UNIX_EPOCH);
-                    let relative = std::path::Path::new(path)
-                        .strip_prefix(&search_path)
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .unwrap_or_else(|_| path.to_string());
-                    file_entries.push((relative, mtime));
+                    if let Some(path) = pending.next() {
+                        let sp = search_path.clone();
+                        join_set.spawn(async move {
+                            let mtime = tokio::fs::metadata(&path)
+                                .await
+                                .and_then(|m| m.modified())
+                                .unwrap_or(UNIX_EPOCH);
+                            let relative = std::path::Path::new(&path)
+                                .strip_prefix(&sp)
+                                .map(|p| p.to_string_lossy().into_owned())
+                                .unwrap_or_else(|_| path.clone());
+                            (relative, mtime)
+                        });
+                    }
                 }
 
                 file_entries.sort_by(|a, b| b.1.cmp(&a.1));
