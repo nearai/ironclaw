@@ -32,6 +32,8 @@ use ironclaw_common::truncate_preview;
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
 const POST_COMPACTION_EVENT_TIMEOUT: Duration = Duration::from_secs(2);
+const THREAD_TURNS_SIGNATURE_TRACE_THRESHOLD: Duration = Duration::from_millis(10);
+const THREAD_TURNS_SIGNATURE_WARN_THRESHOLD: Duration = Duration::from_millis(50);
 
 fn requires_preexisting_uuid_thread(channel: &str) -> bool {
     // Gateway-style channels send server-issued conversation UUIDs.
@@ -49,9 +51,9 @@ fn turn_usage_from_result(result: &Result<AgenticLoopResult, Error>) -> Option<&
 }
 
 fn inject_post_compaction_context(messages: &mut Vec<ChatMessage>, context: String) {
-    let historical_note = ChatMessage::assistant(context);
-    if let Some(last_user_idx) = messages.iter().rposition(|m| m.role == Role::User) {
-        messages.insert(last_user_idx, historical_note);
+    let historical_note = ChatMessage::system(context);
+    if let Some(last_system_idx) = messages.iter().rposition(|m| m.role == Role::System) {
+        messages.insert(last_system_idx + 1, historical_note);
     } else {
         messages.push(historical_note);
     }
@@ -106,6 +108,7 @@ fn thread_turns_signature(thread: &crate::agent::session::Thread) -> u64 {
         turn.user_input.hash(&mut hasher);
         turn.response.hash(&mut hasher);
         turn.error.hash(&mut hasher);
+        turn.narrative.hash(&mut hasher);
         for call in &turn.tool_calls {
             call.name.hash(&mut hasher);
             call.parameters.to_string().hash(&mut hasher);
@@ -121,6 +124,28 @@ fn thread_turns_signature(thread: &crate::agent::session::Thread) -> u64 {
     hasher.finish()
 }
 
+fn timed_thread_turns_signature(thread: &crate::agent::session::Thread, phase: &str) -> u64 {
+    let started_at = std::time::Instant::now();
+    let signature = thread_turns_signature(thread);
+    let elapsed = started_at.elapsed();
+    if elapsed >= THREAD_TURNS_SIGNATURE_WARN_THRESHOLD {
+        tracing::warn!(
+            phase,
+            turns = thread.turns.len(),
+            elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+            "Compaction turns signature hashing is slow"
+        );
+    } else if elapsed >= THREAD_TURNS_SIGNATURE_TRACE_THRESHOLD {
+        tracing::trace!(
+            phase,
+            turns = thread.turns.len(),
+            elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+            "Compaction turns signature hashing"
+        );
+    }
+    signature
+}
+
 fn capture_compaction_snapshot(
     thread: &crate::agent::session::Thread,
     restore_state: ThreadState,
@@ -129,7 +154,7 @@ fn capture_compaction_snapshot(
         expected_state: thread.state,
         restore_state,
         turns_len: thread.turns.len(),
-        turns_signature: thread_turns_signature(thread),
+        turns_signature: timed_thread_turns_signature(thread, "capture"),
         thread: thread.clone(),
     }
 }
@@ -140,7 +165,7 @@ fn thread_matches_compaction_snapshot(
 ) -> bool {
     thread.state == snapshot.expected_state
         && thread.turns.len() == snapshot.turns_len
-        && thread_turns_signature(thread) == snapshot.turns_signature
+        && timed_thread_turns_signature(thread, "match") == snapshot.turns_signature
 }
 
 fn apply_compaction_snapshot(
@@ -2441,7 +2466,7 @@ mod tests {
     }
 
     #[test]
-    fn test_inject_post_compaction_context_places_assistant_note_before_last_user() {
+    fn test_inject_post_compaction_context_inserts_system_note_after_last_system() {
         let mut messages = vec![
             ChatMessage::system("base"),
             ChatMessage::assistant("prior"),
@@ -2449,19 +2474,65 @@ mod tests {
         ];
         inject_post_compaction_context(&mut messages, "post-compaction".to_string());
         assert_eq!(messages.len(), 4);
+        assert_eq!(messages[1].role, crate::llm::Role::System);
+        assert!(messages[1].content.contains("post-compaction"));
         assert_eq!(messages[2].role, crate::llm::Role::Assistant);
-        assert!(messages[2].content.contains("post-compaction"));
         assert_eq!(messages[3].role, crate::llm::Role::User);
         assert_eq!(messages[3].content, "latest");
+        let has_consecutive_assistant = messages.windows(2).any(|pair| {
+            pair[0].role == crate::llm::Role::Assistant
+                && pair[1].role == crate::llm::Role::Assistant
+        });
+        assert!(
+            !has_consecutive_assistant,
+            "injected post-compaction context must not create adjacent assistant roles"
+        );
     }
 
     #[test]
-    fn test_inject_post_compaction_context_appends_when_no_user_message_exists() {
+    fn test_inject_post_compaction_context_appends_system_when_no_system_message_exists() {
         let mut messages = vec![ChatMessage::assistant("only-assistant")];
         inject_post_compaction_context(&mut messages, "ctx".to_string());
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[1].role, crate::llm::Role::Assistant);
+        assert_eq!(messages[1].role, crate::llm::Role::System);
         assert_eq!(messages[1].content, "ctx");
+    }
+
+    #[test]
+    fn test_inject_post_compaction_context_preserves_tool_message_ordering() {
+        let mut messages = vec![
+            ChatMessage::user("run tool"),
+            ChatMessage::assistant_with_tool_calls(
+                None,
+                vec![crate::llm::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "shell_command".to_string(),
+                    arguments: serde_json::json!({"command": "echo hi"}),
+                    reasoning: None,
+                }],
+            ),
+            ChatMessage::tool_result("call_1", "shell_command", "hi"),
+            ChatMessage::assistant("done"),
+            ChatMessage::user("next"),
+        ];
+
+        inject_post_compaction_context(&mut messages, "ctx".to_string());
+
+        // No system message existed in the original sequence, so context is appended.
+        assert_eq!(
+            messages.last().map(|m| m.role),
+            Some(crate::llm::Role::System)
+        );
+
+        let tool_decl_idx = messages
+            .iter()
+            .position(|m| m.role == crate::llm::Role::Assistant && m.tool_calls.is_some())
+            .expect("tool declaration must remain present");
+        assert_eq!(messages[tool_decl_idx + 1].role, crate::llm::Role::Tool);
+        assert_eq!(
+            messages[tool_decl_idx + 2].role,
+            crate::llm::Role::Assistant
+        );
     }
 
     #[test]
@@ -2943,6 +3014,21 @@ mod tests {
 
         // Mutating turn content must invalidate the snapshot.
         thread.turns[0].response = Some("changed".to_string());
+        assert!(!thread_matches_compaction_snapshot(&thread, &snapshot));
+    }
+
+    #[test]
+    fn test_compaction_snapshot_detects_narrative_mutation() {
+        use crate::agent::session::Thread;
+
+        let mut thread = Thread::new(Uuid::new_v4(), None);
+        thread.start_turn("q1");
+        thread.complete_turn("a1");
+        thread.turns[0].narrative = Some("initial rationale".to_string());
+        thread.state = ThreadState::Processing;
+        let snapshot = capture_compaction_snapshot(&thread, ThreadState::Idle);
+
+        thread.turns[0].narrative = Some("changed rationale".to_string());
         assert!(!thread_matches_compaction_snapshot(&thread, &snapshot));
     }
 
