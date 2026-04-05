@@ -64,6 +64,7 @@ use ironclaw_safety::LeakDetector;
 const WEBSOCKET_EVENT_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue";
 const WEBSOCKET_EVENT_PROCESSING_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue_processing";
 const WEBSOCKET_EVENT_QUEUE_MAX_ITEMS: usize = 100;
+const TELEGRAM_TEST_API_BASE_ENV: &str = "IRONCLAW_TEST_TELEGRAM_API_BASE_URL";
 
 // Generate component model bindings from the WIT file
 wasmtime::component::bindgen!({
@@ -359,7 +360,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             "Parsed and injected request headers"
         );
 
-        let mut url = injected_url;
+        let mut logical_url = injected_url;
 
         // Leak scan runs on WASM-provided values BEFORE host credential injection.
         // This prevents false positives where the host-injected Bearer token
@@ -372,13 +373,23 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             .collect();
 
         leak_detector
-            .scan_http_request(&url, &header_vec, body.as_deref())
+            .scan_http_request(&logical_url, &header_vec, body.as_deref())
             .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
 
         // Inject pre-resolved host credentials (Bearer tokens, API keys, etc.)
         // after the leak scan so host-injected secrets don't trigger false positives.
-        if let Some(host) = extract_host_from_url(&url) {
-            self.inject_host_credentials(&host, &mut headers, &mut url);
+        if let Some(host) = extract_host_from_url(&logical_url) {
+            self.inject_host_credentials(&host, &mut headers, &mut logical_url);
+        }
+
+        let transport_url = rewrite_telegram_api_url_for_testing(&logical_url)
+            .unwrap_or_else(|| logical_url.clone());
+        if transport_url != logical_url {
+            tracing::info!(
+                logical_url = %logical_url,
+                transport_url = %transport_url,
+                "Rewriting Telegram API request to test base URL"
+            );
         }
 
         // Get the max response size from capabilities (default 10MB).
@@ -412,12 +423,12 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                 .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
             let mut request = match method.to_uppercase().as_str() {
-                "GET" => client.get(&url),
-                "POST" => client.post(&url),
-                "PUT" => client.put(&url),
-                "DELETE" => client.delete(&url),
-                "PATCH" => client.patch(&url),
-                "HEAD" => client.head(&url),
+                "GET" => client.get(&transport_url),
+                "POST" => client.post(&transport_url),
+                "PUT" => client.put(&transport_url),
+                "DELETE" => client.delete(&transport_url),
+                "PATCH" => client.patch(&transport_url),
+                "HEAD" => client.head(&transport_url),
                 _ => return Err(format!("Unsupported HTTP method: {}", method)),
             };
 
@@ -506,7 +517,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             // safety layer before they reach the LLM, so we allow the polling
             // response to continue here to avoid poisoning the offset state.
             if let Ok(body_str) = std::str::from_utf8(&body)
-                && !should_skip_response_leak_scan(&url)
+                && !should_skip_response_leak_scan(&logical_url)
             {
                 leak_detector
                     .scan_and_clean(body_str)
@@ -3949,6 +3960,31 @@ fn extract_host_from_url(url: &str) -> Option<String> {
     })
 }
 
+fn rewrite_telegram_api_url_for_testing(url: &str) -> Option<String> {
+    let override_base = std::env::var(TELEGRAM_TEST_API_BASE_ENV)
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())?;
+
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+
+    let host = parsed.host_str()?;
+    if !host.eq_ignore_ascii_case("api.telegram.org") {
+        return None;
+    }
+
+    let path = parsed.path().trim_start_matches('/');
+    let mut rewritten = format!("{override_base}/{path}");
+    if let Some(query) = parsed.query() {
+        rewritten.push('?');
+        rewritten.push_str(query);
+    }
+    Some(rewritten)
+}
+
 fn should_skip_response_leak_scan(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|parsed| {
         matches!(parsed.scheme(), "http" | "https")
@@ -4127,12 +4163,13 @@ mod tests {
         PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
     use crate::channels::wasm::wrapper::{
-        EmitDispatchContext, HttpResponse, WasmChannel, WebsocketRuntimeConfig,
-        build_discord_gateway_presence_update, build_websocket_identify_message,
-        build_websocket_resume_message, discord_gateway_presence_status, drain_guest_logs,
-        parse_websocket_invalid_session, parse_websocket_ready_session,
-        should_warn_on_heartbeat_interval, uses_owner_broadcast_target,
-        websocket_heartbeat_sleep_duration, websocket_reconnect_backoff,
+        EmitDispatchContext, HttpResponse, TELEGRAM_TEST_API_BASE_ENV, WasmChannel,
+        WebsocketRuntimeConfig, build_discord_gateway_presence_update,
+        build_websocket_identify_message, build_websocket_resume_message,
+        discord_gateway_presence_status, drain_guest_logs, parse_websocket_invalid_session,
+        parse_websocket_ready_session, should_warn_on_heartbeat_interval,
+        uses_owner_broadcast_target, websocket_heartbeat_sleep_duration,
+        websocket_reconnect_backoff,
     };
     use crate::pairing::PairingStore;
     use crate::testing::credentials::TEST_TELEGRAM_BOT_TOKEN;
@@ -5497,6 +5534,32 @@ mod tests {
             "https://api.example.com/getUpdates"
         ));
         assert!(!should_skip_response_leak_scan("not a url"));
+    }
+
+    #[test]
+    fn test_rewrite_telegram_api_url_for_testing_uses_test_override() {
+        use super::rewrite_telegram_api_url_for_testing;
+
+        let _guard = crate::config::helpers::lock_env();
+        let original = std::env::var(TELEGRAM_TEST_API_BASE_ENV).ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var(TELEGRAM_TEST_API_BASE_ENV, "http://127.0.0.1:19001/");
+        }
+
+        let rewritten =
+            rewrite_telegram_api_url_for_testing("https://api.telegram.org/bot123/sendMessage")
+                .expect("Telegram URL should rewrite");
+        assert_eq!(rewritten, "http://127.0.0.1:19001/bot123/sendMessage");
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            if let Some(value) = original {
+                std::env::set_var(TELEGRAM_TEST_API_BASE_ENV, value);
+            } else {
+                std::env::remove_var(TELEGRAM_TEST_API_BASE_ENV);
+            }
+        }
     }
 
     /// Verify that WASM HTTP host functions work using a dedicated
