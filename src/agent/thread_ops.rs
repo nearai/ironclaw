@@ -262,10 +262,35 @@ impl Agent {
         message: &IncomingMessage,
         external_thread_id: &str,
     ) -> Option<String> {
-        // Only hydrate UUID-shaped thread IDs (web gateway uses UUIDs)
+        // Determine the conversation UUID to hydrate from.
+        // UUID-shaped IDs (web gateway) are used directly; non-UUID IDs
+        // (e.g. Slack channel/thread_ts) are resolved via a DB lookup on
+        // the conversations.thread_id column.
         let thread_uuid = match Uuid::parse_str(external_thread_id) {
             Ok(id) => id,
-            Err(_) => return None,
+            Err(_) => {
+                // Non-UUID external scope — look up by (user, channel, thread_id).
+                let store = self.store()?;
+                match store
+                    .find_conversation_by_scope(
+                        &message.user_id,
+                        &message.channel,
+                        external_thread_id,
+                    )
+                    .await
+                {
+                    Ok(Some(id)) => id,
+                    Ok(None) => return None, // No prior conversation — nothing to hydrate.
+                    Err(e) => {
+                        tracing::warn!(
+                            channel = %message.channel,
+                            thread_id = %external_thread_id,
+                            "Failed to look up conversation by scope: {e}"
+                        );
+                        return None;
+                    }
+                }
+            }
         };
 
         // Check if already in memory
@@ -673,6 +698,7 @@ impl Agent {
                 turn_number,
                 effective_content,
                 turn_started_at,
+                message.conversation_scope(),
             )
             .await;
 
@@ -716,8 +742,13 @@ impl Agent {
 
         if thread.state == ThreadState::Interrupted {
             drop(sess);
-            self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
-                .await;
+            self.clear_conversation_live_state(
+                thread_id,
+                &message.channel,
+                &message.user_id,
+                message.conversation_scope(),
+            )
+            .await;
             if let Some(turn_usage) = turn_usage_from_result(&result) {
                 self.send_turn_cost_status(&message.channel, &message.metadata, turn_usage)
                     .await;
@@ -777,6 +808,7 @@ impl Agent {
                     thread_id,
                     &message.channel,
                     &message.user_id,
+                    message.conversation_scope(),
                     turn_number,
                     &tool_calls,
                     narrative.as_deref(),
@@ -787,6 +819,7 @@ impl Agent {
                     &message.channel,
                     &message.user_id,
                     &response,
+                    message.conversation_scope(),
                 )
                 .await;
 
@@ -819,8 +852,13 @@ impl Agent {
                 let allow_always = pending.allow_always;
                 thread.await_approval(*pending);
                 drop(sess);
-                self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
-                    .await;
+                self.clear_conversation_live_state(
+                    thread_id,
+                    &message.channel,
+                    &message.user_id,
+                    message.conversation_scope(),
+                )
+                .await;
                 self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                     .await;
                 let _ = self
@@ -866,6 +904,7 @@ impl Agent {
                     thread_id,
                     &message.channel,
                     &message.user_id,
+                    message.conversation_scope(),
                     turn_number,
                     &tool_calls,
                     narrative.as_deref(),
@@ -880,15 +919,25 @@ impl Agent {
                     .await;
                 thread.conclude_turn(TurnOutcome::Failed(error.to_string()));
                 drop(sess);
-                self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
-                    .await;
+                self.clear_conversation_live_state(
+                    thread_id,
+                    &message.channel,
+                    &message.user_id,
+                    message.conversation_scope(),
+                )
+                .await;
                 Ok(SubmissionResult::error(error.to_string()))
             }
             Err(e) => {
                 thread.conclude_turn(TurnOutcome::Failed(e.to_string()));
                 drop(sess);
-                self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
-                    .await;
+                self.clear_conversation_live_state(
+                    thread_id,
+                    &message.channel,
+                    &message.user_id,
+                    message.conversation_scope(),
+                )
+                .await;
                 // User message already persisted at turn start; nothing else to save
                 Ok(SubmissionResult::error(e.to_string()))
             }
@@ -904,9 +953,16 @@ impl Agent {
         thread_id: Uuid,
         channel: &str,
         user_id: &str,
+        external_thread_id: Option<&str>,
     ) -> bool {
         match store
-            .ensure_conversation(thread_id, channel, user_id, None, Some(channel))
+            .ensure_conversation(
+                thread_id,
+                channel,
+                user_id,
+                external_thread_id,
+                Some(channel),
+            )
             .await
         {
             Ok(true) => true,
@@ -953,6 +1009,7 @@ impl Agent {
         thread_id: Uuid,
         channel: &str,
         user_id: &str,
+        external_thread_id: Option<&str>,
         live_state: ProcessingLiveState<'_>,
     ) {
         let store = match self.store() {
@@ -961,7 +1018,7 @@ impl Agent {
         };
 
         if !self
-            .ensure_writable_conversation(&store, thread_id, channel, user_id)
+            .ensure_writable_conversation(&store, thread_id, channel, user_id, external_thread_id)
             .await
         {
             return;
@@ -983,6 +1040,7 @@ impl Agent {
         thread_id: Uuid,
         channel: &str,
         user_id: &str,
+        external_thread_id: Option<&str>,
     ) {
         let store = match self.store() {
             Some(s) => Arc::clone(s),
@@ -990,7 +1048,7 @@ impl Agent {
         };
 
         if !self
-            .ensure_writable_conversation(&store, thread_id, channel, user_id)
+            .ensure_writable_conversation(&store, thread_id, channel, user_id, external_thread_id)
             .await
         {
             return;
@@ -1016,6 +1074,7 @@ impl Agent {
     ///
     /// This ensures the user message is durable even if the process crashes
     /// mid-response. Call this right after `thread.start_turn()`.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn persist_user_message(
         &self,
         thread_id: Uuid,
@@ -1024,6 +1083,7 @@ impl Agent {
         turn_number: usize,
         user_input: &str,
         started_at: DateTime<Utc>,
+        external_thread_id: Option<&str>,
     ) -> Option<Uuid> {
         let store = match self.store() {
             Some(s) => Arc::clone(s),
@@ -1031,7 +1091,7 @@ impl Agent {
         };
 
         if !self
-            .ensure_writable_conversation(&store, thread_id, channel, user_id)
+            .ensure_writable_conversation(&store, thread_id, channel, user_id, external_thread_id)
             .await
         {
             return None;
@@ -1046,6 +1106,7 @@ impl Agent {
                     thread_id,
                     channel,
                     user_id,
+                    external_thread_id,
                     ProcessingLiveState {
                         turn_number,
                         user_message_id: Some(user_message_id),
@@ -1062,6 +1123,7 @@ impl Agent {
                     thread_id,
                     channel,
                     user_id,
+                    external_thread_id,
                     ProcessingLiveState {
                         turn_number,
                         user_message_id: None,
@@ -1086,6 +1148,7 @@ impl Agent {
         channel: &str,
         user_id: &str,
         response: &str,
+        external_thread_id: Option<&str>,
     ) {
         let store = match self.store() {
             Some(s) => Arc::clone(s),
@@ -1093,7 +1156,7 @@ impl Agent {
         };
 
         if !self
-            .ensure_writable_conversation(&store, thread_id, channel, user_id)
+            .ensure_writable_conversation(&store, thread_id, channel, user_id, external_thread_id)
             .await
         {
             return;
@@ -1130,11 +1193,13 @@ impl Agent {
     /// Content is a JSON object: `{ "calls": [...], "narrative": "..." }`.
     /// The `calls` array contains tool call summaries with optional `rationale`
     /// and `tool_call_id` fields. Legacy rows may be plain JSON arrays.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn persist_tool_calls(
         &self,
         thread_id: Uuid,
         channel: &str,
         user_id: &str,
+        external_thread_id: Option<&str>,
         turn_number: usize,
         tool_calls: &[crate::agent::session::TurnToolCall],
         narrative: Option<&str>,
@@ -1200,7 +1265,7 @@ impl Agent {
         };
 
         if !self
-            .ensure_writable_conversation(&store, thread_id, channel, user_id)
+            .ensure_writable_conversation(&store, thread_id, channel, user_id, external_thread_id)
             .await
         {
             return;
@@ -1304,7 +1369,7 @@ impl Agent {
                     .unwrap_or_else(|| "gateway".to_string());
                 thread.interrupt();
                 drop(sess);
-                self.clear_conversation_live_state(thread_id, &channel, &user_id)
+                self.clear_conversation_live_state(thread_id, &channel, &user_id, None)
                     .await;
                 Ok(SubmissionResult::ok_with_message("Interrupted."))
             }
@@ -1372,7 +1437,7 @@ impl Agent {
         thread.pending_messages.clear();
         thread.state = ThreadState::Idle;
         drop(sess);
-        self.clear_conversation_live_state(thread_id, &channel, &user_id)
+        self.clear_conversation_live_state(thread_id, &channel, &user_id, None)
             .await;
 
         // Clear undo history too
@@ -1547,6 +1612,7 @@ impl Agent {
                     thread_id,
                     &message.channel,
                     &message.user_id,
+                    message.conversation_scope(),
                     ProcessingLiveState {
                         turn_number,
                         user_message_id,
@@ -1992,8 +2058,13 @@ impl Agent {
                     }
                 }
 
-                self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
-                    .await;
+                self.clear_conversation_live_state(
+                    thread_id,
+                    &message.channel,
+                    &message.user_id,
+                    message.conversation_scope(),
+                )
+                .await;
 
                 let _ = self
                     .channels
@@ -2083,6 +2154,7 @@ impl Agent {
                         thread_id,
                         &message.channel,
                         &message.user_id,
+                        message.conversation_scope(),
                         turn_number,
                         &tool_calls,
                         narrative.as_deref(),
@@ -2093,6 +2165,7 @@ impl Agent {
                         &message.channel,
                         &message.user_id,
                         &response,
+                        message.conversation_scope(),
                     )
                     .await;
                     if !suggestions.is_empty() {
@@ -2124,6 +2197,7 @@ impl Agent {
                         thread_id,
                         &message.channel,
                         &message.user_id,
+                        message.conversation_scope(),
                     )
                     .await;
                     self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
@@ -2162,6 +2236,7 @@ impl Agent {
                         thread_id,
                         &message.channel,
                         &message.user_id,
+                        message.conversation_scope(),
                         turn_number,
                         &tool_calls,
                         narrative.as_deref(),
@@ -2180,6 +2255,7 @@ impl Agent {
                         thread_id,
                         &message.channel,
                         &message.user_id,
+                        message.conversation_scope(),
                     )
                     .await;
                     Ok(SubmissionResult::error(error.to_string()))
@@ -2191,6 +2267,7 @@ impl Agent {
                         thread_id,
                         &message.channel,
                         &message.user_id,
+                        message.conversation_scope(),
                     )
                     .await;
                     // User message already persisted at turn start
@@ -2216,6 +2293,7 @@ impl Agent {
                             &message.channel,
                             &message.user_id,
                             &rejection,
+                            message.conversation_scope(),
                         )
                         .await;
                     }
@@ -2266,6 +2344,7 @@ impl Agent {
                         &message.channel,
                         &message.user_id,
                         &instructions,
+                        message.conversation_scope(),
                     )
                     .await;
                 }

@@ -492,6 +492,15 @@ pub trait ConversationStore: Send + Sync {
         &self,
         conversation_id: Uuid,
     ) -> Result<Option<String>, DatabaseError>;
+    /// Look up an existing conversation by its external thread scope
+    /// (e.g. Slack `channel_id#thread_ts`). Returns the conversation UUID
+    /// if found, allowing thread hydration for non-UUID external IDs.
+    async fn find_conversation_by_scope(
+        &self,
+        user_id: &str,
+        channel: &str,
+        thread_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError>;
 }
 
 #[async_trait]
