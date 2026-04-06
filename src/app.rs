@@ -336,6 +336,7 @@ impl AppBuilder {
         };
         tools.register_builtin_tools();
         tools.register_tool_info();
+        tools.register_system_tools();
 
         if let Some(ref ss) = self.secrets_store {
             tools.register_secrets_tools(Arc::clone(ss));

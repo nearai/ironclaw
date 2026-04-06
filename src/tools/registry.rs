@@ -337,6 +337,17 @@ impl ToolRegistry {
         tracing::debug!("Registered tool_info discovery tool");
     }
 
+    /// Register system introspection tools (tools_list, version).
+    ///
+    /// Requires `Arc<Self>` because `SystemToolsListTool` queries the
+    /// registry at runtime. Call after other registration methods.
+    pub fn register_system_tools(self: &Arc<Self>) {
+        use crate::tools::builtin::system::{SystemToolsListTool, SystemVersionTool};
+        self.register_sync(Arc::new(SystemToolsListTool::new(Arc::clone(self))));
+        self.register_sync(Arc::new(SystemVersionTool));
+        tracing::debug!("Registered system introspection tools");
+    }
+
     /// Register only orchestrator-domain tools (safe for the main process).
     ///
     /// This registers tools that don't touch the filesystem or run shell commands:
