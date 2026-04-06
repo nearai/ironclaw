@@ -17,6 +17,22 @@ use crate::extensions::ExtensionManager;
 use crate::pairing::PairingStore;
 use crate::secrets::SecretsStore;
 
+fn reserved_wasm_channel_names() -> Vec<&'static str> {
+    use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
+
+    let mut reserved: Vec<&str> = vec![
+        "cli",
+        "repl",
+        "http",
+        "signal",
+        "slack-relay",
+        "secret_save",
+    ];
+    reserved.extend(TRUSTED_APPROVAL_CHANNELS);
+    reserved.push(BOOTSTRAP_SOURCE_CHANNEL);
+    reserved
+}
+
 /// Result of WASM channel setup.
 pub struct WasmChannelSetup {
     pub channels: Vec<(String, Box<dyn crate::channels::Channel>)>,
@@ -83,22 +99,10 @@ pub async fn setup_wasm_channels(
     // channel and bypass cross-channel authorization checks.
     //
     // This list includes:
-    // - All built-in channel names (prevent impersonation)
+    // - All native/built-in channel names (prevent impersonation)
     // - Trusted approval channels from session::TRUSTED_APPROVAL_CHANNELS
     // - The bootstrap sentinel (universal approval wildcard)
-    use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
-
-    let mut reserved: Vec<&str> = vec![
-        "cli",
-        "repl",
-        "http",
-        "signal",
-        "telegram",
-        "slack-relay",
-        "secret_save",
-    ];
-    reserved.extend(TRUSTED_APPROVAL_CHANNELS);
-    reserved.push(BOOTSTRAP_SOURCE_CHANNEL);
+    let reserved = reserved_wasm_channel_names();
 
     for loaded in results.loaded {
         let name_lower = loaded.name().to_ascii_lowercase();
@@ -511,21 +515,11 @@ async fn inject_channel_secrets_into_config(
 #[cfg(test)]
 mod tests {
     use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
+    use crate::channels::wasm::setup::reserved_wasm_channel_names;
 
     /// Build the same reserved-name list that `setup_wasm_channels` uses.
     fn reserved_names() -> Vec<&'static str> {
-        let mut reserved: Vec<&str> = vec![
-            "cli",
-            "repl",
-            "http",
-            "signal",
-            "telegram",
-            "slack-relay",
-            "secret_save",
-        ];
-        reserved.extend(TRUSTED_APPROVAL_CHANNELS);
-        reserved.push(BOOTSTRAP_SOURCE_CHANNEL);
-        reserved
+        reserved_wasm_channel_names()
     }
 
     #[test]
@@ -569,7 +563,7 @@ mod tests {
     #[test]
     fn non_reserved_names_allowed() {
         let reserved = reserved_names();
-        let allowed = ["discord", "my-custom-channel", "slack-bot"];
+        let allowed = ["discord", "telegram", "my-custom-channel", "slack-bot"];
         for name in allowed {
             assert!(
                 !reserved.contains(&name),
