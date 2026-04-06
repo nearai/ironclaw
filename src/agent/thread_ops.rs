@@ -480,7 +480,9 @@ impl Agent {
             thread.messages()
         };
 
-        // Persist user message to DB immediately so it survives crashes
+        // Persist the augmented content (with attachment context) so that
+        // rebuild_chat_messages_from_db can reconstruct full LLM context after restart.
+        // The <attachments> block is stripped only when rendering for the UI.
         tracing::debug!(
             message_id = %message.id,
             thread_id = %thread_id,
