@@ -706,13 +706,17 @@ fn slugify(title: &str, id: &str) -> String {
     }
     let collapsed = collapsed.trim_end_matches('-');
 
-    // Truncate slug to 60 chars, append 8-char ID suffix
+    // Truncate slug to 60 chars, append 8-char ID suffix. `collapsed` is
+    // ASCII-only because slugify() already replaced non-ASCII chars, so
+    // byte-index slicing into it is safe.
     let max_slug = 60;
     let truncated = if collapsed.len() > max_slug {
-        // Don't cut in the middle of a word — find last dash before limit
-        match collapsed[..max_slug].rfind('-') { // safety: collapsed is ASCII-only (slugified)
-            Some(pos) if pos > 20 => &collapsed[..pos], // safety: pos from rfind on ASCII slug
-            _ => &collapsed[..max_slug], // safety: max_slug checked against len above
+        // Don't cut in the middle of a word — find last dash before limit.
+        let window = &collapsed.as_bytes()[..max_slug]; // safety: ASCII-only input
+        let dash_pos = window.iter().rposition(|&b| b == b'-');
+        match dash_pos {
+            Some(pos) if pos > 20 => &collapsed[..pos], // safety: ASCII-only input
+            _ => &collapsed[..max_slug],                // safety: ASCII-only input
         }
     } else {
         collapsed

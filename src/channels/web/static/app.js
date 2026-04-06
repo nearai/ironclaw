@@ -861,7 +861,7 @@ function connectSSE(lastEventIdOverride) {
   }
 
   // Plan progress checklist
-  eventSource.addEventListener('plan_update', (e) => {
+  addTrackedEventListener('plan_update', (e) => {
     const data = JSON.parse(e.data);
     if (data.thread_id && !isCurrentThread(data.thread_id)) return;
     renderPlanChecklist(data);

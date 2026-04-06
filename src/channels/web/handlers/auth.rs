@@ -414,7 +414,7 @@ pub async fn near_verify_handler(
         account_id = %body.account_id,
         public_key = %body.public_key,
         signature_len = body.signature.len(),
-        signature_prefix = &body.signature[..body.signature.len().min(20)], // safety: min(len,20) is always valid boundary on ASCII base58/hex/base64
+        signature_prefix = safe_truncate(&body.signature, 20),
         "NEAR verify: decoding credentials"
     );
 

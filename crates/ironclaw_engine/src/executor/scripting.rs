@@ -1480,6 +1480,19 @@ mod tests {
     use crate::types::thread::{Thread, ThreadConfig, ThreadType};
     use std::sync::Mutex;
 
+    /// Truncate a string to at most `max_bytes`, snapping to a UTF-8 char
+    /// boundary so assertion messages never panic on multibyte output.
+    fn truncate_for_assert(s: &str, max_bytes: usize) -> &str {
+        if s.len() <= max_bytes {
+            return s;
+        }
+        let mut end = max_bytes;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end] // safety: end is walked down to a valid char boundary above
+    }
+
     struct MockEffects {
         results: Mutex<Vec<Result<ActionResult, EngineError>>>,
         actions: Vec<ActionDef>,
@@ -1973,7 +1986,7 @@ while True:
             assert!(
                 r.had_error || r.stdout.contains("Error") || r.stdout.contains("limit"),
                 "resource limit should terminate infinite loop, got stdout: {}",
-                &r.stdout[..r.stdout.len().min(500)], // safety: test-only; stdout is String so len() is a valid boundary
+                truncate_for_assert(&r.stdout, 500),
             );
         }
         // Err(_) is also acceptable — means the VM was killed by resource limits
@@ -2115,7 +2128,7 @@ while True:
             assert!(
                 r.had_error || r.stdout.contains("Error") || r.stdout.contains("limit"),
                 "cpu-bound loop should be terminated, stdout: {}",
-                &r.stdout[..r.stdout.len().min(500)], // safety: test-only; stdout is String so len() is a valid boundary
+                truncate_for_assert(&r.stdout, 500),
             );
         }
         // Err(_) is also acceptable — means the VM was killed by resource limits
