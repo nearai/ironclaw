@@ -154,7 +154,7 @@ pub async fn users_create_handler(
 /// GET /api/admin/users — list all users with inline usage stats.
 pub async fn users_list_handler(
     State(state): State<Arc<GatewayState>>,
-    AdminUser(_user): AdminUser,
+    AdminUser(_admin): AdminUser,
 ) -> Result<Json<AdminUserListResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -189,7 +189,7 @@ pub async fn users_list_handler(
 /// GET /api/admin/users/{id} — get a single user.
 pub async fn users_detail_handler(
     State(state): State<Arc<GatewayState>>,
-    AdminUser(_user): AdminUser,
+    AdminUser(_admin): AdminUser,
     Path(id): Path<String>,
 ) -> Result<Json<AdminUserDetailResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -230,7 +230,7 @@ pub async fn users_detail_handler(
 /// PATCH /api/admin/users/{id} — update a user's profile.
 pub async fn users_update_handler(
     State(state): State<Arc<GatewayState>>,
-    AdminUser(_user): AdminUser,
+    AdminUser(admin): AdminUser,
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<AdminUserProfileResponse>, (StatusCode, String)> {
@@ -309,6 +309,8 @@ pub async fn users_update_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
+    tracing::warn!(admin = %admin.user_id, action = "user_updated", target_user = %id, "Admin updated user");
+
     Ok(Json(AdminUserProfileResponse {
         id: updated.id,
         email: updated.email,
@@ -324,7 +326,7 @@ pub async fn users_update_handler(
 /// POST /api/admin/users/{id}/suspend — suspend a user.
 pub async fn users_suspend_handler(
     State(state): State<Arc<GatewayState>>,
-    AdminUser(_user): AdminUser,
+    AdminUser(admin): AdminUser,
     Path(id): Path<String>,
 ) -> Result<Json<AdminUserStatusResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -366,6 +368,8 @@ pub async fn users_suspend_handler(
         ps.evict_user(&id);
     }
 
+    tracing::warn!(admin = %admin.user_id, action = "user_suspended", target_user = %id, "Admin suspended user");
+
     Ok(Json(AdminUserStatusResponse {
         id,
         status: "suspended".to_string(),
@@ -375,7 +379,7 @@ pub async fn users_suspend_handler(
 /// POST /api/admin/users/{id}/activate — activate a user.
 pub async fn users_activate_handler(
     State(state): State<Arc<GatewayState>>,
-    AdminUser(_user): AdminUser,
+    AdminUser(admin): AdminUser,
     Path(id): Path<String>,
 ) -> Result<Json<AdminUserStatusResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -400,6 +404,8 @@ pub async fn users_activate_handler(
         db_auth.invalidate_user(&id).await;
     }
 
+    tracing::warn!(admin = %admin.user_id, action = "user_activated", target_user = %id, "Admin activated user");
+
     Ok(Json(AdminUserStatusResponse {
         id,
         status: "active".to_string(),
@@ -409,7 +415,7 @@ pub async fn users_activate_handler(
 /// DELETE /api/admin/users/{id} — delete a user and all their data.
 pub async fn users_delete_handler(
     State(state): State<Arc<GatewayState>>,
-    AdminUser(_user): AdminUser,
+    AdminUser(admin): AdminUser,
     Path(id): Path<String>,
 ) -> Result<Json<AdminUserDeleteResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -445,6 +451,8 @@ pub async fn users_delete_handler(
     if let Some(ref ps) = state.pairing_store {
         ps.evict_user(&id);
     }
+
+    tracing::warn!(admin = %admin.user_id, action = "user_deleted", target_user = %id, "Admin deleted user");
 
     Ok(Json(AdminUserDeleteResponse { id, deleted: true }))
 }
@@ -543,7 +551,7 @@ pub async fn profile_update_handler(
 /// GET /api/admin/usage — per-user LLM usage stats.
 pub async fn usage_stats_handler(
     State(state): State<Arc<GatewayState>>,
-    AdminUser(_user): AdminUser,
+    AdminUser(_admin): AdminUser,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<AdminUsageStatsResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -586,7 +594,7 @@ pub async fn usage_stats_handler(
 /// System-wide usage summary for the admin dashboard.
 pub async fn usage_summary_handler(
     State(state): State<Arc<GatewayState>>,
-    AdminUser(_user): AdminUser,
+    AdminUser(_admin): AdminUser,
 ) -> Result<Json<AdminUsageSummaryResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
