@@ -2286,8 +2286,8 @@ fn render_tool_detail_modal(
     layout: &TuiLayout,
 ) {
     use ratatui::style::Modifier;
-    use ratatui::text::{Line, Span};
-    use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
+    use ratatui::text::Span;
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 
     let Some(ref modal) = state.tool_detail_modal else {
         return;
@@ -2317,14 +2317,13 @@ fn render_tool_detail_modal(
     let inner = block.inner(area);
     block.render(area, frame.buffer_mut());
 
-    let lines: Vec<Line<'_>> = modal
-        .content
-        .lines()
-        .map(|l| Line::from(l.to_string()))
-        .collect();
+    let lines = crate::render::render_markdown(
+        &modal.content,
+        inner.width as usize,
+        &theme,
+    );
 
     let paragraph = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
         .scroll((modal.scroll, 0));
     paragraph.render(inner, frame.buffer_mut());
 }
