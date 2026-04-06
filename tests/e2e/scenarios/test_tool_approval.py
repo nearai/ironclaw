@@ -47,7 +47,7 @@ async def _wait_for_history(
         )
         assert response.status_code == 200, response.text
         history = response.json()
-        pending = history.get("pending_approval")
+        pending = history.get("pending_gate") or history.get("pending_approval")
         turns = history.get("turns", [])
         latest_response = turns[-1].get("response") if turns else None
 
@@ -259,7 +259,7 @@ async def test_chat_reply_approve_resumes_pending_tool(ironclaw_server):
         turn_count_at_least=1,
     )
 
-    assert history.get("pending_approval") is None
+    assert (history.get("pending_gate") or history.get("pending_approval")) is None
     assert history["turns"][-1]["response"] is not None
 
 
@@ -309,5 +309,5 @@ async def test_chat_reply_always_auto_approves_next_same_tool(ironclaw_server):
         turn_count_at_least=2,
     )
 
-    assert history.get("pending_approval") is None
+    assert (history.get("pending_gate") or history.get("pending_approval")) is None
     assert len(history["turns"]) >= 2

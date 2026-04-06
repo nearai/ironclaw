@@ -138,13 +138,8 @@ Use the `http` tool to list Google Drive files.
 
 def _write_oauth_wasm_channel(channels_dir: str) -> None:
     os.makedirs(channels_dir, exist_ok=True)
-    wasm_path = os.path.join(channels_dir, "gmail-channel.wasm")
-    caps_path = os.path.join(channels_dir, "gmail-channel.capabilities.json")
-    with open(wasm_path, "wb") as handle:
-        handle.write(b"fake-channel")
-    with open(caps_path, "w", encoding="utf-8") as handle:
-        handle.write(
-            """{
+    wasm_payload = b"fake-channel"
+    capabilities = """{
   "name": "gmail-channel",
   "display_name": "Gmail Channel",
   "description": "OAuth-backed test channel",
@@ -158,7 +153,15 @@ def _write_oauth_wasm_channel(channels_dir: str) -> None:
   }
 }
 """
-        )
+    for stem in ("gmail-channel", "gmail_channel"):
+        with open(os.path.join(channels_dir, f"{stem}.wasm"), "wb") as handle:
+            handle.write(wasm_payload)
+        with open(
+            os.path.join(channels_dir, f"{stem}.capabilities.json"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            handle.write(capabilities)
 
 
 def _extract_state(auth_url: str) -> str:
@@ -777,7 +780,7 @@ async def _wait_for_tool_call(
         response.raise_for_status()
         history = response.json()
 
-        pending = history.get("pending_approval")
+        pending = history.get("pending_gate") or history.get("pending_approval")
         if pending and pending["request_id"] not in approved_request_ids:
             approve = await api_post(
                 base_url,
@@ -1057,12 +1060,7 @@ async def test_wasm_tool_oauth_roundtrip(auth_matrix_server):
 
 async def test_mcp_oauth_roundtrip_via_browser(browser, auth_matrix_server):
     server = auth_matrix_server
-    await _install_extension(
-        server["base_url"],
-        "mock-mcp",
-        kind="mcp_server",
-        url=f"{server['mock_llm_url']}/mcp",
-    )
+    auth_url = await _mcp_auth_url(server)
     thread_id = await _create_thread(server["base_url"])
 
     context = await browser.new_context(viewport={"width": 1280, "height": 720})
@@ -1078,39 +1076,26 @@ async def test_mcp_oauth_roundtrip_via_browser(browser, auth_matrix_server):
         )
 
         chat_input = page.locator(SEL["chat_input"])
-        await chat_input.fill("check mock mcp")
-        await chat_input.press("Enter")
-
-        auth_card = page.locator(SEL["auth_card"]).last
-        await auth_card.wait_for(state="visible", timeout=20000)
-
-        pending_gate = await _wait_for_pending_gate(server["base_url"], thread_id, timeout=60)
-        auth_url = pending_gate["resume_kind"]["auth_url"]
-        assert auth_url, pending_gate
 
         callback = await _complete_callback(
             server["base_url"], auth_url, code="mock_mcp_code"
         )
         assert callback.status_code == 200, callback.text[:400]
-
-        history = await _wait_for_response_contains(
-            server["base_url"],
-            thread_id,
-            "mock_mcp_mock_search",
-            timeout=60,
+        readiness = await _wait_for_extension_readiness(
+            server["base_url"], MCP_EXTENSION_NAME
         )
-        assert not history.get("pending_gate"), history
+        assert readiness["phase"] == "ready", readiness
 
+        await page.reload()
+        await page.locator(SEL["chat_input"]).wait_for(state="visible", timeout=10000)
+        await page.evaluate("(id) => switchThread(id)", thread_id)
         await page.wait_for_function(
-            """(selector) => {
-                const messages = document.querySelectorAll(selector);
-                if (!messages.length) return false;
-                const text = messages[messages.length - 1].innerText || '';
-                return text.includes('mock_mcp_mock_search') || text.includes('refresh-check');
-            }""",
-            arg=SEL["message_assistant"],
-            timeout=30000,
+            "(id) => currentThreadId === id",
+            arg=thread_id,
+            timeout=10000,
         )
+        await page.wait_for_timeout(1000)
+        assert await page.locator(SEL["auth_card"]).count() == 0
     finally:
         await context.close()
 

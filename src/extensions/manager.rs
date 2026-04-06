@@ -2534,12 +2534,24 @@ impl ExtensionManager {
                     wasm_url,
                     capabilities_url,
                 } => {
-                    self.install_wasm_tool_from_url_with_caps(
+                    let result = self.install_wasm_tool_from_url_with_caps(
                         &entry.name,
                         wasm_url,
                         capabilities_url.as_deref(),
                     )
-                    .await
+                    .await?;
+                    if let Some(fallback) = entry.fallback_source.as_ref()
+                        && let ExtensionSource::WasmBuildable { source_dir, .. } = fallback.as_ref()
+                    {
+                        let _ = self
+                            .hydrate_capabilities_from_source_dir(
+                                &entry.name,
+                                source_dir,
+                                &self.wasm_tools_dir,
+                            )
+                            .await?;
+                    }
+                    Ok(result)
                 }
                 ExtensionSource::WasmBuildable {
                     build_dir,
@@ -2564,12 +2576,24 @@ impl ExtensionManager {
                     wasm_url,
                     capabilities_url,
                 } => {
-                    self.install_wasm_channel_from_url(
+                    let result = self.install_wasm_channel_from_url(
                         &entry.name,
                         wasm_url,
                         capabilities_url.as_deref(),
                     )
-                    .await
+                    .await?;
+                    if let Some(fallback) = entry.fallback_source.as_ref()
+                        && let ExtensionSource::WasmBuildable { source_dir, .. } = fallback.as_ref()
+                    {
+                        let _ = self
+                            .hydrate_capabilities_from_source_dir(
+                                &entry.name,
+                                source_dir,
+                                &self.wasm_channels_dir,
+                            )
+                            .await?;
+                    }
+                    Ok(result)
                 }
                 ExtensionSource::WasmBuildable {
                     build_dir,
@@ -2684,6 +2708,51 @@ impl ExtensionManager {
                 name,
             ),
         })
+    }
+
+    async fn hydrate_capabilities_from_source_dir(
+        &self,
+        name: &str,
+        source_dir: &str,
+        target_dir: &std::path::Path,
+    ) -> Result<bool, ExtensionError> {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let source_path = {
+            let path = std::path::Path::new(source_dir);
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                manifest_dir.join(path)
+            }
+        };
+
+        let target_caps = target_dir.join(format!("{}.capabilities.json", name));
+        if target_caps.exists() {
+            return Ok(false);
+        }
+
+        let caps_candidates = [
+            source_path.join(format!("{}.capabilities.json", name)),
+            source_path.join(format!("{}-tool.capabilities.json", name)),
+            source_path.join("capabilities.json"),
+        ];
+
+        for caps_src in &caps_candidates {
+            if caps_src.exists() {
+                tokio::fs::copy(caps_src, &target_caps)
+                    .await
+                    .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+                tracing::debug!(
+                    extension = %name,
+                    source = %caps_src.display(),
+                    target = %target_caps.display(),
+                    "Hydrated capabilities sidecar from source directory"
+                );
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     /// Download a WASM extension (tool or channel) from URL and install to target directory.
@@ -2854,6 +2923,13 @@ impl ExtensionManager {
         let wasm_filename = format!("{}.wasm", name);
         let caps_filename = format!("{}.capabilities.json", name);
         let mut found_wasm = false;
+        let mut found_caps = false;
+        let mut fallback_wasm: Option<Vec<u8>> = None;
+        let mut fallback_wasm_name: Option<String> = None;
+        let mut multiple_wasm_candidates = false;
+        let mut fallback_caps: Option<Vec<u8>> = None;
+        let mut fallback_caps_name: Option<String> = None;
+        let mut multiple_caps_candidates = false;
 
         let entries = archive
             .entries()
@@ -2883,27 +2959,65 @@ impl ExtensionManager {
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
 
+            let mut data = Vec::with_capacity(entry.size() as usize);
+            std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
+                .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+
             if filename == wasm_filename {
-                let mut data = Vec::with_capacity(entry.size() as usize);
-                std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
-                    .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 std::fs::write(target_wasm, &data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 found_wasm = true;
             } else if filename == caps_filename {
-                let mut data = Vec::with_capacity(entry.size() as usize);
-                std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
-                    .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 std::fs::write(target_caps, &data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+                found_caps = true;
+            } else if filename.ends_with(".wasm") {
+                if fallback_wasm.is_some() {
+                    multiple_wasm_candidates = true;
+                } else {
+                    fallback_wasm = Some(data);
+                    fallback_wasm_name = Some(filename.to_string());
+                }
+            } else if filename.ends_with(".capabilities.json") {
+                if fallback_caps.is_some() {
+                    multiple_caps_candidates = true;
+                } else {
+                    fallback_caps = Some(data);
+                    fallback_caps_name = Some(filename.to_string());
+                }
             }
         }
 
         if !found_wasm {
-            return Err(ExtensionError::InstallFailed(format!(
-                "tar.gz archive does not contain '{}'",
-                wasm_filename
-            )));
+            if multiple_wasm_candidates {
+                return Err(ExtensionError::InstallFailed(format!(
+                    "tar.gz archive does not contain '{}' and has multiple .wasm entries",
+                    wasm_filename
+                )));
+            }
+            let data = fallback_wasm.ok_or_else(|| {
+                ExtensionError::InstallFailed(format!(
+                    "tar.gz archive does not contain '{}'",
+                    wasm_filename
+                ))
+            })?;
+            std::fs::write(target_wasm, &data)
+                .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+            tracing::debug!(
+                extension = %name,
+                fallback_wasm = fallback_wasm_name.as_deref().unwrap_or("<unknown>"),
+                "Archive did not contain the canonical wasm filename; using the sole .wasm entry"
+            );
+        }
+
+        if !found_caps && !multiple_caps_candidates && let Some(data) = fallback_caps {
+            std::fs::write(target_caps, &data)
+                .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+            tracing::debug!(
+                extension = %name,
+                fallback_caps = fallback_caps_name.as_deref().unwrap_or("<unknown>"),
+                "Archive did not contain the canonical capabilities filename; using the sole capabilities entry"
+            );
         }
 
         Ok(())
@@ -6150,8 +6264,8 @@ impl ExtensionManager {
         fields: &std::collections::HashMap<String, String>,
         user_id: &str,
     ) -> Result<ConfigureResult, ExtensionError> {
-        Self::validate_extension_name(name)?;
-        let kind = self.determine_installed_kind(name, user_id).await?;
+        let name = canonicalize_extension_name(name)?;
+        let kind = self.determine_installed_kind(&name, user_id).await?;
 
         // Load allowed secret names and tool setup field definitions from capabilities.
         let mut channel_cap_file: Option<crate::channels::wasm::ChannelCapabilitiesFile> = None;
@@ -6185,7 +6299,7 @@ impl ExtensionManager {
                 (names, Vec::new())
             }
             ExtensionKind::WasmTool => {
-                let cap_file = self.load_tool_capabilities(name).await.ok_or_else(|| {
+                let cap_file = self.load_tool_capabilities(&name).await.ok_or_else(|| {
                     ExtensionError::Other(format!("Capabilities file not found for '{}'", name))
                 })?;
                 let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -6207,7 +6321,7 @@ impl ExtensionManager {
             }
             ExtensionKind::McpServer => {
                 let server = self
-                    .get_mcp_server(name, user_id)
+                    .get_mcp_server(&name, user_id)
                     .await
                     .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
                 let mut names = std::collections::HashSet::new();
@@ -6310,7 +6424,7 @@ impl ExtensionManager {
         }
 
         let mut restart_required = false;
-        let mut stored_fields = self.load_tool_setup_fields(name).await.unwrap_or_default();
+        let mut stored_fields = self.load_tool_setup_fields(&name).await.unwrap_or_default();
 
         for (field_name, field_value) in fields {
             if !allowed_fields.contains(field_name.as_str()) {
@@ -6330,7 +6444,7 @@ impl ExtensionManager {
                 {
                     stored_fields.remove(field_name);
                     if let Some(setting_path) = &def.setting_path {
-                        Self::validate_setup_setting_path(name, setting_path)?;
+                        Self::validate_setup_setting_path(&name, setting_path)?;
                         if let Some(store) = self.store.as_ref() {
                             let _ = store.delete_setting(&self.user_id, setting_path).await;
                         }
@@ -6346,7 +6460,7 @@ impl ExtensionManager {
                     restart_required = true;
                 }
                 if let Some(setting_path) = &field_def.setting_path {
-                    Self::validate_setup_setting_path(name, setting_path)?;
+                    Self::validate_setup_setting_path(&name, setting_path)?;
                     let store = self.store.as_ref().ok_or_else(|| {
                         ExtensionError::Other(
                             "Settings store unavailable for setup field persistence".to_string(),
@@ -6370,7 +6484,7 @@ impl ExtensionManager {
         }
 
         if !allowed_fields.is_empty() && !fields.is_empty() {
-            self.save_tool_setup_fields(name, &stored_fields).await?;
+            self.save_tool_setup_fields(&name, &stored_fields).await?;
         }
 
         for field_def in setup_field_defs.values() {
@@ -6378,7 +6492,7 @@ impl ExtensionManager {
                 continue;
             }
             if !self
-                .is_tool_setup_field_provided(name, field_def, &stored_fields)
+                .is_tool_setup_field_provided(&name, field_def, &stored_fields)
                 .await
             {
                 return Err(ExtensionError::Other(format!(
@@ -6424,7 +6538,7 @@ impl ExtensionManager {
 
         let mut telegram_binding = None;
         if kind == ExtensionKind::WasmChannel && name == TELEGRAM_CHANNEL_NAME {
-            match self.configure_telegram_binding(name, secrets).await? {
+            match self.configure_telegram_binding(&name, secrets).await? {
                 TelegramBindingResult::Bound(binding) => {
                     telegram_binding = Some(binding);
                 }
@@ -6445,12 +6559,12 @@ impl ExtensionManager {
 
         // For tools, save and attempt auto-activation, then check auth.
         if kind == ExtensionKind::WasmTool {
-            match self.activate_wasm_tool(name, user_id).await {
+            match self.activate_wasm_tool(&name, user_id).await {
                 Ok(result) => {
                     // Delete existing OAuth token so auth() starts a fresh flow.
                     // Done AFTER activation succeeds to avoid losing tokens on failure.
                     // This covers Reconfigure: user wants to re-auth (switch account, update creds).
-                    if let Some(cap) = self.load_tool_capabilities(name).await
+                    if let Some(cap) = self.load_tool_capabilities(&name).await
                         && let Some(ref auth_cfg) = cap.auth
                         && auth_cfg.oauth.is_some()
                     {
@@ -6470,7 +6584,7 @@ impl ExtensionManager {
                     let mut auth_url = None;
                     // Box::pin breaks the async recursion cycle:
                     // auth() → auth_wasm_tool() → (OAuth) → configure() → auth()
-                    if let Ok(auth_result) = Box::pin(self.auth(name, user_id)).await {
+                    if let Ok(auth_result) = Box::pin(self.auth(&name, user_id)).await {
                         auth_url = auth_result.auth_url().map(String::from);
                     }
                     let message = if auth_url.is_some() {
@@ -6510,7 +6624,7 @@ impl ExtensionManager {
         }
 
         if kind == ExtensionKind::WasmChannel
-            && let Ok(auth_result) = Box::pin(self.auth(name, user_id)).await
+            && let Ok(auth_result) = Box::pin(self.auth(&name, user_id)).await
             && auth_result.auth_url().is_some()
         {
             return Ok(ConfigureResult {
@@ -6528,9 +6642,9 @@ impl ExtensionManager {
         // Activate the extension now that secrets are saved.
         // Dispatch by kind — WasmTool was already handled above with an early return.
         let activate_result = match kind {
-            ExtensionKind::WasmChannel => self.activate_wasm_channel(name, user_id).await,
-            ExtensionKind::McpServer => self.activate_mcp(name, user_id).await,
-            ExtensionKind::ChannelRelay => self.activate_channel_relay(name, user_id).await,
+            ExtensionKind::WasmChannel => self.activate_wasm_channel(&name, user_id).await,
+            ExtensionKind::McpServer => self.activate_mcp(&name, user_id).await,
+            ExtensionKind::ChannelRelay => self.activate_channel_relay(&name, user_id).await,
             ExtensionKind::WasmTool | ExtensionKind::AcpAgent => {
                 return Ok(ConfigureResult {
                     message: format!("Configuration saved for '{}'.", name),
@@ -6544,10 +6658,10 @@ impl ExtensionManager {
 
         match activate_result {
             Ok(result) => {
-                self.activation_errors.write().await.remove(name);
-                self.broadcast_extension_status(name, "active", None).await;
+                self.activation_errors.write().await.remove(&name);
+                self.broadcast_extension_status(&name, "active", None).await;
                 if name == TELEGRAM_CHANNEL_NAME {
-                    self.notify_telegram_owner_verified(name, telegram_binding.as_ref())
+                    self.notify_telegram_owner_verified(&name, telegram_binding.as_ref())
                         .await;
                 }
                 let message = if name == TELEGRAM_CHANNEL_NAME {
@@ -6580,7 +6694,7 @@ impl ExtensionManager {
                     .write()
                     .await
                     .insert(name.to_string(), error_msg.clone());
-                self.broadcast_extension_status(name, "failed", Some(&error_msg))
+                self.broadcast_extension_status(&name, "failed", Some(&error_msg))
                     .await;
                 Ok(ConfigureResult {
                     message: format!(
@@ -7317,6 +7431,29 @@ mod tests {
         channels_dir
     }
 
+    fn make_test_tar_gz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use tar::Builder;
+
+        let mut tar_data = Vec::new();
+        {
+            let encoder = GzEncoder::new(&mut tar_data, Compression::default());
+            let mut builder = Builder::new(encoder);
+            for (path, data) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(data.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, *path, *data)
+                    .expect("append tar entry");
+            }
+            builder.into_inner().expect("finish tar");
+        }
+        tar_data
+    }
+
     async fn store_test_secret(
         manager: &crate::extensions::manager::ExtensionManager,
         name: &str,
@@ -7367,6 +7504,39 @@ mod tests {
             }
             other => panic!("expected needs auth outcome, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn extract_wasm_tar_gz_accepts_single_noncanonical_entries() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let manager = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+        );
+        let target_wasm = dir.path().join("web-search.wasm");
+        let target_caps = dir.path().join("web-search.capabilities.json");
+        let tar_gz = make_test_tar_gz(&[
+            ("web_search_tool.wasm", b"\0asmfallback"),
+            (
+                "web-search-tool.capabilities.json",
+                br#"{"name":"web-search-tool"}"#,
+            ),
+        ]);
+
+        manager
+            .extract_wasm_tar_gz("web-search", &tar_gz, &target_wasm, &target_caps)
+            .expect("extract tar.gz");
+
+        assert_eq!(
+            std::fs::read(&target_wasm).expect("read wasm"),
+            b"\0asmfallback"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target_caps).expect("read capabilities"),
+            r#"{"name":"web-search-tool"}"#
+        );
     }
 
     #[tokio::test]

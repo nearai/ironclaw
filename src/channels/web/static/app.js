@@ -1800,6 +1800,9 @@ function handleAuthRequired(data) {
     debouncedLoadThreads();
     return;
   }
+  if (data.extension_name && getConfigureOverlay(data.extension_name)) {
+    return;
+  }
   setAuthFlowPending(true, data.instructions);
   if (data.auth_url || data.instructions) {
     // Token paste flow (with optional OAuth button): show the global auth
@@ -1809,7 +1812,6 @@ function handleAuthRequired(data) {
   } else {
     // Extension setup flow: fetch the extension's credential schema and show
     // the multi-field configure modal (Extensions tab "Setup" button UI).
-    if (getConfigureOverlay(data.extension_name)) return;
     showConfigureModal(data.extension_name);
   }
 }

@@ -2076,9 +2076,8 @@ async fn history_pending_gate_info(
     user_id: &str,
     thread_id: Option<&str>,
 ) -> Option<PendingGateInfo> {
-    let scoped = engine_pending_gate_info(user_id, thread_id).await;
-    if scoped.is_some() || thread_id.is_none() {
-        return scoped;
+    if thread_id.is_some() {
+        return engine_pending_gate_info(user_id, thread_id).await;
     }
     engine_pending_gate_info(user_id, None).await
 }
@@ -2298,20 +2297,6 @@ async fn chat_threads_handler(
             .get_or_create_assistant_conversation(&user.user_id, "gateway")
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        // Seed the bootstrap greeting if this is a brand-new assistant thread.
-        // Use add_conversation_message_if_empty to avoid duplicates on concurrent requests.
-        static GREETING: &str = include_str!("../../workspace/seeds/GREETING.md");
-        if let Err(e) = store
-            .add_conversation_message_if_empty(assistant_id, "assistant", GREETING)
-            .await
-        {
-            tracing::warn!(
-                user_id = %user.user_id,
-                error = %e,
-                "Failed to seed assistant greeting"
-            );
-        }
 
         match store
             .list_conversations_all_channels(&user.user_id, 50)

@@ -1,12 +1,12 @@
-//! Integration tests for the bootstrap greeting and cookie-based auth.
+//! Integration tests for assistant-thread bootstrap and cookie-based auth.
 //!
 //! Verifies:
-//! - Bootstrap greeting is inserted exactly once for new users
-//! - Subsequent calls to /api/chat/threads do NOT re-insert the greeting
-//! - Concurrent requests don't duplicate the greeting
-//! - Multiple users each get their own greeting
+//! - Assistant threads are auto-created for new users
+//! - Listing /api/chat/threads does not inject a synthetic greeting
+//! - Concurrent requests don't create duplicate bootstrap messages
+//! - Multiple users each get their own assistant thread
 //! - Cookie-based session auth works for protected endpoints
-//! - Pre-existing conversations are not overwritten with the greeting
+//! - Pre-existing conversations are not overwritten
 
 #[cfg(feature = "libsql")]
 mod tests {
@@ -149,38 +149,33 @@ mod tests {
     // ── Tests ────────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn test_greeting_inserted_once_for_new_user() {
+    async fn test_fresh_user_gets_empty_assistant_thread() {
         let (db, _dir) = create_test_db().await;
         let auth = auth_state(vec![(ALICE_TOKEN, "alice")]);
         let addr = start_test_server(db, auth).await;
         let c = client();
 
-        // First call — should create assistant thread with greeting.
+        // First call should create an assistant thread but not inject messages.
         let threads1 = get_threads(&c, addr, ALICE_TOKEN).await;
         let assistant1 = threads1["assistant_thread"]
             .as_object()
             .expect("assistant thread");
         let thread_id = assistant1["id"].as_str().expect("thread id");
 
-        // Verify history has exactly one turn (the greeting as a standalone assistant msg).
+        // A fresh assistant thread should start empty.
         let history = get_history(&c, addr, ALICE_TOKEN, thread_id).await;
         let turns = history["turns"].as_array().expect("turns array");
-        assert_eq!(turns.len(), 1, "should have exactly one greeting turn");
-        let response = turns[0]["response"].as_str().unwrap_or("");
-        assert!(
-            response.contains("excited to be your new assistant"),
-            "greeting content mismatch: {response}"
-        );
+        assert_eq!(turns.len(), 0, "fresh assistant thread should start empty");
 
-        // Second call — should NOT insert another greeting.
+        // Second call should remain a pure read.
         let _threads2 = get_threads(&c, addr, ALICE_TOKEN).await;
         let history2 = get_history(&c, addr, ALICE_TOKEN, thread_id).await;
         let turns2 = history2["turns"].as_array().expect("turns array");
-        assert_eq!(turns2.len(), 1, "second call should not duplicate greeting");
+        assert_eq!(turns2.len(), 0, "second call should not inject a greeting");
     }
 
     #[tokio::test]
-    async fn test_greeting_not_duplicated_on_rapid_calls() {
+    async fn test_threads_listing_does_not_create_bootstrap_messages_on_rapid_calls() {
         let (db, _dir) = create_test_db().await;
         let auth = auth_state(vec![(ALICE_TOKEN, "alice-rapid")]);
         let addr = start_test_server(db, auth).await;
@@ -199,7 +194,7 @@ mod tests {
             h.await.expect("join");
         }
 
-        // Check that the assistant thread has exactly 1 message.
+        // Check that the assistant thread is still empty.
         let threads = get_threads(&c, addr, ALICE_TOKEN).await;
         let thread_id = threads["assistant_thread"]["id"]
             .as_str()
@@ -208,13 +203,13 @@ mod tests {
         let turns = history["turns"].as_array().expect("turns");
         assert_eq!(
             turns.len(),
-            1,
-            "concurrent calls should not duplicate the greeting"
+            0,
+            "concurrent calls should not create bootstrap messages"
         );
     }
 
     #[tokio::test]
-    async fn test_each_user_gets_own_greeting() {
+    async fn test_each_user_gets_own_empty_assistant_thread() {
         let (db, _dir) = create_test_db().await;
         let auth = auth_state(vec![(ALICE_TOKEN, "alice-multi"), (BOB_TOKEN, "bob-multi")]);
         let addr = start_test_server(db, auth).await;
@@ -238,19 +233,19 @@ mod tests {
             "each user should have their own assistant thread"
         );
 
-        // Both have the greeting.
+        // Both threads remain empty until the user actually chats.
         let alice_history = get_history(&c, addr, ALICE_TOKEN, alice_id).await;
         let bob_history = get_history(&c, addr, BOB_TOKEN, bob_id).await;
 
         assert_eq!(
             alice_history["turns"].as_array().unwrap().len(),
-            1,
-            "alice should have greeting"
+            0,
+            "alice should start with an empty assistant thread"
         );
         assert_eq!(
             bob_history["turns"].as_array().unwrap().len(),
-            1,
-            "bob should have greeting"
+            0,
+            "bob should start with an empty assistant thread"
         );
     }
 
@@ -282,7 +277,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_existing_conversation_no_greeting() {
+    async fn test_existing_conversation_is_preserved() {
         let (db, _dir) = create_test_db().await;
         let auth = auth_state(vec![(ALICE_TOKEN, "alice-existing")]);
         let addr = start_test_server(Arc::clone(&db), auth).await;
@@ -297,7 +292,7 @@ mod tests {
             .await
             .expect("add message");
 
-        // Now call /api/chat/threads — should NOT insert greeting (conv not empty).
+        // Now call /api/chat/threads — should leave the existing conversation untouched.
         let threads = get_threads(&c, addr, ALICE_TOKEN).await;
         let thread_id = threads["assistant_thread"]["id"]
             .as_str()
@@ -308,13 +303,13 @@ mod tests {
         assert_eq!(
             turns.len(),
             1,
-            "should have only the pre-existing message, no greeting"
+            "should have only the pre-existing message"
         );
         // A standalone user message with no assistant response shows as user_input.
         let user_input = turns[0]["user_input"].as_str().unwrap_or("");
         assert_eq!(
             user_input, "Hello!",
-            "should be the original message, not the greeting"
+            "should be the original message"
         );
     }
 }

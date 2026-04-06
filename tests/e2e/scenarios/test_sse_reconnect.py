@@ -5,18 +5,19 @@ from helpers import SEL
 
 
 async def test_sse_status_shows_connected(page):
-    """SSE status should show Connected after page load."""
-    status = page.locator(SEL["sse_status"])
-    await status.wait_for(state="visible", timeout=5000)
-    text = await status.text_content()
-    assert text == "Connected", f"Expected 'Connected', got '{text}'"
+    """SSE status dot should show connected after page load."""
+    status_dot = page.locator(SEL["sse_dot"])
+    await status_dot.wait_for(state="visible", timeout=5000)
+    classes = await status_dot.get_attribute("class")
+    assert classes is not None
+    assert "disconnected" not in classes, f"Expected connected dot, got '{classes}'"
 
 
 async def test_sse_reconnect_after_disconnect(page):
-    """After programmatic disconnect, SSE should reconnect and show Connected."""
+    """After programmatic disconnect, SSE should reconnect and clear the disconnected state."""
     # Verify initial connection
     await page.wait_for_function(
-        'document.getElementById("sse-status").textContent === "Connected"',
+        '!document.getElementById("sse-dot").classList.contains("disconnected")',
         timeout=5000,
     )
 
@@ -28,12 +29,12 @@ async def test_sse_reconnect_after_disconnect(page):
 
     # Wait for reconnection
     await page.wait_for_function(
-        'document.getElementById("sse-status").textContent === "Connected"',
+        '!document.getElementById("sse-dot").classList.contains("disconnected")',
         timeout=10000,
     )
-    status = page.locator(SEL["sse_status"])
-    text = await status.text_content()
-    assert text == "Connected"
+    classes = await page.locator(SEL["sse_dot"]).get_attribute("class")
+    assert classes is not None
+    assert "disconnected" not in classes
 
 
 async def test_sse_reconnect_preserves_chat_history(page):
@@ -59,7 +60,7 @@ async def test_sse_reconnect_preserves_chat_history(page):
 
     # Wait for reconnection
     await page.wait_for_function(
-        'document.getElementById("sse-status").textContent === "Connected"',
+        '!document.getElementById("sse-dot").classList.contains("disconnected")',
         timeout=10000,
     )
 

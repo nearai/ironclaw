@@ -14,6 +14,13 @@ import httpx
 
 from helpers import api_get, api_post
 
+MCP_ROUTE_NAME = "mock-mcp"
+MCP_LIST_NAME = "mock_mcp"
+MCP_TOOL_NAME = "mock_mcp_mock_search"
+MCP_ACCESS_TOKEN_SECRET = "mcp_mock_mcp_access_token"
+MCP_CLIENT_SECRET = "mcp_mock_mcp_client_secret"
+MCP_REFRESH_TOKEN_SECRET = "mcp_mock_mcp_access_token_refresh_token"
+
 
 def _extract_state(auth_url: str) -> str:
     parsed = urlparse(auth_url)
@@ -34,7 +41,7 @@ def _expire_access_token(db_path: str, user_id: str, secret_name: str) -> None:
             """
             UPDATE secrets
             SET expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour')
-            WHERE user_id = ?1 AND name = ?2
+            WHERE user_id = ? AND name = ?
             """,
             (user_id, secret_name),
         )
@@ -51,7 +58,7 @@ def _find_secret_row(
             """
             SELECT user_id, expires_at, updated_at
             FROM secrets
-            WHERE name = ?1
+            WHERE name = ?
             ORDER BY updated_at DESC
             LIMIT 1
             """,
@@ -267,7 +274,7 @@ async def test_hosted_mcp_oauth_refresh_uses_proxy(hosted_oauth_refresh_server):
     install_response = await api_post(
         server,
         "/api/extensions/install",
-        json={"name": "mock-mcp", "url": mcp_url, "kind": "mcp_server"},
+        json={"name": MCP_ROUTE_NAME, "url": mcp_url, "kind": "mcp_server"},
         timeout=30,
     )
     assert install_response.status_code == 200, install_response.text
@@ -275,7 +282,7 @@ async def test_hosted_mcp_oauth_refresh_uses_proxy(hosted_oauth_refresh_server):
 
     activate_response = await api_post(
         server,
-        "/api/extensions/mock-mcp/activate",
+        f"/api/extensions/{MCP_ROUTE_NAME}/activate",
         timeout=30,
     )
     assert activate_response.status_code == 200, activate_response.text
@@ -294,14 +301,14 @@ async def test_hosted_mcp_oauth_refresh_uses_proxy(hosted_oauth_refresh_server):
     callback_body = callback_response.text.lower()
     assert "connected" in callback_body or "success" in callback_body
 
-    mock_mcp = await _get_extension(server, "mock-mcp")
-    assert mock_mcp is not None, "mock-mcp should be installed"
+    mock_mcp = await _get_extension(server, MCP_LIST_NAME)
+    assert mock_mcp is not None, "mock_mcp should be installed"
     assert mock_mcp["authenticated"] is True, mock_mcp
-    assert "mock-mcp_mock_search" in mock_mcp.get("tools", []), mock_mcp
+    assert MCP_TOOL_NAME in mock_mcp.get("tools", []), mock_mcp
 
-    client_secret_user_id, _, _ = _find_secret_row(db_path, "mcp_mock-mcp_client_secret")
+    client_secret_user_id, _, _ = _find_secret_row(db_path, MCP_CLIENT_SECRET)
     stored_user_id, expires_before, updated_before = _find_secret_row(
-        db_path, "mcp_mock-mcp_access_token"
+        db_path, MCP_ACCESS_TOKEN_SECRET
     )
     assert client_secret_user_id == stored_user_id
     assert _parse_timestamp(expires_before) is not None
@@ -309,7 +316,7 @@ async def test_hosted_mcp_oauth_refresh_uses_proxy(hosted_oauth_refresh_server):
 
     await _reset_mock_oauth_state(mock_base_url)
     await asyncio.sleep(0.1)
-    _expire_access_token(db_path, stored_user_id, "mcp_mock-mcp_access_token")
+    _expire_access_token(db_path, stored_user_id, MCP_ACCESS_TOKEN_SECRET)
 
     thread_response = await api_post(server, "/api/chat/thread/new", timeout=15)
     assert thread_response.status_code == 200, thread_response.text
@@ -323,9 +330,9 @@ async def test_hosted_mcp_oauth_refresh_uses_proxy(hosted_oauth_refresh_server):
     )
     assert send_response.status_code == 202, send_response.text
 
-    history = await _wait_for_tool_call(server, thread_id, "mock-mcp_mock_search")
+    history = await _wait_for_tool_call(server, thread_id, MCP_TOOL_NAME)
     assert any(
-        tool_call.get("name") == "mock-mcp_mock_search"
+        tool_call.get("name") == MCP_TOOL_NAME
         for turn in history.get("turns", [])
         for tool_call in turn.get("tool_calls", [])
     ), history
@@ -335,17 +342,17 @@ async def test_hosted_mcp_oauth_refresh_uses_proxy(hosted_oauth_refresh_server):
     last_refresh = oauth_state["last_refresh"]
     assert last_refresh is not None, oauth_state
     assert last_refresh["authorization"] == "Bearer e2e-test-token"
-    assert last_refresh["form"]["provider"] == "mcp:mock-mcp"
+    assert last_refresh["form"]["provider"] == f"mcp:{MCP_LIST_NAME}"
     assert last_refresh["form"]["client_id"] == "mock-mcp-client-id"
     assert last_refresh["form"]["client_secret"] == "mock-mcp-client-secret"
     assert last_refresh["form"]["token_url"].endswith("/oauth/token")
     assert last_refresh["form"]["resource"] == mcp_url
 
     refreshed_user_id, expires_after, updated_after = _find_secret_row(
-        db_path, "mcp_mock-mcp_access_token"
+        db_path, MCP_ACCESS_TOKEN_SECRET
     )
     refresh_user_id, _, refresh_updated_after = _find_secret_row(
-        db_path, "mcp_mock-mcp_access_token_refresh_token"
+        db_path, MCP_REFRESH_TOKEN_SECRET
     )
     assert refreshed_user_id == stored_user_id
     assert refresh_user_id == stored_user_id

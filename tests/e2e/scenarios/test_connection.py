@@ -5,13 +5,12 @@ from helpers import AUTH_TOKEN, SEL, TABS
 
 
 async def test_page_loads_and_connects(page):
-    """After auth, the app shows Connected status and all tabs."""
-    # Connection status
-    status = page.locator(SEL["sse_status"])
-    await status.wait_for(state="visible", timeout=10000)
-    text = await status.text_content()
-    assert text is not None
-    assert "connect" in text.lower(), f"Expected 'Connected', got '{text}'"
+    """After auth, the app shows a connected status indicator and all tabs."""
+    status_dot = page.locator(SEL["sse_dot"])
+    await status_dot.wait_for(state="visible", timeout=10000)
+    classes = await status_dot.get_attribute("class")
+    assert classes is not None
+    assert "disconnected" not in classes, f"Expected connected dot, got '{classes}'"
 
     # All 6 main tabs visible
     for tab in TABS:

@@ -487,9 +487,6 @@ impl Agent {
 
     /// Run the agent main loop.
     pub async fn run(self) -> Result<(), Error> {
-        // Bootstrap greeting is now handled by chat_threads_handler in server.rs
-        // when the assistant conversation is first created with zero messages.
-
         // Eagerly initialize engine v2 so gateway API endpoints can serve
         // data (projects, missions, threads) before the first chat message.
         if self.config.engine_v2
@@ -868,10 +865,6 @@ impl Agent {
             None
         };
 
-        // Bootstrap phase 2: register the thread in session manager and
-        // broadcast the greeting via SSE for any clients already connected.
-        // The greeting was already persisted to DB before start_all(), so
-        // clients that connect after this point will see it via history.
         // Main message loop
         tracing::debug!("Agent {} ready and listening", self.config.name);
 

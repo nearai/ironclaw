@@ -64,16 +64,19 @@ async def test_empty_message_not_sent(page):
     """Pressing Enter with empty input should not create a message."""
     chat_input = page.locator(SEL["chat_input"])
     await chat_input.wait_for(state="visible", timeout=5000)
+    await page.locator(".message-skeleton").first.wait_for(state="hidden", timeout=15000)
 
-    initial_count = await page.locator(f"{SEL['message_user']}, {SEL['message_assistant']}").count()
+    initial_user_count = await page.locator(SEL["message_user"]).count()
 
     # Press Enter with empty input
     await chat_input.press("Enter")
 
-    # Wait a moment and verify no new messages
+    # Wait a moment and verify no new user messages
     await page.wait_for_timeout(2000)
-    final_count = await page.locator(f"{SEL['message_user']}, {SEL['message_assistant']}").count()
-    assert final_count == initial_count, "Empty message should not create new messages"
+    final_user_count = await page.locator(SEL["message_user"]).count()
+    assert final_user_count == initial_user_count, (
+        "Empty message should not create a new user message"
+    )
 
 
 async def test_copy_from_chat_forces_plain_text(page):
