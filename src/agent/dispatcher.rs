@@ -199,12 +199,12 @@ impl Agent {
                 active_skills.iter().map(|s| s.name().to_string()).collect();
             reasoning = reasoning.with_active_skill_names(skill_names);
         }
-        if active_skills.is_empty() {
-            if let Some(extension_manager) = self.deps.extension_manager.as_ref() {
-                let extension_context = extension_manager.active_extension_summary().await;
-                if !extension_context.is_empty() {
-                    reasoning = reasoning.with_extension_context(extension_context);
-                }
+        if active_skills.is_empty()
+            && let Some(extension_manager) = self.deps.extension_manager.as_ref()
+        {
+            let extension_context = extension_manager.active_extension_summary().await;
+            if !extension_context.is_empty() {
+                reasoning = reasoning.with_extension_context(extension_context);
             }
         }
 
