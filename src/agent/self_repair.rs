@@ -224,10 +224,44 @@ impl SelfRepair for DefaultSelfRepair {
     async fn repair_stuck_job(&self, job: &StuckJob) -> Result<RepairResult, RepairError> {
         // Check if we've exceeded max repair attempts
         if job.repair_attempts >= self.max_repair_attempts {
+            // Transition to Failed so detect_stuck_jobs() stops finding this job.
+            // Without this, the repair loop re-detects the job every cycle and
+            // sends a ManualRequired notification each time (notification spam).
+            // update_context returns Result<Result<(), String>, JobError>.
+            // Outer Err = job not found. Inner Err = invalid state transition.
+            // Both mean the job was NOT transitioned to Failed.
+            let transition_ok = matches!(
+                self.context_manager
+                    .update_context(job.job_id, |ctx| {
+                        ctx.transition_to(
+                            JobState::Failed,
+                            Some(format!(
+                                "exceeded max repair attempts ({})",
+                                self.max_repair_attempts
+                            )),
+                        )
+                    })
+                    .await,
+                Ok(Ok(()))
+            );
+
+            if !transition_ok {
+                tracing::error!(
+                    job = %job.job_id,
+                    "Failed to transition job to Failed state after exceeding max repair attempts"
+                );
+            }
+
+            let status = if transition_ok {
+                "and has been marked failed"
+            } else {
+                "but could not be marked failed (will be suppressed by dedup)"
+            };
+
             return Ok(RepairResult::ManualRequired {
                 message: format!(
-                    "Job {} has exceeded maximum repair attempts ({})",
-                    job.job_id, self.max_repair_attempts
+                    "Job {} has exceeded maximum repair attempts ({}) {}",
+                    job.job_id, self.max_repair_attempts, status
                 ),
             });
         }
@@ -581,7 +615,19 @@ mod tests {
         let cm = Arc::new(ContextManager::new(10));
         let job_id = cm.create_job("Unrepairable", "desc").await.unwrap();
 
-        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(60), 2);
+        // Transition through the production path: Pending → InProgress → Stuck
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap()
+            .unwrap();
+        cm.update_context(job_id, |ctx| {
+            ctx.transition_to(JobState::Stuck, Some("test".into()))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let repair = DefaultSelfRepair::new(cm.clone(), Duration::from_secs(60), 2);
 
         let stuck_job = StuckJob {
             job_id,
@@ -596,6 +642,17 @@ mod tests {
             matches!(result, RepairResult::ManualRequired { .. }),
             "Expected ManualRequired, got: {:?}",
             result
+        );
+
+        // Regression: the job must be transitioned to Failed so
+        // detect_stuck_jobs() stops finding it. Without this, the repair
+        // loop re-detects the job every cycle and sends ManualRequired
+        // notifications forever (notification spam bug).
+        let ctx = cm.get_context(job_id).await.unwrap();
+        assert_eq!(
+            ctx.state,
+            JobState::Failed,
+            "Job should be Failed after exceeding max repair attempts"
         );
     }
 

@@ -264,17 +264,18 @@ def _wasm_build_symlinks():
         return
 
     created = []
-    tools_src = ROOT / "tools-src"
-    main_tools_src = _MAIN_ROOT / "tools-src"
-    if tools_src.is_dir() and main_tools_src.is_dir():
-        for tool_dir in tools_src.iterdir():
-            if not tool_dir.is_dir():
-                continue
-            target = tool_dir / "target"
-            main_target = main_tools_src / tool_dir.name / "target"
-            if not target.exists() and main_target.is_dir():
-                target.symlink_to(main_target)
-                created.append(target)
+    for src_dir_name in ("tools-src", "channels-src"):
+        src_dir = ROOT / src_dir_name
+        main_src_dir = _MAIN_ROOT / src_dir_name
+        if src_dir.is_dir() and main_src_dir.is_dir():
+            for child in src_dir.iterdir():
+                if not child.is_dir():
+                    continue
+                target = child / "target"
+                main_target = main_src_dir / child.name / "target"
+                if not target.exists() and main_target.is_dir():
+                    target.symlink_to(main_target)
+                    created.append(target)
     yield
     for link in created:
         if link.is_symlink():
@@ -928,7 +929,6 @@ async def length_preserving_page(length_preserving_server, browser):
     yield pg
     await context.close()
 
-
 # ---------------------------------------------------------------------------
 # Slack E2E fixtures
 # ---------------------------------------------------------------------------
@@ -1023,3 +1023,150 @@ async def slack_e2e_server(ironclaw_binary, mock_llm_server, fake_slack_server):
         await asyncio.wait_for(proc.wait(), timeout=10)
     except asyncio.TimeoutError:
         proc.kill()
+
+# ── Telegram E2E fixtures ────────────────────────────────────────────────
+
+
+@pytest.fixture(scope="session")
+async def fake_telegram_server():
+    """Start the fake Telegram Bot API server. Yields the base URL."""
+    server_script = Path(__file__).parent / "fake_telegram_api.py"
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, str(server_script), "--port", "0",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        port = await wait_for_port_line(
+            proc, r"FAKE_TELEGRAM_PORT=(\d+)", timeout=10
+        )
+        url = f"http://127.0.0.1:{port}"
+        yield url
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            proc.kill()
+
+
+@pytest.fixture(scope="session")
+async def telegram_e2e_server(
+    ironclaw_binary,
+    mock_llm_server,
+    wasm_tools_dir,
+    fake_telegram_server,
+):
+    """Start an isolated ironclaw instance wired to the fake Telegram API.
+
+    Yields a dict with:
+    - ``base_url``: gateway URL
+    - ``http_url``: webhook server URL (for POSTing Telegram webhooks)
+    - ``fake_tg_url``: fake Telegram API URL (for control endpoints)
+    """
+    reserved = _reserve_loopback_sockets(2)
+    db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-tg-db-")
+    home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-tg-home-")
+    channels_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-tg-channels-")
+
+    try:
+        gateway_port = reserved[0].getsockname()[1]
+        http_port = reserved[1].getsockname()[1]
+        for sock in reserved:
+            if sock.fileno() != -1:
+                sock.close()
+
+        home_dir = home_tmpdir.name
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": home_dir,
+            "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
+            "RUST_LOG": "ironclaw=debug",
+            "RUST_BACKTRACE": "1",
+            "IRONCLAW_OWNER_ID": OWNER_SCOPE_ID,
+            "GATEWAY_ENABLED": "true",
+            "GATEWAY_HOST": "127.0.0.1",
+            "GATEWAY_PORT": str(gateway_port),
+            "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
+            "HTTP_HOST": "127.0.0.1",
+            "HTTP_PORT": str(http_port),
+            "HTTP_WEBHOOK_SECRET": HTTP_WEBHOOK_SECRET,
+            "CLI_ENABLED": "false",
+            "LLM_BACKEND": "openai_compatible",
+            "LLM_BASE_URL": mock_llm_server,
+            "LLM_MODEL": "mock-model",
+            "DATABASE_BACKEND": "libsql",
+            "LIBSQL_PATH": os.path.join(db_tmpdir.name, "tg-e2e.db"),
+            "SECRETS_MASTER_KEY": (
+                "0123456789abcdef0123456789abcdef"
+                "0123456789abcdef0123456789abcdef"
+            ),
+            "SANDBOX_ENABLED": "false",
+            "SKILLS_ENABLED": "true",
+            "ROUTINES_ENABLED": "false",
+            "HEARTBEAT_ENABLED": "false",
+            "EMBEDDING_ENABLED": "false",
+            "WASM_ENABLED": "true",
+            "WASM_TOOLS_DIR": wasm_tools_dir,
+            "WASM_CHANNELS_DIR": channels_tmpdir.name,
+            "ONBOARD_COMPLETED": "true",
+            "IRONCLAW_OAUTH_CALLBACK_URL": (
+                "https://oauth.test.example/oauth/callback"
+            ),
+            "IRONCLAW_OAUTH_EXCHANGE_URL": mock_llm_server,
+            # Route Telegram API calls to the fake server
+            "IRONCLAW_TEST_TELEGRAM_API_BASE_URL": fake_telegram_server,
+        }
+        _forward_coverage_env(env)
+
+        proc = await asyncio.create_subprocess_exec(
+            ironclaw_binary, "--no-onboard",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        startup_kill_attempted = False
+        base_url = f"http://127.0.0.1:{gateway_port}"
+        http_url = f"http://127.0.0.1:{http_port}"
+        try:
+            await wait_for_ready(f"{base_url}/api/health", timeout=60)
+            yield {
+                "base_url": base_url,
+                "http_url": http_url,
+                "fake_tg_url": fake_telegram_server,
+                "channels_dir": channels_tmpdir.name,
+            }
+        except TimeoutError:
+            if proc.returncode is None:
+                startup_kill_attempted = True
+                await _stop_process(proc, timeout=2)
+            returncode = proc.returncode
+            stderr_bytes = b""
+            if proc.stderr:
+                try:
+                    stderr_bytes = await asyncio.wait_for(
+                        proc.stderr.read(8192), timeout=2
+                    )
+                except asyncio.TimeoutError:
+                    pass
+            stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+            pytest.fail(
+                f"telegram e2e server failed to start on port {gateway_port} "
+                f"(returncode={returncode}).\nstderr:\n{stderr_text}"
+            )
+        finally:
+            if proc.returncode is None:
+                if startup_kill_attempted:
+                    await _stop_process(proc, timeout=2)
+                else:
+                    await _stop_process(proc, sig=signal.SIGINT, timeout=10)
+                    if proc.returncode is None:
+                        await _stop_process(proc, timeout=2)
+    finally:
+        for sock in reserved:
+            if sock.fileno() != -1:
+                sock.close()
+        db_tmpdir.cleanup()
+        home_tmpdir.cleanup()
+        channels_tmpdir.cleanup()
