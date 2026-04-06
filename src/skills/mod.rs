@@ -35,6 +35,7 @@ pub mod bundled;
 pub use attenuation::{AttenuationResult, attenuate_tools};
 
 use crate::secrets::{CredentialLocation, CredentialMapping};
+use crate::tools::wasm::OAuthRefreshConfig;
 use ironclaw_skills::{LoadedSkill, SkillCredentialLocation, SkillCredentialSpec};
 
 /// Convert a skill credential location to the main crate's [`CredentialLocation`].
@@ -62,6 +63,96 @@ pub fn credential_spec_to_mapping(spec: &SkillCredentialSpec) -> CredentialMappi
         location: convert_credential_location(&spec.location),
         host_patterns: spec.hosts.clone(),
     }
+}
+
+fn credential_spec_to_oauth_refresh(spec: &SkillCredentialSpec) -> Option<OAuthRefreshConfig> {
+    let oauth = spec.oauth.as_ref()?;
+    match &oauth.refresh {
+        ironclaw_skills::ProviderRefreshStrategy::ReauthorizeOnly => return None,
+        ironclaw_skills::ProviderRefreshStrategy::Standard => {}
+        ironclaw_skills::ProviderRefreshStrategy::Custom {
+            refresh_url,
+            extra_params,
+        } => {
+            let builtin = crate::cli::oauth_defaults::builtin_credentials(&spec.name);
+            let exchange_proxy_url = crate::cli::oauth_defaults::exchange_proxy_url();
+            let client_id = oauth
+                .client_id
+                .clone()
+                .or_else(|| {
+                    oauth
+                        .client_id_env
+                        .as_ref()
+                        .and_then(|env| std::env::var(env).ok())
+                })
+                .or_else(|| builtin.as_ref().map(|c| c.client_id.to_string()))?;
+            let client_secret = oauth
+                .client_secret
+                .clone()
+                .or_else(|| {
+                    oauth
+                        .client_secret_env
+                        .as_ref()
+                        .and_then(|env| std::env::var(env).ok())
+                })
+                .or_else(|| builtin.as_ref().map(|c| c.client_secret.to_string()));
+            let client_secret = crate::cli::oauth_defaults::hosted_proxy_client_secret(
+                &client_secret,
+                builtin.as_ref(),
+                exchange_proxy_url.is_some(),
+            );
+
+            return Some(OAuthRefreshConfig {
+                token_url: refresh_url.clone(),
+                client_id,
+                client_secret,
+                exchange_proxy_url,
+                gateway_token: crate::cli::oauth_defaults::oauth_proxy_auth_token(),
+                secret_name: spec.name.clone(),
+                provider: Some(spec.provider.clone()),
+                extra_refresh_params: extra_params.clone(),
+            });
+        }
+    }
+
+    let builtin = crate::cli::oauth_defaults::builtin_credentials(&spec.name);
+    let exchange_proxy_url = crate::cli::oauth_defaults::exchange_proxy_url();
+    let client_id = oauth
+        .client_id
+        .clone()
+        .or_else(|| {
+            oauth
+                .client_id_env
+                .as_ref()
+                .and_then(|env| std::env::var(env).ok())
+        })
+        .or_else(|| builtin.as_ref().map(|c| c.client_id.to_string()))?;
+    let client_secret = oauth
+        .client_secret
+        .clone()
+        .or_else(|| {
+            oauth
+                .client_secret_env
+                .as_ref()
+                .and_then(|env| std::env::var(env).ok())
+        })
+        .or_else(|| builtin.as_ref().map(|c| c.client_secret.to_string()));
+    let client_secret = crate::cli::oauth_defaults::hosted_proxy_client_secret(
+        &client_secret,
+        builtin.as_ref(),
+        exchange_proxy_url.is_some(),
+    );
+
+    Some(OAuthRefreshConfig {
+        token_url: oauth.token_url.clone(),
+        client_id,
+        client_secret,
+        exchange_proxy_url,
+        gateway_token: crate::cli::oauth_defaults::oauth_proxy_auth_token(),
+        secret_name: spec.name.clone(),
+        provider: Some(spec.provider.clone()),
+        extra_refresh_params: std::collections::HashMap::new(),
+    })
 }
 
 /// Register credential mappings from loaded skills into the shared registry.
@@ -92,6 +183,10 @@ pub fn register_skill_credentials(
                 "Registering skill credential mapping"
             );
             registry.add_mappings(std::iter::once(mapping));
+            if let Some(oauth) = credential_spec_to_oauth_refresh(spec) {
+                registry
+                    .add_oauth_refresh_configs(std::iter::once((oauth.secret_name.clone(), oauth)));
+            }
             count += 1;
         }
     }
@@ -214,6 +309,62 @@ mod tests {
 
         assert!(registry.has_credentials_for_host("api.test.com"));
         assert!(!registry.has_credentials_for_host("other.host.com"));
+    }
+
+    #[test]
+    fn test_register_skill_credentials_registers_oauth_refresh_config() {
+        use ironclaw_skills::types::*;
+        use std::path::PathBuf;
+
+        let skill = ironclaw_skills::LoadedSkill {
+            manifest: SkillManifest {
+                name: "gmail".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Test".to_string(),
+                activation: ActivationCriteria::default(),
+                credentials: vec![SkillCredentialSpec {
+                    name: "google_oauth_token".to_string(),
+                    provider: "google".to_string(),
+                    location: SkillCredentialLocation::Bearer,
+                    hosts: vec!["www.googleapis.com".to_string()],
+                    oauth: Some(SkillOAuthConfig {
+                        authorization_url: "https://accounts.google.com/o/oauth2/v2/auth"
+                            .to_string(),
+                        token_url: "https://oauth2.googleapis.com/token".to_string(),
+                        client_id: Some("client-id".to_string()),
+                        client_id_env: None,
+                        client_secret: Some("client-secret".to_string()),
+                        client_secret_env: None,
+                        scopes: vec![],
+                        use_pkce: true,
+                        extra_params: std::collections::HashMap::new(),
+                        refresh: ProviderRefreshStrategy::Standard,
+                        test_url: None,
+                    }),
+                    setup_instructions: None,
+                }],
+                metadata: None,
+            },
+            prompt_content: "test".to_string(),
+            trust: SkillTrust::Trusted,
+            source: SkillSource::User(PathBuf::from("/tmp/test")),
+            content_hash: "sha256:000".to_string(),
+            compiled_patterns: vec![],
+            lowercased_keywords: vec![],
+            lowercased_exclude_keywords: vec![],
+            lowercased_tags: vec![],
+        };
+
+        let registry = crate::tools::wasm::SharedCredentialRegistry::new();
+        register_skill_credentials(&[skill], &registry);
+
+        let oauth = registry
+            .oauth_refresh_for_secret("google_oauth_token")
+            .expect("oauth refresh config");
+        assert_eq!(oauth.secret_name, "google_oauth_token");
+        assert_eq!(oauth.token_url, "https://oauth2.googleapis.com/token");
+        assert_eq!(oauth.client_id, "client-id");
+        assert_eq!(oauth.client_secret.as_deref(), Some("client-secret"));
     }
 
     #[test]

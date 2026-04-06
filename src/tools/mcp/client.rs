@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
+use crate::auth::resolve_access_token_string_with_refresh;
 use crate::context::JobContext;
 use crate::secrets::SecretsStore;
 use crate::tools::mcp::auth::refresh_access_token;
@@ -269,44 +270,20 @@ impl McpClient {
         let Some(ref config) = self.server_config else {
             return Ok(None);
         };
-        match secrets
-            .get_decrypted(&self.user_id, &config.token_secret_name())
-            .await
-        {
-            Ok(token) => Ok(Some(token.expose().to_string())),
-            Err(crate::secrets::SecretError::NotFound(_)) => Ok(None),
-            Err(crate::secrets::SecretError::Expired) => {
-                // Token expired — attempt refresh before failing.
-                tracing::info!(
-                    server = %self.server_name,
-                    "Access token expired, attempting refresh"
-                );
-                match refresh_access_token(config, secrets, &self.user_id).await {
-                    Ok(new_token) => {
-                        tracing::info!(
-                            server = %self.server_name,
-                            "Access token refreshed successfully"
-                        );
-                        Ok(Some(new_token.access_token))
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            server = %self.server_name,
-                            "Token refresh failed: {}", e
-                        );
-                        Err(ToolError::ExternalService(format!(
-                            "Failed to get access token: Secret has expired \
-                             and refresh failed: {}",
-                            e
-                        )))
-                    }
-                }
-            }
-            Err(e) => Err(ToolError::ExternalService(format!(
-                "Failed to get access token: {}",
-                e
-            ))),
-        }
+        resolve_access_token_string_with_refresh(
+            secrets.as_ref(),
+            &self.user_id,
+            &config.token_secret_name(),
+            &self.server_name,
+            || async {
+                refresh_access_token(config, secrets, &self.user_id)
+                    .await
+                    .map(|token| token.access_token)
+                    .map_err(|e| format!("Token refresh failed: {}", e))
+            },
+        )
+        .await
+        .map_err(|e| ToolError::ExternalService(format!("Failed to get access token: {}", e)))
     }
 
     /// Build the headers map for a request (auth, session-id, custom headers).

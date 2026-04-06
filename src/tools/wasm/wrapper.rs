@@ -16,10 +16,11 @@ use wasmtime::Store;
 use wasmtime::component::Linker;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
+use crate::auth::resolve_secret_for_runtime;
 use crate::context::JobContext;
 use crate::db::Database;
 use crate::llm::recording::{HttpExchangeRequest, HttpExchangeResponse, HttpInterceptor};
-use crate::secrets::{DecryptedSecret, SecretsStore};
+use crate::secrets::SecretsStore;
 use crate::tools::tool::{Tool, ToolDiscoverySummary, ToolError, ToolOutput};
 use crate::tools::wasm::capabilities::Capabilities;
 use crate::tools::wasm::credential_injector::{
@@ -45,7 +46,6 @@ wasmtime::component::bindgen!({
 });
 
 // Alias the export interface types for convenience.
-use crate::cli::oauth_defaults;
 use exports::near::agent::tool as wit_tool;
 
 /// Configuration needed to refresh an expired OAuth access token.
@@ -71,10 +71,12 @@ pub struct OAuthRefreshConfig {
     pub secret_name: String,
     /// Provider hint stored alongside the refreshed secret.
     pub provider: Option<String>,
+    /// Extra form parameters appended during refresh requests.
+    pub extra_refresh_params: HashMap<String, String>,
 }
 
 impl OAuthRefreshConfig {
-    fn oauth_proxy_auth_token(&self) -> Option<&str> {
+    pub fn oauth_proxy_auth_token(&self) -> Option<&str> {
         self.gateway_token.as_deref()
     }
 }
@@ -1255,230 +1257,11 @@ impl std::fmt::Debug for WasmToolWrapper {
     }
 }
 
-/// Refresh an expired OAuth access token using the stored refresh token.
-///
-/// Posts to the provider's token endpoint with `grant_type=refresh_token`,
-/// then stores the new access token (with expiry) and rotated refresh token
-/// (if the provider returns one).
-///
-/// SSRF defense: `token_url` originates from a tool's capabilities JSON, so
-/// a malicious tool could point it at an internal service to exfiltrate the
-/// refresh token. We require HTTPS, reject private/loopback IPs (including
-/// DNS-resolved), and disable redirects.
-///
-/// Returns `true` if the refresh succeeded, `false` otherwise.
-async fn refresh_oauth_token(
-    store: &(dyn SecretsStore + Send + Sync),
-    user_id: &str,
-    config: &OAuthRefreshConfig,
-) -> bool {
-    let refresh_name = format!("{}_refresh_token", config.secret_name);
-
-    if let Some(proxy_url) = config.exchange_proxy_url.as_deref() {
-        let Some(oauth_proxy_auth_token) = config.oauth_proxy_auth_token() else {
-            tracing::warn!(
-                "OAuth refresh proxy is configured, but no OAuth proxy auth token is available"
-            );
-            return false;
-        };
-
-        // In hosted mode, the configured exchange proxy owns the outbound token
-        // refresh and validation policy for the provider token_url. Direct-mode
-        // HTTPS/private-IP checks remain in place for self-hosted refreshes below.
-        let refresh_secret = match load_oauth_refresh_secret(store, user_id, &refresh_name).await {
-            Some(secret) => secret,
-            None => return false,
-        };
-        let token_response = match oauth_defaults::refresh_token_via_proxy(
-            oauth_defaults::ProxyRefreshTokenRequest {
-                proxy_url,
-                gateway_token: oauth_proxy_auth_token,
-                token_url: &config.token_url,
-                client_id: &config.client_id,
-                client_secret: config.client_secret.as_deref(),
-                refresh_token: refresh_secret.expose(),
-                resource: None,
-                provider: config.provider.as_deref(),
-            },
-        )
-        .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                tracing::warn!(error = %error, "OAuth token refresh via proxy failed");
-                return false;
-            }
-        };
-
-        return persist_refreshed_oauth_tokens(
-            store,
-            user_id,
-            config,
-            &refresh_name,
-            token_response,
-        )
-        .await;
-    }
-
-    // SSRF defense: token_url comes from the tool's capabilities file.
-    if !config.token_url.starts_with("https://") {
-        tracing::warn!(
-            token_url = %config.token_url,
-            "OAuth token_url must use HTTPS, refusing token refresh"
-        );
-        return false;
-    }
-    if let Err(reason) = reject_private_ip(&config.token_url) {
-        tracing::warn!(
-            token_url = %config.token_url,
-            reason = %reason,
-            "OAuth token_url points to a private/internal IP, refusing token refresh"
-        );
-        return false;
-    }
-
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to build HTTP client for token refresh");
-            return false;
-        }
-    };
-
-    let refresh_secret = match load_oauth_refresh_secret(store, user_id, &refresh_name).await {
-        Some(secret) => secret,
-        None => return false,
-    };
-    let mut params = vec![
-        ("grant_type", "refresh_token".to_string()),
-        ("refresh_token", refresh_secret.expose().to_string()),
-        ("client_id", config.client_id.clone()),
-    ];
-    if let Some(ref secret) = config.client_secret {
-        params.push(("client_secret", secret.clone()));
-    }
-
-    let response = match client.post(&config.token_url).form(&params).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "OAuth token refresh request failed");
-            return false;
-        }
-    };
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        tracing::warn!(
-            status = %status,
-            body = %body,
-            "OAuth token refresh returned non-success status"
-        );
-        return false;
-    }
-
-    let token_data: serde_json::Value = match response.json().await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to parse token refresh response");
-            return false;
-        }
-    };
-    let token_response = match token_data.get("access_token").and_then(|v| v.as_str()) {
-        Some(access_token) => oauth_defaults::OAuthTokenResponse {
-            access_token: access_token.to_string(),
-            refresh_token: token_data
-                .get("refresh_token")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-            expires_in: token_data.get("expires_in").and_then(|v| v.as_u64()),
-            token_type: token_data
-                .get("token_type")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-            scope: token_data
-                .get("scope")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-        },
-        None => {
-            tracing::warn!("Token refresh response missing access_token field");
-            return false;
-        }
-    };
-
-    persist_refreshed_oauth_tokens(store, user_id, config, &refresh_name, token_response).await
-}
-
-async fn load_oauth_refresh_secret(
-    store: &(dyn SecretsStore + Send + Sync),
-    user_id: &str,
-    refresh_name: &str,
-) -> Option<DecryptedSecret> {
-    match store.get_decrypted(user_id, refresh_name).await {
-        Ok(secret) => Some(secret),
-        Err(error) => {
-            tracing::debug!(
-                secret_name = %refresh_name,
-                error = %error,
-                "No refresh token available, skipping token refresh"
-            );
-            None
-        }
-    }
-}
-
-async fn persist_refreshed_oauth_tokens(
-    store: &(dyn SecretsStore + Send + Sync),
-    user_id: &str,
-    config: &OAuthRefreshConfig,
-    refresh_name: &str,
-    token_response: oauth_defaults::OAuthTokenResponse,
-) -> bool {
-    let mut access_params =
-        crate::secrets::CreateSecretParams::new(&config.secret_name, &token_response.access_token);
-    if let Some(ref provider) = config.provider {
-        access_params = access_params.with_provider(provider);
-    }
-    if let Some(expires_in) = token_response.expires_in {
-        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_in as i64);
-        access_params = access_params.with_expiry(expires_at);
-    }
-
-    if let Err(e) = store.create(user_id, access_params).await {
-        tracing::warn!(error = %e, "Failed to store refreshed access token");
-        return false;
-    }
-
-    if let Some(new_refresh) = token_response.refresh_token.as_deref() {
-        let mut refresh_params = crate::secrets::CreateSecretParams::new(refresh_name, new_refresh);
-        if let Some(ref provider) = config.provider {
-            refresh_params = refresh_params.with_provider(provider);
-        }
-        if let Err(e) = store.create(user_id, refresh_params).await {
-            tracing::warn!(error = %e, "Failed to store rotated refresh token");
-        }
-    }
-
-    tracing::info!(
-        secret_name = %config.secret_name,
-        "OAuth access token refreshed successfully"
-    );
-    true
-}
-
 /// Pre-resolve credentials for all HTTP capability mappings.
 ///
 /// Called once per tool execution (in async context, before spawn_blocking)
 /// so that the synchronous WASM host function can inject credentials
 /// without needing async access to the secrets store.
-///
-/// If an `OAuthRefreshConfig` is provided and the access token is expired
-/// (or within 5 minutes of expiry), attempts a transparent refresh first.
 ///
 /// Silently skips credentials that can't be resolved (e.g., missing secrets).
 /// The tool will get a 401/403 from the API, which is the expected UX when
@@ -1506,34 +1289,6 @@ async fn resolve_host_credentials(
         }
     };
 
-    // Check if the access token needs refreshing before resolving credentials.
-    // This runs once per tool execution, keeping the hot path (credential injection
-    // inside WASM) synchronous and allocation-free.
-    if let Some(config) = oauth_refresh {
-        let needs_refresh = match store.get(user_id, &config.secret_name).await {
-            Ok(secret) => match secret.expires_at {
-                Some(expires_at) => {
-                    let buffer = chrono::Duration::minutes(5);
-                    expires_at - buffer < chrono::Utc::now()
-                }
-                // No expires_at means legacy token, don't try to refresh
-                None => false,
-            },
-            // Expired error from store means we definitely need to refresh
-            Err(crate::secrets::SecretError::Expired) => true,
-            // Not found or other errors: skip refresh, let the normal flow handle it
-            Err(_) => false,
-        };
-
-        if needs_refresh {
-            tracing::debug!(
-                secret_name = %config.secret_name,
-                "Access token expired or near expiry, attempting refresh"
-            );
-            refresh_oauth_token(store, user_id, config).await;
-        }
-    }
-
     let http_cap = match &capabilities.http {
         Some(cap) => cap,
         None => return Vec::new(),
@@ -1543,7 +1298,6 @@ async fn resolve_host_credentials(
         return Vec::new();
     }
 
-    let can_fallback_to_default = can_use_default_credential_fallback(db, user_id).await;
     let mut resolved = Vec::new();
 
     for mapping in http_cap.credentials.values() {
@@ -1555,43 +1309,23 @@ async fn resolve_host_credentials(
             continue;
         }
 
-        // Try the tenant scope first. Legacy fallback to "default" is only
-        // permitted for admin users so member accounts cannot silently consume
-        // shared/global credentials in multi-tenant deployments.
-        let secret = match store.get_decrypted(user_id, &mapping.secret_name).await {
-            Ok(s) => Some(s),
-            Err(e) => {
-                tracing::trace!(
-                    user_id = %user_id,
-                    secret_name = %mapping.secret_name,
-                    error = %e,
-                    "No matching host credential resolved for WASM tool in the requested scope"
-                );
-
-                if can_fallback_to_default {
-                    tracing::debug!(
-                        secret_name = %mapping.secret_name,
-                        user_id = %user_id,
-                        error = %e,
-                        "Credential not found for user, trying admin-only default global credentials"
-                    );
-                    store
-                        .get_decrypted("default", &mapping.secret_name)
-                        .await
-                        .ok()
-                } else {
-                    None
-                }
-            }
-        };
-
-        let secret = match secret {
-            Some(s) => s,
-            None => {
+        let secret = match resolve_secret_for_runtime(
+            store,
+            user_id,
+            &mapping.secret_name,
+            db,
+            oauth_refresh.filter(|config| config.secret_name == mapping.secret_name),
+            true,
+        )
+        .await
+        {
+            Ok(secret) => secret,
+            Err(error) => {
                 tracing::warn!(
                     secret_name = %mapping.secret_name,
                     user_id = %user_id,
-                    "Could not resolve credential for WASM tool (not found in user context or default)"
+                    error = ?error,
+                    "Could not resolve credential for WASM tool"
                 );
                 continue;
             }
@@ -1620,29 +1354,6 @@ async fn resolve_host_credentials(
     }
 
     resolved
-}
-
-async fn can_use_default_credential_fallback(db: Option<&dyn Database>, user_id: &str) -> bool {
-    if user_id == "default" {
-        return false;
-    }
-
-    let Some(db) = db else {
-        return false;
-    };
-
-    match db.get_user(user_id).await {
-        Ok(Some(user)) => user.role == "admin",
-        Ok(None) => false,
-        Err(e) => {
-            tracing::debug!(
-                user_id = %user_id,
-                error = %e,
-                "Failed to resolve user role for default credential fallback"
-            );
-            false
-        }
-    }
 }
 
 /// Extract the hostname from a URL string.
@@ -2684,6 +2395,7 @@ mod tests {
             gateway_token: None,
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
+            extra_refresh_params: HashMap::new(),
         };
 
         // Should resolve the existing fresh token without attempting refresh
@@ -2784,6 +2496,7 @@ mod tests {
             gateway_token: None,
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
+            extra_refresh_params: HashMap::new(),
         };
 
         // Should use the legacy token directly without attempting refresh
@@ -2850,6 +2563,7 @@ mod tests {
             gateway_token: Some("gateway-test-token".to_string()),
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
+            extra_refresh_params: HashMap::new(),
         };
 
         let resolved =
@@ -2959,6 +2673,7 @@ mod tests {
             gateway_token: None,
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
+            extra_refresh_params: HashMap::new(),
         };
 
         let resolved =
@@ -3026,6 +2741,7 @@ mod tests {
             gateway_token: None,
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
+            extra_refresh_params: HashMap::new(),
         };
 
         let resolved =

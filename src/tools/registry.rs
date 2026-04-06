@@ -290,6 +290,9 @@ impl ToolRegistry {
         if let (Some(cr), Some(ss)) = (&self.credential_registry, &self.secrets_store) {
             http = http.with_credentials(Arc::clone(cr), Arc::clone(ss));
         }
+        if let Some(db) = &self.db {
+            http = http.with_database(Arc::clone(db));
+        }
         self.register_sync(Arc::new(http));
 
         tracing::debug!("Registered {} built-in tools", self.count());
@@ -721,6 +724,7 @@ impl ToolRegistry {
             .as_ref()
             .map(|http| http.credentials.values().cloned().collect())
             .unwrap_or_default();
+        let oauth_refresh = reg.oauth_refresh.clone();
 
         // Create the wrapper
         let mut wrapper = WasmToolWrapper::new(Arc::clone(reg.runtime), prepared, reg.capabilities);
@@ -741,7 +745,7 @@ impl ToolRegistry {
         if let Some(db) = reg.db {
             wrapper = wrapper.with_database(db);
         }
-        if let Some(oauth) = reg.oauth_refresh {
+        if let Some(oauth) = oauth_refresh.clone() {
             wrapper = wrapper.with_oauth_refresh(oauth);
         }
 
@@ -754,6 +758,9 @@ impl ToolRegistry {
         {
             let count = credential_mappings.len();
             cr.add_mappings(credential_mappings);
+            if let Some(oauth) = oauth_refresh {
+                cr.add_oauth_refresh_configs(std::iter::once((oauth.secret_name.clone(), oauth)));
+            }
             tracing::debug!(
                 name = reg.name,
                 credential_count = count,

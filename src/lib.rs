@@ -40,6 +40,7 @@
 
 pub mod agent;
 pub mod app;
+pub mod auth;
 pub mod boot_screen;
 pub mod bootstrap;
 pub mod bridge;

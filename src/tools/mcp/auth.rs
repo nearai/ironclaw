@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 
+use crate::auth::resolve_access_token_string_with_refresh;
 use crate::cli::oauth_defaults::{self, OAUTH_CALLBACK_PORT};
 use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::tools::mcp::config::McpServerConfig;
@@ -1166,41 +1167,24 @@ pub async fn is_authenticated(
     secrets: &Arc<dyn SecretsStore + Send + Sync>,
     user_id: &str,
 ) -> bool {
-    match secrets
-        .get_decrypted(user_id, &server_config.token_secret_name())
-        .await
+    match resolve_access_token_string_with_refresh(
+        secrets.as_ref(),
+        user_id,
+        &server_config.token_secret_name(),
+        &server_config.name,
+        || async {
+            refresh_access_token(server_config, secrets, user_id)
+                .await
+                .map(|token| token.access_token)
+                .map_err(|e| format!("Token refresh failed: {}", e))
+        },
+    )
+    .await
     {
-        Ok(_) => true,
-        Err(crate::secrets::SecretError::NotFound(_)) => false,
-        Err(crate::secrets::SecretError::Expired) => {
-            tracing::info!(
-                server = %server_config.name,
-                "Access token expired, attempting refresh"
-            );
-            match refresh_access_token(server_config, secrets, user_id).await {
-                Ok(_) => {
-                    tracing::info!(
-                        server = %server_config.name,
-                        "Access token refreshed successfully"
-                    );
-                    true
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        server = %server_config.name,
-                        "Token refresh failed: {}",
-                        error
-                    );
-                    false
-                }
-            }
-        }
+        Ok(Some(_)) => true,
+        Ok(None) => false,
         Err(error) => {
-            tracing::warn!(
-                server = %server_config.name,
-                "Failed to read access token: {}",
-                error
-            );
+            tracing::warn!(server = %server_config.name, error = %error, "Failed to read access token");
             false
         }
     }

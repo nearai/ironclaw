@@ -484,6 +484,7 @@ impl AppBuilder {
             let secrets_store = self.secrets_store.clone();
             let tools = Arc::clone(tools);
             let wasm_config = self.config.wasm.clone();
+            let db = self.db.clone();
             async move {
                 let mut dev_loaded_tool_names: Vec<String> = Vec::new();
 
@@ -491,6 +492,9 @@ impl AppBuilder {
                     let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&tools));
                     if let Some(ref secrets) = secrets_store {
                         loader = loader.with_secrets_store(Arc::clone(secrets));
+                    }
+                    if let Some(ref db) = db {
+                        loader = loader.with_database(Arc::clone(db));
                     }
 
                     match loader.load_from_dir(&wasm_config.tools_dir).await {

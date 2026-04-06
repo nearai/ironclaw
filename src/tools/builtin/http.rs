@@ -9,7 +9,9 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::Client;
 
+use crate::auth::resolve_secret_for_runtime;
 use crate::context::JobContext;
+use crate::db::Database;
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 use crate::tools::wasm::{InjectedCredentials, SharedCredentialRegistry, inject_credential};
@@ -57,6 +59,7 @@ const USER_AGENT: &str = concat!(
 pub struct HttpTool {
     credential_registry: Option<Arc<SharedCredentialRegistry>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    db: Option<Arc<dyn Database>>,
 }
 
 impl HttpTool {
@@ -65,6 +68,7 @@ impl HttpTool {
         Self {
             credential_registry: None,
             secrets_store: None,
+            db: None,
         }
     }
 
@@ -76,6 +80,11 @@ impl HttpTool {
     ) -> Self {
         self.credential_registry = Some(registry);
         self.secrets_store = Some(secrets_store);
+        self
+    }
+
+    pub fn with_database(mut self, db: Arc<dyn Database>) -> Self {
+        self.db = Some(db);
         self
     }
 }
@@ -594,9 +603,16 @@ impl Tool for HttpTool {
                 "HTTP tool credential lookup"
             );
             for mapping in &matched {
-                match store
-                    .get_decrypted(&ctx.user_id, &mapping.secret_name)
-                    .await
+                let oauth_refresh = registry.oauth_refresh_for_secret(&mapping.secret_name);
+                match resolve_secret_for_runtime(
+                    store.as_ref(),
+                    &ctx.user_id,
+                    &mapping.secret_name,
+                    self.db.as_deref(),
+                    oauth_refresh.as_ref(),
+                    true,
+                )
+                .await
                 {
                     Ok(secret) => {
                         tracing::debug!(
@@ -616,18 +632,19 @@ impl Tool for HttpTool {
                             request = request.query(&[(name.as_str(), value.as_str())]);
                         }
                     }
-                    Err(crate::secrets::SecretError::NotFound(_)) => {
+                    Err(error) if error.requires_authentication() => {
                         tracing::debug!(
                             secret = %mapping.secret_name,
                             host = %cred_host,
-                            "Credential not configured — proceeding without auth"
+                            error = ?error,
+                            "Credential unavailable — proceeding without auth"
                         );
                         missing_credential = Some(mapping.secret_name.clone());
                     }
                     Err(e) => {
                         tracing::warn!(
                             secret = %mapping.secret_name,
-                            error = %e,
+                            error = ?e,
                             "Failed to inject credential for HTTP tool"
                         );
                     }

@@ -28,6 +28,7 @@ use std::sync::RwLock;
 use crate::secrets::{
     CredentialLocation, CredentialMapping, DecryptedSecret, SecretError, SecretsStore,
 };
+use crate::tools::wasm::OAuthRefreshConfig;
 
 /// Error during credential injection.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -67,6 +68,7 @@ impl From<SecretError> for InjectionError {
 /// `requires_approval` (sync) can query it without async.
 pub struct SharedCredentialRegistry {
     mappings: RwLock<Vec<CredentialMapping>>,
+    oauth_refresh: RwLock<HashMap<String, OAuthRefreshConfig>>,
 }
 
 impl SharedCredentialRegistry {
@@ -74,6 +76,7 @@ impl SharedCredentialRegistry {
     pub fn new() -> Self {
         Self {
             mappings: RwLock::new(Vec::new()),
+            oauth_refresh: RwLock::new(HashMap::new()),
         }
     }
 
@@ -93,6 +96,24 @@ impl SharedCredentialRegistry {
         }
     }
 
+    pub fn add_oauth_refresh_configs(
+        &self,
+        configs: impl IntoIterator<Item = (String, OAuthRefreshConfig)>,
+    ) {
+        match self.oauth_refresh.write() {
+            Ok(mut guard) => {
+                guard.extend(configs);
+            }
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during add_oauth_refresh_configs; recovering"
+                );
+                let mut guard = poisoned.into_inner();
+                guard.extend(configs);
+            }
+        }
+    }
+
     /// Remove all credential mappings whose `secret_name` matches any of the given names.
     ///
     /// Called when an extension is unregistered/deactivated so its credential
@@ -108,6 +129,17 @@ impl SharedCredentialRegistry {
             }
         };
         guard.retain(|m| !secret_names.contains(&m.secret_name));
+
+        let mut oauth_guard = match self.oauth_refresh.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during oauth config removal; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+        oauth_guard.retain(|name, _| !secret_names.contains(name));
     }
 
     /// Check if any credential mapping matches this host (sync, for requires_approval).
@@ -150,6 +182,19 @@ impl SharedCredentialRegistry {
             })
             .cloned()
             .collect()
+    }
+
+    pub fn oauth_refresh_for_secret(&self, secret_name: &str) -> Option<OAuthRefreshConfig> {
+        let guard = match self.oauth_refresh.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during oauth_refresh_for_secret; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+        guard.get(secret_name).cloned()
     }
 }
 

@@ -268,6 +268,10 @@ fn test_validation_rejects_insecure_and_malformed_specs() {
         oauth: Some(SkillOAuthConfig {
             authorization_url: "http://insecure.example.com/auth".to_string(),
             token_url: "https://secure.example.com/token".to_string(),
+            client_id: None,
+            client_id_env: None,
+            client_secret: None,
+            client_secret_env: None,
             scopes: vec![],
             use_pkce: false,
             extra_params: Default::default(),

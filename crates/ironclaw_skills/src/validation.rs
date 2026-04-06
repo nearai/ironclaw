@@ -302,6 +302,10 @@ mod tests {
             oauth: Some(SkillOAuthConfig {
                 authorization_url: "http://insecure.example.com/auth".to_string(),
                 token_url: "http://insecure.example.com/token".to_string(),
+                client_id: None,
+                client_id_env: None,
+                client_secret: None,
+                client_secret_env: None,
                 scopes: vec![],
                 use_pkce: false,
                 extra_params: Default::default(),
@@ -330,6 +334,10 @@ mod tests {
             oauth: Some(SkillOAuthConfig {
                 authorization_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
                 token_url: "https://oauth2.googleapis.com/token".to_string(),
+                client_id: None,
+                client_id_env: None,
+                client_secret: None,
+                client_secret_env: None,
                 scopes: vec!["https://www.googleapis.com/auth/gmail.modify".to_string()],
                 use_pkce: false,
                 extra_params: Default::default(),

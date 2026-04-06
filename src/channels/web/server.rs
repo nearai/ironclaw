@@ -565,6 +565,10 @@ pub async fn start_server(
         )
         // Extensions
         .route("/api/extensions", get(extensions_list_handler))
+        .route(
+            "/api/extensions/readiness",
+            get(extensions_readiness_handler),
+        )
         .route("/api/extensions/tools", get(extensions_tools_handler))
         .route("/api/extensions/registry", get(extensions_registry_handler))
         .route("/api/extensions/install", post(extensions_install_handler))
@@ -2610,6 +2614,69 @@ async fn extensions_list_handler(
     Ok(Json(ExtensionListResponse { extensions }))
 }
 
+fn extension_phase_for_web(
+    ext: &crate::extensions::InstalledExtension,
+) -> crate::extensions::ExtensionPhase {
+    if ext.activation_error.is_some() {
+        crate::extensions::ExtensionPhase::Error
+    } else if ext.needs_setup {
+        crate::extensions::ExtensionPhase::NeedsSetup
+    } else if ext.has_auth && !ext.authenticated {
+        crate::extensions::ExtensionPhase::NeedsAuth
+    } else if matches!(
+        ext.kind,
+        crate::extensions::ExtensionKind::WasmChannel
+            | crate::extensions::ExtensionKind::ChannelRelay
+    ) {
+        crate::extensions::ExtensionPhase::Ready
+    } else if ext.active {
+        crate::extensions::ExtensionPhase::Ready
+    } else {
+        crate::extensions::ExtensionPhase::NeedsActivation
+    }
+}
+
+async fn extensions_readiness_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+) -> Result<Json<ExtensionReadinessResponse>, (StatusCode, String)> {
+    let ext_mgr = state.extension_manager.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Extension manager not available (secrets store required)".to_string(),
+    ))?;
+
+    let installed = ext_mgr
+        .list(None, false, &user.user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let extensions = installed
+        .into_iter()
+        .map(|ext| {
+            let phase = match extension_phase_for_web(&ext) {
+                crate::extensions::ExtensionPhase::Installed => "installed",
+                crate::extensions::ExtensionPhase::NeedsSetup => "needs_setup",
+                crate::extensions::ExtensionPhase::NeedsAuth => "needs_auth",
+                crate::extensions::ExtensionPhase::NeedsActivation => "needs_activation",
+                crate::extensions::ExtensionPhase::Activating => "activating",
+                crate::extensions::ExtensionPhase::Ready => "ready",
+                crate::extensions::ExtensionPhase::Error => "error",
+            }
+            .to_string();
+            ExtensionReadinessInfo {
+                name: ext.name,
+                kind: ext.kind.to_string(),
+                phase,
+                authenticated: ext.authenticated,
+                active: ext.active,
+                activation_error: ext.activation_error,
+            }
+        })
+        .collect();
+
+    Ok(Json(ExtensionReadinessResponse { extensions }))
+}
+
 async fn extensions_tools_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(_user): AuthenticatedUser,
@@ -3682,6 +3749,112 @@ mod tests {
             "expected activation failure in message: {:?}",
             parsed
         );
+    }
+
+    #[test]
+    fn test_extension_phase_for_web_prefers_error_then_readiness() {
+        let mut ext = crate::extensions::InstalledExtension {
+            name: "notion".to_string(),
+            kind: crate::extensions::ExtensionKind::McpServer,
+            display_name: None,
+            description: None,
+            url: None,
+            authenticated: false,
+            active: false,
+            tools: Vec::new(),
+            needs_setup: false,
+            has_auth: true,
+            installed: true,
+            activation_error: Some("boom".to_string()),
+            version: None,
+        };
+        assert_eq!(
+            extension_phase_for_web(&ext),
+            crate::extensions::ExtensionPhase::Error
+        );
+
+        ext.activation_error = None;
+        ext.needs_setup = true;
+        assert_eq!(
+            extension_phase_for_web(&ext),
+            crate::extensions::ExtensionPhase::NeedsSetup
+        );
+
+        ext.needs_setup = false;
+        assert_eq!(
+            extension_phase_for_web(&ext),
+            crate::extensions::ExtensionPhase::NeedsAuth
+        );
+
+        ext.authenticated = true;
+        assert_eq!(
+            extension_phase_for_web(&ext),
+            crate::extensions::ExtensionPhase::NeedsActivation
+        );
+
+        ext.active = true;
+        assert_eq!(
+            extension_phase_for_web(&ext),
+            crate::extensions::ExtensionPhase::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn test_extensions_readiness_handler_reports_phase_summary() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets);
+        let mut server =
+            crate::tools::mcp::McpServerConfig::new("notion", "https://mcp.notion.com/mcp");
+        server.description = Some("Notion".to_string());
+        ext_mgr
+            .install(
+                "notion",
+                Some(&server.url),
+                Some(crate::extensions::ExtensionKind::McpServer),
+                "test",
+            )
+            .await
+            .expect("install notion mcp");
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route(
+                "/api/extensions/readiness",
+                get(extensions_readiness_handler),
+            )
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/extensions/readiness")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+        let notion = parsed["extensions"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["name"] == "notion"))
+            .expect("notion readiness entry");
+        assert_eq!(notion["kind"], "mcp_server");
+        assert_eq!(notion["phase"], "needs_auth");
+        assert_eq!(notion["authenticated"], false);
+        assert_eq!(notion["active"], false);
     }
 
     #[tokio::test]

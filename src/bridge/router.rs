@@ -63,6 +63,43 @@ fn resumed_action_result_message(
     ))
 }
 
+fn resolved_call_id_for_pending_action(
+    thread: &ironclaw_engine::Thread,
+    pending: &PendingGate,
+) -> String {
+    if !pending.call_id.is_empty() {
+        return pending.call_id.clone();
+    }
+
+    let resolved_ids: HashSet<&str> = thread
+        .messages
+        .iter()
+        .filter_map(|message| {
+            (message.role == ironclaw_engine::types::message::MessageRole::ActionResult)
+                .then_some(message.action_call_id.as_deref())
+                .flatten()
+        })
+        .collect();
+
+    thread
+        .messages
+        .iter()
+        .rev()
+        .find_map(|message| {
+            if message.role != ironclaw_engine::types::message::MessageRole::Assistant {
+                return None;
+            }
+            message.action_calls.as_ref().and_then(|calls| {
+                calls.iter().find_map(|call| {
+                    (call.action_name == pending.action_name
+                        && !resolved_ids.contains(call.id.as_str()))
+                    .then(|| call.id.clone())
+                })
+            })
+        })
+        .unwrap_or_default()
+}
+
 async fn insert_and_notify_pending_gate(
     agent: &Agent,
     state: &EngineState,
@@ -167,6 +204,7 @@ async fn execute_pending_gate_action(
         .await
         .map_err(|e| engine_err("load thread", e))?
         .ok_or_else(|| engine_err("load thread", "thread not found"))?;
+    let resolved_call_id = resolved_call_id_for_pending_action(&thread, pending);
 
     let lease = state
         .thread_manager
@@ -186,7 +224,7 @@ async fn execute_pending_gate_action(
         project_id: thread.project_id,
         user_id: thread.user_id.clone(),
         step_id: ironclaw_engine::StepId::new(),
-        current_call_id: Some(pending.call_id.clone()),
+        current_call_id: Some(resolved_call_id.clone()),
         source_channel: Some(pending.source_channel.clone()),
     };
 
@@ -213,7 +251,7 @@ async fn execute_pending_gate_action(
                         &result.output,
                     )),
                     approval_event,
-                    Some(pending.call_id.clone()),
+                    Some(resolved_call_id),
                 )
                 .await
                 .map_err(|e| engine_err("resume error", e))?;
@@ -519,27 +557,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     // Generate the engine workspace README
     store.generate_engine_readme().await;
 
-    // Build capability registry from available tools
     let mut capabilities = CapabilityRegistry::new();
-    let tool_defs = agent.tools().tool_definitions().await;
-    if !tool_defs.is_empty() {
-        capabilities.register(Capability {
-            name: "tools".into(),
-            description: "Available tools".into(),
-            actions: tool_defs
-                .into_iter()
-                .map(|td| ironclaw_engine::ActionDef {
-                    name: td.name.replace('-', "_"),
-                    description: td.description,
-                    parameters_schema: td.parameters,
-                    effects: vec![],
-                    requires_approval: false,
-                })
-                .collect(),
-            knowledge: vec![],
-            policies: vec![],
-        });
-    }
 
     // Register mission functions as a capability so threads receive leases.
     // Handled by EffectBridgeAdapter::handle_mission_call() before the
@@ -1170,14 +1188,13 @@ pub async fn resolve_gate(
                     },
                 );
             }
-            if always {
-                state
-                    .effect_adapter
-                    .auto_approve_tool(&pending.action_name)
-                    .await;
-                if let Some(registry_name) = legacy_extension_alias(&pending.action_name) {
-                    state.effect_adapter.auto_approve_tool(&registry_name).await;
-                }
+            state
+                .effect_adapter
+                .auto_approve_tool(&pending.action_name)
+                .await;
+            let legacy_registry_name = legacy_extension_alias(&pending.action_name);
+            if let Some(ref registry_name) = legacy_registry_name {
+                state.effect_adapter.auto_approve_tool(registry_name).await;
             }
             let result = execute_pending_gate_action(
                 agent,
@@ -1189,12 +1206,12 @@ pub async fn resolve_gate(
             )
             .await;
 
-            if always && result.is_err() {
+            if !always || result.is_err() {
                 state
                     .effect_adapter
                     .revoke_auto_approve(&pending.action_name)
                     .await;
-                if let Some(registry_name) = legacy_extension_alias(&pending.action_name) {
+                if let Some(registry_name) = legacy_registry_name {
                     state
                         .effect_adapter
                         .revoke_auto_approve(&registry_name)
@@ -1317,21 +1334,6 @@ pub async fn resolve_gate(
                             &message.metadata,
                         )
                         .await;
-
-                    if let Some(ref sse) = state.sse {
-                        sse.broadcast_for_user(
-                            &message.user_id,
-                            AppEvent::AuthCompleted {
-                                extension_name: credential_name.clone(),
-                                success: true,
-                                message: format!(
-                                    "Credential '{}' stored. Resuming...",
-                                    credential_name
-                                ),
-                                thread_id: Some(pending.thread_id.to_string()),
-                            },
-                        );
-                    }
                 }
 
                 if pending.action_name == "authentication_fallback"
@@ -2158,19 +2160,6 @@ async fn await_thread_outcome(
                     )
                     .await;
 
-                if let Some(ref sse) = state.sse {
-                    sse.broadcast_for_user(
-                        &message.user_id,
-                        AppEvent::AuthRequired {
-                            extension_name: cred_name.clone(),
-                            instructions: Some(setup_hint.clone()),
-                            auth_url: None,
-                            setup_url: None,
-                            thread_id: Some(thread_id.to_string()),
-                        },
-                    );
-                }
-
                 return Ok(Some(format!(
                     "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
                     cred_name
@@ -2275,19 +2264,6 @@ async fn await_thread_outcome(
                             &message.metadata,
                         )
                         .await;
-
-                    if let Some(ref sse) = state.sse {
-                        sse.broadcast_for_user(
-                            &message.user_id,
-                            AppEvent::AuthRequired {
-                                extension_name: credential_name.clone(),
-                                instructions: Some(instructions.clone()),
-                                auth_url: auth_url.clone(),
-                                setup_url: None,
-                                thread_id: Some(thread_id.to_string()),
-                            },
-                        );
-                    }
 
                     Ok(Some(format!(
                         "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
@@ -3267,7 +3243,9 @@ async fn migrate_legacy_user_ids(store: &Arc<dyn ironclaw_engine::Store>, owner_
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal::Decimal;
     use std::sync::LazyLock;
+    use std::time::Duration;
     use tokio::sync::Mutex as TokioMutex;
     use tokio::sync::RwLock as TokioRwLock;
 
@@ -3488,6 +3466,168 @@ mod tests {
             original_message: None,
             resume_output: None,
         }
+    }
+
+    fn make_router_test_agent(sse: Option<Arc<SseManager>>) -> Agent {
+        struct StaticLlmProvider;
+
+        #[async_trait::async_trait]
+        impl crate::llm::LlmProvider for StaticLlmProvider {
+            fn model_name(&self) -> &str {
+                "static-mock"
+            }
+
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+
+            async fn complete(
+                &self,
+                _request: crate::llm::CompletionRequest,
+            ) -> Result<crate::llm::CompletionResponse, crate::error::LlmError> {
+                Ok(crate::llm::CompletionResponse {
+                    content: "ok".to_string(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: crate::llm::FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+
+            async fn complete_with_tools(
+                &self,
+                _request: crate::llm::ToolCompletionRequest,
+            ) -> Result<crate::llm::ToolCompletionResponse, crate::error::LlmError> {
+                Ok(crate::llm::ToolCompletionResponse {
+                    content: Some("ok".to_string()),
+                    tool_calls: Vec::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: crate::llm::FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+        }
+
+        let deps = crate::agent::AgentDeps {
+            owner_id: "default".to_string(),
+            store: None,
+            llm: Arc::new(StaticLlmProvider),
+            cheap_llm: None,
+            safety: Arc::new(ironclaw_safety::SafetyLayer::new(
+                &ironclaw_safety::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: true,
+                },
+            )),
+            tools: Arc::new(crate::tools::ToolRegistry::new()),
+            workspace: None,
+            extension_manager: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skills_config: crate::config::SkillsConfig::default(),
+            hooks: Arc::new(crate::hooks::HookRegistry::new()),
+            cost_guard: Arc::new(crate::agent::cost_guard::CostGuard::new(
+                crate::agent::cost_guard::CostGuardConfig::default(),
+            )),
+            sse_tx: sse,
+            http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            builder: None,
+            llm_backend: "nearai".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+        };
+
+        Agent::new(
+            crate::config::AgentConfig {
+                name: "router-test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_cost_per_user_per_day_cents: None,
+                max_tool_iterations: 50,
+                auto_approve_tools: false,
+                default_timezone: "UTC".to_string(),
+                max_jobs_per_user: None,
+                max_tokens_per_job: 0,
+                multi_tenant: false,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
+                engine_v2: true,
+            },
+            deps,
+            Arc::new(crate::channels::ChannelManager::new()),
+            None,
+            None,
+            None,
+            Some(Arc::new(crate::context::ContextManager::new(1))),
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn insert_and_notify_pending_gate_emits_gate_required_not_legacy_auth_sse() {
+        let store = Arc::new(TestStore::new());
+        let sse = Arc::new(SseManager::new());
+        let mut receiver = sse.sender().subscribe();
+        let agent = make_router_test_agent(Some(Arc::clone(&sse)));
+        let mut state = make_expected_test_state(store);
+        state.sse = Some(Arc::clone(&sse));
+
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let pending = sample_pending_gate(
+            "alice",
+            thread_id,
+            ironclaw_engine::ResumeKind::Authentication {
+                credential_name: "google_oauth_token".to_string(),
+                instructions: "Sign in with Google".to_string(),
+                auth_url: Some("https://example.test/oauth".to_string()),
+            },
+        );
+        let mut message = crate::channels::IncomingMessage::new("web", "alice", "use google");
+        message.thread_id = Some(thread_id.to_string());
+
+        let prompt = insert_and_notify_pending_gate(&agent, &state, &message, pending)
+            .await
+            .expect("pending gate inserted");
+        assert!(
+            prompt
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Authentication required for 'google_oauth_token'")
+        );
+
+        let scoped = receiver.recv().await.expect("sse event");
+        assert_eq!(scoped.user_id.as_deref(), Some("alice"));
+        match scoped.event {
+            AppEvent::GateRequired {
+                gate_name,
+                tool_name,
+                thread_id: Some(event_thread_id),
+                ..
+            } => {
+                assert_eq!(gate_name, "authentication");
+                assert_eq!(tool_name, "shell");
+                assert_eq!(event_thread_id, thread_id.to_string());
+            }
+            other => panic!("expected GateRequired event, got {other:?}"),
+        }
+
+        assert!(
+            receiver.try_recv().is_err(),
+            "unexpected legacy auth SSE event"
+        );
     }
 
     #[tokio::test]

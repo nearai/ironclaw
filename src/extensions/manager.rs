@@ -1642,6 +1642,11 @@ impl ExtensionManager {
                         let authenticated = is_authenticated(server, &self.secrets, user_id).await;
                         let clients = self.mcp_clients.read().await;
                         let active = clients.contains_key(&server.name);
+                        let has_auth = if authenticated {
+                            true
+                        } else {
+                            self.mcp_supports_auth(server).await
+                        };
 
                         // Get tool names if active
                         let tools = if active {
@@ -1670,7 +1675,7 @@ impl ExtensionManager {
                             active,
                             tools,
                             needs_setup: false,
-                            has_auth: false,
+                            has_auth,
                             installed: true,
                             activation_error: None,
                             version: None,
@@ -1690,14 +1695,15 @@ impl ExtensionManager {
             match discover_tools(&self.wasm_tools_dir).await {
                 Ok(tools) => {
                     for (name, discovered) in tools {
-                        let active = self.tool_registry.has(&name).await;
-
                         let registry_entry = self
                             .registry
                             .get_with_kind(&name, Some(ExtensionKind::WasmTool))
                             .await;
                         let display_name = registry_entry.as_ref().map(|e| e.display_name.clone());
                         let auth_state = self.check_tool_auth_status(&name, user_id).await;
+                        let loaded = self.tool_registry.has(&name).await;
+                        let active = loaded
+                            && matches!(auth_state, ToolAuthState::Ready | ToolAuthState::NoAuth);
                         let version = if let Some(ref cap_path) = discovered.capabilities_path {
                             tokio::fs::read(cap_path)
                                 .await
@@ -3350,9 +3356,121 @@ impl ExtensionManager {
 
         if all_provided {
             ToolAuthState::Ready
+        } else if required
+            .iter()
+            .any(|secret| self.secret_supports_oauth(&secret.name))
+        {
+            ToolAuthState::NeedsAuth
         } else {
             ToolAuthState::NeedsSetup
         }
+    }
+
+    fn secret_supports_oauth(&self, secret_name: &str) -> bool {
+        matches!(secret_name, "google_oauth_token")
+    }
+
+    async fn mcp_supports_auth(&self, server: &McpServerConfig) -> bool {
+        if server.oauth.is_some() || server.requires_auth() {
+            return true;
+        }
+
+        match discover_full_oauth_metadata(&server.url).await {
+            Ok(_) => true,
+            Err(crate::tools::mcp::auth::AuthError::NotSupported) => false,
+            Err(error) => {
+                tracing::debug!(
+                    server = %server.name,
+                    url = %server.url,
+                    error = %error,
+                    "Failed to determine MCP auth support from metadata discovery"
+                );
+                false
+            }
+        }
+    }
+
+    async fn start_secret_oauth_flow(
+        &self,
+        extension_name: &str,
+        secret_name: &str,
+        user_id: &str,
+    ) -> Option<AuthResult> {
+        use crate::cli::oauth_defaults;
+
+        let builtin = oauth_defaults::builtin_credentials(secret_name)?;
+        let (display_name, provider, authorization_url, token_url, scopes) = match secret_name {
+            "google_oauth_token" => (
+                "Google",
+                Some("google".to_string()),
+                "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
+                "https://oauth2.googleapis.com/token".to_string(),
+                vec![
+                    "openid".to_string(),
+                    "email".to_string(),
+                    "profile".to_string(),
+                ],
+            ),
+            _ => return None,
+        };
+        let redirect_uri = if oauth_defaults::use_gateway_callback() {
+            oauth_defaults::callback_url()
+        } else {
+            format!("{}/callback", oauth_defaults::callback_url())
+        };
+        let oauth_result = oauth_defaults::build_oauth_url(
+            &authorization_url,
+            builtin.client_id,
+            &redirect_uri,
+            &scopes,
+            true,
+            &std::collections::HashMap::new(),
+        );
+        let sse_manager = self.sse_manager.read().await.clone();
+        let kind = self
+            .determine_installed_kind(extension_name, user_id)
+            .await
+            .unwrap_or(ExtensionKind::WasmChannel);
+
+        let pending_flow = oauth_defaults::PendingOAuthFlow {
+            extension_name: extension_name.to_string(),
+            display_name: display_name.to_string(),
+            token_url,
+            client_id: builtin.client_id.to_string(),
+            client_secret: Some(builtin.client_secret.to_string()),
+            redirect_uri,
+            code_verifier: oauth_result.code_verifier,
+            access_token_field: "access_token".to_string(),
+            secret_name: secret_name.to_string(),
+            provider,
+            validation_endpoint: None,
+            scopes,
+            user_id: user_id.to_string(),
+            secrets: Arc::clone(&self.secrets),
+            sse_manager,
+            gateway_token: self.oauth_proxy_auth_token.clone(),
+            token_exchange_extra_params: std::collections::HashMap::new(),
+            client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
+            created_at: std::time::Instant::now(),
+            auto_activate_extension: kind == ExtensionKind::WasmChannel,
+        };
+
+        if self.should_use_gateway_mode() {
+            return Some(
+                self.start_gateway_oauth_flow(HostedOAuthFlowStart {
+                    name: extension_name.to_string(),
+                    kind,
+                    auth_url: oauth_result.url,
+                    expected_state: oauth_result.state,
+                    flow: pending_flow,
+                })
+                .await,
+            );
+        }
+
+        None
     }
 
     /// Load and parse a WASM tool's capabilities file.
@@ -4342,6 +4460,13 @@ impl ExtensionManager {
 
         // Prompt for the first missing secret
         let secret = &missing[0];
+        if let Some(auth_result) = self
+            .start_secret_oauth_flow(name, &secret.name, user_id)
+            .await
+        {
+            return Ok(auth_result);
+        }
+
         Ok(AuthResult::awaiting_token(
             name,
             ExtensionKind::WasmChannel,
@@ -4539,8 +4664,11 @@ impl ExtensionManager {
             None
         };
 
-        let loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&self.tool_registry))
+        let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&self.tool_registry))
             .with_secrets_store(Arc::clone(&self.secrets));
+        if let Some(ref db) = self.store {
+            loader = loader.with_database(Arc::clone(db));
+        }
         loader
             .load_from_files(name, &wasm_path, cap_path_option)
             .await
@@ -6379,6 +6507,22 @@ impl ExtensionManager {
                     });
                 }
             }
+        }
+
+        if kind == ExtensionKind::WasmChannel
+            && let Ok(auth_result) = Box::pin(self.auth(name, user_id)).await
+            && auth_result.auth_url().is_some()
+        {
+            return Ok(ConfigureResult {
+                message: format!(
+                    "Configuration saved for '{}'. Complete OAuth in your browser.",
+                    name
+                ),
+                activated: false,
+                restart_required,
+                auth_url: auth_result.auth_url().map(String::from),
+                verification: None,
+            });
         }
 
         // Activate the extension now that secrets are saved.

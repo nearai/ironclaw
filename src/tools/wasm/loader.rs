@@ -39,6 +39,7 @@ use std::sync::Arc;
 
 use tokio::fs;
 
+use crate::db::Database;
 use crate::secrets::SecretsStore;
 use crate::tools::registry::{ToolRegistry, WasmRegistrationError, WasmToolRegistration};
 use crate::tools::wasm::capabilities_schema::CapabilitiesFile;
@@ -82,6 +83,7 @@ pub struct WasmToolLoader {
     runtime: Arc<WasmToolRuntime>,
     registry: Arc<ToolRegistry>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    db: Option<Arc<dyn Database>>,
 }
 
 impl WasmToolLoader {
@@ -91,12 +93,18 @@ impl WasmToolLoader {
             runtime,
             registry,
             secrets_store: None,
+            db: None,
         }
     }
 
     /// Set the secrets store for credential injection in WASM tools.
     pub fn with_secrets_store(mut self, store: Arc<dyn SecretsStore + Send + Sync>) -> Self {
         self.secrets_store = Some(store);
+        self
+    }
+
+    pub fn with_database(mut self, db: Arc<dyn Database>) -> Self {
+        self.db = Some(db);
         self
     }
 
@@ -185,7 +193,7 @@ impl WasmToolLoader {
                 schema: None,
                 discovery_summary,
                 secrets_store: self.secrets_store.clone(),
-                db: None,
+                db: self.db.clone(),
                 oauth_refresh,
             })
             .await?;
@@ -462,6 +470,7 @@ fn resolve_oauth_refresh_config(cap_file: &CapabilitiesFile) -> Option<OAuthRefr
         gateway_token: oauth_proxy_auth_token,
         secret_name: auth.secret_name.clone(),
         provider: auth.provider.clone(),
+        extra_refresh_params: HashMap::new(),
     })
 }
 
