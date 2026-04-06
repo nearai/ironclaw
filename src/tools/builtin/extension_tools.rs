@@ -1158,7 +1158,7 @@ mod tests {
         let tool = ToolPermissionSetTool::new(Arc::clone(&registry), None);
         let ctx = JobContext::default();
         let result = tool
-            .execute(serde_json::json!({"tool_name": "unknown_xyz"}), &ctx)
+            .execute(serde_json::json!({"tool_name": "unknown_xyz"}), &ctx) // safety: Tool::execute, not DB
             .await;
         assert!(result.is_err(), "expected error for unknown tool");
         let err = result.unwrap_err();
@@ -1224,7 +1224,7 @@ mod tests {
 
         let ctx = JobContext::default();
         let result = list_tool
-            .execute(serde_json::json!({"kind": "builtin"}), &ctx)
+            .execute(serde_json::json!({"kind": "builtin"}), &ctx) // safety: Tool::execute, not DB
             .await
             .expect("tool_list kind=builtin should succeed");
 

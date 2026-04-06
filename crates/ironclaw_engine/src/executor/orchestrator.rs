@@ -2009,7 +2009,7 @@ mod tests {
         let helpers_end = DEFAULT_ORCHESTRATOR
             .find("\ndef run_loop(")
             .unwrap_or(DEFAULT_ORCHESTRATOR.len());
-        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end];
+        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end]; // safety: find() returns a char boundary on this ASCII-only constant
 
         let code = format!("{helpers}\nFINAL({expr})");
 
