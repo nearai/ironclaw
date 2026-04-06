@@ -252,7 +252,7 @@ impl GatewayChannel {
                         {
                             tracing::warn!("Failed to bootstrap admin user: {}", e);
                         } else {
-                            tracing::info!(
+                            tracing::debug!(
                                 user_id = owner_id,
                                 "Bootstrapped admin user from gateway config"
                             );

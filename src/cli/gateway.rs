@@ -75,7 +75,7 @@ pub async fn run_gateway_command(
     match cmd {
         GatewayCommand::Serve => cmd_serve(config_path).await,
         GatewayCommand::Start => cmd_start(config_path).await,
-        GatewayCommand::Stop => cmd_stop(),
+        GatewayCommand::Stop => cmd_stop().await,
         GatewayCommand::Status => cmd_status(config_path).await,
     }
 }
@@ -257,6 +257,28 @@ fn write_gateway_token_file(path: &Path, auth_token: &str) -> std::io::Result<()
     Ok(())
 }
 
+/// Open the gateway log file in append mode. On Unix, restrict to owner-only
+/// (0600) because the auth token is printed to stdout which lands in this file
+/// when `gateway start` redirects output.
+fn open_log_file(path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+    }
+}
+
 fn cleanup_gateway_token_file(path: &Path) {
     if let Err(e) = std::fs::remove_file(path)
         && e.kind() != std::io::ErrorKind::NotFound
@@ -307,10 +329,7 @@ async fn cmd_start(config_path: Option<&Path>) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow::anyhow!("Cannot create directory {}: {e}", parent.display()))?;
     }
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
+    let log_file = open_log_file(&log_path)
         .map_err(|e| anyhow::anyhow!("Cannot open log file {}: {e}", log_path.display()))?;
     let stderr_file = log_file
         .try_clone()
@@ -355,6 +374,10 @@ async fn cmd_start(config_path: Option<&Path>) -> anyhow::Result<()> {
     let health_url = format!("http://{health_host}:{}/api/health", gw_config.port);
     let deadline = std::time::Instant::now() + START_HEALTH_TIMEOUT;
     let mut healthy = false;
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| anyhow::anyhow!("Cannot create HTTP client: {e}"))?;
 
     while std::time::Instant::now() < deadline {
         tokio::time::sleep(START_HEALTH_POLL).await;
@@ -367,7 +390,10 @@ async fn cmd_start(config_path: Option<&Path>) -> anyhow::Result<()> {
             );
         }
 
-        if probe_health(&health_url).await.unwrap_or(false) {
+        if probe_health(&http_client, &health_url)
+            .await
+            .unwrap_or(false)
+        {
             healthy = true;
             break;
         }
@@ -401,25 +427,30 @@ async fn cmd_start(config_path: Option<&Path>) -> anyhow::Result<()> {
 
 // ─── stop ────────────────────────────────────────────────────────
 
-fn cmd_stop() -> anyhow::Result<()> {
-    let pid_path = gateway_pid_lock_path();
-    let pid_str = std::fs::read_to_string(&pid_path).map_err(|_| {
-        anyhow::anyhow!(
-            "Gateway is not running (no PID file at {})",
-            pid_path.display()
-        )
-    })?;
-
-    let pid: u32 = pid_str.trim().parse().map_err(|_| {
-        anyhow::anyhow!(
-            "Invalid PID in {}: '{}'",
-            pid_path.display(),
-            pid_str.trim()
-        )
-    })?;
+async fn cmd_stop() -> anyhow::Result<()> {
+    #[cfg(not(unix))]
+    {
+        anyhow::bail!("gateway stop is currently Unix-only");
+    }
 
     #[cfg(unix)]
     {
+        let pid_path = gateway_pid_lock_path();
+        let pid_str = std::fs::read_to_string(&pid_path).map_err(|_| {
+            anyhow::anyhow!(
+                "Gateway is not running (no PID file at {})",
+                pid_path.display()
+            )
+        })?;
+
+        let pid: u32 = pid_str.trim().parse().map_err(|_| {
+            anyhow::anyhow!(
+                "Invalid PID in {}: '{}'",
+                pid_path.display(),
+                pid_str.trim()
+            )
+        })?;
+
         // Note: is_process_alive uses kill(pid, 0) which can return false
         // positives if the PID has been reused by an unrelated process.
         // This is inherent to PID-file-based lifecycle management; the
@@ -454,7 +485,7 @@ fn cmd_stop() -> anyhow::Result<()> {
             if !is_process_alive(pid) {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
 
         // If the PID file still exists and the process has exited, remove it.
@@ -470,15 +501,9 @@ fn cmd_stop() -> anyhow::Result<()> {
             cleanup_gateway_token_file(&gateway_token_path());
             println!("Gateway stopped.");
         }
-    }
 
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        anyhow::bail!("gateway stop is currently Unix-only");
+        Ok(())
     }
-
-    Ok(())
 }
 
 // ─── status ──────────────────────────────────────────────────────
@@ -525,10 +550,16 @@ async fn cmd_status(config_path: Option<&Path>) -> anyhow::Result<()> {
 
         // Probe /api/health (unauthenticated endpoint)
         let url = format!("http://{addr}/api/health");
-        match probe_health(&url).await {
-            Ok(true) => println!("Health:  ok"),
-            Ok(false) => println!("Health:  unhealthy"),
-            Err(reason) => println!("Health:  unreachable ({reason})"),
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build();
+        match client {
+            Ok(c) => match probe_health(&c, &url).await {
+                Ok(true) => println!("Health:  ok"),
+                Ok(false) => println!("Health:  unhealthy"),
+                Err(reason) => println!("Health:  unreachable ({reason})"),
+            },
+            Err(e) => println!("Health:  cannot create client ({e})"),
         }
     }
 
@@ -573,12 +604,7 @@ fn normalize_probe_host(host: &str) -> &str {
     }
 }
 
-async fn probe_health(url: &str) -> Result<bool, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .map_err(|e| format!("client build error: {e}"))?;
-
+async fn probe_health(client: &reqwest::Client, url: &str) -> Result<bool, String> {
     let resp = client.get(url).send().await.map_err(|e| format!("{e}"))?;
     Ok(resp.status().is_success())
 }
