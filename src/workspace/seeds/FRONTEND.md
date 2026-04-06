@@ -36,12 +36,13 @@ Common CSS variables: `--color-primary`, `--color-accent`, `--bg-primary`, `--bg
 
 ### Widgets
 
-Create custom UI components in `frontend/widgets/{name}/`:
+Create custom UI components in `frontend/widgets/{id}/`. The directory name is the widget id — it matches the id field in `manifest.json` and the path segment in `GET /api/frontend/widget/{id}/{file}`.
+
 - `manifest.json` — widget metadata (id, name, slot)
 - `index.js` — widget code (calls `IronClaw.registerWidget()`)
-- `style.css` — optional scoped styles
+- `style.css` — optional scoped styles (auto-prefixed with `[data-widget="{id}"]`)
 
-Slots: `tab`, `chat_header`, `chat_footer`, `sidebar`, `settings_section`.
+**Slot:** only `tab` is currently mounted by the browser runtime — `IronClaw.registerWidget({ slot: "tab", ... })` adds a new tab to the tab bar. For inline rendering of structured data in chat messages, use `IronClaw.registerChatRenderer({ id, match, render })` instead. Additional slot names may be accepted by the server but will not be mounted anywhere in the UI yet.
 
 ## API Endpoints
 

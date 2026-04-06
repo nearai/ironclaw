@@ -5555,7 +5555,7 @@ mod tests {
             capabilities,
             std::collections::HashMap::new(),
             Vec::new(),
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
         );
 
         let result = super::near::agent::channel_host::Host::http_request(
