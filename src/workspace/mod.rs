@@ -92,8 +92,8 @@ use crate::error::WorkspaceError;
 use crate::llm::error::LlmError;
 use crate::llm::retry::{is_retryable, retry_backoff_delay};
 use crate::llm::{ChatMessage, CompletionRequest, LlmProvider};
-use ironclaw_safety::{Sanitizer, Severity};
 use crate::util::floor_char_boundary;
+use ironclaw_safety::{Sanitizer, Severity};
 use tokio::time::sleep;
 
 /// Files injected into the system prompt. Writes to these are scanned for
