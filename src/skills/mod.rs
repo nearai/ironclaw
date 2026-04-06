@@ -78,8 +78,8 @@ fn credential_spec_to_oauth_refresh(spec: &SkillCredentialSpec) -> Option<OAuthR
             refresh_url,
             extra_params,
         } => {
-            let builtin = crate::cli::oauth_defaults::builtin_credentials(&spec.name);
-            let exchange_proxy_url = crate::cli::oauth_defaults::exchange_proxy_url();
+            let builtin = crate::auth::oauth::builtin_credentials(&spec.name);
+            let exchange_proxy_url = crate::auth::oauth::exchange_proxy_url();
             let client_id = oauth
                 .client_id
                 .clone()
@@ -100,7 +100,7 @@ fn credential_spec_to_oauth_refresh(spec: &SkillCredentialSpec) -> Option<OAuthR
                         .and_then(|env| std::env::var(env).ok())
                 })
                 .or_else(|| builtin.as_ref().map(|c| c.client_secret.to_string()));
-            let client_secret = crate::cli::oauth_defaults::hosted_proxy_client_secret(
+            let client_secret = crate::auth::oauth::hosted_proxy_client_secret(
                 &client_secret,
                 builtin.as_ref(),
                 exchange_proxy_url.is_some(),
@@ -111,7 +111,7 @@ fn credential_spec_to_oauth_refresh(spec: &SkillCredentialSpec) -> Option<OAuthR
                 client_id,
                 client_secret,
                 exchange_proxy_url,
-                gateway_token: crate::cli::oauth_defaults::oauth_proxy_auth_token(),
+                gateway_token: crate::auth::oauth::oauth_proxy_auth_token(),
                 secret_name: spec.name.clone(),
                 provider: Some(spec.provider.clone()),
                 extra_refresh_params: extra_params.clone(),
@@ -119,8 +119,8 @@ fn credential_spec_to_oauth_refresh(spec: &SkillCredentialSpec) -> Option<OAuthR
         }
     }
 
-    let builtin = crate::cli::oauth_defaults::builtin_credentials(&spec.name);
-    let exchange_proxy_url = crate::cli::oauth_defaults::exchange_proxy_url();
+    let builtin = crate::auth::oauth::builtin_credentials(&spec.name);
+    let exchange_proxy_url = crate::auth::oauth::exchange_proxy_url();
     let client_id = oauth
         .client_id
         .clone()
@@ -141,7 +141,7 @@ fn credential_spec_to_oauth_refresh(spec: &SkillCredentialSpec) -> Option<OAuthR
                 .and_then(|env| std::env::var(env).ok())
         })
         .or_else(|| builtin.as_ref().map(|c| c.client_secret.to_string()));
-    let client_secret = crate::cli::oauth_defaults::hosted_proxy_client_secret(
+    let client_secret = crate::auth::oauth::hosted_proxy_client_secret(
         &client_secret,
         builtin.as_ref(),
         exchange_proxy_url.is_some(),
@@ -152,7 +152,7 @@ fn credential_spec_to_oauth_refresh(spec: &SkillCredentialSpec) -> Option<OAuthR
         client_id,
         client_secret,
         exchange_proxy_url,
-        gateway_token: crate::cli::oauth_defaults::oauth_proxy_auth_token(),
+        gateway_token: crate::auth::oauth::oauth_proxy_auth_token(),
         secret_name: spec.name.clone(),
         provider: Some(spec.provider.clone()),
         extra_refresh_params: std::collections::HashMap::new(),

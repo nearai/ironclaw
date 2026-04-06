@@ -468,7 +468,7 @@ impl AuthManager {
         credential_name: &str,
         user_id: &str,
     ) -> Option<String> {
-        use crate::cli::oauth_defaults;
+        use crate::auth::oauth;
 
         let spec = self.get_credential_spec(credential_name)?;
         let oauth = spec.oauth.as_ref()?;
@@ -493,8 +493,8 @@ impl AuthManager {
                 validation_url: oauth.test_url.clone(),
             }),
         };
-        let builtin = oauth_defaults::builtin_credentials(credential_name);
-        let exchange_proxy_url = oauth_defaults::exchange_proxy_url();
+        let builtin = oauth::builtin_credentials(credential_name);
+        let exchange_proxy_url = oauth::exchange_proxy_url();
         let client_id = oauth
             .client_id
             .clone()
@@ -515,18 +515,18 @@ impl AuthManager {
                     .and_then(|env| std::env::var(env).ok())
             })
             .or_else(|| builtin.as_ref().map(|c| c.client_secret.to_string()));
-        let client_secret = oauth_defaults::hosted_proxy_client_secret(
+        let client_secret = oauth::hosted_proxy_client_secret(
             &client_secret,
             builtin.as_ref(),
             exchange_proxy_url.is_some(),
         );
         let ext_mgr = self.extension_manager.as_ref()?;
         upsert_auth_descriptor(self.settings_store(), user_id, descriptor).await;
-        let use_gateway = oauth_defaults::use_gateway_callback();
+        let use_gateway = oauth::use_gateway_callback();
         let redirect_uri = if use_gateway {
-            oauth_defaults::callback_url()
+            oauth::callback_url()
         } else {
-            format!("{}/callback", oauth_defaults::callback_url())
+            format!("{}/callback", oauth::callback_url())
         };
         let validation_endpoint =
             oauth
@@ -557,7 +557,7 @@ impl AuthManager {
             user_id: user_id.to_string(),
             secrets: Arc::clone(&self.secrets_store),
             sse_manager: ext_mgr.sse_sender().await,
-            gateway_token: oauth_defaults::oauth_proxy_auth_token(),
+            gateway_token: oauth::oauth_proxy_auth_token(),
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
             client_secret_secret_name: None,
@@ -573,7 +573,7 @@ impl AuthManager {
             });
             pending_flows.insert(launch.expected_state.clone(), pending_flow);
         } else {
-            let listener = oauth_defaults::bind_callback_listener().await.ok()?;
+            let listener = oauth::bind_callback_listener().await.ok()?;
             let display_name = pending_flow.display_name.clone();
             let token_url = pending_flow.token_url.clone();
             let client_id = pending_flow.client_id.clone();
@@ -589,7 +589,7 @@ impl AuthManager {
             let expected_state = launch.expected_state.clone();
             tokio::spawn(async move {
                 let result: Result<(), String> = async {
-                    let code = oauth_defaults::wait_for_callback(
+                    let code = oauth::wait_for_callback(
                         listener,
                         "/callback",
                         "code",
@@ -599,7 +599,7 @@ impl AuthManager {
                     .await
                     .map_err(|e| e.to_string())?;
 
-                    let token_response = oauth_defaults::exchange_oauth_code(
+                    let token_response = oauth::exchange_oauth_code(
                         &token_url,
                         &client_id,
                         client_secret.as_deref(),
@@ -612,15 +612,12 @@ impl AuthManager {
                     .map_err(|e| e.to_string())?;
 
                     if let Some(ref validation) = validation_endpoint {
-                        oauth_defaults::validate_oauth_token(
-                            &token_response.access_token,
-                            validation,
-                        )
-                        .await
-                        .map_err(|e| e.to_string())?;
+                        oauth::validate_oauth_token(&token_response.access_token, validation)
+                            .await
+                            .map_err(|e| e.to_string())?;
                     }
 
-                    oauth_defaults::store_oauth_tokens(
+                    oauth::store_oauth_tokens(
                         secrets.as_ref(),
                         &user_id,
                         &secret_name,

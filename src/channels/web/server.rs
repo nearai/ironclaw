@@ -982,7 +982,7 @@ async fn health_handler() -> Json<HealthResponse> {
 
 /// Return an OAuth error landing page response.
 fn oauth_error_page(label: &str) -> axum::response::Response {
-    let html = crate::cli::oauth_defaults::landing_html(label, false);
+    let html = crate::auth::oauth::landing_html(label, false);
     axum::response::Html(html).into_response()
 }
 
@@ -999,7 +999,7 @@ async fn oauth_callback_handler(
     State(state): State<Arc<GatewayState>>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    use crate::cli::oauth_defaults;
+    use crate::auth::oauth;
 
     // Check for error from OAuth provider (e.g., user denied consent)
     if let Some(error) = params.get("error") {
@@ -1032,7 +1032,7 @@ async fn oauth_callback_handler(
         }
     };
 
-    let decoded_state = match oauth_defaults::decode_hosted_oauth_state(&state_param) {
+    let decoded_state = match oauth::decode_hosted_oauth_state(&state_param) {
         Ok(decoded) => decoded,
         Err(error) => {
             let redacted_state = redact_oauth_state_for_logs(&state_param);
@@ -1068,7 +1068,7 @@ async fn oauth_callback_handler(
     };
 
     // Check flow expiry (5 minutes, matching TCP listener timeout)
-    if flow.created_at.elapsed() > oauth_defaults::OAUTH_FLOW_EXPIRY {
+    if flow.created_at.elapsed() > oauth::OAUTH_FLOW_EXPIRY {
         tracing::warn!(
             extension = %flow.extension_name,
             "OAuth flow expired"
@@ -1092,12 +1092,12 @@ async fn oauth_callback_handler(
     // Exchange the authorization code for tokens.
     // Use the platform exchange proxy when configured, otherwise call the
     // provider's token URL directly.
-    let exchange_proxy_url = oauth_defaults::exchange_proxy_url();
+    let exchange_proxy_url = oauth::exchange_proxy_url();
 
     let result: Result<(), String> = async {
         let token_response = if let Some(proxy_url) = &exchange_proxy_url {
             let oauth_proxy_auth_token = flow.oauth_proxy_auth_token().unwrap_or_default();
-            oauth_defaults::exchange_via_proxy(oauth_defaults::ProxyTokenExchangeRequest {
+            oauth::exchange_via_proxy(oauth::ProxyTokenExchangeRequest {
                 proxy_url,
                 gateway_token: oauth_proxy_auth_token,
                 token_url: &flow.token_url,
@@ -1112,7 +1112,7 @@ async fn oauth_callback_handler(
             .await
             .map_err(|e| e.to_string())?
         } else {
-            oauth_defaults::exchange_oauth_code_with_params(
+            oauth::exchange_oauth_code_with_params(
                 &flow.token_url,
                 &flow.client_id,
                 flow.client_secret.as_deref(),
@@ -1128,13 +1128,13 @@ async fn oauth_callback_handler(
 
         // Validate the token before storing (catches wrong account, etc.)
         if let Some(ref validation) = flow.validation_endpoint {
-            oauth_defaults::validate_oauth_token(&token_response.access_token, validation)
+            oauth::validate_oauth_token(&token_response.access_token, validation)
                 .await
                 .map_err(|e| e.to_string())?;
         }
 
         // Store tokens encrypted in the secrets store
-        oauth_defaults::store_oauth_tokens(
+        oauth::store_oauth_tokens(
             flow.secrets.as_ref(),
             &flow.user_id,
             &flow.secret_name,
@@ -1295,7 +1295,7 @@ async fn oauth_callback_handler(
         );
     }
 
-    let html = oauth_defaults::landing_html(&flow.display_name, success);
+    let html = oauth::landing_html(&flow.display_name, success);
     axum::response::Html(html).into_response()
 }
 
@@ -3265,10 +3265,10 @@ struct GatewayStatusResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::oauth;
     use crate::channels::web::types::{
         ExtensionActivationStatus, classify_wasm_channel_activation,
     };
-    use crate::cli::oauth_defaults;
     use crate::extensions::{ExtensionKind, InstalledExtension};
     use crate::testing::credentials::TEST_GATEWAY_CRYPTO_KEY;
 
@@ -3939,8 +3939,8 @@ mod tests {
         secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
         sse_manager: Option<Arc<SseManager>>,
         oauth_proxy_auth_token: Option<String>,
-    ) -> crate::cli::oauth_defaults::PendingOAuthFlow {
-        crate::cli::oauth_defaults::PendingOAuthFlow {
+    ) -> crate::auth::oauth::PendingOAuthFlow {
+        crate::auth::oauth::PendingOAuthFlow {
             extension_name: "test_tool".to_string(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
@@ -4253,7 +4253,7 @@ mod tests {
 
     fn expired_flow_created_at() -> Option<std::time::Instant> {
         std::time::Instant::now()
-            .checked_sub(oauth_defaults::OAUTH_FLOW_EXPIRY + std::time::Duration::from_secs(1))
+            .checked_sub(oauth::OAUTH_FLOW_EXPIRY + std::time::Duration::from_secs(1))
     }
 
     #[test]
@@ -4468,7 +4468,7 @@ mod tests {
         };
 
         // Insert an expired flow.
-        let flow = crate::cli::oauth_defaults::PendingOAuthFlow {
+        let flow = crate::auth::oauth::PendingOAuthFlow {
             extension_name: "test_tool".to_string(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
@@ -4540,7 +4540,7 @@ mod tests {
             eprintln!("Skipping expired OAuth flow SSE test: monotonic uptime below expiry window");
             return;
         };
-        let flow = crate::cli::oauth_defaults::PendingOAuthFlow {
+        let flow = crate::auth::oauth::PendingOAuthFlow {
             extension_name: "test_tool".to_string(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
@@ -4647,7 +4647,7 @@ mod tests {
             eprintln!("Skipping OAuth state-prefix test: monotonic uptime below expiry window");
             return;
         };
-        let flow = crate::cli::oauth_defaults::PendingOAuthFlow {
+        let flow = crate::auth::oauth::PendingOAuthFlow {
             extension_name: "test_tool".to_string(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
@@ -4737,7 +4737,7 @@ mod tests {
             eprintln!("Skipping versioned OAuth state test: monotonic uptime below expiry window");
             return;
         };
-        let flow = crate::cli::oauth_defaults::PendingOAuthFlow {
+        let flow = crate::auth::oauth::PendingOAuthFlow {
             extension_name: "test_tool".to_string(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
@@ -4771,7 +4771,7 @@ mod tests {
         let state = test_gateway_state(Some(ext_mgr.clone()));
         let app = test_oauth_router(state);
         let versioned_state =
-            crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", Some("myinstance"));
+            crate::auth::oauth::encode_hosted_oauth_state("test_nonce", Some("myinstance"));
 
         let req = axum::http::Request::builder()
             .uri(format!(
@@ -4821,7 +4821,7 @@ mod tests {
             );
             return;
         };
-        let flow = crate::cli::oauth_defaults::PendingOAuthFlow {
+        let flow = crate::auth::oauth::PendingOAuthFlow {
             extension_name: "test_tool".to_string(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
@@ -4854,8 +4854,7 @@ mod tests {
 
         let state = test_gateway_state(Some(ext_mgr.clone()));
         let app = test_oauth_router(state);
-        let versioned_state =
-            crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", None);
+        let versioned_state = crate::auth::oauth::encode_hosted_oauth_state("test_nonce", None);
 
         let req = axum::http::Request::builder()
             .uri(format!(
@@ -4907,7 +4906,7 @@ mod tests {
         let flow = fresh_pending_oauth_flow(
             Arc::clone(&secrets),
             Some(Arc::clone(&sse_mgr)),
-            crate::cli::oauth_defaults::oauth_proxy_auth_token(),
+            crate::auth::oauth::oauth_proxy_auth_token(),
         );
 
         ext_mgr
@@ -4919,7 +4918,7 @@ mod tests {
         let state = test_gateway_state(Some(ext_mgr.clone()));
         let app = test_oauth_router(state);
         let versioned_state =
-            crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", Some("myinstance"));
+            crate::auth::oauth::encode_hosted_oauth_state("test_nonce", Some("myinstance"));
 
         let req = axum::http::Request::builder()
             .uri(format!(
@@ -5007,7 +5006,7 @@ mod tests {
         let flow = fresh_pending_oauth_flow(
             Arc::clone(&secrets),
             Some(Arc::clone(&sse_mgr)),
-            crate::cli::oauth_defaults::oauth_proxy_auth_token(),
+            crate::auth::oauth::oauth_proxy_auth_token(),
         );
 
         ext_mgr
@@ -5018,8 +5017,7 @@ mod tests {
 
         let state = test_gateway_state(Some(ext_mgr.clone()));
         let app = test_oauth_router(state);
-        let versioned_state =
-            crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", None);
+        let versioned_state = crate::auth::oauth::encode_hosted_oauth_state("test_nonce", None);
 
         let req = axum::http::Request::builder()
             .uri(format!(
@@ -5102,7 +5100,7 @@ mod tests {
         let mut flow = fresh_pending_oauth_flow(
             Arc::clone(&secrets),
             Some(Arc::clone(&sse_mgr)),
-            crate::cli::oauth_defaults::oauth_proxy_auth_token(),
+            crate::auth::oauth::oauth_proxy_auth_token(),
         );
         flow.auto_activate_extension = false;
 
@@ -5115,7 +5113,7 @@ mod tests {
         let state = test_gateway_state(Some(ext_mgr.clone()));
         let app = test_oauth_router(state);
         let versioned_state =
-            crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", Some("myinstance"));
+            crate::auth::oauth::encode_hosted_oauth_state("test_nonce", Some("myinstance"));
 
         let req = axum::http::Request::builder()
             .uri(format!(
@@ -5166,7 +5164,7 @@ mod tests {
         let flow = fresh_pending_oauth_flow(
             Arc::clone(&secrets),
             Some(Arc::clone(&sse_mgr)),
-            crate::cli::oauth_defaults::oauth_proxy_auth_token(),
+            crate::auth::oauth::oauth_proxy_auth_token(),
         );
 
         ext_mgr
@@ -5178,7 +5176,7 @@ mod tests {
         let state = test_gateway_state(Some(ext_mgr.clone()));
         let app = test_oauth_router(state);
         let versioned_state =
-            crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", Some("myinstance"));
+            crate::auth::oauth::encode_hosted_oauth_state("test_nonce", Some("myinstance"));
 
         let req = axum::http::Request::builder()
             .uri(format!(

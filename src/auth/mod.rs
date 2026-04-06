@@ -1,3 +1,6 @@
+pub mod oauth;
+pub mod providers;
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Weak};
@@ -5,7 +8,6 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::cli::oauth_defaults;
 use crate::db::{SettingsStore, UserStore};
 use crate::secrets::{CreateSecretParams, DecryptedSecret, SecretError, SecretsStore};
 use crate::tools::wasm::OAuthRefreshConfig;
@@ -70,7 +72,7 @@ pub struct AuthDescriptor {
 pub struct PendingOAuthLaunch {
     pub auth_url: String,
     pub expected_state: String,
-    pub flow: crate::cli::oauth_defaults::PendingOAuthFlow,
+    pub flow: crate::auth::oauth::PendingOAuthFlow,
 }
 
 pub struct PendingOAuthLaunchParams {
@@ -104,7 +106,7 @@ fn default_access_token_field() -> String {
 }
 
 pub fn build_pending_oauth_launch(params: PendingOAuthLaunchParams) -> PendingOAuthLaunch {
-    let oauth_result = oauth_defaults::build_oauth_url(
+    let oauth_result = oauth::build_oauth_url(
         &params.authorization_url,
         &params.client_id,
         &params.redirect_uri,
@@ -113,7 +115,7 @@ pub fn build_pending_oauth_launch(params: PendingOAuthLaunchParams) -> PendingOA
         &params.extra_params,
     );
 
-    let flow = crate::cli::oauth_defaults::PendingOAuthFlow {
+    let flow = crate::auth::oauth::PendingOAuthFlow {
         extension_name: params.extension_name,
         display_name: params.display_name,
         token_url: params.token_url,
@@ -371,7 +373,7 @@ async fn persist_refreshed_oauth_tokens(
     user_id: &str,
     config: &OAuthRefreshConfig,
     refresh_name: &str,
-    token_response: oauth_defaults::OAuthTokenResponse,
+    token_response: oauth::OAuthTokenResponse,
 ) -> bool {
     let mut access_params =
         CreateSecretParams::new(&config.secret_name, &token_response.access_token);
@@ -434,18 +436,16 @@ pub async fn refresh_oauth_access_token(
             Some(secret) => secret,
             None => return false,
         };
-        let token_response = match oauth_defaults::refresh_token_via_proxy(
-            oauth_defaults::ProxyRefreshTokenRequest {
-                proxy_url,
-                gateway_token: oauth_proxy_auth_token,
-                token_url: &config.token_url,
-                client_id: &config.client_id,
-                client_secret: config.client_secret.as_deref(),
-                refresh_token: refresh_secret.expose(),
-                resource: None,
-                provider: config.provider.as_deref(),
-            },
-        )
+        let token_response = match oauth::refresh_token_via_proxy(oauth::ProxyRefreshTokenRequest {
+            proxy_url,
+            gateway_token: oauth_proxy_auth_token,
+            token_url: &config.token_url,
+            client_id: &config.client_id,
+            client_secret: config.client_secret.as_deref(),
+            refresh_token: refresh_secret.expose(),
+            resource: None,
+            provider: config.provider.as_deref(),
+        })
         .await
         {
             Ok(response) => response,
@@ -536,7 +536,7 @@ pub async fn refresh_oauth_access_token(
         }
     };
     let token_response = match token_data.get("access_token").and_then(|v| v.as_str()) {
-        Some(access_token) => oauth_defaults::OAuthTokenResponse {
+        Some(access_token) => oauth::OAuthTokenResponse {
             access_token: access_token.to_string(),
             refresh_token: token_data
                 .get("refresh_token")

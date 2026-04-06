@@ -431,8 +431,8 @@ fn resolve_oauth_refresh_config(cap_file: &CapabilitiesFile) -> Option<OAuthRefr
     let auth = cap_file.auth.as_ref()?;
     let oauth = auth.oauth.as_ref()?;
 
-    let builtin = crate::cli::oauth_defaults::builtin_credentials(&auth.secret_name);
-    let exchange_proxy_url = crate::cli::oauth_defaults::exchange_proxy_url();
+    let builtin = crate::auth::oauth::builtin_credentials(&auth.secret_name);
+    let exchange_proxy_url = crate::auth::oauth::exchange_proxy_url();
 
     let client_id = oauth
         .client_id
@@ -455,12 +455,12 @@ fn resolve_oauth_refresh_config(cap_file: &CapabilitiesFile) -> Option<OAuthRefr
                 .and_then(|env| std::env::var(env).ok())
         })
         .or_else(|| builtin.as_ref().map(|c| c.client_secret.to_string()));
-    let client_secret = crate::cli::oauth_defaults::hosted_proxy_client_secret(
+    let client_secret = crate::auth::oauth::hosted_proxy_client_secret(
         &client_secret,
         builtin.as_ref(),
         exchange_proxy_url.is_some(),
     );
-    let oauth_proxy_auth_token = crate::cli::oauth_defaults::oauth_proxy_auth_token();
+    let oauth_proxy_auth_token = crate::auth::oauth::oauth_proxy_auth_token();
 
     Some(OAuthRefreshConfig {
         token_url: oauth.token_url.clone(),

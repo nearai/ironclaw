@@ -57,7 +57,7 @@ struct HostedOAuthFlowStart {
     kind: ExtensionKind,
     auth_url: String,
     expected_state: String,
-    flow: crate::cli::oauth_defaults::PendingOAuthFlow,
+    flow: crate::auth::oauth::PendingOAuthFlow,
     instructions: Option<String>,
     setup_url: Option<String>,
 }
@@ -497,7 +497,7 @@ pub struct ExtensionManager {
     /// Keyed by CSRF `state` parameter. Populated in `start_wasm_oauth()`
     /// when running in gateway mode, consumed by the web gateway's
     /// `/oauth/callback` handler.
-    pending_oauth_flows: crate::cli::oauth_defaults::PendingOAuthRegistry,
+    pending_oauth_flows: crate::auth::oauth::PendingOAuthRegistry,
     /// OAuth proxy auth token for authenticating with the hosted token exchange proxy.
     /// Resolved once at construction from `IRONCLAW_OAUTH_PROXY_AUTH_TOKEN`,
     /// then `GATEWAY_AUTH_TOKEN` as a backward-compatible fallback.
@@ -655,8 +655,8 @@ impl ExtensionManager {
             installed_relay_extensions: RwLock::new(HashSet::new()),
             activation_errors: RwLock::new(HashMap::new()),
             sse_manager: RwLock::new(None),
-            pending_oauth_flows: crate::cli::oauth_defaults::new_pending_oauth_registry(),
-            oauth_proxy_auth_token: crate::cli::oauth_defaults::oauth_proxy_auth_token(),
+            pending_oauth_flows: crate::auth::oauth::new_pending_oauth_registry(),
+            oauth_proxy_auth_token: crate::auth::oauth::oauth_proxy_auth_token(),
             relay_config: crate::config::RelayConfig::from_env(),
             relay_event_tx: Arc::new(tokio::sync::Mutex::new(None)),
             relay_signing_secret_cache: Arc::new(std::sync::Mutex::new(None)),
@@ -729,7 +729,7 @@ impl ExtensionManager {
         if self.gateway_mode.load(std::sync::atomic::Ordering::Acquire) {
             return true;
         }
-        if crate::cli::oauth_defaults::use_gateway_callback() {
+        if crate::auth::oauth::use_gateway_callback() {
             return true;
         }
         self.tunnel_url
@@ -737,7 +737,7 @@ impl ExtensionManager {
             .filter(|u| !u.is_empty())
             .and_then(|raw| url::Url::parse(raw).ok())
             .and_then(|u| u.host_str().map(String::from))
-            .map(|host| !crate::cli::oauth_defaults::is_loopback_host(&host))
+            .map(|host| !crate::auth::oauth::is_loopback_host(&host))
             .unwrap_or(false)
     }
 
@@ -749,11 +749,9 @@ impl ExtensionManager {
     /// 3. `tunnel_url` (from config)
     /// 4. `None` (local/CLI mode)
     async fn gateway_callback_redirect_uri(&self) -> Option<String> {
-        use crate::cli::oauth_defaults;
-        if oauth_defaults::use_gateway_callback() {
-            return Some(normalize_hosted_callback_url(
-                &oauth_defaults::callback_url(),
-            ));
+        use crate::auth::oauth;
+        if oauth::use_gateway_callback() {
+            return Some(normalize_hosted_callback_url(&oauth::callback_url()));
         }
         // Use gateway_base_url from enable_gateway_mode()
         if let Some(ref base) = *self.gateway_base_url.read().await {
@@ -767,7 +765,7 @@ impl ExtensionManager {
             .and_then(|raw| {
                 let url = url::Url::parse(raw).ok()?;
                 let host = url.host_str().map(String::from)?;
-                if oauth_defaults::is_loopback_host(&host) {
+                if oauth::is_loopback_host(&host) {
                     return None;
                 }
                 let base = raw.trim_end_matches('/');
@@ -1235,7 +1233,7 @@ impl ExtensionManager {
     ///
     /// The gateway's `/oauth/callback` handler uses this to look up pending flows
     /// by CSRF `state` parameter and complete the token exchange.
-    pub fn pending_oauth_flows(&self) -> &crate::cli::oauth_defaults::PendingOAuthRegistry {
+    pub fn pending_oauth_flows(&self) -> &crate::auth::oauth::PendingOAuthRegistry {
         &self.pending_oauth_flows
     }
 
@@ -1311,11 +1309,11 @@ impl ExtensionManager {
     }
 
     async fn start_gateway_oauth_flow(&self, request: HostedOAuthFlowStart) -> AuthResult {
-        use crate::cli::oauth_defaults;
+        use crate::auth::oauth;
 
-        oauth_defaults::sweep_expired_flows(&self.pending_oauth_flows).await;
+        oauth::sweep_expired_flows(&self.pending_oauth_flows).await;
 
-        let hosted_state = oauth_defaults::build_platform_state(&request.expected_state);
+        let hosted_state = oauth::build_platform_state(&request.expected_state);
         let auth_url = Self::rewrite_oauth_state_param(
             request.auth_url,
             &request.expected_state,
@@ -3805,21 +3803,21 @@ impl ExtensionManager {
         secret_name: &str,
         user_id: &str,
     ) -> Option<AuthResult> {
-        use crate::cli::oauth_defaults;
+        use crate::auth::oauth;
 
         let descriptor =
             auth_descriptor_for_secret(self.settings_store(), user_id, secret_name).await?;
         let oauth = descriptor.oauth?;
-        let builtin = oauth_defaults::builtin_credentials(secret_name);
+        let builtin = oauth::builtin_credentials(secret_name);
         let display_name = descriptor
             .display_name
             .clone()
             .or_else(|| descriptor.provider.clone())
             .unwrap_or_else(|| secret_name.to_string());
-        let redirect_uri = if oauth_defaults::use_gateway_callback() {
-            oauth_defaults::callback_url()
+        let redirect_uri = if oauth::use_gateway_callback() {
+            oauth::callback_url()
         } else {
-            format!("{}/callback", oauth_defaults::callback_url())
+            format!("{}/callback", oauth::callback_url())
         };
         let client_id = oauth
             .client_id
@@ -3841,10 +3839,10 @@ impl ExtensionManager {
                     .and_then(|env| std::env::var(env).ok())
             })
             .or_else(|| builtin.as_ref().map(|c| c.client_secret.to_string()));
-        let client_secret = oauth_defaults::hosted_proxy_client_secret(
+        let client_secret = oauth::hosted_proxy_client_secret(
             &client_secret,
             builtin.as_ref(),
-            oauth_defaults::exchange_proxy_url().is_some(),
+            oauth::exchange_proxy_url().is_some(),
         );
         let sse_manager = self.sse_manager.read().await.clone();
         let kind = self
@@ -4280,7 +4278,7 @@ impl ExtensionManager {
         oauth: &crate::tools::wasm::OAuthConfigSchema,
         user_id: &str,
     ) -> bool {
-        let builtin = crate::cli::oauth_defaults::builtin_credentials(&auth.secret_name);
+        let builtin = crate::auth::oauth::builtin_credentials(&auth.secret_name);
         let (id_entry, secret_entry) = self.find_setup_credential_names(name).await;
 
         for (entry, inline, env, fallback) in [
@@ -4364,7 +4362,7 @@ impl ExtensionManager {
         oauth: &crate::tools::wasm::OAuthConfigSchema,
         user_id: &str,
     ) -> Result<AuthResult, String> {
-        use crate::cli::oauth_defaults;
+        use crate::auth::oauth;
 
         upsert_auth_descriptor(
             self.settings_store(),
@@ -4373,7 +4371,7 @@ impl ExtensionManager {
         )
         .await;
 
-        let builtin = oauth_defaults::builtin_credentials(&auth.secret_name);
+        let builtin = oauth::builtin_credentials(&auth.secret_name);
 
         // Find setup secret names for client_id and client_secret from capabilities.
         // These are the actual names used in the Setup tab (e.g., "google_oauth_client_id"),
@@ -4405,7 +4403,7 @@ impl ExtensionManager {
                     name, env_name
                 );
                 if let Some(override_env) =
-                    crate::cli::oauth_defaults::builtin_client_id_override_env(&auth.secret_name)
+                    crate::auth::oauth::builtin_client_id_override_env(&auth.secret_name)
                 {
                     msg.push_str(&format!(", or build with {override_env}"));
                 }
@@ -4429,7 +4427,7 @@ impl ExtensionManager {
         let redirect_uri = self
             .gateway_callback_redirect_uri()
             .await
-            .unwrap_or_else(|| format!("{}/callback", oauth_defaults::callback_url()));
+            .unwrap_or_else(|| format!("{}/callback", oauth::callback_url()));
 
         // Merge scopes from all tools sharing this provider
         let merged_scopes = self
@@ -4447,10 +4445,10 @@ impl ExtensionManager {
             authorization_url: oauth.authorization_url.clone(),
             token_url: oauth.token_url.clone(),
             client_id: client_id.clone(),
-            client_secret: oauth_defaults::hosted_proxy_client_secret(
+            client_secret: oauth::hosted_proxy_client_secret(
                 &client_secret,
                 builtin.as_ref(),
-                oauth_defaults::exchange_proxy_url().is_some(),
+                oauth::exchange_proxy_url().is_some(),
             ),
             redirect_uri: redirect_uri.clone(),
             access_token_field: oauth.access_token_field.clone(),
@@ -4486,7 +4484,7 @@ impl ExtensionManager {
         } else {
             // TCP listener mode: bind port 9876 and spawn a background task
             // to wait for the callback. This is the original flow for local/desktop use.
-            let listener = oauth_defaults::bind_callback_listener()
+            let listener = oauth::bind_callback_listener()
                 .await
                 .map_err(|e| format!("Failed to start OAuth callback listener: {}", e))?;
 
@@ -4506,7 +4504,7 @@ impl ExtensionManager {
 
             let task_handle = tokio::spawn(async move {
                 let result: Result<(), String> = async {
-                    let code = oauth_defaults::wait_for_callback(
+                    let code = oauth::wait_for_callback(
                         listener,
                         "/callback",
                         "code",
@@ -4516,7 +4514,7 @@ impl ExtensionManager {
                     .await
                     .map_err(|e| e.to_string())?;
 
-                    let token_response = oauth_defaults::exchange_oauth_code(
+                    let token_response = oauth::exchange_oauth_code(
                         &token_url,
                         &client_id,
                         client_secret.as_deref(),
@@ -4530,15 +4528,12 @@ impl ExtensionManager {
 
                     // Validate the token before storing (catches wrong account, etc.)
                     if let Some(ref validation) = validation_endpoint {
-                        oauth_defaults::validate_oauth_token(
-                            &token_response.access_token,
-                            validation,
-                        )
-                        .await
-                        .map_err(|e| e.to_string())?;
+                        oauth::validate_oauth_token(&token_response.access_token, validation)
+                            .await
+                            .map_err(|e| e.to_string())?;
                     }
 
-                    oauth_defaults::store_oauth_tokens(
+                    oauth::store_oauth_tokens(
                         secrets.as_ref(),
                         &user_id,
                         &secret_name,
@@ -4642,7 +4637,7 @@ impl ExtensionManager {
         let Some(ref oauth) = auth.oauth else {
             return false;
         };
-        let builtin = crate::cli::oauth_defaults::builtin_credentials(&auth.secret_name);
+        let builtin = crate::auth::oauth::builtin_credentials(&auth.secret_name);
 
         if is_client_id {
             oauth.client_id.is_some()
@@ -9314,7 +9309,7 @@ mod tests {
         let secrets = Arc::clone(&mgr.secrets);
         mgr.pending_oauth_flows().write().await.insert(
             "gmail-state".to_string(),
-            crate::cli::oauth_defaults::PendingOAuthFlow {
+            crate::auth::oauth::PendingOAuthFlow {
                 extension_name: "gmail".to_string(),
                 display_name: "Gmail".to_string(),
                 token_url: "https://example.com/token".to_string(),
@@ -9341,7 +9336,7 @@ mod tests {
         );
         mgr.pending_oauth_flows().write().await.insert(
             "other-state".to_string(),
-            crate::cli::oauth_defaults::PendingOAuthFlow {
+            crate::auth::oauth::PendingOAuthFlow {
                 extension_name: "web-search".to_string(),
                 display_name: "Web Search".to_string(),
                 token_url: "https://example.com/token".to_string(),
@@ -10704,12 +10699,11 @@ mod tests {
 
     #[test]
     fn test_proxy_client_secret_suppressed_when_builtin_matches_with_exchange_proxy() {
-        let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
+        let builtin = crate::auth::oauth::builtin_credentials("google_oauth_token");
         let builtin_ref = builtin.as_ref();
         let secret = Some(builtin_ref.unwrap().client_secret.to_string());
 
-        let result =
-            crate::cli::oauth_defaults::hosted_proxy_client_secret(&secret, builtin_ref, true);
+        let result = crate::auth::oauth::hosted_proxy_client_secret(&secret, builtin_ref, true);
         assert_eq!(
             result, None,
             "built-in desktop secret must be suppressed when the exchange proxy is configured"
@@ -10718,11 +10712,11 @@ mod tests {
 
     #[test]
     fn test_proxy_client_secret_kept_when_not_builtin_with_exchange_proxy() {
-        let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
+        let builtin = crate::auth::oauth::builtin_credentials("google_oauth_token");
         let secret = Some("user-entered-custom-secret".to_string());
 
         let result =
-            crate::cli::oauth_defaults::hosted_proxy_client_secret(&secret, builtin.as_ref(), true);
+            crate::auth::oauth::hosted_proxy_client_secret(&secret, builtin.as_ref(), true);
         assert_eq!(
             result,
             Some("user-entered-custom-secret".to_string()),
@@ -10732,12 +10726,11 @@ mod tests {
 
     #[test]
     fn test_proxy_client_secret_kept_without_exchange_proxy_even_for_builtin_secret() {
-        let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
+        let builtin = crate::auth::oauth::builtin_credentials("google_oauth_token");
         let builtin_ref = builtin.as_ref();
         let secret = Some(builtin_ref.unwrap().client_secret.to_string());
 
-        let result =
-            crate::cli::oauth_defaults::hosted_proxy_client_secret(&secret, builtin_ref, false);
+        let result = crate::auth::oauth::hosted_proxy_client_secret(&secret, builtin_ref, false);
         assert_eq!(
             result, secret,
             "built-in secret must be kept when the callback will exchange directly"
@@ -10746,10 +10739,9 @@ mod tests {
 
     #[test]
     fn test_proxy_client_secret_none_stays_none() {
-        let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
+        let builtin = crate::auth::oauth::builtin_credentials("google_oauth_token");
 
-        let result =
-            crate::cli::oauth_defaults::hosted_proxy_client_secret(&None, builtin.as_ref(), true);
+        let result = crate::auth::oauth::hosted_proxy_client_secret(&None, builtin.as_ref(), true);
         assert_eq!(
             result, None,
             "None secret stays None even when the exchange proxy is configured"
@@ -10759,12 +10751,12 @@ mod tests {
     #[test]
     fn test_proxy_client_secret_no_builtin_provider() {
         // MCP/non-Google providers have no builtin credentials
-        let builtin = crate::cli::oauth_defaults::builtin_credentials("mcp_notion_access_token");
+        let builtin = crate::auth::oauth::builtin_credentials("mcp_notion_access_token");
         assert!(builtin.is_none());
 
         let secret = Some("dcr-secret".to_string());
         let result =
-            crate::cli::oauth_defaults::hosted_proxy_client_secret(&secret, builtin.as_ref(), true);
+            crate::auth::oauth::hosted_proxy_client_secret(&secret, builtin.as_ref(), true);
         assert_eq!(
             result,
             Some("dcr-secret".to_string()),

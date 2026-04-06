@@ -667,7 +667,7 @@ local browser.
    export IRONCLAW_OAUTH_CALLBACK_URL=https://myserver.example.com:9876
    ```
 
-The `callback_url()` function in `oauth_defaults.rs` checks this env var
+The `callback_url()` function in `src/auth/oauth.rs` checks this env var
 and falls back to `http://127.0.0.1:{OAUTH_CALLBACK_PORT}`.
 
 ### URL Passwords
