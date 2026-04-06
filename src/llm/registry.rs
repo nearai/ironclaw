@@ -499,6 +499,18 @@ mod tests {
     }
 
     #[test]
+    fn test_ollama_provider_uses_loopback_default_base_url() {
+        let registry = ProviderRegistry::new(
+            serde_json::from_str(include_str!("../../providers.json")).unwrap(),
+        );
+        let ollama = registry.find("ollama").expect("ollama should exist");
+        assert_eq!(
+            ollama.default_base_url.as_deref(),
+            Some("http://127.0.0.1:11434")
+        );
+    }
+
+    #[test]
     fn test_models_filter_accessor() {
         let registry = ProviderRegistry::new(
             serde_json::from_str(include_str!("../../providers.json")).unwrap(),

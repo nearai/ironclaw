@@ -142,7 +142,7 @@ Install Ollama from [ollama.com](https://ollama.com), pull a model, then:
 ```env
 LLM_BACKEND=ollama
 OLLAMA_MODEL=llama3.2
-# OLLAMA_BASE_URL=http://localhost:11434   # default
+# OLLAMA_BASE_URL=http://127.0.0.1:11434   # default
 ```
 
 Pull a model first: `ollama pull llama3.2`

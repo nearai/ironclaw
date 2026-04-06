@@ -1873,7 +1873,7 @@ impl SetupWizard {
             .ollama_base_url
             .as_deref()
             .or(def.default_base_url.as_deref())
-            .unwrap_or("http://localhost:11434");
+            .unwrap_or("http://127.0.0.1:11434");
 
         let display_name = def
             .setup
@@ -2171,7 +2171,7 @@ impl SetupWizard {
                                     .ollama_base_url
                                     .as_deref()
                                     .or(def.default_base_url.as_deref())
-                                    .unwrap_or("http://localhost:11434");
+                                    .unwrap_or("http://127.0.0.1:11434");
                                 let models = fetch_ollama_models(base_url).await;
                                 if models.is_empty() {
                                     print_info(
