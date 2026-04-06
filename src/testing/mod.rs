@@ -1192,6 +1192,7 @@ mod tests {
                 on_attention: true,
                 on_failure: true,
                 on_success: false,
+                ..NotifyConfig::default()
             },
             last_run_at: None,
             next_fire_at: None,
@@ -1325,6 +1326,7 @@ mod tests {
                 on_attention: false,
                 on_failure: false,
                 on_success: false,
+                ..NotifyConfig::default()
             },
             last_run_at: None,
             next_fire_at: None,

@@ -487,6 +487,15 @@ pub struct NotifyConfig {
     pub on_failure: bool,
     /// Notify when routine runs with no findings.
     pub on_success: bool,
+    /// Inject result into agent loop for review on success.
+    #[serde(default)]
+    pub agent_review_on_success: bool,
+    /// Inject result into agent loop for review on attention.
+    #[serde(default)]
+    pub agent_review_on_attention: bool,
+    /// Inject result into agent loop for review on failure.
+    #[serde(default)]
+    pub agent_review_on_failure: bool,
 }
 
 impl Default for NotifyConfig {
@@ -497,6 +506,9 @@ impl Default for NotifyConfig {
             on_attention: true,
             on_failure: true,
             on_success: false,
+            agent_review_on_success: false,
+            agent_review_on_attention: false,
+            agent_review_on_failure: false,
         }
     }
 }

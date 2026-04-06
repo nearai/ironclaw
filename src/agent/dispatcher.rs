@@ -238,6 +238,7 @@ impl Agent {
             user_tz,
             turn_usage: std::sync::Mutex::new(TurnUsageSummary::default()),
             cached_tool_permissions: std::sync::Mutex::new(None),
+            message_source: message.source,
         };
 
         // If /skill-name mentions were expanded, rewrite the last user message
@@ -350,6 +351,8 @@ struct ChatDelegate<'a> {
     turn_usage: std::sync::Mutex<TurnUsageSummary>,
     cached_tool_permissions:
         std::sync::Mutex<Option<std::collections::HashMap<String, PermissionState>>>,
+    /// Message source — used to restrict tool access for RoutineReview.
+    message_source: crate::channels::MessageSource,
 }
 
 impl ChatDelegate<'_> {
@@ -509,6 +512,18 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 sess.auto_approve_tool(name);
             }
         }
+
+        // For RoutineReview messages, filter tools through the autonomous
+        // denylist so the agent cannot use interactive or dangerous tools
+        // when reviewing routine results.
+        let tool_defs = if self.message_source == crate::channels::MessageSource::RoutineReview {
+            tool_defs
+                .into_iter()
+                .filter(|def| !crate::tools::is_autonomous_tool_denylisted(&def.name))
+                .collect()
+        } else {
+            tool_defs
+        };
 
         // Update context for this iteration
         reason_ctx.available_tools = tool_defs;

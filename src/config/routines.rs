@@ -19,6 +19,10 @@ pub struct RoutineConfig {
     pub lightweight_tools_enabled: bool,
     /// Max tool iterations for lightweight routines (default: 3, max: 5).
     pub lightweight_max_iterations: u32,
+    /// Whether agent review of routine results is enabled (default: false).
+    pub agent_review_enabled: bool,
+    /// Max agent reviews per hour (tumbling window, default: 10).
+    pub max_agent_reviews_per_hour: u32,
 }
 
 impl Default for RoutineConfig {
@@ -31,6 +35,8 @@ impl Default for RoutineConfig {
             max_lightweight_tokens: 4096,
             lightweight_tools_enabled: true,
             lightweight_max_iterations: 3,
+            agent_review_enabled: false,
+            max_agent_reviews_per_hour: 10,
         }
     }
 }
@@ -73,6 +79,16 @@ impl RoutineConfig {
                 "ROUTINES_LIGHTWEIGHT_TOOLS",
             )?,
             lightweight_max_iterations: max_iterations.min(5), // cap at 5
+            agent_review_enabled: db_first_bool(
+                rs.agent_review_enabled,
+                defaults.agent_review_enabled,
+                "ROUTINES_AGENT_REVIEW_ENABLED",
+            )?,
+            max_agent_reviews_per_hour: db_first_or_default(
+                &rs.max_agent_reviews_per_hour,
+                &defaults.max_agent_reviews_per_hour,
+                "ROUTINES_MAX_AGENT_REVIEWS_PER_HOUR",
+            )?,
         })
     }
 }

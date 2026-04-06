@@ -73,6 +73,9 @@ struct NormalizedExecutionRequest {
 struct NormalizedDeliveryRequest {
     channel: Option<String>,
     user: Option<String>,
+    agent_review_on_success: bool,
+    agent_review_on_attention: bool,
+    agent_review_on_failure: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +167,21 @@ fn delivery_properties() -> Value {
         "user": {
             "type": "string",
             "description": "Default user or target for notifications and routine job message calls. If omitted, the owner's last-seen notification target is used."
+        },
+        "agent_review_on_success": {
+            "type": "boolean",
+            "default": false,
+            "description": "When true, inject routine result into the agent loop for review on success."
+        },
+        "agent_review_on_attention": {
+            "type": "boolean",
+            "default": false,
+            "description": "When true, inject routine result into the agent loop for review on attention."
+        },
+        "agent_review_on_failure": {
+            "type": "boolean",
+            "default": false,
+            "description": "When true, inject routine result into the agent loop for review on failure."
         }
     })
 }
@@ -431,6 +449,20 @@ fn routine_create_tool_summary() -> ToolDiscoverySummary {
     }
 }
 
+/// Compact label describing how a routine delivers its results.
+pub(crate) fn notification_mode_label(notify: &NotifyConfig) -> &'static str {
+    let has_review = notify.agent_review_on_success
+        || notify.agent_review_on_attention
+        || notify.agent_review_on_failure;
+    let has_notify = notify.on_success || notify.on_attention || notify.on_failure;
+    match (has_notify, has_review) {
+        (true, true) => "notify+review",
+        (true, false) => "notify",
+        (false, true) => "review",
+        (false, false) => "silent",
+    }
+}
+
 fn verification_result_payload(routine: &Routine, verification_reset: bool) -> Value {
     let verification_status = routine_verification_status(routine);
     serde_json::json!({
@@ -676,6 +708,11 @@ pub(crate) fn routine_update_parameters_schema() -> Value {
                 "description": "Maximum LLM iterations for full_job routines (1-200).",
                 "minimum": 1,
                 "maximum": 200
+            },
+            "delivery": {
+                "type": "object",
+                "description": "Update delivery settings (channel, user, agent review).",
+                "properties": delivery_properties()
             }
         },
         "required": ["name"]
@@ -936,6 +973,12 @@ fn parse_routine_delivery(params: &Value) -> NormalizedDeliveryRequest {
     NormalizedDeliveryRequest {
         channel: string_field(params, "delivery", "channel", &["notify_channel"]),
         user: string_field(params, "delivery", "user", &["notify_user"]),
+        agent_review_on_success: bool_field(params, "delivery", "agent_review_on_success", &[])
+            .unwrap_or(false),
+        agent_review_on_attention: bool_field(params, "delivery", "agent_review_on_attention", &[])
+            .unwrap_or(false),
+        agent_review_on_failure: bool_field(params, "delivery", "agent_review_on_failure", &[])
+            .unwrap_or(false),
     }
 }
 
@@ -1194,6 +1237,9 @@ impl Tool for RoutineCreateTool {
                         .filter(|v| *v != "default")
                         .map(ToOwned::to_owned)
                 }),
+                agent_review_on_success: normalized.delivery.agent_review_on_success,
+                agent_review_on_attention: normalized.delivery.agent_review_on_attention,
+                agent_review_on_failure: normalized.delivery.agent_review_on_failure,
                 ..NotifyConfig::default()
             },
             last_run_at: None,
@@ -1313,6 +1359,7 @@ impl Tool for RoutineListTool {
                     "consecutive_failures": r.consecutive_failures,
                     "status": status.as_str(),
                     "verification_status": verification_status.as_str(),
+                    "notification_mode": notification_mode_label(&r.notify),
                 })
             })
             .collect();
@@ -1459,6 +1506,25 @@ impl Tool for RoutineUpdateTool {
                     "Cannot update schedule or timezone on a non-cron routine.".to_string(),
                 ));
             }
+        }
+
+        // Apply delivery/agent_review updates
+        let delivery = parse_routine_delivery(&params);
+        if let Some(ch) = delivery.channel {
+            routine.notify.channel = Some(ch);
+        }
+        if let Some(u) = delivery.user {
+            routine.notify.user = Some(u);
+        }
+        // Agent review flags: only update if explicitly provided in params
+        if bool_field(&params, "delivery", "agent_review_on_success", &[]).is_some() {
+            routine.notify.agent_review_on_success = delivery.agent_review_on_success;
+        }
+        if bool_field(&params, "delivery", "agent_review_on_attention", &[]).is_some() {
+            routine.notify.agent_review_on_attention = delivery.agent_review_on_attention;
+        }
+        if bool_field(&params, "delivery", "agent_review_on_failure", &[]).is_some() {
+            routine.notify.agent_review_on_failure = delivery.agent_review_on_failure;
         }
 
         let updated_fingerprint = routine_verification_fingerprint(&routine);

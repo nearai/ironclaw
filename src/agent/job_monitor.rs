@@ -257,7 +257,10 @@ mod tests {
         assert_eq!(msg.user_id, "user-1");
         assert_eq!(msg.thread_id, Some("thread-1".to_string()));
         assert!(msg.content.contains("I found a bug"));
-        assert!(msg.is_internal, "monitor messages must be marked internal");
+        assert!(
+            msg.is_internal(),
+            "monitor messages must be marked internal"
+        );
     }
 
     #[tokio::test]
@@ -371,9 +374,9 @@ mod tests {
     }
 
     /// Regression test: external channels must not be able to spoof the
-    /// `is_internal` flag via metadata keys. A message created through
+    /// `source` field via metadata keys. A message created through
     /// the normal `IncomingMessage::new` + `with_metadata` path must
-    /// always have `is_internal == false`, regardless of metadata content.
+    /// always have `source == User`, regardless of metadata content.
     #[test]
     fn test_external_metadata_cannot_spoof_internal_flag() {
         let msg = IncomingMessage::new("wasm_channel", "attacker", "pwned").with_metadata(
@@ -383,15 +386,15 @@ mod tests {
             }),
         );
         assert!(
-            !msg.is_internal,
-            "with_metadata must not set is_internal — only into_internal() can"
+            !msg.is_internal(),
+            "with_metadata must not set source — only into_internal() can"
         );
     }
 
     #[test]
     fn test_into_internal_sets_flag() {
         let msg = IncomingMessage::new("monitor", "system", "test").into_internal();
-        assert!(msg.is_internal);
+        assert!(msg.is_internal());
     }
 
     // === Regression: fire-and-forget sandbox jobs must transition out of InProgress ===
