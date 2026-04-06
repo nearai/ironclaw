@@ -1,22 +1,26 @@
 //! Hybrid store adapter — workspace-backed persistence for engine state.
 //!
 //! Knowledge docs use frontmatter+markdown for human readability.
-//! Runtime state uses JSON under `.runtime/` to stay out of the way.
+//! Runtime state uses JSON under `runtime/` to stay out of the way.
+//!
+//! All v2 engine state lives under `.system/engine/` alongside other
+//! machine-managed state (`.system/settings/`, `.system/extensions/`,
+//! `.system/skills/`).
 //!
 //! ## Workspace layout
 //!
 //! ```text
-//! engine/
-//! ├── README.md                            (auto-generated index)
-//! ├── knowledge/{type}/{slug}--{id8}.md    (frontmatter + content)
-//! ├── orchestrator/v{N}.py                 (Python orchestrator versions)
+//! .system/engine/
+//! ├── README.md                                   (auto-generated index)
+//! ├── knowledge/{type}/{slug}--{id8}.md           (frontmatter + content)
+//! ├── orchestrator/v{N}.py                        (Python orchestrator versions)
 //! ├── orchestrator/failures.json
-//! ├── orchestrator/codeact-preamble-overlay.md  (runtime prompt patches)
-//! ├── missions/{slug}--{id8}.json
+//! ├── orchestrator/codeact-preamble-overlay.md    (runtime prompt patches)
 //! ├── projects/{slug}--{id8}.json
-//! └── .runtime/                            (internal, not for browsing)
+//! ├── projects/{slug}/missions/{slug}--{id8}/mission.json
+//! └── runtime/                                    (internal, not for browsing)
 //!     ├── threads/active/{id}.json
-//!     ├── threads/archive/{slug}.json      (compacted summaries)
+//!     ├── threads/archive/{slug}.json             (compacted summaries)
 //!     ├── conversations/{id}.json
 //!     ├── leases/{id}.json
 //!     ├── events/{thread_id}.json
@@ -39,17 +43,22 @@ use ironclaw_engine::{
 use crate::workspace::{Workspace, WorkspaceEntry};
 
 // ── Path constants ──────────────────────────────────────────
+//
+// All v2 engine state lives under `.system/engine/` alongside other
+// machine-managed state (`.system/settings/`, `.system/extensions/`,
+// `.system/skills/`). The dot-prefix on `.system/` is the hidden marker;
+// no inner dot is needed for `runtime/`.
 
-const KNOWLEDGE_PREFIX: &str = "engine/knowledge";
-const ORCHESTRATOR_PREFIX: &str = "engine/orchestrator";
-const PROJECTS_PREFIX: &str = "engine/projects";
+const KNOWLEDGE_PREFIX: &str = ".system/engine/knowledge";
+const ORCHESTRATOR_PREFIX: &str = ".system/engine/orchestrator";
+const PROJECTS_PREFIX: &str = ".system/engine/projects";
 
-const THREADS_PREFIX: &str = "engine/.runtime/threads/active";
-const THREAD_ARCHIVE_PREFIX: &str = "engine/.runtime/threads/archive";
-const STEPS_PREFIX: &str = "engine/.runtime/steps";
-const EVENTS_PREFIX: &str = "engine/.runtime/events";
-const LEASES_PREFIX: &str = "engine/.runtime/leases";
-const CONVERSATIONS_PREFIX: &str = "engine/.runtime/conversations";
+const THREADS_PREFIX: &str = ".system/engine/runtime/threads/active";
+const THREAD_ARCHIVE_PREFIX: &str = ".system/engine/runtime/threads/archive";
+const STEPS_PREFIX: &str = ".system/engine/runtime/steps";
+const EVENTS_PREFIX: &str = ".system/engine/runtime/events";
+const LEASES_PREFIX: &str = ".system/engine/runtime/leases";
+const CONVERSATIONS_PREFIX: &str = ".system/engine/runtime/conversations";
 
 // Well-known titles for special-case routing (must match engine crate constants)
 const ORCHESTRATOR_MAIN_TITLE: &str = "orchestrator:main";
@@ -131,7 +140,7 @@ impl HybridStore {
             self.leases.write().await.insert(lease.id, lease);
         })
         .await;
-        // Missions live under each project: engine/projects/{slug}/missions/{slug}/mission.json
+        // Missions live under each project: .system/engine/projects/{slug}/missions/{slug}/mission.json
         self.load_missions_from_projects(ws).await;
 
         // Backfill archived threads referenced by missions but missing from the
@@ -232,7 +241,7 @@ impl HybridStore {
         cleaned
     }
 
-    /// Generate `engine/README.md` with a summary of current engine state.
+    /// Generate `.system/engine/README.md` with a summary of current engine state.
     pub async fn generate_engine_readme(&self) {
         let docs = self.docs.read().await;
         let threads = self.threads.read().await;
@@ -261,7 +270,7 @@ impl HybridStore {
             chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ")
         );
 
-        readme.push_str("## Knowledge (`engine/knowledge/`)\n\n");
+        readme.push_str("## Knowledge (`.system/engine/knowledge/`)\n\n");
         readme.push_str(&format!(
             "- **{} lessons** — learned rules\n",
             count_by_type(DocType::Lesson)
@@ -284,12 +293,12 @@ impl HybridStore {
         ));
 
         readme.push_str(&format!(
-            "\n## Orchestrator (`engine/orchestrator/`)\n\n\
+            "\n## Orchestrator (`.system/engine/orchestrator/`)\n\n\
              - {} version(s) stored\n",
             orch_versions
         ));
 
-        readme.push_str("\n## Missions (`engine/missions/`)\n\n");
+        readme.push_str("\n## Missions (`.system/engine/projects/<project>/missions/`)\n\n");
         for m in missions.values() {
             readme.push_str(&format!(
                 "- **{}** ({:?}) — {}\n",
@@ -300,13 +309,13 @@ impl HybridStore {
         }
 
         readme.push_str(&format!(
-            "\n## Runtime (`engine/.runtime/`)\n\n\
+            "\n## Runtime (`.system/engine/runtime/`)\n\n\
              - {} active thread(s)\n\
              - {} active lease(s)\n",
             active_threads, active_leases,
         ));
 
-        self.persist_text("engine/README.md".to_string(), &readme)
+        self.persist_text(".system/engine/README.md".to_string(), &readme)
             .await;
     }
 
@@ -417,7 +426,7 @@ impl HybridStore {
 
     /// Load missions from within each project directory.
     ///
-    /// Scans `engine/projects/*/missions/*/mission.json`.
+    /// Scans `.system/engine/projects/*/missions/*/mission.json`.
     async fn load_missions_from_projects(&self, ws: &Workspace) {
         let project_dirs = match ws.list(PROJECTS_PREFIX).await {
             Ok(entries) => entries,
@@ -579,7 +588,7 @@ impl HybridStore {
 fn doc_workspace_path(doc: &MemoryDoc) -> String {
     let id_str = doc.id.0.to_string();
 
-    // Orchestrator code versions → engine/orchestrator/v{N}.py
+    // Orchestrator code versions → .system/engine/orchestrator/v{N}.py
     if doc.title == ORCHESTRATOR_MAIN_TITLE && doc.tags.contains(&ORCHESTRATOR_CODE_TAG.to_string())
     {
         let version = doc
@@ -590,23 +599,23 @@ fn doc_workspace_path(doc: &MemoryDoc) -> String {
         return format!("{ORCHESTRATOR_PREFIX}/v{version}.py");
     }
 
-    // Orchestrator failure tracker → engine/orchestrator/failures.json
+    // Orchestrator failure tracker → .system/engine/orchestrator/failures.json
     if doc.title == ORCHESTRATOR_FAILURES_TITLE {
         return format!("{ORCHESTRATOR_PREFIX}/failures.json");
     }
 
-    // Prompt overlays → engine/prompts/{slug}.md
+    // Prompt overlays → .system/engine/orchestrator/codeact-preamble-overlay.md
     if doc.title == PREAMBLE_OVERLAY_TITLE {
         return format!("{ORCHESTRATOR_PREFIX}/codeact-preamble-overlay.md");
     }
 
-    // Fix pattern database → engine/knowledge/notes/{slug}.md
+    // Fix pattern database → .system/engine/knowledge/notes/{slug}.md
     if doc.title == FIX_PATTERN_TITLE {
         let slug = slugify(&doc.title, &id_str);
         return format!("{KNOWLEDGE_PREFIX}/notes/{slug}.md");
     }
 
-    // Knowledge docs → engine/knowledge/{type}/{slug}.md
+    // Knowledge docs → .system/engine/knowledge/{type}/{slug}.md
     let type_dir = match doc.doc_type {
         DocType::Summary => "summaries",
         DocType::Lesson => "lessons",

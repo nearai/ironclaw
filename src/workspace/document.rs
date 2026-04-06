@@ -38,22 +38,31 @@ pub mod paths {
     pub const ASSISTANT_DIRECTIVES: &str = "context/assistant-directives.md";
 }
 
-/// Well-known system paths for internal state (settings, extensions, skills).
+/// Well-known system paths for internal state.
 ///
-/// Documents under `_system/` are excluded from search results via folder
-/// `.config` metadata (`skip_indexing: true`) and are never auto-cleaned
-/// by hygiene. They ARE versioned for audit trail.
+/// Everything machine-managed lives under `.system/` — settings, extension
+/// state, skill state, and v2 engine state (knowledge, projects, missions,
+/// runtime threads/steps/events). The dot-prefix follows the Unix convention
+/// for hidden internal state and signals "do not edit by hand".
+///
+/// Documents under `.system/` are excluded from search results via folder
+/// `.config` metadata (`skip_indexing: true`) and are never auto-cleaned by
+/// hygiene. They ARE versioned for audit trail.
 pub mod system_paths {
-    /// Root prefix for all system state.
-    #[allow(dead_code)] // Used by extension/skill state migration in follow-up PRs
-    pub const SYSTEM_PREFIX: &str = "_system/";
+    /// Root prefix for all machine-managed system state.
+    #[allow(dead_code)] // Documents the convention; consumed via subdirectory constants
+    pub const SYSTEM_PREFIX: &str = ".system/";
     /// Settings documents directory.
-    #[allow(dead_code)] // Used by settings_schemas helper
-    pub const SETTINGS_PREFIX: &str = "_system/settings/";
+    pub const SETTINGS_PREFIX: &str = ".system/settings/";
     /// Extension state directory.
-    pub const EXTENSIONS_PREFIX: &str = "_system/extensions/";
+    pub const EXTENSIONS_PREFIX: &str = ".system/extensions/";
     /// Skill state directory.
-    pub const SKILLS_PREFIX: &str = "_system/skills/";
+    pub const SKILLS_PREFIX: &str = ".system/skills/";
+    /// v2 engine state root. The bridge `store_adapter` defines its own
+    /// per-subdirectory constants under this prefix; this constant exists
+    /// as the canonical declaration of the convention.
+    #[allow(dead_code)]
+    pub const ENGINE_PREFIX: &str = ".system/engine/";
 }
 
 /// Name of the folder-level configuration document.

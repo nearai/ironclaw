@@ -1,7 +1,7 @@
 //! Settings adapter that bridges `SettingsStore` to workspace documents.
 //!
 //! During migration, this adapter dual-writes settings to both the old
-//! `settings` table and workspace documents at `_system/settings/`.
+//! `settings` table and workspace documents at `.system/settings/`.
 //! Reads prefer workspace, falling back to the legacy table.
 
 use std::collections::HashMap;
@@ -17,7 +17,7 @@ use crate::workspace::Workspace;
 use crate::workspace::settings_schemas::{schema_for_key, settings_path};
 
 /// Implements `SettingsStore` by reading/writing workspace documents at
-/// `_system/settings/{key}.json`. Falls back to the legacy `settings` table
+/// `.system/settings/{key}.json`. Falls back to the legacy `settings` table
 /// for reads during migration.
 pub struct WorkspaceSettingsAdapter {
     workspace: Arc<Workspace>,
@@ -32,11 +32,11 @@ impl WorkspaceSettingsAdapter {
         }
     }
 
-    /// Ensure the `_system/.config` document exists with system defaults.
+    /// Ensure the `.system/.config` document exists with system defaults.
     ///
     /// Called once during startup to seed the system folder configuration.
     pub async fn ensure_system_config(&self) {
-        let config_path = "_system/.config";
+        let config_path = ".system/.config";
         match self.workspace.exists(config_path).await {
             Ok(true) => {}
             _ => {
@@ -61,7 +61,7 @@ impl WorkspaceSettingsAdapter {
                             }),
                         )
                         .await;
-                    debug!("seeded _system/.config for workspace settings");
+                    debug!("seeded .system/.config for workspace settings");
                 }
             }
         }

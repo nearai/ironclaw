@@ -1,7 +1,7 @@
 //! Workspace-backed extension and skill state persistence.
 //!
 //! Extension configs and skill manifests are stored as workspace documents
-//! under `_system/extensions/` and `_system/skills/` with schema validation.
+//! under `.system/extensions/` and `.system/skills/` with schema validation.
 //! This module provides schemas and helpers for reading/writing extension
 //! and skill state through workspace.
 //!
@@ -121,11 +121,11 @@ mod tests {
     fn extension_paths() {
         assert_eq!(
             extension_config_path("telegram"),
-            "_system/extensions/telegram/config.json"
+            ".system/extensions/telegram/config.json"
         );
         assert_eq!(
             extensions_registry_path(),
-            "_system/extensions/installed.json"
+            ".system/extensions/installed.json"
         );
     }
 
@@ -133,9 +133,9 @@ mod tests {
     fn skill_paths() {
         assert_eq!(
             skill_manifest_path("code-review"),
-            "_system/skills/code-review.json"
+            ".system/skills/code-review.json"
         );
-        assert_eq!(skills_registry_path(), "_system/skills/installed.json");
+        assert_eq!(skills_registry_path(), ".system/skills/installed.json");
     }
 
     #[test]

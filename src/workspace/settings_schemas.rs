@@ -1,12 +1,14 @@
 //! Compile-time JSON Schema registry for known settings keys.
 //!
-//! When a setting is written to `_system/settings/{key}.json`, the schema
+//! When a setting is written to `.system/settings/{key}.json`, the schema
 //! for that key (if known) is stored in the document's metadata. The
 //! workspace write path validates content against it automatically.
 //!
 //! Unknown keys get no schema — they accept any valid JSON (extensible).
 
 use serde_json::{Value, json};
+
+use crate::workspace::document::system_paths::SETTINGS_PREFIX;
 
 /// Return the JSON Schema for a known settings key, or `None` for unknown keys.
 pub fn schema_for_key(key: &str) -> Option<Value> {
@@ -52,7 +54,7 @@ pub fn schema_for_key(key: &str) -> Option<Value> {
 
 /// Build the path for a settings document in the workspace.
 pub fn settings_path(key: &str) -> String {
-    format!("_system/settings/{key}.json")
+    format!("{SETTINGS_PREFIX}{key}.json")
 }
 
 #[cfg(test)]
@@ -77,7 +79,7 @@ mod tests {
     fn settings_path_format() {
         assert_eq!(
             settings_path("llm_backend"),
-            "_system/settings/llm_backend.json"
+            ".system/settings/llm_backend.json"
         );
     }
 }
