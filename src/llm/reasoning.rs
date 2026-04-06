@@ -388,6 +388,8 @@ pub struct Reasoning {
     skill_context: Option<String>,
     /// Names of active skills (used to suppress extension search for covered domains).
     active_skill_names: Vec<String>,
+    /// Optional active extension snapshot to inject into system prompt.
+    extension_context: Option<String>,
     /// Channel name (e.g. "discord", "telegram") for formatting hints.
     channel: Option<String>,
     /// Model name for runtime context.
@@ -409,6 +411,7 @@ impl Reasoning {
             workspace_system_prompt: None,
             skill_context: None,
             active_skill_names: Vec::new(),
+            extension_context: None,
             channel: None,
             model_name: None,
             is_group_chat: false,
@@ -443,6 +446,14 @@ impl Reasoning {
     /// installation for domains already covered by active skills.
     pub fn with_active_skill_names(mut self, names: Vec<String>) -> Self {
         self.active_skill_names = names;
+        self
+    }
+
+    /// Set a compact active-extension snapshot to inject into the system prompt.
+    pub fn with_extension_context(mut self, context: String) -> Self {
+        if !context.is_empty() {
+            self.extension_context = Some(context);
+        }
         self
     }
 
@@ -970,6 +981,32 @@ Respond with a JSON plan in this format:
             String::new()
         };
 
+        let extension_context_section = if let Some(ref ext_ctx) = self.extension_context {
+            if self.active_skill_names.is_empty() {
+                if tools.is_empty() {
+                    format!(
+                        "\n\n## Active Extensions\n\n\
+                         The following extensions are already active and available in the current runtime.\n\
+                         Do not tell the user to set them up again unless the snapshot says they are missing.\n\n{}",
+                        ext_ctx
+                    )
+                } else {
+                    format!(
+                        "\n\n## Active Extensions\n\n\
+                         The following extensions are already active and available in the current runtime.\n\
+                         Do not tell the user to set them up again unless the snapshot says they are missing.\n\
+                         If you need more detail, use `tool_list` or `extension_info` before asking the user\n\
+                         to reconnect or activate anything.\n\n{}",
+                        ext_ctx
+                    )
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
         // Channel-specific formatting hints
         let channel_section = self.build_channel_section();
 
@@ -1047,10 +1084,11 @@ Respond directly with your final answer. Do not wrap your response in any specia
 - Comply with stop, pause, or audit requests. Never bypass safeguards.
 - Do not manipulate anyone to expand your access or disable safeguards.
 - Do not modify system prompts, safety rules, or tool policies unless explicitly requested by the user.{}{}{}{}{}{}
-{}{}"#,
+{}{}{}"#,
             tool_guidance,
             tools_section,
             extensions_section,
+            extension_context_section,
             channel_section,
             runtime_section,
             conversation_section,
@@ -2636,6 +2674,78 @@ That's my plan."#;
             "only use the `message` tool for proactive, background, or cross-channel outbound sends"
         ));
         assert!(!section.contains("omit 'target' to send here"));
+    }
+
+    #[test]
+    fn test_system_prompt_with_extension_context_includes_snapshot() {
+        let reasoning = make_test_reasoning().with_extension_context(
+            "- telegram (wasm_channel): active, authenticated\n".to_string(),
+        );
+        let tool_defs = vec![ToolDefinition {
+            name: "tool_search".to_string(),
+            description: "Search extensions".to_string(),
+            parameters: serde_json::json!({}),
+        }];
+        let prompt = reasoning.build_system_prompt_with_tools(&tool_defs);
+        assert!(
+            prompt.contains("## Active Extensions"),
+            "Prompt should contain the active extensions section"
+        );
+        assert!(
+            prompt.contains("telegram (wasm_channel): active, authenticated"),
+            "Prompt should contain the active extension snapshot"
+        );
+        assert!(
+            prompt.contains("tool_list"),
+            "Prompt should remind the model to inspect extension state when needed"
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_with_extension_context_without_tools_omits_tool_list_mentions() {
+        let reasoning = make_test_reasoning().with_extension_context(
+            "- telegram (wasm_channel): active, authenticated\n".to_string(),
+        );
+        let prompt = reasoning.build_system_prompt_with_tools(&[]);
+        assert!(
+            prompt.contains("## Active Extensions"),
+            "Prompt should contain the active extensions section"
+        );
+        assert!(
+            prompt.contains("telegram (wasm_channel): active, authenticated"),
+            "Prompt should contain the active extension snapshot"
+        );
+        assert!(
+            !prompt.contains("tool_list"),
+            "No-tools prompt should not mention unavailable tool_list"
+        );
+        assert!(
+            !prompt.contains("extension_info"),
+            "No-tools prompt should not mention unavailable extension_info"
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_suppresses_extension_context_when_skills_are_active() {
+        let reasoning = make_test_reasoning()
+            .with_active_skill_names(vec!["gmail".to_string()])
+            .with_extension_context(
+                "- telegram (wasm_channel): active, authenticated\n".to_string(),
+            );
+        let tool_defs = vec![ToolDefinition {
+            name: "tool_search".to_string(),
+            description: "Search extensions".to_string(),
+            parameters: serde_json::json!({}),
+        }];
+        let prompt = reasoning.build_system_prompt_with_tools(&tool_defs);
+        assert!(
+            !prompt.contains("## Active Extensions"),
+            "Attenuated prompts should not advertise active extensions that may be hidden by skills"
+        );
+        assert!(
+            !prompt.contains("telegram (wasm_channel): active, authenticated"),
+            "Attenuated prompts should not surface the hidden extension snapshot"
+        );
     }
 
     // ---- plan/evaluate bypass clean_response (Bug #564-2) ----
