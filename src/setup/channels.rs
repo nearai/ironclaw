@@ -1336,6 +1336,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_public_https_url_fails_closed_on_dns_error() {
+        // Some local DNS resolvers (ISP/router captive portals, ad-injecting
+        // providers) hijack lookups for non-existent domains and return a
+        // public IP instead of NXDOMAIN. On those networks, RFC 6761
+        // ".invalid" lookups succeed and this test cannot run. Detect and skip.
+        use std::net::ToSocketAddrs;
+        if ("ironclaw-dns-hijack-probe.invalid", 443u16)
+            .to_socket_addrs()
+            .is_ok()
+        {
+            eprintln!(
+                "skipping test_validate_public_https_url_fails_closed_on_dns_error: \
+                 local DNS resolver hijacks .invalid lookups"
+            );
+            return;
+        }
         let err = validate_public_https_url("https://should-not-resolve.invalid/api")
             .await
             .unwrap_err()

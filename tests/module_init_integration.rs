@@ -194,6 +194,16 @@ async fn extension_manager_with_process_manager_constructs() {
     use ironclaw::tools::mcp::McpProcessManager;
     use ironclaw::tools::mcp::McpSessionManager;
 
+    // Isolate from the developer's real ~/.ironclaw/ — when `store` is `None`,
+    // ExtensionManager.list() falls back to load_mcp_servers() which reads
+    // ~/.ironclaw/mcp-servers.json. Without this override, any locally
+    // installed MCP server leaks into the test and breaks the empty assertion.
+    // Must be set before any code path triggers the IRONCLAW_BASE_DIR LazyLock.
+    let base_dir = tempfile::tempdir().expect("base_dir"); // safety: integration test, panic on tempdir failure is fine
+    // safety: single-threaded test setup, no other test in this binary
+    // triggers ironclaw_base_dir() before this point.
+    unsafe { std::env::set_var("IRONCLAW_BASE_DIR", base_dir.path()) };
+
     let crypto = test_crypto();
     let secrets: Arc<dyn SecretsStore + Send + Sync> = Arc::new(InMemorySecretsStore::new(crypto));
     let tools = Arc::new(ToolRegistry::new());

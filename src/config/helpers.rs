@@ -274,7 +274,17 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
 
     // For HTTPS, reject private/loopback/link-local/metadata IPs.
     // Check both IP literals and resolved hostnames to prevent DNS-based SSRF.
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    //
+    // `Url::host_str()` returns IPv6 literals WITH the surrounding brackets
+    // (e.g. "[::1]"), but `IpAddr::parse` does not accept brackets — it wants
+    // bare "::1". Strip them so we recognize IPv6 literals before falling
+    // through to the DNS-resolution branch (which on some systems with DNS
+    // hijacking can produce a non-private IP and bypass this check).
+    let host_for_parse = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = host_for_parse.parse::<IpAddr>() {
         if is_dangerous_ip(&ip) {
             return Err(ConfigError::InvalidValue {
                 key: field_name.to_string(),
@@ -601,8 +611,27 @@ mod tests {
         assert!(validate_base_url("https://[::]", "TEST").is_err());
     }
 
+    /// Some local DNS resolvers (ISP/router-level captive portals, ad-injecting
+    /// providers) hijack lookups for non-existent domains and return a public
+    /// IP instead of NXDOMAIN. On those networks, RFC 6761 ".invalid" lookups
+    /// succeed even though they shouldn't, which makes any test that asserts
+    /// "DNS resolution failure" unreliable. Detect that case and skip the test.
+    fn invalid_tld_resolves_locally() -> bool {
+        use std::net::ToSocketAddrs;
+        ("ironclaw-dns-hijack-probe.invalid", 443u16)
+            .to_socket_addrs()
+            .is_ok()
+    }
+
     #[test]
     fn validate_base_url_rejects_dns_failure() {
+        if invalid_tld_resolves_locally() {
+            eprintln!(
+                "skipping validate_base_url_rejects_dns_failure: \
+                 local DNS resolver hijacks .invalid lookups"
+            );
+            return;
+        }
         // .invalid TLD is guaranteed to never resolve (RFC 6761)
         let result = validate_base_url("https://ssrf-test.invalid", "TEST");
         assert!(result.is_err());
