@@ -246,7 +246,18 @@ mod tests {
 
     #[tokio::test]
     async fn health_with_unreachable_url_is_false() {
-        // Use RFC 5737 TEST-NET-1 (192.0.2.0/24) for reliable failure even behind proxies.
+        // Clear proxy env vars so reqwest doesn't route through a local proxy
+        // (which would succeed even for unreachable destinations).
+        // SAFETY: test-only, runs under single-threaded tokio runtime.
+        unsafe {
+            std::env::remove_var("http_proxy");
+            std::env::remove_var("HTTP_PROXY");
+            std::env::remove_var("https_proxy");
+            std::env::remove_var("HTTPS_PROXY");
+            std::env::remove_var("all_proxy");
+            std::env::remove_var("ALL_PROXY");
+        }
+        // Use RFC 5737 TEST-NET-1 (192.0.2.0/24) for reliable failure.
         let tunnel = CustomTunnel::new(
             "sleep 1".into(),
             Some("http://192.0.2.1:9999/healthz".into()),

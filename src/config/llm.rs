@@ -133,9 +133,17 @@ impl LlmConfig {
         }
 
         // Session config (used by NearAI provider for OAuth/session-token auth)
-        let nearai_auth_url = optional_env("NEARAI_AUTH_URL")?
-            .unwrap_or_else(|| "https://private.near.ai".to_string());
-        validate_base_url(&nearai_auth_url, "NEARAI_AUTH_URL")?;
+        const NEARAI_AUTH_URL_DEFAULT: &str = "https://private.near.ai";
+        let nearai_auth_url_env = optional_env("NEARAI_AUTH_URL")?;
+        let nearai_auth_url = nearai_auth_url_env
+            .as_deref()
+            .unwrap_or(NEARAI_AUTH_URL_DEFAULT)
+            .to_string();
+        // Only validate user-supplied URLs; the hardcoded default is trusted and
+        // DNS resolution may fail in sandboxed CI environments.
+        if nearai_auth_url_env.is_some() {
+            validate_base_url(&nearai_auth_url, "NEARAI_AUTH_URL")?;
+        }
         let session = SessionConfig {
             auth_base_url: nearai_auth_url,
             session_path: optional_env("NEARAI_SESSION_PATH")?
@@ -161,16 +169,21 @@ impl LlmConfig {
         } else {
             crate::llm::DEFAULT_MODEL.to_string()
         };
-        let nearai_base_url = if let Some(url) = nearai_override.and_then(|o| o.base_url.clone()) {
-            url
-        } else if let Some(url) = optional_env("NEARAI_BASE_URL")? {
-            url
+        let nearai_base_url_override = nearai_override
+            .and_then(|o| o.base_url.clone())
+            .or_else(|| optional_env("NEARAI_BASE_URL").ok().flatten());
+        let nearai_base_url = if let Some(url) = &nearai_base_url_override {
+            url.clone()
         } else if nearai_api_key.is_some() {
             "https://cloud-api.near.ai".to_string()
         } else {
             "https://private.near.ai".to_string()
         };
-        validate_base_url(&nearai_base_url, "NEARAI_BASE_URL")?;
+        // Only validate user-supplied URLs; hardcoded defaults are trusted and
+        // DNS resolution may fail in sandboxed CI environments.
+        if nearai_base_url_override.is_some() {
+            validate_base_url(&nearai_base_url, "NEARAI_BASE_URL")?;
+        }
         let nearai = NearAiConfig {
             model: nearai_model,
             cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
@@ -259,12 +272,22 @@ impl LlmConfig {
                 .or(optional_env("OPENAI_CODEX_MODEL")?)
                 .or(optional_env("OPENAI_MODEL")?)
                 .unwrap_or_else(|| "gpt-5.3-codex".to_string());
-            let auth_endpoint = optional_env("OPENAI_CODEX_AUTH_URL")?
-                .unwrap_or_else(|| "https://auth.openai.com".to_string());
-            validate_base_url(&auth_endpoint, "OPENAI_CODEX_AUTH_URL")?;
-            let api_base_url = optional_env("OPENAI_CODEX_API_URL")?
-                .unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".to_string());
-            validate_base_url(&api_base_url, "OPENAI_CODEX_API_URL")?;
+            let auth_endpoint_env = optional_env("OPENAI_CODEX_AUTH_URL")?;
+            let auth_endpoint = auth_endpoint_env
+                .as_deref()
+                .unwrap_or("https://auth.openai.com")
+                .to_string();
+            if auth_endpoint_env.is_some() {
+                validate_base_url(&auth_endpoint, "OPENAI_CODEX_AUTH_URL")?;
+            }
+            let api_base_url_env = optional_env("OPENAI_CODEX_API_URL")?;
+            let api_base_url = api_base_url_env
+                .as_deref()
+                .unwrap_or("https://chatgpt.com/backend-api/codex")
+                .to_string();
+            if api_base_url_env.is_some() {
+                validate_base_url(&api_base_url, "OPENAI_CODEX_API_URL")?;
+            }
             let client_id = optional_env("OPENAI_CODEX_CLIENT_ID")?
                 .unwrap_or_else(|| "app_EMoamEEZ73f0CkXaXp7hrann".to_string());
             let session_path = optional_env("OPENAI_CODEX_SESSION_PATH")?
@@ -499,7 +522,9 @@ impl LlmConfig {
         } else {
             None
         };
-        let base_url = codex_base_url_override
+        // Track whether the URL was explicitly supplied by the user (DB, env, settings)
+        // vs falling back to a trusted registry/hardcoded default.
+        let user_supplied_base_url = codex_base_url_override
             .or_else(|| {
                 // DB settings: per-provider base_url override
                 settings
@@ -517,7 +542,9 @@ impl LlmConfig {
                     _ => None,
                 }
             })
-            .or(env_base_url)
+            .or(env_base_url);
+        let base_url = user_supplied_base_url
+            .clone()
             .or_else(|| default_base_url.map(String::from))
             .unwrap_or_default();
 
@@ -531,8 +558,10 @@ impl LlmConfig {
             });
         }
 
-        // Validate base URL to prevent SSRF (#1103).
-        if !base_url.is_empty() {
+        // Validate user-supplied base URLs to prevent SSRF (#1103).
+        // Registry/hardcoded defaults are trusted and skip DNS validation
+        // (which may fail in sandboxed CI environments).
+        if user_supplied_base_url.is_some() && !base_url.is_empty() {
             let field = base_url_env.unwrap_or("LLM_BASE_URL");
             validate_base_url(&base_url, field)?;
         }
@@ -706,7 +735,7 @@ mod tests {
 
         let settings = Settings {
             llm_backend: Some("openai_compatible".to_string()),
-            openai_compatible_base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            openai_compatible_base_url: Some("https://8.8.8.8/api/v1".to_string()),
             selected_model: Some("openai/gpt-5.1-codex".to_string()),
             ..Default::default()
         };
@@ -728,7 +757,7 @@ mod tests {
 
         let settings = Settings {
             llm_backend: Some("openai_compatible".to_string()),
-            openai_compatible_base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            openai_compatible_base_url: Some("https://8.8.8.8/api/v1".to_string()),
             selected_model: Some("openai/gpt-5.1-codex".to_string()),
             ..Default::default()
         };
