@@ -43,9 +43,9 @@ macro_rules! require_slack_wasm {
 }
 
 /// Path to the built Slack WASM module
-fn slack_wasm_path() -> std::path::PathBuf {
-    let local = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("channels-src/slack/target/wasm32-wasip2/release/slack_channel.wasm");
+/// Resolve a project-relative path, falling back to other git worktrees.
+fn find_project_file(relative_path: &str) -> std::path::PathBuf {
+    let local = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative_path);
     if local.exists() {
         return local;
     }
@@ -58,8 +58,7 @@ fn slack_wasm_path() -> std::path::PathBuf {
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines() {
             if let Some(path) = line.strip_prefix("worktree ") {
-                let candidate = std::path::PathBuf::from(path)
-                    .join("channels-src/slack/target/wasm32-wasip2/release/slack_channel.wasm");
+                let candidate = std::path::PathBuf::from(path).join(relative_path);
                 if candidate.exists() {
                     return candidate;
                 }
@@ -70,31 +69,12 @@ fn slack_wasm_path() -> std::path::PathBuf {
     local
 }
 
+fn slack_wasm_path() -> std::path::PathBuf {
+    find_project_file("channels-src/slack/target/wasm32-wasip2/release/slack_channel.wasm")
+}
+
 fn slack_capabilities_path() -> std::path::PathBuf {
-    let local = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("channels-src/slack/slack.capabilities.json");
-    if local.exists() {
-        return local;
-    }
-
-    if let Ok(output) = std::process::Command::new("git")
-        .args(["worktree", "list", "--porcelain"])
-        .output()
-        && output.status.success()
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            if let Some(path) = line.strip_prefix("worktree ") {
-                let candidate = std::path::PathBuf::from(path)
-                    .join("channels-src/slack/slack.capabilities.json");
-                if candidate.exists() {
-                    return candidate;
-                }
-            }
-        }
-    }
-
-    local
+    find_project_file("channels-src/slack/slack.capabilities.json")
 }
 
 /// Create a test runtime for WASM channel operations.

@@ -215,8 +215,9 @@ def run_attachment_case(
         if dm_shares:
             sent_ts = dm_shares[0]["ts"]
         else:
-            # Fallback: use current time minus a second
-            sent_ts = str(time.time() - 1)
+            raise SmokeError(
+                f"Could not find message timestamp for file upload in channel {cfg.dm_channel}"
+            )
 
         reply = poll_for_reply(
             bot_client,

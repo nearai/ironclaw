@@ -5986,11 +5986,21 @@ mod tests {
 
     #[test]
     fn test_rewrite_slack_api_url_for_testing_uses_test_override() {
-        // SAFETY: test-only; tests run single-threaded with --test-threads=1
-        // when env mutation is involved.
+        use std::sync::{Mutex, OnceLock};
+
+        static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+        let _lock = ENV_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env mutex poisoned");
+
+        let original = std::env::var(SLACK_TEST_API_BASE_ENV).ok();
+
+        // SAFETY: guarded by ENV_MUTEX — no concurrent env access.
         unsafe {
             std::env::set_var(SLACK_TEST_API_BASE_ENV, "http://localhost:9999");
         }
+
         // slack.com API call
         let result = rewrite_slack_api_url_for_testing("https://slack.com/api/chat.postMessage");
         assert_eq!(
@@ -6008,9 +6018,14 @@ mod tests {
         // Non-Slack URL should not be rewritten
         let result = rewrite_slack_api_url_for_testing("https://api.telegram.org/bot123/getMe");
         assert!(result.is_none());
-        // SAFETY: test-only cleanup
+
+        // SAFETY: guarded by ENV_MUTEX — restore original state.
         unsafe {
-            std::env::remove_var(SLACK_TEST_API_BASE_ENV);
+            if let Some(ref val) = original {
+                std::env::set_var(SLACK_TEST_API_BASE_ENV, val);
+            } else {
+                std::env::remove_var(SLACK_TEST_API_BASE_ENV);
+            }
         }
     }
 }
