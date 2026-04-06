@@ -15,12 +15,13 @@ use crate::channels::wasm::{
     WasmChannelRouter, WasmChannelRuntime, bot_username_setting_key,
 };
 use crate::channels::{ChannelManager, OutgoingResponse};
+use crate::code_challenge::{CodeChallengeFlow, PendingCodeChallenge, VerificationChallenge};
 use crate::extensions::discovery::OnlineDiscovery;
 use crate::extensions::registry::ExtensionRegistry;
 use crate::extensions::{
     ActivateResult, AuthResult, ConfigureResult, ExtensionError, ExtensionKind, ExtensionSource,
     InstallResult, InstalledExtension, RegistryEntry, ResultSource, SearchResult, ToolAuthState,
-    UpgradeOutcome, UpgradeResult, VerificationChallenge,
+    UpgradeOutcome, UpgradeResult,
     naming::{canonicalize_extension_name, legacy_extension_alias},
 };
 use crate::hooks::HookRegistry;
@@ -165,11 +166,11 @@ enum TelegramOwnerBindingState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PendingTelegramVerificationChallenge {
-    code: String,
+struct TelegramVerificationMeta {
     bot_username: Option<String>,
-    expires_at_unix: u64,
 }
+
+type PendingTelegramVerificationChallenge = PendingCodeChallenge<TelegramVerificationMeta>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TelegramBindingResult {
@@ -259,6 +260,21 @@ struct TelegramUser {
     is_bot: bool,
 }
 
+const TELEGRAM_TEST_API_BASE_ENV: &str = "IRONCLAW_TEST_TELEGRAM_API_BASE_URL";
+const TELEGRAM_DEFAULT_API_BASE: &str = "https://api.telegram.org";
+
+fn telegram_api_base_url() -> String {
+    std::env::var(TELEGRAM_TEST_API_BASE_ENV)
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| TELEGRAM_DEFAULT_API_BASE.to_string())
+}
+
+fn telegram_bot_api_url(bot_token: &str, method: &str) -> String {
+    format!("{}/bot{bot_token}/{method}", telegram_api_base_url())
+}
+
 fn build_wasm_channel_runtime_config_updates(
     tunnel_url: Option<&str>,
     webhook_secret: Option<&str>,
@@ -308,40 +324,78 @@ fn unix_timestamp_secs() -> u64 {
         .as_secs()
 }
 
-fn generate_telegram_verification_code() -> String {
-    use rand::Rng;
-    rand::thread_rng()
-        .sample_iter(&rand::distributions::Alphanumeric)
-        .take(TELEGRAM_OWNER_BIND_CODE_LEN)
-        .map(char::from)
-        .collect::<String>()
-        .to_lowercase()
-}
+#[derive(Debug, Clone, Copy)]
+struct TelegramVerificationFlow;
 
-fn telegram_verification_deep_link(bot_username: Option<&str>, code: &str) -> Option<String> {
-    bot_username
-        .filter(|username| !username.trim().is_empty())
-        .map(|username| format!("https://t.me/{username}?start={code}"))
-}
-
-fn telegram_verification_instructions(bot_username: Option<&str>, code: &str) -> String {
-    if let Some(username) = bot_username.filter(|username| !username.trim().is_empty()) {
-        return format!(
-            "Send `/start {code}` to @{username} in Telegram. IronClaw will finish setup automatically."
-        );
+impl TelegramVerificationFlow {
+    fn deep_link(bot_username: Option<&str>, code: &str) -> Option<String> {
+        bot_username
+            .filter(|username| !username.trim().is_empty())
+            .map(|username| format!("https://t.me/{username}?start={code}"))
     }
 
-    format!("Send `/start {code}` to your Telegram bot. IronClaw will finish setup automatically.")
+    fn instructions(bot_username: Option<&str>, code: &str) -> String {
+        if let Some(username) = bot_username.filter(|username| !username.trim().is_empty()) {
+            return format!(
+                "Send `/start {code}` to @{username} in Telegram. IronClaw will finish setup automatically."
+            );
+        }
+
+        format!(
+            "Send `/start {code}` to your Telegram bot. IronClaw will finish setup automatically."
+        )
+    }
 }
 
+impl CodeChallengeFlow for TelegramVerificationFlow {
+    type Meta = TelegramVerificationMeta;
+
+    fn issue_code(&self) -> String {
+        crate::code_challenge::generate_code(
+            TELEGRAM_OWNER_BIND_CODE_LEN,
+            b"abcdefghijklmnopqrstuvwxyz0123456789",
+        )
+    }
+
+    fn render_challenge(
+        &self,
+        pending: &PendingTelegramVerificationChallenge,
+    ) -> VerificationChallenge {
+        VerificationChallenge {
+            code: pending.code.clone(),
+            instructions: Self::instructions(pending.meta.bot_username.as_deref(), &pending.code),
+            deep_link: Self::deep_link(pending.meta.bot_username.as_deref(), &pending.code),
+        }
+    }
+
+    fn matches_submission(
+        &self,
+        pending: &PendingTelegramVerificationChallenge,
+        submission: &str,
+    ) -> bool {
+        let code = &pending.code;
+        let trimmed = submission.trim();
+        trimmed == code
+            || trimmed == format!("/start {code}")
+            || trimmed
+                .split_whitespace()
+                .map(|token| token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-'))
+                .any(|token| token == code)
+    }
+}
+
+const TELEGRAM_VERIFICATION_FLOW: TelegramVerificationFlow = TelegramVerificationFlow;
+
+#[cfg(test)]
 fn telegram_message_matches_verification_code(text: &str, code: &str) -> bool {
-    let trimmed = text.trim();
-    trimmed == code
-        || trimmed == format!("/start {code}")
-        || trimmed
-            .split_whitespace()
-            .map(|token| token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-'))
-            .any(|token| token == code)
+    TELEGRAM_VERIFICATION_FLOW.matches_submission(
+        &PendingCodeChallenge::new(
+            code.to_string(),
+            TelegramVerificationMeta { bot_username: None },
+            u64::MAX,
+        ),
+        text,
+    )
 }
 
 async fn send_telegram_text_message(
@@ -624,18 +678,22 @@ impl ExtensionManager {
         bot_username: Option<&str>,
     ) {
         let code = code.to_string();
-        let bot_username = bot_username.map(str::to_string);
+        let meta = TelegramVerificationMeta {
+            bot_username: bot_username.map(str::to_string),
+        };
         self.set_test_telegram_binding_resolver(Arc::new(move |_token, existing_owner_id| {
             if existing_owner_id.is_some() {
                 return Err(ExtensionError::Other(
                     "unexpected existing owner binding".to_string(),
                 ));
             }
-            Ok(TelegramBindingResult::Pending(VerificationChallenge {
-                code: code.clone(),
-                instructions: telegram_verification_instructions(bot_username.as_deref(), &code),
-                deep_link: telegram_verification_deep_link(bot_username.as_deref(), &code),
-            }))
+            Ok(TelegramBindingResult::Pending(
+                TELEGRAM_VERIFICATION_FLOW.render_challenge(&PendingCodeChallenge::new(
+                    code.clone(),
+                    meta.clone(),
+                    u64::MAX,
+                )),
+            ))
         }))
         .await;
     }
@@ -918,7 +976,7 @@ impl ExtensionManager {
         let now = unix_timestamp_secs();
         let mut guard = self.pending_telegram_verification.write().await;
         let challenge = guard.get(name).cloned()?;
-        if challenge.expires_at_unix <= now {
+        if challenge.is_expired(now) {
             guard.remove(name);
             return None;
         }
@@ -950,7 +1008,7 @@ impl ExtensionManager {
         bot_token: &str,
         bot_username: Option<&str>,
     ) -> Result<VerificationChallenge, ExtensionError> {
-        let delete_webhook_url = format!("https://api.telegram.org/bot{bot_token}/deleteWebhook");
+        let delete_webhook_url = telegram_bot_api_url(bot_token, "deleteWebhook");
         let delete_webhook_resp = client
             .post(&delete_webhook_url)
             .query(&[("drop_pending_updates", "true")])
@@ -964,25 +1022,16 @@ impl ExtensionManager {
             )));
         }
 
-        let challenge = PendingTelegramVerificationChallenge {
-            code: generate_telegram_verification_code(),
-            bot_username: bot_username.map(str::to_string),
-            expires_at_unix: unix_timestamp_secs() + TELEGRAM_OWNER_BIND_CHALLENGE_TTL_SECS,
-        };
+        let challenge = TELEGRAM_VERIFICATION_FLOW.issue_challenge(
+            TelegramVerificationMeta {
+                bot_username: bot_username.map(str::to_string),
+            },
+            unix_timestamp_secs() + TELEGRAM_OWNER_BIND_CHALLENGE_TTL_SECS,
+        );
         self.set_pending_telegram_verification(name, challenge.clone())
             .await;
 
-        Ok(VerificationChallenge {
-            code: challenge.code.clone(),
-            instructions: telegram_verification_instructions(
-                challenge.bot_username.as_deref(),
-                &challenge.code,
-            ),
-            deep_link: telegram_verification_deep_link(
-                challenge.bot_username.as_deref(),
-                &challenge.code,
-            ),
-        })
+        Ok(TELEGRAM_VERIFICATION_FLOW.render_challenge(&challenge))
     }
 
     /// Set just the channel manager for relay channel hot-activation.
@@ -1441,7 +1490,7 @@ impl ExtensionManager {
             match self.load_mcp_servers(user_id).await {
                 Ok(servers) => {
                     for server in &servers.servers {
-                        let authenticated = is_authenticated(server, &self.secrets, user_id).await;
+                        let authenticated = self.mcp_has_configured_auth(server, user_id).await;
                         let clients = self.mcp_clients.read().await;
                         let active = clients.contains_key(&server.name);
 
@@ -1461,7 +1510,8 @@ impl ExtensionManager {
                             .registry
                             .get_with_kind(&server.name, Some(ExtensionKind::McpServer))
                             .await
-                            .map(|e| e.display_name);
+                            .map(|e| e.display_name)
+                            .or_else(|| Some(server.name.clone()));
                         extensions.push(InstalledExtension {
                             name: server.name.clone(),
                             kind: ExtensionKind::McpServer,
@@ -2768,6 +2818,10 @@ impl ExtensionManager {
         })
     }
 
+    async fn mcp_has_configured_auth(&self, server: &McpServerConfig, user_id: &str) -> bool {
+        server.has_custom_auth_header() || is_authenticated(server, &self.secrets, user_id).await
+    }
+
     async fn auth_mcp(&self, name: &str, user_id: &str) -> Result<AuthResult, ExtensionError> {
         let server = self
             .get_mcp_server(name, user_id)
@@ -2775,7 +2829,7 @@ impl ExtensionManager {
             .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
 
         // Check if already authenticated
-        if is_authenticated(&server, &self.secrets, user_id).await {
+        if self.mcp_has_configured_auth(&server, user_id).await {
             return Ok(AuthResult::authenticated(name, ExtensionKind::McpServer));
         }
 
@@ -2929,9 +2983,16 @@ impl ExtensionManager {
             let mut token_exchange_extra_params = HashMap::new();
             token_exchange_extra_params.insert("resource".to_string(), resource.clone());
 
+            let display_name = self
+                .registry
+                .get_with_kind(&server.name, Some(ExtensionKind::McpServer))
+                .await
+                .map(|e| e.display_name)
+                .unwrap_or_else(|| server.name.clone());
+
             let flow = oauth_defaults::PendingOAuthFlow {
                 extension_name: name.to_string(),
-                display_name: server.name.clone(),
+                display_name,
                 token_url: metadata.token_endpoint,
                 client_id,
                 client_secret,
@@ -4174,13 +4235,15 @@ impl ExtensionManager {
         // is badly formatted" instead of 401 when auth is missing or invalid.
         let mcp_tools = client.list_tools().await.map_err(|e| {
             let msg = e.to_string();
-            let msg_lower = msg.to_ascii_lowercase();
-            if msg_lower.contains("requires authentication")
-                || msg.contains("401")
-                || (msg.contains("400")
-                    && (msg_lower.contains("authorization") || msg_lower.contains("authenticate")))
-            {
-                ExtensionError::AuthRequired
+            if crate::tools::mcp::is_auth_error_message(&msg) {
+                if server.has_custom_auth_header() {
+                    ExtensionError::ActivationFailed(format!(
+                        "MCP server '{}' rejected its configured Authorization header. Update the configured credential and try again.",
+                        name
+                    ))
+                } else {
+                    ExtensionError::AuthRequired
+                }
             } else {
                 ExtensionError::ActivationFailed(msg)
             }
@@ -5519,7 +5582,7 @@ impl ExtensionManager {
             .build()
             .map_err(|e| ExtensionError::Other(e.to_string()))?;
 
-        let get_me_url = format!("https://api.telegram.org/bot{bot_token}/getMe");
+        let get_me_url = telegram_bot_api_url(bot_token, "getMe");
         let get_me_resp = client
             .get(&get_me_url)
             .send()
@@ -5575,7 +5638,7 @@ impl ExtensionManager {
         };
 
         let now = unix_timestamp_secs();
-        if challenge.expires_at_unix <= now {
+        if challenge.is_expired(now) {
             self.clear_pending_telegram_verification(name).await;
             return Ok(TelegramBindingResult::Pending(
                 self.issue_telegram_verification_challenge(
@@ -5600,9 +5663,7 @@ impl ExtensionManager {
             let poll_timeout_secs = TELEGRAM_GET_UPDATES_TIMEOUT_SECS.min(remaining_secs);
 
             let resp = client
-                .get(format!(
-                    "https://api.telegram.org/bot{bot_token}/getUpdates"
-                ))
+                .get(telegram_bot_api_url(bot_token, "getUpdates"))
                 .query(&[
                     ("offset", offset.to_string()),
                     ("timeout", poll_timeout_secs.to_string()),
@@ -5642,7 +5703,7 @@ impl ExtensionManager {
                     && let Some(from) = message.from
                     && !from.is_bot
                     && let Some(text) = message.text.as_deref()
-                    && telegram_message_matches_verification_code(text, &challenge.code)
+                    && TELEGRAM_VERIFICATION_FLOW.matches_submission(&challenge, text)
                 {
                     bound_owner_id = Some(from.id);
                 }
@@ -5651,7 +5712,7 @@ impl ExtensionManager {
             if let Some(owner_id) = bound_owner_id {
                 if let Err(err) = send_telegram_text_message(
                     &client,
-                    &format!("https://api.telegram.org/bot{bot_token}/sendMessage"),
+                    &telegram_bot_api_url(bot_token, "sendMessage"),
                     owner_id,
                     "Verification received. Finishing setup...",
                 )
@@ -5668,9 +5729,7 @@ impl ExtensionManager {
                 self.clear_pending_telegram_verification(name).await;
                 if offset > 0 {
                     let _ = client
-                        .get(format!(
-                            "https://api.telegram.org/bot{bot_token}/getUpdates"
-                        ))
+                        .get(telegram_bot_api_url(bot_token, "getUpdates"))
                         .query(&[("offset", offset.to_string()), ("timeout", "0".to_string())])
                         .send()
                         .await;
@@ -6549,11 +6608,11 @@ mod tests {
     };
     use crate::extensions::ExtensionManager;
     use crate::extensions::manager::{
-        ChannelRuntimeState, FallbackDecision, TelegramBindingData, TelegramBindingResult,
-        TelegramOwnerBindingState, build_wasm_channel_runtime_config_updates,
-        combine_install_errors, fallback_decision, infer_kind_from_url,
-        normalize_hosted_callback_url, send_telegram_text_message,
-        telegram_message_matches_verification_code,
+        ChannelRuntimeState, FallbackDecision, TELEGRAM_TEST_API_BASE_ENV, TelegramBindingData,
+        TelegramBindingResult, TelegramOwnerBindingState,
+        build_wasm_channel_runtime_config_updates, combine_install_errors, fallback_decision,
+        infer_kind_from_url, normalize_hosted_callback_url, send_telegram_text_message,
+        telegram_bot_api_url, telegram_message_matches_verification_code,
     };
     use crate::extensions::{
         ExtensionError, ExtensionKind, ExtensionSource, InstallResult, ToolAuthState,
@@ -7324,7 +7383,7 @@ mod tests {
             )
             .map_err(|e| format!("runtime init failed: {e}"))?,
         );
-        let pairing_store = Arc::new(crate::pairing::PairingStore::new());
+        let pairing_store = Arc::new(crate::pairing::PairingStore::new_noop());
         let router = Arc::new(crate::channels::wasm::WasmChannelRouter::new());
         let mut owner_ids = std::collections::HashMap::new();
         owner_ids.insert("telegram".to_string(), 12345_i64);
@@ -7414,9 +7473,7 @@ mod tests {
             WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
                 .map_err(|err| format!("runtime: {err}"))?,
         );
-        let pairing_store = Arc::new(PairingStore::with_base_dir(
-            dir.path().join("pairing-state"),
-        ));
+        let pairing_store = Arc::new(PairingStore::new_noop());
         let router = Arc::new(WasmChannelRouter::new());
         manager
             .set_channel_runtime(
@@ -7693,7 +7750,7 @@ mod tests {
             )
             .map_err(|e| format!("runtime init failed: {e}"))?,
         );
-        let pairing_store = Arc::new(crate::pairing::PairingStore::new());
+        let pairing_store = Arc::new(crate::pairing::PairingStore::new_noop());
         let router = Arc::new(crate::channels::wasm::WasmChannelRouter::new());
         let mut owner_ids = std::collections::HashMap::new();
         owner_ids.insert("telegram".to_string(), 12345_i64);
@@ -7734,7 +7791,7 @@ mod tests {
                     WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
                         .map_err(|err| format!("runtime: {err}"))?,
                 ),
-                pairing_store: Arc::new(PairingStore::with_base_dir(dir.path().join("pairing"))),
+                pairing_store: Arc::new(PairingStore::new_noop()),
                 wasm_channel_router: Arc::new(WasmChannelRouter::new()),
                 wasm_channel_owner_ids: std::collections::HashMap::new(),
             });
@@ -7784,7 +7841,7 @@ mod tests {
                     WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
                         .map_err(|err| format!("runtime: {err}"))?,
                 ),
-                pairing_store: Arc::new(PairingStore::with_base_dir(dir.path().join("pairing"))),
+                pairing_store: Arc::new(PairingStore::new_noop()),
                 wasm_channel_router: Arc::new(WasmChannelRouter::new()),
                 wasm_channel_owner_ids: std::collections::HashMap::new(),
             });
@@ -8722,6 +8779,41 @@ mod tests {
         }
     }
 
+    struct ScopedEnvVar {
+        key: &'static str,
+        original: Option<String>,
+        _mutex: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let guard = crate::config::helpers::lock_env();
+            let original = std::env::var(key).ok();
+            // SAFETY: Under ENV_MUTEX, no concurrent env access.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self {
+                key,
+                original,
+                _mutex: guard,
+            }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            // SAFETY: Under ENV_MUTEX (still held by _mutex), no concurrent env access.
+            unsafe {
+                if let Some(ref val) = self.original {
+                    std::env::set_var(self.key, val);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn gateway_callback_redirect_uri_from_tunnel_url() {
         let _env = EnvGuard::new();
@@ -9053,6 +9145,188 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn test_resolve_telegram_binding_uses_fake_api_base_override() -> Result<(), String> {
+        use axum::{
+            Router,
+            body::Bytes,
+            extract::State,
+            http::{Method, Uri},
+            response::IntoResponse,
+            routing::any,
+        };
+
+        #[derive(Clone)]
+        struct FakeTelegramState {
+            request_uris: Arc<tokio::sync::Mutex<Vec<String>>>,
+            send_message_payloads: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
+            verification_code: Arc<tokio::sync::Mutex<Option<String>>>,
+        }
+
+        async fn handler(
+            State(state): State<FakeTelegramState>,
+            method: Method,
+            uri: Uri,
+            body: Bytes,
+        ) -> impl IntoResponse {
+            state
+                .request_uris
+                .lock()
+                .await
+                .push(format!("{method} {uri}"));
+
+            if uri.path().ends_with("/deleteWebhook") {
+                return axum::Json(serde_json::json!({ "ok": true, "result": true }))
+                    .into_response();
+            }
+
+            if uri.path().ends_with("/getMe") {
+                return axum::Json(serde_json::json!({
+                    "ok": true,
+                    "result": {
+                        "id": 9001,
+                        "is_bot": true,
+                        "username": "test_hot_bot"
+                    }
+                }))
+                .into_response();
+            }
+
+            if uri.path().ends_with("/getUpdates") {
+                let code = state.verification_code.lock().await.clone();
+                let result = code.map_or_else(Vec::new, |verification_code| {
+                    vec![serde_json::json!({
+                        "update_id": 101,
+                        "message": {
+                            "message_id": 55,
+                            "chat": { "id": 424242, "type": "private" },
+                            "from": {
+                                "id": 424242,
+                                "is_bot": false,
+                                "first_name": "Owner"
+                            },
+                            "text": format!("/start {verification_code}")
+                        }
+                    })]
+                });
+                return axum::Json(serde_json::json!({ "ok": true, "result": result }))
+                    .into_response();
+            }
+
+            if uri.path().ends_with("/sendMessage") {
+                let payload = serde_json::from_slice::<serde_json::Value>(&body)
+                    .unwrap_or_else(|err| panic!("invalid sendMessage payload: {err}"));
+                state.send_message_payloads.lock().await.push(payload);
+                return axum::Json(serde_json::json!({
+                    "ok": true,
+                    "result": { "message_id": 777 }
+                }))
+                .into_response();
+            }
+
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("Unhandled fake Telegram path: {}", uri.path()),
+            )
+                .into_response()
+        }
+
+        let state = FakeTelegramState {
+            request_uris: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            send_message_payloads: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            verification_code: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+
+        let app = Router::new()
+            .route("/{*path}", any(handler))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|err| format!("bind listener: {err}"))?;
+        let addr = listener
+            .local_addr()
+            .map_err(|err| format!("listener addr: {err}"))?;
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let _guard = ScopedEnvVar::set(TELEGRAM_TEST_API_BASE_ENV, &format!("http://{addr}"));
+
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let mgr = make_manager_custom_dirs(dir.path().join("tools"), dir.path().join("channels"));
+        let client = reqwest::Client::new();
+        let challenge = mgr
+            .issue_telegram_verification_challenge(
+                &client,
+                "telegram",
+                "123456:ABCDEF",
+                Some("test_hot_bot"),
+            )
+            .await
+            .map_err(|err| format!("issue challenge: {err}"))?;
+        *state.verification_code.lock().await = Some(challenge.code.clone());
+
+        let result = mgr
+            .resolve_telegram_binding("telegram", "123456:ABCDEF", None)
+            .await
+            .map_err(|err| format!("resolve binding: {err}"))?;
+
+        server.abort();
+
+        let bound = match result {
+            TelegramBindingResult::Bound(data) => data,
+            TelegramBindingResult::Pending(_) => {
+                return Err("expected binding to complete against fake Telegram API".to_string());
+            }
+        };
+
+        require_eq(bound.owner_id, 424242, "bound owner id")?;
+        require_eq(
+            bound.bot_username,
+            Some("test_hot_bot".to_string()),
+            "bound bot username",
+        )?;
+
+        let request_uris = state.request_uris.lock().await.clone();
+        require(
+            request_uris.iter().any(|request| {
+                request.contains("/bot123456:ABCDEF/deleteWebhook?drop_pending_updates=true")
+            }),
+            format!("expected deleteWebhook request, got: {request_uris:?}"),
+        )?;
+        require(
+            request_uris
+                .iter()
+                .any(|request| request.contains("/bot123456:ABCDEF/getMe")),
+            format!("expected getMe request, got: {request_uris:?}"),
+        )?;
+        require(
+            request_uris
+                .iter()
+                .any(|request| request.contains("/bot123456:ABCDEF/getUpdates")),
+            format!("expected getUpdates request, got: {request_uris:?}"),
+        )?;
+        require(
+            request_uris
+                .iter()
+                .any(|request| request.contains("/bot123456:ABCDEF/sendMessage")),
+            format!("expected sendMessage request, got: {request_uris:?}"),
+        )?;
+
+        let send_message_payloads = state.send_message_payloads.lock().await.clone();
+        require_eq(send_message_payloads.len(), 1, "sendMessage payload count")?;
+        require_eq(
+            send_message_payloads[0]["chat_id"].clone(),
+            serde_json::json!(424242),
+            "verification ack chat_id",
+        )?;
+        require_eq(
+            send_message_payloads[0]["text"].clone(),
+            serde_json::json!("Verification received. Finishing setup..."),
+            "verification ack text",
+        )
+    }
+
     #[test]
     fn test_telegram_message_matches_verification_code_variants() -> Result<(), String> {
         require(
@@ -9154,12 +9428,9 @@ mod tests {
         // have their colon URL-encoded to %3A, as this breaks the validation endpoint.
         // Previously: form_urlencoded::byte_serialize encoded the token, causing 404s.
         // Fixed by removing URL-encoding and using the token directly.
-        let endpoint_template = "https://api.telegram.org/bot{telegram_bot_token}/getMe";
-        let secret_name = "telegram_bot_token";
         let token = "123456789:AABBccDDeeFFgg_Test-Token";
 
-        // Simulate the fixed validation URL building logic
-        let url = endpoint_template.replace(&format!("{{{}}}", secret_name), token);
+        let url = telegram_bot_api_url(token, "getMe");
 
         // Verify colon is preserved
         let expected = "https://api.telegram.org/bot123456789:AABBccDDeeFFgg_Test-Token/getMe";
@@ -9176,6 +9447,14 @@ mod tests {
         if !url.contains("123456789:AABBccDDeeFFgg_Test-Token") {
             panic!("URL missing token: {url}"); // safety: test assertion
         }
+    }
+
+    #[test]
+    fn test_telegram_bot_api_url_uses_test_override_env_var() {
+        let _guard = ScopedEnvVar::set(TELEGRAM_TEST_API_BASE_ENV, "http://127.0.0.1:19001/");
+
+        let url = telegram_bot_api_url("123:abc", "getMe");
+        assert_eq!(url, "http://127.0.0.1:19001/bot123:abc/getMe");
     }
 
     // ── proxy_client_secret suppression ─────────────────────────────

@@ -26,7 +26,7 @@ use crate::llm::{
     ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult,
     ResponseMetadata, ToolCall, ToolSelection,
 };
-use crate::tenant::AdminScope;
+use crate::tenant::SystemScope;
 use crate::tools::execute::process_tool_result;
 use crate::tools::rate_limiter::RateLimitResult;
 use crate::tools::{ApprovalContext, ToolRegistry, prepare_tool_params, redact_params};
@@ -47,7 +47,7 @@ pub struct WorkerDeps {
     pub llm: Arc<dyn LlmProvider>,
     pub safety: Arc<SafetyLayer>,
     pub tools: Arc<ToolRegistry>,
-    pub store: Option<AdminScope>,
+    pub store: Option<SystemScope>,
     pub hooks: Arc<HookRegistry>,
     pub timeout: Duration,
     pub use_planning: bool,
@@ -96,7 +96,7 @@ impl Worker {
         &self.deps.tools
     }
 
-    fn store(&self) -> Option<&AdminScope> {
+    fn store(&self) -> Option<&SystemScope> {
         self.deps.store.as_ref()
     }
 

@@ -122,7 +122,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Some(Command::Pairing(pairing_cmd)) => {
             init_cli_tracing();
-            return run_pairing_command(pairing_cmd.clone()).map_err(|e| anyhow::anyhow!("{}", e));
+            return run_pairing_command(pairing_cmd.clone()).await;
         }
         Some(Command::Service(service_cmd)) => {
             init_cli_tracing();
@@ -466,6 +466,7 @@ async fn async_main() -> anyhow::Result<()> {
             components.extension_manager.as_ref(),
             components.db.as_ref(),
             &channel_names,
+            Arc::clone(&components.ownership_cache),
         )
         .await;
 
@@ -490,7 +491,11 @@ async fn async_main() -> anyhow::Result<()> {
     if !cli.cli_only
         && let Some(ref signal_config) = config.channels.signal
     {
-        let signal_channel = SignalChannel::new(signal_config.clone())?;
+        let signal_channel = SignalChannel::new(
+            signal_config.clone(),
+            components.db.clone(),
+            Arc::clone(&components.ownership_cache),
+        )?;
         channel_names.push("signal".to_string());
         channels.add(Box::new(signal_channel)).await;
         let safe_url = SignalChannel::redact_url(&signal_config.http_url);
@@ -648,6 +653,11 @@ async fn async_main() -> anyhow::Result<()> {
         if let Some(ref d) = components.db {
             gw = gw.with_store(Arc::clone(d));
             gw = gw.with_db_auth(Arc::clone(d));
+            let pairing_store = Arc::new(ironclaw::pairing::PairingStore::new(
+                Arc::clone(d),
+                Arc::clone(&components.ownership_cache),
+            ));
+            gw = gw.with_pairing_store(pairing_store);
             if let Some(ref ss) = components.secrets_store {
                 gw = gw.with_secrets_store(Arc::clone(ss));
             }

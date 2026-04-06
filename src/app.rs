@@ -57,6 +57,10 @@ pub struct AppComponents {
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
     pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
+    /// In-process write-through cache: `(channel, external_id)` → `Identity`.
+    /// Populated by the pairing flow (Task 8). Pre-allocated here so all
+    /// subsystems can hold an `Arc` to the same cache instance.
+    pub ownership_cache: Arc<crate::ownership::OwnershipCache>,
 }
 
 /// Options that control optional init phases.
@@ -139,6 +143,11 @@ impl AppBuilder {
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         self.handles = Some(handles);
+
+        // Post-init: ensure owner user row exists and rewrite 'default' user_id rows.
+        bootstrap_ownership(db.as_ref(), &self.config)
+            .await
+            .map_err(|e| anyhow::anyhow!("bootstrap_ownership failed: {e}"))?;
 
         // Post-init: migrate disk config, reload config from DB, attach session, cleanup
         if let Err(e) =
@@ -238,6 +247,11 @@ impl AppBuilder {
                     &self.config.owner_id,
                 )
                 .await;
+
+                // Migrate NEAR AI session token from plaintext settings to
+                // encrypted secrets. Idempotent — safe to run on every startup.
+                migrate_session_credential(db.as_ref(), secrets.as_ref(), &self.config.owner_id)
+                    .await;
             }
 
             // Inject LLM API keys from encrypted storage
@@ -262,6 +276,10 @@ impl AppBuilder {
             {
                 tracing::warn!("Failed to re-resolve LLM config after secret injection: {e}");
             }
+
+            // Wire the secrets store into the session manager so future
+            // token saves go to encrypted storage.
+            self.session.attach_secrets(Arc::clone(secrets)).await;
         }
 
         self.secrets_store = store;
@@ -327,7 +345,12 @@ impl AppBuilder {
         let embeddings = self
             .config
             .embeddings
-            .create_provider(&self.config.llm.nearai.base_url, self.session.clone());
+            .create_provider(
+                &self.config.llm.nearai.base_url,
+                self.session.clone(),
+                self.config.llm.bedrock.as_ref(),
+            )
+            .await;
 
         // Register memory tools if database is available
         let workspace_user_id = self.config.owner_id.as_str();
@@ -459,7 +482,6 @@ impl AppBuilder {
         ),
         anyhow::Error,
     > {
-        use crate::tools::mcp::config::load_mcp_servers_from_db;
         use crate::tools::wasm::{WasmToolLoader, load_dev_tools};
 
         let mcp_session_manager = Arc::new(McpSessionManager::new());
@@ -542,11 +564,9 @@ impl AppBuilder {
             let pm = Arc::clone(&mcp_process_manager);
             let owner_id = self.config.owner_id.clone();
             async move {
-                let servers_result = if let Some(ref d) = db {
-                    load_mcp_servers_from_db(d.as_ref(), &owner_id).await
-                } else {
-                    crate::tools::mcp::config::load_mcp_servers().await
-                };
+                let servers_result =
+                    crate::tools::mcp::config::load_mcp_servers_ready(db.as_deref(), &owner_id)
+                        .await;
                 match servers_result {
                     Ok(servers) => {
                         let enabled: Vec<_> = servers.enabled_servers().cloned().collect();
@@ -567,6 +587,7 @@ impl AppBuilder {
 
                             join_set.spawn(async move {
                                 let server_name = server.name.clone();
+                                let has_custom_auth_header = server.has_custom_auth_header();
 
                                 let client = match crate::tools::mcp::create_client_from_config(
                                     server,
@@ -617,15 +638,21 @@ impl AppBuilder {
                                     }
                                     Err(e) => {
                                         let err_str = e.to_string();
-                                        if err_str.contains("401")
-                                            || err_str.contains("authentication")
+                                        if crate::tools::mcp::is_auth_error_message(&err_str)
                                         {
-                                            tracing::warn!(
-                                                "MCP server '{}' requires authentication. \
-                                                 Run: ironclaw mcp auth {}",
-                                                server_name,
-                                                server_name
-                                            );
+                                            if has_custom_auth_header {
+                                                tracing::warn!(
+                                                    "MCP server '{}' rejected its configured Authorization header. Update the configured credential and try again.",
+                                                    server_name
+                                                );
+                                            } else {
+                                                tracing::warn!(
+                                                    "MCP server '{}' requires authentication. \
+                                                     Run: ironclaw mcp auth {}",
+                                                    server_name,
+                                                    server_name
+                                                );
+                                            }
                                         } else {
                                             tracing::warn!(
                                                 "Failed to connect to MCP server '{}': {}",
@@ -739,6 +766,16 @@ impl AppBuilder {
                 catalog_entries.clone(),
             ));
             tools.register_extension_tools(Arc::clone(&manager));
+
+            // Register permission management tool and upgrade tool_list with
+            // builtin registry support.
+            let settings_store_for_perms: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>> =
+                self.db
+                    .as_ref()
+                    .map(|db| Arc::clone(db) as Arc<dyn crate::db::SettingsStore + Send + Sync>);
+            tools.register_permission_tools(settings_store_for_perms.clone());
+            tools.upgrade_tool_list(Arc::clone(&manager), settings_store_for_perms);
+
             tracing::debug!("Extension manager initialized with in-chat discovery tools");
 
             if !startup_mcp_clients.is_empty() {
@@ -937,6 +974,11 @@ impl AppBuilder {
             tools.count()
         );
 
+        // Seed per-user tool permission defaults into the database.
+        // This runs after all tools (built-in, WASM, MCP) are registered so
+        // that every tool name is known.  Existing entries are never overwritten.
+        seed_tool_permissions(&tools, self.db.as_ref(), &self.config.owner_id).await;
+
         Ok(AppComponents {
             config: self.config,
             db: self.db,
@@ -963,7 +1005,237 @@ impl AppBuilder {
             catalog_entries,
             dev_loaded_tool_names,
             builder,
+            ownership_cache: Arc::new(crate::ownership::OwnershipCache::new()),
         })
+    }
+}
+
+/// FK constraints applied after bootstrap_ownership rewrites 'default' rows.
+/// NOT applied by the automatic refinery sweep — applied programmatically below.
+///
+/// PostgreSQL uses `ADD CONSTRAINT IF NOT EXISTS` to be idempotent.
+/// libSQL (SQLite) does not support `ADD CONSTRAINT` at all — FK enforcement
+/// there is handled by `PRAGMA foreign_keys = ON` in the schema declarations.
+// TODO(ownership): Apply OWNERSHIP_FK_SQL on PostgreSQL after bootstrap completes.
+// Requires detecting the database backend type from the Database trait object.
+#[allow(dead_code)]
+const OWNERSHIP_FK_SQL: &str = r#"
+ALTER TABLE conversations    ADD CONSTRAINT IF NOT EXISTS fk_conversations_user
+    FOREIGN KEY (user_id) REFERENCES users(id);
+ALTER TABLE memory_documents ADD CONSTRAINT IF NOT EXISTS fk_memory_documents_user
+    FOREIGN KEY (user_id) REFERENCES users(id);
+ALTER TABLE heartbeat_state  ADD CONSTRAINT IF NOT EXISTS fk_heartbeat_user
+    FOREIGN KEY (user_id) REFERENCES users(id);
+ALTER TABLE secrets          ADD CONSTRAINT IF NOT EXISTS fk_secrets_user
+    FOREIGN KEY (user_id) REFERENCES users(id);
+ALTER TABLE wasm_tools       ADD CONSTRAINT IF NOT EXISTS fk_wasm_tools_user
+    FOREIGN KEY (user_id) REFERENCES users(id);
+ALTER TABLE routines         ADD CONSTRAINT IF NOT EXISTS fk_routines_user
+    FOREIGN KEY (user_id) REFERENCES users(id);
+ALTER TABLE settings         ADD CONSTRAINT IF NOT EXISTS fk_settings_user
+    FOREIGN KEY (user_id) REFERENCES users(id);
+ALTER TABLE agent_jobs       ADD CONSTRAINT IF NOT EXISTS fk_agent_jobs_user
+    FOREIGN KEY (user_id) REFERENCES users(id);
+"#;
+
+/// Runs on every startup after migrations V1–V20.
+/// Idempotent — safe to call multiple times.
+///
+/// 1. Ensures the owner user row exists in `users`.
+/// 2. Rewrites all `user_id = 'default'` rows to the real owner_id.
+pub async fn bootstrap_ownership(
+    db: &dyn crate::db::Database,
+    config: &crate::config::Config,
+) -> Result<(), anyhow::Error> {
+    let owner_id = &config.owner_id;
+
+    // 1. Ensure owner user exists
+    db.get_or_create_user(crate::db::UserRecord {
+        id: owner_id.clone(),
+        role: "admin".to_string(),
+        display_name: "Owner".to_string(),
+        status: "active".to_string(),
+        email: None,
+        last_login_at: None,
+        created_by: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        metadata: serde_json::Value::Object(Default::default()),
+    })
+    .await?;
+
+    // 2. Rewrite 'default' rows to the real owner_id
+    db.migrate_default_owner(owner_id).await?;
+
+    tracing::info!(
+        owner_id = %owner_id,
+        "bootstrap_ownership: owner user ensured, default rows migrated"
+    );
+    Ok(())
+}
+
+/// Migrate the NEAR AI session token from the plaintext settings table to the
+/// encrypted secrets store.
+///
+/// The `nearai.session_token` settings key stores a JSON-serialized `SessionData`
+/// object. This migration re-serializes it as a JSON string and stores it under
+/// the `nearai_session_token` secret name.
+///
+/// Idempotent: if the secret already exists, the settings key is removed (cleanup).
+/// If the settings key is absent, nothing happens.
+async fn migrate_session_credential(
+    db: &dyn crate::db::Database,
+    secrets: &(dyn crate::secrets::SecretsStore + Send + Sync),
+    user_id: &str,
+) {
+    // If already migrated and the secret decrypts to valid JSON, clean up the
+    // plaintext copy and return. If the secret exists but is corrupt, fall
+    // through to re-migrate from the plaintext settings value.
+    match secrets.get_decrypted(user_id, "nearai_session_token").await {
+        Ok(decrypted) => {
+            if let Ok(secret_value) = serde_json::from_str::<serde_json::Value>(decrypted.expose())
+            {
+                // Verify the decrypted secret matches the plaintext setting (round-trip check).
+                match db.get_setting(user_id, "nearai.session_token").await {
+                    Ok(Some(settings_value)) if secret_value == settings_value => {
+                        // Round-trip verified — safe to clean up plaintext copy.
+                        let _ = db.delete_setting(user_id, "nearai.session_token").await;
+                        return;
+                    }
+                    Ok(Some(_)) => {
+                        // Secret doesn't match plaintext — fall through to re-migrate.
+                        tracing::warn!(
+                            "nearai_session_token secret doesn't match plaintext setting; re-migrating"
+                        );
+                    }
+                    Ok(None) => {
+                        // No plaintext left — treat as already migrated.
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to read nearai.session_token setting for round-trip check: {e}"
+                        );
+                        return;
+                    }
+                }
+            } else {
+                // Secret exists but failed JSON parsing — fall through to re-migrate.
+                tracing::warn!(
+                    "nearai_session_token secret exists but failed JSON validation; re-migrating"
+                );
+            }
+        }
+        Err(crate::secrets::SecretError::NotFound(_)) => {
+            // Not yet migrated — continue.
+        }
+        Err(e) => {
+            tracing::warn!("Failed to check secrets store for nearai_session_token: {e}");
+            return;
+        }
+    }
+
+    // Read the JSON value from settings.
+    let value = match db.get_setting(user_id, "nearai.session_token").await {
+        Ok(Some(v)) => v,
+        Ok(None) => return, // Nothing to migrate.
+        Err(e) => {
+            tracing::warn!("Failed to read nearai.session_token from settings: {e}");
+            return;
+        }
+    };
+
+    // Re-serialize the JSON value to a string for secrets storage.
+    let value_str = match &value {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+
+    let params = crate::secrets::CreateSecretParams::new("nearai_session_token", value_str)
+        .with_provider("nearai");
+
+    match secrets.create(user_id, params).await {
+        Ok(_) => {
+            tracing::info!("Migrated nearai.session_token from settings to encrypted secrets");
+            let _ = db.delete_setting(user_id, "nearai.session_token").await;
+        }
+        Err(e) => {
+            tracing::warn!("Failed to migrate nearai.session_token to secrets: {e}");
+        }
+    }
+}
+
+/// Seed tool permission defaults into the database for every registered tool
+/// that has no explicit user override yet.
+///
+/// This is called once at startup after the full tool registry is built.
+/// It is idempotent: existing entries in `tool_permissions.*` are never touched.
+async fn seed_tool_permissions(
+    tools: &crate::tools::ToolRegistry,
+    db: Option<&Arc<dyn Database>>,
+    owner_id: &str,
+) {
+    use crate::tools::permissions::{TOOL_RISK_DEFAULTS, effective_permission};
+
+    let db = match db {
+        Some(db) => db,
+        None => {
+            tracing::debug!("seed_tool_permissions: no database available, skipping");
+            return;
+        }
+    };
+
+    // Load existing tool permission overrides from the DB.
+    let db_map = match db.get_all_settings(owner_id).await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("seed_tool_permissions: failed to load settings: {}", e);
+            return;
+        }
+    };
+    let existing = crate::settings::Settings::from_db_map(&db_map).tool_permissions;
+
+    let registered_names = tools.list().await;
+    let mut seeded = 0u32;
+
+    for name in &registered_names {
+        if existing.contains_key(name.as_str()) {
+            // User has an explicit override — do not touch it.
+            continue;
+        }
+
+        // Only insert if the tool appears in the static defaults table.
+        // Unknown/dynamic tools stay absent (they will fall back to AskEachTime
+        // at runtime via effective_permission) to avoid polluting the DB.
+        if TOOL_RISK_DEFAULTS.contains_key(name.as_str()) {
+            let default_state = effective_permission(name, &existing);
+            let json_value = match serde_json::to_value(default_state) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        "seed_tool_permissions: failed to serialize state for '{}': {}",
+                        name,
+                        e
+                    );
+                    continue;
+                }
+            };
+            if let Err(e) = db
+                .set_setting(owner_id, &format!("tool_permissions.{}", name), &json_value)
+                .await
+            {
+                tracing::warn!("seed_tool_permissions: failed to set '{}': {}", name, e);
+            } else {
+                seeded += 1;
+            }
+        }
+    }
+
+    if seeded > 0 {
+        tracing::debug!(
+            count = seeded,
+            "Seeded tool permission defaults into database"
+        );
     }
 }
 
@@ -1030,5 +1302,57 @@ mod tests {
 
         assert_eq!(user_id, "user-123");
         assert!(!session_id.is_empty());
+    }
+
+    /// Verify that `seed_tool_permissions` is idempotent: an existing user
+    /// override must survive a re-seed.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn seed_tool_permissions_preserves_user_overrides() {
+        use crate::db::Database;
+        use crate::db::libsql::LibSqlBackend;
+        use crate::tools::ToolRegistry;
+        use crate::tools::permissions::PermissionState;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_seed.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+        let db: Arc<dyn Database> = Arc::new(backend);
+
+        let registry = ToolRegistry::new();
+        registry.register_builtin_tools();
+
+        let owner = "test-user";
+
+        // 1. Initial seed: creates defaults for all registered tools.
+        super::seed_tool_permissions(&registry, Some(&db), owner).await;
+
+        // Verify "echo" was seeded as AlwaysAllow.
+        let map = db.get_all_settings(owner).await.unwrap();
+        let settings = crate::settings::Settings::from_db_map(&map);
+        assert_eq!(
+            settings.tool_permissions.get("echo"),
+            Some(&PermissionState::AlwaysAllow),
+            "echo should be AlwaysAllow after initial seed"
+        );
+
+        // 2. User overrides echo → Disabled.
+        let disabled_json = serde_json::to_value(PermissionState::Disabled).unwrap();
+        db.set_setting(owner, "tool_permissions.echo", &disabled_json)
+            .await
+            .unwrap();
+
+        // 3. Re-seed (e.g. after a restart).
+        super::seed_tool_permissions(&registry, Some(&db), owner).await;
+
+        // 4. Assert the override survived.
+        let map = db.get_all_settings(owner).await.unwrap();
+        let settings = crate::settings::Settings::from_db_map(&map);
+        assert_eq!(
+            settings.tool_permissions.get("echo"),
+            Some(&PermissionState::Disabled),
+            "user override to Disabled must survive re-seed"
+        );
     }
 }

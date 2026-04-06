@@ -21,7 +21,6 @@ use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::config::SignalConfig;
 use crate::error::ChannelError;
-use crate::pairing::PairingStore;
 
 const GROUP_TARGET_PREFIX: &str = "group:";
 const SIGNAL_HEALTH_ENDPOINT: &str = "/api/v1/check";
@@ -95,11 +94,17 @@ pub struct SignalChannel {
     reply_targets: Arc<RwLock<LruCache<Uuid, String>>>,
     /// Debug mode for verbose tool output (toggled via /debug command).
     debug_mode: Arc<AtomicBool>,
+    /// Pairing store for DM pairing (guest access control).
+    pairing_store: Arc<crate::pairing::PairingStore>,
 }
 
 impl SignalChannel {
     /// Create a new Signal channel with normalized config and fresh client/cache.
-    pub fn new(config: SignalConfig) -> Result<Self, ChannelError> {
+    pub fn new(
+        config: SignalConfig,
+        db: Option<Arc<dyn crate::db::Database>>,
+        ownership_cache: Arc<crate::ownership::OwnershipCache>,
+    ) -> Result<Self, ChannelError> {
         let mut config = config;
         config.http_url = config.http_url.trim_end_matches('/').to_string();
 
@@ -112,7 +117,19 @@ impl SignalChannel {
         let reply_targets = Arc::new(RwLock::new(LruCache::new(cap)));
         let debug_mode = Arc::new(AtomicBool::new(false));
 
-        Ok(Self::from_parts(config, client, reply_targets, debug_mode))
+        let pairing_store = if let Some(db) = db {
+            Arc::new(crate::pairing::PairingStore::new(db, ownership_cache))
+        } else {
+            Arc::new(crate::pairing::PairingStore::new_noop())
+        };
+
+        Ok(Self::from_parts(
+            config,
+            client,
+            reply_targets,
+            debug_mode,
+            pairing_store,
+        ))
     }
 
     /// Construct a SignalChannel from pre-validated parts.
@@ -124,12 +141,14 @@ impl SignalChannel {
         client: Client,
         reply_targets: Arc<RwLock<LruCache<Uuid, String>>>,
         debug_mode: Arc<AtomicBool>,
+        pairing_store: Arc<crate::pairing::PairingStore>,
     ) -> Self {
         Self {
             config,
             client,
             reply_targets,
             debug_mode,
+            pairing_store,
         }
     }
 
@@ -172,40 +191,79 @@ impl SignalChannel {
         })
     }
 
-    /// Check if sender is allowed via config allow_from OR pairing store.
-    fn is_sender_allowed_with_pairing(&self, sender: &str) -> bool {
+    /// Resolve the sender's identity via config allow_from or pairing store.
+    /// Returns `Ok(Some(owner_id))` if paired, `Ok(None)` if allowed via config
+    /// (use sender as user_id), or `Err(())` if the sender is not admitted.
+    fn resolve_sender_identity(&self, sender: &str) -> Result<Option<String>, ()> {
+        // Config allow_from — backward compat, use sender as user_id.
         if self.is_sender_allowed(sender) {
-            return true;
+            return Ok(None);
         }
-        let store = PairingStore::new();
-        if let Ok(allowed) = store.read_allow_from("signal") {
-            return allowed.iter().any(|entry| entry == "*" || entry == sender);
+        let store = Arc::clone(&self.pairing_store);
+        let sender_owned = sender.to_string();
+        // SAFETY: block_in_place requires a multi-thread Tokio runtime.
+        // Signal channel message processing runs on a multi-thread runtime worker thread.
+        // Do NOT use this pattern in #[tokio::test] (which uses current_thread by default).
+        debug_assert!(
+            tokio::runtime::Handle::current().runtime_flavor()
+                == tokio::runtime::RuntimeFlavor::MultiThread,
+            "Signal channel requires a multi-thread Tokio runtime"
+        );
+        let result: Result<Option<crate::ownership::Identity>, crate::error::DatabaseError> =
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(async move { store.resolve_identity("signal", &sender_owned).await })
+            });
+        match result {
+            Ok(Some(identity)) => Ok(Some(identity.owner_id.to_string())),
+            Ok(None) => Err(()),
+            Err(e) => {
+                tracing::error!(sender = %sender, error = %e, "Signal: DB error resolving sender identity");
+                Err(())
+            }
         }
-        false
     }
 
     /// Handle pairing request for unapproved sender.
     /// Returns Ok(true) if message should be allowed (was already paired),
     /// Ok(false) if message was blocked but pairing request was processed.
     fn handle_pairing_request(&self, sender: &str, source_name: Option<&str>) -> Result<bool, ()> {
-        let store = PairingStore::new();
+        let store = Arc::clone(&self.pairing_store);
         let meta = serde_json::json!({
             "sender": sender,
             "name": source_name,
         });
+        let sender_owned = sender.to_string();
+        let meta_clone = meta.clone();
 
-        match store.upsert_request("signal", sender, Some(meta)) {
-            Ok(result) => {
+        // SAFETY: block_in_place requires a multi-thread Tokio runtime.
+        // Signal channel message processing runs on a multi-thread runtime worker thread.
+        // Do NOT use this pattern in #[tokio::test] (which uses current_thread by default).
+        debug_assert!(
+            tokio::runtime::Handle::current().runtime_flavor()
+                == tokio::runtime::RuntimeFlavor::MultiThread,
+            "Signal channel requires a multi-thread Tokio runtime"
+        );
+        let result: Result<crate::db::PairingRequestRecord, crate::error::DatabaseError> =
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async move {
+                    store
+                        .upsert_request("signal", &sender_owned, Some(meta_clone))
+                        .await
+                })
+            });
+
+        match result {
+            Ok(req) => {
                 tracing::info!(
                     sender = %sender,
-                    code = %result.code,
+                    code = %req.code,
                     "Signal: pairing request upserted"
                 );
-                if result.created {
-                    let message = format!(
-                        "To pair with this bot, run: `ironclaw pairing approve signal {}`",
-                        result.code
-                    );
+                let is_new = req.created;
+                if is_new {
+                    let message =
+                        crate::pairing::PairingCodeChallenge::new("signal").reply_text(&req.code);
                     let http_url = self.config.http_url.clone();
                     let account = self.config.account.clone();
                     let sender_owned = sender.to_string();
@@ -684,7 +742,10 @@ impl SignalChannel {
                     None
                 }
             })?;
-        let sender = Self::sender(envelope)?;
+        let mut sender = Self::sender(envelope)?;
+        // raw_sender preserves the original phone number for reply routing
+        // even when sender is overwritten with resolved owner_id.
+        let raw_sender = sender.clone();
 
         // Log sender info including UUID if available
         tracing::debug!(
@@ -751,21 +812,28 @@ impl SignalChannel {
             }
         } else {
             // DM message - apply DM policy
+            // resolved_user_id: owner_id if paired, sender if allowed via config/open
+            let resolved_user_id: String;
             match self.config.dm_policy.as_str() {
-                "open" => {}
+                "open" => {
+                    resolved_user_id = sender.clone();
+                }
                 "pairing" => {
-                    // Pairing policy: check allow_from + pairing store
-                    if !self.is_sender_allowed_with_pairing(&sender) {
-                        // Handle pairing request - this will create a request and send reply if new
-                        match self.handle_pairing_request(&sender, envelope.source_name.as_deref())
-                        {
-                            Ok(_) => {
-                                // Pairing request processed (new or existing), drop the message
-                                return None;
-                            }
-                            Err(()) => {
-                                // Error processing pairing, drop message
-                                return None;
+                    // Pairing policy: resolve identity via allow_from + pairing store
+                    match self.resolve_sender_identity(&sender) {
+                        Ok(Some(owner_id)) => {
+                            resolved_user_id = owner_id;
+                        }
+                        Ok(None) => {
+                            // Allowed via config allow_from — use sender as user_id
+                            resolved_user_id = sender.clone();
+                        }
+                        Err(()) => {
+                            // Not admitted — handle pairing request
+                            match self
+                                .handle_pairing_request(&sender, envelope.source_name.as_deref())
+                            {
+                                Ok(_) | Err(()) => return None,
                             }
                         }
                     }
@@ -776,12 +844,19 @@ impl SignalChannel {
                         tracing::debug!(sender = %sender, "Signal: sender not in allow_from, dropping");
                         return None;
                     }
+                    resolved_user_id = sender.clone();
                 }
-                _ => {}
+                _ => {
+                    resolved_user_id = sender.clone();
+                }
             }
+
+            // Replace sender with resolved user_id for downstream message construction.
+            // raw_sender (set at the top) preserves the phone number for reply routing.
+            sender = resolved_user_id;
         }
 
-        let target = Self::reply_target(data_msg, &sender);
+        let target = Self::reply_target(data_msg, &raw_sender);
 
         let timestamp = data_msg
             .timestamp
@@ -799,13 +874,15 @@ impl SignalChannel {
         // Build metadata with signal-specific routing info.
         let sender_uuid = envelope.source_uuid.as_deref();
         let metadata = serde_json::json!({
-            "signal_sender": &sender,
+            "signal_sender": &raw_sender,
             "signal_sender_uuid": sender_uuid,
             "signal_target": &target,
             "signal_timestamp": timestamp,
         });
 
-        let mut msg = IncomingMessage::new("signal", &sender, text).with_metadata(metadata);
+        let mut msg = IncomingMessage::new("signal", &sender, text)
+            .with_sender_id(&raw_sender)
+            .with_metadata(metadata);
 
         // Use sourceName as display name if available.
         if let Some(ref name) = envelope.source_name
@@ -826,7 +903,7 @@ impl SignalChannel {
             msg = msg.with_thread(uuid.clone());
         } else {
             // For regular DMs, generate a deterministic UUID from the phone number
-            msg = msg.with_thread(Self::thread_id_from_identifier(&sender));
+            msg = msg.with_thread(Self::thread_id_from_identifier(&raw_sender));
         }
 
         Some((msg, target))
@@ -846,9 +923,12 @@ impl Channel for SignalChannel {
         let client = self.client.clone();
         let reply_targets = Arc::clone(&self.reply_targets);
         let debug_mode = Arc::clone(&self.debug_mode);
+        let pairing_store = Arc::clone(&self.pairing_store);
 
         tokio::spawn(async move {
-            if let Err(e) = sse_listener(config, client, tx, reply_targets, debug_mode).await {
+            if let Err(e) =
+                sse_listener(config, client, tx, reply_targets, debug_mode, pairing_store).await
+            {
                 tracing::error!("Signal SSE listener exited with error: {e}");
             }
         });
@@ -1104,12 +1184,14 @@ async fn sse_listener(
     tx: tokio::sync::mpsc::Sender<IncomingMessage>,
     reply_targets: Arc<RwLock<LruCache<Uuid, String>>>,
     debug_mode: Arc<AtomicBool>,
+    pairing_store: Arc<crate::pairing::PairingStore>,
 ) -> Result<(), ChannelError> {
     let channel = SignalChannel::from_parts(
         config,
         client,
         Arc::clone(&reply_targets),
         Arc::clone(&debug_mode),
+        pairing_store,
     );
 
     let mut url = reqwest::Url::parse(&format!("{}/api/v1/events", channel.config.http_url))
@@ -1381,11 +1463,19 @@ mod tests {
     }
 
     fn make_channel() -> Result<SignalChannel, ChannelError> {
-        SignalChannel::new(make_config())
+        SignalChannel::new(
+            make_config(),
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )
     }
 
     fn make_channel_with_allowed_group(group_id: &str) -> Result<SignalChannel, ChannelError> {
-        SignalChannel::new(make_config_with_allowed_group(group_id))
+        SignalChannel::new(
+            make_config_with_allowed_group(group_id),
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )
     }
 
     fn make_envelope(source_number: Option<&str>, message: Option<&str>) -> Envelope {
@@ -1421,7 +1511,11 @@ mod tests {
     fn strips_trailing_slash() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.http_url = "http://127.0.0.1:8686/".to_string();
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
         assert_eq!(ch.config.http_url, "http://127.0.0.1:8686");
         Ok(())
     }
@@ -1474,7 +1568,11 @@ mod tests {
     fn wildcard_allows_anyone() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allow_from = vec!["*".to_string()];
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
         assert!(ch.is_sender_allowed("+9999999999"));
         Ok(())
     }
@@ -1497,7 +1595,11 @@ mod tests {
     fn empty_allowlist_denies_all() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allow_from = vec![];
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
         assert!(!ch.is_sender_allowed("+1111111111"));
         Ok(())
     }
@@ -1507,7 +1609,11 @@ mod tests {
         let uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
         let mut config = make_config();
         config.allow_from = vec![format!("uuid:{uuid}")];
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
         assert!(ch.is_sender_allowed(uuid));
         // Should not match phone numbers.
         assert!(!ch.is_sender_allowed("+1111111111"));
@@ -1519,7 +1625,11 @@ mod tests {
         let uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
         let mut config = make_config();
         config.allow_from = vec![uuid.to_string()];
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
         assert!(ch.is_sender_allowed(uuid));
         Ok(())
     }
@@ -1529,7 +1639,11 @@ mod tests {
         let mut config = make_config();
         config.allow_from = vec!["*".to_string()];
         config.allow_from_groups = vec!["group123".to_string()];
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
         assert!(ch.is_group_allowed("group123"));
         assert!(!ch.is_group_allowed("other_group"));
         Ok(())
@@ -1539,7 +1653,11 @@ mod tests {
     fn group_allowlist_wildcard() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allow_from_groups = vec!["*".to_string()];
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
         assert!(ch.is_group_allowed("any_group"));
         Ok(())
     }
@@ -1548,7 +1666,11 @@ mod tests {
     fn group_allowlist_empty_denies_all() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allow_from_groups = vec![];
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
         assert!(!ch.is_group_allowed("any_group"));
         Ok(())
     }
@@ -1574,7 +1696,11 @@ mod tests {
         // Empty allow_from_groups = DMs only. Group messages should be denied.
         let mut config = make_config();
         config.allow_from = vec!["*".to_string()];
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
 
         let env = Envelope {
             source: Some("+1111111111".to_string()),
@@ -1826,7 +1952,11 @@ mod tests {
         let mut config = make_config();
         config.allow_from = vec!["*".to_string()];
         config.ignore_stories = true;
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
         let mut env = make_envelope(Some("+1111111111"), Some("story text"));
         env.story_message = Some(serde_json::json!({}));
         assert!(ch.process_envelope(&env).is_none());
@@ -1838,7 +1968,11 @@ mod tests {
         let mut config = make_config();
         config.allow_from = vec!["*".to_string()];
         config.ignore_attachments = true;
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
         let env = Envelope {
             source: Some("+1111111111".to_string()),
             source_number: Some("+1111111111".to_string()),
@@ -1862,7 +1996,11 @@ mod tests {
         let uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
         let mut config = make_config();
         config.allow_from = vec!["*".to_string()];
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
 
         let env = Envelope {
             source: Some(uuid.to_string()),
@@ -1896,7 +2034,11 @@ mod tests {
         let mut config = make_config_with_allowed_group("testgroup");
         config.ignore_attachments = false;
         config.ignore_stories = false;
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
 
         let env = Envelope {
             source: Some(uuid.to_string()),
@@ -1932,7 +2074,11 @@ mod tests {
         let mut config = make_config();
         config.allow_from = vec!["*".to_string()];
         config.allow_from_groups = vec!["allowed_group".to_string()];
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
 
         let env = Envelope {
             source: Some("+1111111111".to_string()),
@@ -2186,7 +2332,11 @@ mod tests {
         config.allow_from = vec!["*".to_string()];
         config.allow_from_groups = vec!["*".to_string()];
         config.group_policy = "allowlist".to_string();
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
 
         let env = Envelope {
             source: Some("+2222222222".to_string()),
@@ -2219,7 +2369,11 @@ mod tests {
         let mut config = make_config();
         config.allow_from = vec!["*".to_string()];
         config.ignore_attachments = true;
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
 
         let env = Envelope {
             source: Some("+1111111111".to_string()),
@@ -2253,7 +2407,11 @@ mod tests {
         let mut config = make_config();
         config.allow_from = vec!["*".to_string()];
         config.ignore_attachments = false;
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
 
         let env = Envelope {
             source: Some("+1111111111".to_string()),
@@ -2287,7 +2445,11 @@ mod tests {
     fn process_envelope_source_name_sets_user_name() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allow_from = vec!["*".to_string()];
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
 
         let env = Envelope {
             source: Some("+3333333333".to_string()),
@@ -2312,7 +2474,11 @@ mod tests {
     fn process_envelope_empty_source_name_not_set() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allow_from = vec!["*".to_string()];
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
 
         let env = Envelope {
             source: Some("+3333333333".to_string()),
@@ -2368,7 +2534,11 @@ mod tests {
         config.allow_from = vec!["*".to_string()];
         config.allow_from_groups = vec!["*".to_string()];
         config.group_policy = "allowlist".to_string();
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
 
         let env = Envelope {
             source: Some("+1111111111".to_string()),
@@ -2403,7 +2573,11 @@ mod tests {
     fn process_envelope_uses_data_message_timestamp() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allow_from = vec!["*".to_string()];
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
 
         let env = Envelope {
             source: Some("+1111111111".to_string()),
@@ -2429,7 +2603,11 @@ mod tests {
     fn process_envelope_falls_back_to_envelope_timestamp() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allow_from = vec!["*".to_string()];
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
 
         let env = Envelope {
             source: Some("+1111111111".to_string()),
@@ -2454,7 +2632,11 @@ mod tests {
     fn process_envelope_generates_timestamp_when_missing() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allow_from = vec!["*".to_string()];
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
 
         let env = Envelope {
             source: Some("+1111111111".to_string()),
@@ -2552,7 +2734,11 @@ mod tests {
             "+2222222222".to_string(),
             "a1b2c3d4-e5f6-7890-abcd-ef1234567890".to_string(),
         ];
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
         assert!(ch.is_sender_allowed("+1111111111"));
         assert!(ch.is_sender_allowed("+2222222222"));
         assert!(ch.is_sender_allowed("a1b2c3d4-e5f6-7890-abcd-ef1234567890"));
@@ -2564,7 +2750,11 @@ mod tests {
     fn multiple_allow_from_groups() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allow_from_groups = vec!["group_a".to_string(), "group_b".to_string()];
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
         assert!(ch.is_group_allowed("group_a"));
         assert!(ch.is_group_allowed("group_b"));
         assert!(!ch.is_group_allowed("group_c"));
@@ -2576,7 +2766,11 @@ mod tests {
         let uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
         let mut config = make_config();
         config.allow_from = vec![format!("uuid:{uuid}"), "+1111111111".to_string()];
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
         // uuid:-prefixed entry should match bare UUID sender.
         assert!(ch.is_sender_allowed(uuid));
         // Phone numbers still work alongside UUID entries.
@@ -2595,7 +2789,11 @@ mod tests {
         let mut config = make_config();
         config.allow_from = vec!["*".to_string()];
         config.ignore_stories = false;
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
 
         let env = Envelope {
             source: Some("+1111111111".to_string()),
@@ -2625,7 +2823,11 @@ mod tests {
     fn strips_multiple_trailing_slashes() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.http_url = "http://127.0.0.1:8686///".to_string();
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
         assert_eq!(ch.config.http_url, "http://127.0.0.1:8686");
         Ok(())
     }
@@ -2633,7 +2835,11 @@ mod tests {
     #[test]
     fn preserves_url_without_trailing_slash() -> Result<(), ChannelError> {
         let config = make_config();
-        let ch = SignalChannel::new(config)?;
+        let ch = SignalChannel::new(
+            config,
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )?;
         assert_eq!(ch.config.http_url, "http://127.0.0.1:8686");
         Ok(())
     }
@@ -2714,7 +2920,12 @@ mod tests {
 
     #[test]
     fn conversation_context_extracts_sender() {
-        let ch = SignalChannel::new(make_config()).unwrap();
+        let ch = SignalChannel::new(
+            make_config(),
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )
+        .unwrap();
         let metadata = serde_json::json!({
             "signal_sender": "+1234567890",
             "signal_sender_uuid": "uuid-123",
@@ -2728,7 +2939,12 @@ mod tests {
 
     #[test]
     fn conversation_context_extracts_group() {
-        let ch = SignalChannel::new(make_config()).unwrap();
+        let ch = SignalChannel::new(
+            make_config(),
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )
+        .unwrap();
         let metadata = serde_json::json!({
             "signal_sender": "+1234567890",
             "signal_target": "group:mygroup"
@@ -2740,7 +2956,12 @@ mod tests {
 
     #[test]
     fn conversation_context_empty_for_unknown_channel() {
-        let ch = SignalChannel::new(make_config()).unwrap();
+        let ch = SignalChannel::new(
+            make_config(),
+            None,
+            std::sync::Arc::new(crate::ownership::OwnershipCache::new()),
+        )
+        .unwrap();
         let metadata = serde_json::json!({
             "unknown_key": "value"
         });

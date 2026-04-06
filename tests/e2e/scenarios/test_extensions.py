@@ -18,7 +18,7 @@ WASM binaries or external registry connections are needed.
 
 import json
 
-from helpers import SEL
+from helpers import AUTH_TOKEN, SEL
 
 # ─── Fixture data ─────────────────────────────────────────────────────────────
 
@@ -155,6 +155,73 @@ async def mock_ext_apis(page, *, installed=None, registry=None):
         await route.fulfill(status=200, content_type="application/json", body=registry_body)
 
     await page.route("**/api/extensions/registry", handle_registry)
+
+
+async def open_channels_with_mock_role(
+    browser,
+    ironclaw_server,
+    *,
+    role,
+    installed,
+    pairing_requests=None,
+    approve_response=None,
+):
+    """Open the channels settings page with mocked profile and pairing APIs."""
+    context = await browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+
+    await mock_ext_apis(page, installed=installed)
+
+    async def handle_profile(route):
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "id": "mock-user",
+                    "display_name": "Mock User",
+                    "email": "mock@example.test",
+                    "status": "active",
+                    "role": role,
+                    "metadata": {},
+                }
+            ),
+        )
+
+    await page.route("**/api/profile", handle_profile)
+
+    pairing_hits = {"list": 0, "approve": 0, "approve_body": None}
+
+    async def handle_pairing_list(route):
+        pairing_hits["list"] += 1
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"requests": pairing_requests or []}),
+        )
+
+    await page.route("**/api/pairing/test-channel", handle_pairing_list)
+
+    if approve_response is not None:
+        async def handle_pairing_approve(route):
+            pairing_hits["approve"] += 1
+            pairing_hits["approve_body"] = json.loads(route.request.post_data or "{}")
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(approve_response),
+            )
+
+        await page.route("**/api/pairing/test-channel/approve", handle_pairing_approve)
+
+    await page.goto(
+        f"{ironclaw_server}/?token={AUTH_TOKEN}",
+        wait_until="networkidle",
+        timeout=15000,
+    )
+    await page.locator(SEL["auth_screen"]).wait_for(state="hidden", timeout=10000)
+    await go_to_channels(page)
+    return context, page, pairing_hits
 
 
 async def wait_for_toast(page, text: str, *, timeout: int = 5000):
@@ -305,6 +372,103 @@ async def test_wasm_channel_pairing_state(page):
     card = await _load_wasm_channel(page, "pairing")
     assert await card.locator(SEL["ext_pairing_label"]).count() == 1
     assert await card.locator(SEL["ext_configure_btn"], has_text="Reconfigure").count() == 1
+
+
+async def test_wasm_channel_pairing_state_admin_shows_pending_requests(browser, ironclaw_server):
+    """Admins see pending pairing rows for channels awaiting pairing."""
+    context, page, pairing_hits = await open_channels_with_mock_role(
+        browser,
+        ironclaw_server,
+        role="admin",
+        installed=[{**_WASM_CHANNEL, "activation_status": "pairing"}],
+        pairing_requests=[{"code": "ABCD1234", "sender_id": "telegram-user-1"}],
+    )
+    try:
+        card = page.locator(SEL["channels_ext_card"], has_text="Test Channel").first
+        await card.wait_for(state="visible", timeout=5000)
+
+        pairing = card.locator(SEL["ext_pairing"])
+        await pairing.locator(SEL["pairing_heading"]).wait_for(state="visible", timeout=5000)
+        assert "Pending pairing requests" in await pairing.locator(SEL["pairing_heading"]).text_content()
+        assert "ABCD1234" in await pairing.locator(SEL["pairing_code"]).text_content()
+        assert "telegram-user-1" in await pairing.locator(SEL["pairing_sender"]).text_content()
+        assert await pairing.locator(".btn-ext.activate", has_text="Approve").count() == 1
+        assert pairing_hits["list"] >= 1
+    finally:
+        await context.close()
+
+
+async def test_wasm_channel_pairing_state_member_shows_claim_ui(browser, ironclaw_server):
+    """Members see the claim-code UI and never fetch the admin pending list."""
+    context, page, pairing_hits = await open_channels_with_mock_role(
+        browser,
+        ironclaw_server,
+        role="member",
+        installed=[{**_WASM_CHANNEL, "activation_status": "pairing"}],
+    )
+    try:
+        card = page.locator(SEL["channels_ext_card"], has_text="Test Channel").first
+        await card.wait_for(state="visible", timeout=5000)
+
+        pairing = card.locator(SEL["ext_pairing"])
+        await pairing.locator(SEL["pairing_heading"]).wait_for(state="visible", timeout=5000)
+        assert "pair this account" in (await pairing.locator(SEL["pairing_heading"]).text_content()).lower()
+        assert await pairing.locator(SEL["pairing_help"]).count() == 1
+        assert await pairing.locator(SEL["pairing_input"]).count() == 1
+        assert await pairing.locator(".btn-ext.activate").count() == 1
+        assert await pairing.locator(SEL["pairing_code"]).count() == 0
+        assert await pairing.locator(SEL["pairing_sender"]).count() == 0
+        assert pairing_hits["list"] == 0
+    finally:
+        await context.close()
+
+
+async def test_member_pairing_claim_submission_shows_success(browser, ironclaw_server):
+    """Submitting a claim code posts to the approve endpoint, clears the input, and shows a toast."""
+    context, page, pairing_hits = await open_channels_with_mock_role(
+        browser,
+        ironclaw_server,
+        role="member",
+        installed=[{**_WASM_CHANNEL, "activation_status": "pairing"}],
+        approve_response={"success": True},
+    )
+    try:
+        card = page.locator(SEL["channels_ext_card"], has_text="Test Channel").first
+        input_field = card.locator(SEL["pairing_input"])
+        await input_field.wait_for(state="visible", timeout=5000)
+        await input_field.fill("PAIR-1234")
+        await input_field.press("Enter")
+
+        await wait_for_toast(page, "Pairing approved")
+        assert pairing_hits["approve"] == 1
+        assert pairing_hits["approve_body"] == {"code": "PAIR-1234"}
+        assert await input_field.input_value() == ""
+    finally:
+        await context.close()
+
+
+async def test_member_pairing_claim_failure_shows_error(browser, ironclaw_server):
+    """Failed claim attempts show an error toast and leave the field available for retry."""
+    context, page, pairing_hits = await open_channels_with_mock_role(
+        browser,
+        ironclaw_server,
+        role="member",
+        installed=[{**_WASM_CHANNEL, "activation_status": "pairing"}],
+        approve_response={"success": False, "message": "Invalid pairing code"},
+    )
+    try:
+        card = page.locator(SEL["channels_ext_card"], has_text="Test Channel").first
+        input_field = card.locator(SEL["pairing_input"])
+        await input_field.wait_for(state="visible", timeout=5000)
+        await input_field.fill("bad-code")
+        await card.locator(SEL["ext_pairing"]).locator(".btn-ext.activate").click()
+
+        await wait_for_toast(page, "Invalid pairing code")
+        assert pairing_hits["approve"] == 1
+        assert await input_field.input_value() == "bad-code"
+        assert await input_field.is_visible()
+    finally:
+        await context.close()
 
 
 async def test_wasm_channel_active_state(page):
