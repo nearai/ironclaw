@@ -83,6 +83,7 @@ fn build_state(
         active_config: ActiveConfigSnapshot::default(),
         secrets_store: None,
         db_auth: None,
+        pairing_store: None,
         oauth_providers: None,
         oauth_state_store: None,
         oauth_base_url: None,
@@ -829,8 +830,8 @@ mod auth_enforcement {
 mod admin_role_enforcement {
     use super::*;
     use crate::channels::web::handlers::users::{
-        usage_summary_handler, users_activate_handler, users_detail_handler,
-        users_list_handler, users_suspend_handler, users_update_handler,
+        usage_summary_handler, users_activate_handler, users_detail_handler, users_list_handler,
+        users_suspend_handler, users_update_handler,
     };
     use axum::routing::patch;
 
@@ -866,10 +867,7 @@ mod admin_role_enforcement {
                 "/api/admin/users/{id}/activate",
                 post(users_activate_handler),
             )
-            .route(
-                "/api/admin/usage/summary",
-                get(usage_summary_handler),
-            )
+            .route("/api/admin/usage/summary", get(usage_summary_handler))
             .layer(middleware::from_fn_with_state(
                 crate::channels::web::auth::CombinedAuthState::from(auth),
                 auth_middleware,

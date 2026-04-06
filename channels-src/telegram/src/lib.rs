@@ -262,6 +262,9 @@ struct SentMessage {
 /// Workspace path for storing polling state.
 const POLLING_STATE_PATH: &str = "state/last_update_id";
 
+/// Workspace path for storing the most recently processed webhook update ID.
+const WEBHOOK_STATE_PATH: &str = "state/last_webhook_update_id";
+
 /// Workspace path for persisting owner_id across WASM callbacks.
 const OWNER_ID_PATH: &str = "state/owner_id";
 
@@ -641,8 +644,31 @@ impl Guest for TelegramChannel {
             }
         };
 
+        let last_processed = channel_host::workspace_read(WEBHOOK_STATE_PATH)
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(-1);
+        let update_id = update.update_id;
+        if update_id <= last_processed {
+            channel_host::log(
+                channel_host::LogLevel::Info,
+                &format!(
+                    "Skipping duplicate or stale webhook update {} (last processed {})",
+                    update_id, last_processed
+                ),
+            );
+            return json_response(200, serde_json::json!({"ok": true}));
+        }
+
         // Handle the update
         handle_update(update);
+
+        if let Err(err) = channel_host::workspace_write(WEBHOOK_STATE_PATH, &update_id.to_string())
+        {
+            channel_host::log(
+                channel_host::LogLevel::Error,
+                &format!("Failed to persist webhook update id: {}", err),
+            );
+        }
 
         // Always respond 200 quickly (Telegram expects fast responses)
         json_response(200, serde_json::json!({"ok": true}))
@@ -1634,8 +1660,8 @@ fn send_pairing_reply(chat_id: i64, code: &str) -> Result<(), String> {
     send_message(
         chat_id,
         &format!(
-            "To pair with this bot, run: `ironclaw pairing approve telegram {}`",
-            code
+            "Enter this code in IronClaw to pair your telegram account: `{}`. CLI fallback: `ironclaw pairing approve telegram {}`",
+            code, code
         ),
         None,
         Some("Markdown"),
@@ -2815,11 +2841,13 @@ mod tests {
         assert_eq!(attachments[0].id, "large_id"); // Largest photo
         assert_eq!(attachments[0].mime_type, "image/jpeg");
         assert_eq!(attachments[0].size_bytes, Some(54321));
-        assert!(attachments[0]
-            .source_url
-            .as_ref()
-            .unwrap()
-            .contains("large_id"));
+        assert!(
+            attachments[0]
+                .source_url
+                .as_ref()
+                .unwrap()
+                .contains("large_id")
+        );
     }
 
     #[test]

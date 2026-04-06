@@ -74,6 +74,34 @@ impl UserStore for LibSqlBackend {
         Ok(())
     }
 
+    async fn get_or_create_user(&self, user: UserRecord) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        let metadata_json = serde_json::to_string(&user.metadata)
+            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+
+        conn.execute(
+            r#"
+            INSERT OR IGNORE INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+            params![
+                user.id.as_str(),
+                opt_text(user.email.as_deref()),
+                user.display_name.as_str(),
+                user.status.as_str(),
+                user.role.as_str(),
+                fmt_ts(&user.created_at),
+                fmt_ts(&user.updated_at),
+                fmt_opt_ts(&user.last_login_at),
+                opt_text(user.created_by.as_deref()),
+                metadata_json,
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(format!("get_or_create_user: {e}")))?;
+        Ok(())
+    }
+
     async fn get_user(&self, id: &str) -> Result<Option<UserRecord>, DatabaseError> {
         let conn = self.connect().await?;
         let mut rows = conn
@@ -740,18 +768,24 @@ impl UserStore for LibSqlBackend {
             .next()
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?
-            .ok_or_else(|| DatabaseError::Query("admin usage summary query returned no rows".to_string()))?;
+            .ok_or_else(|| {
+                DatabaseError::Query("admin usage summary query returned no rows".to_string())
+            })?;
 
         let total_cost_str = get_text(&row, 5);
-        let total_cost =
-            rust_decimal::Decimal::from_str_exact(&total_cost_str).map_err(|e| {
-                DatabaseError::Query(format!("invalid total_cost value '{}': {}", total_cost_str, e))
-            })?;
+        let total_cost = rust_decimal::Decimal::from_str_exact(&total_cost_str).map_err(|e| {
+            DatabaseError::Query(format!(
+                "invalid total_cost value '{}': {}",
+                total_cost_str, e
+            ))
+        })?;
         let usage_cost_str = get_text(&row, 9);
-        let usage_cost =
-            rust_decimal::Decimal::from_str_exact(&usage_cost_str).map_err(|e| {
-                DatabaseError::Query(format!("invalid usage_cost value '{}': {}", usage_cost_str, e))
-            })?;
+        let usage_cost = rust_decimal::Decimal::from_str_exact(&usage_cost_str).map_err(|e| {
+            DatabaseError::Query(format!(
+                "invalid usage_cost value '{}': {}",
+                usage_cost_str, e
+            ))
+        })?;
 
         Ok(AdminUsageSummary {
             total_users: row

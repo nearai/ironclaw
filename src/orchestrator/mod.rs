@@ -138,7 +138,7 @@ pub async fn setup_orchestrator(
             prompt_queue: Arc::clone(&prompt_queue),
             store: db.cloned(),
             secrets_store: secrets_store.cloned(),
-            user_id: "default".to_string(),
+            user_id: config.owner_id.clone(),
             job_owner_cache: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         };
 
