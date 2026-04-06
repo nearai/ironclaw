@@ -62,6 +62,32 @@ use self::server::GatewayState;
 use self::sse::SseManager;
 use self::types::AppEvent;
 
+/// Components shared between full agent mode (`main.rs`) and standalone
+/// gateway mode (`cli/gateway.rs`). Used by [`GatewayChannel::from_components`]
+/// to eliminate wiring duplication.
+pub struct GatewayComponents {
+    pub llm: Arc<dyn crate::llm::LlmProvider>,
+    pub workspace: Option<Arc<Workspace>>,
+    pub session_manager: Arc<SessionManager>,
+    pub log_broadcaster: Arc<LogBroadcaster>,
+    pub log_level_handle: Arc<LogLevelHandle>,
+    pub tools: Arc<ToolRegistry>,
+    pub extension_manager: Option<Arc<ExtensionManager>>,
+    pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
+    pub db: Option<Arc<dyn Database>>,
+    pub skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
+    pub skill_catalog: Option<Arc<SkillCatalog>>,
+    pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
+    pub secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+    /// If set, enables gateway mode on the extension manager with this base URL.
+    pub gateway_base_url: Option<String>,
+    /// If set, creates a per-user workspace pool for multi-user isolation.
+    pub workspace_pool: Option<Arc<server::WorkspacePool>>,
+    /// If true and a DB is present, enable database-backed authentication
+    /// and bootstrap the admin user if none exist.
+    pub enable_db_auth: bool,
+}
+
 /// Web gateway channel implementing the Channel trait.
 pub struct GatewayChannel {
     config: GatewayConfig,
@@ -154,6 +180,98 @@ impl GatewayChannel {
             state,
             auth,
         }
+    }
+
+    /// Build a gateway channel from shared components.
+    ///
+    /// Wires all subsystems that are common to both full agent mode and
+    /// standalone gateway mode. Agent-loop-only features (scheduler,
+    /// job_manager, routine_engine, prompt_queue, active_config) must
+    /// be added separately via `with_*`.
+    pub async fn from_components(
+        config: GatewayConfig,
+        owner_id: String,
+        c: GatewayComponents,
+    ) -> Self {
+        let mut gw = Self::new(config, owner_id.clone());
+        gw = gw.with_llm_provider(c.llm);
+        if let Some(ws) = c.workspace {
+            gw = gw.with_workspace(ws);
+        }
+        if let Some(pool) = c.workspace_pool {
+            gw = gw.with_workspace_pool(pool);
+        }
+        gw = gw.with_session_manager(c.session_manager);
+        gw = gw.with_log_broadcaster(c.log_broadcaster);
+        gw = gw.with_log_level_handle(c.log_level_handle);
+        gw = gw.with_tool_registry(c.tools);
+        if let Some(ext_mgr) = c.extension_manager {
+            if let Some(ref gw_base) = c.gateway_base_url {
+                ext_mgr.enable_gateway_mode(gw_base.clone()).await;
+            }
+            gw = gw.with_extension_manager(ext_mgr);
+        }
+        if !c.catalog_entries.is_empty() {
+            gw = gw.with_registry_entries(c.catalog_entries);
+        }
+        if let Some(ref d) = c.db {
+            gw = gw.with_store(Arc::clone(d));
+            if c.enable_db_auth {
+                gw = gw.with_db_auth(Arc::clone(d));
+                // Bootstrap: create the first admin user so the owner appears
+                // in the Users admin panel immediately.
+                if let Ok(false) = d.has_any_users().await {
+                    let now = chrono::Utc::now();
+                    let user = crate::db::UserRecord {
+                        id: owner_id.clone(),
+                        email: None,
+                        display_name: owner_id.clone(),
+                        status: "active".to_string(),
+                        role: "admin".to_string(),
+                        created_at: now,
+                        updated_at: now,
+                        last_login_at: None,
+                        created_by: None,
+                        metadata: serde_json::json!({"source": "bootstrap"}),
+                    };
+                    let auth_token = gw.auth_token();
+                    if auth_token.is_empty() {
+                        if let Err(e) = d.create_user(&user).await {
+                            tracing::warn!("Failed to bootstrap admin user: {}", e);
+                        }
+                    } else {
+                        let hash = auth::hash_token(auth_token);
+                        let prefix = if auth_token.len() >= 8 {
+                            &auth_token[..8]
+                        } else {
+                            auth_token
+                        };
+                        if let Err(e) = d
+                            .create_user_with_token(&user, "bootstrap", &hash, prefix, None)
+                            .await
+                        {
+                            tracing::warn!("Failed to bootstrap admin user: {}", e);
+                        } else {
+                            tracing::info!(
+                                user_id = owner_id,
+                                "Bootstrapped admin user from gateway config"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(ss) = c.secrets_store {
+            gw = gw.with_secrets_store(ss);
+        }
+        if let Some(sr) = c.skill_registry {
+            gw = gw.with_skill_registry(sr);
+        }
+        if let Some(sc) = c.skill_catalog {
+            gw = gw.with_skill_catalog(sc);
+        }
+        gw = gw.with_cost_guard(c.cost_guard);
+        gw
     }
 
     /// Helper to rebuild state, copying existing fields and applying a mutation.
@@ -486,6 +604,11 @@ impl GatewayChannel {
         self.auth.env_auth.first_token().unwrap_or("")
     }
 
+    /// Get a reference to the combined auth state.
+    pub fn auth(&self) -> &CombinedAuthState {
+        &self.auth
+    }
+
     /// Get a reference to the shared gateway state (for the agent to push SSE events).
     pub fn state(&self) -> &Arc<GatewayState> {
         &self.state
@@ -512,7 +635,8 @@ impl Channel for GatewayChannel {
                 ),
             })?;
 
-        server::start_server(addr, self.state.clone(), self.auth.clone()).await?;
+        let (_bound_addr, _server_handle) =
+            server::start_server(addr, self.state.clone(), self.auth.clone()).await?;
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }

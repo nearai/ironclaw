@@ -124,6 +124,13 @@ async fn async_main() -> anyhow::Result<()> {
             init_cli_tracing();
             return run_pairing_command(pairing_cmd.clone()).await;
         }
+        Some(Command::Gateway(gw_cmd)) => {
+            // Serve initializes its own full tracing; other subcommands use lightweight CLI tracing.
+            if !matches!(gw_cmd, ironclaw::cli::GatewayCommand::Serve) {
+                init_cli_tracing();
+            }
+            return ironclaw::cli::run_gateway_command(gw_cmd.clone(), cli.config.as_deref()).await;
+        }
         Some(Command::Service(service_cmd)) => {
             init_cli_tracing();
             return run_service_command(service_cmd);
@@ -613,114 +620,64 @@ async fn async_main() -> anyhow::Result<()> {
     let mut gateway_url: Option<String> = None;
     let mut sse_manager: Option<std::sync::Arc<ironclaw::channels::web::sse::SseManager>> = None;
     if let Some(ref gw_config) = config.channels.gateway {
-        let mut gw = GatewayChannel::new(gw_config.clone(), config.owner_id.clone());
-        gw = gw.with_llm_provider(Arc::clone(&components.llm));
-        if let Some(ref ws) = components.workspace {
-            gw = gw.with_workspace(Arc::clone(ws));
-        }
-        // Create per-user workspace pool for multi-user mode.
-        if let Some(ref db) = components.db {
-            let emb_cache_config = ironclaw::workspace::EmbeddingCacheConfig {
-                max_entries: config.embeddings.cache_size,
-            };
-            let pool = Arc::new(ironclaw::channels::web::server::WorkspacePool::new(
-                Arc::clone(db),
-                components.embeddings.clone(),
-                emb_cache_config,
-                config.search.clone(),
-                config.workspace.clone(),
-            ));
-            gw = gw.with_workspace_pool(pool);
-        }
-        gw = gw.with_session_manager(Arc::clone(&session_manager));
-        gw = gw.with_log_broadcaster(Arc::clone(&log_broadcaster));
-        gw = gw.with_log_level_handle(Arc::clone(&log_level_handle));
-        gw = gw.with_tool_registry(Arc::clone(&components.tools));
-        if let Some(ref ext_mgr) = components.extension_manager {
-            // Enable gateway mode so MCP OAuth returns auth URLs to the frontend
-            // instead of calling open::that() on the server.
-            let gw_base = config
-                .tunnel
-                .public_url
-                .clone()
-                .unwrap_or_else(|| format!("http://{}:{}", gw_config.host, gw_config.port));
-            ext_mgr.enable_gateway_mode(gw_base).await;
-            gw = gw.with_extension_manager(Arc::clone(ext_mgr));
-        }
-        if !components.catalog_entries.is_empty() {
-            gw = gw.with_registry_entries(components.catalog_entries.clone());
-        }
+        let gw_base = config
+            .tunnel
+            .public_url
+            .clone()
+            .unwrap_or_else(|| format!("http://{}:{}", gw_config.host, gw_config.port));
+
+        // Build gateway from shared components (same factory as cli/gateway.rs).
+        let mut gw = GatewayChannel::from_components(gw_config.clone(), config.owner_id.clone(), {
+            // Build workspace pool for multi-user isolation if DB is available.
+            let workspace_pool = components.db.as_ref().map(|db| {
+                let emb_cache_config = ironclaw::workspace::EmbeddingCacheConfig {
+                    max_entries: config.embeddings.cache_size,
+                };
+                Arc::new(ironclaw::channels::web::server::WorkspacePool::new(
+                    Arc::clone(db),
+                    components.embeddings.clone(),
+                    emb_cache_config,
+                    config.search.clone(),
+                    config.workspace.clone(),
+                ))
+            });
+
+            ironclaw::channels::web::GatewayComponents {
+                llm: Arc::clone(&components.llm),
+                workspace: components.workspace.clone(),
+                session_manager: Arc::clone(&session_manager),
+                log_broadcaster: Arc::clone(&log_broadcaster),
+                log_level_handle: Arc::clone(&log_level_handle),
+                tools: Arc::clone(&components.tools),
+                extension_manager: components.extension_manager.clone(),
+                catalog_entries: components.catalog_entries.clone(),
+                db: components.db.clone(),
+                skill_registry: components.skill_registry.clone(),
+                skill_catalog: components.skill_catalog.clone(),
+                cost_guard: Arc::clone(&components.cost_guard),
+                secrets_store: components.secrets_store.clone(),
+                gateway_base_url: Some(gw_base),
+                workspace_pool,
+                enable_db_auth: true,
+            }
+        })
+        .await;
+
+        // Wire pairing store (requires ownership_cache from main).
         if let Some(ref d) = components.db {
-            gw = gw.with_store(Arc::clone(d));
-            gw = gw.with_db_auth(Arc::clone(d));
             let pairing_store = Arc::new(ironclaw::pairing::PairingStore::new(
                 Arc::clone(d),
                 Arc::clone(&components.ownership_cache),
             ));
             gw = gw.with_pairing_store(pairing_store);
-            if let Some(ref ss) = components.secrets_store {
-                gw = gw.with_secrets_store(Arc::clone(ss));
-            }
+        }
 
-            // Bootstrap: create the first admin user from single-user config
-            // so the owner appears in the Users admin panel immediately.
-            if let Ok(false) = d.has_any_users().await {
-                let now = chrono::Utc::now();
-                let user = ironclaw::db::UserRecord {
-                    id: config.owner_id.clone(),
-                    email: None,
-                    display_name: config.owner_id.clone(),
-                    status: "active".to_string(),
-                    role: "admin".to_string(),
-                    created_at: now,
-                    updated_at: now,
-                    last_login_at: None,
-                    created_by: None,
-                    metadata: serde_json::json!({"source": "bootstrap"}),
-                };
-                // Create admin user + bootstrap token atomically.
-                let auth_token = gw.auth_token();
-                if auth_token.is_empty() {
-                    if let Err(e) = d.create_user(&user).await {
-                        tracing::warn!("Failed to bootstrap admin user: {}", e);
-                    }
-                } else {
-                    use ironclaw::channels::web::auth::hash_token;
-                    let hash = hash_token(auth_token);
-                    let prefix = if auth_token.len() >= 8 {
-                        &auth_token[..8]
-                    } else {
-                        auth_token
-                    };
-                    if let Err(e) = d
-                        .create_user_with_token(&user, "bootstrap", &hash, prefix, None)
-                        .await
-                    {
-                        tracing::warn!("Failed to bootstrap admin user: {}", e);
-                    } else {
-                        tracing::debug!(
-                            user_id = config.owner_id,
-                            "Bootstrapped admin user from gateway config"
-                        );
-                    }
-                }
-            }
-        }
-        if let Some(ref ss) = components.secrets_store {
-            gw = gw.with_secrets_store(Arc::clone(ss));
-        }
+        // Agent-loop-only features beyond the shared factory:
         if let Some(ref jm) = container_job_manager {
             gw = gw.with_job_manager(Arc::clone(jm));
         }
         gw = gw.with_scheduler(scheduler_slot.clone());
         gw = gw.with_routine_engine_slot(Arc::clone(&shared_routine_engine_slot));
-        if let Some(ref sr) = components.skill_registry {
-            gw = gw.with_skill_registry(Arc::clone(sr));
-        }
-        if let Some(ref sc) = components.skill_catalog {
-            gw = gw.with_skill_catalog(Arc::clone(sc));
-        }
-        gw = gw.with_cost_guard(Arc::clone(&components.cost_guard));
         gw = gw.with_oauth(config.oauth.clone(), gw_config.port);
         {
             let active_model = components.llm.model_name().to_string();

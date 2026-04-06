@@ -1,5 +1,6 @@
 ---
 source: src/cli/mod.rs
+assertion_line: 463
 expression: help
 ---
 IronClaw is a secure AI assistant. Use 'ironclaw <subcommand> --help' for details.
@@ -20,6 +21,7 @@ Commands:
   mcp         Manage MCP servers
   memory      Manage workspace memory
   pairing     Manage DM pairing
+  gateway     Manage web gateway
   service     Manage OS service
   skills      Manage skills
   hooks       Manage lifecycle hooks

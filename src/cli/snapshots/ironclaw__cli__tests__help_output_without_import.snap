@@ -1,6 +1,6 @@
 ---
 source: src/cli/mod.rs
-assertion_line: 422
+assertion_line: 455
 expression: help
 ---
 Secure personal AI assistant that protects your data and expands its capabilities
@@ -18,6 +18,7 @@ Commands:
   mcp         Manage MCP servers
   memory      Manage workspace memory
   pairing     Manage DM pairing
+  gateway     Manage web gateway
   service     Manage OS service
   skills      Manage skills
   hooks       Manage lifecycle hooks

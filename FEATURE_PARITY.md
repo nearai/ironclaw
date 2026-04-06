@@ -156,7 +156,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 |---------|----------|----------|----------|-------|
 | `run` (agent) | ✅ | ✅ | - | Default command |
 | `tool install/list/remove` | ✅ | ✅ | - | WASM tools |
-| `gateway start/stop` | ✅ | ❌ | P2 | |
+| `gateway serve/start/stop/status` | ✅ | ✅ | - | `serve` (foreground), `start` (background daemon), `stop` (SIGTERM, Unix-only), `status` (PID + health). Standalone: read-only APIs; agent-dependent APIs return 503. |
 | `onboard` (wizard) | ✅ | ✅ | - | Interactive setup |
 | `tui` | ✅ | ✅ | - | Ratatui TUI |
 | `config` | ✅ | ✅ | - | Read/write config plus validate/path helpers |
