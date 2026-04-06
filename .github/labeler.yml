@@ -74,12 +74,6 @@
           - src/db/libsql_backend.rs
           - src/db/libsql_migrations.rs
 
-"DB MIGRATION":
-  - changed-files:
-      - any-glob-to-any-file:
-          - migrations/**
-          - src/db/libsql_migrations.rs
-
 "scope: safety":
   - changed-files:
       - any-glob-to-any-file:
@@ -170,3 +164,9 @@
       - any-glob-to-any-file:
           - Cargo.toml
           - Cargo.lock
+
+"DB MIGRATION":
+  - changed-files:
+      - any-glob-to-any-file:
+          - migrations/**
+          - src/db/libsql_migrations.rs
