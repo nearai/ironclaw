@@ -198,6 +198,15 @@ impl Drop for ScopedEnvVar {
 }
 
 #[cfg(feature = "integration")]
+fn slack_test_http_rewrite_map(base_url: &str) -> String {
+    serde_json::json!({
+        "slack.com": base_url,
+        "files.slack.com": base_url,
+    })
+    .to_string()
+}
+
+#[cfg(feature = "integration")]
 async fn expect_no_message(stream: &mut ironclaw::channels::MessageStream, timeout_ms: u64) {
     let result = timeout(Duration::from_millis(timeout_ms), stream.next()).await;
     assert!(
@@ -674,8 +683,8 @@ async fn test_respond_posts_to_slack_api() {
         let _ = axum::serve(listener, app).await;
     });
     let _guard = ScopedEnvVar::set(
-        "IRONCLAW_TEST_SLACK_API_BASE_URL",
-        &format!("http://{addr}"),
+        "IRONCLAW_TEST_HTTP_REWRITE_MAP",
+        &slack_test_http_rewrite_map(&format!("http://{addr}")),
     );
 
     let config = serde_json::json!({

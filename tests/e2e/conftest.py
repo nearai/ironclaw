@@ -5,6 +5,7 @@ Function-scoped: fresh browser context and page per test.
 """
 
 import asyncio
+import json
 import os
 import signal
 import socket
@@ -990,7 +991,12 @@ async def slack_e2e_server(ironclaw_binary, mock_llm_server, fake_slack_server):
         "EMBEDDING_ENABLED": "false",
         "SKILLS_ENABLED": "false",
         "ONBOARD_COMPLETED": "true",
-        "IRONCLAW_TEST_SLACK_API_BASE_URL": fake_slack_server,
+        "IRONCLAW_TEST_HTTP_REWRITE_MAP": json.dumps(
+            {
+                "slack.com": fake_slack_server,
+                "files.slack.com": fake_slack_server,
+            }
+        ),
         "SECRETS_MASTER_KEY": "dGVzdC1zbGFjay1tYXN0ZXIta2V5LTMyYnl0ZXM=",
         "PATH": os.environ.get("PATH", ""),
     }

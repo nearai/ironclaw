@@ -61,7 +61,7 @@ use crate::tools::wasm::credential_injector::{
 };
 use ironclaw_safety::LeakDetector;
 
-const SLACK_TEST_API_BASE_ENV: &str = "IRONCLAW_TEST_SLACK_API_BASE_URL";
+const TEST_HTTP_REWRITE_MAP_ENV: &str = "IRONCLAW_TEST_HTTP_REWRITE_MAP";
 
 const WEBSOCKET_EVENT_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue";
 const WEBSOCKET_EVENT_PROCESSING_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue_processing";
@@ -383,14 +383,13 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             self.inject_host_credentials(&host, &mut headers, &mut url);
         }
 
-        // Rewrite Slack API URLs to point at a test server when the override
-        // env var is set. This must happen after credential injection so that
-        // the real host pattern still matches for token lookup.
-        if let Some(rewritten) = rewrite_slack_api_url_for_testing(&url) {
+        // Rewrite outbound HTTP URLs for test infra after credential injection
+        // so host-based credential lookup still uses the original target host.
+        if let Some(rewritten) = rewrite_http_url_for_testing(&url) {
             tracing::info!(
                 original_url = %url,
                 rewritten_url = %rewritten,
-                "Rewriting Slack API request to test base URL"
+                "Rewriting outbound HTTP request to test base URL"
             );
             url = rewritten;
         }
@@ -3972,26 +3971,24 @@ fn extract_host_from_url(url: &str) -> Option<String> {
     })
 }
 
-/// Rewrite Slack API URLs for testing.
+/// Rewrite outbound HTTP URLs for testing.
 ///
-/// When `IRONCLAW_TEST_SLACK_API_BASE_URL` is set, redirects requests to
-/// `slack.com` and `files.slack.com` to the test server. This enables E2E
-/// tests to run against a fake Slack API without touching the real one.
-fn rewrite_slack_api_url_for_testing(url: &str) -> Option<String> {
-    let override_base = std::env::var(SLACK_TEST_API_BASE_ENV)
-        .ok()
-        .map(|value| value.trim().trim_end_matches('/').to_string())
-        .filter(|value| !value.is_empty())?;
-
+/// `IRONCLAW_TEST_HTTP_REWRITE_MAP` is a JSON object mapping exact hostnames to
+/// replacement base URLs. For example:
+/// `{"slack.com":"http://127.0.0.1:8080","files.slack.com":"http://127.0.0.1:8080"}`
+///
+/// The replacement preserves the original path and query string so tests can
+/// point production hosts at local fakes without adding channel-specific code.
+fn rewrite_http_url_for_testing(url: &str) -> Option<String> {
     let parsed = url::Url::parse(url).ok()?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return None;
     }
 
-    let host = parsed.host_str()?;
-    if !host.eq_ignore_ascii_case("slack.com") && !host.eq_ignore_ascii_case("files.slack.com") {
-        return None;
-    }
+    let host = parsed.host_str()?.to_lowercase();
+    let override_base = std::env::var(TEST_HTTP_REWRITE_MAP_ENV)
+        .ok()
+        .and_then(|value| parse_test_http_rewrite_map(&value).get(&host).cloned())?;
 
     let path = parsed.path().trim_start_matches('/');
     let mut rewritten = format!("{override_base}/{path}");
@@ -4000,6 +3997,35 @@ fn rewrite_slack_api_url_for_testing(url: &str) -> Option<String> {
         rewritten.push_str(query);
     }
     Some(rewritten)
+}
+
+fn parse_test_http_rewrite_map(raw: &str) -> HashMap<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return HashMap::new();
+    }
+
+    match serde_json::from_str::<HashMap<String, String>>(trimmed) {
+        Ok(map) => map
+            .into_iter()
+            .filter_map(|(host, base)| {
+                let host = host.trim().to_lowercase();
+                let base = base.trim().trim_end_matches('/').to_string();
+                if host.is_empty() || base.is_empty() {
+                    return None;
+                }
+                Some((host, base))
+            })
+            .collect(),
+        Err(error) => {
+            tracing::warn!(
+                env_var = TEST_HTTP_REWRITE_MAP_ENV,
+                %error,
+                "Ignoring invalid test HTTP rewrite map"
+            );
+            HashMap::new()
+        }
+    }
 }
 
 fn should_skip_response_leak_scan(url: &str) -> bool {
@@ -4180,11 +4206,11 @@ mod tests {
         PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
     use crate::channels::wasm::wrapper::{
-        EmitDispatchContext, HttpResponse, SLACK_TEST_API_BASE_ENV, WasmChannel,
+        EmitDispatchContext, HttpResponse, TEST_HTTP_REWRITE_MAP_ENV, WasmChannel,
         WebsocketRuntimeConfig, build_discord_gateway_presence_update,
         build_websocket_identify_message, build_websocket_resume_message,
         discord_gateway_presence_status, drain_guest_logs, parse_websocket_invalid_session,
-        parse_websocket_ready_session, rewrite_slack_api_url_for_testing,
+        parse_websocket_ready_session, rewrite_http_url_for_testing,
         should_warn_on_heartbeat_interval, uses_owner_broadcast_target,
         websocket_heartbeat_sleep_duration, websocket_reconnect_backoff,
     };
@@ -5985,7 +6011,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_slack_api_url_for_testing_uses_test_override() {
+    fn test_rewrite_http_url_for_testing_uses_host_map() {
         use std::sync::{Mutex, OnceLock};
 
         static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
@@ -5994,21 +6020,24 @@ mod tests {
             .lock()
             .expect("env mutex poisoned");
 
-        let original = std::env::var(SLACK_TEST_API_BASE_ENV).ok();
+        let original = std::env::var(TEST_HTTP_REWRITE_MAP_ENV).ok();
 
         // SAFETY: guarded by ENV_MUTEX — no concurrent env access.
         unsafe {
-            std::env::set_var(SLACK_TEST_API_BASE_ENV, "http://localhost:9999");
+            std::env::set_var(
+                TEST_HTTP_REWRITE_MAP_ENV,
+                r#"{"slack.com":"http://localhost:9999","files.slack.com":"http://localhost:9999"}"#,
+            );
         }
 
         // slack.com API call
-        let result = rewrite_slack_api_url_for_testing("https://slack.com/api/chat.postMessage");
+        let result = rewrite_http_url_for_testing("https://slack.com/api/chat.postMessage");
         assert_eq!(
             result.as_deref(),
             Some("http://localhost:9999/api/chat.postMessage")
         );
         // files.slack.com file download
-        let result = rewrite_slack_api_url_for_testing(
+        let result = rewrite_http_url_for_testing(
             "https://files.slack.com/files-pri/T123/download/test.txt",
         );
         assert_eq!(
@@ -6016,15 +6045,15 @@ mod tests {
             Some("http://localhost:9999/files-pri/T123/download/test.txt")
         );
         // Non-Slack URL should not be rewritten
-        let result = rewrite_slack_api_url_for_testing("https://api.telegram.org/bot123/getMe");
+        let result = rewrite_http_url_for_testing("https://api.telegram.org/bot123/getMe");
         assert!(result.is_none());
 
         // SAFETY: guarded by ENV_MUTEX — restore original state.
         unsafe {
             if let Some(ref val) = original {
-                std::env::set_var(SLACK_TEST_API_BASE_ENV, val);
+                std::env::set_var(TEST_HTTP_REWRITE_MAP_ENV, val);
             } else {
-                std::env::remove_var(SLACK_TEST_API_BASE_ENV);
+                std::env::remove_var(TEST_HTTP_REWRITE_MAP_ENV);
             }
         }
     }
