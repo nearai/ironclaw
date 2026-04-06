@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use crate::auth::resolve_secret_for_runtime;
 use crate::extensions::naming::canonicalize_extension_name;
 use crate::extensions::{ConfigureResult, ExtensionError};
 use crate::secrets::SecretsStore;
@@ -165,29 +166,39 @@ impl AuthManager {
 
         let mut missing = Vec::new();
         for mapping in &matched {
-            match self
-                .secrets_store
-                .exists(user_id, &mapping.secret_name)
-                .await
+            let oauth_refresh = credential_registry.oauth_refresh_for_secret(&mapping.secret_name);
+            let db = self
+                .tools
+                .as_ref()
+                .and_then(|tools| tools.database().map(Arc::as_ref));
+            match resolve_secret_for_runtime(
+                self.secrets_store.as_ref(),
+                user_id,
+                &mapping.secret_name,
+                db,
+                oauth_refresh.as_ref(),
+                true,
+            )
+            .await
             {
-                Ok(true) => {
+                Ok(_) => {
                     // At least one credential is configured — tool can proceed.
                     // (Multiple mappings for the same host is normal, e.g.,
                     // Bearer token + org header. If any is present, we allow
                     // execution and let the HTTP tool handle partial injection.)
                     return AuthCheckResult::Ready;
                 }
-                Ok(false) => {
+                Err(error) if error.requires_authentication() => {
                     missing.push(
                         self.describe_missing_credential(&mapping.secret_name, user_id)
                             .await,
                     );
                 }
-                Err(e) => {
+                Err(error) => {
                     tracing::debug!(
                         secret = %mapping.secret_name,
-                        error = %e,
-                        "Failed to check credential existence — assuming missing"
+                        error = ?error,
+                        "Failed to resolve credential during pre-flight auth — assuming missing"
                     );
                     missing.push(MissingCredential {
                         credential_name: mapping.secret_name.clone(),
@@ -1127,6 +1138,27 @@ Test skill
         assert!(
             matches!(result, AuthCheckResult::Ready),
             "Expected Ready, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_http_expired_credential_without_refresh_is_missing() {
+        let store = test_store();
+        let params = crate::secrets::CreateSecretParams::new("github_token", "ghp_test123")
+            .with_expiry(chrono::Utc::now() - chrono::Duration::hours(1));
+        store.create("user1", params).await.unwrap();
+
+        let mgr = make_auth_manager(store);
+        let registry = make_registry_with_mapping("github_token", "api.github.com");
+
+        let params = serde_json::json!({"url": "https://api.github.com/repos"});
+        let result = mgr
+            .check_action_auth("http", &params, "user1", &registry)
+            .await;
+
+        assert!(
+            matches!(result, AuthCheckResult::MissingCredentials(ref m) if m.len() == 1),
+            "Expected MissingCredentials for expired credential, got {result:?}"
         );
     }
 
