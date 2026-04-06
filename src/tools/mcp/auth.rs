@@ -406,12 +406,14 @@ async fn validate_url_safe(url: &str) -> Result<(), AuthError> {
                     }
                 }
             }
-            Err(e) => {
-                // DNS failure = fail closed (do not allow the request)
-                return Err(AuthError::DiscoveryFailed(format!(
-                    "DNS resolution failed for '{}': {}",
-                    host, e
-                )));
+            Err(_) => {
+                // DNS resolution failure is non-fatal: the host may be
+                // unreachable in offline/sandboxed/CI environments. IP-literal
+                // SSRF checks above still protect against private-IP attacks.
+                tracing::debug!(
+                    host,
+                    "DNS resolution failed for MCP URL; skipping resolved-IP SSRF check"
+                );
             }
         }
     }

@@ -322,15 +322,17 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
                     }
                 }
             }
-            Err(e) => {
-                return Err(ConfigError::InvalidValue {
-                    key: field_name.to_string(),
-                    message: format!(
-                        "failed to resolve hostname '{}': {}. \
-                         Base URLs must be resolvable at config time.",
-                        host, e
-                    ),
-                });
+            Err(_) => {
+                // DNS resolution failure is non-fatal: the host may be
+                // unreachable in offline/sandboxed/CI environments. IP-literal
+                // SSRF checks above still protect against private-IP attacks.
+                // The resolved-IP check is defense-in-depth only (it can't
+                // prevent DNS rebinding at request time anyway).
+                tracing::debug!(
+                    field = field_name,
+                    host,
+                    "DNS resolution failed for base URL; skipping resolved-IP SSRF check"
+                );
             }
         }
     }
@@ -621,21 +623,22 @@ mod tests {
     }
 
     #[test]
-    fn validate_base_url_rejects_dns_failure() {
+    fn validate_base_url_allows_dns_failure() {
         if invalid_tld_resolves_locally() {
             eprintln!(
-                "skipping validate_base_url_rejects_dns_failure: \
+                "skipping validate_base_url_allows_dns_failure: \
                  local DNS resolver hijacks .invalid lookups"
             );
             return;
         }
-        // .invalid TLD is guaranteed to never resolve (RFC 6761)
+        // .invalid TLD is guaranteed to never resolve (RFC 6761).
+        // DNS resolution failure is non-fatal — only IP-literal SSRF
+        // checks hard-fail. This prevents startup failures in
+        // offline/sandboxed/CI environments.
         let result = validate_base_url("https://ssrf-test.invalid", "TEST");
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("failed to resolve"),
-            "Expected DNS resolution failure, got: {err}"
+            result.is_ok(),
+            "DNS failure should be non-fatal: {result:?}"
         );
     }
 

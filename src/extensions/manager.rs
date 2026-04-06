@@ -8799,6 +8799,20 @@ mod tests {
                 _mutex: guard,
             }
         }
+
+        fn clear(key: &'static str) -> Self {
+            let guard = crate::config::helpers::lock_env();
+            let original = std::env::var(key).ok();
+            // SAFETY: Under ENV_MUTEX, no concurrent env access.
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self {
+                key,
+                original,
+                _mutex: guard,
+            }
+        }
     }
 
     impl Drop for ScopedEnvVar {
@@ -9428,6 +9442,10 @@ mod tests {
         // have their colon URL-encoded to %3A, as this breaks the validation endpoint.
         // Previously: form_urlencoded::byte_serialize encoded the token, causing 404s.
         // Fixed by removing URL-encoding and using the token directly.
+        //
+        // Clear the test override env var so a parallel test can't race-inject a
+        // non-default base URL and make our expected-URL assertion fail.
+        let _guard = ScopedEnvVar::clear(TELEGRAM_TEST_API_BASE_ENV);
         let token = "123456789:AABBccDDeeFFgg_Test-Token";
 
         let url = telegram_bot_api_url(token, "getMe");
