@@ -15,6 +15,7 @@ fn test_gateway() -> GatewayChannel {
             host: "127.0.0.1".to_string(),
             port: 0,
             auth_token: Some("test-token".to_string()),
+            max_connections: 100,
             workspace_read_scopes: vec![],
             memory_layers: vec![],
             oidc: None,
