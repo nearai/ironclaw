@@ -59,8 +59,9 @@ impl JobState {
 
         matches!(
             (self, target),
-            // From Pending
-            (Pending, InProgress) | (Pending, Cancelled) |
+            // From Pending (Failed added for self-repair: stuck Pending jobs
+            // that exhaust repair attempts must be terminable)
+            (Pending, InProgress) | (Pending, Failed) | (Pending, Cancelled) |
             // From InProgress
             (InProgress, Completed) | (InProgress, Failed) |
             (InProgress, Stuck) | (InProgress, Cancelled) |
