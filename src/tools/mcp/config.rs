@@ -473,6 +473,20 @@ pub async fn bootstrap_nearai_mcp_server(
     Ok(true)
 }
 
+/// Load MCP servers after bootstrapping NEAR AI MCP server (when env vars are set).
+pub async fn load_mcp_servers_ready(
+    db: Option<&dyn crate::db::Database>,
+    user_id: &str,
+) -> Result<McpServersFile, ConfigError> {
+    if let Err(e) = bootstrap_nearai_mcp_server(db, user_id).await {
+        tracing::warn!("Failed to bootstrap NEAR AI MCP server: {}", e);
+    }
+    match db {
+        Some(store) => load_mcp_servers_from_db(store, user_id).await,
+        None => load_mcp_servers().await,
+    }
+}
+
 /// Get the default MCP servers configuration path.
 pub fn default_config_path() -> PathBuf {
     ironclaw_base_dir().join("mcp-servers.json")

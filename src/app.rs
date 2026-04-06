@@ -477,20 +477,10 @@ impl AppBuilder {
         ),
         anyhow::Error,
     > {
-        use crate::tools::mcp::config::load_mcp_servers_from_db;
         use crate::tools::wasm::{WasmToolLoader, load_dev_tools};
 
         let mcp_session_manager = Arc::new(McpSessionManager::new());
         let mcp_process_manager = Arc::new(McpProcessManager::new());
-
-        if let Err(e) = crate::tools::mcp::config::bootstrap_nearai_mcp_server(
-            self.db.as_deref(),
-            &self.config.owner_id,
-        )
-        .await
-        {
-            tracing::warn!("Failed to bootstrap NEAR AI MCP server: {}", e);
-        }
 
         // Create WASM tool runtime eagerly so extensions installed after startup
         // (e.g. via the web UI) can still be activated. The tools directory is only
@@ -569,11 +559,9 @@ impl AppBuilder {
             let pm = Arc::clone(&mcp_process_manager);
             let owner_id = self.config.owner_id.clone();
             async move {
-                let servers_result = if let Some(ref d) = db {
-                    load_mcp_servers_from_db(d.as_ref(), &owner_id).await
-                } else {
-                    crate::tools::mcp::config::load_mcp_servers().await
-                };
+                let servers_result =
+                    crate::tools::mcp::config::load_mcp_servers_ready(db.as_deref(), &owner_id)
+                        .await;
                 match servers_result {
                     Ok(servers) => {
                         let enabled: Vec<_> = servers.enabled_servers().cloned().collect();

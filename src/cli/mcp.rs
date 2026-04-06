@@ -646,29 +646,20 @@ async fn toggle_server(name: String, enable: bool, disable: bool) -> anyhow::Res
 /// Try to connect to the database (backend-agnostic).
 /// Returns both the optional database handle and the resolved owner_id.
 async fn connect_db() -> (Option<Arc<dyn Database>>, String) {
-    let Ok(app_config) = Config::from_env().await else {
+    let Ok(config) = Config::from_env().await else {
         return (None, "<unset>".to_string());
     };
-    let owner_id = app_config.owner_id.clone();
-    let db = crate::db::connect_from_config(&app_config.database)
-        .await
-        .ok();
-    if let Err(e) = config::bootstrap_nearai_mcp_server(db.as_deref(), &owner_id).await {
-        tracing::warn!("Failed to bootstrap NEAR AI MCP server: {}", e);
-    }
+    let owner_id = config.owner_id.clone();
+    let db = crate::db::connect_from_config(&config.database).await.ok();
     (db, owner_id)
 }
 
-/// Load MCP servers (DB if available, else disk).
+/// Load MCP servers (DB if available, else disk), after NEAR AI env bootstrap when applicable.
 async fn load_servers(
     db: Option<&dyn Database>,
     owner_id: &str,
 ) -> Result<McpServersFile, config::ConfigError> {
-    if let Some(db) = db {
-        config::load_mcp_servers_from_db(db, owner_id).await
-    } else {
-        config::load_mcp_servers().await
-    }
+    config::load_mcp_servers_ready(db, owner_id).await
 }
 
 /// Save MCP servers (DB if available, else disk).
