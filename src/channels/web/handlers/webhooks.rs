@@ -90,11 +90,12 @@ pub async fn webhook_trigger_handler(
             "Unscoped webhooks disabled in multi-tenant mode. Use /api/webhooks/u/{user_id}/{path} instead.".to_string(),
         ));
     }
-    let owner_user_id = state
-        .workspace
-        .as_ref()
-        .map(|workspace| workspace.user_id().to_owned());
-    fire_webhook_inner(state, &path, owner_user_id.as_deref(), &headers, body).await
+    let owner_user_id = state.workspace.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Workspace not available".to_string(),
+    ))?;
+    let owner_user_id = owner_user_id.user_id().to_string();
+    fire_webhook_inner(state, &owner_user_id, &path, &headers, body).await
 }
 
 /// Handle incoming webhook POST to `/api/webhooks/u/{user_id}/{path}`.
@@ -108,14 +109,14 @@ pub async fn webhook_trigger_user_scoped_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    fire_webhook_inner(state, &path, Some(&user_id), &headers, body).await
+    fire_webhook_inner(state, &user_id, &path, &headers, body).await
 }
 
 /// Shared webhook logic for both scoped and unscoped endpoints.
 async fn fire_webhook_inner(
     state: Arc<GatewayState>,
+    user_id: &str,
     path: &str,
-    user_id: Option<&str>,
     headers: &HeaderMap,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -135,7 +136,7 @@ async fn fire_webhook_inner(
     // Scope the lookup to the gateway owner or explicit user_id so webhook
     // paths do not become a cross-tenant identifier.
     let routine = store
-        .get_webhook_routine_by_path(path, user_id)
+        .get_webhook_routine_by_path(user_id, path)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
