@@ -1267,6 +1267,10 @@ async fn handle_event(
             percentage,
             warning,
         } => {
+            // Update context_window from the engine's actual value
+            if max_tokens > 0 {
+                state.context_window = max_tokens;
+            }
             state.context_pressure = Some(ContextPressureInfo {
                 used_tokens,
                 max_tokens,

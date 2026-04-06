@@ -51,16 +51,28 @@ impl TuiWidget for StatusBarWidget {
             return;
         }
 
-        let total_tokens = state.total_input_tokens + state.total_output_tokens;
-        let tokens_used_str = format_tokens(total_tokens);
-        let context_max_str = format_tokens(state.context_window);
-
-        let ratio = if state.context_window > 0 {
-            (total_tokens as f64 / state.context_window as f64).clamp(0.0, 1.0)
+        // Use actual context pressure data from the engine when available;
+        // fall back to cumulative session tokens before the first update arrives.
+        let (used_tokens, max_tokens, pct) =
+            if let Some(ref cp) = state.context_pressure {
+                (cp.used_tokens, cp.max_tokens, cp.percentage as u64)
+            } else {
+                let total = state.total_input_tokens + state.total_output_tokens;
+                let ctx = state.context_window;
+                let p = if ctx > 0 {
+                    ((total as f64 / ctx as f64).clamp(0.0, 1.0) * 100.0).round() as u64
+                } else {
+                    0
+                };
+                (total, ctx, p)
+            };
+        let tokens_used_str = format_tokens(used_tokens);
+        let context_max_str = format_tokens(max_tokens);
+        let ratio = if max_tokens > 0 {
+            (used_tokens as f64 / max_tokens as f64).clamp(0.0, 1.0)
         } else {
             0.0
         };
-        let pct = (ratio * 100.0).round() as u64;
 
         // Session duration
         let elapsed = chrono::Utc::now()
