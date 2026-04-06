@@ -17,7 +17,7 @@ use crate::extensions::ExtensionManager;
 use crate::pairing::PairingStore;
 use crate::secrets::SecretsStore;
 
-fn reserved_wasm_channel_names() -> Vec<&'static str> {
+pub(crate) fn reserved_wasm_channel_names() -> Vec<&'static str> {
     use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
 
     let mut reserved: Vec<&str> = vec![
@@ -31,6 +31,11 @@ fn reserved_wasm_channel_names() -> Vec<&'static str> {
     reserved.extend(TRUSTED_APPROVAL_CHANNELS);
     reserved.push(BOOTSTRAP_SOURCE_CHANNEL);
     reserved
+}
+
+pub(crate) fn is_reserved_wasm_channel_name(name: &str) -> bool {
+    let name_lower = name.to_ascii_lowercase();
+    reserved_wasm_channel_names().contains(&name_lower.as_str())
 }
 
 /// Result of WASM channel setup.
@@ -102,11 +107,9 @@ pub async fn setup_wasm_channels(
     // - All native/built-in channel names (prevent impersonation)
     // - Trusted approval channels from session::TRUSTED_APPROVAL_CHANNELS
     // - The bootstrap sentinel (universal approval wildcard)
-    let reserved = reserved_wasm_channel_names();
-
     for loaded in results.loaded {
         let name_lower = loaded.name().to_ascii_lowercase();
-        if reserved.contains(&name_lower.as_str()) {
+        if is_reserved_wasm_channel_name(&name_lower) {
             tracing::warn!(
                 channel = %loaded.name(),
                 "Rejected WASM channel with reserved name"
