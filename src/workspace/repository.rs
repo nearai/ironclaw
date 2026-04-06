@@ -248,11 +248,28 @@ impl Repository {
         &self,
         user_id: &str,
         agent_id: Option<Uuid>,
+        limit: Option<usize>,
     ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
         let conn = self.conn().await?;
 
-        let rows = conn
-            .query(
+        let rows = if let Some(limit) = limit.and_then(|n| i64::try_from(n).ok()) {
+            conn.query(
+                r#"
+                SELECT id, user_id, agent_id, path, content,
+                       summary_l0, summary_l1, created_at, updated_at, metadata
+                FROM memory_documents
+                WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2
+                ORDER BY updated_at DESC
+                LIMIT $3
+                "#,
+                &[&user_id, &agent_id, &limit],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Query failed: {}", e),
+            })?
+        } else {
+            conn.query(
                 r#"
                 SELECT id, user_id, agent_id, path, content,
                        summary_l0, summary_l1, created_at, updated_at, metadata
@@ -265,7 +282,8 @@ impl Repository {
             .await
             .map_err(|e| WorkspaceError::SearchFailed {
                 reason: format!("Query failed: {}", e),
-            })?;
+            })?
+        };
 
         Ok(rows.iter().map(|r| self.row_to_document(r)).collect())
     }

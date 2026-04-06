@@ -787,8 +787,9 @@ impl WorkspaceStore for PgBackend {
         &self,
         user_id: &str,
         agent_id: Option<Uuid>,
+        limit: Option<usize>,
     ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
-        self.repo.list_documents(user_id, agent_id).await
+        self.repo.list_documents(user_id, agent_id, limit).await
     }
 
     async fn delete_chunks(&self, document_id: Uuid) -> Result<(), WorkspaceError> {

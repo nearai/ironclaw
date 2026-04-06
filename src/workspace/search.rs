@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 use uuid::Uuid;
 
 /// Detail level requested from memory search results.
@@ -221,21 +222,28 @@ pub fn fuse_results(
 }
 
 fn choose_search_content(
+    document_path: &str,
     summary_l0: &Option<String>,
     summary_l1: &Option<String>,
     raw_content: &str,
     detail: SearchDetailLevel,
 ) -> String {
+    let missing_summaries = summary_l0.is_none() && summary_l1.is_none();
     match detail {
-        SearchDetailLevel::L0 => summary_l0
-            .clone()
-            .or_else(|| summary_l1.clone())
-            .unwrap_or_else(|| raw_content.to_string()),
-        SearchDetailLevel::L1 => summary_l1
-            .clone()
-            .unwrap_or_else(|| raw_content.to_string()),
-        SearchDetailLevel::L2 => raw_content.to_string(),
+        SearchDetailLevel::L0 => summary_l0.clone().or_else(|| summary_l1.clone()),
+        SearchDetailLevel::L1 => summary_l1.clone(),
+        SearchDetailLevel::L2 => None,
     }
+    .unwrap_or_else(|| {
+        if missing_summaries && detail != SearchDetailLevel::L2 {
+            warn!(
+                path = %document_path,
+                detail = ?detail,
+                "Search result missing summaries; falling back to raw content"
+            );
+        }
+        raw_content.to_string()
+    })
 }
 
 /// Reciprocal Rank Fusion algorithm.
@@ -330,21 +338,26 @@ pub fn reciprocal_rank_fusion(
     // Convert to SearchResult and sort by score
     let mut results: Vec<SearchResult> = chunk_scores
         .into_iter()
-        .map(|(chunk_id, info)| SearchResult {
-            document_id: info.document_id,
-            document_path: info.document_path,
-            chunk_id,
-            content: choose_search_content(
+        .map(|(chunk_id, info)| {
+            let document_path = info.document_path;
+            let content = choose_search_content(
+                &document_path,
                 &info.summary_l0,
                 &info.summary_l1,
                 &info.content,
                 config.detail,
-            ),
-            summary_l0: info.summary_l0,
-            summary_l1: info.summary_l1,
-            score: info.score,
-            fts_rank: info.fts_rank,
-            vector_rank: info.vector_rank,
+            );
+            SearchResult {
+                document_id: info.document_id,
+                document_path,
+                chunk_id,
+                content,
+                summary_l0: info.summary_l0,
+                summary_l1: info.summary_l1,
+                score: info.score,
+                fts_rank: info.fts_rank,
+                vector_rank: info.vector_rank,
+            }
         })
         .collect();
 
@@ -458,21 +471,26 @@ pub fn weighted_score_fusion(
 
     let mut results: Vec<SearchResult> = chunk_scores
         .into_iter()
-        .map(|(chunk_id, info)| SearchResult {
-            document_id: info.document_id,
-            document_path: info.document_path,
-            chunk_id,
-            content: choose_search_content(
+        .map(|(chunk_id, info)| {
+            let document_path = info.document_path;
+            let content = choose_search_content(
+                &document_path,
                 &info.summary_l0,
                 &info.summary_l1,
                 &info.content,
                 config.detail,
-            ),
-            summary_l0: info.summary_l0,
-            summary_l1: info.summary_l1,
-            score: info.score,
-            fts_rank: info.fts_rank,
-            vector_rank: info.vector_rank,
+            );
+            SearchResult {
+                document_id: info.document_id,
+                document_path,
+                chunk_id,
+                content,
+                summary_l0: info.summary_l0,
+                summary_l1: info.summary_l1,
+                score: info.score,
+                fts_rank: info.fts_rank,
+                vector_rank: info.vector_rank,
+            }
         })
         .collect();
 

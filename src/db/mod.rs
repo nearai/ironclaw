@@ -719,6 +719,7 @@ pub trait WorkspaceStore: Send + Sync {
         &self,
         user_id: &str,
         agent_id: Option<Uuid>,
+        limit: Option<usize>,
     ) -> Result<Vec<MemoryDocument>, WorkspaceError>;
     async fn delete_chunks(&self, document_id: Uuid) -> Result<(), WorkspaceError>;
     async fn insert_chunk(

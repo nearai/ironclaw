@@ -455,7 +455,7 @@ impl WorkspaceStore for LibSqlBackend {
             .query(
                 r#"
                 SELECT path, updated_at,
-                       COALESCE(summary_l0, substr(content, 1, 200)) as content_preview
+                       COALESCE(summary_l0, substr(content, 1, 120)) as content_preview
                 FROM memory_documents
                 WHERE user_id = ?1 AND agent_id IS ?2
                   AND (?3 = '%' OR path LIKE ?3)
@@ -571,6 +571,7 @@ impl WorkspaceStore for LibSqlBackend {
         &self,
         user_id: &str,
         agent_id: Option<Uuid>,
+        limit: Option<usize>,
     ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
         let conn = self
             .connect()
@@ -579,21 +580,40 @@ impl WorkspaceStore for LibSqlBackend {
                 reason: e.to_string(),
             })?;
         let agent_id_str = agent_id.map(|id| id.to_string());
-        let mut rows = conn
-            .query(
-                r#"
+        let query = if limit.is_some() {
+            r#"
                 SELECT id, user_id, agent_id, path, content,
                        summary_l0, summary_l1, created_at, updated_at, metadata
                 FROM memory_documents
                 WHERE user_id = ?1 AND agent_id IS ?2
                 ORDER BY updated_at DESC
-                "#,
-                params![user_id, agent_id_str.as_deref()],
+                LIMIT ?3
+                "#
+        } else {
+            r#"
+                SELECT id, user_id, agent_id, path, content,
+                       summary_l0, summary_l1, created_at, updated_at, metadata
+                FROM memory_documents
+                WHERE user_id = ?1 AND agent_id IS ?2
+                ORDER BY updated_at DESC
+                "#
+        };
+        let mut rows = if let Some(limit) = limit {
+            conn.query(
+                query,
+                params![user_id, agent_id_str.as_deref(), limit as i64],
             )
             .await
             .map_err(|e| WorkspaceError::SearchFailed {
                 reason: format!("Query failed: {}", e),
-            })?;
+            })?
+        } else {
+            conn.query(query, params![user_id, agent_id_str.as_deref()])
+                .await
+                .map_err(|e| WorkspaceError::SearchFailed {
+                    reason: format!("Query failed: {}", e),
+                })?
+        };
 
         let mut docs = Vec::new();
         while let Some(row) = rows
