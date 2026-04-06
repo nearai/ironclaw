@@ -29,6 +29,11 @@ use ironclaw::llm::recording::{HttpExchange, HttpInterceptor, ReplayingHttpInter
 // TestRig
 // ---------------------------------------------------------------------------
 
+/// Substring unique to the static bootstrap greeting (GREETING.md).
+/// Used to transparently filter per-user bootstrap greetings from the
+/// response stream so tests don't need to account for them manually.
+const BOOTSTRAP_GREETING_MARKER: &str = "always-on chief of staff";
+
 /// A running test agent with methods to inject messages and inspect results.
 pub struct TestRig {
     /// The test channel for sending messages and reading captures.
@@ -59,6 +64,11 @@ pub struct TestRig {
     /// Temp directory guard -- keeps the libSQL database file alive.
     #[cfg(feature = "libsql")]
     _temp_dir: tempfile::TempDir,
+    /// How many bootstrap greetings to keep in `wait_for_responses`.
+    /// 0 for normal tests (filter all greetings), 1 for `.with_bootstrap()`
+    /// tests (keep the startup greeting, filter per-user duplicates).
+    #[cfg(feature = "libsql")]
+    bootstrap_greetings_to_keep: usize,
 }
 
 impl TestRig {
@@ -93,9 +103,47 @@ impl TestRig {
         &self.session_manager
     }
 
-    /// Wait until at least `n` responses have been captured, or `timeout` elapses.
+    /// Wait until at least `n` non-bootstrap responses have been captured, or
+    /// `timeout` elapses.
+    ///
+    /// Per-user bootstrap greetings (fired when `tenant_ctx` creates a workspace
+    /// for a non-owner user) are transparently filtered from the response stream.
+    /// For `.with_bootstrap()` tests, the startup greeting is kept (1 allowed)
+    /// while additional per-user greetings are still filtered.
     pub async fn wait_for_responses(&self, n: usize, timeout: Duration) -> Vec<OutgoingResponse> {
-        self.channel.wait_for_responses(n, timeout).await
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut interval = Duration::from_millis(50);
+        let max_interval = Duration::from_millis(500);
+        loop {
+            let filtered = self.filter_responses(self.channel.captured_responses_async().await);
+            if filtered.len() >= n {
+                return filtered;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return filtered;
+            }
+            tokio::time::sleep(interval).await;
+            interval = (interval * 2).min(max_interval);
+        }
+    }
+
+    /// Filter bootstrap greetings from the response stream.
+    ///
+    /// Keeps up to `bootstrap_greetings_to_keep` greeting responses (0 for
+    /// normal tests, 1 for `.with_bootstrap()` tests) and drops the rest.
+    fn filter_responses(&self, responses: Vec<OutgoingResponse>) -> Vec<OutgoingResponse> {
+        let mut greetings_kept = 0usize;
+        responses
+            .into_iter()
+            .filter(|r| {
+                if r.content.contains(BOOTSTRAP_GREETING_MARKER) {
+                    greetings_kept += 1;
+                    greetings_kept <= self.bootstrap_greetings_to_keep
+                } else {
+                    true
+                }
+            })
+            .collect()
     }
 
     /// Return the names of all `ToolStarted` events captured so far.
@@ -363,15 +411,18 @@ pub struct WasmToolSpec {
 pub struct TestRigBuilder {
     trace: Option<LlmTrace>,
     llm: Option<Arc<dyn LlmProvider>>,
+    config_override: Option<Config>,
     max_tool_iterations: usize,
     injection_check: bool,
     auto_approve_tools: Option<bool>,
     enable_skills: bool,
     enable_routines: bool,
     http_exchanges: Vec<HttpExchange>,
+    http_interceptor_override: Option<Arc<dyn HttpInterceptor>>,
     extra_tools: Vec<Arc<dyn Tool>>,
     wasm_tools: Vec<WasmToolSpec>,
     keep_bootstrap: bool,
+    engine_v2: bool,
 }
 
 impl TestRigBuilder {
@@ -380,15 +431,18 @@ impl TestRigBuilder {
         Self {
             trace: None,
             llm: None,
+            config_override: None,
             max_tool_iterations: 10,
             injection_check: false,
             auto_approve_tools: Some(true),
             enable_skills: false,
             enable_routines: false,
             http_exchanges: Vec::new(),
+            http_interceptor_override: None,
             extra_tools: Vec::new(),
             wasm_tools: Vec::new(),
             keep_bootstrap: false,
+            engine_v2: false,
         }
     }
 
@@ -424,6 +478,19 @@ impl TestRigBuilder {
     /// Override the LLM provider directly (takes precedence over trace).
     pub fn with_llm(mut self, llm: Arc<dyn LlmProvider>) -> Self {
         self.llm = Some(llm);
+        self
+    }
+
+    /// Override the Config to mirror real binary behavior.
+    ///
+    /// When set, uses this config instead of `Config::for_testing()`.
+    /// The database path is still overridden to use a temp libSQL file,
+    /// but agent settings (`allow_local_tools`, `engine_v2`, etc.) are
+    /// preserved from the provided config. Post-build forcing of
+    /// `allow_local_tools = true` is skipped so the test matches the
+    /// real binary's tool availability.
+    pub fn with_config(mut self, config: Config) -> Self {
+        self.config_override = Some(config);
         self
     }
 
@@ -475,12 +542,29 @@ impl TestRigBuilder {
         self
     }
 
+    /// Route messages through the engine v2 pipeline instead of the v1 agentic loop.
+    pub fn with_engine_v2(mut self) -> Self {
+        self.engine_v2 = true;
+        self
+    }
+
     /// Add pre-recorded HTTP exchanges for the `ReplayingHttpInterceptor`.
     ///
     /// When set, all `http` tool calls will return these responses in order
     /// instead of making real network requests.
     pub fn with_http_exchanges(mut self, exchanges: Vec<HttpExchange>) -> Self {
         self.http_exchanges = exchanges;
+        self
+    }
+
+    /// Override the HTTP interceptor directly.
+    ///
+    /// When set, this interceptor is used instead of constructing a
+    /// `ReplayingHttpInterceptor` from trace http_exchanges or
+    /// `with_http_exchanges()`. Useful for live-mode recording where a
+    /// `RecordingHttpInterceptor` captures real HTTP traffic.
+    pub fn with_http_interceptor(mut self, interceptor: Arc<dyn HttpInterceptor>) -> Self {
+        self.http_interceptor_override = Some(interceptor);
         self
     }
 
@@ -499,15 +583,18 @@ impl TestRigBuilder {
         let TestRigBuilder {
             trace,
             llm,
+            config_override,
             max_tool_iterations,
             injection_check,
             auto_approve_tools,
             enable_skills,
             enable_routines,
             http_exchanges: explicit_http_exchanges,
+            http_interceptor_override,
             extra_tools,
             wasm_tools,
             keep_bootstrap,
+            engine_v2,
         } = self;
 
         // 1. Create temp dir + libSQL database + run migrations.
@@ -522,12 +609,22 @@ impl TestRigBuilder {
             .expect("failed to run migrations");
         let db: Arc<dyn ironclaw::db::Database> = Arc::new(backend);
 
-        // 2. Build Config::for_testing().
+        // 2. Build Config.
+        let has_config_override = config_override.is_some();
         let skills_dir = temp_dir.path().join("skills");
         let installed_skills_dir = temp_dir.path().join("installed_skills");
         let _ = std::fs::create_dir_all(&skills_dir);
         let _ = std::fs::create_dir_all(&installed_skills_dir);
-        let mut config = Config::for_testing(db_path, skills_dir, installed_skills_dir);
+        let mut config = if let Some(mut cfg) = config_override {
+            // Override database to use temp libSQL, but preserve agent/llm settings.
+            cfg.database.backend = ironclaw::config::DatabaseBackend::LibSql;
+            cfg.database.libsql_path = Some(db_path);
+            cfg.skills.local_dir = skills_dir;
+            cfg.skills.installed_dir = installed_skills_dir;
+            cfg
+        } else {
+            Config::for_testing(db_path, skills_dir, installed_skills_dir)
+        };
         config.agent.max_tool_iterations = max_tool_iterations;
         config.safety.injection_check_enabled = injection_check;
         config.skills.enabled = enable_skills;
@@ -588,22 +685,52 @@ impl TestRigBuilder {
             .await
             .expect("AppBuilder::build_all() failed in test rig");
 
-        // Clear bootstrap flag so tests don't get an unexpected proactive greeting
-        // (unless the test explicitly wants to test the bootstrap flow).
+        // Clear the *owner* workspace bootstrap flag so tests don't get an
+        // unexpected proactive greeting on startup (unless the test explicitly
+        // wants to test the bootstrap flow via `.with_bootstrap()`).
+        //
+        // Per-user bootstrap greetings (fired when `tenant_ctx` creates a
+        // workspace for a non-owner user like "test-user") are allowed to
+        // happen naturally. They are transparently filtered from the response
+        // stream by `wait_for_responses` so tests don't need to account for
+        // them in response counting.
         if !keep_bootstrap && let Some(ref ws) = components.workspace {
             ws.take_bootstrap_pending();
         }
 
         // AppBuilder may re-resolve config from env/TOML and override test defaults.
-        // Force test-rig agent flags to the requested deterministic values.
-        components.config.agent.auto_approve_tools = auto_approve_tools.unwrap_or(true);
-        components.config.agent.allow_local_tools = true;
+        // When a config override was provided, preserve its agent settings to mirror
+        // the real binary. Otherwise force deterministic test defaults.
+        if has_config_override {
+            if let Some(v) = auto_approve_tools {
+                components.config.agent.auto_approve_tools = v;
+            }
+            // allow_local_tools comes from the provided config.
+            // engine_v2: honour the builder's explicit override if set.
+            if engine_v2 {
+                components.config.agent.engine_v2 = true;
+            }
+        } else {
+            components.config.agent.auto_approve_tools = auto_approve_tools.unwrap_or(true);
+            components.config.agent.allow_local_tools = true;
+            components.config.agent.engine_v2 = engine_v2;
+        }
+
+        // Reset engine v2 global state so each test gets a clean engine instance.
+        if components.config.agent.engine_v2 {
+            ironclaw::bridge::reset_engine_state().await;
+        }
 
         let scheduler_slot: ironclaw::tools::builtin::SchedulerSlot =
             Arc::new(tokio::sync::RwLock::new(None));
 
         // Build HTTP interceptor once — shared by both AgentDeps and WASM tools.
-        let http_interceptor: Option<Arc<dyn HttpInterceptor>> = {
+        // Direct override takes priority (e.g. RecordingHttpInterceptor for live tests).
+        let http_interceptor: Option<Arc<dyn HttpInterceptor>> = if let Some(override_interceptor) =
+            http_interceptor_override
+        {
+            Some(override_interceptor)
+        } else {
             let exchanges = if explicit_http_exchanges.is_empty() {
                 trace_http_exchanges
             } else {
@@ -618,9 +745,12 @@ impl TestRigBuilder {
 
         // 6. Register job tools, routine tools, and extra tools.
         {
-            // Ensure filesystem/shell dev tools are always available in the
-            // test rig, even if upstream builder flags/config disable local tools.
-            components.tools.register_dev_tools();
+            // Register filesystem/shell dev tools. When using a config override
+            // (real-binary parity mode), respect the allow_local_tools flag.
+            // Otherwise always register them for test convenience.
+            if !has_config_override || components.config.agent.allow_local_tools {
+                components.tools.register_dev_tools();
+            }
 
             components.tools.register_job_tools(
                 Arc::clone(&components.context_manager),
@@ -642,7 +772,7 @@ impl TestRigBuilder {
                 let (notify_tx, _notify_rx) = tokio::sync::mpsc::channel(16);
                 let engine = Arc::new(RoutineEngine::new(
                     routine_config,
-                    Arc::clone(db_arc),
+                    ironclaw::tenant::SystemScope::new(Arc::clone(db_arc)),
                     components.llm.clone(),
                     Arc::clone(ws),
                     notify_tx,
@@ -650,7 +780,7 @@ impl TestRigBuilder {
                     None,
                     components.tools.clone(),
                     components.safety.clone(),
-                    ironclaw::agent::SandboxReadiness::Available, // tests don't use real Docker
+                    ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
                 ));
                 components
                     .tools
@@ -661,10 +791,10 @@ impl TestRigBuilder {
             // AppBuilder did not wire them for this environment.
             if enable_skills {
                 let registry = Arc::new(std::sync::RwLock::new(
-                    ironclaw::skills::SkillRegistry::new(temp_dir.path().join("skills"))
+                    ironclaw_skills::SkillRegistry::new(temp_dir.path().join("skills"))
                         .with_installed_dir(temp_dir.path().join("installed_skills")),
                 ));
-                let catalog = ironclaw::skills::catalog::shared_catalog();
+                let catalog = ironclaw_skills::catalog::shared_catalog();
                 components
                     .tools
                     .register_skill_tools(Arc::clone(&registry), Arc::clone(&catalog));
@@ -701,7 +831,7 @@ impl TestRigBuilder {
                     let wasm_bytes = tokio::fs::read(&spec.wasm_path)
                         .await
                         .unwrap_or_else(|e| panic!("read {}: {e}", spec.wasm_path.display()));
-                    let (capabilities, description, schema) =
+                    let (capabilities, description) =
                         if let Some(cap_path) = &spec.capabilities_path {
                             if cap_path.exists() {
                                 let cap_bytes = tokio::fs::read(cap_path)
@@ -709,16 +839,12 @@ impl TestRigBuilder {
                                     .unwrap_or_else(|e| panic!("read {}: {e}", cap_path.display()));
                                 let cap_file = CapabilitiesFile::from_bytes(&cap_bytes)
                                     .expect("parse capabilities.json");
-                                (
-                                    cap_file.to_capabilities(),
-                                    cap_file.description.clone(),
-                                    cap_file.parameters.clone(),
-                                )
+                                (cap_file.to_capabilities(), cap_file.description.clone())
                             } else {
-                                (Capabilities::default(), None, None)
+                                (Capabilities::default(), None)
                             }
                         } else {
-                            (Capabilities::default(), None, None)
+                            (Capabilities::default(), None)
                         };
 
                     let prepared = runtime
@@ -729,9 +855,6 @@ impl TestRigBuilder {
                         WasmToolWrapper::new(Arc::clone(&runtime), prepared, capabilities);
                     if let Some(desc) = description {
                         wrapper = wrapper.with_description(desc);
-                    }
-                    if let Some(s) = schema {
-                        wrapper = wrapper.with_schema(s);
                     }
                     if let Some(interceptor) = &http_interceptor {
                         wrapper = wrapper.with_http_interceptor(Arc::clone(interceptor));
@@ -766,8 +889,10 @@ impl TestRigBuilder {
             http_interceptor,
             transcription: None,
             document_extraction: None,
-            sandbox_readiness: ironclaw::agent::SandboxReadiness::Available, // tests don't use real Docker
+            sandbox_readiness: ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
+            llm_backend: "nearai".to_string(),
+            tenant_rates: std::sync::Arc::new(ironclaw::tenant::TenantRateRegistry::new(4, 3)),
         };
 
         // 7. Create TestChannel and ChannelManager.
@@ -840,6 +965,7 @@ impl TestRigBuilder {
             extension_manager: ext_mgr_ref,
             session_manager: session_manager_ref,
             _temp_dir: temp_dir,
+            bootstrap_greetings_to_keep: if keep_bootstrap { 1 } else { 0 },
         }
     }
 }
@@ -893,6 +1019,25 @@ pub async fn run_recorded_trace(filename: &str) {
     let trace = LlmTrace::from_file(&path)
         .unwrap_or_else(|e| panic!("failed to load trace {filename}: {e}"));
     let rig = TestRigBuilder::new()
+        .with_trace(trace.clone())
+        .build()
+        .await;
+    rig.run_and_verify_trace(&trace, Duration::from_secs(30))
+        .await;
+    rig.shutdown();
+}
+
+/// Like [`run_recorded_trace`] but routes through the engine v2 pipeline.
+#[cfg(feature = "libsql")]
+pub async fn run_recorded_trace_v2(filename: &str) {
+    let path = format!(
+        "{}/tests/fixtures/llm_traces/recorded/{filename}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let trace = LlmTrace::from_file(&path)
+        .unwrap_or_else(|e| panic!("failed to load trace {filename}: {e}"));
+    let rig = TestRigBuilder::new()
+        .with_engine_v2()
         .with_trace(trace.clone())
         .build()
         .await;

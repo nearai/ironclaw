@@ -2,7 +2,8 @@
 //! and activation of channels, tools, and MCP servers.
 //!
 //! Extensions are the user-facing abstraction that unifies three runtime kinds:
-//! - **Channels** (Telegram, Slack, Discord) — messaging integrations (WASM)
+//! - **Channels** (Telegram, Slack, Discord) — messaging platform connections
+//!   and conversation transports (WASM)
 //! - **Tools** — sandboxed capabilities (WASM)
 //! - **MCP servers** — external API integrations via Model Context Protocol
 //!
@@ -18,6 +19,7 @@
 
 pub mod discovery;
 pub mod manager;
+pub mod naming;
 pub mod registry;
 
 pub use discovery::OnlineDiscovery;
@@ -26,6 +28,8 @@ pub use registry::ExtensionRegistry;
 
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
+
+pub use crate::code_challenge::VerificationChallenge;
 
 /// The kind of extension, determining how it's installed, authenticated, and activated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -39,6 +43,8 @@ pub enum ExtensionKind {
     WasmChannel,
     /// External channel via channel-relay service (Slack, etc.).
     ChannelRelay,
+    /// ACP-compliant coding agent (Goose, Codex, Gemini CLI, etc.).
+    AcpAgent,
 }
 
 impl std::fmt::Display for ExtensionKind {
@@ -48,6 +54,7 @@ impl std::fmt::Display for ExtensionKind {
             ExtensionKind::WasmTool => write!(f, "wasm_tool"),
             ExtensionKind::WasmChannel => write!(f, "wasm_channel"),
             ExtensionKind::ChannelRelay => write!(f, "channel_relay"),
+            ExtensionKind::AcpAgent => write!(f, "acp_agent"),
         }
     }
 }
@@ -447,21 +454,6 @@ pub struct ActivateResult {
     /// Names of tools that were loaded/registered.
     pub tools_loaded: Vec<String>,
     pub message: String,
-}
-
-/// Result of configuring secrets for an extension.
-///
-/// Returned by `ExtensionManager::configure()`, the single entrypoint
-/// for providing secrets to any extension (chat auth, gateway setup, etc.).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VerificationChallenge {
-    /// One-time code the user must send back to the integration.
-    pub code: String,
-    /// Human-readable instructions for completing verification.
-    pub instructions: String,
-    /// Deep-link or shortcut URL that prefills the verification payload when supported.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deep_link: Option<String>,
 }
 
 #[derive(Debug, Clone)]

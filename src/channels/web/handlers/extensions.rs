@@ -8,11 +8,42 @@ use axum::{
     http::StatusCode,
 };
 
+use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 
+/// Derive the activation status for an installed extension.
+///
+/// Previously relied on the file-based pairing store to determine whether any
+/// senders had been approved. With the DB-backed pairing model, we derive the
+/// status from the extension's known fields and the owner-binding flag instead.
+pub(crate) fn derive_activation_status(
+    ext: &crate::extensions::InstalledExtension,
+    has_owner_binding: bool,
+) -> Option<ExtensionActivationStatus> {
+    if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
+        // In the DB-backed model, "paired" no longer comes from a local allowFrom
+        // file. Until this handler can query channel_identities directly, be
+        // conservative: only explicit owner binding upgrades an active channel to
+        // Active. Otherwise it remains in Pairing.
+        // TODO(ownership): derive has_paired from the DB-backed pairing tables.
+        classify_wasm_channel_activation(ext, false, has_owner_binding)
+    } else if ext.kind == crate::extensions::ExtensionKind::ChannelRelay {
+        Some(if ext.active {
+            ExtensionActivationStatus::Active
+        } else if ext.authenticated {
+            ExtensionActivationStatus::Configured
+        } else {
+            ExtensionActivationStatus::Installed
+        })
+    } else {
+        None
+    }
+}
+
 pub async fn extensions_list_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<ExtensionListResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
@@ -20,11 +51,10 @@ pub async fn extensions_list_handler(
     ))?;
 
     let installed = ext_mgr
-        .list(None, false)
+        .list(None, false, &user.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let pairing_store = crate::pairing::PairingStore::new();
     let mut owner_bound_channels = std::collections::HashSet::new();
     for ext in &installed {
         if ext.kind == crate::extensions::ExtensionKind::WasmChannel
@@ -36,27 +66,8 @@ pub async fn extensions_list_handler(
     let extensions = installed
         .into_iter()
         .map(|ext| {
-            let activation_status = if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-                let has_paired = pairing_store
-                    .read_allow_from(&ext.name)
-                    .map(|list| !list.is_empty())
-                    .unwrap_or(false);
-                crate::channels::web::types::classify_wasm_channel_activation(
-                    &ext,
-                    has_paired,
-                    owner_bound_channels.contains(&ext.name),
-                )
-            } else if ext.kind == crate::extensions::ExtensionKind::ChannelRelay {
-                Some(if ext.active {
-                    crate::channels::web::types::ExtensionActivationStatus::Active
-                } else if ext.authenticated {
-                    crate::channels::web::types::ExtensionActivationStatus::Configured
-                } else {
-                    crate::channels::web::types::ExtensionActivationStatus::Installed
-                })
-            } else {
-                None
-            };
+            let activation_status =
+                derive_activation_status(&ext, owner_bound_channels.contains(&ext.name));
             ExtensionInfo {
                 name: ext.name,
                 display_name: ext.display_name,
@@ -80,6 +91,7 @@ pub async fn extensions_list_handler(
 
 pub async fn extensions_tools_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(_user): AuthenticatedUser,
 ) -> Result<Json<ToolListResponse>, (StatusCode, String)> {
     let registry = state.tool_registry.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -100,6 +112,7 @@ pub async fn extensions_tools_handler(
 
 pub async fn extensions_install_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<InstallExtensionRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
@@ -112,11 +125,12 @@ pub async fn extensions_install_handler(
         "wasm_tool" => Some(crate::extensions::ExtensionKind::WasmTool),
         "wasm_channel" => Some(crate::extensions::ExtensionKind::WasmChannel),
         "channel_relay" => Some(crate::extensions::ExtensionKind::ChannelRelay),
+        "acp_agent" => Some(crate::extensions::ExtensionKind::AcpAgent),
         _ => None,
     });
 
     match ext_mgr
-        .install(&req.name, req.url.as_deref(), kind_hint)
+        .install(&req.name, req.url.as_deref(), kind_hint, &user.user_id)
         .await
     {
         Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
@@ -126,6 +140,7 @@ pub async fn extensions_install_handler(
 
 pub async fn extensions_remove_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
@@ -133,8 +148,51 @@ pub async fn extensions_remove_handler(
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
-    match ext_mgr.remove(&name).await {
+    match ext_mgr.remove(&name, &user.user_id).await {
         Ok(message) => Ok(Json(ActionResponse::ok(message))),
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derive_activation_status;
+    use crate::channels::web::types::ExtensionActivationStatus;
+    use crate::extensions::{ExtensionKind, InstalledExtension};
+
+    fn active_authenticated_wasm_channel(name: &str) -> InstalledExtension {
+        InstalledExtension {
+            name: name.to_string(),
+            kind: ExtensionKind::WasmChannel,
+            display_name: None,
+            description: None,
+            url: None,
+            authenticated: true,
+            active: true,
+            tools: Vec::new(),
+            needs_setup: false,
+            has_auth: false,
+            installed: true,
+            activation_error: None,
+            version: None,
+        }
+    }
+
+    #[test]
+    fn active_authenticated_wasm_channel_without_owner_binding_stays_pairing() {
+        let ext = active_authenticated_wasm_channel("discord");
+        assert_eq!(
+            derive_activation_status(&ext, false),
+            Some(ExtensionActivationStatus::Pairing)
+        );
+    }
+
+    #[test]
+    fn active_authenticated_wasm_channel_with_owner_binding_is_active() {
+        let ext = active_authenticated_wasm_channel("discord");
+        assert_eq!(
+            derive_activation_status(&ext, true),
+            Some(ExtensionActivationStatus::Active)
+        );
     }
 }

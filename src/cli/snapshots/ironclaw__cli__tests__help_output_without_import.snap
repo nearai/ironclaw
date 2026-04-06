@@ -1,5 +1,6 @@
 ---
 source: src/cli/mod.rs
+assertion_line: 422
 expression: help
 ---
 Secure personal AI assistant that protects your data and expands its capabilities
@@ -26,6 +27,7 @@ Commands:
   status      Show system status
   completion  Generate completions
   login       Authenticate with a provider
+  acp         Manage ACP agents
   help        Print this message or the help of the given subcommand(s)
 
 Options:
@@ -34,5 +36,6 @@ Options:
   -m, --message <MESSAGE>  Single message mode - send one message and exit
   -c, --config <CONFIG>    Configuration file path (optional, uses env vars by default)
       --no-onboard         Skip first-run onboarding check
+      --auto-approve       Auto-approve tool execution (shell, file writes, HTTP, etc.)
   -h, --help               Print help (see more with '--help')
   -V, --version            Print version

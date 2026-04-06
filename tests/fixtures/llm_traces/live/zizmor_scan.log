@@ -1,0 +1,135 @@
+# Live Test Session: zizmor_scan
+# Mode: Replay
+# LLM calls: 8, Input tokens: 143884, Output tokens: 1410
+# Wall time: 0.9s, Cost: $0.0000
+# ──────────────────────────────────────────────────
+
+› can we run https://github.com/zizmorcore/zizmor
+  ○ Processing...
+  ○ Thinking (step 1)...
+  ○ Running tool_search...
+  ● tool_search
+  ✓ tool_search
+    tool_search → {
+  "count": 0,
+  "results": [],
+  "searched_online": false
+}
+  ○ Thinking (step 2)...
+  ○ Running command...
+  ● shell
+  ✓ shell
+    shell → {
+  "exit_code": 0,
+  "output": "/Users/coder/.cargo/bin/zizmor\n",
+  "sandboxed": false,
+  "success": true
+}
+  ○ Thinking (step 3)...
+  ○ Running list_dir...
+  ● list_dir
+  ✓ list_dir
+    list_dir → {
+  "count": 70,
+  "entries": [
+    ".claude/",
+    ".git/",
+    ".githooks/",
+    ".github/",
+    "channels-src/",
+    "crates/",
+    "deploy/",
+    "docker/",
+    "docs/",
+    "fuzz/",
+    "migratio…
+  ○ Thinking (step 4)...
+  ○ Running list_dir...
+  ● list_dir
+  ✓ list_dir
+    list_dir → {
+  "count": 4,
+  "entries": [
+    "scripts/",
+    "workflows/",
+    "labeler.yml (3.4KB)",
+    "pull_request_template.md (1.7KB)"
+  ],
+  "path": "/Users/coder/ironclaw8/.github",
+  "truncated": false…
+  ○ Thinking (step 5)...
+  ○ Running list_dir...
+  ● list_dir
+  ✓ list_dir
+    list_dir → {
+  "count": 14,
+  "entries": [
+    "claude-review.yml (5.3KB)",
+    "code_style.yml (3.3KB)",
+    "coverage.yml (6.9KB)",
+    "docker.yml (4.3KB)",
+    "e2e.yml (4.0KB)",
+    "pr-label-classify.yml (…
+  ○ Thinking (step 6)...
+  ○ Running command...
+  ● shell
+  ✓ shell
+    shell → {
+  "exit_code": 2,
+  "output": "error: invalid value 'pretty' for '--format <FORMAT>'\n  [possible values: plain, json, json-v1, sarif, github]\n\nFor more information, try '--help'.\n",
+  "sandboxed…
+  ○ Thinking (step 7)...
+  ○ Running command...
+  ● shell
+  ✓ shell
+    shell → {
+  "exit_code": 14,
+  "output": "help[artipacked]: credential persistence through GitHub Actions artifacts\n  --> .github/workflows/claude-review.yml:23:9\n   |\n23 |         - uses: actions/checkout…
+  ○ Thinking (step 8)...
+  … Done
+────────────────────────────────────────────────────
+Done! I ran zizmor on your GitHub Actions workflows and found **security issues across all 14 workflow files**. Here's the summary:
+
+## 🔴 Critical Issues Found
+
+### 1. **Unpinned Action References** (Most Common)
+Every workflow uses actions like `actions/checkout@v6` instead of pinned SHA hashes. This is a supply chain risk - the action could change without notice.
+
+**Example fixes needed:**
+```yaml
+# Before
+uses: actions/checkout@v6
+
+# After  
+uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v6
+```
+
+### 2. **Dangerous Triggers**
+- `pr-label-classify.yml`, `pr-label-scope.yml`, `release-plz-batch-summary.yml` use `pull_request_target` which is fundamentally insecure when combined with PR code execution.
+
+### 3. **Template Injection Risks**
+Multiple workflows have code injection vulnerabilities where user-controlled input can be expanded into shell commands:
+- `docker.yml` - workflow inputs directly in run blocks
+- `release.yml` - matrix args and tags in commands
+- `regression-test-check.yml` - PR base ref in git commands
+
+### 4. **Excessive Permissions**
+- `coverage.yml` has `id-token: write` at workflow level (too broad)
+- `release.yml` has `contents: write` at workflow level
+- Most workflows use default permissions instead of explicit least-privilege
+
+### 5. **Secrets Outside Environments**
+`release-plz.yml` and `claude-review.yml` access secrets (API keys, private keys) without using dedicated GitHub Environments for protection.
+
+### 6. **Artipacked (Credential Persistence)**
+Nearly all `actions/checkout` steps don't set `persist-credentials: false`, leaving Git credentials in the runner artifact.
+
+## 📊 Severity Breakdown
+- **Errors**: 70+ (unpinned uses, dangerous triggers, template injection)
+- **Warnings**: 20+ (excessive permissions, secrets-outside-env)
+- **Help/Info**: 30+ (artipacked, superfluous-actions, template-injection)
+
+Would you like me to:
+1. Generate a SARIF report for GitHub Security tab integration?
+2. Create specific PRs to fix the highest-priority issues?
+3. Focus on one workflow file at a time?

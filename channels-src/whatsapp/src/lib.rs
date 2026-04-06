@@ -910,8 +910,8 @@ fn send_pairing_reply(
         "text": {
             "preview_url": false,
             "body": format!(
-                "To pair with this bot, run: ironclaw pairing approve whatsapp {}",
-                code
+                "Enter this code in IronClaw to pair your whatsapp account: {}. CLI fallback: ironclaw pairing approve whatsapp {}",
+                code, code
             )
         }
     });

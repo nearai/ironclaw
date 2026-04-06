@@ -33,8 +33,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::{RwLock, mpsc, oneshot};
+use futures::{SinkExt, StreamExt};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_tungstenite::tungstenite::protocol::Message as WebsocketMessage;
 use uuid::Uuid;
 use wasmtime::Store;
 use wasmtime::component::Linker;
@@ -51,13 +53,19 @@ use crate::channels::wasm::schema::ChannelConfig;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
 use crate::pairing::PairingStore;
-use crate::safety::LeakDetector;
 use crate::secrets::SecretsStore;
-use crate::tools::wasm::LogLevel;
-use crate::tools::wasm::WasmResourceLimiter;
 use crate::tools::wasm::credential_injector::{
     InjectedCredentials, host_matches_pattern, inject_credential,
 };
+use crate::tools::wasm::{
+    LogLevel, WasmResourceLimiter, reject_private_ip, ssrf_safe_client_builder,
+};
+use ironclaw_safety::LeakDetector;
+
+const WEBSOCKET_EVENT_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue";
+const WEBSOCKET_EVENT_PROCESSING_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue_processing";
+const WEBSOCKET_EVENT_QUEUE_MAX_ITEMS: usize = 100;
+const TELEGRAM_TEST_API_BASE_ENV: &str = "IRONCLAW_TEST_TELEGRAM_API_BASE_URL";
 
 // Generate component model bindings from the WIT file
 wasmtime::component::bindgen!({
@@ -353,7 +361,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             "Parsed and injected request headers"
         );
 
-        let mut url = injected_url;
+        let mut logical_url = injected_url;
 
         // Leak scan runs on WASM-provided values BEFORE host credential injection.
         // This prevents false positives where the host-injected Bearer token
@@ -366,13 +374,23 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             .collect();
 
         leak_detector
-            .scan_http_request(&url, &header_vec, body.as_deref())
+            .scan_http_request(&logical_url, &header_vec, body.as_deref())
             .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
 
         // Inject pre-resolved host credentials (Bearer tokens, API keys, etc.)
         // after the leak scan so host-injected secrets don't trigger false positives.
-        if let Some(host) = extract_host_from_url(&url) {
-            self.inject_host_credentials(&host, &mut headers, &mut url);
+        if let Some(host) = extract_host_from_url(&logical_url) {
+            self.inject_host_credentials(&host, &mut headers, &mut logical_url);
+        }
+
+        let transport_url = rewrite_telegram_api_url_for_testing(&logical_url)
+            .unwrap_or_else(|| logical_url.clone());
+        if transport_url != logical_url {
+            tracing::info!(
+                logical_url = %logical_url,
+                transport_url = %transport_url,
+                "Rewriting Telegram API request to test base URL"
+            );
         }
 
         // Get the max response size from capabilities (default 10MB).
@@ -384,6 +402,9 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             .as_ref()
             .map(|h| h.max_response_bytes)
             .unwrap_or(10 * 1024 * 1024);
+
+        // Resolve hostname and reject private/internal IPs to prevent DNS rebinding.
+        reject_private_ip(&url)?;
 
         // Make the HTTP request using a dedicated single-threaded runtime.
         // We're inside spawn_blocking, so we can't rely on the main runtime's
@@ -400,18 +421,18 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         }
         let rt = self.http_runtime.as_ref().expect("just initialized");
         let result = rt.block_on(async {
-            let client = reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(10))
+            let client = ssrf_safe_client_builder()
+                .connect_timeout(Duration::from_secs(10))
                 .build()
                 .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
             let mut request = match method.to_uppercase().as_str() {
-                "GET" => client.get(&url),
-                "POST" => client.post(&url),
-                "PUT" => client.put(&url),
-                "DELETE" => client.delete(&url),
-                "PATCH" => client.patch(&url),
-                "HEAD" => client.head(&url),
+                "GET" => client.get(&transport_url),
+                "POST" => client.post(&transport_url),
+                "PUT" => client.put(&transport_url),
+                "DELETE" => client.delete(&transport_url),
+                "PATCH" => client.patch(&transport_url),
+                "HEAD" => client.head(&transport_url),
                 _ => return Err(format!("Unsupported HTTP method: {}", method)),
             };
 
@@ -500,7 +521,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             // safety layer before they reach the LLM, so we allow the polling
             // response to continue here to avoid poisoning the offset state.
             if let Ok(body_str) = std::str::from_utf8(&body)
-                && !should_skip_response_leak_scan(&url)
+                && !should_skip_response_leak_scan(&logical_url)
             {
                 leak_detector
                     .scan_and_clean(body_str)
@@ -625,30 +646,59 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         } else {
             serde_json::from_str(&meta_json).ok()
         };
-        match self.pairing_store.upsert_request(&channel, &id, meta) {
-            Ok(r) => Ok(near::agent::channel_host::PairingUpsertResult {
-                code: r.code,
-                created: r.created,
+        let store = self.pairing_store.clone();
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| "pairing host callback requires a Tokio runtime".to_string())?;
+        if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+            return Err("pairing host callback requires a multi-thread Tokio runtime".to_string());
+        }
+        let result: Result<crate::db::PairingRequestRecord, crate::error::DatabaseError> =
+            tokio::task::block_in_place(move || {
+                handle.block_on(async move { store.upsert_request(&channel, &id, meta).await })
+            });
+        match result {
+            Ok(req) => Ok(near::agent::channel_host::PairingUpsertResult {
+                code: req.code,
+                created: req.created,
             }),
             Err(e) => Err(e.to_string()),
         }
     }
 
-    fn pairing_is_allowed(
+    fn pairing_resolve_identity(
         &mut self,
         channel: String,
-        id: String,
-        username: Option<String>,
-    ) -> Result<bool, String> {
-        self.pairing_store
-            .is_sender_allowed(&channel, &id, username.as_deref())
-            .map_err(|e| e.to_string())
+        external_id: String,
+    ) -> Result<Option<String>, String> {
+        let store = self.pairing_store.clone();
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| "pairing host callback requires a Tokio runtime".to_string())?;
+        if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+            return Err("pairing host callback requires a multi-thread Tokio runtime".to_string());
+        }
+        let result: Result<Option<crate::ownership::Identity>, crate::error::DatabaseError> =
+            tokio::task::block_in_place(move || {
+                handle.block_on(async move { store.resolve_identity(&channel, &external_id).await })
+            });
+        match result {
+            Ok(Some(identity)) => Ok(Some(identity.owner_id.to_string())),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     fn pairing_read_allow_from(&mut self, channel: String) -> Result<Vec<String>, String> {
-        self.pairing_store
-            .read_allow_from(&channel)
-            .map_err(|e| e.to_string())
+        let store = self.pairing_store.clone();
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| "pairing host callback requires a Tokio runtime".to_string())?;
+        if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+            return Err("pairing host callback requires a multi-thread Tokio runtime".to_string());
+        }
+        let result: Result<Vec<String>, crate::error::DatabaseError> =
+            tokio::task::block_in_place(move || {
+                handle.block_on(async move { store.read_allow_from(&channel).await })
+            });
+        result.map_err(|e| e.to_string())
     }
 }
 
@@ -690,6 +740,12 @@ pub struct WasmChannel {
 
     /// Polling shutdown signal sender (keeps polling alive while held).
     poll_shutdown_tx: RwLock<Option<oneshot::Sender<()>>>,
+
+    /// Websocket runtime shutdown signal sender.
+    websocket_shutdown_tx: RwLock<Option<oneshot::Sender<()>>>,
+
+    /// Serializes websocket-triggered poll executions.
+    websocket_poll_lock: Arc<Mutex<()>>,
 
     /// Registered HTTP endpoints.
     endpoints: RwLock<Vec<RegisteredEndpoint>>,
@@ -839,6 +895,8 @@ impl WasmChannel {
             rate_limiter: Arc::new(RwLock::new(rate_limiter)),
             shutdown_tx: RwLock::new(None),
             poll_shutdown_tx: RwLock::new(None),
+            websocket_shutdown_tx: RwLock::new(None),
+            websocket_poll_lock: Arc::new(Mutex::new(())),
             endpoints: RwLock::new(Vec::new()),
             credentials: Arc::new(RwLock::new(HashMap::new())),
             typing_task: RwLock::new(None),
@@ -1068,6 +1126,228 @@ impl WasmChannel {
         })?;
 
         Ok(())
+    }
+
+    fn start_websocket_runtime(
+        &self,
+        config: WebsocketRuntimeConfig,
+        shutdown_rx: oneshot::Receiver<()>,
+    ) {
+        let channel_name = self.name.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let prepared = Arc::clone(&self.prepared);
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
+        let poll_capabilities = self.capabilities.clone();
+        let message_tx = self.message_tx.clone();
+        let rate_limiter = self.rate_limiter.clone();
+        let credentials = self.credentials.clone();
+        let pairing_store = self.pairing_store.clone();
+        let callback_timeout = self.runtime.config().callback_timeout;
+        let workspace_store = self.workspace_store.clone();
+        let last_broadcast_metadata = self.last_broadcast_metadata.clone();
+        let settings_store = self.settings_store.clone();
+        let owner_scope_id = self.owner_scope_id.clone();
+        let owner_actor_id = self.owner_actor_id.clone();
+        let websocket_secrets_store = self.secrets_store.clone();
+        let websocket_poll_lock = Arc::clone(&self.websocket_poll_lock);
+
+        tokio::spawn(async move {
+            let mut shutdown = std::pin::pin!(shutdown_rx);
+            let mut reconnect_attempt = 0u32;
+            let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<String>();
+
+            tracing::info!(
+                channel = %channel_name,
+                url = %config.url,
+                "Starting websocket runtime"
+            );
+            let queue_path = websocket_queue_path(&channel_name);
+            let processing_queue_path = websocket_processing_queue_path(&channel_name);
+            let identify_payload =
+                resolve_websocket_identify_message(&config, websocket_secrets_store.as_deref())
+                    .await;
+            let mut session_state = WebsocketSessionState::new(identify_payload.as_deref());
+
+            'reconnect: loop {
+                let connect_url = session_state.connect_url(&config.url);
+                let connect_result = tokio_tungstenite::connect_async(connect_url).await;
+                let (stream, _) = match connect_result {
+                    Ok(parts) => {
+                        reconnect_attempt = 0;
+                        tracing::info!(channel = %channel_name, "Websocket runtime connected");
+                        parts
+                    }
+                    Err(error) => {
+                        let backoff = websocket_reconnect_backoff(reconnect_attempt);
+                        reconnect_attempt = reconnect_attempt.saturating_add(1);
+                        tracing::warn!(
+                            channel = %channel_name,
+                            url = %config.url,
+                            error = %error,
+                            backoff_secs = backoff.as_secs(),
+                            "Websocket runtime connection failed; retrying"
+                        );
+                        tokio::select! {
+                            _ = tokio::time::sleep(backoff) => continue 'reconnect,
+                            _ = &mut shutdown => {
+                                tracing::info!(channel = %channel_name, "Stopping websocket runtime");
+                                break 'reconnect;
+                            }
+                        }
+                    }
+                };
+
+                let (mut write, mut read) = stream.split();
+                let mut next_heartbeat: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
+                session_state.reset_connection();
+
+                loop {
+                    tokio::select! {
+                        _ = async {
+                            if let Some(sleep) = next_heartbeat.as_mut() {
+                                sleep.as_mut().await;
+                            } else {
+                                std::future::pending::<()>().await;
+                            }
+                        } => {
+                            if let Some(payload) = build_websocket_heartbeat_message(session_state.last_sequence.clone())
+                                && let Err(error) = write.send(WebsocketMessage::Text(payload.into())).await
+                            {
+                                tracing::warn!(channel = %channel_name, error = %error, "Websocket heartbeat send failed");
+                                break;
+                            }
+
+                            next_heartbeat = session_state.heartbeat_interval_ms
+                                .map(|interval_ms| Box::pin(tokio::time::sleep(websocket_heartbeat_sleep_duration(interval_ms))));
+                        }
+                        outbound = outbound_rx.recv() => {
+                            if let Some(payload) = outbound
+                                && let Err(error) = write.send(WebsocketMessage::Text(payload.into())).await
+                            {
+                                tracing::warn!(channel = %channel_name, error = %error, "Websocket outbound control send failed");
+                                break;
+                            }
+                        }
+                        _ = &mut shutdown => {
+                            tracing::info!(channel = %channel_name, "Stopping websocket runtime");
+                            break 'reconnect;
+                        }
+                        message = read.next() => {
+                            match message {
+                                Some(Ok(WebsocketMessage::Text(text))) => {
+                                    log_websocket_diagnostic(&channel_name, &WebsocketMessage::Text(text.clone()));
+                                    let text = text.to_string();
+
+                                    let actions = session_state.process_text_frame(
+                                        &text,
+                                        &channel_name,
+                                        identify_payload.as_deref(),
+                                        workspace_store.as_ref(),
+                                        pairing_store.as_ref(),
+                                    );
+
+                                    let mut should_break = false;
+                                    let mut should_reconnect = false;
+                                    for action in actions {
+                                        match action {
+                                            WebsocketFrameAction::SetHeartbeat { interval_ms } => {
+                                                next_heartbeat = Some(Box::pin(tokio::time::sleep(
+                                                    websocket_heartbeat_sleep_duration(interval_ms),
+                                                )));
+                                            }
+                                            WebsocketFrameAction::Send(payload) => {
+                                                if let Err(error) = write.send(WebsocketMessage::Text(payload.into())).await {
+                                                    tracing::warn!(channel = %channel_name, error = %error, "Websocket send failed");
+                                                    should_break = true;
+                                                    break;
+                                                }
+                                            }
+                                            WebsocketFrameAction::Enqueue(raw_text) => {
+                                                if let Err(error) = workspace_store.append_json_text_queue(
+                                                    &queue_path,
+                                                    &raw_text,
+                                                    WEBSOCKET_EVENT_QUEUE_MAX_ITEMS,
+                                                ) {
+                                                    tracing::warn!(channel = %channel_name, error = %error, "Failed to enqueue websocket text frame");
+                                                    continue;
+                                                }
+
+                                                if let Ok(poll_guard) = Arc::clone(&websocket_poll_lock).try_lock_owned() {
+                                                    spawn_websocket_poll(
+                                                        poll_guard,
+                                                        WebsocketPollContext {
+                                                            channel_name: channel_name.clone(),
+                                                            runtime: Arc::clone(&runtime),
+                                                            prepared: Arc::clone(&prepared),
+                                                            capabilities: capabilities.clone(),
+                                                            poll_capabilities: poll_capabilities.clone(),
+                                                            credentials: Arc::clone(&credentials),
+                                                            pairing_store: pairing_store.clone(),
+                                                            workspace_store: workspace_store.clone(),
+                                                            message_tx: message_tx.clone(),
+                                                            rate_limiter: Arc::clone(&rate_limiter),
+                                                            last_broadcast_metadata: Arc::clone(&last_broadcast_metadata),
+                                                            settings_store: settings_store.clone(),
+                                                            owner_scope_id: owner_scope_id.clone(),
+                                                            owner_actor_id: owner_actor_id.clone(),
+                                                            secrets_store: websocket_secrets_store.clone(),
+                                                            outbound_tx: outbound_tx.clone(),
+                                                            queue_path: queue_path.clone(),
+                                                            processing_queue_path: processing_queue_path.clone(),
+                                                            callback_timeout,
+                                                        },
+                                                    );
+                                                }
+                                            }
+                                            WebsocketFrameAction::InvalidateAndReconnect => {
+                                                should_reconnect = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if should_reconnect {
+                                        break;
+                                    }
+                                    if should_break {
+                                        break;
+                                    }
+                                }
+                                Some(Ok(other)) => {
+                                    log_websocket_diagnostic(&channel_name, &other);
+                                }
+                                Some(Err(error)) => {
+                                    tracing::warn!(
+                                        channel = %channel_name,
+                                        error = %error,
+                                        "Websocket runtime receive error"
+                                    );
+                                    break;
+                                }
+                                None => {
+                                    tracing::info!(channel = %channel_name, "Websocket runtime closed by peer");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let backoff = websocket_reconnect_backoff(reconnect_attempt);
+                reconnect_attempt = reconnect_attempt.saturating_add(1);
+                tracing::info!(
+                    channel = %channel_name,
+                    backoff_secs = backoff.as_secs(),
+                    "Websocket runtime disconnected; reconnect scheduled"
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(backoff) => {}
+                    _ = &mut shutdown => {
+                        tracing::info!(channel = %channel_name, "Stopping websocket runtime");
+                        break 'reconnect;
+                    }
+                }
+            }
+        });
     }
 
     /// Create a fresh store configured for WASM execution.
@@ -1504,6 +1784,8 @@ impl WasmChannel {
         let channel_name = self.name.clone();
         match result {
             Ok(Ok(((), mut host_state))) => {
+                let _ = drain_guest_logs(&channel_name, "on_poll", &mut host_state);
+
                 // Process emitted messages
                 let emitted = host_state.take_emitted_messages();
                 self.process_emitted_messages(emitted).await?;
@@ -1562,7 +1844,7 @@ impl WasmChannel {
 
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
-        let capabilities = self.capabilities.clone();
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
@@ -1573,6 +1855,7 @@ impl WasmChannel {
         )
         .await;
         let pairing_store = self.pairing_store.clone();
+        let workspace_store = self.workspace_store.clone();
 
         // Prepare response data
         let message_id_str = message_id.to_string();
@@ -1643,8 +1926,10 @@ impl WasmChannel {
                     });
                 }
 
-                let host_state =
+                let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+                let pending_writes = host_state.take_pending_writes();
+                workspace_store.commit_writes(&pending_writes);
                 tracing::info!("on_respond WASM execution completed successfully");
                 Ok(((), host_state))
             })
@@ -1706,7 +1991,7 @@ impl WasmChannel {
 
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
-        let capabilities = self.capabilities.clone();
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
@@ -1717,6 +2002,7 @@ impl WasmChannel {
         )
         .await;
         let pairing_store = self.pairing_store.clone();
+        let workspace_store = self.workspace_store.clone();
 
         let user_id = user_id.to_string();
         let content = content.to_string();
@@ -1768,8 +2054,10 @@ impl WasmChannel {
                     });
                 }
 
-                let host_state =
+                let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+                let pending_writes = host_state.take_pending_writes();
+                workspace_store.commit_writes(&pending_writes);
                 tracing::info!("on_broadcast WASM execution completed successfully");
                 Ok(((), host_state))
             })
@@ -1813,7 +2101,7 @@ impl WasmChannel {
 
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
-        let capabilities = self.capabilities.clone();
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
@@ -1824,6 +2112,7 @@ impl WasmChannel {
         )
         .await;
         let pairing_store = self.pairing_store.clone();
+        let workspace_store = self.workspace_store.clone();
 
         let Some(wit_update) = status_to_wit(status, metadata) else {
             return Ok(());
@@ -1845,6 +2134,11 @@ impl WasmChannel {
                 channel_iface
                     .call_on_status(&mut store, &wit_update)
                     .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))?;
+
+                let mut host_state =
+                    Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+                let pending_writes = host_state.take_pending_writes();
+                workspace_store.commit_writes(&pending_writes);
 
                 Ok(())
             })
@@ -1886,6 +2180,7 @@ impl WasmChannel {
         host_credentials: Vec<ResolvedHostCredential>,
         pairing_store: Arc<PairingStore>,
         timeout: Duration,
+        workspace_store: &Arc<ChannelWorkspaceStore>,
         wit_update: wit_channel::StatusUpdate,
     ) -> Result<(), WasmChannelError> {
         if prepared.component().is_none() {
@@ -1894,9 +2189,10 @@ impl WasmChannel {
 
         let runtime = Arc::clone(runtime);
         let prepared = Arc::clone(prepared);
-        let capabilities = capabilities.clone();
+        let capabilities = Self::inject_workspace_reader(capabilities, workspace_store);
         let credentials_snapshot = credentials.read().await.clone();
         let channel_name_owned = channel_name.to_string();
+        let workspace_store = Arc::clone(workspace_store);
 
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
@@ -1914,6 +2210,11 @@ impl WasmChannel {
                 channel_iface
                     .call_on_status(&mut store, &wit_update)
                     .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))?;
+
+                let mut host_state =
+                    Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+                let pending_writes = host_state.take_pending_writes();
+                workspace_store.commit_writes(&pending_writes);
 
                 Ok(())
             })
@@ -1986,6 +2287,7 @@ impl WasmChannel {
                 let runtime = Arc::clone(&self.runtime);
                 let prepared = Arc::clone(&self.prepared);
                 let capabilities = self.capabilities.clone();
+                let workspace_store = self.workspace_store.clone();
                 let credentials = self.credentials.clone();
                 // Pre-resolve host credentials once for the lifetime of the repeater.
                 // Channels tokens rarely change, so a snapshot per-repeater is correct.
@@ -2021,6 +2323,7 @@ impl WasmChannel {
                             hc,
                             pairing_store.clone(),
                             callback_timeout,
+                            &workspace_store,
                             wit_update_clone,
                         )
                         .await
@@ -2039,63 +2342,16 @@ impl WasmChannel {
             StatusUpdate::StreamChunk(_) => {
                 // No-op, too noisy
             }
-            StatusUpdate::ApprovalNeeded {
-                tool_name,
-                description,
-                parameters,
-                allow_always,
-                ..
-            } => {
+            StatusUpdate::ApprovalNeeded { .. } => {
                 // WASM channels (Telegram, Slack, etc.) cannot render
                 // interactive approval overlays.  Send the approval prompt
                 // as an actual message so the user can reply yes/no.
                 self.cancel_typing_task().await;
 
-                let params_preview = parameters
-                    .as_object()
-                    .map(|obj| {
-                        obj.iter()
-                            .map(|(k, v)| {
-                                let val = match v {
-                                    serde_json::Value::String(s) => {
-                                        if s.chars().count() > 80 {
-                                            let truncated: String = s.chars().take(77).collect();
-                                            format!("\"{}...\"", truncated)
-                                        } else {
-                                            format!("\"{}\"", s)
-                                        }
-                                    }
-                                    other => {
-                                        let s = other.to_string();
-                                        if s.chars().count() > 80 {
-                                            let truncated: String = s.chars().take(77).collect();
-                                            format!("{}...", truncated)
-                                        } else {
-                                            s
-                                        }
-                                    }
-                                };
-                                format!("  {}: {}", k, val)
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    })
-                    .unwrap_or_default();
-
-                let reply_hint = if *allow_always {
-                    "Reply \"yes\" to approve, \"no\" to deny, or \"always\" to auto-approve."
-                } else {
-                    "Reply \"yes\" to approve or \"no\" to deny."
+                let Some(prompt) = crate::channels::ChatApprovalPrompt::from_status(&status) else {
+                    return Ok(());
                 };
-                let prompt = format!(
-                    "Approval needed: {tool_name}\n\
-                     {description}\n\
-                     \n\
-                     Parameters:\n\
-                     {params_preview}\n\
-                     \n\
-                     {reply_hint}"
-                );
+                let prompt = prompt.plain_text_message();
 
                 let metadata_json = serde_json::to_string(metadata).unwrap_or_default();
                 if let Err(e) = self
@@ -2203,7 +2459,6 @@ impl WasmChannel {
 
             // Convert to IncomingMessage
             let mut msg = IncomingMessage::new(&self.name, &resolved_user_id, &emitted.content)
-                .with_owner_id(&self.owner_scope_id)
                 .with_sender_id(&emitted.user_id);
 
             if let Some(name) = emitted.user_name {
@@ -2439,6 +2694,7 @@ impl WasmChannel {
 
         match result {
             Ok(Ok(mut host_state)) => {
+                let _ = drain_guest_logs(channel_name, "on_poll", &mut host_state);
                 let emitted = host_state.take_emitted_messages();
                 tracing::debug!(
                     channel = %channel_name,
@@ -2507,7 +2763,6 @@ impl WasmChannel {
             // Convert to IncomingMessage
             let mut msg =
                 IncomingMessage::new(dispatch.channel_name, &resolved_user_id, &emitted.content)
-                    .with_owner_id(dispatch.owner_scope_id)
                     .with_sender_id(&emitted.user_id);
 
             if let Some(name) = emitted.user_name {
@@ -2550,6 +2805,15 @@ impl WasmChannel {
                     dispatch.settings_store,
                 )
                 .await;
+            }
+
+            if emitted.content.trim().is_empty() && emitted.attachments.is_empty() {
+                tracing::debug!(
+                    channel = %dispatch.channel_name,
+                    user_id = %emitted.user_id,
+                    "Skipping empty emitted message"
+                );
+                continue;
             }
 
             // Send to stream — no locks held across this await
@@ -2658,6 +2922,15 @@ impl Channel for WasmChannel {
             *self.poll_shutdown_tx.write().await = Some(poll_shutdown_tx);
 
             self.start_polling(Duration::from_millis(interval as u64), poll_shutdown_rx);
+        }
+
+        if let Some(websocket_config) =
+            WebsocketRuntimeConfig::from_capabilities(&self.capabilities)
+            && websocket_config.connect_on_start
+        {
+            let (websocket_shutdown_tx, websocket_shutdown_rx) = oneshot::channel();
+            *self.websocket_shutdown_tx.write().await = Some(websocket_shutdown_tx);
+            self.start_websocket_runtime(websocket_config, websocket_shutdown_rx);
         }
 
         tracing::info!(
@@ -2776,6 +3049,9 @@ impl Channel for WasmChannel {
         // Stop polling by dropping the sender (receiver will complete)
         let _ = self.poll_shutdown_tx.write().await.take();
 
+        // Stop websocket runtime by dropping the sender (receiver will complete)
+        let _ = self.websocket_shutdown_tx.write().await.take();
+
         // Clear the message sender
         *self.message_tx.write().await = None;
 
@@ -2785,6 +3061,556 @@ impl Channel for WasmChannel {
         );
 
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WebsocketRuntimeConfig {
+    pub(crate) url: String,
+    pub(crate) connect_on_start: bool,
+    pub(crate) identify: Option<serde_json::Value>,
+    pub(crate) identify_secret_name: Option<String>,
+}
+
+impl WebsocketRuntimeConfig {
+    pub(crate) fn from_capabilities(capabilities: &ChannelCapabilities) -> Option<Self> {
+        let raw = capabilities.tool_capabilities.websocket.as_ref()?;
+        let url = raw.get("url")?.as_str()?.trim();
+        if url.is_empty() {
+            return None;
+        }
+
+        let parsed = url::Url::parse(url).ok()?;
+        let scheme = parsed.scheme();
+        if scheme != "ws" && scheme != "wss" {
+            return None;
+        }
+
+        let host = parsed.host_str()?;
+        let path = parsed.path();
+        let http = capabilities.tool_capabilities.http.as_ref()?;
+        if !http
+            .allowlist
+            .iter()
+            .any(|pattern| pattern.matches(host, path, "GET"))
+        {
+            return None;
+        }
+
+        Some(Self {
+            url: url.to_string(),
+            connect_on_start: raw
+                .get("connect_on_start")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            identify: raw.get("identify").cloned(),
+            identify_secret_name: raw
+                .get("identify_secret_name")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned),
+        })
+    }
+}
+
+fn websocket_queue_path(channel_name: &str) -> String {
+    format!("channels/{channel_name}/{WEBSOCKET_EVENT_QUEUE_RELATIVE_PATH}")
+}
+
+fn websocket_processing_queue_path(channel_name: &str) -> String {
+    format!("channels/{channel_name}/{WEBSOCKET_EVENT_PROCESSING_QUEUE_RELATIVE_PATH}")
+}
+
+async fn resolve_websocket_identify_message(
+    config: &WebsocketRuntimeConfig,
+    store: Option<&(dyn SecretsStore + Send + Sync)>,
+) -> Option<String> {
+    let identify = config.identify.clone()?;
+    let secret_name = config.identify_secret_name.as_ref()?;
+    let store = store?;
+    let secret = store.get_decrypted("default", secret_name).await.ok()?;
+    build_websocket_identify_message(&identify, secret.expose())
+}
+
+fn build_websocket_identify_message(identify: &serde_json::Value, token: &str) -> Option<String> {
+    let mut payload = identify.as_object()?.clone();
+    payload.insert(
+        "token".to_string(),
+        serde_json::Value::String(token.to_string()),
+    );
+
+    serde_json::to_string(&serde_json::json!({
+        "op": 2,
+        "d": serde_json::Value::Object(payload),
+    }))
+    .ok()
+}
+
+fn build_websocket_heartbeat_message(sequence: Option<serde_json::Value>) -> Option<String> {
+    serde_json::to_string(&serde_json::json!({
+        "op": 1,
+        "d": sequence.unwrap_or(serde_json::Value::Null),
+    }))
+    .ok()
+}
+
+fn build_discord_gateway_presence_update(status: &str) -> Option<String> {
+    serde_json::to_string(&serde_json::json!({
+        "op": 3,
+        "d": {
+            "since": serde_json::Value::Null,
+            "activities": [],
+            "status": status,
+            "afk": false
+        }
+    }))
+    .ok()
+}
+
+fn build_gateway_presence_update(
+    channel_name: &str,
+    workspace_store: &crate::channels::wasm::host::ChannelWorkspaceStore,
+    pairing_store: &PairingStore,
+) -> Option<String> {
+    if channel_name != "discord" {
+        return None;
+    }
+
+    build_discord_gateway_presence_update(discord_gateway_presence_status(
+        channel_name,
+        workspace_store,
+        pairing_store,
+    ))
+}
+
+fn discord_gateway_presence_status(
+    channel_name: &str,
+    workspace_store: &crate::channels::wasm::host::ChannelWorkspaceStore,
+    _pairing_store: &PairingStore,
+) -> &'static str {
+    use crate::tools::wasm::WorkspaceReader;
+
+    let owner_key = format!("channels/{}/state/owner_id", channel_name);
+    if workspace_store
+        .read(&owner_key)
+        .filter(|s| !s.is_empty())
+        .is_some()
+    {
+        return "online";
+    }
+
+    "dnd"
+}
+
+fn parse_websocket_hello_heartbeat_interval_ms(text: &str) -> Option<u64> {
+    let payload: serde_json::Value = serde_json::from_str(text).ok()?;
+    if payload.get("op")?.as_u64()? != 10 {
+        return None;
+    }
+
+    payload.get("d")?.get("heartbeat_interval")?.as_u64()
+}
+
+fn websocket_reconnect_backoff(attempt: u32) -> Duration {
+    use rand::Rng;
+
+    let exponent = attempt.min(6);
+    let base_ms = (1u64 << exponent) * 1_000;
+    // Add 0-25% jitter per Discord's reconnection recommendations to avoid
+    // thundering-herd when many bots reconnect after a Discord deploy.
+    let jitter_ms = rand::thread_rng().gen_range(0..=base_ms / 4);
+    Duration::from_millis(base_ms + jitter_ms)
+}
+
+fn websocket_heartbeat_sleep_duration(interval_ms: u64) -> Duration {
+    Duration::from_millis(interval_ms.max(1))
+}
+
+fn should_warn_on_heartbeat_interval(interval_ms: u64) -> bool {
+    interval_ms < 1_000
+}
+
+fn parse_websocket_sequence(text: &str) -> Option<u64> {
+    let payload: serde_json::Value = serde_json::from_str(text).ok()?;
+    payload.get("s")?.as_u64()
+}
+
+fn parse_websocket_ready_session(text: &str) -> Option<(String, Option<String>)> {
+    let payload: serde_json::Value = serde_json::from_str(text).ok()?;
+    if payload.get("op")?.as_u64()? != 0 {
+        return None;
+    }
+    if payload.get("t")?.as_str()? != "READY" {
+        return None;
+    }
+    let d = payload.get("d")?;
+    let sid = d.get("session_id")?.as_str()?.to_string();
+    let resume_url = d
+        .get("resume_gateway_url")
+        .and_then(|v| v.as_str())
+        .map(ToOwned::to_owned);
+    Some((sid, resume_url))
+}
+
+fn build_websocket_resume_message(
+    token: &str,
+    session_id: &str,
+    sequence: Option<&serde_json::Value>,
+) -> Option<String> {
+    serde_json::to_string(&serde_json::json!({
+        "op": 6,
+        "d": {
+            "token": token,
+            "session_id": session_id,
+            "seq": sequence.cloned().unwrap_or(serde_json::Value::Null),
+        }
+    }))
+    .ok()
+}
+
+fn parse_websocket_invalid_session(text: &str) -> Option<bool> {
+    let payload: serde_json::Value = serde_json::from_str(text).ok()?;
+    if payload.get("op")?.as_u64()? != 9 {
+        return None;
+    }
+    Some(payload.get("d")?.as_bool().unwrap_or(false))
+}
+
+fn extract_token_from_identify_payload(identify_payload: &str) -> Option<String> {
+    let payload: serde_json::Value = serde_json::from_str(identify_payload).ok()?;
+    payload
+        .get("d")?
+        .get("token")?
+        .as_str()
+        .map(ToOwned::to_owned)
+}
+
+fn drain_guest_logs(
+    channel_name: &str,
+    callback: &str,
+    host_state: &mut ChannelHostState,
+) -> Vec<crate::tools::wasm::LogEntry> {
+    let entries = host_state.take_logs();
+
+    for entry in &entries {
+        match entry.level {
+            crate::tools::wasm::LogLevel::Error => {
+                tracing::error!(channel = %channel_name, callback = callback, "{}", entry.message);
+            }
+            crate::tools::wasm::LogLevel::Warn => {
+                tracing::warn!(channel = %channel_name, callback = callback, "{}", entry.message);
+            }
+            crate::tools::wasm::LogLevel::Info => {
+                tracing::info!(channel = %channel_name, callback = callback, "{}", entry.message);
+            }
+            crate::tools::wasm::LogLevel::Debug => {
+                tracing::debug!(channel = %channel_name, callback = callback, "{}", entry.message);
+            }
+            crate::tools::wasm::LogLevel::Trace => {
+                tracing::trace!(channel = %channel_name, callback = callback, "{}", entry.message);
+            }
+        }
+    }
+
+    entries
+}
+
+/// Shared state for websocket-triggered poll tasks.
+///
+/// Groups the many `Arc` handles needed by [`spawn_websocket_poll`] into a
+/// single cloneable context so the call site stays readable.
+struct WebsocketPollContext {
+    channel_name: String,
+    runtime: Arc<WasmChannelRuntime>,
+    prepared: Arc<PreparedChannelModule>,
+    capabilities: ChannelCapabilities,
+    poll_capabilities: ChannelCapabilities,
+    credentials: Arc<RwLock<HashMap<String, String>>>,
+    pairing_store: Arc<PairingStore>,
+    workspace_store: Arc<ChannelWorkspaceStore>,
+    message_tx: Arc<RwLock<Option<mpsc::Sender<IncomingMessage>>>>,
+    rate_limiter: Arc<RwLock<ChannelEmitRateLimiter>>,
+    last_broadcast_metadata: Arc<tokio::sync::RwLock<Option<String>>>,
+    settings_store: Option<Arc<dyn crate::db::SettingsStore>>,
+    owner_scope_id: String,
+    owner_actor_id: Option<String>,
+    secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    outbound_tx: mpsc::UnboundedSender<String>,
+    queue_path: String,
+    processing_queue_path: String,
+    callback_timeout: Duration,
+}
+
+/// Spawn the websocket-triggered poll task.
+///
+/// Extracted from the select loop to reduce nesting. Moves items from the
+/// event queue to a processing queue and runs the WASM `on_poll` callback.
+fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: WebsocketPollContext) {
+    tokio::spawn(async move {
+        let _poll_guard = poll_guard;
+
+        loop {
+            let moved = match ctx
+                .workspace_store
+                .move_json_text_queue(&ctx.queue_path, &ctx.processing_queue_path)
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(channel = %ctx.channel_name, error = %error, "Failed to snapshot websocket queue for polling");
+                    break;
+                }
+            };
+
+            if !moved {
+                break;
+            }
+
+            let host_credentials = resolve_channel_host_credentials(
+                &ctx.poll_capabilities,
+                ctx.secrets_store.as_deref(),
+                &ctx.owner_scope_id,
+            )
+            .await;
+
+            match WasmChannel::execute_poll(
+                &ctx.channel_name,
+                &ctx.runtime,
+                &ctx.prepared,
+                &ctx.capabilities,
+                &ctx.credentials,
+                host_credentials,
+                ctx.pairing_store.clone(),
+                ctx.callback_timeout,
+                &ctx.workspace_store,
+            )
+            .await
+            {
+                Ok(emitted_messages) => {
+                    if !emitted_messages.is_empty()
+                        && let Err(error) = WasmChannel::dispatch_emitted_messages(
+                            EmitDispatchContext {
+                                channel_name: &ctx.channel_name,
+                                owner_scope_id: &ctx.owner_scope_id,
+                                owner_actor_id: ctx.owner_actor_id.as_deref(),
+                                message_tx: &ctx.message_tx,
+                                rate_limiter: &ctx.rate_limiter,
+                                last_broadcast_metadata: &ctx.last_broadcast_metadata,
+                                settings_store: ctx.settings_store.as_ref(),
+                            },
+                            emitted_messages,
+                        )
+                        .await
+                    {
+                        tracing::warn!(channel = %ctx.channel_name, error = %error, "Failed to dispatch emitted websocket poll messages");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(channel = %ctx.channel_name, error = %error, "Websocket-triggered poll failed");
+                }
+            }
+
+            if let Some(payload) = build_gateway_presence_update(
+                &ctx.channel_name,
+                ctx.workspace_store.as_ref(),
+                ctx.pairing_store.as_ref(),
+            ) {
+                let _ = ctx.outbound_tx.send(payload);
+            }
+        }
+    });
+}
+
+/// Actions produced by websocket text frame processing.
+///
+/// Returned from [`WebsocketSessionState::process_text_frame`] so the caller
+/// can perform the actual I/O (send messages, break loops) while keeping the
+/// parsing logic synchronous and testable.
+enum WebsocketFrameAction {
+    /// Update the heartbeat timer to fire after `interval_ms` milliseconds.
+    SetHeartbeat { interval_ms: u64 },
+    /// Send a text payload over the websocket.
+    Send(String),
+    /// Enqueue the raw text into the workspace event queue.
+    Enqueue(String),
+    /// Clear session state and reconnect with a fresh identify.
+    InvalidateAndReconnect,
+}
+
+/// Tracks websocket session state across reconnects.
+///
+/// Keeps heartbeat interval, sequence counter, and Discord Gateway session
+/// resumption fields. The [`process_text_frame`] method parses incoming frames
+/// and returns a list of [`WebsocketFrameAction`]s the caller should execute.
+struct WebsocketSessionState {
+    heartbeat_interval_ms: Option<u64>,
+    last_sequence: Option<serde_json::Value>,
+    session_id: Option<String>,
+    resume_gateway_url: Option<String>,
+    /// Raw bot token extracted from the identify payload.
+    token: Option<String>,
+    /// Whether we attempted a resume on this connection.
+    attempted_resume: bool,
+}
+
+impl WebsocketSessionState {
+    fn new(identify_payload: Option<&str>) -> Self {
+        let token = identify_payload.and_then(extract_token_from_identify_payload);
+        Self {
+            heartbeat_interval_ms: None,
+            last_sequence: None,
+            session_id: None,
+            resume_gateway_url: None,
+            token,
+            attempted_resume: false,
+        }
+    }
+
+    /// Determine the URL to use for the next connection attempt.
+    fn connect_url<'a>(&'a self, default_url: &'a str) -> &'a str {
+        if self.session_id.is_some()
+            && let Some(ref url) = self.resume_gateway_url
+        {
+            return url.as_str();
+        }
+        default_url
+    }
+
+    /// Reset per-connection state when starting a fresh connection.
+    fn reset_connection(&mut self) {
+        self.heartbeat_interval_ms = None;
+        self.attempted_resume = false;
+    }
+
+    /// Clear all session state so the next reconnect performs a fresh identify.
+    fn invalidate_session(&mut self) {
+        self.session_id = None;
+        self.resume_gateway_url = None;
+        self.last_sequence = None;
+    }
+
+    /// Process a text frame and return a list of actions for the caller to
+    /// execute. This keeps the select loop thin and the parsing logic testable.
+    fn process_text_frame(
+        &mut self,
+        text: &str,
+        channel_name: &str,
+        identify_payload: Option<&str>,
+        workspace_store: &crate::channels::wasm::host::ChannelWorkspaceStore,
+        pairing_store: &PairingStore,
+    ) -> Vec<WebsocketFrameAction> {
+        let mut actions = Vec::new();
+
+        // OP 10 Hello: extract heartbeat interval, send identify or resume
+        if let Some(interval_ms) = parse_websocket_hello_heartbeat_interval_ms(text) {
+            if should_warn_on_heartbeat_interval(interval_ms) {
+                tracing::warn!(
+                    channel = %channel_name,
+                    heartbeat_interval_ms = interval_ms,
+                    "Websocket hello provided unexpectedly low heartbeat interval"
+                );
+            }
+
+            self.heartbeat_interval_ms = Some(interval_ms);
+            actions.push(WebsocketFrameAction::SetHeartbeat { interval_ms });
+
+            // Try resume if we have a session, otherwise fresh identify
+            let sent_resume = if let (Some(token), Some(sid)) = (&self.token, &self.session_id) {
+                if let Some(payload) =
+                    build_websocket_resume_message(token, sid, self.last_sequence.as_ref())
+                {
+                    self.attempted_resume = true;
+                    actions.push(WebsocketFrameAction::Send(payload));
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if !sent_resume && let Some(payload) = identify_payload {
+                actions.push(WebsocketFrameAction::Send(payload.to_string()));
+            }
+        }
+
+        // OP 0 Dispatch READY: capture session_id and resume_gateway_url.
+        // Presence update is sent here (after READY) rather than on Hello,
+        // because Discord's gateway protocol requires waiting for READY/RESUMED
+        // before sending non-Identify commands.
+        if let Some((sid, resume_url)) = parse_websocket_ready_session(text) {
+            self.session_id = Some(sid);
+            self.resume_gateway_url = resume_url;
+
+            if let Some(payload) =
+                build_gateway_presence_update(channel_name, workspace_store, pairing_store)
+            {
+                actions.push(WebsocketFrameAction::Send(payload));
+            }
+        }
+
+        // Track sequence number from any dispatch
+        if let Some(sequence) = parse_websocket_sequence(text) {
+            self.last_sequence = Some(serde_json::Value::Number(sequence.into()));
+        }
+
+        // OP 9 Invalid Session: if not resumable, clear state and reconnect
+        if let Some(resumable) = parse_websocket_invalid_session(text)
+            && !resumable
+        {
+            tracing::info!(
+                channel = %channel_name,
+                "Received non-resumable invalid session; will reconnect with fresh identify"
+            );
+            self.invalidate_session();
+            actions.push(WebsocketFrameAction::InvalidateAndReconnect);
+            return actions;
+        }
+
+        // Always enqueue the raw frame for the poll callback
+        actions.push(WebsocketFrameAction::Enqueue(text.to_string()));
+
+        actions
+    }
+}
+
+fn log_websocket_diagnostic(channel_name: &str, message: &WebsocketMessage) {
+    match message {
+        WebsocketMessage::Text(text) => {
+            tracing::trace!(
+                channel = %channel_name,
+                bytes = text.len(),
+                "Websocket runtime received text frame"
+            );
+        }
+        WebsocketMessage::Binary(bytes) => {
+            tracing::debug!(
+                channel = %channel_name,
+                bytes = bytes.len(),
+                "Websocket runtime received binary frame"
+            );
+        }
+        WebsocketMessage::Close(frame) => {
+            tracing::info!(
+                channel = %channel_name,
+                code = ?frame.as_ref().map(|f| f.code),
+                reason = ?frame.as_ref().map(|f| f.reason.to_string()),
+                "Websocket runtime received close frame"
+            );
+        }
+        WebsocketMessage::Ping(payload) => {
+            tracing::trace!(
+                channel = %channel_name,
+                bytes = payload.len(),
+                "Websocket runtime received ping"
+            );
+        }
+        WebsocketMessage::Pong(payload) => {
+            tracing::trace!(
+                channel = %channel_name,
+                bytes = payload.len(),
+                "Websocket runtime received pong"
+            );
+        }
+        WebsocketMessage::Frame(_) => {}
     }
 }
 
@@ -2983,24 +3809,11 @@ fn status_to_wit(
                 metadata_json,
             }
         }
-        StatusUpdate::ApprovalNeeded {
-            request_id,
-            tool_name,
-            description,
-            allow_always,
-            ..
-        } => {
-            let reply_hint = if *allow_always {
-                "yes (or /approve), no (or /deny), or always (or /always)"
-            } else {
-                "yes (or /approve) or no (or /deny)"
-            };
+        StatusUpdate::ApprovalNeeded { .. } => {
+            let prompt = crate::channels::ChatApprovalPrompt::from_status(status)?;
             wit_channel::StatusUpdate {
                 status: wit_channel::StatusType::ApprovalNeeded,
-                message: format!(
-                    "Approval needed for tool '{}'. {}\nRequest ID: {}\nReply with: {}.",
-                    tool_name, description, request_id, reply_hint
-                ),
+                message: prompt.plain_text_message(),
                 metadata_json,
             }
         }
@@ -3059,8 +3872,24 @@ fn status_to_wit(
             },
             metadata_json,
         },
-        // Suggestions and turn cost are web-gateway-only; skip for WASM channels
-        StatusUpdate::Suggestions { .. } | StatusUpdate::TurnCost { .. } => return None,
+        // Suggestions, turn cost, and skill activation are web-gateway-only; skip for WASM channels
+        StatusUpdate::Suggestions { .. }
+        | StatusUpdate::TurnCost { .. }
+        | StatusUpdate::SkillActivated { .. } => return None,
+        StatusUpdate::ReasoningUpdate {
+            narrative,
+            decisions,
+        } => {
+            let mut msg = narrative.clone();
+            for d in decisions {
+                msg.push_str(&format!("\n  → {}: {}", d.tool_name, d.rationale));
+            }
+            wit_channel::StatusUpdate {
+                status: wit_channel::StatusType::Status,
+                message: msg,
+                metadata_json,
+            }
+        }
     })
 }
 
@@ -3142,6 +3971,31 @@ fn extract_host_from_url(url: &str) -> Option<String> {
             .unwrap_or(h)
             .to_lowercase()
     })
+}
+
+fn rewrite_telegram_api_url_for_testing(url: &str) -> Option<String> {
+    let override_base = std::env::var(TELEGRAM_TEST_API_BASE_ENV)
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())?;
+
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+
+    let host = parsed.host_str()?;
+    if !host.eq_ignore_ascii_case("api.telegram.org") {
+        return None;
+    }
+
+    let path = parsed.path().trim_start_matches('/');
+    let mut rewritten = format!("{override_base}/{path}");
+    if let Some(query) = parsed.query() {
+        rewritten.push('?');
+        rewritten.push_str(query);
+    }
+    Some(rewritten)
 }
 
 fn should_skip_response_leak_scan(url: &str) -> bool {
@@ -3312,20 +4166,29 @@ fn read_attachments(paths: &[String]) -> Result<Vec<wit_channel::Attachment>, St
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use crate::channels::Channel;
     use crate::channels::OutgoingResponse;
     use crate::channels::wasm::capabilities::ChannelCapabilities;
+    use crate::channels::wasm::host::{ChannelHostState, PendingWorkspaceWrite};
     use crate::channels::wasm::runtime::{
         PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
     use crate::channels::wasm::wrapper::{
-        EmitDispatchContext, HttpResponse, WasmChannel, uses_owner_broadcast_target,
+        EmitDispatchContext, HttpResponse, TELEGRAM_TEST_API_BASE_ENV, WasmChannel,
+        WebsocketRuntimeConfig, build_discord_gateway_presence_update,
+        build_websocket_identify_message, build_websocket_resume_message,
+        discord_gateway_presence_status, drain_guest_logs, parse_websocket_invalid_session,
+        parse_websocket_ready_session, should_warn_on_heartbeat_interval,
+        uses_owner_broadcast_target, websocket_heartbeat_sleep_duration,
+        websocket_reconnect_backoff,
     };
     use crate::pairing::PairingStore;
     use crate::testing::credentials::TEST_TELEGRAM_BOT_TOKEN;
-    use crate::tools::wasm::ResourceLimits;
-
+    use crate::tools::wasm::{
+        Capabilities as ToolCapabilities, EndpointPattern, HttpCapability, LogLevel, ResourceLimits,
+    };
     fn create_test_channel() -> WasmChannel {
         create_test_channel_with_owner_scope("default")
     }
@@ -3349,9 +4212,203 @@ mod tests {
             capabilities,
             owner_scope_id,
             "{}".to_string(),
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
             None,
         )
+    }
+
+    #[test]
+    fn test_websocket_runtime_config_reads_capability_payload() {
+        let mut tool_capabilities = ToolCapabilities::default();
+        let mut http = HttpCapability::new(vec![EndpointPattern::host("gateway.discord.gg")]);
+        http.credentials.insert(
+            "discord_bot_token".to_string(),
+            crate::secrets::CredentialMapping {
+                secret_name: "discord_bot_token".to_string(),
+                location: crate::secrets::CredentialLocation::Header {
+                    name: "Authorization".to_string(),
+                    prefix: Some("Bot ".to_string()),
+                },
+                host_patterns: vec!["discord.com".to_string()],
+            },
+        );
+        tool_capabilities.http = Some(http);
+        tool_capabilities.websocket = Some(serde_json::json!({
+            "url": "wss://gateway.discord.gg/?v=10&encoding=json",
+            "connect_on_start": true,
+            "identify_secret_name": "discord_bot_token",
+            "identify": {
+                "intents": 513,
+                "properties": {
+                    "os": "linux",
+                    "browser": "ironclaw",
+                    "device": "ironclaw"
+                }
+            }
+        }));
+
+        let capabilities =
+            ChannelCapabilities::for_channel("discord").with_tool_capabilities(tool_capabilities);
+
+        let config = WebsocketRuntimeConfig::from_capabilities(&capabilities)
+            .expect("websocket config should be parsed");
+
+        assert_eq!(config.url, "wss://gateway.discord.gg/?v=10&encoding=json");
+        assert!(config.connect_on_start);
+        assert_eq!(
+            config.identify_secret_name.as_deref(),
+            Some("discord_bot_token")
+        );
+        assert_eq!(
+            config.identify,
+            Some(serde_json::json!({
+                "intents": 513,
+                "properties": {
+                    "os": "linux",
+                    "browser": "ironclaw",
+                    "device": "ironclaw"
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn test_build_websocket_identify_message_includes_token() {
+        let identify = serde_json::json!({
+            "intents": 513,
+            "properties": {
+                "os": "linux",
+                "browser": "ironclaw",
+                "device": "ironclaw"
+            }
+        });
+
+        let payload = build_websocket_identify_message(&identify, "bot-token").unwrap();
+        let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(json["op"], serde_json::json!(2));
+        assert_eq!(json["d"]["token"], serde_json::json!("bot-token"));
+        assert_eq!(json["d"]["intents"], serde_json::json!(513));
+    }
+
+    #[test]
+    fn test_websocket_runtime_config_requires_allowlisted_host() {
+        let tool_capabilities = ToolCapabilities {
+            http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                "discord.com",
+            )])),
+            websocket: Some(serde_json::json!({
+                "url": "wss://gateway.discord.gg/?v=10&encoding=json",
+                "connect_on_start": true
+            })),
+            ..Default::default()
+        };
+
+        let capabilities =
+            ChannelCapabilities::for_channel("discord").with_tool_capabilities(tool_capabilities);
+
+        assert!(WebsocketRuntimeConfig::from_capabilities(&capabilities).is_none());
+    }
+
+    #[test]
+    fn test_drain_guest_logs_collects_poll_entries() {
+        let mut host_state = ChannelHostState::new("poll-test", ChannelCapabilities::default());
+        host_state
+            .log(LogLevel::Warn, "poll warning".to_string())
+            .expect("log entry should be stored");
+
+        let logs = drain_guest_logs("poll-test", "on_poll", &mut host_state);
+
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].message, "poll warning");
+        assert_eq!(logs[0].level, LogLevel::Warn);
+        assert!(host_state.take_logs().is_empty(), "logs should be drained");
+    }
+
+    #[test]
+    fn test_websocket_reconnect_backoff_caps_at_sixty_four_seconds_with_jitter() {
+        // Backoff = base + 0-25% jitter, so check range [base, base * 1.25].
+        let check = |attempt: u32, base_secs: u64| {
+            let d = websocket_reconnect_backoff(attempt);
+            let base = Duration::from_secs(base_secs);
+            let max = base + base / 4;
+            assert!(
+                d >= base && d <= max,
+                "attempt {attempt}: {d:?} not in [{base:?}, {max:?}]"
+            );
+        };
+        check(0, 1);
+        check(1, 2);
+        check(5, 32);
+        check(6, 64);
+        check(10, 64); // capped at 2^6
+    }
+
+    #[test]
+    fn test_websocket_heartbeat_helpers_guard_low_intervals() {
+        assert!(should_warn_on_heartbeat_interval(0));
+        assert!(should_warn_on_heartbeat_interval(999));
+        assert!(!should_warn_on_heartbeat_interval(1_000));
+        assert_eq!(
+            websocket_heartbeat_sleep_duration(0),
+            Duration::from_millis(1)
+        );
+        assert_eq!(
+            websocket_heartbeat_sleep_duration(42),
+            Duration::from_millis(42)
+        );
+    }
+
+    #[test]
+    fn test_discord_gateway_presence_defaults_to_dnd() {
+        let store = crate::channels::wasm::host::ChannelWorkspaceStore::new();
+        let pairing_store = PairingStore::new_noop();
+
+        assert_eq!(
+            discord_gateway_presence_status("discord", &store, &pairing_store),
+            "dnd"
+        );
+    }
+
+    #[test]
+    fn test_discord_gateway_presence_empty_owner_id_is_dnd() {
+        let store = crate::channels::wasm::host::ChannelWorkspaceStore::new();
+        let pairing_store = PairingStore::new_noop();
+        // Simulate on_start writing empty string when no owner_id is configured
+        store.commit_writes(&[PendingWorkspaceWrite {
+            path: "channels/discord/state/owner_id".to_string(),
+            content: String::new(),
+        }]);
+
+        assert_eq!(
+            discord_gateway_presence_status("discord", &store, &pairing_store),
+            "dnd"
+        );
+    }
+
+    #[test]
+    fn test_discord_gateway_presence_owner_id_is_online() {
+        let store = crate::channels::wasm::host::ChannelWorkspaceStore::new();
+        let pairing_store = PairingStore::new_noop();
+        store.commit_writes(&[PendingWorkspaceWrite {
+            path: "channels/discord/state/owner_id".to_string(),
+            content: "owner-1".to_string(),
+        }]);
+
+        assert_eq!(
+            discord_gateway_presence_status("discord", &store, &pairing_store),
+            "online"
+        );
+    }
+
+    #[test]
+    fn test_build_discord_gateway_presence_update_uses_status() {
+        let payload = build_discord_gateway_presence_update("dnd").unwrap();
+        let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(json["op"], serde_json::json!(3));
+        assert_eq!(json["d"]["status"], serde_json::json!("dnd"));
+        assert_eq!(json["d"]["afk"], serde_json::json!(false));
     }
 
     #[test]
@@ -3382,6 +4439,47 @@ mod tests {
         let response = HttpResponse::error(400, "Bad request");
         assert_eq!(response.status, 400);
         assert_eq!(response.body, b"Bad request");
+    }
+
+    #[test]
+    fn test_inject_workspace_reader_adds_missing_reader() {
+        let capabilities = ChannelCapabilities::for_channel("test");
+        assert!(capabilities.tool_capabilities.workspace_read.is_none());
+
+        let workspace_store = Arc::new(crate::channels::wasm::host::ChannelWorkspaceStore::new());
+        let injected = WasmChannel::inject_workspace_reader(&capabilities, &workspace_store);
+
+        assert!(injected.tool_capabilities.workspace_read.is_some());
+        assert!(
+            injected
+                .tool_capabilities
+                .workspace_read
+                .as_ref()
+                .and_then(|cap| cap.reader.as_ref())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_inject_workspace_reader_preserves_allowed_prefixes() {
+        let tool_capabilities = crate::tools::wasm::Capabilities::default()
+            .with_workspace_read(vec!["state/".to_string(), "context/".to_string()]);
+        let capabilities =
+            ChannelCapabilities::for_channel("test").with_tool_capabilities(tool_capabilities);
+        let workspace_store = Arc::new(crate::channels::wasm::host::ChannelWorkspaceStore::new());
+
+        let injected = WasmChannel::inject_workspace_reader(&capabilities, &workspace_store);
+
+        let workspace_read = injected
+            .tool_capabilities
+            .workspace_read
+            .as_ref()
+            .expect("workspace_read capability should exist");
+        assert_eq!(
+            workspace_read.allowed_prefixes,
+            vec!["state/".to_string(), "context/".to_string()]
+        );
+        assert!(workspace_read.reader.is_some());
     }
 
     #[tokio::test]
@@ -3439,7 +4537,7 @@ mod tests {
             &capabilities,
             &credentials,
             Vec::new(), // no host credentials in test
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
             timeout,
             &workspace_store,
         )
@@ -3494,6 +4592,50 @@ mod tests {
         assert_eq!(msg2.content, "Another message"); // safety: test-only assertion
 
         // No more messages
+        assert!(rx.try_recv().is_err()); // safety: test-only assertion
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_emitted_messages_skips_empty_messages_without_attachments() {
+        use crate::channels::wasm::host::EmittedMessage;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+
+        let rate_limiter = Arc::new(tokio::sync::RwLock::new(
+            crate::channels::wasm::host::ChannelEmitRateLimiter::new(
+                crate::channels::wasm::capabilities::EmitRateLimitConfig::default(),
+            ),
+        ));
+
+        let messages = vec![
+            EmittedMessage::new("user1", ""),
+            EmittedMessage::new("user2", "   "),
+            EmittedMessage::new("user3", "real message"),
+        ];
+
+        let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
+        let result = WasmChannel::dispatch_emitted_messages(
+            EmitDispatchContext {
+                channel_name: "test-channel",
+                owner_scope_id: "default",
+                owner_actor_id: None,
+                message_tx: &message_tx,
+                rate_limiter: &rate_limiter,
+                last_broadcast_metadata: &last_broadcast_metadata,
+                settings_store: None,
+            },
+            messages,
+        )
+        .await;
+
+        assert!(result.is_ok()); // safety: test-only assertion
+
+        let msg = rx
+            .try_recv()
+            .expect("Should receive only the non-empty message");
+        assert_eq!(msg.user_id, "user3"); // safety: test-only assertion
+        assert_eq!(msg.content, "real message"); // safety: test-only assertion
         assert!(rx.try_recv().is_err()); // safety: test-only assertion
     }
 
@@ -3554,7 +4696,7 @@ mod tests {
             capabilities,
             "default",
             "{}".to_string(),
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
             None,
         );
 
@@ -4330,7 +5472,7 @@ mod tests {
             ChannelCapabilities::default(),
             creds,
             Vec::new(),
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
         );
 
         let error = format!(
@@ -4364,7 +5506,7 @@ mod tests {
             ChannelCapabilities::default(),
             std::collections::HashMap::new(),
             Vec::new(),
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
         );
 
         let input = "some error message";
@@ -4395,7 +5537,7 @@ mod tests {
             ChannelCapabilities::default(),
             creds,
             host_creds,
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
         );
 
         // Error containing URL-encoded form of the credential
@@ -4428,11 +5570,45 @@ mod tests {
             ChannelCapabilities::default(),
             creds,
             Vec::new(),
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
         );
 
         let input = "should not match anything";
         assert_eq!(store.redact_credentials(input), input);
+    }
+
+    #[test]
+    fn test_http_request_rejects_private_ip_targets() {
+        let capabilities =
+            ChannelCapabilities::for_channel("test").with_tool_capabilities(ToolCapabilities {
+                http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                    "127.0.0.1",
+                )])),
+                ..Default::default()
+            });
+        let mut store = super::ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            capabilities,
+            std::collections::HashMap::new(),
+            Vec::new(),
+            Arc::new(PairingStore::new()),
+        );
+
+        let result = super::near::agent::channel_host::Host::http_request(
+            &mut store,
+            "GET".to_string(),
+            "https://127.0.0.1:1/health".to_string(),
+            "{}".to_string(),
+            None,
+            Some(1_000),
+        );
+
+        assert!(result.is_err(), "loopback targets must be rejected");
+        assert!(
+            result.unwrap_err().contains("private/internal IP"),
+            "expected SSRF guard error"
+        );
     }
 
     #[test]
@@ -4449,6 +5625,32 @@ mod tests {
             "https://api.example.com/getUpdates"
         ));
         assert!(!should_skip_response_leak_scan("not a url"));
+    }
+
+    #[test]
+    fn test_rewrite_telegram_api_url_for_testing_uses_test_override() {
+        use super::rewrite_telegram_api_url_for_testing;
+
+        let _guard = crate::config::helpers::lock_env();
+        let original = std::env::var(TELEGRAM_TEST_API_BASE_ENV).ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var(TELEGRAM_TEST_API_BASE_ENV, "http://127.0.0.1:19001/");
+        }
+
+        let rewritten =
+            rewrite_telegram_api_url_for_testing("https://api.telegram.org/bot123/sendMessage")
+                .expect("Telegram URL should rewrite");
+        assert_eq!(rewritten, "http://127.0.0.1:19001/bot123/sendMessage");
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            if let Some(value) = original {
+                std::env::set_var(TELEGRAM_TEST_API_BASE_ENV, value);
+            } else {
+                std::env::remove_var(TELEGRAM_TEST_API_BASE_ENV);
+            }
+        }
     }
 
     /// Verify that WASM HTTP host functions work using a dedicated
@@ -4621,7 +5823,6 @@ mod tests {
 
         let msg = rx.try_recv().expect("Should receive message"); // safety: test-only assertion
         assert_eq!(msg.user_id, "owner-scope"); // safety: test-only assertion
-        assert_eq!(msg.owner_id, "owner-scope"); // safety: test-only assertion
         assert_eq!(msg.sender_id, "telegram-owner"); // safety: test-only assertion
         assert_eq!(msg.conversation_scope(), Some("12345")); // safety: test-only assertion
         let stored_metadata = last_broadcast_metadata.read().await.clone();
@@ -4663,7 +5864,6 @@ mod tests {
 
         let msg = rx.try_recv().expect("Should receive message"); // safety: test-only assertion
         assert_eq!(msg.user_id, "guest-42"); // safety: test-only assertion
-        assert_eq!(msg.owner_id, "owner-scope"); // safety: test-only assertion
         assert_eq!(msg.sender_id, "guest-42"); // safety: test-only assertion
         assert_eq!(msg.conversation_scope(), Some("999")); // safety: test-only assertion
         assert!(last_broadcast_metadata.read().await.is_none()); // safety: test-only assertion
@@ -4746,6 +5946,77 @@ mod tests {
         let msg = rx.try_recv().expect("Should receive message"); // safety: test-only assertion
         assert_eq!(msg.content, "Just text, no attachments"); // safety: test-only assertion
         assert!(msg.attachments.is_empty()); // safety: test-only assertion
+    }
+
+    #[test]
+    fn test_parse_websocket_ready_session() {
+        let ready = serde_json::json!({
+            "op": 0,
+            "s": 1,
+            "t": "READY",
+            "d": {
+                "session_id": "abc123",
+                "resume_gateway_url": "wss://gateway-resume.discord.gg",
+                "user": {"id": "12345"}
+            }
+        });
+        let (sid, resume_url) = parse_websocket_ready_session(&ready.to_string()).unwrap();
+        assert_eq!(sid, "abc123");
+        assert_eq!(
+            resume_url.as_deref(),
+            Some("wss://gateway-resume.discord.gg")
+        );
+
+        // Non-READY dispatch returns None
+        let message_create = serde_json::json!({
+            "op": 0,
+            "s": 2,
+            "t": "MESSAGE_CREATE",
+            "d": {"content": "hello"}
+        });
+        assert!(parse_websocket_ready_session(&message_create.to_string()).is_none());
+
+        // Non-dispatch opcode returns None
+        let hello = serde_json::json!({"op": 10, "d": {"heartbeat_interval": 41250}});
+        assert!(parse_websocket_ready_session(&hello.to_string()).is_none());
+    }
+
+    #[test]
+    fn test_build_websocket_resume_message() {
+        let seq = serde_json::Value::Number(42.into());
+        let payload = build_websocket_resume_message("bot-token", "session-1", Some(&seq)).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(json["op"], serde_json::json!(6));
+        assert_eq!(json["d"]["token"], serde_json::json!("bot-token"));
+        assert_eq!(json["d"]["session_id"], serde_json::json!("session-1"));
+        assert_eq!(json["d"]["seq"], serde_json::json!(42));
+
+        // With no sequence, seq should be null
+        let payload_null = build_websocket_resume_message("bot-token", "session-1", None).unwrap();
+        let json_null: serde_json::Value = serde_json::from_str(&payload_null).unwrap();
+        assert!(json_null["d"]["seq"].is_null());
+    }
+
+    #[test]
+    fn test_parse_websocket_invalid_session() {
+        // Non-resumable invalid session (d: false)
+        let not_resumable = serde_json::json!({"op": 9, "d": false});
+        assert_eq!(
+            parse_websocket_invalid_session(&not_resumable.to_string()),
+            Some(false)
+        );
+
+        // Resumable invalid session (d: true)
+        let resumable = serde_json::json!({"op": 9, "d": true});
+        assert_eq!(
+            parse_websocket_invalid_session(&resumable.to_string()),
+            Some(true)
+        );
+
+        // Different opcode returns None
+        let hello = serde_json::json!({"op": 10, "d": {"heartbeat_interval": 41250}});
+        assert!(parse_websocket_invalid_session(&hello.to_string()).is_none());
     }
 
     #[test]

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::llm::recording::HttpInterceptor;
+use crate::tools::ApprovalContext;
 
 /// Error returned when a job exceeds its token budget.
 #[derive(Debug, thiserror::Error)]
@@ -58,8 +59,9 @@ impl JobState {
 
         matches!(
             (self, target),
-            // From Pending
-            (Pending, InProgress) | (Pending, Cancelled) |
+            // From Pending (Failed added for self-repair: stuck Pending jobs
+            // that exhaust repair attempts must be terminable)
+            (Pending, InProgress) | (Pending, Failed) | (Pending, Cancelled) |
             // From InProgress
             (InProgress, Completed) | (InProgress, Failed) |
             (InProgress, Stuck) | (InProgress, Cancelled) |
@@ -192,10 +194,19 @@ pub struct JobContext {
     /// but subsequent tools (e.g., `json`) may need the full output. This
     /// stash stores the complete, unsanitized output so tools can reference
     /// previous results by ID via `$tool_call_id` parameter syntax.
+    ///
+    /// Also used for cross-tool implicit state (keys prefixed with `__`) such
+    /// as `__routine_last_name` for fallback recovery in routine tool chains.
     #[serde(skip)]
     pub tool_output_stash: Arc<tokio::sync::RwLock<HashMap<String, String>>>,
     /// User's preferred timezone (IANA name, e.g. "America/New_York"). Defaults to "UTC".
     pub user_timezone: String,
+    /// Approval context for tool execution in this job.
+    ///
+    /// When set, tools check this context before executing to determine
+    /// if they're allowed to run in autonomous/non-interactive contexts.
+    #[serde(skip)]
+    pub approval_context: Option<ApprovalContext>,
 }
 
 impl JobContext {
@@ -237,6 +248,7 @@ impl JobContext {
             metadata: serde_json::Value::Null,
             tool_output_stash: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             user_timezone: "UTC".to_string(),
+            approval_context: None,
         }
     }
 
@@ -249,6 +261,12 @@ impl JobContext {
     /// Set the channel-specific requester/actor ID.
     pub fn with_requester_id(mut self, requester_id: impl Into<String>) -> Self {
         self.requester_id = Some(requester_id.into());
+        self
+    }
+
+    /// Set the approval context on this context.
+    pub fn with_approval_context(mut self, ctx: ApprovalContext) -> Self {
+        self.approval_context = Some(ctx);
         self
     }
 
@@ -363,6 +381,9 @@ impl JobContext {
 
 impl Default for JobContext {
     fn default() -> Self {
+        // Default has no approval_context - safer default that requires explicit
+        // opt-in for autonomous execution. Code that creates JobContext directly
+        // must use with_approval_context() to enable autonomous tool use.
         Self::with_user("default", "Untitled", "No description")
     }
 }

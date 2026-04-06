@@ -122,7 +122,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Some(Command::Pairing(pairing_cmd)) => {
             init_cli_tracing();
-            return run_pairing_command(pairing_cmd.clone()).map_err(|e| anyhow::anyhow!("{}", e));
+            return run_pairing_command(pairing_cmd.clone()).await;
         }
         Some(Command::Service(service_cmd)) => {
             init_cli_tracing();
@@ -165,6 +165,10 @@ async fn async_main() -> anyhow::Result<()> {
             let config = ironclaw::config::Config::from_env().await?;
             return ironclaw::cli::run_import_command(import_cmd, &config).await;
         }
+        Some(Command::Acp(acp_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_acp_command(acp_cmd.clone()).await;
+        }
         Some(Command::Worker {
             job_id,
             orchestrator_url,
@@ -187,6 +191,13 @@ async fn async_main() -> anyhow::Result<()> {
                 model,
             )
             .await;
+        }
+        Some(Command::AcpBridge {
+            job_id,
+            orchestrator_url,
+        }) => {
+            init_worker_tracing();
+            return ironclaw::worker::run_acp_bridge(*job_id, orchestrator_url).await;
         }
         Some(Command::Login { openai_codex }) => {
             init_cli_tracing();
@@ -298,6 +309,11 @@ async fn async_main() -> anyhow::Result<()> {
             cli.config.as_deref(),
         )?;
         wizard.run().await?;
+    }
+
+    // CLI flag overrides for config
+    if cli.auto_approve {
+        ironclaw::config::set_runtime_env("AGENT_AUTO_APPROVE_TOOLS", "true");
     }
 
     // Load initial config from env + disk + optional TOML (before DB is available).
@@ -449,6 +465,8 @@ async fn async_main() -> anyhow::Result<()> {
             &components.secrets_store,
             components.extension_manager.as_ref(),
             components.db.as_ref(),
+            &channel_names,
+            Arc::clone(&components.ownership_cache),
         )
         .await;
 
@@ -473,7 +491,11 @@ async fn async_main() -> anyhow::Result<()> {
     if !cli.cli_only
         && let Some(ref signal_config) = config.channels.signal
     {
-        let signal_channel = SignalChannel::new(signal_config.clone())?;
+        let signal_channel = SignalChannel::new(
+            signal_config.clone(),
+            components.db.clone(),
+            Arc::clone(&components.ownership_cache),
+        )?;
         channel_names.push("signal".to_string());
         channels.add(Box::new(signal_channel)).await;
         let safe_url = SignalChannel::redact_url(&signal_config.http_url);
@@ -520,8 +542,8 @@ async fn async_main() -> anyhow::Result<()> {
     let webhook_server: Option<Arc<tokio::sync::Mutex<WebhookServer>>> = if !webhook_routes
         .is_empty()
     {
-        let addr =
-            webhook_server_addr.unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 8080)));
+        let addr = webhook_server_addr
+            .unwrap_or_else(|| std::net::SocketAddr::from(([127, 0, 0, 1], 8080)));
         if addr.ip().is_unspecified() {
             tracing::warn!(
                 "Webhook server is binding to {} — it will be reachable from all network interfaces. \
@@ -589,14 +611,26 @@ async fn async_main() -> anyhow::Result<()> {
     // ── Gateway channel ────────────────────────────────────────────────
 
     let mut gateway_url: Option<String> = None;
-    let mut sse_sender: Option<
-        tokio::sync::broadcast::Sender<ironclaw::channels::web::types::SseEvent>,
-    > = None;
+    let mut sse_manager: Option<std::sync::Arc<ironclaw::channels::web::sse::SseManager>> = None;
     if let Some(ref gw_config) = config.channels.gateway {
-        let mut gw =
-            GatewayChannel::new(gw_config.clone()).with_llm_provider(Arc::clone(&components.llm));
+        let mut gw = GatewayChannel::new(gw_config.clone(), config.owner_id.clone());
+        gw = gw.with_llm_provider(Arc::clone(&components.llm));
         if let Some(ref ws) = components.workspace {
             gw = gw.with_workspace(Arc::clone(ws));
+        }
+        // Create per-user workspace pool for multi-user mode.
+        if let Some(ref db) = components.db {
+            let emb_cache_config = ironclaw::workspace::EmbeddingCacheConfig {
+                max_entries: config.embeddings.cache_size,
+            };
+            let pool = Arc::new(ironclaw::channels::web::server::WorkspacePool::new(
+                Arc::clone(db),
+                components.embeddings.clone(),
+                emb_cache_config,
+                config.search.clone(),
+                config.workspace.clone(),
+            ));
+            gw = gw.with_workspace_pool(pool);
         }
         gw = gw.with_session_manager(Arc::clone(&session_manager));
         gw = gw.with_log_broadcaster(Arc::clone(&log_broadcaster));
@@ -618,6 +652,62 @@ async fn async_main() -> anyhow::Result<()> {
         }
         if let Some(ref d) = components.db {
             gw = gw.with_store(Arc::clone(d));
+            gw = gw.with_db_auth(Arc::clone(d));
+            let pairing_store = Arc::new(ironclaw::pairing::PairingStore::new(
+                Arc::clone(d),
+                Arc::clone(&components.ownership_cache),
+            ));
+            gw = gw.with_pairing_store(pairing_store);
+            if let Some(ref ss) = components.secrets_store {
+                gw = gw.with_secrets_store(Arc::clone(ss));
+            }
+
+            // Bootstrap: create the first admin user from single-user config
+            // so the owner appears in the Users admin panel immediately.
+            if let Ok(false) = d.has_any_users().await {
+                let now = chrono::Utc::now();
+                let user = ironclaw::db::UserRecord {
+                    id: config.owner_id.clone(),
+                    email: None,
+                    display_name: config.owner_id.clone(),
+                    status: "active".to_string(),
+                    role: "admin".to_string(),
+                    created_at: now,
+                    updated_at: now,
+                    last_login_at: None,
+                    created_by: None,
+                    metadata: serde_json::json!({"source": "bootstrap"}),
+                };
+                // Create admin user + bootstrap token atomically.
+                let auth_token = gw.auth_token();
+                if auth_token.is_empty() {
+                    if let Err(e) = d.create_user(&user).await {
+                        tracing::warn!("Failed to bootstrap admin user: {}", e);
+                    }
+                } else {
+                    use ironclaw::channels::web::auth::hash_token;
+                    let hash = hash_token(auth_token);
+                    let prefix = if auth_token.len() >= 8 {
+                        &auth_token[..8]
+                    } else {
+                        auth_token
+                    };
+                    if let Err(e) = d
+                        .create_user_with_token(&user, "bootstrap", &hash, prefix, None)
+                        .await
+                    {
+                        tracing::warn!("Failed to bootstrap admin user: {}", e);
+                    } else {
+                        tracing::debug!(
+                            user_id = config.owner_id,
+                            "Bootstrapped admin user from gateway config"
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(ref ss) = components.secrets_store {
+            gw = gw.with_secrets_store(Arc::clone(ss));
         }
         if let Some(ref jm) = container_job_manager {
             gw = gw.with_job_manager(Arc::clone(jm));
@@ -631,6 +721,7 @@ async fn async_main() -> anyhow::Result<()> {
             gw = gw.with_skill_catalog(Arc::clone(sc));
         }
         gw = gw.with_cost_guard(Arc::clone(&components.cost_guard));
+        gw = gw.with_oauth(config.oauth.clone(), gw_config.port);
         {
             let active_model = components.llm.model_name().to_string();
             let mut enabled = channel_names.clone();
@@ -648,32 +739,49 @@ async fn async_main() -> anyhow::Result<()> {
                 let mut rx = tx.subscribe();
                 let gw_state = Arc::clone(gw.state());
                 tokio::spawn(async move {
-                    while let Ok((_job_id, event)) = rx.recv().await {
-                        gw_state.sse.broadcast(event);
+                    while let Ok((_job_id, user_id, event)) = rx.recv().await {
+                        if user_id.is_empty() {
+                            gw_state.sse.broadcast(event);
+                        } else {
+                            gw_state.sse.broadcast_for_user(&user_id, event);
+                        }
                     }
                 });
             }
         }
 
         // Persist auto-generated auth token so it survives restarts.
-        // Write to the "default" settings namespace, which is the namespace
-        // Config::from_db() reads from — NOT the gateway channel's user_id.
+        // Gateway auth is env-only, so write to bootstrap `.env` rather than DB
+        // settings and opportunistically remove any legacy DB copy.
         if gw_config.auth_token.is_none() {
             let token_to_persist = gw.auth_token().to_string();
+            tokio::spawn(async move {
+                if let Err(e) = ironclaw::bootstrap::upsert_bootstrap_var(
+                    "GATEWAY_AUTH_TOKEN",
+                    &token_to_persist,
+                ) {
+                    tracing::warn!("Failed to persist auto-generated gateway auth token: {e}");
+                } else {
+                    tracing::debug!("Persisted auto-generated gateway auth token to bootstrap env");
+                }
+            });
+
             if let Some(ref db) = components.db {
                 let db = db.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = db
-                        .set_setting(
-                            "default",
-                            "channels.gateway_auth_token",
-                            &serde_json::Value::String(token_to_persist),
-                        )
+                    match db
+                        .delete_setting("default", "channels.gateway_auth_token")
                         .await
                     {
-                        tracing::warn!("Failed to persist auto-generated gateway auth token: {e}");
-                    } else {
-                        tracing::debug!("Persisted auto-generated gateway auth token to settings");
+                        Ok(true) => {
+                            tracing::debug!("Removed legacy gateway auth token from DB settings");
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to remove legacy gateway auth token from DB settings: {e}"
+                            );
+                        }
                     }
                 });
             }
@@ -691,7 +799,7 @@ async fn async_main() -> anyhow::Result<()> {
         // Capture SSE sender and routine engine slot before moving gw into channels.
         // IMPORTANT: This must come after all `with_*` calls since `rebuild_state`
         // creates a new SseManager, which would orphan this sender.
-        sse_sender = Some(gw.state().sse.sender());
+        sse_manager = Some(Arc::clone(&gw.state().sse));
         channel_names.push("gateway".to_string());
         channels.add(Box::new(gw)).await;
     }
@@ -731,6 +839,7 @@ async fn async_main() -> anyhow::Result<()> {
             sandbox_enabled: config.sandbox.enabled,
             docker_status,
             claude_code_enabled: config.claude_code.enabled,
+            acp_enabled: config.acp.enabled,
             routines_enabled: config.routines.enabled,
             skills_enabled: config.skills.enabled,
             channels: channel_names,
@@ -754,6 +863,9 @@ async fn async_main() -> anyhow::Result<()> {
         .register_message_tools(Arc::clone(&channels), components.extension_manager.clone())
         .await;
 
+    // Default user ID for extension operations (single-user mode).
+    let ext_user_id = config.owner_id.clone();
+
     // Wire up channel runtime for hot-activation of WASM channels.
     if let Some(ref ext_mgr) = components.extension_manager
         && let Some((rt, ps, router)) = wasm_channel_runtime_state.take()
@@ -774,12 +886,14 @@ async fn async_main() -> anyhow::Result<()> {
 
         // Auto-activate WASM channels that were active in a previous session.
         // Relay channels are handled separately below via restore_relay_channels().
-        let persisted = ext_mgr.load_persisted_active_channels().await;
+        let persisted = ext_mgr.load_persisted_active_channels(&ext_user_id).await;
         for name in &persisted {
-            if active_at_startup.contains(name) || ext_mgr.is_relay_channel(name).await {
+            if active_at_startup.contains(name)
+                || ext_mgr.is_relay_channel(name, &ext_user_id).await
+            {
                 continue;
             }
-            match ext_mgr.activate(name).await {
+            match ext_mgr.activate(name, &ext_user_id).await {
                 Ok(result) => {
                     tracing::debug!(
                         channel = %name,
@@ -804,14 +918,19 @@ async fn async_main() -> anyhow::Result<()> {
         ext_mgr
             .set_relay_channel_manager(Arc::clone(&channels))
             .await;
-        ext_mgr.restore_relay_channels().await;
+        ext_mgr.restore_relay_channels(&ext_user_id).await;
     }
 
     // Wire SSE sender into extension manager for broadcasting status events.
     if let Some(ref ext_mgr) = components.extension_manager
-        && let Some(ref sender) = sse_sender
+        && let Some(ref sse) = sse_manager
     {
-        ext_mgr.set_sse_sender(sender.clone()).await;
+        ext_mgr.set_sse_sender(Arc::clone(sse)).await;
+    }
+
+    // Wire SSE into plan_update tool for live plan progress broadcasting.
+    if let Some(ref sse) = sse_manager {
+        components.tools.register_plan_tools(Some(Arc::clone(sse)));
     }
 
     // Snapshot memory for trace recording before the agent starts
@@ -849,7 +968,7 @@ async fn async_main() -> anyhow::Result<()> {
         skills_config: config.skills.clone(),
         hooks: components.hooks,
         cost_guard: components.cost_guard,
-        sse_tx: sse_sender,
+        sse_tx: sse_manager,
         http_interceptor,
         transcription: config.transcription.create_provider().map(|p| {
             Arc::new(ironclaw::llm::transcription::TranscriptionMiddleware::new(
@@ -867,6 +986,11 @@ async fn async_main() -> anyhow::Result<()> {
             ironclaw::agent::routine_engine::SandboxReadiness::DockerUnavailable
         },
         builder: components.builder,
+        llm_backend: config.llm.backend.clone(),
+        tenant_rates: Arc::new(ironclaw::tenant::TenantRateRegistry::new(
+            config.agent.max_llm_concurrent_per_user.unwrap_or(4),
+            config.agent.max_jobs_concurrent_per_user.unwrap_or(3),
+        )),
     };
 
     let channels_for_warnings = Arc::clone(&channels);

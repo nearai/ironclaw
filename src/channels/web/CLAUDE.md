@@ -35,9 +35,10 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | GET | `/api/chat/history` | Paginated turn history for a thread |
 | GET | `/api/chat/threads` | List threads (returns `assistant_thread` + regular threads) |
 | POST | `/api/chat/thread/new` | Create new thread |
-| POST | `/api/chat/approval` | Approve/deny/always a pending tool call |
-| POST | `/api/chat/auth-token` | Submit auth token for an extension |
-| POST | `/api/chat/auth-cancel` | Cancel pending auth flow |
+| POST | `/api/chat/gate/resolve` | Resolve a pending engine v2 gate (approve, deny, credential, cancel) |
+| POST | `/api/chat/approval` | Legacy approval shim; translates to unified gate resolution |
+| POST | `/api/chat/auth-token` | Legacy auth shim; translates engine v2 auth gates or configures extensions directly |
+| POST | `/api/chat/auth-cancel` | Legacy auth-cancel shim |
 
 ### Memory
 | Method | Path | Description |
@@ -84,12 +85,40 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/routines` | List routines |
-| GET | `/api/routines/summary` | Aggregated stats (total/enabled/disabled/failing/runs_today) |
+| GET | `/api/routines/summary` | Aggregated stats (total/enabled/disabled/unverified/failing/runs_today) |
 | GET | `/api/routines/{id}` | Routine detail with recent run history |
 | POST | `/api/routines/{id}/trigger` | Manually trigger a routine |
 | POST | `/api/routines/{id}/toggle` | Enable/disable a routine |
 | DELETE | `/api/routines/{id}` | Delete a routine |
 | GET | `/api/routines/{id}/runs` | List runs for a specific routine |
+
+### User Management (admin — requires `admin` role, see `docs/USER_MANAGEMENT_API.md`)
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/admin/users` | Create a new user (returns one-time token) |
+| GET | `/api/admin/users` | List all users |
+| GET | `/api/admin/users/{id}` | Get a single user |
+| PATCH | `/api/admin/users/{id}` | Update user profile/metadata |
+| DELETE | `/api/admin/users/{id}` | Delete user and all data |
+| POST | `/api/admin/users/{id}/suspend` | Suspend a user |
+| POST | `/api/admin/users/{id}/activate` | Re-activate a user |
+| GET | `/api/admin/usage` | Per-user LLM usage stats |
+| GET | `/api/admin/users/{user_id}/secrets` | List a user's secrets (names only) |
+| PUT | `/api/admin/users/{user_id}/secrets/{name}` | Create or update a user's secret |
+| DELETE | `/api/admin/users/{user_id}/secrets/{name}` | Delete a user's secret |
+
+### Profile (self-service)
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/profile` | Get own profile |
+| PATCH | `/api/profile` | Update own display name/metadata |
+
+### Tokens (self-service)
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/tokens` | Create API token (returns plaintext once) |
+| GET | `/api/tokens` | List own tokens |
+| DELETE | `/api/tokens/{id}` | Revoke a token |
 
 ### Settings
 | Method | Path | Description |
@@ -106,8 +135,8 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 |--------|------|-------------|
 | GET | `/api/logs/events` | Live log stream (SSE) |
 | GET/PUT | `/api/logs/level` | Get/set log level at runtime |
-| GET | `/api/pairing/{channel}` | List pending pairing requests |
-| POST | `/api/pairing/{channel}/approve` | Approve a pairing request |
+| GET | `/api/pairing/{channel}` | Admin-only list of pending pairing requests |
+| POST | `/api/pairing/{channel}/approve` | Authenticated user self-claims a pairing code |
 | GET | `/api/gateway/status` | Server uptime, connected clients, config |
 | POST | `/v1/chat/completions` | OpenAI-compatible LLM proxy |
 | GET | `/v1/models` | OpenAI-compatible model list |
@@ -141,8 +170,10 @@ The SSE contract — every field is `#[serde(tag = "type")]`:
 | `job_tool_result` | Tool result from sandbox |
 | `job_status` | Sandbox job status update |
 | `job_result` | Sandbox job final result |
-| `approval_needed` | Tool requires user approval (pauses agent) |
-| `auth_required` | Extension needs auth credentials |
+| `gate_required` | Engine v2 gate requires user input (approval/auth/external) |
+| `gate_resolved` | Engine v2 gate was resolved |
+| `approval_needed` | Legacy approval event |
+| `auth_required` | Legacy extension/auth event |
 | `auth_completed` | Extension auth flow finished |
 | `extension_status` | WASM channel activation status changed |
 | `error` | Error from agent or gateway |
@@ -199,9 +230,9 @@ All responses include:
 
 **Request body limit:** 10 MB (`DefaultBodyLimit::max(10 * 1024 * 1024)`), sized for image uploads (#725). Larger payloads return 413.
 
-## Pending Approvals
+## Pending Gates
 
-Tool approval state is **in-memory only** (not persisted to DB). Server restart clears all pending approvals. The `pending_approval` field in `HistoryResponse` is re-populated on thread switch from in-memory state.
+Classic agent approvals are in-memory, but engine v2 pauses live in the unified pending-gate store with file-backed recovery under `~/.ironclaw/pending-gates.json`. `HistoryResponse.pending_gate` rehydrates from that store so cards survive thread switches, SSE reconnects, and process restarts. Gate UI must remain thread-scoped: stale cards from another thread should not be rendered or resolved in the current thread.
 
 ## Adding a New API Endpoint
 

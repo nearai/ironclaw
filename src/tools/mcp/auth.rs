@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -36,6 +36,38 @@ fn oauth_http_client() -> Result<&'static reqwest::Client, AuthError> {
         })
         .as_ref()
         .map_err(Clone::clone)
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct RefreshLockKey {
+    server_name: String,
+    user_id: String,
+}
+
+fn refresh_lock_key(server_name: &str, user_id: &str) -> RefreshLockKey {
+    RefreshLockKey {
+        server_name: server_name.to_string(),
+        user_id: user_id.to_string(),
+    }
+}
+
+async fn refresh_lock(server_name: &str, user_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        tokio::sync::Mutex<HashMap<RefreshLockKey, Weak<tokio::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+
+    let registry = LOCKS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
+    let mut locks = registry.lock().await;
+    locks.retain(|_, lock| lock.strong_count() > 0);
+
+    let key = refresh_lock_key(server_name, user_id);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
 }
 
 /// Log a debug message when a discovery/auth response is a redirect.
@@ -199,6 +231,12 @@ pub struct AccessToken {
 
     /// Scopes granted.
     pub scope: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ClientCredentials {
+    client_id: String,
+    client_secret: Option<String>,
 }
 
 /// Token response from the authorization server.
@@ -706,40 +744,52 @@ pub async fn authorize_mcp_server(
     }
 
     // Determine client_id and endpoints
-    let (client_id, authorization_url, token_url, use_pkce, scopes, mut extra_params) =
-        if let Some(oauth) = &server_config.oauth {
-            // Pre-configured OAuth
-            let (auth_url, tok_url) = discover_oauth_endpoints(server_config).await?;
-            (
-                oauth.client_id.clone(),
-                auth_url,
-                tok_url,
-                oauth.use_pkce,
-                oauth.scopes.clone(),
-                oauth.extra_params.clone(),
-            )
-        } else {
-            // Try Dynamic Client Registration
-            println!("  Discovering OAuth endpoints...");
-            let auth_meta = discover_full_oauth_metadata(&server_config.url).await?;
+    let (
+        client_id,
+        client_secret,
+        client_secret_expires_at,
+        authorization_url,
+        token_url,
+        use_pkce,
+        scopes,
+        mut extra_params,
+    ) = if let Some(oauth) = &server_config.oauth {
+        // Pre-configured OAuth
+        let (auth_url, tok_url) = discover_oauth_endpoints(server_config).await?;
+        (
+            oauth.client_id.clone(),
+            None,
+            None,
+            auth_url,
+            tok_url,
+            oauth.use_pkce,
+            oauth.scopes.clone(),
+            oauth.extra_params.clone(),
+        )
+    } else {
+        // Try Dynamic Client Registration
+        println!("  Discovering OAuth endpoints...");
+        let auth_meta = discover_full_oauth_metadata(&server_config.url).await?;
 
-            let registration_endpoint = auth_meta
-                .registration_endpoint
-                .ok_or(AuthError::NotSupported)?;
+        let registration_endpoint = auth_meta
+            .registration_endpoint
+            .ok_or(AuthError::NotSupported)?;
 
-            println!("  Registering client dynamically...");
-            let registration = register_client(&registration_endpoint, &redirect_uri).await?;
-            println!("  Client registered: {}", registration.client_id);
+        println!("  Registering client dynamically...");
+        let registration = register_client(&registration_endpoint, &redirect_uri).await?;
+        println!("  Client registered: {}", registration.client_id);
 
-            (
-                registration.client_id,
-                auth_meta.authorization_endpoint,
-                auth_meta.token_endpoint,
-                true, // Always use PKCE for DCR clients
-                auth_meta.scopes_supported,
-                HashMap::new(),
-            )
-        };
+        (
+            registration.client_id,
+            registration.client_secret,
+            registration.client_secret_expires_at,
+            auth_meta.authorization_endpoint,
+            auth_meta.token_endpoint,
+            true, // Always use PKCE for DCR clients
+            auth_meta.scopes_supported,
+            HashMap::new(),
+        )
+    };
 
     // Generate PKCE challenge
     let pkce = if use_pkce {
@@ -797,6 +847,7 @@ pub async fn authorize_mcp_server(
     let token = exchange_code_for_token(
         &token_url,
         &client_id,
+        client_secret.as_deref(),
         &code,
         &redirect_uri,
         pkce.as_ref(),
@@ -810,6 +861,16 @@ pub async fn authorize_mcp_server(
     // Store the client_id for DCR (needed for token refresh)
     if server_config.oauth.is_none() {
         store_client_id(secrets, user_id, server_config, &client_id).await?;
+        if let Some(ref client_secret) = client_secret {
+            store_client_secret(
+                secrets,
+                user_id,
+                server_config,
+                client_secret,
+                client_secret_expires_at,
+            )
+            .await?;
+        }
     }
 
     Ok(token)
@@ -893,6 +954,7 @@ pub async fn wait_for_authorization_callback(
 pub async fn exchange_code_for_token(
     token_url: &str,
     client_id: &str,
+    client_secret: Option<&str>,
     code: &str,
     redirect_uri: &str,
     pkce: Option<&PkceChallenge>,
@@ -908,6 +970,10 @@ pub async fn exchange_code_for_token(
         ("redirect_uri", redirect_uri.to_string()),
         ("client_id", client_id.to_string()),
     ];
+
+    if let Some(secret) = client_secret {
+        params.push(("client_secret", secret.to_string()));
+    }
 
     if let Some(pkce) = pkce {
         params.push(("code_verifier", pkce.verifier.clone()));
@@ -954,16 +1020,22 @@ pub async fn store_tokens(
     server_config: &McpServerConfig,
     token: &AccessToken,
 ) -> Result<(), AuthError> {
-    // Store access token
-    let params = CreateSecretParams::new(server_config.token_secret_name(), &token.access_token)
-        .with_provider(format!("mcp:{}", server_config.name));
+    // Store access token (with expiry if provided)
+    let mut params =
+        CreateSecretParams::new(server_config.token_secret_name(), &token.access_token)
+            .with_provider(format!("mcp:{}", server_config.name));
+
+    if let Some(secs) = token.expires_in {
+        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
+        params = params.with_expiry(expires_at);
+    }
 
     secrets
         .create(user_id, params)
         .await
         .map_err(|e| AuthError::Secrets(e.to_string()))?;
 
-    // Store refresh token if present
+    // Store refresh token if present (no expiry — long-lived)
     if let Some(ref refresh_token) = token.refresh_token {
         let params =
             CreateSecretParams::new(server_config.refresh_token_secret_name(), refresh_token)
@@ -995,6 +1067,31 @@ pub async fn store_client_id(
         .map_err(|e| AuthError::Secrets(e.to_string()))
 }
 
+/// Store the DCR client secret for future token refresh.
+pub async fn store_client_secret(
+    secrets: &Arc<dyn SecretsStore + Send + Sync>,
+    user_id: &str,
+    server_config: &McpServerConfig,
+    client_secret: &str,
+    client_secret_expires_at: Option<u64>,
+) -> Result<(), AuthError> {
+    let mut params =
+        CreateSecretParams::new(server_config.client_secret_secret_name(), client_secret)
+            .with_provider(format!("mcp:{}", server_config.name));
+
+    if let Some(expires_at) = client_secret_expires_at
+        && let Some(dt) = chrono::DateTime::<chrono::Utc>::from_timestamp(expires_at as i64, 0)
+    {
+        params = params.with_expiry(dt);
+    }
+
+    secrets
+        .create(user_id, params)
+        .await
+        .map(|_| ())
+        .map_err(|e| AuthError::Secrets(e.to_string()))
+}
+
 /// Get the client ID for a server (from config or stored DCR).
 async fn get_client_id(
     server_config: &McpServerConfig,
@@ -1017,6 +1114,30 @@ async fn get_client_id(
         )),
         Err(e) => Err(AuthError::Secrets(e.to_string())),
     }
+}
+
+/// Get client credentials for a server (from config or stored DCR registration).
+async fn get_client_credentials(
+    server_config: &McpServerConfig,
+    secrets: &Arc<dyn SecretsStore + Send + Sync>,
+    user_id: &str,
+) -> Result<ClientCredentials, AuthError> {
+    let client_id = get_client_id(server_config, secrets, user_id).await?;
+    let client_secret = match secrets
+        .get_decrypted(user_id, &server_config.client_secret_secret_name())
+        .await
+    {
+        Ok(secret) => Some(secret.expose().to_string()),
+        Err(crate::secrets::SecretError::NotFound(_) | crate::secrets::SecretError::Expired) => {
+            None
+        }
+        Err(e) => return Err(AuthError::Secrets(e.to_string())),
+    };
+
+    Ok(ClientCredentials {
+        client_id,
+        client_secret,
+    })
 }
 
 /// Get the stored access token for an MCP server.
@@ -1061,14 +1182,49 @@ pub async fn refresh_access_token(
     secrets: &Arc<dyn SecretsStore + Send + Sync>,
     user_id: &str,
 ) -> Result<AccessToken, AuthError> {
-    // Get client_id (from config or stored DCR)
-    let client_id = get_client_id(server_config, secrets, user_id).await?;
+    let lock = refresh_lock(&server_config.name, user_id).await;
+    let _guard = lock.lock().await;
 
-    // Get the refresh token
-    let refresh_token = secrets
+    match secrets
+        .get_decrypted(user_id, &server_config.token_secret_name())
+        .await
+    {
+        Ok(token) => {
+            return Ok(AccessToken {
+                access_token: token.expose().to_string(),
+                token_type: "Bearer".to_string(),
+                expires_in: None,
+                refresh_token: None,
+                scope: None,
+            });
+        }
+        Err(crate::secrets::SecretError::Expired | crate::secrets::SecretError::NotFound(_)) => {}
+        Err(e) => return Err(AuthError::Secrets(e.to_string())),
+    }
+
+    // Get client_id (from config or stored DCR)
+    let credentials = get_client_credentials(server_config, secrets, user_id).await?;
+
+    // Get the refresh token (try current name, fall back to legacy name for
+    // users who authenticated before the naming convention was fixed).
+    // Only fall back on NotFound/Expired — propagate real errors (DB, decryption).
+    let refresh_token = match secrets
         .get_decrypted(user_id, &server_config.refresh_token_secret_name())
         .await
-        .map_err(|e| AuthError::RefreshFailed(format!("No refresh token: {}", e)))?;
+    {
+        Ok(token) => token,
+        Err(crate::secrets::SecretError::NotFound(_) | crate::secrets::SecretError::Expired) => {
+            secrets
+                .get_decrypted(user_id, &server_config.legacy_refresh_token_secret_name())
+                .await
+                .map_err(|e| AuthError::RefreshFailed(format!("No refresh token: {}", e)))?
+        }
+        Err(e) => {
+            return Err(AuthError::RefreshFailed(format!(
+                "Failed to read refresh token: {e}"
+            )));
+        }
+    };
 
     // Discover the token endpoint
     let token_url = if let Some(ref oauth) = server_config.oauth {
@@ -1087,45 +1243,82 @@ pub async fn refresh_access_token(
 
     validate_url_safe(&token_url).await?;
 
-    let client = oauth_http_client()?;
+    let token = if let Some(proxy_url) = oauth_defaults::exchange_proxy_url() {
+        let resource = canonical_resource_uri(&server_config.url);
+        let provider = format!("mcp:{}", server_config.name);
+        let gateway_token = oauth_defaults::oauth_proxy_auth_token().ok_or_else(|| {
+            AuthError::RefreshFailed(
+                "OAuth refresh proxy is configured but no proxy auth token is available"
+                    .to_string(),
+            )
+        })?;
+        let token_response =
+            oauth_defaults::refresh_token_via_proxy(oauth_defaults::ProxyRefreshTokenRequest {
+                proxy_url: &proxy_url,
+                gateway_token: &gateway_token,
+                token_url: &token_url,
+                client_id: &credentials.client_id,
+                client_secret: credentials.client_secret.as_deref(),
+                refresh_token: refresh_token.expose(),
+                resource: Some(&resource),
+                provider: Some(provider.as_str()),
+            })
+            .await
+            .map_err(|e| AuthError::RefreshFailed(e.to_string()))?;
 
-    // Compute canonical resource URI for RFC 8707
-    let resource = canonical_resource_uri(&server_config.url);
+        AccessToken {
+            access_token: token_response.access_token,
+            token_type: token_response
+                .token_type
+                .unwrap_or_else(|| "Bearer".to_string()),
+            expires_in: token_response.expires_in,
+            refresh_token: token_response.refresh_token,
+            scope: token_response.scope,
+        }
+    } else {
+        let client = oauth_http_client()?;
 
-    let params = vec![
-        ("grant_type", "refresh_token".to_string()),
-        ("refresh_token", refresh_token.expose().to_string()),
-        ("client_id", client_id),
-        ("resource", resource),
-    ];
+        // Compute canonical resource URI for RFC 8707
+        let resource = canonical_resource_uri(&server_config.url);
 
-    let response = client
-        .post(&token_url)
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| AuthError::RefreshFailed(e.to_string()))?;
+        let mut params = vec![
+            ("grant_type", "refresh_token".to_string()),
+            ("refresh_token", refresh_token.expose().to_string()),
+            ("client_id", credentials.client_id.clone()),
+            ("resource", resource),
+        ];
+        if let Some(client_secret) = credentials.client_secret.as_deref() {
+            params.push(("client_secret", client_secret.to_string()));
+        }
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(AuthError::RefreshFailed(format!(
-            "HTTP {} - {}",
-            status, body
-        )));
-    }
+        let response = client
+            .post(&token_url)
+            .form(&params)
+            .send()
+            .await
+            .map_err(|e| AuthError::RefreshFailed(e.to_string()))?;
 
-    let token_response: TokenResponse = response
-        .json()
-        .await
-        .map_err(|e| AuthError::RefreshFailed(format!("Invalid response: {}", e)))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AuthError::RefreshFailed(format!(
+                "HTTP {} - {}",
+                status, body
+            )));
+        }
 
-    let token = AccessToken {
-        access_token: token_response.access_token,
-        token_type: token_response.token_type,
-        expires_in: token_response.expires_in,
-        refresh_token: token_response.refresh_token,
-        scope: token_response.scope,
+        let token_response: TokenResponse = response
+            .json()
+            .await
+            .map_err(|e| AuthError::RefreshFailed(format!("Invalid response: {}", e)))?;
+
+        AccessToken {
+            access_token: token_response.access_token,
+            token_type: token_response.token_type,
+            expires_in: token_response.expires_in,
+            refresh_token: token_response.refresh_token,
+            scope: token_response.scope,
+        }
     };
 
     // Store the new tokens
@@ -1137,6 +1330,85 @@ pub async fn refresh_access_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use axum::{
+        Router,
+        extract::{Form, State},
+        routing::post,
+    };
+    use secrecy::SecretString;
+    use tokio::net::TcpListener;
+    use tokio::sync::Mutex;
+
+    use crate::config::helpers::lock_env;
+    use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+    use crate::testing::credentials::TEST_GATEWAY_CRYPTO_KEY;
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordedRefreshRequest {
+        authorization: Option<String>,
+        form: HashMap<String, String>,
+    }
+
+    #[derive(Clone, Default)]
+    struct MockRefreshState {
+        requests: Arc<Mutex<Vec<RecordedRefreshRequest>>>,
+    }
+
+    impl MockRefreshState {
+        async fn requests(&self) -> Vec<RecordedRefreshRequest> {
+            self.requests.lock().await.clone()
+        }
+    }
+
+    fn test_secrets_store() -> Arc<dyn SecretsStore + Send + Sync> {
+        Arc::new(InMemorySecretsStore::new(Arc::new(
+            SecretsCrypto::new(SecretString::from(TEST_GATEWAY_CRYPTO_KEY.to_string()))
+                .expect("test crypto"),
+        )))
+    }
+
+    async fn start_refresh_server() -> Option<(String, MockRefreshState)> {
+        async fn token_handler(
+            State(state): State<MockRefreshState>,
+            headers: axum::http::HeaderMap,
+            Form(form): Form<HashMap<String, String>>,
+        ) -> axum::Json<serde_json::Value> {
+            state.requests.lock().await.push(RecordedRefreshRequest {
+                authorization: headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string),
+                form,
+            });
+            axum::Json(serde_json::json!({
+                "access_token": "refreshed-access-token",
+                "token_type": "Bearer",
+                "refresh_token": "rotated-refresh-token",
+                "expires_in": 3600
+            }))
+        }
+
+        let state = MockRefreshState::default();
+        let app = Router::new()
+            .route("/token", post(token_handler))
+            .route("/oauth/refresh", post(token_handler))
+            .with_state(state.clone());
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("Skipping refresh server test: loopback bind denied by sandbox");
+                return None;
+            }
+            Err(error) => panic!("failed to bind refresh test server: {error}"),
+        };
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        Some((format!("http://127.0.0.1:{}", addr.port()), state))
+    }
 
     #[test]
     fn test_pkce_challenge_generation() {
@@ -1825,5 +2097,217 @@ mod tests {
         rand::rngs::OsRng.fill_bytes(&mut state_bytes_2);
         let state_2 = URL_SAFE_NO_PAD.encode(state_bytes_2);
         assert_ne!(state, state_2, "State must be unique per request");
+    }
+
+    #[tokio::test]
+    async fn test_refresh_access_token_direct_includes_stored_client_secret() {
+        let secrets = test_secrets_store();
+        let user_id = "test-user";
+        let Some((base_url, state)) = start_refresh_server().await else {
+            return;
+        };
+        let server = McpServerConfig::new("notion", "https://mcp.notion.com/mcp").with_oauth(
+            crate::tools::mcp::config::OAuthConfig::new("configured-client")
+                .with_endpoints("http://127.0.0.1/authorize", format!("{base_url}/token")),
+        );
+
+        secrets
+            .create(
+                user_id,
+                CreateSecretParams::new(server.refresh_token_secret_name(), "refresh-token-123"),
+            )
+            .await
+            .unwrap();
+        store_client_secret(&secrets, user_id, &server, "stored-client-secret", None)
+            .await
+            .unwrap();
+
+        let token = refresh_access_token(&server, &secrets, user_id)
+            .await
+            .expect("refresh succeeds");
+        assert_eq!(token.access_token, "refreshed-access-token");
+        assert_eq!(
+            token.refresh_token.as_deref(),
+            Some("rotated-refresh-token")
+        );
+
+        let requests = state.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].form.get("client_id").map(String::as_str),
+            Some("configured-client")
+        );
+        assert_eq!(
+            requests[0].form.get("client_secret").map(String::as_str),
+            Some("stored-client-secret")
+        );
+        assert_eq!(
+            requests[0].form.get("refresh_token").map(String::as_str),
+            Some("refresh-token-123")
+        );
+        assert_eq!(
+            requests[0].form.get("resource").map(String::as_str),
+            Some("https://mcp.notion.com/mcp")
+        );
+
+        let stored_refresh = secrets
+            .get_decrypted(user_id, &server.refresh_token_secret_name())
+            .await
+            .unwrap();
+        assert_eq!(stored_refresh.expose(), "rotated-refresh-token");
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_refresh_access_token_uses_proxy_when_configured() {
+        let _env_guard = lock_env();
+        let Some((base_url, state)) = start_refresh_server().await else {
+            return;
+        };
+        let _proxy_url_guard = set_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", Some(&base_url));
+        let _proxy_token_guard = set_env_var(
+            "IRONCLAW_OAUTH_PROXY_AUTH_TOKEN",
+            Some("gateway-test-token"),
+        );
+        let expected_token_url = format!("{base_url}/token");
+
+        let secrets = test_secrets_store();
+        let user_id = "test-user";
+        let server = McpServerConfig::new("notion", "https://mcp.notion.com/mcp").with_oauth(
+            crate::tools::mcp::config::OAuthConfig::new("configured-client")
+                .with_endpoints("http://127.0.0.1/authorize", expected_token_url.clone()),
+        );
+
+        secrets
+            .create(
+                user_id,
+                CreateSecretParams::new(server.refresh_token_secret_name(), "refresh-token-123"),
+            )
+            .await
+            .unwrap();
+        store_client_secret(&secrets, user_id, &server, "stored-client-secret", None)
+            .await
+            .unwrap();
+
+        refresh_access_token(&server, &secrets, user_id)
+            .await
+            .expect("proxy refresh succeeds");
+
+        let requests = state.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].authorization.as_deref(),
+            Some("Bearer gateway-test-token")
+        );
+        assert_eq!(
+            requests[0].form.get("token_url").map(String::as_str),
+            Some(expected_token_url.as_str())
+        );
+        assert_eq!(
+            requests[0].form.get("provider").map(String::as_str),
+            Some("mcp:notion")
+        );
+        assert_eq!(
+            requests[0].form.get("client_secret").map(String::as_str),
+            Some("stored-client-secret")
+        );
+        assert_eq!(
+            requests[0].form.get("resource").map(String::as_str),
+            Some("https://mcp.notion.com/mcp")
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_refresh_access_token_serializes_concurrent_refreshes() {
+        let _env_guard = lock_env();
+        let _proxy_url_guard = set_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", None);
+        let _proxy_token_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", None);
+        let secrets = test_secrets_store();
+        let user_id = "test-user";
+        let Some((base_url, state)) = start_refresh_server().await else {
+            return;
+        };
+        let server = McpServerConfig::new("notion", "https://mcp.notion.com/mcp").with_oauth(
+            crate::tools::mcp::config::OAuthConfig::new("configured-client")
+                .with_endpoints("http://127.0.0.1/authorize", format!("{base_url}/token")),
+        );
+
+        secrets
+            .create(
+                user_id,
+                CreateSecretParams::new(server.refresh_token_secret_name(), "refresh-token-123"),
+            )
+            .await
+            .unwrap();
+
+        let (first, second) = tokio::join!(
+            refresh_access_token(&server, &secrets, user_id),
+            refresh_access_token(&server, &secrets, user_id),
+        );
+        assert!(first.is_ok(), "first refresh should succeed: {first:?}");
+        assert!(second.is_ok(), "second refresh should succeed: {second:?}");
+
+        let requests = state.requests().await;
+        assert_eq!(
+            requests.len(),
+            1,
+            "only one outbound refresh should run for concurrent callers"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_lock_reuses_same_key() {
+        let first = refresh_lock("notion", "user-a").await;
+        let second = refresh_lock("notion", "user-a").await;
+        let other_user = refresh_lock("notion", "user-b").await;
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &other_user));
+    }
+
+    #[tokio::test]
+    async fn test_refresh_lock_recreates_dropped_entry() {
+        let first = refresh_lock("notion-recreate", "user-recreate").await;
+        let first_weak = Arc::downgrade(&first);
+        drop(first);
+
+        assert!(first_weak.upgrade().is_none());
+
+        let second = refresh_lock("notion-recreate", "user-recreate").await;
+        let third = refresh_lock("notion-recreate", "user-recreate").await;
+
+        assert!(Arc::ptr_eq(&second, &third));
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: Tests use lock_env() to serialize environment access.
+            unsafe {
+                if let Some(ref value) = self.original {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    fn set_env_var(key: &'static str, value: Option<&str>) -> EnvVarGuard {
+        let original = std::env::var(key).ok();
+        // SAFETY: Tests use lock_env() to serialize environment access.
+        unsafe {
+            if let Some(value) = value {
+                std::env::set_var(key, value);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+        EnvVarGuard { key, original }
     }
 }
