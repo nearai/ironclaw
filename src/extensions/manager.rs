@@ -465,6 +465,7 @@ pub struct ExtensionManager {
     wasm_tool_runtime: Option<Arc<WasmToolRuntime>>,
     wasm_tools_dir: PathBuf,
     wasm_channels_dir: PathBuf,
+    latent_wasm_provider_actions: RwLock<Option<Vec<LatentProviderAction>>>,
 
     // WASM channel hot-activation infrastructure (set post-construction)
     channel_runtime: RwLock<Option<ChannelRuntimeState>>,
@@ -638,6 +639,7 @@ impl ExtensionManager {
             wasm_tool_runtime,
             wasm_tools_dir,
             wasm_channels_dir,
+            latent_wasm_provider_actions: RwLock::new(None),
             channel_runtime: RwLock::new(None),
             relay_channel_manager: RwLock::new(None),
             secrets,
@@ -1633,16 +1635,37 @@ impl ExtensionManager {
             }
         }
 
+        for action in self.cached_latent_wasm_provider_actions().await {
+            if self
+                .is_extension_active(&action.provider_extension, ExtensionKind::WasmTool)
+                .await
+            {
+                continue;
+            }
+            actions.push(action);
+        }
+
+        actions.sort_by(|a, b| a.action_name.cmp(&b.action_name));
+        actions
+    }
+
+    async fn cached_latent_wasm_provider_actions(&self) -> Vec<LatentProviderAction> {
+        if let Some(actions) = self.latent_wasm_provider_actions.read().await.clone() {
+            return actions;
+        }
+
+        let actions = self.build_latent_wasm_provider_actions().await;
+        *self.latent_wasm_provider_actions.write().await = Some(actions.clone());
+        actions
+    }
+
+    async fn build_latent_wasm_provider_actions(&self) -> Vec<LatentProviderAction> {
+        let mut actions = Vec::new();
+
         if self.wasm_tools_dir.exists()
             && let Ok(tools) = discover_tools(&self.wasm_tools_dir).await
         {
             for (name, _) in tools {
-                if self
-                    .is_extension_active(&name, ExtensionKind::WasmTool)
-                    .await
-                {
-                    continue;
-                }
                 let description = self
                     .load_tool_capabilities(&name)
                     .await
@@ -1670,6 +1693,10 @@ impl ExtensionManager {
 
         actions.sort_by(|a, b| a.action_name.cmp(&b.action_name));
         actions
+    }
+
+    async fn invalidate_latent_wasm_provider_actions_cache(&self) {
+        *self.latent_wasm_provider_actions.write().await = None;
     }
 
     pub async fn provider_action_names(&self, provider_extension: &str) -> Vec<String> {
@@ -2041,6 +2068,7 @@ impl ExtensionManager {
 
                 self.cleanup_uninstalled_extension_secrets(cleanup_plan, user_id)
                     .await;
+                self.invalidate_latent_wasm_provider_actions_cache().await;
 
                 Ok(format!("Removed WASM tool '{}'", name))
             }
@@ -2649,12 +2677,13 @@ impl ExtensionManager {
                     wasm_url,
                     capabilities_url,
                 } => {
-                    let result = self.install_wasm_tool_from_url_with_caps(
-                        &entry.name,
-                        wasm_url,
-                        capabilities_url.as_deref(),
-                    )
-                    .await?;
+                    let result = self
+                        .install_wasm_tool_from_url_with_caps(
+                            &entry.name,
+                            wasm_url,
+                            capabilities_url.as_deref(),
+                        )
+                        .await?;
                     if let Some(fallback) = entry.fallback_source.as_ref()
                         && let ExtensionSource::WasmBuildable { source_dir, .. } = fallback.as_ref()
                     {
@@ -2691,12 +2720,13 @@ impl ExtensionManager {
                     wasm_url,
                     capabilities_url,
                 } => {
-                    let result = self.install_wasm_channel_from_url(
-                        &entry.name,
-                        wasm_url,
-                        capabilities_url.as_deref(),
-                    )
-                    .await?;
+                    let result = self
+                        .install_wasm_channel_from_url(
+                            &entry.name,
+                            wasm_url,
+                            capabilities_url.as_deref(),
+                        )
+                        .await?;
                     if let Some(fallback) = entry.fallback_source.as_ref()
                         && let ExtensionSource::WasmBuildable { source_dir, .. } = fallback.as_ref()
                     {
@@ -2798,6 +2828,7 @@ impl ExtensionManager {
     ) -> Result<InstallResult, ExtensionError> {
         self.download_and_install_wasm(name, url, capabilities_url, &self.wasm_tools_dir)
             .await?;
+        self.invalidate_latent_wasm_provider_actions_cache().await;
 
         Ok(InstallResult {
             name: name.to_string(),
@@ -3125,7 +3156,10 @@ impl ExtensionManager {
             );
         }
 
-        if !found_caps && !multiple_caps_candidates && let Some(data) = fallback_caps {
+        if !found_caps
+            && !multiple_caps_candidates
+            && let Some(data) = fallback_caps
+        {
             std::fs::write(target_caps, &data)
                 .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
             tracing::debug!(
@@ -3191,6 +3225,10 @@ impl ExtensionManager {
         )
         .await
         .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+
+        if target_dir == self.wasm_tools_dir.as_path() {
+            self.invalidate_latent_wasm_provider_actions_cache().await;
+        }
 
         let kind_label = match kind {
             ExtensionKind::WasmTool => "WASM tool",
@@ -7945,6 +7983,39 @@ mod tests {
         let actions = manager.latent_provider_actions("test").await;
         assert!(
             actions
+                .iter()
+                .any(|action| action.action_name == "latent_tool")
+        );
+    }
+
+    #[tokio::test]
+    async fn latent_provider_actions_cache_invalidates_when_wasm_tool_is_removed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "latent_tool",
+            r#"{
+                "description": "latent test tool"
+            }"#,
+        );
+        let manager =
+            make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+
+        let first = manager.latent_provider_actions("test").await;
+        assert!(
+            first
+                .iter()
+                .any(|action| action.action_name == "latent_tool")
+        );
+
+        manager
+            .remove("latent_tool", "test")
+            .await
+            .expect("remove latent tool");
+
+        let second = manager.latent_provider_actions("test").await;
+        assert!(
+            !second
                 .iter()
                 .any(|action| action.action_name == "latent_tool")
         );

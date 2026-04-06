@@ -19,6 +19,7 @@
 //! - `__get_actions__` — available tool definitions
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use std::collections::HashMap;
 
@@ -26,7 +27,7 @@ use monty::{
     ExtFunctionResult, LimitedTracker, MontyObject, MontyRun, NameLookupResult, PrintWriter,
     ResourceLimits, RunProgress,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::capability::lease::LeaseManager;
 use crate::capability::policy::PolicyEngine;
@@ -98,6 +99,23 @@ const MAX_FAILURES_BEFORE_ROLLBACK: u64 = 3;
 
 /// Well-known title for orchestrator failure tracking.
 const FAILURE_TRACKER_TITLE: &str = "orchestrator:failures";
+const LEASE_REFRESH_WARN_INTERVAL_SECS: u64 = 60;
+
+fn warn_on_lease_refresh_failure(context: &'static str, error: &crate::types::error::EngineError) {
+    static LAST_WARN_TS: AtomicU64 = AtomicU64::new(0);
+
+    let now = chrono::Utc::now().timestamp().max(0) as u64;
+    let last = LAST_WARN_TS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) >= LEASE_REFRESH_WARN_INTERVAL_SECS
+        && LAST_WARN_TS
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        warn!(context, error = %error, "dynamic lease refresh failed");
+    } else {
+        debug!(context, error = %error, "dynamic lease refresh failed");
+    }
+}
 
 /// Load orchestrator code: runtime version from Store, or compiled-in default.
 ///
@@ -553,7 +571,7 @@ async fn handle_llm_complete(
         reconcile_dynamic_tool_lease(thread, effects, leases, store, &crate::LeasePlanner::new())
             .await
     {
-        debug!("llm_complete lease refresh failed: {e}");
+        warn_on_lease_refresh_failure("llm_complete", &e);
     }
 
     let active_leases = leases.active_for_thread(thread.id).await;
@@ -1673,7 +1691,7 @@ async fn handle_get_actions(
         reconcile_dynamic_tool_lease(thread, effects, leases, store, &crate::LeasePlanner::new())
             .await
     {
-        debug!("get_actions lease refresh failed: {e}");
+        warn_on_lease_refresh_failure("get_actions", &e);
     }
 
     let active_leases = leases.active_for_thread(thread.id).await;

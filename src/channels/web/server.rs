@@ -2088,6 +2088,9 @@ async fn history_pending_gate_info(
     thread_id: Option<&str>,
 ) -> Option<PendingGateInfo> {
     if thread_id.is_some() {
+        // Thread-scoped pending gates are authoritative once the client sends a
+        // thread_id. The unscoped fallback only exists for legacy callers that
+        // do not know which thread owns the gate yet.
         return engine_pending_gate_info(user_id, thread_id).await;
     }
     engine_pending_gate_info(user_id, None).await

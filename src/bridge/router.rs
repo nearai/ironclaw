@@ -67,6 +67,8 @@ fn resolved_call_id_for_pending_action(
     thread: &ironclaw_engine::Thread,
     pending: &PendingGate,
 ) -> String {
+    // New pending gates persist the exact call_id at insertion time.
+    // Only infer from history for legacy rows created before call_id was stored.
     if !pending.call_id.is_empty() {
         return pending.call_id.clone();
     }
@@ -1191,13 +1193,15 @@ pub async fn resolve_gate(
                     },
                 );
             }
-            state
-                .effect_adapter
-                .auto_approve_tool(&pending.action_name)
-                .await;
             let legacy_registry_name = legacy_extension_alias(&pending.action_name);
-            if let Some(ref registry_name) = legacy_registry_name {
-                state.effect_adapter.auto_approve_tool(registry_name).await;
+            if always {
+                state
+                    .effect_adapter
+                    .auto_approve_tool(&pending.action_name)
+                    .await;
+                if let Some(ref registry_name) = legacy_registry_name {
+                    state.effect_adapter.auto_approve_tool(registry_name).await;
+                }
             }
             let result = execute_pending_gate_action(
                 agent,
@@ -1209,7 +1213,7 @@ pub async fn resolve_gate(
             )
             .await;
 
-            if !always || result.is_err() {
+            if always && result.is_err() {
                 state
                     .effect_adapter
                     .revoke_auto_approve(&pending.action_name)
@@ -3767,6 +3771,92 @@ mod tests {
             gate.resume_kind,
             ironclaw_engine::ResumeKind::Authentication { .. }
         ));
+    }
+
+    #[test]
+    fn resolved_call_id_prefers_stored_id_for_parallel_same_name_calls() {
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.add_message(ironclaw_engine::ThreadMessage::assistant_with_actions(
+            Some("parallel shell calls".to_string()),
+            vec![
+                ironclaw_engine::ActionCall {
+                    id: "call-1".to_string(),
+                    action_name: "shell".to_string(),
+                    parameters: serde_json::json!({"cmd": "pwd"}),
+                },
+                ironclaw_engine::ActionCall {
+                    id: "call-2".to_string(),
+                    action_name: "shell".to_string(),
+                    parameters: serde_json::json!({"cmd": "ls"}),
+                },
+            ],
+        ));
+
+        let pending = PendingGate {
+            call_id: "call-1".to_string(),
+            parameters: serde_json::json!({"cmd": "pwd"}),
+            ..sample_pending_gate(
+                "alice",
+                thread.id,
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            )
+        };
+
+        assert_eq!(
+            resolved_call_id_for_pending_action(&thread, &pending),
+            "call-1"
+        );
+    }
+
+    #[test]
+    fn resolved_call_id_legacy_fallback_uses_last_unresolved_parallel_call() {
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.add_message(ironclaw_engine::ThreadMessage::assistant_with_actions(
+            Some("parallel shell calls".to_string()),
+            vec![
+                ironclaw_engine::ActionCall {
+                    id: "call-1".to_string(),
+                    action_name: "shell".to_string(),
+                    parameters: serde_json::json!({"cmd": "pwd"}),
+                },
+                ironclaw_engine::ActionCall {
+                    id: "call-2".to_string(),
+                    action_name: "shell".to_string(),
+                    parameters: serde_json::json!({"cmd": "ls"}),
+                },
+            ],
+        ));
+        thread.add_message(ironclaw_engine::ThreadMessage::action_result(
+            "call-1",
+            "shell",
+            "{\"ok\":true}",
+        ));
+
+        let pending = PendingGate {
+            call_id: String::new(),
+            ..sample_pending_gate(
+                "alice",
+                thread.id,
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            )
+        };
+
+        assert_eq!(
+            resolved_call_id_for_pending_action(&thread, &pending),
+            "call-2"
+        );
     }
 
     #[tokio::test]
