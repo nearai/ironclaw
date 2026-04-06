@@ -146,7 +146,7 @@ mod tests {
             },
             prompt_content: content.to_string(),
             trust: SkillTrust::Trusted,
-            source: SkillSource::User(PathBuf::from("/tmp/test")),
+            source: SkillSource::User(PathBuf::from("/tmp/test")), // safety: dummy path in test, not used for I/O
             content_hash: ironclaw_skills::compute_hash(content),
             compiled_patterns: vec![],
             lowercased_keywords: vec!["test".to_string()],

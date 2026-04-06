@@ -2100,7 +2100,7 @@ async fn await_thread_outcome(
                     .nth(1)
                     .and_then(|s| {
                         // Handle both JSON ("credential_name":"foo") and prose
-                        s.split(&['"', '\'', '`'][..])
+                        s.split(&['"', '\'', '`'][..]) // safety: slice of char array, not string byte slicing
                             .find(|seg| !seg.is_empty() && !seg.contains(':') && !seg.contains(' '))
                     })
                     .filter(|name| {
