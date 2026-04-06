@@ -135,44 +135,95 @@ pub async fn run() -> anyhow::Result<()> {
     let stdout = tokio::io::stdout();
     let mut reader = BufReader::new(stdin);
     let mut writer = stdout;
-    let mut line = String::new();
 
     loop {
-        line.clear();
-        let bytes_read = reader.read_line(&mut line).await?;
-        if bytes_read == 0 {
-            break;
-        }
-        if line.len() > MAX_JSON_RPC_LINE_SIZE {
-            let response = jsonrpc_error(
-                serde_json::Value::Null,
-                -32600,
-                format!(
-                    "Request too large: {} bytes exceeds limit of {} bytes",
-                    line.len(),
-                    MAX_JSON_RPC_LINE_SIZE
-                ),
-            );
-            let text = serde_json::to_string(&response)?;
-            writer.write_all(text.as_bytes()).await?;
-            writer.write_all(b"\n").await?;
-            writer.flush().await?;
-            continue;
-        }
-        if line.trim().is_empty() {
-            continue;
-        }
+        match read_json_rpc_line(&mut reader).await? {
+            ReadJsonRpcLine::Eof => break,
+            ReadJsonRpcLine::Oversized(bytes_read) => {
+                let response = jsonrpc_error(
+                    serde_json::Value::Null,
+                    -32600,
+                    format!(
+                        "Request too large: {} bytes exceeds limit of {} bytes",
+                        bytes_read, MAX_JSON_RPC_LINE_SIZE
+                    ),
+                );
+                let text = serde_json::to_string(&response)?;
+                writer.write_all(text.as_bytes()).await?;
+                writer.write_all(b"\n").await?;
+                writer.flush().await?;
+            }
+            ReadJsonRpcLine::Line(line) => {
+                if line.trim().is_empty() {
+                    continue;
+                }
 
-        let response = handle_line(&line).await;
-        if let Some(response) = response {
-            let text = serde_json::to_string(&response)?;
-            writer.write_all(text.as_bytes()).await?;
-            writer.write_all(b"\n").await?;
-            writer.flush().await?;
+                let response = handle_line(&line).await;
+                if let Some(response) = response {
+                    let text = serde_json::to_string(&response)?;
+                    writer.write_all(text.as_bytes()).await?;
+                    writer.write_all(b"\n").await?;
+                    writer.flush().await?;
+                }
+            }
         }
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+enum ReadJsonRpcLine {
+    Line(String),
+    Oversized(usize),
+    Eof,
+}
+
+async fn read_json_rpc_line<R>(reader: &mut R) -> anyhow::Result<ReadJsonRpcLine>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let mut line = Vec::new();
+    let mut total_len = 0usize;
+    let mut oversized = false;
+
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if total_len == 0 {
+                return Ok(ReadJsonRpcLine::Eof);
+            }
+            break;
+        }
+
+        let newline_pos = available.iter().position(|b| *b == b'\n');
+        let chunk_len = newline_pos.map_or(available.len(), |pos| pos + 1);
+        let chunk = &available[..chunk_len];
+        total_len += chunk_len;
+
+        if !oversized {
+            let remaining = MAX_JSON_RPC_LINE_SIZE.saturating_sub(line.len());
+            if chunk.len() <= remaining {
+                line.extend_from_slice(chunk);
+            } else {
+                line.extend_from_slice(&chunk[..remaining]);
+                oversized = true;
+            }
+        }
+
+        reader.consume(chunk_len);
+
+        if newline_pos.is_some() {
+            break;
+        }
+    }
+
+    if oversized {
+        return Ok(ReadJsonRpcLine::Oversized(total_len));
+    }
+
+    let line = String::from_utf8(line)?;
+    Ok(ReadJsonRpcLine::Line(line))
 }
 
 async fn handle_line(line: &str) -> Option<JsonRpcResponse> {
@@ -650,6 +701,35 @@ mod tests {
     async fn unknown_notification_is_ignored() {
         let response = handle_line(r#"{"jsonrpc":"2.0","method":"something/unknown"}"#).await;
         assert!(response.is_none());
+    }
+
+    #[tokio::test]
+    async fn oversized_json_rpc_line_is_rejected_without_unbounded_buffering() {
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let oversized_line = format!(
+            "{{\"jsonrpc\":\"2.0\",\"method\":\"tools/list\",\"padding\":\"{}\"}}\n",
+            "x".repeat(MAX_JSON_RPC_LINE_SIZE + 1)
+        );
+
+        let writer_task = tokio::spawn(async move {
+            writer
+                .write_all(oversized_line.as_bytes())
+                .await
+                .expect("write oversized line");
+        });
+
+        let mut reader = BufReader::new(reader);
+        match read_json_rpc_line(&mut reader)
+            .await
+            .expect("read oversized line")
+        {
+            ReadJsonRpcLine::Oversized(bytes_read) => {
+                assert!(bytes_read > MAX_JSON_RPC_LINE_SIZE);
+            }
+            other => panic!("expected oversized line, got {:?}", other),
+        }
+
+        writer_task.await.expect("join writer task");
     }
 
     #[tokio::test]
