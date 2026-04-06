@@ -16,6 +16,7 @@ use crate::agent::dispatcher::{
     parse_auth_result,
 };
 use crate::agent::session::{MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState};
+use crate::agent::session_manager::SessionGuardTimer;
 use crate::agent::submission::SubmissionResult;
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
@@ -68,7 +69,7 @@ impl Agent {
             .get_or_create_session(&message.user_id)
             .await;
         {
-            let sess = session.lock().await;
+            let sess = SessionGuardTimer::new(session.lock().await, "hydrate_check_exists");
             if sess.threads.contains_key(&thread_uuid) {
                 return None;
             }
@@ -182,7 +183,7 @@ impl Agent {
         let effective_source_channel = db_source_channel.as_deref();
 
         let session_id = {
-            let sess = session.lock().await;
+            let sess = SessionGuardTimer::new(session.lock().await, "hydrate_get_session_id");
             sess.id
         };
 
@@ -197,7 +198,7 @@ impl Agent {
 
         // Insert into session and register with session manager
         {
-            let mut sess = session.lock().await;
+            let mut sess = SessionGuardTimer::new(session.lock().await, "hydrate_insert_thread");
             sess.threads.insert(thread_uuid, thread);
             sess.active_thread = Some(thread_uuid);
             sess.last_active_at = chrono::Utc::now();
@@ -238,7 +239,7 @@ impl Agent {
 
         // First check thread state without holding lock during I/O
         let (thread_state, approval_context) = {
-            let sess = session.lock().await;
+            let sess = SessionGuardTimer::new(session.lock().await, "check_thread_state");
             let thread = sess
                 .threads
                 .get(&thread_id)
@@ -261,7 +262,8 @@ impl Agent {
         // Check thread state
         match thread_state {
             ThreadState::Processing => {
-                let mut sess = session.lock().await;
+                let mut sess =
+                    SessionGuardTimer::new(session.lock().await, "queue_pending_message");
                 if let Some(thread) = sess.threads.get_mut(&thread_id) {
                     // Re-check state under lock — the turn may have completed
                     // between the snapshot read and this mutable lock acquisition.
@@ -408,31 +410,30 @@ impl Agent {
         // Job tools (create_job, list_jobs, etc.) are in the tool registry
 
         // Auto-compact if needed BEFORE adding new turn
-        {
-            let mut sess = session.lock().await;
+        let compact_needed = {
+            let sess = SessionGuardTimer::new(session.lock().await, "auto_compact_check");
             let thread = sess
                 .threads
-                .get_mut(&thread_id)
+                .get(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-
             let messages = thread.messages();
-            if let Some(strategy) = self.context_monitor.suggest_compaction(&messages) {
-                let pct = self.context_monitor.usage_percent(&messages);
-                tracing::info!("Context at {:.1}% capacity, auto-compacting", pct);
+            self.context_monitor
+                .suggest_compaction(&messages)
+                .map(|strategy| (strategy, self.context_monitor.usage_percent(&messages)))
+        };
+        if let Some((strategy, pct)) = compact_needed {
+            tracing::info!("Context at {:.1}% capacity, auto-compacting", pct);
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::Status(format!("Context at {:.0}% capacity, compacting...", pct)),
+                    &message.metadata,
+                )
+                .await;
 
-                // Notify the user that compaction is happening
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::Status(format!(
-                            "Context at {:.0}% capacity, compacting...",
-                            pct
-                        )),
-                        &message.metadata,
-                    )
-                    .await;
-
+            let mut sess = SessionGuardTimer::new(session.lock().await, "auto_compact_execute");
+            if let Some(thread) = sess.threads.get_mut(&thread_id) {
                 let compactor = ContextCompactor::new(self.llm().clone());
                 if let Err(e) = compactor
                     .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
@@ -445,18 +446,20 @@ impl Agent {
 
         // Create checkpoint before turn
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
-        {
-            let sess = session.lock().await;
+        let (turn_number, messages) = {
+            let sess = SessionGuardTimer::new(session.lock().await, "checkpoint_read");
             let thread = sess
                 .threads
                 .get(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-
+            (thread.turn_number(), thread.messages())
+        };
+        {
             let mut mgr = undo_mgr.lock().await;
             mgr.checkpoint(
-                thread.turn_number(),
-                thread.messages(),
-                format!("Before turn {}", thread.turn_number()),
+                turn_number,
+                messages,
+                format!("Before turn {}", turn_number),
             );
         }
 
@@ -470,7 +473,7 @@ impl Agent {
 
         // Start the turn and get messages
         let turn_messages = {
-            let mut sess = session.lock().await;
+            let mut sess = SessionGuardTimer::new(session.lock().await, "start_turn");
             let thread = sess
                 .threads
                 .get_mut(&thread_id)
@@ -516,7 +519,7 @@ impl Agent {
             .await;
 
         // Re-acquire lock and check if interrupted
-        let mut sess = session.lock().await;
+        let mut sess = SessionGuardTimer::new(session.lock().await, "complete_turn");
         let thread = sess
             .threads
             .get_mut(&thread_id)
@@ -873,7 +876,7 @@ impl Agent {
             return Ok(SubmissionResult::ok_with_message("Nothing to undo."));
         }
 
-        let mut sess = session.lock().await;
+        let mut sess = SessionGuardTimer::new(session.lock().await, "process_undo");
         let thread = sess
             .threads
             .get_mut(&thread_id)
@@ -911,7 +914,7 @@ impl Agent {
             return Ok(SubmissionResult::ok_with_message("Nothing to redo."));
         }
 
-        let mut sess = session.lock().await;
+        let mut sess = SessionGuardTimer::new(session.lock().await, "process_redo");
         let thread = sess
             .threads
             .get_mut(&thread_id)
@@ -936,7 +939,7 @@ impl Agent {
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
-        let mut sess = session.lock().await;
+        let mut sess = SessionGuardTimer::new(session.lock().await, "process_interrupt");
         let thread = sess
             .threads
             .get_mut(&thread_id)
@@ -956,20 +959,28 @@ impl Agent {
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
-        let mut sess = session.lock().await;
+        let (strategy, usage) = {
+            let sess = SessionGuardTimer::new(session.lock().await, "compact_check");
+            let thread = sess
+                .threads
+                .get(&thread_id)
+                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+            let messages = thread.messages();
+            let usage = self.context_monitor.usage_percent(&messages);
+            let strategy = self
+                .context_monitor
+                .suggest_compaction(&messages)
+                .unwrap_or(
+                    crate::agent::context_monitor::CompactionStrategy::Summarize { keep_recent: 5 },
+                );
+            (strategy, usage)
+        };
+
+        let mut sess = SessionGuardTimer::new(session.lock().await, "compact_execute");
         let thread = sess
             .threads
             .get_mut(&thread_id)
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-
-        let messages = thread.messages();
-        let usage = self.context_monitor.usage_percent(&messages);
-        let strategy = self
-            .context_monitor
-            .suggest_compaction(&messages)
-            .unwrap_or(
-                crate::agent::context_monitor::CompactionStrategy::Summarize { keep_recent: 5 },
-            );
 
         let compactor = ContextCompactor::new(self.llm().clone());
         match compactor
@@ -995,16 +1006,17 @@ impl Agent {
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
-        let mut sess = session.lock().await;
-        let thread = sess
-            .threads
-            .get_mut(&thread_id)
-            .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-        thread.turns.clear();
-        thread.pending_messages.clear();
-        thread.state = ThreadState::Idle;
+        {
+            let mut sess = SessionGuardTimer::new(session.lock().await, "process_clear");
+            let thread = sess
+                .threads
+                .get_mut(&thread_id)
+                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+            thread.turns.clear();
+            thread.pending_messages.clear();
+            thread.state = ThreadState::Idle;
+        }
 
-        // Clear undo history too
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         undo_mgr.lock().await.clear();
 
@@ -1023,7 +1035,7 @@ impl Agent {
     ) -> Result<SubmissionResult, Error> {
         // Get pending approval for this thread
         let pending = {
-            let mut sess = session.lock().await;
+            let mut sess = SessionGuardTimer::new(session.lock().await, "take_pending_approval");
             let thread = sess
                 .threads
                 .get_mut(&thread_id)
@@ -1058,7 +1070,7 @@ impl Agent {
             && req_id != pending.request_id
         {
             // Put it back and return error
-            let mut sess = session.lock().await;
+            let mut sess = SessionGuardTimer::new(session.lock().await, "restore_pending_approval");
             if let Some(thread) = sess.threads.get_mut(&thread_id) {
                 thread.await_approval(pending);
             }
@@ -1070,7 +1082,7 @@ impl Agent {
         if approved {
             // If always, add to auto-approved set and persist to settings.
             if always {
-                let mut sess = session.lock().await;
+                let mut sess = SessionGuardTimer::new(session.lock().await, "auto_approve_tool");
                 sess.auto_approve_tool(&pending.tool_name);
                 tracing::info!(
                     "Auto-approved tool '{}' for session {}",
@@ -1127,7 +1139,7 @@ impl Agent {
 
             // Reset thread state to processing
             {
-                let mut sess = session.lock().await;
+                let mut sess = SessionGuardTimer::new(session.lock().await, "resume_processing");
                 if let Some(thread) = sess.threads.get_mut(&thread_id) {
                     thread.state = ThreadState::Processing;
                 }
@@ -1212,7 +1224,8 @@ impl Agent {
 
             // Record sanitized result in thread
             {
-                let mut sess = session.lock().await;
+                let mut sess =
+                    SessionGuardTimer::new(session.lock().await, "record_approval_result");
                 if let Some(thread) = sess.threads.get_mut(&thread_id)
                     && let Some(turn) = thread.last_turn_mut()
                 {
@@ -1290,7 +1303,10 @@ impl Agent {
                         let needs = match requirement {
                             ApprovalRequirement::Never => false,
                             ApprovalRequirement::UnlessAutoApproved => {
-                                let sess = session.lock().await;
+                                let sess = SessionGuardTimer::new(
+                                    session.lock().await,
+                                    "check_deferred_approval",
+                                );
                                 !sess.is_tool_auto_approved(&tc.name)
                             }
                             ApprovalRequirement::Always => true,
@@ -1469,7 +1485,8 @@ impl Agent {
 
                 // Record sanitized result in thread
                 {
-                    let mut sess = session.lock().await;
+                    let mut sess =
+                        SessionGuardTimer::new(session.lock().await, "record_deferred_result");
                     if let Some(thread) = sess.threads.get_mut(&thread_id)
                         && let Some(turn) = thread.last_turn_mut()
                     {
@@ -1531,7 +1548,8 @@ impl Agent {
                 let parameters = new_pending.display_parameters.clone();
 
                 {
-                    let mut sess = session.lock().await;
+                    let mut sess =
+                        SessionGuardTimer::new(session.lock().await, "await_deferred_approval");
                     if let Some(thread) = sess.threads.get_mut(&thread_id) {
                         thread.await_approval(new_pending);
                     }
@@ -1573,7 +1591,8 @@ impl Agent {
                 .await;
 
             // Handle the result
-            let mut sess = session.lock().await;
+            let mut sess =
+                SessionGuardTimer::new(session.lock().await, "handle_approval_loop_result");
             let thread = sess
                 .threads
                 .get_mut(&thread_id)
@@ -1684,20 +1703,24 @@ impl Agent {
                  You can continue the conversation or try a different approach.",
                 pending.tool_name
             );
-            {
-                let mut sess = session.lock().await;
+            let should_persist = {
+                let mut sess = SessionGuardTimer::new(session.lock().await, "process_rejection");
                 if let Some(thread) = sess.threads.get_mut(&thread_id) {
                     thread.clear_pending_approval();
                     thread.complete_turn(&rejection);
-                    // User message already persisted at turn start; save rejection response
-                    self.persist_assistant_response(
-                        thread_id,
-                        &message.channel,
-                        &message.user_id,
-                        &rejection,
-                    )
-                    .await;
+                    true
+                } else {
+                    false
                 }
+            };
+            if should_persist {
+                self.persist_assistant_response(
+                    thread_id,
+                    &message.channel,
+                    &message.user_id,
+                    &rejection,
+                )
+                .await;
             }
 
             let _ = self
@@ -1728,20 +1751,24 @@ impl Agent {
         instructions: String,
     ) {
         let auth_data = parse_auth_result(tool_result);
-        {
-            let mut sess = session.lock().await;
+        let should_persist = {
+            let mut sess = SessionGuardTimer::new(session.lock().await, "enter_auth_mode");
             if let Some(thread) = sess.threads.get_mut(&thread_id) {
                 thread.enter_auth_mode(ext_name.clone());
                 thread.complete_turn(&instructions);
-                // User message already persisted at turn start; save auth instructions
-                self.persist_assistant_response(
-                    thread_id,
-                    &message.channel,
-                    &message.user_id,
-                    &instructions,
-                )
-                .await;
+                true
+            } else {
+                false
             }
+        };
+        if should_persist {
+            self.persist_assistant_response(
+                thread_id,
+                &message.channel,
+                &message.user_id,
+                &instructions,
+            )
+            .await;
         }
         let _ = self
             .channels
@@ -1800,7 +1827,7 @@ impl Agent {
 
         // Clear auth mode regardless of outcome
         {
-            let mut sess = session.lock().await;
+            let mut sess = SessionGuardTimer::new(session.lock().await, "clear_auth_mode");
             if let Some(thread) = sess.threads.get_mut(&thread_id) {
                 thread.pending_auth = None;
             }
@@ -1838,7 +1865,8 @@ impl Agent {
             }
             Ok(result) => {
                 {
-                    let mut sess = session.lock().await;
+                    let mut sess =
+                        SessionGuardTimer::new(session.lock().await, "re_enter_auth_mode");
                     if let Some(thread) = sess.threads.get_mut(&thread_id) {
                         thread.enter_auth_mode(pending.extension_name.clone());
                     }
@@ -1863,7 +1891,8 @@ impl Agent {
                 // Token validation errors: re-enter auth mode and re-prompt
                 if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
                     {
-                        let mut sess = session.lock().await;
+                        let mut sess =
+                            SessionGuardTimer::new(session.lock().await, "auth_validation_retry");
                         if let Some(thread) = sess.threads.get_mut(&thread_id) {
                             thread.enter_auth_mode(pending.extension_name.clone());
                         }
@@ -1909,7 +1938,7 @@ impl Agent {
             .session_manager
             .get_or_create_session(&message.user_id)
             .await;
-        let mut sess = session.lock().await;
+        let mut sess = SessionGuardTimer::new(session.lock().await, "new_thread");
         let thread = sess.create_thread(Some(&message.channel));
         let thread_id = thread.id;
         Ok(SubmissionResult::ok_with_message(format!(
@@ -1927,7 +1956,7 @@ impl Agent {
             .session_manager
             .get_or_create_session(&message.user_id)
             .await;
-        let mut sess = session.lock().await;
+        let mut sess = SessionGuardTimer::new(session.lock().await, "switch_thread");
 
         if sess.switch_thread(target_thread_id) {
             Ok(SubmissionResult::ok_with_message(format!(
@@ -1949,7 +1978,7 @@ impl Agent {
         let mut mgr = undo_mgr.lock().await;
 
         if let Some(checkpoint) = mgr.restore(checkpoint_id) {
-            let mut sess = session.lock().await;
+            let mut sess = SessionGuardTimer::new(session.lock().await, "process_resume");
             let thread = sess
                 .threads
                 .get_mut(&thread_id)

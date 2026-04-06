@@ -13,6 +13,53 @@ use crate::agent::session::Session;
 use crate::agent::undo::UndoManager;
 use crate::hooks::HookRegistry;
 
+pub struct SessionGuardTimer<'a> {
+    guard: tokio::sync::MutexGuard<'a, Session>,
+    #[cfg(debug_assertions)]
+    acquired_at: std::time::Instant,
+    #[cfg(debug_assertions)]
+    context: &'static str,
+}
+
+impl<'a> SessionGuardTimer<'a> {
+    pub fn new(guard: tokio::sync::MutexGuard<'a, Session>, context: &'static str) -> Self {
+        Self {
+            guard,
+            #[cfg(debug_assertions)]
+            acquired_at: std::time::Instant::now(),
+            #[cfg(debug_assertions)]
+            context,
+        }
+    }
+}
+
+impl<'a> std::ops::Deref for SessionGuardTimer<'a> {
+    type Target = Session;
+    fn deref(&self) -> &Session {
+        &self.guard
+    }
+}
+
+impl<'a> std::ops::DerefMut for SessionGuardTimer<'a> {
+    fn deref_mut(&mut self) -> &mut Session {
+        &mut self.guard
+    }
+}
+
+#[cfg(debug_assertions)]
+impl<'a> Drop for SessionGuardTimer<'a> {
+    fn drop(&mut self) {
+        let held_for = self.acquired_at.elapsed();
+        if held_for > std::time::Duration::from_secs(5) {
+            tracing::warn!(
+                held_ms = held_for.as_millis(),
+                context = self.context,
+                "Session lock held for >5s — possible lock-across-await violation"
+            );
+        }
+    }
+}
+
 /// Warn when session count exceeds this threshold.
 const SESSION_COUNT_WARNING_THRESHOLD: usize = 1000;
 
@@ -155,7 +202,7 @@ impl SessionManager {
 
             // Fast path: exact key match
             if let Some(&thread_id) = thread_map.get(&key) {
-                let sess = session.lock().await;
+                let sess = SessionGuardTimer::new(session.lock().await, "resolve_thread_lookup");
                 if sess.threads.contains_key(&thread_id) {
                     return (Arc::clone(&session), thread_id);
                 }
@@ -176,7 +223,7 @@ impl SessionManager {
 
         // If we found an adoptable UUID, verify it exists in session and acquire write lock
         if let Some(ext_uuid) = adoptable_uuid {
-            let sess = session.lock().await;
+            let sess = SessionGuardTimer::new(session.lock().await, "resolve_thread_adopt");
             if sess.threads.contains_key(&ext_uuid) {
                 drop(sess);
 
@@ -199,7 +246,7 @@ impl SessionManager {
 
         // Create new thread (always create a new one for a new key)
         let thread_id = {
-            let mut sess = session.lock().await;
+            let mut sess = SessionGuardTimer::new(session.lock().await, "resolve_thread_create");
             let thread = sess.create_thread(Some(channel));
             thread.id
         };
