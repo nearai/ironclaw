@@ -476,11 +476,14 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         Some(agent.cheap_llm().clone()),
     ));
 
-    let effect_adapter = Arc::new(EffectBridgeAdapter::new(
-        agent.tools().clone(),
-        agent.safety().clone(),
-        agent.hooks().clone(),
-    ));
+    let effect_adapter = Arc::new(
+        EffectBridgeAdapter::new(
+            agent.tools().clone(),
+            agent.safety().clone(),
+            agent.hooks().clone(),
+        )
+        .with_global_auto_approve(agent.config().auto_approve_tools),
+    );
 
     // Build centralized auth manager for pre-flight credential checks.
     let has_secrets = agent.tools().secrets_store().is_some();
