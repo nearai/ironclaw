@@ -38,6 +38,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ github.event_name == 'schedule' && 'staging' || '' }}
+          persist-credentials: false
 
       - name: Extract version from Cargo.toml
         id: version
@@ -48,35 +49,38 @@ jobs:
 
       - name: Determine tags
         id: tags
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
           SHA="sha-${GITHUB_SHA::7}"
           echo "sha_tag=${SHA}" >> "$GITHUB_OUTPUT"
 
-          if [[ "${{ github.event_name }}" == "workflow_call" ]]; then
+          if [[ "${EVENT_NAME}" == "workflow_call" ]]; then
             # Release: :version + :latest + :sha-xxx
-            TAGS="${{ env.IMAGE_NAME }}:${VERSION}"
-            TAGS="${TAGS},${{ env.IMAGE_NAME }}:latest"
-            TAGS="${TAGS},${{ env.IMAGE_NAME }}:${SHA}"
-            WORKER_TAGS="${{ env.WORKER_IMAGE_NAME }}:${VERSION}"
-            WORKER_TAGS="${WORKER_TAGS},${{ env.WORKER_IMAGE_NAME }}:latest"
-            WORKER_TAGS="${WORKER_TAGS},${{ env.WORKER_IMAGE_NAME }}:${SHA}"
-          elif [[ "${{ github.event_name }}" == "schedule" ]]; then
+            TAGS="${IMAGE_NAME}:${VERSION}"
+            TAGS="${TAGS},${IMAGE_NAME}:latest"
+            TAGS="${TAGS},${IMAGE_NAME}:${SHA}"
+            WORKER_TAGS="${WORKER_IMAGE_NAME}:${VERSION}"
+            WORKER_TAGS="${WORKER_TAGS},${WORKER_IMAGE_NAME}:latest"
+            WORKER_TAGS="${WORKER_TAGS},${WORKER_IMAGE_NAME}:${SHA}"
+          elif [[ "${EVENT_NAME}" == "schedule" ]]; then
             # Daily staging: :staging + :sha-xxx
-            TAGS="${{ env.IMAGE_NAME }}:staging"
-            TAGS="${TAGS},${{ env.IMAGE_NAME }}:${SHA}"
-            WORKER_TAGS="${{ env.WORKER_IMAGE_NAME }}:staging"
-            WORKER_TAGS="${WORKER_TAGS},${{ env.WORKER_IMAGE_NAME }}:${SHA}"
+            TAGS="${IMAGE_NAME}:staging"
+            TAGS="${TAGS},${IMAGE_NAME}:${SHA}"
+            WORKER_TAGS="${WORKER_IMAGE_NAME}:staging"
+            WORKER_TAGS="${WORKER_TAGS},${WORKER_IMAGE_NAME}:${SHA}"
           else
             # Manual dispatch: :sha-xxx only
-            TAGS="${{ env.IMAGE_NAME }}:${SHA}"
-            WORKER_TAGS="${{ env.WORKER_IMAGE_NAME }}:${SHA}"
+            TAGS="${IMAGE_NAME}:${SHA}"
+            WORKER_TAGS="${WORKER_IMAGE_NAME}:${SHA}"
           fi
 
           # Manual override adds an extra tag (e.g. "staging")
-          if [[ -n "${{ inputs.tag }}" ]]; then
-            TAGS="${TAGS},${{ env.IMAGE_NAME }}:${{ inputs.tag }}"
-            WORKER_TAGS="${WORKER_TAGS},${{ env.WORKER_IMAGE_NAME }}:${{ inputs.tag }}"
+          if [[ -n "${INPUT_TAG}" ]]; then
+            TAGS="${TAGS},${IMAGE_NAME}:${INPUT_TAG}"
+            WORKER_TAGS="${WORKER_TAGS},${WORKER_IMAGE_NAME}:${INPUT_TAG}"
           fi
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
           echo "worker_tags=${WORKER_TAGS}" >> "$GITHUB_OUTPUT"
