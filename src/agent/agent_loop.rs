@@ -1692,7 +1692,18 @@ impl Agent {
 
         let tenant = self.tenant_ctx(&message.user_id).await;
 
-        // Run BeforeOutbound hooks on the response and broadcast it.
+        // Set message tool context to the routine's notify channel/user so the
+        // `message` tool targets the right destination (not a stale previous context).
+        let notify_ch = message
+            .metadata
+            .get("notify_channel")
+            .and_then(|v| v.as_str());
+        let notify_user = message.metadata.get("notify_user").and_then(|v| v.as_str());
+        self.tools()
+            .set_message_tool_context(notify_ch.map(String::from), notify_user.map(String::from))
+            .await;
+
+        // Enter the agentic loop for routine review processing.
         let result = self
             .process_user_input(message, tenant, session, thread_id, &message.content)
             .await;
@@ -1791,6 +1802,15 @@ impl Agent {
                     }
                 }
 
+                Ok(Some(String::new()))
+            }
+            Ok(SubmissionResult::NeedApproval { tool_name, .. }) => {
+                // Approval-requiring tools should not fire during routine review
+                // (there's no user to approve). Log and return empty.
+                tracing::warn!(
+                    tool = %tool_name,
+                    "Routine review triggered tool approval request — auto-denied (no interactive user)"
+                );
                 Ok(Some(String::new()))
             }
             Ok(other) => {

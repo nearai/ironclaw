@@ -2175,7 +2175,8 @@ async fn inject_agent_review(
             );
             return;
         }
-        rate.1 += 1;
+        // Counter incremented after successful injection (below) to avoid
+        // consuming budget on failed sends.
     }
 
     // 5. Check inject_tx is available
@@ -2229,6 +2230,11 @@ async fn inject_agent_review(
             e
         );
     } else {
+        // Increment rate counter only on successful injection
+        {
+            let mut rate = ctx.agent_review_rate.write().await;
+            rate.1 += 1;
+        }
         tracing::debug!(
             routine = %routine.name,
             status = %status,
