@@ -12,8 +12,9 @@ use uuid::Uuid;
 use crate::agent::Agent;
 use crate::agent::compaction::ContextCompactor;
 use crate::agent::dispatcher::{
-    AgenticLoopResult, TurnUsageSummary, capture_auth_prompt, execute_chat_tool_standalone,
-    parse_auth_result, persist_selected_auth_prompt, restore_selected_auth_prompt,
+    AgenticLoopResult, TurnUsageSummary, auth_instructions_or_default, capture_auth_prompt,
+    execute_chat_tool_standalone, parse_auth_result, persist_selected_auth_prompt,
+    restore_selected_auth_prompt,
 };
 use crate::agent::session::{MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState};
 use crate::agent::submission::SubmissionResult;
@@ -25,11 +26,20 @@ use crate::tools::redact_params;
 use ironclaw_common::truncate_preview;
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
+const INVALID_AUTH_TOKEN_MESSAGE: &str = "Invalid token. Please try again.";
 
 fn requires_preexisting_uuid_thread(channel: &str) -> bool {
     // Gateway-style channels send server-issued conversation UUIDs.
     // Unknown UUIDs should be rejected instead of silently creating a new thread.
     matches!(channel, "gateway" | "test")
+}
+
+fn auth_retry_message_for_error(error: &crate::extensions::ExtensionError) -> Option<String> {
+    matches!(
+        error,
+        crate::extensions::ExtensionError::ValidationFailed(_)
+    )
+    .then(|| INVALID_AUTH_TOKEN_MESSAGE.to_string())
 }
 
 fn turn_usage_from_result(result: &Result<AgenticLoopResult, Error>) -> Option<&TurnUsageSummary> {
@@ -1533,10 +1543,8 @@ impl Agent {
 
             if let Some((ext_name, auth_data)) = selected_auth_prompt {
                 if auth_data.awaiting_token {
-                    let instructions = auth_data
-                        .instructions
-                        .clone()
-                        .unwrap_or_else(|| "Please provide your API token/key.".to_string());
+                    let instructions =
+                        auth_instructions_or_default(auth_data.instructions.as_deref());
                     let auth_result = Ok(serde_json::json!({
                         "name": ext_name.clone(),
                         "instructions": instructions.clone(),
@@ -1888,9 +1896,13 @@ impl Agent {
                 Ok(Some(result.message))
             }
             Err(e) => {
-                let msg = e.to_string();
                 // Token validation errors: re-enter auth mode and re-prompt
-                if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
+                if let Some(msg) = auth_retry_message_for_error(&e) {
+                    tracing::debug!(
+                        extension = %pending.extension_name,
+                        error = %e,
+                        "Rejected invalid auth token"
+                    );
                     {
                         let mut sess = session.lock().await;
                         if let Some(thread) = sess.threads.get_mut(&thread_id) {
@@ -1913,6 +1925,7 @@ impl Agent {
                     return Ok(Some(msg));
                 }
                 // Infrastructure errors
+                let msg = e.to_string();
                 let _ = self
                     .channels
                     .send_status(
@@ -2151,6 +2164,17 @@ mod tests {
         let turn_usage = turn_usage_from_result(&result).expect("usage should be present");
         assert_eq!(turn_usage.usage.input_tokens, 7);
         assert_eq!(turn_usage.usage.output_tokens, 2);
+    }
+
+    #[test]
+    fn test_auth_retry_message_hides_validation_details() {
+        let err =
+            crate::extensions::ExtensionError::ValidationFailed("wrong format for API key".into());
+
+        assert_eq!(
+            auth_retry_message_for_error(&err).as_deref(),
+            Some("Invalid token. Please try again.")
+        );
     }
 
     #[test]

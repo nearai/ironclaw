@@ -1193,10 +1193,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
         if let Some((ext_name, auth_data)) = selected_auth_prompt {
             if auth_data.awaiting_token {
-                let instructions = auth_data
-                    .instructions
-                    .clone()
-                    .unwrap_or_else(|| "Please provide your API token/key.".to_string());
+                let instructions = auth_instructions_or_default(auth_data.instructions.as_deref());
                 {
                     let mut sess = self.session.lock().await;
                     if let Some(thread) = sess.threads.get_mut(&self.thread_id) {
@@ -1272,37 +1269,57 @@ pub(super) struct ParsedAuthData {
     pub(super) awaiting_token: bool,
 }
 
-impl ParsedAuthData {
-    fn from_pending(prompt: PendingAuthPrompt) -> Self {
-        Self {
-            extension_name: Some(prompt.extension_name),
-            instructions: prompt.instructions,
-            auth_url: prompt.auth_url,
-            setup_url: prompt.setup_url,
-            awaiting_token: prompt.awaiting_token,
-        }
-    }
+const DEFAULT_AUTH_TOKEN_INSTRUCTIONS: &str = "Please provide your API token/key.";
+
+fn normalize_extension_name(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+pub(super) fn auth_instructions_or_default(instructions: Option<&str>) -> String {
+    instructions
+        .unwrap_or(DEFAULT_AUTH_TOKEN_INSTRUCTIONS)
+        .to_owned()
 }
 
 pub(super) fn persist_selected_auth_prompt(
     selected: Option<&(String, ParsedAuthData)>,
 ) -> Option<PendingAuthPrompt> {
-    selected.map(|(extension_name, auth_data)| PendingAuthPrompt {
-        extension_name: extension_name.clone(),
-        instructions: auth_data.instructions.clone(),
-        auth_url: auth_data.auth_url.clone(),
-        setup_url: auth_data.setup_url.clone(),
-        awaiting_token: auth_data.awaiting_token,
+    selected.and_then(|(extension_name, auth_data)| {
+        let extension_name = normalize_extension_name(Some(extension_name.as_str()))?;
+        Some(PendingAuthPrompt {
+            extension_name,
+            instructions: auth_data.instructions.clone(),
+            auth_url: auth_data.auth_url.clone(),
+            setup_url: auth_data.setup_url.clone(),
+            awaiting_token: auth_data.awaiting_token,
+        })
     })
 }
 
 pub(super) fn restore_selected_auth_prompt(
     pending: Option<PendingAuthPrompt>,
 ) -> Option<(String, ParsedAuthData)> {
-    pending.map(|prompt| {
-        let extension_name = prompt.extension_name.clone();
-        (extension_name, ParsedAuthData::from_pending(prompt))
-    })
+    let PendingAuthPrompt {
+        extension_name,
+        instructions,
+        auth_url,
+        setup_url,
+        awaiting_token,
+    } = pending?;
+    let extension_name = normalize_extension_name(Some(extension_name.as_str()))?;
+    Some((
+        extension_name.clone(),
+        ParsedAuthData {
+            extension_name: Some(extension_name),
+            instructions,
+            auth_url,
+            setup_url,
+            awaiting_token,
+        },
+    ))
 }
 
 /// Extract auth prompt fields from a tool_auth/tool_activate result JSON string.
@@ -1312,11 +1329,12 @@ pub(super) fn parse_auth_result(result: &Result<String, Error>) -> ParsedAuthDat
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
     ParsedAuthData {
-        extension_name: parsed
-            .as_ref()
-            .and_then(|v| v.get("name"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+        extension_name: normalize_extension_name(
+            parsed
+                .as_ref()
+                .and_then(|v| v.get("name"))
+                .and_then(|v| v.as_str()),
+        ),
         instructions: parsed
             .as_ref()
             .and_then(|v| v.get("instructions"))
@@ -1379,6 +1397,8 @@ pub(super) fn capture_auth_prompt(
 ///
 /// Returns `Some((extension_name, instructions))` if the tool result contains
 /// `awaiting_token: true`, meaning the thread should enter auth mode.
+/// This helper is test-only; the runtime path uses `extract_auth_prompt()` and
+/// `capture_auth_prompt()` so approval/auth coordination stays inside the loop.
 #[cfg(test)]
 pub(super) fn check_auth_required(
     tool_name: &str,
@@ -1389,9 +1409,7 @@ pub(super) fn check_auth_required(
         return None;
     }
     let name = auth_data.extension_name?;
-    let instructions = auth_data
-        .instructions
-        .unwrap_or_else(|| "Please provide your API token/key.".to_string());
+    let instructions = auth_instructions_or_default(auth_data.instructions.as_deref());
     Some((name, instructions))
 }
 
@@ -1609,6 +1627,7 @@ mod tests {
         capture_auth_prompt, check_auth_required, extract_auth_prompt,
         persist_selected_auth_prompt, restore_selected_auth_prompt, selected_model_override,
     };
+    use crate::agent::session::PendingAuthPrompt;
 
     /// Minimal LLM provider for unit tests that always returns a static response.
     struct StaticLlmProvider;
@@ -2248,6 +2267,19 @@ mod tests {
     }
 
     #[test]
+    fn test_restore_selected_auth_prompt_rejects_blank_extension_name() {
+        let pending = PendingAuthPrompt {
+            extension_name: "   ".to_string(),
+            instructions: Some("Connect Gmail".to_string()),
+            auth_url: Some("https://accounts.google.com/o/oauth2/auth".to_string()),
+            setup_url: None,
+            awaiting_token: false,
+        };
+
+        assert!(restore_selected_auth_prompt(Some(pending)).is_none());
+    }
+
+    #[test]
     fn test_detect_auth_awaiting_positive() {
         let result: Result<String, Error> = Ok(serde_json::json!({
             "name": "telegram",
@@ -2296,6 +2328,19 @@ mod tests {
         );
         assert!(!auth_data.awaiting_token);
         assert!(check_auth_required("tool_activate", &result).is_none());
+    }
+
+    #[test]
+    fn test_extract_auth_prompt_rejects_blank_extension_name() {
+        let result: Result<String, Error> = Ok(serde_json::json!({
+            "name": "   ",
+            "kind": "WasmTool",
+            "status": "awaiting_authorization",
+            "auth_url": "https://accounts.google.com/o/oauth2/v2/auth?client_id=test"
+        })
+        .to_string());
+
+        assert!(extract_auth_prompt("tool_activate", &result).is_none());
     }
 
     #[test]
