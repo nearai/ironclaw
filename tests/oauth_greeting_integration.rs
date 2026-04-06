@@ -100,9 +100,10 @@ mod tests {
         });
 
         let addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
-        start_server(addr, state, auth.into())
+        let (bound_addr, _server_handle) = start_server(addr, state, auth.into())
             .await
-            .expect("start server")
+            .expect("start server");
+        bound_addr
     }
 
     fn client() -> reqwest::Client {

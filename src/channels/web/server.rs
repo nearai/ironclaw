@@ -463,12 +463,14 @@ pub struct GatewayState {
 
 /// Start the gateway HTTP server.
 ///
-/// Returns the actual bound `SocketAddr` (useful when binding to port 0).
+/// Returns the actual bound `SocketAddr` and the server task handle.
+/// Callers that need graceful shutdown can await the handle after sending
+/// the shutdown signal via `state.shutdown_tx`.
 pub async fn start_server(
     addr: SocketAddr,
     state: Arc<GatewayState>,
     auth: CombinedAuthState,
-) -> Result<SocketAddr, crate::error::ChannelError> {
+) -> Result<(SocketAddr, tokio::task::JoinHandle<()>), crate::error::ChannelError> {
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
         crate::error::ChannelError::StartupFailed {
             name: "gateway".to_string(),
@@ -858,7 +860,7 @@ pub async fn start_server(
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     *state.shutdown_tx.write().await = Some(shutdown_tx);
 
-    tokio::spawn(async move {
+    let server_handle = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app)
             .with_graceful_shutdown(async {
                 let _ = shutdown_rx.await;
@@ -870,7 +872,7 @@ pub async fn start_server(
         }
     });
 
-    Ok(bound_addr)
+    Ok((bound_addr, server_handle))
 }
 
 // --- Static file handlers ---
@@ -4144,7 +4146,7 @@ mod tests {
             "test-token".to_string(),
             "test".to_string(),
         ));
-        let bound = start_server(addr, state.clone(), auth)
+        let (bound, _server_handle) = start_server(addr, state.clone(), auth)
             .await
             .expect("server should start");
 

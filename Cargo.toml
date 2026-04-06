@@ -201,6 +201,7 @@ security-framework = "3"
 
 # PTY allocation for Claude CLI stdout buffering fix (Unix only)
 [target.'cfg(unix)'.dependencies]
+libc = "0.2"
 pty-process = { version = "0.5", features = ["async"] }
 
 # Linux secret-service (GNOME Keyring, KWallet)
