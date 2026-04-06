@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::ffi::OsString;
 use std::process::Stdio;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -11,6 +12,8 @@ use tokio::process::Command;
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_OUTPUT_SIZE: usize = 64 * 1024;
+const MAX_JSON_RPC_LINE_SIZE: usize = 1024 * 1024;
+const MAX_STREAM_OUTPUT_SIZE: usize = MAX_OUTPUT_SIZE / 2;
 
 const AUTH_STATUS_COMMAND: [&str; 2] = ["auth", "status"];
 const GMAIL_READ_COMMANDS: [&[&str]; 2] =
@@ -19,18 +22,19 @@ const CALENDAR_READ_COMMANDS: [&[&str]; 2] = [
     &["calendar", "events", "list"],
     &["calendar", "users", "events", "list"],
 ];
-const DRIVE_READ_COMMANDS: [&[&str]; 2] = [&["drive", "files"], &["drive", "files", "list"]];
+const DRIVE_READ_COMMANDS: [&[&str]; 1] = [&["drive", "files", "list"]];
 
-static BEARER_RE: LazyLock<Option<Regex>> =
+static BEARER_RE: LazyLock<Regex> =
     LazyLock::new(|| compile_regex(r"(?i)(bearer\s+)([a-zA-Z0-9_\-\.]{20,})"));
-static OAUTH_RE: LazyLock<Option<Regex>> =
+static OAUTH_RE: LazyLock<Regex> =
     LazyLock::new(|| compile_regex(r#"(?i)(token[=\'":\s]+)([a-zA-Z0-9_\-\.]{20,})"#));
-static YA29_RE: LazyLock<Option<Regex>> =
-    LazyLock::new(|| compile_regex(r"(ya29\.[a-zA-Z0-9_\-\.]+)"));
-static AKIA_RE: LazyLock<Option<Regex>> =
-    LazyLock::new(|| compile_regex(r"(?i)(AKIA[0-9A-Z]{16})"));
-static SK_RE: LazyLock<Option<Regex>> =
-    LazyLock::new(|| compile_regex(r"(?i)(sk-[a-zA-Z0-9]{32,})"));
+static YA29_RE: LazyLock<Regex> = LazyLock::new(|| compile_regex(r"(ya29\.[a-zA-Z0-9_\-\.]+)"));
+static AKIA_RE: LazyLock<Regex> = LazyLock::new(|| compile_regex(r"(?i)(AKIA[0-9A-Z]{16})"));
+static SK_RE: LazyLock<Regex> = LazyLock::new(|| compile_regex(r"(?i)(sk-[a-zA-Z0-9]{32,})"));
+static GOOGLE_REFRESH_RE: LazyLock<Regex> =
+    LazyLock::new(|| compile_regex(r"(1//[0-9A-Za-z_\-]{20,})"));
+static GOOGLE_API_KEY_RE: LazyLock<Regex> =
+    LazyLock::new(|| compile_regex(r"(AIza[0-9A-Za-z_\-]{20,})"));
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
@@ -129,10 +133,32 @@ enum ContentBlock {
 pub async fn run() -> anyhow::Result<()> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
-    let mut reader = BufReader::new(stdin).lines();
+    let mut reader = BufReader::new(stdin);
     let mut writer = stdout;
+    let mut line = String::new();
 
-    while let Some(line) = reader.next_line().await? {
+    loop {
+        line.clear();
+        let bytes_read = reader.read_line(&mut line).await?;
+        if bytes_read == 0 {
+            break;
+        }
+        if line.len() > MAX_JSON_RPC_LINE_SIZE {
+            let response = jsonrpc_error(
+                serde_json::Value::Null,
+                -32600,
+                format!(
+                    "Request too large: {} bytes exceeds limit of {} bytes",
+                    line.len(),
+                    MAX_JSON_RPC_LINE_SIZE
+                ),
+            );
+            let text = serde_json::to_string(&response)?;
+            writer.write_all(text.as_bytes()).await?;
+            writer.write_all(b"\n").await?;
+            writer.flush().await?;
+            continue;
+        }
         if line.trim().is_empty() {
             continue;
         }
@@ -235,6 +261,14 @@ async fn handle_request(request: JsonRpcRequest) -> Option<JsonRpcResponse> {
 }
 
 async fn call_tool_response(id: serde_json::Value, request: ToolCallRequest) -> JsonRpcResponse {
+    call_tool_response_with_env(id, request, &BridgeEnv::capture()).await
+}
+
+async fn call_tool_response_with_env(
+    id: serde_json::Value,
+    request: ToolCallRequest,
+    env: &BridgeEnv,
+) -> JsonRpcResponse {
     if request.name != "gws_bridge" {
         return tool_error(id, format!("Unknown tool: {}", request.name));
     }
@@ -246,7 +280,7 @@ async fn call_tool_response(id: serde_json::Value, request: ToolCallRequest) -> 
         }
     };
 
-    if !bridge_enabled_from_env(std::env::var("GWS_BRIDGE_ENABLED").ok().as_deref()) {
+    if !env.bridge_enabled {
         return tool_error(
             id,
             "gws_bridge is disabled. Set GWS_BRIDGE_ENABLED=true to enable it.".to_string(),
@@ -257,7 +291,7 @@ async fn call_tool_response(id: serde_json::Value, request: ToolCallRequest) -> 
         return tool_error(id, format!("Command blocked by allowlist: {}", reason));
     }
 
-    let bin_path = std::env::var("GWS_BINARY_PATH").unwrap_or_else(|_| "gws".to_string());
+    let bin_path = env.binary_path.clone();
     if bin_path.is_empty() {
         return tool_error(
             id,
@@ -267,19 +301,14 @@ async fn call_tool_response(id: serde_json::Value, request: ToolCallRequest) -> 
 
     let mut command = Command::new(&bin_path);
     command.env_clear();
-    if let Some(path) = std::env::var_os("PATH") {
+    if let Some(path) = env.path.clone() {
         command.env("PATH", path);
     }
-    if let Some(home) = std::env::var_os("HOME") {
+    if let Some(home) = env.home.clone() {
         command.env("HOME", home);
     }
-    for (key, value) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("GWS_")
-            && key != "GWS_BRIDGE_ENABLED"
-            && key != "GWS_BINARY_PATH"
-        {
-            command.env(key, value);
-        }
+    for (key, value) in &env.forwarded_gws_env {
+        command.env(key, value);
     }
     command
         .args(&args.args)
@@ -302,7 +331,7 @@ async fn call_tool_response(id: serde_json::Value, request: ToolCallRequest) -> 
             if let Some(mut out) = stdout_handle {
                 let mut buf = Vec::new();
                 if let Err(e) = (&mut out)
-                    .take(MAX_OUTPUT_SIZE as u64)
+                    .take(MAX_STREAM_OUTPUT_SIZE as u64)
                     .read_to_end(&mut buf)
                     .await
                 {
@@ -318,7 +347,7 @@ async fn call_tool_response(id: serde_json::Value, request: ToolCallRequest) -> 
             if let Some(mut err) = stderr_handle {
                 let mut buf = Vec::new();
                 if let Err(e) = (&mut err)
-                    .take(MAX_OUTPUT_SIZE as u64)
+                    .take(MAX_STREAM_OUTPUT_SIZE as u64)
                     .read_to_end(&mut buf)
                     .await
                 {
@@ -366,18 +395,17 @@ async fn call_tool_response(id: serde_json::Value, request: ToolCallRequest) -> 
                     "content": [
                         {
                             "type": "text",
-                            "text": redacted
+                            "text": format!("exit_code: {}\nsuccess: {}\n\n{}", code, code == 0, redacted)
                         }
                     ],
-                    "isError": code != 0,
-                    "exit_code": code,
-                    "success": code == 0
+                    "isError": code != 0
                 }),
             )
         }
         Ok(Err(e)) => tool_error(id, format!("Execution error: {}", e)),
         Err(_) => {
             let _ = child.kill().await;
+            let _ = child.wait().await;
             tool_error(id, format!("Timed out after {:?}", DEFAULT_TIMEOUT))
         }
     }
@@ -436,8 +464,8 @@ fn tool_error(id: serde_json::Value, message: String) -> JsonRpcResponse {
     }
 }
 
-fn compile_regex(pattern: &str) -> Option<Regex> {
-    Regex::new(pattern).ok()
+fn compile_regex(pattern: &str) -> Regex {
+    Regex::new(pattern).expect("static redaction regex must compile")
 }
 
 fn bridge_enabled_from_env(value: Option<&str>) -> bool {
@@ -482,7 +510,7 @@ fn check_allowlist(args: &[String]) -> Result<(), &'static str> {
             }
         }
         _ => Err(
-            "Command not in the strict phase 1 allowlist (only auth status, gmail read, calendar read, drive read allowed)",
+            "Command not in the strict phase 1 allowlist (only auth status, gmail read, calendar read, drive files list allowed)",
         ),
     }
 }
@@ -503,24 +531,25 @@ fn matches_exact_any_command(args: &[String], allowed: &[&[&str]]) -> bool {
 
 fn redact_secrets(input: &str) -> String {
     let mut result: Cow<'_, str> = Cow::Borrowed(input);
-    result = redact_secret_pattern(result, BEARER_RE.as_ref(), "${1}[REDACTED]");
-    result = redact_secret_pattern(result, OAUTH_RE.as_ref(), "${1}[REDACTED]");
-    result = redact_secret_pattern(result, YA29_RE.as_ref(), "[REDACTED_OAUTH_TOKEN]");
-    result = redact_secret_pattern(result, AKIA_RE.as_ref(), "[REDACTED_AWS_KEY]");
-    result = redact_secret_pattern(result, SK_RE.as_ref(), "[REDACTED_SECRET_KEY]");
+    result = redact_secret_pattern(result, &BEARER_RE, "${1}[REDACTED]");
+    result = redact_secret_pattern(result, &OAUTH_RE, "${1}[REDACTED]");
+    result = redact_secret_pattern(result, &YA29_RE, "[REDACTED_OAUTH_TOKEN]");
+    result = redact_secret_pattern(result, &AKIA_RE, "[REDACTED_AWS_KEY]");
+    result = redact_secret_pattern(result, &SK_RE, "[REDACTED_SECRET_KEY]");
+    result = redact_secret_pattern(
+        result,
+        &GOOGLE_REFRESH_RE,
+        "[REDACTED_GOOGLE_REFRESH_TOKEN]",
+    );
+    result = redact_secret_pattern(result, &GOOGLE_API_KEY_RE, "[REDACTED_GOOGLE_API_KEY]");
     result.into_owned()
 }
 
-fn redact_secret_pattern<'a>(
-    input: Cow<'a, str>,
-    re: Option<&Regex>,
-    replacement: &str,
-) -> Cow<'a, str> {
-    match re {
-        Some(re) if re.is_match(input.as_ref()) => {
-            Cow::Owned(re.replace_all(input.as_ref(), replacement).into_owned())
-        }
-        _ => input,
+fn redact_secret_pattern<'a>(input: Cow<'a, str>, re: &Regex, replacement: &str) -> Cow<'a, str> {
+    if re.is_match(input.as_ref()) {
+        Cow::Owned(re.replace_all(input.as_ref(), replacement).into_owned())
+    } else {
+        input
     }
 }
 
@@ -530,6 +559,29 @@ fn floor_char_boundary(s: &str, idx: usize) -> usize {
         idx -= 1;
     }
     idx
+}
+
+#[derive(Debug, Clone)]
+struct BridgeEnv {
+    bridge_enabled: bool,
+    binary_path: String,
+    path: Option<OsString>,
+    home: Option<OsString>,
+    forwarded_gws_env: Vec<(OsString, OsString)>,
+}
+
+impl BridgeEnv {
+    fn capture() -> Self {
+        Self {
+            bridge_enabled: bridge_enabled_from_env(
+                std::env::var("GWS_BRIDGE_ENABLED").ok().as_deref(),
+            ),
+            binary_path: std::env::var("GWS_BINARY_PATH").unwrap_or_else(|_| "gws".to_string()),
+            path: std::env::var_os("PATH"),
+            home: std::env::var_os("HOME"),
+            forwarded_gws_env: Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -571,17 +623,20 @@ mod tests {
         assert!(check_allowlist(&["gmail".into(), "send".into()]).is_err());
         assert!(check_allowlist(&["calendar".into(), "delete".into()]).is_err());
         assert!(check_allowlist(&["drive".into(), "upload".into()]).is_err());
+        assert!(check_allowlist(&["drive".into(), "files".into()]).is_err());
     }
 
     #[test]
     fn redact_secrets_masks_known_formats() {
         let redacted = redact_secrets(
-            "Bearer abcdefghijklmnopqrstuvwxyz123456\nya29.abcd1234\nAKIA1234567890ABCDEF\nsk-abcdefghijklmnopqrstuvwxyz1234567890",
+            "Bearer abcdefghijklmnopqrstuvwxyz123456\nya29.abcd1234\nAKIA1234567890ABCDEF\nsk-abcdefghijklmnopqrstuvwxyz1234567890\n1//abcdefghijklmnopqrstuvwxyz123456\nAIzaabcdefghijklmnopqrstuvwxyz123456",
         );
         assert!(!redacted.contains("abcdefghijklmnopqrstuvwxyz123456"));
         assert!(!redacted.contains("ya29.abcd1234"));
         assert!(!redacted.contains("AKIA1234567890ABCDEF"));
         assert!(!redacted.contains("sk-abcdefghijklmnopqrstuvwxyz1234567890"));
+        assert!(!redacted.contains("1//abcdefghijklmnopqrstuvwxyz123456"));
+        assert!(!redacted.contains("AIzaabcdefghijklmnopqrstuvwxyz123456"));
     }
 
     #[test]
@@ -617,12 +672,7 @@ mod tests {
         perms.set_mode(0o755);
         fs::set_permissions(&script_path, perms).expect("chmod script");
 
-        std::env::set_var("GWS_BRIDGE_ENABLED", "true");
-        std::env::set_var("GWS_BINARY_PATH", &script_path);
-        std::env::set_var("GWS_CUSTOM_TEST_VAR", "kept");
-        std::env::set_var("SECRET_TOKEN_TEST_VAR", "should_not_leak");
-
-        let response = call_tool_response(
+        let response = call_tool_response_with_env(
             serde_json::Value::Null,
             ToolCallRequest {
                 name: "gws_bridge".to_string(),
@@ -630,18 +680,26 @@ mod tests {
                     "args": ["auth", "status"]
                 }),
             },
+            &BridgeEnv {
+                bridge_enabled: true,
+                binary_path: script_path.to_string_lossy().to_string(),
+                path: std::env::var_os("PATH"),
+                home: std::env::var_os("HOME"),
+                forwarded_gws_env: Vec::new(),
+            },
         )
         .await;
 
         let response_text = serde_json::to_string(&response).expect("serialize response");
-        assert!(response_text.contains("\"success\":true"));
+        assert!(response_text.contains("success: true"));
+        assert!(response_text.contains("exit_code: 0"));
 
         let env_dump = fs::read_to_string(&env_dump_path).expect("read env dump");
         assert!(env_dump.contains("HOME="));
         assert!(env_dump.contains("PATH="));
-        assert!(env_dump.contains("GWS_CUSTOM_TEST_VAR=kept"));
         assert!(!env_dump.contains("GWS_BRIDGE_ENABLED="));
         assert!(!env_dump.contains("GWS_BINARY_PATH="));
+        assert!(!env_dump.contains("GWS_CUSTOM_TEST_VAR="));
         assert!(!env_dump.contains("SECRET_TOKEN_TEST_VAR=should_not_leak"));
     }
 }

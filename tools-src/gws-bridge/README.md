@@ -10,6 +10,7 @@ Google OAuth flow.
 - Allows only a strict read-only allowlist of commands in phase 1
 - Redacts common secret/token patterns from output
 - Requires an explicit opt-in environment variable
+- Inherits only `PATH` and `HOME` for the wrapped `gws` process
 
 ## Build
 
@@ -26,6 +27,7 @@ cargo run --release
 ```
 
 If `GWS_BINARY_PATH` is omitted, the server looks for `gws` in `PATH`.
+The bridge does not forward arbitrary `GWS_*` variables to the child process.
 
 ## Register in IronClaw
 
@@ -46,7 +48,6 @@ ironclaw mcp add gws-bridge \
 - `gmail users messages list`
 - `calendar events list`
 - `calendar users events list`
-- `drive files`
 - `drive files list`
 
 Anything else is rejected.
