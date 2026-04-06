@@ -12,6 +12,10 @@ fn is_internal_tool_marker(trimmed: &str) -> bool {
 
 /// Strip internal `[Called tool ...]` and `[Tool ... returned: ...]` markers
 /// from provider-flattened text before it is shown to users.
+///
+/// `fallback` is returned when stripping leaves an empty string. Callers pass
+/// context-specific messages (e.g. chat vs lightweight routine) so the
+/// user-visible fallback matches the interaction they are in.
 pub(crate) fn strip_internal_tool_call_text(text: &str, fallback: &str) -> String {
     let result = text
         .lines()

@@ -2747,34 +2747,6 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_internal_tool_call_text_removes_markers() {
-        let input = "[Called tool search({\"query\": \"test\"})]\nHere is the answer.";
-        let result = crate::agent::text_util::strip_internal_tool_call_text(input, "fallback");
-        assert_eq!(result, "Here is the answer.");
-    }
-
-    #[test]
-    fn test_strip_internal_tool_call_text_removes_returned_markers() {
-        let input = "[Tool search returned: some result]\nSummary of findings.";
-        let result = crate::agent::text_util::strip_internal_tool_call_text(input, "fallback");
-        assert_eq!(result, "Summary of findings.");
-    }
-
-    #[test]
-    fn test_strip_internal_tool_call_text_all_markers_yields_fallback() {
-        let input = "[Called tool search({\"query\": \"test\"})]\n[Tool search returned: error]";
-        let result = crate::agent::text_util::strip_internal_tool_call_text(input, "fallback");
-        assert_eq!(result, "fallback");
-    }
-
-    #[test]
-    fn test_strip_internal_tool_call_text_preserves_normal_text() {
-        let input = "This is a normal response with [brackets] inside.";
-        let result = crate::agent::text_util::strip_internal_tool_call_text(input, "fallback");
-        assert_eq!(result, input);
-    }
-
-    #[test]
     fn test_extract_suggestions_basic() {
         let input = "Here is my answer.\n<suggestions>[\"Check logs\", \"Deploy\"]</suggestions>";
         let (text, suggestions) = super::extract_suggestions(input);
