@@ -245,6 +245,13 @@ impl McpServerConfig {
             return false;
         }
 
+        // Respect explicit user-provided Authorization headers. These servers
+        // are already configured with a credential, so the runtime must not
+        // initiate OAuth or DCR on top of that.
+        if self.has_custom_auth_header() {
+            return false;
+        }
+
         if self.oauth.is_some() {
             return true;
         }
@@ -1033,6 +1040,38 @@ mod tests {
         let config =
             McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
         assert!(!config.has_custom_auth_header());
+    }
+
+    #[test]
+    fn test_requires_auth_remote_https_without_authorization_header() {
+        let config = McpServerConfig::new("server", "https://mcp.example.com");
+        assert!(
+            config.requires_auth(),
+            "remote HTTPS MCP servers without explicit auth should still require auth handling"
+        );
+    }
+
+    #[test]
+    fn test_requires_auth_skips_remote_https_when_authorization_header_present() {
+        let headers = HashMap::from([("Authorization".to_string(), "Bearer sk-test".to_string())]);
+        let config =
+            McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
+        assert!(
+            !config.requires_auth(),
+            "user-provided Authorization header must suppress OAuth/DCR auth handling"
+        );
+    }
+
+    #[test]
+    fn test_requires_auth_skips_oauth_when_authorization_header_present_case_insensitive() {
+        let headers = HashMap::from([("AUTHORIZATION".to_string(), "Bearer sk-test".to_string())]);
+        let config = McpServerConfig::new("server", "https://mcp.example.com")
+            .with_headers(headers)
+            .with_oauth(OAuthConfig::new("client-id"));
+        assert!(
+            !config.requires_auth(),
+            "Authorization header should win even when OAuth metadata is present"
+        );
     }
 
     #[test]
