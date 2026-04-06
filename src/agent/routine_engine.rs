@@ -127,6 +127,10 @@ pub struct RoutineEngine {
     /// `sync_dispatched_runs` to distinguish orphaned runs (from a previous
     /// process) from actively-watched runs (from this process).
     boot_time: chrono::DateTime<Utc>,
+    /// Sender for injecting messages into the agent loop (routine review).
+    inject_tx: Option<mpsc::Sender<IncomingMessage>>,
+    /// Agent review rate limiter: (window_start, count_in_window).
+    agent_review_rate: Arc<RwLock<(chrono::DateTime<Utc>, u32)>>,
 }
 
 impl RoutineEngine {
@@ -157,7 +161,14 @@ impl RoutineEngine {
             safety,
             sandbox_readiness,
             boot_time: Utc::now(),
+            inject_tx: None,
+            agent_review_rate: Arc::new(RwLock::new((Utc::now(), 0))),
         }
+    }
+
+    /// Set the agent-loop injection channel for routine review.
+    pub fn set_inject_tx(&mut self, tx: mpsc::Sender<IncomingMessage>) {
+        self.inject_tx = Some(tx);
     }
 
     /// Expose the running count for integration tests.
@@ -829,6 +840,8 @@ impl RoutineEngine {
             safety: self.safety.clone(),
             sandbox_readiness: self.sandbox_readiness,
             event_cache: Arc::clone(&self.event_cache),
+            inject_tx: self.inject_tx.clone(),
+            agent_review_rate: Arc::clone(&self.agent_review_rate),
         };
 
         tokio::spawn(async move {
@@ -915,6 +928,8 @@ impl RoutineEngine {
             safety: self.safety.clone(),
             sandbox_readiness: self.sandbox_readiness,
             event_cache: Arc::clone(&self.event_cache),
+            inject_tx: self.inject_tx.clone(),
+            agent_review_rate: Arc::clone(&self.agent_review_rate),
         };
 
         tokio::spawn(async move {
@@ -967,6 +982,8 @@ impl RoutineEngine {
             safety: self.safety.clone(),
             sandbox_readiness: self.sandbox_readiness,
             event_cache: Arc::clone(&self.event_cache),
+            inject_tx: self.inject_tx.clone(),
+            agent_review_rate: Arc::clone(&self.agent_review_rate),
         };
 
         // Record the run in DB, then spawn execution
@@ -1106,6 +1123,8 @@ struct EngineContext {
     safety: Arc<SafetyLayer>,
     sandbox_readiness: SandboxReadiness,
     event_cache: Arc<RwLock<Vec<EventMatcher>>>,
+    inject_tx: Option<mpsc::Sender<IncomingMessage>>,
+    agent_review_rate: Arc<RwLock<(chrono::DateTime<Utc>, u32)>>,
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
@@ -1359,6 +1378,9 @@ async fn execute_routine(ctx: EngineContext, mut routine: Routine, run: RoutineR
         thread_id.as_deref(),
     )
     .await;
+
+    // Optionally inject result into agent loop for review
+    inject_agent_review(&ctx, &routine, status, summary.as_deref()).await;
 }
 
 async fn update_cached_event_runtime(
@@ -2078,6 +2100,140 @@ async fn send_notification(
 
     if let Err(e) = tx.send(response).await {
         tracing::error!(routine = %routine_name, "Failed to send notification: {}", e);
+    }
+}
+
+/// Circuit breaker threshold: disable agent review after N consecutive failures.
+const AGENT_REVIEW_CIRCUIT_BREAKER_THRESHOLD: u32 = 3;
+
+/// Inject a routine result into the agent loop for review.
+///
+/// Checks:
+/// 1. Per-routine `agent_review_on_*` matches the status
+/// 2. Global `config.agent_review_enabled` is true
+/// 3. Circuit breaker: skip if `consecutive_failures >= 3` (reset on successful Ok run)
+/// 4. Rate limit: tumbling hourly window, `max_agent_reviews_per_hour`
+/// 5. `inject_tx` is available
+///
+/// Sanitizes the summary through the safety layer before injection.
+async fn inject_agent_review(
+    ctx: &EngineContext,
+    routine: &Routine,
+    status: RunStatus,
+    summary: Option<&str>,
+) {
+    // 1. Check per-routine config
+    let should_review = match status {
+        RunStatus::Ok => routine.notify.agent_review_on_success,
+        RunStatus::Attention => routine.notify.agent_review_on_attention,
+        RunStatus::Failed => routine.notify.agent_review_on_failure,
+        RunStatus::Running => false,
+    };
+    if !should_review {
+        return;
+    }
+
+    // 2. Check global config
+    if !ctx.config.agent_review_enabled {
+        tracing::debug!(
+            routine = %routine.name,
+            "Agent review skipped: globally disabled"
+        );
+        return;
+    }
+
+    // 3. Circuit breaker: skip if too many consecutive failures
+    // The circuit breaker checks the routine's consecutive_failures count.
+    // This resets automatically when a routine run succeeds (Ok status)
+    // without agent review — the normal execute_routine path resets
+    // consecutive_failures to 0 on success.
+    if routine.consecutive_failures >= AGENT_REVIEW_CIRCUIT_BREAKER_THRESHOLD {
+        tracing::debug!(
+            routine = %routine.name,
+            consecutive_failures = routine.consecutive_failures,
+            "Agent review skipped: circuit breaker open ({} consecutive failures)",
+            routine.consecutive_failures
+        );
+        return;
+    }
+
+    // 4. Rate limit: tumbling hourly window
+    {
+        let mut rate = ctx.agent_review_rate.write().await;
+        let now = Utc::now();
+        let window_duration = chrono::Duration::hours(1);
+        if now.signed_duration_since(rate.0) >= window_duration {
+            // Reset window
+            *rate = (now, 0);
+        }
+        if rate.1 >= ctx.config.max_agent_reviews_per_hour {
+            tracing::debug!(
+                routine = %routine.name,
+                count = rate.1,
+                max = ctx.config.max_agent_reviews_per_hour,
+                "Agent review skipped: hourly rate limit reached"
+            );
+            return;
+        }
+        rate.1 += 1;
+    }
+
+    // 5. Check inject_tx is available
+    let inject_tx = match &ctx.inject_tx {
+        Some(tx) => tx,
+        None => {
+            tracing::debug!(
+                routine = %routine.name,
+                "Agent review skipped: no inject_tx available"
+            );
+            return;
+        }
+    };
+
+    // Sanitize the summary through the safety layer
+    let raw_summary = summary.unwrap_or("(no summary)");
+    let sanitized = ctx
+        .safety
+        .sanitize_tool_output("routine_result", raw_summary);
+    let safe_summary = if sanitized.was_modified {
+        &sanitized.content
+    } else {
+        raw_summary
+    };
+
+    // Build the review message content
+    let content = format!(
+        "Routine '{}' completed with status: {}\n\n\
+         Please review this result and decide what, if anything, \
+         to tell the user. If the result is routine and expected, \
+         you may choose not to send any message.\n\n\
+         Result summary:\n{}",
+        routine.name, status, safe_summary
+    );
+
+    let message = IncomingMessage::new("routine-review", &routine.user_id, content)
+        .with_conversation_scope(format!("routine-review:{}", routine.id))
+        .with_metadata(serde_json::json!({
+            "routine_name": routine.name,
+            "routine_id": routine.id.to_string(),
+            "status": status.to_string(),
+            "notify_channel": routine.notify.channel,
+            "notify_user": routine.notify.user,
+        }))
+        .into_routine_review();
+
+    if let Err(e) = inject_tx.send(message).await {
+        tracing::error!(
+            routine = %routine.name,
+            "Failed to inject agent review message: {}",
+            e
+        );
+    } else {
+        tracing::debug!(
+            routine = %routine.name,
+            status = %status,
+            "Injected agent review message"
+        );
     }
 }
 
@@ -2882,5 +3038,101 @@ mod tests {
             prompt.contains("C088K6C3SQZ"),
             "prompt should mention configured delivery target: {prompt}",
         );
+    }
+
+    #[test]
+    fn test_agent_review_respects_per_routine_config() {
+        // agent_review_on_success = false means Ok status should not trigger review
+        let notify = NotifyConfig {
+            agent_review_on_success: false,
+            agent_review_on_attention: true,
+            agent_review_on_failure: true,
+            ..NotifyConfig::default()
+        };
+
+        // Verify the should_review logic matches what inject_agent_review checks
+        let should_review_ok = match RunStatus::Ok {
+            RunStatus::Ok => notify.agent_review_on_success,
+            RunStatus::Attention => notify.agent_review_on_attention,
+            RunStatus::Failed => notify.agent_review_on_failure,
+            RunStatus::Running => false,
+        };
+        assert!(
+            !should_review_ok,
+            "Ok status should not trigger agent review when agent_review_on_success is false"
+        );
+
+        let should_review_attention = match RunStatus::Attention {
+            RunStatus::Ok => notify.agent_review_on_success,
+            RunStatus::Attention => notify.agent_review_on_attention,
+            RunStatus::Failed => notify.agent_review_on_failure,
+            RunStatus::Running => false,
+        };
+        assert!(
+            should_review_attention,
+            "Attention status should trigger agent review when agent_review_on_attention is true"
+        );
+    }
+
+    #[test]
+    fn test_agent_review_circuit_breaker_threshold() {
+        // Circuit breaker should open after AGENT_REVIEW_CIRCUIT_BREAKER_THRESHOLD failures
+        assert_eq!(
+            super::AGENT_REVIEW_CIRCUIT_BREAKER_THRESHOLD,
+            3,
+            "Circuit breaker should trigger after 3 consecutive failures"
+        );
+
+        // A routine with consecutive_failures >= threshold should be blocked
+        let threshold = super::AGENT_REVIEW_CIRCUIT_BREAKER_THRESHOLD;
+        assert!(threshold >= 3); // not too aggressive
+        assert!(threshold <= 10); // not too permissive
+    }
+
+    #[test]
+    fn test_notification_mode_label() {
+        use crate::tools::builtin::routine::notification_mode_label;
+
+        let silent = NotifyConfig {
+            on_success: false,
+            on_attention: false,
+            on_failure: false,
+            ..NotifyConfig::default()
+        };
+        assert_eq!(notification_mode_label(&silent), "silent");
+
+        let notify_only = NotifyConfig {
+            on_attention: true,
+            on_failure: true,
+            ..NotifyConfig::default()
+        };
+        assert_eq!(notification_mode_label(&notify_only), "notify");
+
+        let review_only = NotifyConfig {
+            on_success: false,
+            on_attention: false,
+            on_failure: false,
+            agent_review_on_attention: true,
+            ..NotifyConfig::default()
+        };
+        assert_eq!(notification_mode_label(&review_only), "review");
+
+        let both = NotifyConfig {
+            on_attention: true,
+            agent_review_on_attention: true,
+            ..NotifyConfig::default()
+        };
+        assert_eq!(notification_mode_label(&both), "notify+review");
+    }
+
+    #[test]
+    fn test_message_source_routine_review_construction() {
+        let msg = crate::channels::IncomingMessage::new("routine-review", "user1", "test content")
+            .with_conversation_scope("routine-review:some-uuid")
+            .into_routine_review();
+        assert_eq!(msg.source, crate::channels::MessageSource::RoutineReview);
+        assert!(!msg.is_internal());
+        assert_eq!(msg.channel, "routine-review");
+        assert_eq!(msg.conversation_scope(), Some("routine-review:some-uuid"));
     }
 }

@@ -772,7 +772,7 @@ impl Agent {
                     let (notify_tx, mut notify_rx) =
                         tokio::sync::mpsc::channel::<OutgoingResponse>(32);
 
-                    let engine = Arc::new(RoutineEngine::new(
+                    let mut engine = RoutineEngine::new(
                         rt_config.clone(),
                         crate::tenant::SystemScope::new(Arc::clone(store)),
                         self.llm().clone(),
@@ -783,7 +783,10 @@ impl Agent {
                         self.tools().clone(),
                         self.safety().clone(),
                         self.deps.sandbox_readiness,
-                    ));
+                    );
+                    // Wire up agent-loop injection for routine review.
+                    engine.set_inject_tx(self.channels.inject_sender());
+                    let engine = Arc::new(engine);
 
                     // Register routine tools
                     self.deps

@@ -889,4 +889,32 @@ mod tests {
         let markdown = prompt.markdown_message();
         assert!(markdown.contains("\\`\\`\\`danger\\`\\`\\`"));
     }
+
+    #[test]
+    fn message_source_default_is_user() {
+        let source = MessageSource::default();
+        assert_eq!(source, MessageSource::User);
+    }
+
+    #[test]
+    fn into_internal_sets_source_to_internal() {
+        let msg = IncomingMessage::new("test", "user1", "hello").into_internal();
+        assert_eq!(msg.source, MessageSource::Internal);
+        assert!(msg.is_internal());
+    }
+
+    #[test]
+    fn into_routine_review_sets_source() {
+        let msg =
+            IncomingMessage::new("routine-review", "user1", "review this").into_routine_review();
+        assert_eq!(msg.source, MessageSource::RoutineReview);
+        assert!(!msg.is_internal());
+    }
+
+    #[test]
+    fn external_metadata_cannot_spoof_source() {
+        let msg = IncomingMessage::new("wasm", "user1", "test")
+            .with_metadata(serde_json::json!({ "source": "RoutineReview" }));
+        assert_eq!(msg.source, MessageSource::User);
+    }
 }
