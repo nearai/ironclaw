@@ -1101,18 +1101,28 @@ impl Agent {
             "Message details"
         );
 
-        // Internal messages (e.g. job-monitor notifications) are already
-        // rendered text and should be forwarded directly to the user without
-        // entering the normal user-input pipeline (LLM/tool loop).
-        // The `is_internal` field and `into_internal()` setter are pub(crate),
-        // so external channels cannot spoof this flag.
-        if message.is_internal {
-            tracing::debug!(
-                message_id = %message.id,
-                channel = %message.channel,
-                "Forwarding internal message"
-            );
-            return Ok(Some(message.content.clone()));
+        // Dispatch based on message source.
+        // Internal messages bypass the pipeline; RoutineReview enters the
+        // agentic loop but skips submission parsing, hooks, and event triggers.
+        use crate::channels::MessageSource;
+        match message.source {
+            MessageSource::Internal => {
+                tracing::debug!(
+                    message_id = %message.id,
+                    channel = %message.channel,
+                    "Forwarding internal message"
+                );
+                return Ok(Some(message.content.clone()));
+            }
+            MessageSource::RoutineReview => {
+                tracing::debug!(
+                    message_id = %message.id,
+                    channel = %message.channel,
+                    "Processing routine review message"
+                );
+                return self.handle_routine_review(message).await;
+            }
+            MessageSource::User => { /* fall through to normal pipeline */ }
         }
 
         // Set message tool context for this turn (current channel and target)
@@ -1368,7 +1378,7 @@ impl Agent {
             message.content.len()
         );
 
-        if !message.is_internal
+        if message.source == MessageSource::User
             && let Submission::UserInput { ref content } = submission
             && let Some(engine) = self.routine_engine().await
         {
@@ -1652,6 +1662,144 @@ impl Agent {
                 // returning this result. Empty string signals the caller to skip
                 // respond() (no duplicate text).
                 Ok(Some(String::new()))
+            }
+        }
+    }
+
+    /// Handle a routine-review message by entering the agentic loop
+    /// directly, skipping submission parsing, hooks, and event triggers.
+    ///
+    /// Responses are broadcast via the notify_channel from metadata
+    /// instead of using `channels.respond()` (routine-review isn't a
+    /// real channel).
+    async fn handle_routine_review(
+        &self,
+        message: &IncomingMessage,
+    ) -> Result<Option<String>, Error> {
+        // Resolve session and thread using the routine-review channel
+        // with conversation_scope for per-routine thread isolation.
+        let (session, thread_id) = self
+            .session_manager
+            .resolve_thread(
+                &message.user_id,
+                &message.channel,
+                message.conversation_scope(),
+            )
+            .await;
+
+        let tenant = self.tenant_ctx(&message.user_id).await;
+
+        // Run BeforeOutbound hooks on the response and broadcast it.
+        let result = self
+            .process_user_input(message, tenant, session, thread_id, &message.content)
+            .await;
+
+        match result {
+            Ok(SubmissionResult::Response { content }) => {
+                if content.is_empty() {
+                    return Ok(Some(String::new()));
+                }
+
+                // Run BeforeOutbound hooks
+                let hooked_content = match self
+                    .hooks()
+                    .run(&crate::hooks::HookEvent::Outbound {
+                        user_id: message.user_id.clone(),
+                        channel: message.channel.clone(),
+                        content: content.clone(),
+                        thread_id: message.thread_id.clone(),
+                    })
+                    .await
+                {
+                    Ok(crate::hooks::HookOutcome::Continue {
+                        modified: Some(new_content),
+                    }) => new_content,
+                    _ => content,
+                };
+
+                // Broadcast the response via notify_channel from metadata.
+                let notify_channel = message
+                    .metadata
+                    .get("notify_channel")
+                    .and_then(|v| v.as_str());
+                let notify_user = message
+                    .metadata
+                    .get("notify_user")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&message.user_id);
+
+                let routine_name = message
+                    .metadata
+                    .get("routine_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+
+                let response = OutgoingResponse {
+                    content: hooked_content.clone(),
+                    thread_id: message.thread_id.clone(),
+                    attachments: Vec::new(),
+                    metadata: serde_json::json!({
+                        "source": "routine_review",
+                        "routine_name": routine_name,
+                        "notify_channel": notify_channel,
+                        "notify_user": notify_user,
+                    }),
+                };
+
+                if let Some(channel_name) = notify_channel {
+                    if let Err(e) = self
+                        .channels
+                        .broadcast(channel_name, notify_user, response)
+                        .await
+                    {
+                        tracing::warn!(
+                            routine = routine_name,
+                            channel = channel_name,
+                            "Failed to broadcast routine review response: {e}"
+                        );
+                        // Fallback: broadcast to all channels
+                        let fallback = OutgoingResponse::text(&hooked_content);
+                        let results = self.channels.broadcast_all(notify_user, fallback).await;
+                        for (ch, res) in &results {
+                            if let Err(e2) = res {
+                                tracing::error!(
+                                    routine = routine_name,
+                                    channel = %ch,
+                                    "Fallback broadcast failed: {e2}"
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        routine = routine_name,
+                        "No notify_channel in routine review metadata; using broadcast_all"
+                    );
+                    let fallback = OutgoingResponse::text(&hooked_content);
+                    let results = self.channels.broadcast_all(notify_user, fallback).await;
+                    for (ch, res) in &results {
+                        if let Err(e) = res {
+                            tracing::error!(
+                                routine = routine_name,
+                                channel = %ch,
+                                "broadcast_all failed for routine review: {e}"
+                            );
+                        }
+                    }
+                }
+
+                Ok(Some(String::new()))
+            }
+            Ok(other) => {
+                tracing::debug!(
+                    "Routine review got non-Response result: {:?}",
+                    std::any::type_name_of_val(&other)
+                );
+                Ok(Some(String::new()))
+            }
+            Err(e) => {
+                tracing::error!("Routine review processing failed: {e}");
+                Err(e)
             }
         }
     }

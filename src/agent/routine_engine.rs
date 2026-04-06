@@ -2196,7 +2196,7 @@ mod tests {
             on_success: false,
             on_failure: true,
             on_attention: true,
-            ..Default::default()
+            ..NotifyConfig::default()
         };
 
         // on_success = false means Ok status should not notify
@@ -2288,6 +2288,7 @@ mod tests {
             on_attention: true,
             on_failure: true,
             on_success: false,
+            ..NotifyConfig::default()
         };
 
         let prompt = super::build_lightweight_prompt(
@@ -2428,7 +2429,7 @@ mod tests {
             metadata: serde_json::Value::Null,
             timezone: None,
             attachments: vec![],
-            is_internal: false,
+            source: crate::channels::MessageSource::User,
         }
     }
 
@@ -2582,7 +2583,7 @@ mod tests {
             on_success: true,
             on_failure: true,
             on_attention: true,
-            ..Default::default()
+            ..NotifyConfig::default()
         };
         let should_notify = match RunStatus::Running {
             RunStatus::Ok => config.on_success,
@@ -2867,6 +2868,7 @@ mod tests {
             on_attention: true,
             on_failure: true,
             on_success: false,
+            ..NotifyConfig::default()
         };
 
         let prompt =

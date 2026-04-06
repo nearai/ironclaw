@@ -145,6 +145,7 @@ fn make_routine(user_id: &str, name: &str) -> crate::agent::routine::Routine {
             on_success: false,
             on_failure: true,
             on_attention: true,
+            ..crate::agent::routine::NotifyConfig::default()
         },
         last_run_at: None,
         next_fire_at: None,

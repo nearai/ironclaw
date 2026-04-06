@@ -42,7 +42,8 @@ pub(crate) const ROUTINE_COLUMNS: &str = "\
     cooldown_secs, max_concurrent, dedup_window_secs, \
     notify_channel, notify_user, notify_on_success, notify_on_failure, notify_on_attention, \
     state, last_run_at, next_fire_at, run_count, consecutive_failures, \
-    created_at, updated_at";
+    created_at, updated_at, \
+    agent_review_on_success, agent_review_on_failure, agent_review_on_attention";
 
 /// Explicit column list for routine_runs table (matches positional access in `row_to_routine_run_libsql`).
 pub(crate) const ROUTINE_RUN_COLUMNS: &str = "\
@@ -449,6 +450,9 @@ pub(crate) fn row_to_routine_libsql(row: &libsql::Row) -> Result<Routine, Databa
             on_success: get_i64(row, 14) != 0,
             on_failure: get_i64(row, 15) != 0,
             on_attention: get_i64(row, 16) != 0,
+            agent_review_on_success: get_i64(row, 24) != 0,
+            agent_review_on_failure: get_i64(row, 25) != 0,
+            agent_review_on_attention: get_i64(row, 26) != 0,
         },
         state: get_json(row, 17),
         last_run_at: get_opt_ts(row, 18),

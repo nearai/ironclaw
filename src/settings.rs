@@ -851,6 +851,14 @@ pub struct RoutineSettings {
     /// Max tool iterations for lightweight routines.
     #[serde(default = "default_routine_max_iterations")]
     pub lightweight_max_iterations: u32,
+
+    /// Enable agent review of routine results (default: false).
+    #[serde(default)]
+    pub agent_review_enabled: bool,
+
+    /// Max agent reviews per hour (default: 10).
+    #[serde(default = "default_routine_max_agent_reviews")]
+    pub max_agent_reviews_per_hour: u32,
 }
 
 fn default_routine_cron_interval() -> u64 {
@@ -873,6 +881,10 @@ fn default_routine_max_iterations() -> u32 {
     3
 }
 
+fn default_routine_max_agent_reviews() -> u32 {
+    10
+}
+
 impl Default for RoutineSettings {
     fn default() -> Self {
         Self {
@@ -883,6 +895,8 @@ impl Default for RoutineSettings {
             max_lightweight_tokens: default_routine_max_tokens(),
             lightweight_tools_enabled: true,
             lightweight_max_iterations: default_routine_max_iterations(),
+            agent_review_enabled: false,
+            max_agent_reviews_per_hour: default_routine_max_agent_reviews(),
         }
     }
 }

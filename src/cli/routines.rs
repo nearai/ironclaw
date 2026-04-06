@@ -310,6 +310,7 @@ fn cli_notify_config(notify_channel: Option<String>) -> NotifyConfig {
         on_attention: true,
         on_failure: true,
         on_success: false,
+        ..NotifyConfig::default()
     }
 }
 

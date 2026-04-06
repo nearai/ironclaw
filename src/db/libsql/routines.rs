@@ -34,13 +34,15 @@ impl RoutineStore for LibSqlBackend {
                     trigger_type, trigger_config, action_type, action_config,
                     cooldown_secs, max_concurrent, dedup_window_secs,
                     notify_channel, notify_user, notify_on_success, notify_on_failure, notify_on_attention,
+                    agent_review_on_success, agent_review_on_failure, agent_review_on_attention,
                     state, next_fire_at, created_at, updated_at
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5,
                     ?6, ?7, ?8, ?9,
                     ?10, ?11, ?12,
                     ?13, ?14, ?15, ?16, ?17,
-                    ?18, ?19, ?20, ?21
+                    ?18, ?19, ?20,
+                    ?21, ?22, ?23, ?24
                 )
                 "#,
                 params![
@@ -61,6 +63,9 @@ impl RoutineStore for LibSqlBackend {
                     routine.notify.on_success as i64,
                     routine.notify.on_failure as i64,
                     routine.notify.on_attention as i64,
+                    routine.notify.agent_review_on_success as i64,
+                    routine.notify.agent_review_on_failure as i64,
+                    routine.notify.agent_review_on_attention as i64,
                     routine.state.to_string(),
                     fmt_opt_ts(&routine.next_fire_at),
                     fmt_ts(&routine.created_at),
@@ -233,8 +238,9 @@ impl RoutineStore for LibSqlBackend {
                     cooldown_secs = ?9, max_concurrent = ?10, dedup_window_secs = ?11,
                     notify_channel = ?12, notify_user = ?13,
                     notify_on_success = ?14, notify_on_failure = ?15, notify_on_attention = ?16,
-                    state = ?17, next_fire_at = ?18,
-                    updated_at = ?19
+                    agent_review_on_success = ?17, agent_review_on_failure = ?18, agent_review_on_attention = ?19,
+                    state = ?20, next_fire_at = ?21,
+                    updated_at = ?22
                 WHERE id = ?1
                 "#,
             params![
@@ -254,6 +260,9 @@ impl RoutineStore for LibSqlBackend {
                 routine.notify.on_success as i64,
                 routine.notify.on_failure as i64,
                 routine.notify.on_attention as i64,
+                routine.notify.agent_review_on_success as i64,
+                routine.notify.agent_review_on_failure as i64,
+                routine.notify.agent_review_on_attention as i64,
                 routine.state.to_string(),
                 fmt_opt_ts(&routine.next_fire_at),
                 now,

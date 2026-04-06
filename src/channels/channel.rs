@@ -10,6 +10,24 @@ use uuid::Uuid;
 
 use crate::error::ChannelError;
 
+/// Origin of an incoming message.
+///
+/// Replaces the former `is_internal: bool` flag with a three-way
+/// classification so the agent loop can dispatch differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MessageSource {
+    /// Normal user message from an external channel.
+    #[default]
+    User,
+    /// Generated inside the process (e.g. job-monitor notifications).
+    /// Bypasses the user-input pipeline; content is forwarded directly.
+    Internal,
+    /// Injected by the routine engine for agent review of routine results.
+    /// Enters the agentic loop but skips submission parsing, hooks, and
+    /// event triggers.
+    RoutineReview,
+}
+
 /// Kind of attachment carried on an incoming message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachmentKind {
@@ -92,10 +110,10 @@ pub struct IncomingMessage {
     pub timezone: Option<String>,
     /// File or media attachments on this message.
     pub attachments: Vec<IncomingAttachment>,
-    /// Internal-only flag: message was generated inside the process (e.g. job
-    /// monitor) and must bypass the normal user-input pipeline. This field is
-    /// not settable via metadata, so external channels cannot spoof it.
-    pub(crate) is_internal: bool,
+    /// Message origin classification. Determines how the agent loop
+    /// dispatches this message. Not settable via metadata, so external
+    /// channels cannot spoof privileged sources.
+    pub(crate) source: MessageSource,
 }
 
 impl IncomingMessage {
@@ -119,7 +137,7 @@ impl IncomingMessage {
             metadata: serde_json::Value::Null,
             timezone: None,
             attachments: Vec::new(),
-            is_internal: false,
+            source: MessageSource::User,
         }
     }
 
@@ -169,8 +187,20 @@ impl IncomingMessage {
 
     /// Mark this message as internal (bypasses user-input pipeline).
     pub(crate) fn into_internal(mut self) -> Self {
-        self.is_internal = true;
+        self.source = MessageSource::Internal;
         self
+    }
+
+    /// Mark this message as a routine-review injection.
+    pub(crate) fn into_routine_review(mut self) -> Self {
+        self.source = MessageSource::RoutineReview;
+        self
+    }
+
+    /// Backward-compatible accessor: returns `true` for `Internal` source.
+    #[allow(dead_code)]
+    pub(crate) fn is_internal(&self) -> bool {
+        self.source == MessageSource::Internal
     }
 
     /// Effective conversation scope, falling back to thread_id for legacy callers.
