@@ -359,6 +359,8 @@ I18n.register('zh-CN', {
   'language.en': 'English',
   'language.zhCN': '简体中文',
   'language.switch': '切换语言',
+  // 此语言包的本地名称 — 用于切换语言后的提示
+  'language.name': '简体中文',
   
   // 工具活动
   'tool.thinking': '思考中...',
@@ -746,6 +748,7 @@ I18n.register('zh-CN', {
   'jobs.followUpPlaceholder': '发送后续提示...',
   'jobs.signalDone': '标记完成',
   'jobs.done': '完成',
+  'jobs.mode': '模式',
 
   // 定时任务（动态）
   'routines.loadFailed': '加载定时任务失败：{message}',

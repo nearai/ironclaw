@@ -359,6 +359,9 @@ I18n.register('en', {
   'language.en': 'English',
   'language.zhCN': '简体中文',
   'language.switch': 'Switch Language',
+  // Native name of THIS language pack — used by the language-switch
+  // toast so it always reads in the language just selected.
+  'language.name': 'English',
   
   // Tool Activity
   'tool.thinking': 'Thinking...',
@@ -746,6 +749,7 @@ I18n.register('en', {
   'jobs.followUpPlaceholder': 'Send follow-up prompt...',
   'jobs.signalDone': 'Signal done',
   'jobs.done': 'Done',
+  'jobs.mode': 'Mode',
 
   // Routines (dynamic)
   'routines.loadFailed': 'Failed to load routine: {message}',

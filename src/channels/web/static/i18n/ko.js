@@ -359,6 +359,8 @@ I18n.register('ko', {
   'language.en': 'English',
   'language.zhCN': '简体中文',
   'language.switch': '언어 전환',
+  // 이 언어 팩의 자체 표기 — 언어 전환 토스트에서 사용
+  'language.name': '한국어',
 
   // 도구 활동
   'tool.thinking': '생각 중...',
@@ -746,6 +748,7 @@ I18n.register('ko', {
   'jobs.followUpPlaceholder': '후속 프롬프트 보내기...',
   'jobs.signalDone': '완료 신호',
   'jobs.done': '완료',
+  'jobs.mode': '모드',
 
   // 루틴 (동적)
   'routines.loadFailed': '루틴 로드 실패: {message}',

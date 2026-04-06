@@ -4258,7 +4258,7 @@ function renderJobOverview(container, job) {
     + metaItem(I18n.t('jobs.startedLabel'), formatDate(job.started_at))
     + metaItem(I18n.t('jobs.completedLabel'), formatDate(job.completed_at))
     + metaItem(I18n.t('jobs.duration'), formatDuration(job.elapsed_secs))
-    + (job.job_mode ? metaItem('Mode', job.job_mode) : '');
+    + (job.job_mode ? metaItem(I18n.t('jobs.mode'), job.job_mode) : '');
   container.appendChild(grid);
 
   // Description
@@ -4716,7 +4716,7 @@ function renderRoutineDetail(routine) {
   // Metadata grid
   html += '<div class="job-meta-grid">'
     + metaItem(I18n.t('routines.id'), routine.id)
-    + metaItem(I18n.t('routines.enabled'), routine.enabled ? 'Yes' : 'No')
+    + metaItem(I18n.t('routines.enabled'), routine.enabled ? I18n.t('settings.on') : I18n.t('settings.off'))
     + metaItem(I18n.t('routines.runCount'), routine.run_count)
     + metaItem(I18n.t('routines.failures'), routine.consecutive_failures)
     + metaItem(I18n.t('routines.lastRun'), formatDate(routine.last_run_at))
@@ -4936,7 +4936,7 @@ function renderMissionDetail(m) {
     + metaItem(I18n.t('missions.threadsToday'), m.threads_today + ' / ' + (m.max_threads_per_day || '∞'))
     + metaItem(I18n.t('missions.totalThreads'), m.thread_count)
     + metaItem(I18n.t('missions.created'), formatDate(m.created_at))
-    + metaItem(I18n.t('missions.nextFire'), m.next_fire_at ? formatDate(m.next_fire_at) : 'N/A')
+    + metaItem(I18n.t('missions.nextFire'), m.next_fire_at ? formatDate(m.next_fire_at) : I18n.t('common.noData'))
     + '</div>';
 
   if (m.current_focus) {
@@ -5417,10 +5417,11 @@ function fetchTeeReport() {
 
 function renderTeePopover(report) {
   var popover = document.getElementById('tee-popover');
-  var digest = (teeInfo && teeInfo.image_digest) || 'N/A';
-  var fingerprint = report.tls_certificate_fingerprint || 'N/A';
+  var na = I18n.t('common.noData');
+  var digest = (teeInfo && teeInfo.image_digest) || na;
+  var fingerprint = report.tls_certificate_fingerprint || na;
   var reportData = report.report_data || '';
-  var vmConfig = report.vm_config || 'N/A';
+  var vmConfig = report.vm_config || na;
   var truncated = reportData.length > 32 ? reportData.slice(0, 32) + '...' : reportData;
   popover.innerHTML = '<div class="tee-popover-title">'
     + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>'

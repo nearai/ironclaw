@@ -62,15 +62,22 @@ done
 
 # --- Check 2: Every language has identical key set to en.js ---
 en_path="$I18N_DIR/$BASE_LANG"
+# Portable mktemp helper: BSD/macOS `mktemp` requires an explicit template
+# with at least 6 trailing X's, while GNU `mktemp` accepts a bare invocation.
+# Always pass a template so the script works on every platform.
+mktemp_file() {
+    mktemp "${TMPDIR:-/tmp}/check-i18n-parity.XXXXXX"
+}
+
 if [ -f "$en_path" ]; then
-    en_keys_file=$(mktemp)
+    en_keys_file=$(mktemp_file)
     extract_keys "$en_path" | sort -u > "$en_keys_file"
 
     for f in "${OTHER_LANGS[@]}"; do
         path="$I18N_DIR/$f"
         [ -f "$path" ] || continue
 
-        lang_keys_file=$(mktemp)
+        lang_keys_file=$(mktemp_file)
         extract_keys "$path" | sort -u > "$lang_keys_file"
 
         missing=$(comm -23 "$en_keys_file" "$lang_keys_file")
@@ -92,28 +99,31 @@ fi
 
 # --- Check 3: Placeholder tokens ({name}, {count}, ...) match across files ---
 if [ -f "$en_path" ]; then
-    en_ph_file=$(mktemp)
+    en_ph_file=$(mktemp_file)
     extract_key_placeholders "$en_path" | sort > "$en_ph_file"
 
     for f in "${OTHER_LANGS[@]}"; do
         path="$I18N_DIR/$f"
         [ -f "$path" ] || continue
 
-        lang_ph_file=$(mktemp)
+        lang_ph_file=$(mktemp_file)
         extract_key_placeholders "$path" | sort > "$lang_ph_file"
 
-        # Join on key, compare placeholder strings
+        # Use mktemp instead of /tmp/<name>.$$ to avoid symlink races and
+        # collisions: the predictable PID-suffix path is vulnerable to
+        # symlink attacks in shared /tmp.
+        mismatch_file=$(mktemp_file)
         join -t '=' -j 1 \
             <(awk -F= '{print $1 "=" $2}' "$en_ph_file") \
             <(awk -F= '{print $1 "=" $2}' "$lang_ph_file") \
             | awk -F= '$2 != $3 {print "  " $1 ": en=[" $2 "] '"$f"'=[" $3 "]"}' \
-            > /tmp/i18n-ph-mismatch.$$
+            > "$mismatch_file"
 
-        if [ -s /tmp/i18n-ph-mismatch.$$ ]; then
+        if [ -s "$mismatch_file" ]; then
             fail "$f has placeholder mismatches with $BASE_LANG:"
-            cat /tmp/i18n-ph-mismatch.$$ >&2
+            cat "$mismatch_file" >&2
         fi
-        rm -f "$lang_ph_file" /tmp/i18n-ph-mismatch.$$
+        rm -f "$lang_ph_file" "$mismatch_file"
     done
     rm -f "$en_ph_file"
 fi
