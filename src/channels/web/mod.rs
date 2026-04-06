@@ -110,7 +110,7 @@ impl GatewayChannel {
 
         let state = Arc::new(GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
-            sse: Arc::new(SseManager::new()),
+            sse: Arc::new(SseManager::with_max_connections(config.max_connections)),
             workspace: None,
             workspace_pool: None,
             session_manager: None,
@@ -138,6 +138,7 @@ impl GatewayChannel {
             active_config: server::ActiveConfigSnapshot::default(),
             secrets_store: None,
             db_auth: None,
+            pairing_store: None,
             oauth_providers: None,
             oauth_state_store: None,
             oauth_base_url: None,
@@ -160,7 +161,10 @@ impl GatewayChannel {
         let mut new_state = GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
             // Preserve the existing broadcast channel so sender handles remain valid.
-            sse: Arc::new(SseManager::from_sender(self.state.sse.sender())),
+            sse: Arc::new(SseManager::from_sender(
+                self.state.sse.sender(),
+                self.state.sse.max_connections(),
+            )),
             workspace: self.state.workspace.clone(),
             workspace_pool: self.state.workspace_pool.clone(),
             session_manager: self.state.session_manager.clone(),
@@ -188,6 +192,7 @@ impl GatewayChannel {
             active_config: self.state.active_config.clone(),
             secrets_store: self.state.secrets_store.clone(),
             db_auth: self.state.db_auth.clone(),
+            pairing_store: self.state.pairing_store.clone(),
             oauth_providers: self.state.oauth_providers.clone(),
             oauth_state_store: self.state.oauth_state_store.clone(),
             oauth_base_url: self.state.oauth_base_url.clone(),
@@ -467,6 +472,12 @@ impl GatewayChannel {
     /// Inject the per-user workspace pool for multi-user mode.
     pub fn with_workspace_pool(mut self, pool: Arc<server::WorkspacePool>) -> Self {
         self.rebuild_state(|s| s.workspace_pool = Some(pool));
+        self
+    }
+
+    /// Inject the shared pairing store for the pairing API endpoints.
+    pub fn with_pairing_store(mut self, store: Arc<crate::pairing::PairingStore>) -> Self {
+        self.rebuild_state(|s| s.pairing_store = Some(store));
         self
     }
 

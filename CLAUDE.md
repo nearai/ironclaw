@@ -202,8 +202,8 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 
 ```
 Pending -> InProgress -> Completed -> Submitted -> Accepted
-                     \-> Failed
-                     \-> Stuck -> InProgress (recovery)
+    \                \-> Failed
+     \-> Failed       \-> Stuck -> InProgress (recovery)
                               \-> Failed
 ```
 

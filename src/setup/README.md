@@ -302,12 +302,13 @@ key first, then falls back to the standard env var.
 1. Ask "Enable semantic search?" (default: yes)
 2. Detect available providers:
    - NEAR AI: if backend is `nearai` OR valid session exists
+   - AWS Bedrock: if backend is `bedrock`
    - OpenAI: if `OPENAI_API_KEY` in env OR (backend is `openai` AND cached key)
 3. If both available → let user choose
 4. If only one → use it
 5. If neither → disable embeddings
 
-**Default model:** `text-embedding-3-small` (for both providers)
+**Default model:** `text-embedding-3-small` for NEAR AI/OpenAI, `amazon.titan-embed-text-v2:0` for AWS Bedrock
 
 ---
 

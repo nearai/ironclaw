@@ -500,7 +500,7 @@ mod tests {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
         let loader =
-            WasmChannelLoader::new(runtime, Arc::new(PairingStore::new()), None, "default");
+            WasmChannelLoader::new(runtime, Arc::new(PairingStore::new_noop()), None, "default");
 
         let dir = TempDir::new().unwrap();
         let wasm_path = dir.path().join("test.wasm");
@@ -519,7 +519,7 @@ mod tests {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
         let loader =
-            WasmChannelLoader::new(runtime, Arc::new(PairingStore::new()), None, "default");
+            WasmChannelLoader::new(runtime, Arc::new(PairingStore::new_noop()), None, "default");
 
         let dir = TempDir::new().unwrap();
         let missing = dir.path().join("nonexistent_channels_dir");

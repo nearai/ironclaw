@@ -172,6 +172,14 @@ pub struct ResponseUsage {
     pub total_tokens: u64,
 }
 
+impl ResponseUsage {
+    fn add_turn_cost(&mut self, input_tokens: u64, output_tokens: u64) {
+        self.input_tokens = self.input_tokens.saturating_add(input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(output_tokens);
+        self.total_tokens = self.input_tokens.saturating_add(self.output_tokens);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Streaming event types
 // ---------------------------------------------------------------------------
@@ -528,11 +536,7 @@ impl ResponseAccumulator {
                 output_tokens,
                 ..
             } => {
-                self.usage = ResponseUsage {
-                    input_tokens,
-                    output_tokens,
-                    total_tokens: input_tokens + output_tokens,
-                };
+                self.usage.add_turn_cost(input_tokens, output_tokens);
                 false
             }
             AppEvent::Error { message, .. } => {
@@ -1002,11 +1006,7 @@ async fn streaming_worker(
                 output_tokens,
                 ..
             } => {
-                acc.usage = ResponseUsage {
-                    input_tokens: *input_tokens,
-                    output_tokens: *output_tokens,
-                    total_tokens: input_tokens + output_tokens,
-                };
+                acc.usage.add_turn_cost(*input_tokens, *output_tokens);
             }
             _ => {}
         }
@@ -1444,6 +1444,52 @@ mod tests {
             &resp.output[2],
             ResponseOutputItem::Message { .. }
         ));
+    }
+
+    #[test]
+    fn accumulator_turn_cost_populates_usage() {
+        let mut acc = ResponseAccumulator::new("resp_test".to_string(), "m".to_string());
+        assert!(!acc.process(AppEvent::TurnCost {
+            input_tokens: 12,
+            output_tokens: 3,
+            cost_usd: "$0.0180".to_string(),
+            thread_id: Some("t".to_string()),
+        }));
+        assert!(acc.process(AppEvent::Response {
+            content: "Done".to_string(),
+            thread_id: "t".to_string(),
+        }));
+
+        let resp = acc.finish();
+        assert_eq!(resp.usage.input_tokens, 12);
+        assert_eq!(resp.usage.output_tokens, 3);
+        assert_eq!(resp.usage.total_tokens, 15);
+    }
+
+    #[test]
+    fn accumulator_turn_cost_accumulates_multiple_segments() {
+        let mut acc = ResponseAccumulator::new("resp_test".to_string(), "m".to_string());
+        assert!(!acc.process(AppEvent::TurnCost {
+            input_tokens: 12,
+            output_tokens: 3,
+            cost_usd: "$0.0180".to_string(),
+            thread_id: Some("t".to_string()),
+        }));
+        assert!(!acc.process(AppEvent::TurnCost {
+            input_tokens: 5,
+            output_tokens: 7,
+            cost_usd: "$0.0190".to_string(),
+            thread_id: Some("t".to_string()),
+        }));
+        assert!(acc.process(AppEvent::Response {
+            content: "Done".to_string(),
+            thread_id: "t".to_string(),
+        }));
+
+        let resp = acc.finish();
+        assert_eq!(resp.usage.input_tokens, 17);
+        assert_eq!(resp.usage.output_tokens, 10);
+        assert_eq!(resp.usage.total_tokens, 27);
     }
 
     #[test]

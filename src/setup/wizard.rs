@@ -2323,6 +2323,7 @@ impl SetupWizard {
         let has_openai_key = std::env::var("OPENAI_API_KEY").is_ok()
             || (backend == "openai" && self.llm_api_key.is_some());
         let has_nearai = backend == "nearai" || self.session_manager.is_some();
+        let has_bedrock = backend == "bedrock";
 
         // If the LLM backend is OpenAI and we already have a key, default to OpenAI embeddings
         if backend == "openai" && has_openai_key {
@@ -2333,28 +2334,38 @@ impl SetupWizard {
             return Ok(());
         }
 
-        // If no NEAR AI session and no OpenAI key, only OpenAI is viable
-        if !has_nearai && !has_openai_key {
+        if backend == "bedrock" {
+            self.settings.embeddings.enabled = true;
+            self.settings.embeddings.provider = "bedrock".to_string();
+            self.settings.embeddings.model = "amazon.titan-embed-text-v2:0".to_string();
+            print_success("Embeddings enabled via AWS Bedrock");
+            return Ok(());
+        }
+
+        // If no NEAR AI session, Bedrock config, or OpenAI key, embeddings aren't available.
+        if !has_nearai && !has_bedrock && !has_openai_key {
             print_info("No NEAR AI session or OpenAI key found for embeddings.");
             print_info("Set OPENAI_API_KEY in your environment to enable embeddings.");
             self.settings.embeddings.enabled = false;
             return Ok(());
         }
 
-        let mut options = Vec::new();
+        let mut provider_options = Vec::new();
         if has_nearai {
-            options.push("NEAR AI (uses same auth, no extra cost)");
+            provider_options.push(("nearai", "NEAR AI (uses same auth, no extra cost)"));
         }
-        options.push("OpenAI (requires API key)");
+        if has_bedrock {
+            provider_options.push(("bedrock", "AWS Bedrock (uses AWS auth and region)"));
+        }
+        provider_options.push(("openai", "OpenAI (requires API key)"));
 
-        let choice = select_one("Select embeddings provider:", &options).map_err(SetupError::Io)?;
-
-        // Map choice back to provider name
-        let provider = if has_nearai && choice == 0 {
-            "nearai"
-        } else {
-            "openai"
-        };
+        let display_options: Vec<&str> = provider_options
+            .iter()
+            .map(|(_, display)| *display)
+            .collect();
+        let choice =
+            select_one("Select embeddings provider:", &display_options).map_err(SetupError::Io)?;
+        let provider = provider_options[choice].0;
 
         match provider {
             "nearai" => {
@@ -2362,6 +2373,12 @@ impl SetupWizard {
                 self.settings.embeddings.provider = "nearai".to_string();
                 self.settings.embeddings.model = "text-embedding-3-small".to_string();
                 print_success("Embeddings enabled via NEAR AI");
+            }
+            "bedrock" => {
+                self.settings.embeddings.enabled = true;
+                self.settings.embeddings.provider = "bedrock".to_string();
+                self.settings.embeddings.model = "amazon.titan-embed-text-v2:0".to_string();
+                print_success("Embeddings enabled via AWS Bedrock");
             }
             _ => {
                 if !has_openai_key {
@@ -3275,16 +3292,17 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Persist the NEAR AI session token to the database.
+    /// Persist the NEAR AI session token to encrypted secrets and the database.
     ///
     /// The session manager writes to disk during `ensure_authenticated()` but
     /// doesn't have a DB store attached during onboarding. This reads the
-    /// session file from disk and stores it under the `nearai.session_token`
-    /// key so the runtime's `attach_store()` finds it without fallback.
+    /// session file from disk and stores it under `nearai_session_token` in the
+    /// encrypted secrets store. Falls back to the plaintext settings table
+    /// only when no secrets store is available.
     ///
     /// Best-effort: silently ignores errors (no DB connection yet, no
     /// session file, etc.).
-    async fn persist_session_to_db(&self) {
+    async fn persist_session_to_db(&mut self) {
         let session_path = crate::config::llm::default_session_path();
         let data = match std::fs::read_to_string(&session_path) {
             Ok(d) if !d.trim().is_empty() => d,
@@ -3295,6 +3313,23 @@ impl SetupWizard {
             Err(_) => return,
         };
 
+        // Try to persist to encrypted secrets store (preferred).
+        if let Ok(ctx) = self.init_secrets_context().await {
+            if let Err(e) = ctx
+                .save_secret(
+                    "nearai_session_token",
+                    &secrecy::SecretString::from(data.clone()),
+                )
+                .await
+            {
+                tracing::debug!("Could not persist session token to secrets store: {}", e);
+            } else {
+                tracing::debug!("Session token persisted to encrypted secrets store");
+                return;
+            }
+        }
+
+        // Fallback: persist to plaintext settings table.
         #[cfg(feature = "postgres")]
         if let Some(ref pool) = self.db_pool {
             let store = crate::history::Store::from_pool(pool.clone());

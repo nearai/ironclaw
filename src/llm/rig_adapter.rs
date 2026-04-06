@@ -669,7 +669,7 @@ where
         &self,
         mut request: CompletionRequest,
     ) -> Result<CompletionResponse, LlmError> {
-        let model_override = request.model.take();
+        let model_override = request.take_model_override();
 
         self.strip_unsupported_completion_params(&mut request);
 
@@ -726,7 +726,7 @@ where
         &self,
         mut request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let model_override = request.model.take();
+        let model_override = request.take_model_override();
 
         self.strip_unsupported_tool_params(&mut request);
 
