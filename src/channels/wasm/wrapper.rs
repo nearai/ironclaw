@@ -4190,9 +4190,8 @@ mod tests {
         build_websocket_identify_message, build_websocket_resume_message,
         discord_gateway_presence_status, drain_guest_logs, parse_websocket_invalid_session,
         parse_websocket_ready_session, resolve_websocket_identify_message,
-        should_warn_on_heartbeat_interval,
-        uses_owner_broadcast_target, websocket_heartbeat_sleep_duration,
-        websocket_reconnect_backoff,
+        should_warn_on_heartbeat_interval, uses_owner_broadcast_target,
+        websocket_heartbeat_sleep_duration, websocket_reconnect_backoff,
     };
     use crate::pairing::PairingStore;
     use crate::secrets::{CreateSecretParams, InMemorySecretsStore, SecretsCrypto, SecretsStore};

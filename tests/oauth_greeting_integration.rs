@@ -301,16 +301,9 @@ mod tests {
 
         let history = get_history(&c, addr, ALICE_TOKEN, thread_id).await;
         let turns = history["turns"].as_array().expect("turns");
-        assert_eq!(
-            turns.len(),
-            1,
-            "should have only the pre-existing message"
-        );
+        assert_eq!(turns.len(), 1, "should have only the pre-existing message");
         // A standalone user message with no assistant response shows as user_input.
         let user_input = turns[0]["user_input"].as_str().unwrap_or("");
-        assert_eq!(
-            user_input, "Hello!",
-            "should be the original message"
-        );
+        assert_eq!(user_input, "Hello!", "should be the original message");
     }
 }
