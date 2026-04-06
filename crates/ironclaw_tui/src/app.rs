@@ -35,6 +35,7 @@ use crate::widgets::help_overlay::HelpOverlayWidget;
 use crate::widgets::logs::LogsWidget;
 use crate::widgets::model_picker::{ModelPickerState, ModelPickerWidget};
 use crate::widgets::registry::{BuiltinWidgets, create_default_widgets};
+use crate::widgets::thread_list::engine_thread_index_at;
 use crate::widgets::thread_picker::ThreadPickerWidget;
 use crate::widgets::{
     ActiveTab, AppState, ApprovalRequest, ChatMessage, ContextPressureInfo, CostGuardInfo,
@@ -445,6 +446,7 @@ async fn handle_event(
                                 text: trimmed,
                                 attachments,
                                 thread_id,
+                                ui_action: None,
                             })
                             .await;
                     }
@@ -636,6 +638,7 @@ async fn handle_event(
                                     text: command,
                                     attachments,
                                     thread_id,
+                                    ui_action: None,
                                 })
                                 .await;
                         }
@@ -686,6 +689,7 @@ async fn handle_event(
                                             text: command,
                                             attachments,
                                             thread_id,
+                                            ui_action: None,
                                         })
                                         .await;
                                 }
@@ -1351,6 +1355,14 @@ async fn handle_event(
                 .collect();
         }
 
+        TuiEvent::EngineThreadDetail { detail } => {
+            state.tool_detail_modal = Some(ToolDetailModal {
+                tool_name: format!("Thread {}", detail.thread_type),
+                content: format_engine_thread_detail(&detail),
+                scroll: 0,
+            });
+        }
+
         TuiEvent::ConversationHistory {
             thread_id,
             messages,
@@ -1504,6 +1516,71 @@ fn parse_model_list_response(content: &str) -> Option<(String, Vec<String>)> {
     }
 }
 
+fn format_detail_timestamp(raw: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|dt| dt.with_timezone(&chrono::Local))
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S %Z").to_string())
+        .unwrap_or_else(|_| raw.to_string())
+}
+
+fn format_engine_thread_detail(detail: &crate::event::EngineThreadDetailEntry) -> String {
+    use std::fmt::Write as _;
+
+    let mut content = String::new();
+    let _ = writeln!(content, "Goal");
+    let _ = writeln!(content, "{}", detail.goal);
+    let _ = writeln!(content);
+
+    let _ = writeln!(content, "Overview");
+    let _ = writeln!(content, "  Thread ID: {}", detail.id);
+    let _ = writeln!(content, "  Type: {}", detail.thread_type);
+    let _ = writeln!(content, "  State: {}", detail.state);
+    let _ = writeln!(content, "  Steps: {}", detail.step_count);
+    let _ = writeln!(content, "  Tokens: {}", detail.total_tokens);
+    let _ = writeln!(content, "  Cost: ${:.4}", detail.total_cost_usd);
+    let _ = writeln!(content, "  Max iterations: {}", detail.max_iterations);
+    let _ = writeln!(
+        content,
+        "  Created: {}",
+        format_detail_timestamp(&detail.created_at)
+    );
+    let _ = writeln!(
+        content,
+        "  Updated: {}",
+        format_detail_timestamp(&detail.updated_at)
+    );
+    let completed = detail
+        .completed_at
+        .as_deref()
+        .map(format_detail_timestamp)
+        .unwrap_or_else(|| "-".to_string());
+    let _ = writeln!(content, "  Completed: {completed}");
+    let _ = writeln!(content, "  Project: {}", detail.project_id);
+    let _ = writeln!(
+        content,
+        "  Parent: {}",
+        detail.parent_id.as_deref().unwrap_or("-")
+    );
+
+    if detail.messages.is_empty() {
+        return content;
+    }
+
+    let _ = writeln!(content);
+    let _ = writeln!(content, "Messages ({})", detail.messages.len());
+    for message in &detail.messages {
+        let _ = writeln!(
+            content,
+            "\n[{}] {}",
+            message.role,
+            format_detail_timestamp(&message.timestamp)
+        );
+        let _ = writeln!(content, "{}", message.content);
+    }
+
+    content
+}
+
 struct TerminalRestoreGuard {
     active: bool,
 }
@@ -1633,6 +1710,18 @@ async fn handle_mouse_click(
 
     if let Some(tab) = tab_at(terminal, layout, state, column, row) {
         state.active_tab = tab;
+        state.text_selection = None;
+        return;
+    }
+
+    if state.tool_detail_modal.is_none()
+        && let Some(area) = thread_list_sidebar_area(terminal, layout, state)
+        && let Some(index) = engine_thread_index_at(area, state, column, row)
+        && let Some(thread) = state.engine_threads.get(index)
+    {
+        let _ = msg_tx
+            .send(TuiUserMessage::open_engine_thread_detail(thread.id.clone()))
+            .await;
         state.text_selection = None;
         return;
     }
@@ -1785,6 +1874,35 @@ fn selectable_area_at(
     };
 
     rect_contains(selectable, column, row).then_some(selectable)
+}
+
+fn thread_list_sidebar_area(size: Rect, layout: &TuiLayout, state: &AppState) -> Option<Rect> {
+    if state.active_tab != ActiveTab::Conversation || !state.sidebar_visible {
+        return None;
+    }
+
+    let main_area = frame_sections(size, layout, state)[2];
+    if main_area.width <= 40 {
+        return None;
+    }
+
+    let sidebar_width =
+        (main_area.width as u32 * layout.sidebar.effective_width() as u32 / 100) as u16;
+    let conversation_width = main_area.width.saturating_sub(sidebar_width + 1);
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(conversation_width),
+            Constraint::Length(1),
+            Constraint::Length(sidebar_width),
+        ])
+        .split(main_area);
+    let sidebar_area = horizontal[2];
+    let sidebar_split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(sidebar_area);
+    Some(sidebar_split[1])
 }
 
 fn approval_action_at(
@@ -2518,6 +2636,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn engine_thread_detail_opens_modal() {
+        let mut state = AppState::default();
+
+        apply_event(
+            &mut state,
+            TuiEvent::EngineThreadDetail {
+                detail: crate::event::EngineThreadDetailEntry {
+                    id: "eng-1".to_string(),
+                    goal: "Send the top three Hacker News stories".to_string(),
+                    thread_type: "Mission".to_string(),
+                    state: "Running".to_string(),
+                    project_id: "proj-1".to_string(),
+                    parent_id: None,
+                    step_count: 7,
+                    total_tokens: 2_048,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    updated_at: chrono::Utc::now().to_rfc3339(),
+                    max_iterations: 24,
+                    completed_at: None,
+                    total_cost_usd: 0.1234,
+                    messages: vec![crate::event::EngineThreadMessageEntry {
+                        role: "Assistant".to_string(),
+                        content: "Fetching the latest stories.".to_string(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                    }],
+                },
+            },
+        )
+        .await;
+
+        let modal = state
+            .tool_detail_modal
+            .as_ref()
+            .expect("thread detail modal should open");
+        assert_eq!(modal.tool_name, "Thread Mission");
+        assert!(modal.content.contains("Goal"));
+        assert!(
+            modal
+                .content
+                .contains("Send the top three Hacker News stories")
+        );
+        assert!(modal.content.contains("Messages (1)"));
+        assert!(modal.content.contains("Fetching the latest stories."));
+    }
+
+    #[tokio::test]
     async fn empty_thread_list_clears_picker() {
         let mut state = AppState::default();
 
@@ -2601,6 +2765,55 @@ mod tests {
         apply_event(&mut state, TuiEvent::MouseClick { column: 9, row: 0 }).await;
 
         assert_eq!(state.active_tab, ActiveTab::Logs);
+    }
+
+    #[tokio::test]
+    async fn mouse_click_engine_thread_row_requests_detail_modal_data() {
+        let now = chrono::Utc::now();
+        let mut state = AppState {
+            engine_threads: vec![EngineThreadInfo {
+                id: "eng-1".to_string(),
+                goal: "Check Hacker News hourly".to_string(),
+                thread_type: "Mission".to_string(),
+                status: ThreadStatus::Active,
+                step_count: 5,
+                total_tokens: 4_096,
+                started_at: now - chrono::Duration::minutes(9),
+                updated_at: now,
+            }],
+            ..Default::default()
+        };
+
+        let layout = TuiLayout::default();
+        let area = thread_list_sidebar_area(Rect::new(0, 0, 80, 24), &layout, &state)
+            .expect("thread list area should exist");
+        let click = (area.y..area.y + area.height)
+            .find_map(|row| {
+                (area.x..area.x + area.width).find_map(|column| {
+                    (engine_thread_index_at(area, &state, column, row) == Some(0))
+                        .then_some((column, row))
+                })
+            })
+            .expect("expected a clickable engine thread row");
+
+        let messages = apply_event_and_take_messages(
+            &mut state,
+            TuiEvent::MouseClick {
+                column: click.0,
+                row: click.1,
+            },
+        )
+        .await;
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].text.is_empty());
+        assert!(messages[0].thread_id.is_none());
+        match &messages[0].ui_action {
+            Some(crate::event::TuiUiAction::OpenEngineThreadDetail { thread_id }) => {
+                assert_eq!(thread_id, "eng-1");
+            }
+            other => panic!("expected engine thread detail action, got {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -75,6 +75,15 @@ pub struct TuiUserMessage {
     pub attachments: Vec<TuiAttachment>,
     /// Active thread scope for this message, if the TUI has one selected.
     pub thread_id: Option<String>,
+    /// Non-chat UI action to run through the bridge.
+    pub ui_action: Option<TuiUiAction>,
+}
+
+/// Out-of-band UI actions emitted by the TUI.
+#[derive(Debug, Clone)]
+pub enum TuiUiAction {
+    /// Load and show engine thread detail without sending chat text.
+    OpenEngineThreadDetail { thread_id: String },
 }
 
 impl TuiUserMessage {
@@ -84,6 +93,7 @@ impl TuiUserMessage {
             text: text.into(),
             attachments: Vec::new(),
             thread_id: None,
+            ui_action: None,
         }
     }
 
@@ -91,6 +101,18 @@ impl TuiUserMessage {
     pub fn with_thread_id(mut self, thread_id: Option<String>) -> Self {
         self.thread_id = thread_id;
         self
+    }
+
+    /// Request detail for an engine thread from the TUI bridge.
+    pub fn open_engine_thread_detail(thread_id: impl Into<String>) -> Self {
+        Self {
+            text: String::new(),
+            attachments: Vec::new(),
+            thread_id: None,
+            ui_action: Some(TuiUiAction::OpenEngineThreadDetail {
+                thread_id: thread_id.into(),
+            }),
+        }
     }
 }
 
@@ -135,6 +157,33 @@ pub struct EngineThreadEntry {
     pub total_tokens: u64,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// A single message in engine thread detail.
+#[derive(Debug, Clone)]
+pub struct EngineThreadMessageEntry {
+    pub role: String,
+    pub content: String,
+    pub timestamp: String,
+}
+
+/// Full engine thread detail for the sidebar modal.
+#[derive(Debug, Clone)]
+pub struct EngineThreadDetailEntry {
+    pub id: String,
+    pub goal: String,
+    pub thread_type: String,
+    pub state: String,
+    pub project_id: String,
+    pub parent_id: Option<String>,
+    pub step_count: usize,
+    pub total_tokens: u64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub max_iterations: usize,
+    pub completed_at: Option<String>,
+    pub total_cost_usd: f64,
+    pub messages: Vec<EngineThreadMessageEntry>,
 }
 
 /// Events consumed by the TUI run loop.
@@ -294,6 +343,9 @@ pub enum TuiEvent {
 
     /// Engine v2 thread list update for the activity sidebar.
     EngineThreadList { threads: Vec<EngineThreadEntry> },
+
+    /// Full engine v2 thread detail for the sidebar modal.
+    EngineThreadDetail { detail: EngineThreadDetailEntry },
 
     /// Full conversation history for a resumed thread.
     ConversationHistory {

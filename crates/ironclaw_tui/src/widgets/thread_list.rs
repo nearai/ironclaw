@@ -73,6 +73,61 @@ fn format_uptime(secs: u64) -> String {
     }
 }
 
+/// Resolve which engine thread row was clicked inside the activity sidebar.
+pub(crate) fn engine_thread_index_at(
+    area: Rect,
+    state: &AppState,
+    column: u16,
+    row: u16,
+) -> Option<usize> {
+    if area.height < 3 || area.width < 6 {
+        return None;
+    }
+
+    let inner = Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
+    if inner.height == 0 || inner.width == 0 {
+        return None;
+    }
+
+    let within_inner = column >= inner.x
+        && column < inner.x + inner.width
+        && row >= inner.y
+        && row < inner.y + inner.height;
+    if !within_inner {
+        return None;
+    }
+
+    let has_any_data = !state.jobs.is_empty()
+        || !state.routines.is_empty()
+        || !state.engine_threads.is_empty()
+        || state.sandbox_status.is_some()
+        || state.secrets_status.is_some();
+    if !has_any_data || state.engine_threads.is_empty() {
+        return None;
+    }
+
+    let mut line_index = 0usize;
+    let system_items =
+        state.sandbox_status.is_some() as usize + state.secrets_status.is_some() as usize;
+    if system_items > 0 {
+        line_index += 1 + system_items + 1;
+    }
+
+    line_index += 1 + state.jobs.len().max(1);
+    line_index += 1 + state.routines.len().max(1);
+
+    let thread_rows_start = line_index + 1;
+    let clicked_line = row.checked_sub(inner.y)? as usize;
+    let thread_index = clicked_line.checked_sub(thread_rows_start)?;
+    state.engine_threads.get(thread_index)?;
+    Some(thread_index)
+}
+
 pub struct ThreadListWidget {
     theme: Theme,
 }
@@ -677,5 +732,41 @@ mod tests {
         let text = buffer_text(&buf);
         assert!(text.contains("\u{2717}")); // ✗ icon
         assert!(text.contains("failed"));
+    }
+
+    #[test]
+    fn engine_thread_index_at_hits_first_visible_thread_row() {
+        let mut state = make_state();
+        state.engine_threads = vec![EngineThreadInfo {
+            id: "thread-1".to_string(),
+            goal: "Ship release".to_string(),
+            thread_type: "Foreground".to_string(),
+            status: ThreadStatus::Active,
+            step_count: 4,
+            total_tokens: 1_024,
+            started_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }];
+
+        let area = Rect::new(0, 0, 40, 12);
+        assert_eq!(super::engine_thread_index_at(area, &state, 4, 6), Some(0));
+    }
+
+    #[test]
+    fn engine_thread_index_at_returns_none_when_thread_rows_are_clipped() {
+        let mut state = make_state();
+        state.engine_threads = vec![EngineThreadInfo {
+            id: "thread-1".to_string(),
+            goal: "Ship release".to_string(),
+            thread_type: "Foreground".to_string(),
+            status: ThreadStatus::Active,
+            step_count: 4,
+            total_tokens: 1_024,
+            started_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }];
+
+        let area = Rect::new(0, 0, 40, 5);
+        assert_eq!(super::engine_thread_index_at(area, &state, 4, 3), None);
     }
 }

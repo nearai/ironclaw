@@ -150,6 +150,49 @@ fn build_tui_incoming_message(
     }
 }
 
+fn build_engine_thread_detail_event(detail: crate::bridge::EngineThreadDetail) -> TuiEvent {
+    let messages = detail
+        .messages
+        .into_iter()
+        .map(|message| ironclaw_tui::EngineThreadMessageEntry {
+            role: message
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Unknown")
+                .to_string(),
+            content: message
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            timestamp: message
+                .get("timestamp")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        })
+        .collect();
+
+    TuiEvent::EngineThreadDetail {
+        detail: ironclaw_tui::EngineThreadDetailEntry {
+            id: detail.info.id,
+            goal: detail.info.goal,
+            thread_type: detail.info.thread_type,
+            state: detail.info.state,
+            project_id: detail.info.project_id,
+            parent_id: detail.info.parent_id,
+            step_count: detail.info.step_count,
+            total_tokens: detail.info.total_tokens,
+            created_at: detail.info.created_at,
+            updated_at: detail.info.updated_at,
+            max_iterations: detail.max_iterations,
+            completed_at: detail.completed_at,
+            total_cost_usd: detail.total_cost_usd,
+            messages,
+        },
+    }
+}
+
 /// TUI channel backed by `ironclaw_tui`.
 pub struct TuiChannel {
     user_id: String,
@@ -321,9 +364,44 @@ impl Channel for TuiChannel {
         let (incoming_tx, incoming_rx) = mpsc::channel::<IncomingMessage>(32);
         let user_id = self.user_id.clone();
         let sys_tz = crate::timezone::detect_system_timezone().name().to_string();
+        let detail_event_tx = event_tx.clone();
 
         tokio::spawn(async move {
             while let Some(user_msg) = msg_rx.recv().await {
+                if let Some(action) = user_msg.ui_action {
+                    match action {
+                        ironclaw_tui::TuiUiAction::OpenEngineThreadDetail { thread_id } => {
+                            match crate::bridge::get_engine_thread(&thread_id, &user_id).await {
+                                Ok(Some(detail)) => {
+                                    let _ = detail_event_tx
+                                        .send(build_engine_thread_detail_event(detail))
+                                        .await;
+                                }
+                                Ok(None) => {
+                                    let _ = detail_event_tx
+                                        .send(TuiEvent::Status(format!(
+                                            "Thread not found: {thread_id}"
+                                        )))
+                                        .await;
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        thread_id = %thread_id,
+                                        error = %err,
+                                        "Failed to load engine thread detail for TUI"
+                                    );
+                                    let _ = detail_event_tx
+                                        .send(TuiEvent::Status(format!(
+                                            "Failed to load thread details: {err}"
+                                        )))
+                                        .await;
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                }
+
                 let msg = build_tui_incoming_message(user_msg, &user_id, &sys_tz);
                 if incoming_tx.send(msg).await.is_err() {
                     break;
