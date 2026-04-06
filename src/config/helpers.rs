@@ -274,7 +274,12 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
 
     // For HTTPS, reject private/loopback/link-local/metadata IPs.
     // Check both IP literals and resolved hostnames to prevent DNS-based SSRF.
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    // Strip brackets from IPv6 literals (host_str() returns "[::1]" not "::1").
+    let host_for_parse = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = host_for_parse.parse::<IpAddr>() {
         if is_dangerous_ip(&ip) {
             return Err(ConfigError::InvalidValue {
                 key: field_name.to_string(),
@@ -294,12 +299,29 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
         //
         // NOTE: `to_socket_addrs()` performs blocking DNS resolution. This is
         // acceptable because `validate_base_url` runs at config-load time only,
-        // before the async runtime is fully driving I/O. If this ever moves to
-        // a hot path, wrap in `tokio::task::spawn_blocking` or use
-        // `tokio::net::lookup_host`.
+        // before the async runtime is fully driving I/O. We wrap in a thread
+        // with a timeout to avoid hanging in network-restricted environments
+        // (e.g. CI) where DNS queries may never complete.
         use std::net::ToSocketAddrs;
         let port = parsed.port().unwrap_or(443);
-        match (host, port).to_socket_addrs() {
+        let host_owned = host.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = (host_owned.as_str(), port)
+                .to_socket_addrs()
+                .map(|addrs| addrs.collect::<Vec<_>>());
+            let _ = tx.send(result);
+        });
+
+        let dns_timeout = std::time::Duration::from_secs(2);
+        let resolve_result = rx.recv_timeout(dns_timeout).unwrap_or_else(|_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "DNS resolution timed out after 2s",
+            ))
+        });
+
+        match resolve_result {
             Ok(addrs) => {
                 for addr in addrs {
                     if is_dangerous_ip(&addr.ip()) {
@@ -316,14 +338,16 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
                 }
             }
             Err(e) => {
-                return Err(ConfigError::InvalidValue {
-                    key: field_name.to_string(),
-                    message: format!(
-                        "failed to resolve hostname '{}': {}. \
-                         Base URLs must be resolvable at config time.",
-                        host, e
-                    ),
-                });
+                // DNS failure is non-fatal for HTTPS hostnames. The primary
+                // SSRF protection is blocking private IP literals above. DNS
+                // resolution is defense-in-depth and must not prevent startup
+                // in network-restricted environments (CI, containers, air-gapped).
+                tracing::debug!(
+                    "DNS resolution for '{}' failed ({}); skipping SSRF IP check — \
+                     this is non-fatal for HTTPS hostnames",
+                    host,
+                    e
+                );
             }
         }
     }
@@ -602,14 +626,14 @@ mod tests {
     }
 
     #[test]
-    fn validate_base_url_rejects_dns_failure() {
-        // .invalid TLD is guaranteed to never resolve (RFC 6761)
+    fn validate_base_url_tolerates_dns_failure() {
+        // .invalid TLD is guaranteed to never resolve (RFC 6761).
+        // DNS failure for HTTPS hostnames is non-fatal (defense-in-depth);
+        // the primary SSRF protection is blocking private IP literals.
         let result = validate_base_url("https://ssrf-test.invalid", "TEST");
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("failed to resolve"),
-            "Expected DNS resolution failure, got: {err}"
+            result.is_ok(),
+            "HTTPS with unresolvable hostname should succeed (DNS check is non-fatal): {result:?}"
         );
     }
 

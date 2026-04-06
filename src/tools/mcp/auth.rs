@@ -394,8 +394,13 @@ async fn validate_url_safe(url: &str) -> Result<(), AuthError> {
     // (e.g., 169.254.169.254 for cloud metadata endpoints).
     if host.parse::<IpAddr>().is_err() {
         let addr = format!("{}:{}", host, parsed.port_or_known_default().unwrap_or(443));
-        match tokio::net::lookup_host(&addr).await {
-            Ok(addrs) => {
+        let dns_result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::net::lookup_host(&addr),
+        )
+        .await;
+        match dns_result {
+            Ok(Ok(addrs)) => {
                 for socket_addr in addrs {
                     if is_dangerous_ip(socket_addr.ip()) {
                         return Err(AuthError::DiscoveryFailed(format!(
@@ -406,11 +411,18 @@ async fn validate_url_safe(url: &str) -> Result<(), AuthError> {
                     }
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 // DNS failure = fail closed (do not allow the request)
                 return Err(AuthError::DiscoveryFailed(format!(
                     "DNS resolution failed for '{}': {}",
                     host, e
+                )));
+            }
+            Err(_) => {
+                // DNS timeout = fail closed
+                return Err(AuthError::DiscoveryFailed(format!(
+                    "DNS resolution timed out for '{}'",
+                    host
                 )));
             }
         }
@@ -1930,7 +1942,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_url_safe_https() {
-        assert!(validate_url_safe("https://example.com/path").await.is_ok());
+        // Use an IP literal to avoid DNS resolution in restricted environments.
+        // 93.184.215.14 is example.com's IP — a public, non-dangerous address.
+        assert!(
+            validate_url_safe("https://93.184.215.14/path")
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
