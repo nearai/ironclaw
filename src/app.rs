@@ -353,12 +353,14 @@ impl AppBuilder {
             ws = ws.with_memory_layers(self.config.workspace.memory_layers.clone());
             let ws = Arc::new(ws);
 
-            // Detect multi-tenant mode: when the database has registered users,
-            // each authenticated user needs their own workspace scope. Use
-            // WorkspacePool (which implements WorkspaceResolver) to create
-            // per-user workspaces on demand instead of sharing the startup
-            // workspace across all users.
-            let is_multi_tenant = db.has_any_users().await.unwrap_or(false);
+            // Multi-tenant mode: when enabled, each authenticated user gets their
+            // own workspace scope via WorkspacePool. Activation requires both
+            // the explicit AGENT_MULTI_TENANT=true flag *and* at least one
+            // registered user in the database. When the flag is false (default),
+            // all users share the single owner-scoped workspace regardless of
+            // whether the users table has rows.
+            let is_multi_tenant =
+                self.config.agent.multi_tenant && db.has_any_users().await.unwrap_or(false);
 
             if is_multi_tenant {
                 let pool = Arc::new(crate::channels::web::server::WorkspacePool::new(

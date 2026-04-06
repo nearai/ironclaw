@@ -597,7 +597,9 @@ async fn async_main() -> anyhow::Result<()> {
             gw = gw.with_workspace(Arc::clone(ws));
         }
         // Create per-user workspace pool for multi-user mode.
-        if let Some(ref db) = components.db {
+        if config.agent.multi_tenant
+            && let Some(ref db) = components.db
+        {
             let emb_cache_config = ironclaw::workspace::EmbeddingCacheConfig {
                 max_entries: config.embeddings.cache_size,
             };
