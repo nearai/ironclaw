@@ -528,6 +528,11 @@ impl Agent {
         let repair_channels = self.channels.clone();
         let repair_owner_id = self.owner_id().to_string();
         let repair_handle = tokio::spawn(async move {
+            // Track jobs that have already been escalated to ManualRequired
+            // to prevent sending duplicate notifications every repair cycle.
+            let mut notified_manual: std::collections::HashSet<uuid::Uuid> =
+                std::collections::HashSet::new();
+
             loop {
                 tokio::time::sleep(repair_interval).await;
 
@@ -548,19 +553,31 @@ impl Agent {
                         }
                         Ok(RepairResult::Failed { message }) => {
                             tracing::error!("Repair failed: {}", message);
-                            Some(format!(
-                                "Job {} was stuck for {}s, recovery failed permanently: {}",
-                                job.job_id,
-                                job.stuck_duration.as_secs(),
-                                message
-                            ))
+                            // Dedup: only notify once per job (same pattern as ManualRequired)
+                            if notified_manual.insert(job.job_id) {
+                                Some(format!(
+                                    "Job {} was stuck for {}s, recovery failed permanently: {}",
+                                    job.job_id,
+                                    job.stuck_duration.as_secs(),
+                                    message
+                                ))
+                            } else {
+                                None
+                            }
                         }
                         Ok(RepairResult::ManualRequired { message }) => {
                             tracing::warn!("Manual intervention needed: {}", message);
-                            Some(format!(
-                                "Job {} needs manual intervention: {}",
-                                job.job_id, message
-                            ))
+                            // Only notify once per job to prevent notification spam.
+                            // The job should have been transitioned to Failed by
+                            // repair_stuck_job, but guard against that failing too.
+                            if notified_manual.insert(job.job_id) {
+                                Some(format!(
+                                    "Job {} needs manual intervention: {}",
+                                    job.job_id, message
+                                ))
+                            } else {
+                                None
+                            }
                         }
                         Ok(RepairResult::Retry { message }) => {
                             tracing::warn!("Repair needs retry: {}", message);
