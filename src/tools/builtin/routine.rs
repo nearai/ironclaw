@@ -708,6 +708,11 @@ pub(crate) fn routine_update_parameters_schema() -> Value {
                 "description": "Maximum LLM iterations for full_job routines (1-200).",
                 "minimum": 1,
                 "maximum": 200
+            },
+            "delivery": {
+                "type": "object",
+                "description": "Update delivery settings (channel, user, agent review).",
+                "properties": delivery_properties()
             }
         },
         "required": ["name"]
