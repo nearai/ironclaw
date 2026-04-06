@@ -422,9 +422,10 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
     if server.has_custom_auth_header() {
         println!();
         println!(
-            "  Server '{}' uses a configured Authorization header. No separate 'ironclaw mcp auth' flow is available.",
+            "  Server '{}' is configured with an Authorization header, so 'ironclaw mcp auth' is not used for this configuration.",
             name
         );
+        println!("  Update or remove that header if you want to switch auth methods.");
         println!();
         return Ok(());
     }
