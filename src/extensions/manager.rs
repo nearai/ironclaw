@@ -15,12 +15,13 @@ use crate::channels::wasm::{
     WasmChannelRouter, WasmChannelRuntime, bot_username_setting_key,
 };
 use crate::channels::{ChannelManager, OutgoingResponse};
+use crate::code_challenge::{CodeChallengeFlow, PendingCodeChallenge, VerificationChallenge};
 use crate::extensions::discovery::OnlineDiscovery;
 use crate::extensions::registry::ExtensionRegistry;
 use crate::extensions::{
     ActivateResult, AuthResult, ConfigureResult, ExtensionError, ExtensionKind, ExtensionSource,
     InstallResult, InstalledExtension, RegistryEntry, ResultSource, SearchResult, ToolAuthState,
-    UpgradeOutcome, UpgradeResult, VerificationChallenge,
+    UpgradeOutcome, UpgradeResult,
     naming::{canonicalize_extension_name, legacy_extension_alias},
 };
 use crate::hooks::HookRegistry;
@@ -165,11 +166,11 @@ enum TelegramOwnerBindingState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PendingTelegramVerificationChallenge {
-    code: String,
+struct TelegramVerificationMeta {
     bot_username: Option<String>,
-    expires_at_unix: u64,
 }
+
+type PendingTelegramVerificationChallenge = PendingCodeChallenge<TelegramVerificationMeta>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TelegramBindingResult {
@@ -308,40 +309,78 @@ fn unix_timestamp_secs() -> u64 {
         .as_secs()
 }
 
-fn generate_telegram_verification_code() -> String {
-    use rand::Rng;
-    rand::thread_rng()
-        .sample_iter(&rand::distributions::Alphanumeric)
-        .take(TELEGRAM_OWNER_BIND_CODE_LEN)
-        .map(char::from)
-        .collect::<String>()
-        .to_lowercase()
-}
+#[derive(Debug, Clone, Copy)]
+struct TelegramVerificationFlow;
 
-fn telegram_verification_deep_link(bot_username: Option<&str>, code: &str) -> Option<String> {
-    bot_username
-        .filter(|username| !username.trim().is_empty())
-        .map(|username| format!("https://t.me/{username}?start={code}"))
-}
-
-fn telegram_verification_instructions(bot_username: Option<&str>, code: &str) -> String {
-    if let Some(username) = bot_username.filter(|username| !username.trim().is_empty()) {
-        return format!(
-            "Send `/start {code}` to @{username} in Telegram. IronClaw will finish setup automatically."
-        );
+impl TelegramVerificationFlow {
+    fn deep_link(bot_username: Option<&str>, code: &str) -> Option<String> {
+        bot_username
+            .filter(|username| !username.trim().is_empty())
+            .map(|username| format!("https://t.me/{username}?start={code}"))
     }
 
-    format!("Send `/start {code}` to your Telegram bot. IronClaw will finish setup automatically.")
+    fn instructions(bot_username: Option<&str>, code: &str) -> String {
+        if let Some(username) = bot_username.filter(|username| !username.trim().is_empty()) {
+            return format!(
+                "Send `/start {code}` to @{username} in Telegram. IronClaw will finish setup automatically."
+            );
+        }
+
+        format!(
+            "Send `/start {code}` to your Telegram bot. IronClaw will finish setup automatically."
+        )
+    }
 }
 
+impl CodeChallengeFlow for TelegramVerificationFlow {
+    type Meta = TelegramVerificationMeta;
+
+    fn issue_code(&self) -> String {
+        crate::code_challenge::generate_code(
+            TELEGRAM_OWNER_BIND_CODE_LEN,
+            b"abcdefghijklmnopqrstuvwxyz0123456789",
+        )
+    }
+
+    fn render_challenge(
+        &self,
+        pending: &PendingTelegramVerificationChallenge,
+    ) -> VerificationChallenge {
+        VerificationChallenge {
+            code: pending.code.clone(),
+            instructions: Self::instructions(pending.meta.bot_username.as_deref(), &pending.code),
+            deep_link: Self::deep_link(pending.meta.bot_username.as_deref(), &pending.code),
+        }
+    }
+
+    fn matches_submission(
+        &self,
+        pending: &PendingTelegramVerificationChallenge,
+        submission: &str,
+    ) -> bool {
+        let code = &pending.code;
+        let trimmed = submission.trim();
+        trimmed == code
+            || trimmed == format!("/start {code}")
+            || trimmed
+                .split_whitespace()
+                .map(|token| token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-'))
+                .any(|token| token == code)
+    }
+}
+
+const TELEGRAM_VERIFICATION_FLOW: TelegramVerificationFlow = TelegramVerificationFlow;
+
+#[cfg(test)]
 fn telegram_message_matches_verification_code(text: &str, code: &str) -> bool {
-    let trimmed = text.trim();
-    trimmed == code
-        || trimmed == format!("/start {code}")
-        || trimmed
-            .split_whitespace()
-            .map(|token| token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-'))
-            .any(|token| token == code)
+    TELEGRAM_VERIFICATION_FLOW.matches_submission(
+        &PendingCodeChallenge::new(
+            code.to_string(),
+            TelegramVerificationMeta { bot_username: None },
+            u64::MAX,
+        ),
+        text,
+    )
 }
 
 async fn send_telegram_text_message(
@@ -624,18 +663,22 @@ impl ExtensionManager {
         bot_username: Option<&str>,
     ) {
         let code = code.to_string();
-        let bot_username = bot_username.map(str::to_string);
+        let meta = TelegramVerificationMeta {
+            bot_username: bot_username.map(str::to_string),
+        };
         self.set_test_telegram_binding_resolver(Arc::new(move |_token, existing_owner_id| {
             if existing_owner_id.is_some() {
                 return Err(ExtensionError::Other(
                     "unexpected existing owner binding".to_string(),
                 ));
             }
-            Ok(TelegramBindingResult::Pending(VerificationChallenge {
-                code: code.clone(),
-                instructions: telegram_verification_instructions(bot_username.as_deref(), &code),
-                deep_link: telegram_verification_deep_link(bot_username.as_deref(), &code),
-            }))
+            Ok(TelegramBindingResult::Pending(
+                TELEGRAM_VERIFICATION_FLOW.render_challenge(&PendingCodeChallenge::new(
+                    code.clone(),
+                    meta.clone(),
+                    u64::MAX,
+                )),
+            ))
         }))
         .await;
     }
@@ -918,7 +961,7 @@ impl ExtensionManager {
         let now = unix_timestamp_secs();
         let mut guard = self.pending_telegram_verification.write().await;
         let challenge = guard.get(name).cloned()?;
-        if challenge.expires_at_unix <= now {
+        if challenge.is_expired(now) {
             guard.remove(name);
             return None;
         }
@@ -964,25 +1007,16 @@ impl ExtensionManager {
             )));
         }
 
-        let challenge = PendingTelegramVerificationChallenge {
-            code: generate_telegram_verification_code(),
-            bot_username: bot_username.map(str::to_string),
-            expires_at_unix: unix_timestamp_secs() + TELEGRAM_OWNER_BIND_CHALLENGE_TTL_SECS,
-        };
+        let challenge = TELEGRAM_VERIFICATION_FLOW.issue_challenge(
+            TelegramVerificationMeta {
+                bot_username: bot_username.map(str::to_string),
+            },
+            unix_timestamp_secs() + TELEGRAM_OWNER_BIND_CHALLENGE_TTL_SECS,
+        );
         self.set_pending_telegram_verification(name, challenge.clone())
             .await;
 
-        Ok(VerificationChallenge {
-            code: challenge.code.clone(),
-            instructions: telegram_verification_instructions(
-                challenge.bot_username.as_deref(),
-                &challenge.code,
-            ),
-            deep_link: telegram_verification_deep_link(
-                challenge.bot_username.as_deref(),
-                &challenge.code,
-            ),
-        })
+        Ok(TELEGRAM_VERIFICATION_FLOW.render_challenge(&challenge))
     }
 
     /// Set just the channel manager for relay channel hot-activation.
@@ -5575,7 +5609,7 @@ impl ExtensionManager {
         };
 
         let now = unix_timestamp_secs();
-        if challenge.expires_at_unix <= now {
+        if challenge.is_expired(now) {
             self.clear_pending_telegram_verification(name).await;
             return Ok(TelegramBindingResult::Pending(
                 self.issue_telegram_verification_challenge(
@@ -5642,7 +5676,7 @@ impl ExtensionManager {
                     && let Some(from) = message.from
                     && !from.is_bot
                     && let Some(text) = message.text.as_deref()
-                    && telegram_message_matches_verification_code(text, &challenge.code)
+                    && TELEGRAM_VERIFICATION_FLOW.matches_submission(&challenge, text)
                 {
                     bound_owner_id = Some(from.id);
                 }
@@ -7324,7 +7358,7 @@ mod tests {
             )
             .map_err(|e| format!("runtime init failed: {e}"))?,
         );
-        let pairing_store = Arc::new(crate::pairing::PairingStore::new());
+        let pairing_store = Arc::new(crate::pairing::PairingStore::new_noop());
         let router = Arc::new(crate::channels::wasm::WasmChannelRouter::new());
         let mut owner_ids = std::collections::HashMap::new();
         owner_ids.insert("telegram".to_string(), 12345_i64);
@@ -7414,9 +7448,7 @@ mod tests {
             WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
                 .map_err(|err| format!("runtime: {err}"))?,
         );
-        let pairing_store = Arc::new(PairingStore::with_base_dir(
-            dir.path().join("pairing-state"),
-        ));
+        let pairing_store = Arc::new(PairingStore::new_noop());
         let router = Arc::new(WasmChannelRouter::new());
         manager
             .set_channel_runtime(
@@ -7693,7 +7725,7 @@ mod tests {
             )
             .map_err(|e| format!("runtime init failed: {e}"))?,
         );
-        let pairing_store = Arc::new(crate::pairing::PairingStore::new());
+        let pairing_store = Arc::new(crate::pairing::PairingStore::new_noop());
         let router = Arc::new(crate::channels::wasm::WasmChannelRouter::new());
         let mut owner_ids = std::collections::HashMap::new();
         owner_ids.insert("telegram".to_string(), 12345_i64);
@@ -7734,7 +7766,7 @@ mod tests {
                     WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
                         .map_err(|err| format!("runtime: {err}"))?,
                 ),
-                pairing_store: Arc::new(PairingStore::with_base_dir(dir.path().join("pairing"))),
+                pairing_store: Arc::new(PairingStore::new_noop()),
                 wasm_channel_router: Arc::new(WasmChannelRouter::new()),
                 wasm_channel_owner_ids: std::collections::HashMap::new(),
             });
@@ -7784,7 +7816,7 @@ mod tests {
                     WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
                         .map_err(|err| format!("runtime: {err}"))?,
                 ),
-                pairing_store: Arc::new(PairingStore::with_base_dir(dir.path().join("pairing"))),
+                pairing_store: Arc::new(PairingStore::new_noop()),
                 wasm_channel_router: Arc::new(WasmChannelRouter::new()),
                 wasm_channel_owner_ids: std::collections::HashMap::new(),
             });

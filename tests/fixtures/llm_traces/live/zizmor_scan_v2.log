@@ -1,0 +1,28 @@
+# Live Test Session: zizmor_scan_v2
+# Mode: Live
+# LLM calls: 4, Input tokens: 52200, Output tokens: 477
+# Wall time: 9.7s, Cost: $0.0224
+# ──────────────────────────────────────────────────
+
+› can we run https://github.com/zizmorcore/zizmor
+  ○ Processing...
+  ○ Calling LLM...
+  ○ Step complete — 9624 in / 118 out tokens
+  ● tool_search(zizmor)
+  ✓ tool_search(zizmor)
+  ● http(https://github.com/zizmorcore/zizmor)
+  ✓ http(https://github.com/zizmorcore/zizmor)
+  ○ Calling LLM...
+  ○ Step complete — 10895 in / 125 out tokens
+  ● tool_search(zizmor github actions security)
+  ✓ tool_search(zizmor github actions security)
+  ● tool_list
+  ✓ tool_list
+  ○ Calling LLM...
+  ○ Step complete — 15823 in / 65 out tokens
+  ● tool_search(zizmor)
+  ✓ tool_search(zizmor)
+  ○ Calling LLM...
+  ○ Step complete — 15858 in / 169 out tokens
+────────────────────────────────────────────────────
+Tool 'shell' requires approval. Reply 'yes' to approve, 'no' to deny.

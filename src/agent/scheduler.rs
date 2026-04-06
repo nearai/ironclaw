@@ -15,7 +15,7 @@ use crate::error::{Error, JobError};
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
-use crate::tenant::AdminScope;
+use crate::tenant::SystemScope;
 use crate::tools::{
     ApprovalContext, ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_error,
     prepare_tool_params,
@@ -52,7 +52,7 @@ struct ScheduledSubtask {
 pub struct SchedulerDeps {
     pub tools: Arc<ToolRegistry>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
-    pub store: Option<AdminScope>,
+    pub store: Option<SystemScope>,
     pub hooks: Arc<HookRegistry>,
 }
 
@@ -64,7 +64,7 @@ pub struct Scheduler {
     safety: Arc<SafetyLayer>,
     tools: Arc<ToolRegistry>,
     extension_manager: Option<Arc<ExtensionManager>>,
-    store: Option<AdminScope>,
+    store: Option<SystemScope>,
     hooks: Arc<HookRegistry>,
     /// SSE manager for live job event streaming.
     sse_tx: Option<Arc<crate::channels::web::sse::SseManager>>,

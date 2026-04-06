@@ -1669,9 +1669,15 @@ mod tests {
     async fn test_list_jobs_tool() {
         let manager = Arc::new(ContextManager::new(5));
 
-        // Create some jobs
-        manager.create_job("Job 1", "Desc 1").await.unwrap(); // safety: test
-        manager.create_job("Job 2", "Desc 2").await.unwrap(); // safety: test
+        // Create jobs owned by "default" to match JobContext::default()'s user_id.
+        manager
+            .create_job_for_user("default", "Job 1", "Desc 1")
+            .await
+            .unwrap(); // safety: test
+        manager
+            .create_job_for_user("default", "Job 2", "Desc 2")
+            .await
+            .unwrap(); // safety: test
 
         let tool = ListJobsTool::new(manager);
 
@@ -1686,7 +1692,11 @@ mod tests {
     #[tokio::test]
     async fn test_job_status_tool() {
         let manager = Arc::new(ContextManager::new(5));
-        let job_id = manager.create_job("Test Job", "Description").await.unwrap(); // safety: test
+        // Create job owned by "default" to match JobContext::default()'s user_id.
+        let job_id = manager
+            .create_job_for_user("default", "Test Job", "Description")
+            .await
+            .unwrap(); // safety: test
 
         let tool = JobStatusTool::new(manager);
 

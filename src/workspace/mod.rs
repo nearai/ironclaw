@@ -58,6 +58,8 @@ pub use document::{
     is_config_path, is_identity_path, merge_workspace_entries, paths,
 };
 pub use embedding_cache::{CachedEmbeddingProvider, EmbeddingCacheConfig};
+#[cfg(feature = "bedrock")]
+pub use embeddings::BedrockEmbeddings;
 pub use embeddings::{
     EmbeddingProvider, MockEmbeddings, NearAiEmbeddings, OllamaEmbeddings, OpenAiEmbeddings,
 };

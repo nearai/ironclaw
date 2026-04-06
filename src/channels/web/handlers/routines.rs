@@ -14,10 +14,11 @@ use crate::agent::routine::{
     RoutineDisplayStatus, RoutineVerificationStatus, Trigger, next_cron_fire,
     routine_display_status_for_verification, routine_verification_status,
 };
-use crate::channels::web::auth::AuthenticatedUser;
+use crate::channels::web::auth::{AuthenticatedUser, ownership_identity};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::error::RoutineError;
+use crate::ownership::{OwnerId, can_act_on};
 
 pub async fn routines_list_handler(
     State(state): State<Arc<GatewayState>>,
@@ -139,7 +140,8 @@ pub async fn routines_detail_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
-    if routine.user_id != user.user_id {
+    let actor = ownership_identity(&user);
+    if !can_act_on(&actor, &OwnerId::from(routine.user_id.clone())) {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 
@@ -251,7 +253,8 @@ pub async fn routines_toggle_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
-    if routine.user_id != user.user_id {
+    let actor = ownership_identity(&user);
+    if !can_act_on(&actor, &OwnerId::from(routine.user_id.clone())) {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 
@@ -318,7 +321,8 @@ pub async fn routines_delete_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
-    if routine.user_id != user.user_id {
+    let actor = ownership_identity(&user);
+    if !can_act_on(&actor, &OwnerId::from(routine.user_id.clone())) {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 
@@ -366,7 +370,8 @@ pub async fn routines_runs_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
-    if routine.user_id != user.user_id {
+    let actor = ownership_identity(&user);
+    if !can_act_on(&actor, &OwnerId::from(routine.user_id.clone())) {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 

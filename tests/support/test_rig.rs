@@ -411,12 +411,14 @@ pub struct WasmToolSpec {
 pub struct TestRigBuilder {
     trace: Option<LlmTrace>,
     llm: Option<Arc<dyn LlmProvider>>,
+    config_override: Option<Config>,
     max_tool_iterations: usize,
     injection_check: bool,
     auto_approve_tools: Option<bool>,
     enable_skills: bool,
     enable_routines: bool,
     http_exchanges: Vec<HttpExchange>,
+    http_interceptor_override: Option<Arc<dyn HttpInterceptor>>,
     extra_tools: Vec<Arc<dyn Tool>>,
     wasm_tools: Vec<WasmToolSpec>,
     keep_bootstrap: bool,
@@ -429,12 +431,14 @@ impl TestRigBuilder {
         Self {
             trace: None,
             llm: None,
+            config_override: None,
             max_tool_iterations: 10,
             injection_check: false,
             auto_approve_tools: Some(true),
             enable_skills: false,
             enable_routines: false,
             http_exchanges: Vec::new(),
+            http_interceptor_override: None,
             extra_tools: Vec::new(),
             wasm_tools: Vec::new(),
             keep_bootstrap: false,
@@ -474,6 +478,19 @@ impl TestRigBuilder {
     /// Override the LLM provider directly (takes precedence over trace).
     pub fn with_llm(mut self, llm: Arc<dyn LlmProvider>) -> Self {
         self.llm = Some(llm);
+        self
+    }
+
+    /// Override the Config to mirror real binary behavior.
+    ///
+    /// When set, uses this config instead of `Config::for_testing()`.
+    /// The database path is still overridden to use a temp libSQL file,
+    /// but agent settings (`allow_local_tools`, `engine_v2`, etc.) are
+    /// preserved from the provided config. Post-build forcing of
+    /// `allow_local_tools = true` is skipped so the test matches the
+    /// real binary's tool availability.
+    pub fn with_config(mut self, config: Config) -> Self {
+        self.config_override = Some(config);
         self
     }
 
@@ -540,6 +557,17 @@ impl TestRigBuilder {
         self
     }
 
+    /// Override the HTTP interceptor directly.
+    ///
+    /// When set, this interceptor is used instead of constructing a
+    /// `ReplayingHttpInterceptor` from trace http_exchanges or
+    /// `with_http_exchanges()`. Useful for live-mode recording where a
+    /// `RecordingHttpInterceptor` captures real HTTP traffic.
+    pub fn with_http_interceptor(mut self, interceptor: Arc<dyn HttpInterceptor>) -> Self {
+        self.http_interceptor_override = Some(interceptor);
+        self
+    }
+
     /// Build the test rig, creating a real agent and spawning it in the background.
     ///
     /// Uses `AppBuilder::build_all()` to get the same component set as the real
@@ -555,12 +583,14 @@ impl TestRigBuilder {
         let TestRigBuilder {
             trace,
             llm,
+            config_override,
             max_tool_iterations,
             injection_check,
             auto_approve_tools,
             enable_skills,
             enable_routines,
             http_exchanges: explicit_http_exchanges,
+            http_interceptor_override,
             extra_tools,
             wasm_tools,
             keep_bootstrap,
@@ -579,12 +609,22 @@ impl TestRigBuilder {
             .expect("failed to run migrations");
         let db: Arc<dyn ironclaw::db::Database> = Arc::new(backend);
 
-        // 2. Build Config::for_testing().
+        // 2. Build Config.
+        let has_config_override = config_override.is_some();
         let skills_dir = temp_dir.path().join("skills");
         let installed_skills_dir = temp_dir.path().join("installed_skills");
         let _ = std::fs::create_dir_all(&skills_dir);
         let _ = std::fs::create_dir_all(&installed_skills_dir);
-        let mut config = Config::for_testing(db_path, skills_dir, installed_skills_dir);
+        let mut config = if let Some(mut cfg) = config_override {
+            // Override database to use temp libSQL, but preserve agent/llm settings.
+            cfg.database.backend = ironclaw::config::DatabaseBackend::LibSql;
+            cfg.database.libsql_path = Some(db_path);
+            cfg.skills.local_dir = skills_dir;
+            cfg.skills.installed_dir = installed_skills_dir;
+            cfg
+        } else {
+            Config::for_testing(db_path, skills_dir, installed_skills_dir)
+        };
         config.agent.max_tool_iterations = max_tool_iterations;
         config.safety.injection_check_enabled = injection_check;
         config.skills.enabled = enable_skills;
@@ -659,13 +699,25 @@ impl TestRigBuilder {
         }
 
         // AppBuilder may re-resolve config from env/TOML and override test defaults.
-        // Force test-rig agent flags to the requested deterministic values.
-        components.config.agent.auto_approve_tools = auto_approve_tools.unwrap_or(true);
-        components.config.agent.allow_local_tools = true;
-        components.config.agent.engine_v2 = engine_v2;
+        // When a config override was provided, preserve its agent settings to mirror
+        // the real binary. Otherwise force deterministic test defaults.
+        if has_config_override {
+            if let Some(v) = auto_approve_tools {
+                components.config.agent.auto_approve_tools = v;
+            }
+            // allow_local_tools comes from the provided config.
+            // engine_v2: honour the builder's explicit override if set.
+            if engine_v2 {
+                components.config.agent.engine_v2 = true;
+            }
+        } else {
+            components.config.agent.auto_approve_tools = auto_approve_tools.unwrap_or(true);
+            components.config.agent.allow_local_tools = true;
+            components.config.agent.engine_v2 = engine_v2;
+        }
 
         // Reset engine v2 global state so each test gets a clean engine instance.
-        if engine_v2 {
+        if components.config.agent.engine_v2 {
             ironclaw::bridge::reset_engine_state().await;
         }
 
@@ -673,7 +725,12 @@ impl TestRigBuilder {
             Arc::new(tokio::sync::RwLock::new(None));
 
         // Build HTTP interceptor once — shared by both AgentDeps and WASM tools.
-        let http_interceptor: Option<Arc<dyn HttpInterceptor>> = {
+        // Direct override takes priority (e.g. RecordingHttpInterceptor for live tests).
+        let http_interceptor: Option<Arc<dyn HttpInterceptor>> = if let Some(override_interceptor) =
+            http_interceptor_override
+        {
+            Some(override_interceptor)
+        } else {
             let exchanges = if explicit_http_exchanges.is_empty() {
                 trace_http_exchanges
             } else {
@@ -688,9 +745,12 @@ impl TestRigBuilder {
 
         // 6. Register job tools, routine tools, and extra tools.
         {
-            // Ensure filesystem/shell dev tools are always available in the
-            // test rig, even if upstream builder flags/config disable local tools.
-            components.tools.register_dev_tools();
+            // Register filesystem/shell dev tools. When using a config override
+            // (real-binary parity mode), respect the allow_local_tools flag.
+            // Otherwise always register them for test convenience.
+            if !has_config_override || components.config.agent.allow_local_tools {
+                components.tools.register_dev_tools();
+            }
 
             components.tools.register_job_tools(
                 Arc::clone(&components.context_manager),
@@ -712,7 +772,7 @@ impl TestRigBuilder {
                 let (notify_tx, _notify_rx) = tokio::sync::mpsc::channel(16);
                 let engine = Arc::new(RoutineEngine::new(
                     routine_config,
-                    ironclaw::tenant::AdminScope::new(Arc::clone(db_arc)),
+                    ironclaw::tenant::SystemScope::new(Arc::clone(db_arc)),
                     components.llm.clone(),
                     Arc::clone(ws),
                     notify_tx,

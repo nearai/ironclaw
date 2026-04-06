@@ -51,7 +51,7 @@ Options:
 
       --auto-approve
           Auto-approve tool execution (shell, file writes, HTTP, etc.)
-          
+
           Skips interactive approval prompts for standard tools. Destructive operations still require explicit approval. Other safeguards remain active: rate limits, hooks, authentication gates.
 
   -h, --help

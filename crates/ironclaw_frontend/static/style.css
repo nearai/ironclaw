@@ -3629,6 +3629,28 @@ body {
   margin-bottom: 4px;
 }
 
+.pairing-help {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.pairing-input {
+  flex: 1;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-family: inherit;
+}
+
+.pairing-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .pairing-code {
   font-family: var(--font-mono);
   font-size: var(--text-sm);
@@ -6317,3 +6339,83 @@ body.theme-transition *:not(svg):not(path):not(line):not(circle):not(rect) {
 .btn-primary { background: var(--accent); color: #fff; border: none; padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
 .btn-primary:hover { opacity: 0.9; }
 .btn-secondary { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border); padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
+
+/* --- Tool Permissions Tab --- */
+.tool-permission-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.tool-permission-row:last-child { border-bottom: none; }
+.tool-permission-row:hover { background: var(--bg-secondary); border-radius: var(--radius-md); }
+
+.tool-permission-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.tool-permission-name {
+  font-weight: 600;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+.tool-permission-desc {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tool-permission-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.tool-permission-toggle {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.tool-permission-toggle button {
+  padding: 4px 10px;
+  border: none;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: var(--text-xs);
+  transition: background var(--transition-fast), color var(--transition-fast);
+  border-right: 1px solid var(--border);
+}
+.tool-permission-toggle button:last-child { border-right: none; }
+.tool-permission-toggle button:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.tool-permission-toggle button.active {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.tool-lock-icon {
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  cursor: help;
+}
+
+.tool-default-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-size: 0.7rem;
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}

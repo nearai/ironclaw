@@ -83,6 +83,7 @@ fn build_state(
         active_config: ActiveConfigSnapshot::default(),
         secrets_store: None,
         db_auth: None,
+        pairing_store: None,
         oauth_providers: None,
         oauth_state_store: None,
         oauth_base_url: None,

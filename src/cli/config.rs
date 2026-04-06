@@ -59,45 +59,40 @@ pub enum ConfigCommand {
 /// Connects to the database to read/write settings. Falls back to disk
 /// if the database is not available.
 pub async fn run_config_command(cmd: ConfigCommand) -> anyhow::Result<()> {
-    // Try to connect to the DB for settings access
-    let db: Option<Arc<dyn crate::db::Database>> = match connect_db().await {
-        Ok(d) => Some(d),
-        Err(e) => {
-            eprintln!(
-                "Warning: Could not connect to database ({}), using disk fallback",
-                e
-            );
-            None
-        }
-    };
+    // Resolve config to get owner_id and database settings.
+    let config = crate::config::Config::from_env()
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let owner_id = config.owner_id.clone();
+
+    // Try to connect to the DB for settings access.
+    let db: Option<Arc<dyn crate::db::Database>> =
+        match crate::db::connect_from_config(&config.database).await {
+            Ok(d) => Some(d),
+            Err(e) => {
+                eprintln!(
+                    "Warning: Could not connect to database ({}), using disk fallback",
+                    e
+                );
+                None
+            }
+        };
 
     let db_ref = db.as_deref();
     match cmd {
-        ConfigCommand::Init { output, force } => init_toml(db_ref, output, force).await,
-        ConfigCommand::List { filter } => list_settings(db_ref, filter).await,
-        ConfigCommand::Get { path } => get_setting(db_ref, &path).await,
-        ConfigCommand::Set { path, value } => set_setting(db_ref, &path, &value).await,
-        ConfigCommand::Reset { path } => reset_setting(db_ref, &path).await,
+        ConfigCommand::Init { output, force } => init_toml(db_ref, &owner_id, output, force).await,
+        ConfigCommand::List { filter } => list_settings(db_ref, &owner_id, filter).await,
+        ConfigCommand::Get { path } => get_setting(db_ref, &owner_id, &path).await,
+        ConfigCommand::Set { path, value } => set_setting(db_ref, &owner_id, &path, &value).await,
+        ConfigCommand::Reset { path } => reset_setting(db_ref, &owner_id, &path).await,
         ConfigCommand::Path => show_path(db_ref.is_some()),
     }
 }
 
-/// Bootstrap a DB connection for config commands (backend-agnostic).
-async fn connect_db() -> anyhow::Result<Arc<dyn crate::db::Database>> {
-    let config = crate::config::Config::from_env()
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-    crate::db::connect_from_config(&config.database)
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))
-}
-
-const DEFAULT_USER_ID: &str = "default";
-
 /// Load settings: DB if available, else disk.
-async fn load_settings(store: Option<&dyn crate::db::Database>) -> Settings {
+async fn load_settings(store: Option<&dyn crate::db::Database>, owner_id: &str) -> Settings {
     if let Some(store) = store {
-        match store.get_all_settings(DEFAULT_USER_ID).await {
+        match store.get_all_settings(owner_id).await {
             Ok(map) if !map.is_empty() => return Settings::from_db_map(&map),
             _ => {}
         }
@@ -108,9 +103,10 @@ async fn load_settings(store: Option<&dyn crate::db::Database>) -> Settings {
 /// List all settings.
 async fn list_settings(
     store: Option<&dyn crate::db::Database>,
+    owner_id: &str,
     filter: Option<String>,
 ) -> anyhow::Result<()> {
-    let settings = load_settings(store).await;
+    let settings = load_settings(store, owner_id).await;
     let all = settings.list();
 
     let max_key_len = all.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
@@ -140,8 +136,12 @@ async fn list_settings(
 }
 
 /// Get a specific setting.
-async fn get_setting(store: Option<&dyn crate::db::Database>, path: &str) -> anyhow::Result<()> {
-    let settings = load_settings(store).await;
+async fn get_setting(
+    store: Option<&dyn crate::db::Database>,
+    owner_id: &str,
+    path: &str,
+) -> anyhow::Result<()> {
+    let settings = load_settings(store, owner_id).await;
 
     match settings.get(path) {
         Some(value) => {
@@ -157,10 +157,11 @@ async fn get_setting(store: Option<&dyn crate::db::Database>, path: &str) -> any
 /// Set a setting value.
 async fn set_setting(
     store: Option<&dyn crate::db::Database>,
+    owner_id: &str,
     path: &str,
     value: &str,
 ) -> anyhow::Result<()> {
-    let mut settings = load_settings(store).await;
+    let mut settings = load_settings(store, owner_id).await;
 
     settings
         .set(path, value)
@@ -174,7 +175,7 @@ async fn set_setting(
         Err(_) => serde_json::Value::String(value.to_string()),
     };
     store
-        .set_setting(DEFAULT_USER_ID, path, &json_value)
+        .set_setting(owner_id, path, &json_value)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to save to database: {}", e))?;
 
@@ -183,7 +184,11 @@ async fn set_setting(
 }
 
 /// Reset a setting to default.
-async fn reset_setting(store: Option<&dyn crate::db::Database>, path: &str) -> anyhow::Result<()> {
+async fn reset_setting(
+    store: Option<&dyn crate::db::Database>,
+    owner_id: &str,
+    path: &str,
+) -> anyhow::Result<()> {
     let default = Settings::default();
     let default_value = default
         .get(path)
@@ -193,7 +198,7 @@ async fn reset_setting(store: Option<&dyn crate::db::Database>, path: &str) -> a
         anyhow::anyhow!("Database connection required to reset settings. Check DATABASE_URL.")
     })?;
     store
-        .delete_setting(DEFAULT_USER_ID, path)
+        .delete_setting(owner_id, path)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to delete setting from database: {}", e))?;
 
@@ -204,6 +209,7 @@ async fn reset_setting(store: Option<&dyn crate::db::Database>, path: &str) -> a
 /// Generate a default TOML config file.
 async fn init_toml(
     store: Option<&dyn crate::db::Database>,
+    owner_id: &str,
     output: Option<std::path::PathBuf>,
     force: bool,
 ) -> anyhow::Result<()> {
@@ -218,7 +224,7 @@ async fn init_toml(
 
     // Start from current settings (DB or defaults) so the generated file
     // reflects the user's existing configuration.
-    let settings = load_settings(store).await;
+    let settings = load_settings(store, owner_id).await;
 
     settings
         .save_toml(&path)
@@ -291,7 +297,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
-        init_toml(None, Some(path.clone()), false).await.unwrap();
+        init_toml(None, "default", Some(path.clone()), false)
+            .await
+            .unwrap();
         assert!(path.exists());
 
         let content = std::fs::read_to_string(&path).unwrap();
@@ -304,7 +312,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "existing").unwrap();
 
-        let result = init_toml(None, Some(path.clone()), false).await;
+        let result = init_toml(None, "default", Some(path.clone()), false).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
     }
@@ -315,7 +323,9 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "old content").unwrap();
 
-        init_toml(None, Some(path.clone()), true).await.unwrap();
+        init_toml(None, "default", Some(path.clone()), true)
+            .await
+            .unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("[agent]"));

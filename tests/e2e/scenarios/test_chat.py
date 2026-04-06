@@ -115,3 +115,53 @@ async def test_copy_from_chat_forces_plain_text(page):
     assert copied["defaultPrevented"] is True
     assert "Copy me into Sheets" in copied["text"]
     assert copied["html"] == ""
+
+
+async def test_turn_cost_event_does_not_render_message_badge(page):
+    """Usage SSE events should not append token/cost footers to chat messages."""
+    await page.evaluate(
+        """
+        () => {
+          currentThreadId = 'thread-turn-cost-test';
+          addMessage('assistant', 'No footer please');
+        }
+        """
+    )
+
+    badge_count = await page.evaluate(
+        """
+        () => {
+          const before = document.querySelectorAll('.turn-cost-badge').length;
+          const hasEventSource =
+            typeof eventSource !== 'undefined' && !!eventSource && !!eventSource.dispatchEvent;
+          if (!hasEventSource) {
+            return {
+              before,
+              after: document.querySelectorAll('.turn-cost-badge').length,
+              text: document.querySelector('#chat-messages .message.assistant:last-child')?.textContent || '',
+              hasEventSource,
+            };
+          }
+          eventSource.dispatchEvent(new MessageEvent('turn_cost', {
+            data: JSON.stringify({
+              thread_id: currentThreadId || 'thread-turn-cost-test',
+              input_tokens: 632101,
+              output_tokens: 0,
+              cost_usd: '$1.6296',
+            }),
+          }));
+          return {
+            before,
+            after: document.querySelectorAll('.turn-cost-badge').length,
+            text: document.querySelector('#chat-messages .message.assistant:last-child')?.textContent || '',
+            hasEventSource,
+          };
+        }
+        """
+    )
+
+    assert badge_count["hasEventSource"] is True
+    assert badge_count["before"] == 0
+    assert badge_count["after"] == 0
+    assert "632,101 tokens" not in badge_count["text"]
+    assert "$1.6296" not in badge_count["text"]
