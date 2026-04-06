@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/ironclaw_common", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_engine"]
+members = [".", "crates/ironclaw_common", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_engine", "crates/ironclaw_hooks", "crates/proof_of_claw"]
 exclude = [
     "channels-src/discord",
     "channels-src/telegram",
@@ -113,6 +113,13 @@ ironclaw_common = { path = "crates/ironclaw_common", version = "0.1.0" }
 ironclaw_engine = { path = "crates/ironclaw_engine", version = "0.1.0" }
 ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.0" }
 ironclaw_skills = { path = "crates/ironclaw_skills", version = "0.1.0" }
+
+# Proof of Claw — provable agent runtime + IronClaw lifecycle hooks (0G trace/policy)
+proof_of_claw = { path = "crates/proof_of_claw", version = "0.1.0", features = ["ironclaw"] }
+
+# Shared hook interface (proof_of_claw ↔ ironclaw integration)
+ironclaw-hooks = { path = "crates/ironclaw_hooks", version = "0.1.0" }
+
 regex = "1"
 aho-corasick = "1"
 
@@ -181,6 +188,7 @@ bytes = "1"
 base64 = "0.22.1"
 cookie = "0.18"
 jsonwebtoken = "9"
+async-stream = "0.3"
 mime_guess = "2.0.5"
 clap_complete = "4.5.0"
 lru = "0.16.3"

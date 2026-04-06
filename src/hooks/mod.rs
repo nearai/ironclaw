@@ -21,5 +21,7 @@ pub use bootstrap::{HookBootstrapSummary, bootstrap_hooks};
 pub use bundled::{
     HookBundleConfig, HookRegistrationSummary, register_bundle, register_bundled_hooks,
 };
-pub use hook::{Hook, HookContext, HookError, HookEvent, HookFailureMode, HookOutcome, HookPoint};
+// Re-export from ironclaw_hooks so the rest of the codebase can use
+// ironclaw::hooks::{Hook, ...} without needing to know about ironclaw_hooks directly.
+pub use ironclaw_hooks::{Hook, HookContext, HookError, HookEvent, HookFailureMode, HookOutcome, HookPoint};
 pub use registry::HookRegistry;

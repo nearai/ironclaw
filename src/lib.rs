@@ -64,6 +64,7 @@ pub mod observability;
 pub mod orchestrator;
 pub mod ownership;
 pub mod pairing;
+pub mod proof_of_claw_hooks;
 pub mod profile;
 pub mod registry;
 pub mod safety;

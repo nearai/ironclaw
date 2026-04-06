@@ -20,6 +20,7 @@ use ironclaw::{
     },
     config::Config,
     hooks::bootstrap_hooks,
+    proof_of_claw_hooks,
     llm::create_session_manager,
     orchestrator::{ReaperConfig, SandboxReaper},
     pairing::PairingStore,
@@ -582,6 +583,22 @@ async fn async_main() -> anyhow::Result<()> {
         errors = hook_bootstrap.errors,
         "Lifecycle hooks initialized"
     );
+
+    if std::env::var("PROOF_OF_CLAW_ENABLED")
+        .ok()
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    {
+        match proof_of_claw_hooks::register(&components.hooks).await {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "PROOF_OF_CLAW_ENABLED but Proof of Claw hook registration failed \
+                     (check ZERO_G_COMPUTE_ENDPOINT, ZERO_G_INDEXER_RPC, PRIVATE_KEY, and logs)"
+                );
+            }
+        }
+    }
 
     // Reuse the shared agent session manager prepared by AppBuilder.
     let session_manager = Arc::clone(&components.agent_session_manager);
