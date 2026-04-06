@@ -280,10 +280,7 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
     // bare "::1". Strip them so we recognize IPv6 literals before falling
     // through to the DNS-resolution branch (which on some systems with DNS
     // hijacking can produce a non-private IP and bypass this check).
-    let host_for_parse = host
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .unwrap_or(host);
+    let host_for_parse = host.trim_matches(|c| c == '[' || c == ']');
     if let Ok(ip) = host_for_parse.parse::<IpAddr>() {
         if is_dangerous_ip(&ip) {
             return Err(ConfigError::InvalidValue {
