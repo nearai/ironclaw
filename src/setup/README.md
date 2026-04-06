@@ -379,6 +379,12 @@ key first, then falls back to the standard env var.
 7. Print consolidated auth hints (deduplicated by provider, e.g. one hint
    for all Google tools sharing `google_oauth_token`)
 
+**Google OAuth note:** Google-suite tools can use a shared built-in desktop OAuth
+client for quick local setup. If the browser flow fails with "This app is blocked",
+the user must provide `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET`
+or enter the matching client credentials in the extension Setup tab, then retry
+the auth flow.
+
 **Registry lookup** (`load_registry_catalog`):
 Searches for `registry/` directory in order:
 1. Current working directory

@@ -58,6 +58,8 @@ struct HostedOAuthFlowStart {
     auth_url: String,
     expected_state: String,
     flow: crate::cli::oauth_defaults::PendingOAuthFlow,
+    instructions: Option<String>,
+    setup_url: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -1335,12 +1337,22 @@ impl ExtensionManager {
             },
         );
 
-        AuthResult::awaiting_authorization(
-            request.name,
-            request.kind,
-            auth_url,
-            "gateway".to_string(),
-        )
+        match request.instructions {
+            Some(instructions) => AuthResult::awaiting_authorization_with_guidance(
+                request.name,
+                request.kind,
+                auth_url,
+                "gateway".to_string(),
+                instructions,
+                request.setup_url,
+            ),
+            None => AuthResult::awaiting_authorization(
+                request.name,
+                request.kind,
+                auth_url,
+                "gateway".to_string(),
+            ),
+        }
     }
 
     /// Broadcast an extension status change to the web UI via SSE.
@@ -3520,6 +3532,8 @@ impl ExtensionManager {
                     auth_url: launch.auth_url,
                     expected_state: launch.expected_state,
                     flow,
+                    instructions: None,
+                    setup_url: None,
                 })
                 .await)
         } else {
@@ -3879,6 +3893,8 @@ impl ExtensionManager {
                     auth_url: launch.auth_url,
                     expected_state: launch.expected_state,
                     flow: pending_flow,
+                    instructions: None,
+                    setup_url: None,
                 })
                 .await,
             );
@@ -4366,6 +4382,7 @@ impl ExtensionManager {
             self.find_setup_credential_names(name).await;
         let setup_client_id_name = setup_client_id_entry.map(|(n, _)| n);
         let setup_client_secret_name = setup_client_secret_entry.map(|(n, _)| n);
+        let oauth_guidance = oauth.pending_instructions.clone();
 
         // Resolve client_id: setup secrets → inline → env var → builtin
         let client_id = self
@@ -4462,6 +4479,8 @@ impl ExtensionManager {
                     auth_url: launch.auth_url,
                     expected_state: launch.expected_state,
                     flow: launch.flow,
+                    instructions: oauth_guidance,
+                    setup_url: auth.setup_url.clone(),
                 })
                 .await)
         } else {
@@ -4582,12 +4601,22 @@ impl ExtensionManager {
                 },
             );
 
-            Ok(AuthResult::awaiting_authorization(
-                name,
-                ExtensionKind::WasmTool,
-                launch.auth_url,
-                "local".to_string(),
-            ))
+            Ok(match oauth_guidance {
+                Some(instructions) => AuthResult::awaiting_authorization_with_guidance(
+                    name,
+                    ExtensionKind::WasmTool,
+                    launch.auth_url,
+                    "local".to_string(),
+                    instructions,
+                    auth.setup_url.clone(),
+                ),
+                None => AuthResult::awaiting_authorization(
+                    name,
+                    ExtensionKind::WasmTool,
+                    launch.auth_url,
+                    "local".to_string(),
+                ),
+            })
         }
     }
 
@@ -10844,6 +10873,87 @@ mod tests {
             ToolAuthState::NeedsAuth,
             "second Google tool should require scope expansion when the shared token lacks its scope",
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_google_oauth_returns_blocked_app_guidance_with_builtin_client()
+    -> Result<(), String> {
+        let _env_guard = crate::config::helpers::lock_env();
+        let original_client_id = std::env::var("GOOGLE_OAUTH_CLIENT_ID").ok();
+        let original_client_secret = std::env::var("GOOGLE_OAUTH_CLIENT_SECRET").ok();
+        // SAFETY: tests serialize env mutation with lock_env().
+        unsafe {
+            std::env::remove_var("GOOGLE_OAUTH_CLIENT_ID");
+            std::env::remove_var("GOOGLE_OAUTH_CLIENT_SECRET");
+        }
+
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).map_err(|err| format!("tools dir: {err}"))?;
+        let caps = serde_json::json!({
+            "auth": {
+                "secret_name": "google_oauth_token",
+                "display_name": "Google",
+                "setup_url": "https://console.cloud.google.com/apis/credentials",
+                "oauth": {
+                    "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                    "token_url": "https://oauth2.googleapis.com/token",
+                    "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                    "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                    "scopes": ["https://www.googleapis.com/auth/gmail.modify"],
+                    "use_pkce": false,
+                    "extra_params": {
+                        "access_type": "offline",
+                        "prompt": "consent"
+                    },
+                    "pending_instructions": "If the provider blocks the shared OAuth app, configure your own Google OAuth Client ID and Client Secret in Setup or via GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET, then retry."
+                }
+            }
+        });
+        std::fs::write(tools_dir.join("gmail.wasm"), b"\0asm")
+            .map_err(|err| format!("write wasm: {err}"))?;
+        std::fs::write(
+            tools_dir.join("gmail.capabilities.json"),
+            serde_json::to_vec(&caps).map_err(|err| format!("serialize caps: {err}"))?,
+        )
+        .map_err(|err| format!("write caps: {err}"))?;
+
+        let mgr = make_test_manager(None, tools_dir);
+        mgr.enable_gateway_mode("https://gateway.example.com".to_string())
+            .await;
+
+        let result = mgr
+            .auth("gmail", "test")
+            .await
+            .map_err(|err| err.to_string())?;
+        assert!(
+            result.auth_url().is_some(),
+            "oauth auth_url should be present"
+        );
+        let instructions = result
+            .instructions()
+            .expect("builtin Google OAuth should include guidance");
+        assert!(instructions.contains("shared OAuth app"));
+        assert!(instructions.contains("GOOGLE_OAUTH_CLIENT_ID"));
+        assert!(instructions.contains("GOOGLE_OAUTH_CLIENT_SECRET"));
+        assert_eq!(
+            result.setup_url(),
+            Some("https://console.cloud.google.com/apis/credentials")
+        );
+
+        // SAFETY: tests serialize env mutation with lock_env().
+        unsafe {
+            match original_client_id {
+                Some(value) => std::env::set_var("GOOGLE_OAUTH_CLIENT_ID", value),
+                None => std::env::remove_var("GOOGLE_OAUTH_CLIENT_ID"),
+            }
+            match original_client_secret {
+                Some(value) => std::env::set_var("GOOGLE_OAUTH_CLIENT_SECRET", value),
+                None => std::env::remove_var("GOOGLE_OAUTH_CLIENT_SECRET"),
+            }
+        }
 
         Ok(())
     }

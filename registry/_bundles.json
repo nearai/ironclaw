@@ -3,6 +3,7 @@
     "google": {
       "display_name": "Google Suite",
       "description": "Gmail, Calendar, Drive, Docs, Sheets, Slides",
+      "aliases": ["gws", "gsuite", "google workspace", "g suite"],
       "extensions": [
         "tools/gmail",
         "tools/google-calendar",

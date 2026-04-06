@@ -211,6 +211,8 @@ pub enum AuthStatus {
     AwaitingAuthorization {
         auth_url: String,
         callback_type: String,
+        instructions: Option<String>,
+        setup_url: Option<String>,
     },
     /// Waiting for user to provide a token/key manually.
     AwaitingToken {
@@ -276,6 +278,28 @@ impl AuthResult {
             status: AuthStatus::AwaitingAuthorization {
                 auth_url,
                 callback_type,
+                instructions: None,
+                setup_url: None,
+            },
+        }
+    }
+
+    pub fn awaiting_authorization_with_guidance(
+        name: impl Into<String>,
+        kind: ExtensionKind,
+        auth_url: String,
+        callback_type: String,
+        instructions: String,
+        setup_url: Option<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            kind,
+            status: AuthStatus::AwaitingAuthorization {
+                auth_url,
+                callback_type,
+                instructions: Some(instructions),
+                setup_url,
             },
         }
     }
@@ -334,17 +358,19 @@ impl AuthResult {
 
     pub fn instructions(&self) -> Option<&str> {
         match &self.status {
+            AuthStatus::AwaitingAuthorization { instructions, .. } => instructions.as_deref(),
             AuthStatus::AwaitingToken { instructions, .. }
             | AuthStatus::NeedsSetup { instructions, .. } => Some(instructions),
-            _ => None,
+            AuthStatus::Authenticated | AuthStatus::NoAuthRequired => None,
         }
     }
 
     pub fn setup_url(&self) -> Option<&str> {
         match &self.status {
+            AuthStatus::AwaitingAuthorization { setup_url, .. } => setup_url.as_deref(),
             AuthStatus::AwaitingToken { setup_url, .. }
             | AuthStatus::NeedsSetup { setup_url, .. } => setup_url.as_deref(),
-            _ => None,
+            AuthStatus::Authenticated | AuthStatus::NoAuthRequired => None,
         }
     }
 
@@ -416,6 +442,8 @@ impl<'de> Deserialize<'de> for AuthResult {
             "awaiting_authorization" => AuthStatus::AwaitingAuthorization {
                 auth_url: raw.auth_url.unwrap_or_default(),
                 callback_type: raw.callback_type.unwrap_or_default(),
+                instructions: raw.instructions,
+                setup_url: raw.setup_url,
             },
             "awaiting_token" => AuthStatus::AwaitingToken {
                 instructions: raw.instructions.unwrap_or_default(),
@@ -692,6 +720,42 @@ mod tests {
         );
         assert_eq!(back.callback_type(), Some("local"));
         assert!(!back.is_authenticated());
+    }
+
+    #[test]
+    fn auth_result_awaiting_authorization_with_guidance_round_trip() {
+        let result = AuthResult::awaiting_authorization_with_guidance(
+            "gmail",
+            ExtensionKind::WasmTool,
+            "https://accounts.google.com/o/oauth2/v2/auth?state=abc".to_string(),
+            "hosted".to_string(),
+            "If Google blocks the shared app, configure GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET, then retry.".to_string(),
+            Some("https://console.cloud.google.com/apis/credentials".to_string()),
+        );
+        let json = serde_json::to_value(&result).unwrap();
+
+        assert_eq!(json["status"], "awaiting_authorization");
+        assert_eq!(json["callback_type"], "hosted");
+        assert_eq!(
+            json["instructions"],
+            "If Google blocks the shared app, configure GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET, then retry."
+        );
+        assert_eq!(
+            json["setup_url"],
+            "https://console.cloud.google.com/apis/credentials"
+        );
+
+        let back: AuthResult = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            back.instructions(),
+            Some(
+                "If Google blocks the shared app, configure GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET, then retry."
+            )
+        );
+        assert_eq!(
+            back.setup_url(),
+            Some("https://console.cloud.google.com/apis/credentials")
+        );
     }
 
     #[test]

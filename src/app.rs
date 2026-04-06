@@ -712,11 +712,7 @@ impl AppBuilder {
         // Load registry catalog entries for extension discovery
         let mut catalog_entries = match crate::registry::RegistryCatalog::load_or_embedded() {
             Ok(catalog) => {
-                let entries: Vec<_> = catalog
-                    .all()
-                    .iter()
-                    .filter_map(|m| m.to_registry_entry())
-                    .collect();
+                let entries = catalog.discovery_entries();
                 tracing::debug!(
                     count = entries.len(),
                     "Loaded registry catalog entries for extension discovery"

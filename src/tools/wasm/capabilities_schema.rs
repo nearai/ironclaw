@@ -651,6 +651,13 @@ pub struct OAuthConfigSchema {
     #[serde(default)]
     pub extra_params: std::collections::HashMap<String, String>,
 
+    /// Optional guidance shown alongside the auth URL while the OAuth flow is pending.
+    ///
+    /// Use this for provider-specific recovery instructions such as alternate
+    /// client setup, consent quirks, or hosted deployment notes.
+    #[serde(default)]
+    pub pending_instructions: Option<String>,
+
     /// Field name in token response containing the access token.
     /// Defaults to "access_token".
     #[serde(default = "default_access_token_field")]
