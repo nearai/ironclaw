@@ -502,10 +502,8 @@ impl Agent {
 
         // Engine threads
         if self.config.engine_v2 {
-            // Use empty user_id — list_engine_threads returns all threads
-            // when the engine is local (single-user TUI).
             if let Ok(threads) =
-                crate::bridge::list_engine_threads(None, "").await
+                crate::bridge::list_engine_threads(None, self.owner_id()).await
             {
                 let summaries: Vec<crate::channels::EngineThreadSummary> = threads
                     .into_iter()
