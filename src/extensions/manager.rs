@@ -1490,7 +1490,7 @@ impl ExtensionManager {
             match self.load_mcp_servers(user_id).await {
                 Ok(servers) => {
                     for server in &servers.servers {
-                        let authenticated = is_authenticated(server, &self.secrets, user_id).await;
+                        let authenticated = self.mcp_has_configured_auth(server, user_id).await;
                         let clients = self.mcp_clients.read().await;
                         let active = clients.contains_key(&server.name);
 
@@ -1510,7 +1510,8 @@ impl ExtensionManager {
                             .registry
                             .get_with_kind(&server.name, Some(ExtensionKind::McpServer))
                             .await
-                            .map(|e| e.display_name);
+                            .map(|e| e.display_name)
+                            .or_else(|| Some(server.name.clone()));
                         extensions.push(InstalledExtension {
                             name: server.name.clone(),
                             kind: ExtensionKind::McpServer,
@@ -2817,6 +2818,10 @@ impl ExtensionManager {
         })
     }
 
+    async fn mcp_has_configured_auth(&self, server: &McpServerConfig, user_id: &str) -> bool {
+        server.has_custom_auth_header() || is_authenticated(server, &self.secrets, user_id).await
+    }
+
     async fn auth_mcp(&self, name: &str, user_id: &str) -> Result<AuthResult, ExtensionError> {
         let server = self
             .get_mcp_server(name, user_id)
@@ -2824,7 +2829,7 @@ impl ExtensionManager {
             .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
 
         // Check if already authenticated
-        if is_authenticated(&server, &self.secrets, user_id).await {
+        if self.mcp_has_configured_auth(&server, user_id).await {
             return Ok(AuthResult::authenticated(name, ExtensionKind::McpServer));
         }
 
@@ -2978,9 +2983,16 @@ impl ExtensionManager {
             let mut token_exchange_extra_params = HashMap::new();
             token_exchange_extra_params.insert("resource".to_string(), resource.clone());
 
+            let display_name = self
+                .registry
+                .get_with_kind(&server.name, Some(ExtensionKind::McpServer))
+                .await
+                .map(|e| e.display_name)
+                .unwrap_or_else(|| server.name.clone());
+
             let flow = oauth_defaults::PendingOAuthFlow {
                 extension_name: name.to_string(),
-                display_name: server.name.clone(),
+                display_name,
                 token_url: metadata.token_endpoint,
                 client_id,
                 client_secret,
@@ -4223,13 +4235,15 @@ impl ExtensionManager {
         // is badly formatted" instead of 401 when auth is missing or invalid.
         let mcp_tools = client.list_tools().await.map_err(|e| {
             let msg = e.to_string();
-            let msg_lower = msg.to_ascii_lowercase();
-            if msg_lower.contains("requires authentication")
-                || msg.contains("401")
-                || (msg.contains("400")
-                    && (msg_lower.contains("authorization") || msg_lower.contains("authenticate")))
-            {
-                ExtensionError::AuthRequired
+            if crate::tools::mcp::is_auth_error_message(&msg) {
+                if server.has_custom_auth_header() {
+                    ExtensionError::ActivationFailed(format!(
+                        "MCP server '{}' rejected its configured Authorization header. Update the configured credential and try again.",
+                        name
+                    ))
+                } else {
+                    ExtensionError::AuthRequired
+                }
             } else {
                 ExtensionError::ActivationFailed(msg)
             }
