@@ -1694,6 +1694,10 @@ impl Agent {
 
         // Set message tool context to the routine's notify channel/user so the
         // `message` tool targets the right destination (not a stale previous context).
+        // KNOWN LIMITATION: `set_message_tool_context` mutates shared Tools state and is
+        // inherently racy when multiple routine reviews run concurrently. This is a
+        // pre-existing design limitation, not introduced by this PR. A proper fix would
+        // require per-invocation tool context scoping.
         let notify_ch = message
             .metadata
             .get("notify_channel")
@@ -1703,10 +1707,29 @@ impl Agent {
             .set_message_tool_context(notify_ch.map(String::from), notify_user.map(String::from))
             .await;
 
+        // Clone thread_id as a String before process_user_input consumes it.
+        let thread_id_str = thread_id.to_string();
+
         // Enter the agentic loop for routine review processing.
         let result = self
             .process_user_input(message, tenant, session, thread_id, &message.content)
             .await;
+
+        // Extract metadata fields before the match so they're available in all arms.
+        let routine_name = message
+            .metadata
+            .get("routine_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let notify_channel = message
+            .metadata
+            .get("notify_channel")
+            .and_then(|v| v.as_str());
+        let notify_user = message
+            .metadata
+            .get("notify_user")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&message.user_id);
 
         match result {
             Ok(SubmissionResult::Response { content }) => {
@@ -1714,43 +1737,41 @@ impl Agent {
                     return Ok(Some(String::new()));
                 }
 
-                // Run BeforeOutbound hooks
-                let hooked_content = match self
+                // Run BeforeOutbound hooks.
+                // Use the resolved thread_id (not message.thread_id, which is None for
+                // injected routine-review messages).
+                let hook_result = self
                     .hooks()
                     .run(&crate::hooks::HookEvent::Outbound {
                         user_id: message.user_id.clone(),
                         channel: message.channel.clone(),
                         content: content.clone(),
-                        thread_id: message.thread_id.clone(),
+                        thread_id: Some(thread_id_str.clone()),
                     })
-                    .await
-                {
+                    .await;
+
+                // If the hook explicitly rejects the outbound, suppress broadcast.
+                if let Err(crate::hooks::HookError::Rejected { reason }) = &hook_result {
+                    tracing::warn!(
+                        routine = routine_name,
+                        reason = %reason,
+                        "BeforeOutbound hook rejected routine review response — suppressing broadcast"
+                    );
+                    return Ok(Some(String::new()));
+                }
+
+                let hooked_content = match hook_result {
                     Ok(crate::hooks::HookOutcome::Continue {
                         modified: Some(new_content),
                     }) => new_content,
                     _ => content,
                 };
 
-                // Broadcast the response via notify_channel from metadata.
-                let notify_channel = message
-                    .metadata
-                    .get("notify_channel")
-                    .and_then(|v| v.as_str());
-                let notify_user = message
-                    .metadata
-                    .get("notify_user")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&message.user_id);
-
-                let routine_name = message
-                    .metadata
-                    .get("routine_name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-
                 let response = OutgoingResponse {
                     content: hooked_content.clone(),
-                    thread_id: message.thread_id.clone(),
+                    // Use the resolved thread_id, not message.thread_id which is None
+                    // for injected routine-review messages.
+                    thread_id: Some(thread_id_str.clone()),
                     attachments: Vec::new(),
                     metadata: serde_json::json!({
                         "source": "routine_review",
@@ -1772,7 +1793,8 @@ impl Agent {
                             "Failed to broadcast routine review response: {e}"
                         );
                         // Fallback: broadcast to all channels
-                        let fallback = OutgoingResponse::text(&hooked_content);
+                        let fallback = OutgoingResponse::text(&hooked_content)
+                            .in_thread(thread_id_str.clone());
                         let results = self.channels.broadcast_all(notify_user, fallback).await;
                         for (ch, res) in &results {
                             if let Err(e2) = res {
@@ -1789,7 +1811,8 @@ impl Agent {
                         routine = routine_name,
                         "No notify_channel in routine review metadata; using broadcast_all"
                     );
-                    let fallback = OutgoingResponse::text(&hooked_content);
+                    let fallback =
+                        OutgoingResponse::text(&hooked_content).in_thread(thread_id_str.clone());
                     let results = self.channels.broadcast_all(notify_user, fallback).await;
                     for (ch, res) in &results {
                         if let Err(e) = res {

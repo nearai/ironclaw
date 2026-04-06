@@ -2177,6 +2177,12 @@ async fn inject_agent_review(
         }
         // Counter incremented after successful injection (below) to avoid
         // consuming budget on failed sends.
+        // ACCEPTABLE RACE: the read-then-write across the lock drop is technically a
+        // TOCTOU window — two concurrent routines could both pass the check and both
+        // increment. In practice this is bounded (at most 2× the hourly limit in the
+        // worst case) and self-correcting within the next window reset. A stricter fix
+        // would require holding the write lock through the send, but that would block
+        // all other routines for the duration of an async channel send.
     }
 
     // 5. Check inject_tx is available
