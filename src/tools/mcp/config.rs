@@ -234,6 +234,10 @@ impl McpServerConfig {
             return false;
         }
 
+        if self.has_custom_auth_header() {
+            return false;
+        }
+
         if self.oauth.is_some() {
             return true;
         }
@@ -800,6 +804,17 @@ mod tests {
 
         let config = McpServerConfig::new("notion", "https://mcp.notion.com");
         assert!(config.requires_auth());
+    }
+
+    #[test]
+    fn test_requires_auth_custom_authorization_header_skips_remote_https_heuristic() {
+        let headers = HashMap::from([("authorization".to_string(), "Bearer token".to_string())]);
+        let config =
+            McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
+        assert!(
+            !config.requires_auth(),
+            "custom Authorization headers should skip OAuth/DCR heuristics"
+        );
     }
 
     #[test]

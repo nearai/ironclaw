@@ -1490,7 +1490,8 @@ impl ExtensionManager {
             match self.load_mcp_servers(user_id).await {
                 Ok(servers) => {
                     for server in &servers.servers {
-                        let authenticated = is_authenticated(server, &self.secrets, user_id).await;
+                        let authenticated = server.has_custom_auth_header()
+                            || is_authenticated(server, &self.secrets, user_id).await;
                         let clients = self.mcp_clients.read().await;
                         let active = clients.contains_key(&server.name);
 
@@ -2822,6 +2823,10 @@ impl ExtensionManager {
             .get_mcp_server(name, user_id)
             .await
             .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
+
+        if server.has_custom_auth_header() {
+            return Ok(AuthResult::authenticated(name, ExtensionKind::McpServer));
+        }
 
         // Check if already authenticated
         if is_authenticated(&server, &self.secrets, user_id).await {
@@ -8536,6 +8541,64 @@ mod tests {
                 "MCP secret {secret_name} should be deleted"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_auth_mcp_custom_authorization_header_is_treated_as_authenticated() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+        let server = McpServerConfig::new("custom_auth", "https://example.com/mcp").with_headers(
+            std::collections::HashMap::from([(
+                "Authorization".to_string(),
+                "Bearer sk-test".to_string(),
+            )]),
+        );
+        mgr.add_mcp_server(server, "test")
+            .await
+            .expect("add mcp server");
+
+        let auth = mgr.auth("custom_auth", "test").await.expect("mcp auth");
+
+        assert!(auth.is_authenticated());
+    }
+
+    #[tokio::test]
+    async fn test_list_mcp_server_custom_authorization_header_is_authenticated() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+        let server = McpServerConfig::new("custom_auth", "https://example.com/mcp").with_headers(
+            std::collections::HashMap::from([(
+                "authorization".to_string(),
+                "Bearer sk-test".to_string(),
+            )]),
+        );
+        mgr.add_mcp_server(server, "test")
+            .await
+            .expect("add mcp server");
+
+        let extensions = mgr
+            .list(Some(ExtensionKind::McpServer), false, "test")
+            .await
+            .expect("list extensions");
+
+        let extension = extensions
+            .iter()
+            .find(|ext| ext.name == "custom_auth")
+            .expect("custom_auth extension should be listed");
+        assert!(extension.authenticated);
+        assert!(!extension.active);
     }
 
     #[test]
