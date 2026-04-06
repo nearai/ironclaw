@@ -53,7 +53,6 @@ pub async fn check_requirements(requirements: &GatingRequirements) -> GatingResu
 /// wrapper when calling from async contexts to avoid blocking the tokio runtime.
 pub fn check_requirements_sync(requirements: &GatingRequirements) -> GatingResult {
     let mut failures = Vec::new();
-    let mut warnings = Vec::new();
 
     for bin in &requirements.bins {
         if !binary_exists(bin) {
@@ -73,18 +72,15 @@ pub fn check_requirements_sync(requirements: &GatingRequirements) -> GatingResul
         }
     }
 
-    // Skill dependencies are warnings, not failures — the skill still loads
-    // but the agent should tell the user which companion skills are needed.
-    // Actual presence checking happens at a higher level (SkillRegistry) since
-    // the gating module doesn't have access to the registry.
-    for skill in &requirements.skills {
-        warnings.push(format!("requires companion skill: {}", skill));
-    }
+    // Companion skill dependencies (`requirements.skills`) are intentionally
+    // not checked here — the gating module has no access to the skill
+    // registry. Missing-skill warnings are produced by the registry layer
+    // at load time, where the set of installed skills is known.
 
     GatingResult {
         passed: failures.is_empty(),
         failures,
-        warnings,
+        warnings: Vec::new(),
     }
 }
 
@@ -180,7 +176,10 @@ mod tests {
     }
 
     #[test]
-    fn test_skill_dependencies_produce_warnings() {
+    fn test_skill_dependencies_are_ignored_by_gating() {
+        // Companion skill dependencies are not checked by gating — the
+        // registry layer handles missing-skill warnings. Gating should
+        // pass with no warnings even when `skills` is populated.
         let req = GatingRequirements {
             skills: vec![
                 "commitment-triage".to_string(),
@@ -189,11 +188,8 @@ mod tests {
             ..Default::default()
         };
         let result = check_requirements_sync(&req);
-        // Skills are warnings, not failures — the skill should still load
         assert!(result.passed);
         assert!(result.failures.is_empty());
-        assert_eq!(result.warnings.len(), 2);
-        assert!(result.warnings[0].contains("commitment-triage"));
-        assert!(result.warnings[1].contains("commitment-digest"));
+        assert!(result.warnings.is_empty());
     }
 }

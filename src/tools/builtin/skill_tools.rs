@@ -366,7 +366,8 @@ impl Tool for SkillInstallTool {
         const MAX_CHAIN_DEPS: usize = 10;
         let mut chain_installed: Vec<String> = Vec::new();
         let mut chain_failed: Vec<String> = Vec::new();
-        let mut chain_need_approval: Vec<String> = Vec::new();
+        let mut chain_missing: Vec<String> = Vec::new();
+        let mut chain_skipped: Vec<String> = Vec::new();
 
         if !required_skills.is_empty() {
             // Batch lookups under a single read lock to avoid per-iteration
@@ -376,13 +377,19 @@ impl Tool for SkillInstallTool {
                     .registry
                     .read()
                     .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
-                let missing: Vec<String> = required_skills
+                let all_missing: Vec<String> = required_skills
                     .iter()
                     .filter(|name| !guard.has(name))
-                    .take(MAX_CHAIN_DEPS)
                     .cloned()
                     .collect();
-                (missing, guard.install_target_dir().to_path_buf())
+                // Cap attempted installs to bound total fetch time.
+                // Record any overflow so the caller can handle it explicitly
+                // instead of silently dropping dependencies.
+                if all_missing.len() > MAX_CHAIN_DEPS {
+                    chain_skipped = all_missing[MAX_CHAIN_DEPS..].to_vec();
+                }
+                let attempted: Vec<String> = all_missing.into_iter().take(MAX_CHAIN_DEPS).collect();
+                (attempted, guard.install_target_dir().to_path_buf())
             };
 
             for dep_name in &missing_deps {
@@ -417,8 +424,18 @@ impl Tool for SkillInstallTool {
                             Err(e) => chain_failed.push(format!("{}: {}", dep_name, e)),
                         }
                     }
-                    Err(_) => {
-                        chain_need_approval.push(dep_name.clone());
+                    Err(e) => {
+                        // Classify fetch errors: HTTP 404/410 means the skill
+                        // genuinely isn't in the catalog (needs manual install);
+                        // anything else (network, 5xx, DNS, timeout) is a
+                        // transient or environmental failure and must surface
+                        // the actual error so the caller can retry/diagnose.
+                        let msg = e.to_string();
+                        if msg.contains("HTTP 404") || msg.contains("HTTP 410") {
+                            chain_missing.push(dep_name.clone());
+                        } else {
+                            chain_failed.push(format!("{}: {}", dep_name, msg));
+                        }
                     }
                 }
             }
@@ -440,11 +457,20 @@ impl Tool for SkillInstallTool {
         if !chain_failed.is_empty() {
             output["chain_install_failed"] = serde_json::json!(chain_failed);
         }
-        if !chain_need_approval.is_empty() {
-            output["missing_dependencies"] = serde_json::json!(chain_need_approval);
+        if !chain_missing.is_empty() {
+            output["missing_dependencies"] = serde_json::json!(chain_missing);
             output["missing_dependencies_message"] = serde_json::json!(format!(
                 "These required skills could not be found in the catalog and need manual installation: {}",
-                chain_need_approval.join(", ")
+                chain_missing.join(", ")
+            ));
+        }
+        if !chain_skipped.is_empty() {
+            output["skipped_dependencies"] = serde_json::json!(chain_skipped);
+            output["skipped_dependencies_message"] = serde_json::json!(format!(
+                "{} dependency chain exceeded MAX_CHAIN_DEPS={}; these were not attempted and must be installed manually: {}",
+                chain_skipped.len(),
+                MAX_CHAIN_DEPS,
+                chain_skipped.join(", ")
             ));
         }
 

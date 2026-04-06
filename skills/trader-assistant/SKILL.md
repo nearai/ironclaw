@@ -56,7 +56,7 @@ If any are missing from `skills/`, tell the user which ones are needed.
 2. **Position tracking**: Do you want me to track your current positions? If so, where do you log them? (I'll read from a workspace file you maintain)
 3. **Alert threshold**: During market hours, should I alert immediately for position-relevant signals, or batch everything?
 4. **Journal cadence**: Do you journal daily (post-market) or weekly?
-6. **Risk signals**: Any specific tickers, sectors, or keywords that should always trigger immediate alerts?
+5. **Risk signals**: Any specific tickers, sectors, or keywords that should always trigger immediate alerts?
 
 ## Step 2: Create workspace structure
 
@@ -70,7 +70,7 @@ memory_write(target="commitments/positions.md", content="# Current Positions\n\n
 ```
 
 ```
-memory_write(target="commitments/trade-journal/README.md", content="Daily trade journal entries. Each file: decisions/<date>-<slug>.md with outcome tracking.", append=false)
+memory_write(target="commitments/trade-journal/README.md", content="Daily trade journal entries. Each file: commitments/decisions/<date>-<slug>.md with outcome tracking.", append=false)
 ```
 
 ## Step 3: Create tuned missions

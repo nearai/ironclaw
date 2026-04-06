@@ -25,8 +25,9 @@ impl SkillTracker {
     /// Record that a skill was used in a completed thread.
     ///
     /// Loads the skill's MemoryDoc, updates metrics in the metadata JSON,
-    /// and saves it back. If the doc is not found or has invalid metadata,
-    /// the error is logged and the operation is skipped.
+    /// and saves it back. Returns `Err(EngineError::Skill)` if the doc is
+    /// missing, not a Skill, or has invalid metadata — callers decide whether
+    /// to propagate or log-and-swallow.
     pub async fn record_usage(&self, doc_id: DocId, success: bool) -> Result<(), EngineError> {
         let doc = self
             .store
