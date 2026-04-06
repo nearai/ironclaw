@@ -16,6 +16,9 @@ dependencies = [
 vision = [
     "anthropic>=0.40",
 ]
+telegram = [
+    "telethon>=1.40",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
