@@ -636,6 +636,13 @@ async fn async_main() -> anyhow::Result<()> {
         gw = gw.with_log_broadcaster(Arc::clone(&log_broadcaster));
         gw = gw.with_log_level_handle(Arc::clone(&log_level_handle));
         gw = gw.with_tool_registry(Arc::clone(&components.tools));
+        if let Some(ref db) = components.db {
+            let dispatcher = Arc::new(ironclaw::tools::dispatch::ToolDispatcher::new(
+                Arc::clone(&components.tools),
+                Arc::clone(db),
+            ));
+            gw = gw.with_tool_dispatcher(dispatcher);
+        }
         if let Some(ref ext_mgr) = components.extension_manager {
             // Enable gateway mode so MCP OAuth returns auth URLs to the frontend
             // instead of calling open::that() on the server.

@@ -147,6 +147,7 @@ impl GatewayChannel {
             near_rpc_url: None,
             near_network: None,
             oauth_sweep_shutdown: None,
+            tool_dispatcher: None,
         });
 
         Self {
@@ -197,7 +198,8 @@ impl GatewayChannel {
             near_nonce_store: self.state.near_nonce_store.clone(),
             near_rpc_url: self.state.near_rpc_url.clone(),
             near_network: self.state.near_network.clone(),
-            oauth_sweep_shutdown: None, // sweep tasks are managed by with_oauth
+            oauth_sweep_shutdown: None,
+            tool_dispatcher: None, // sweep tasks are managed by with_oauth
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
@@ -242,6 +244,16 @@ impl GatewayChannel {
     /// Inject the database store for sandbox job persistence.
     pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
         self.rebuild_state(|s| s.store = Some(store));
+        self
+    }
+
+    /// Inject the channel-agnostic tool dispatcher for routing handler
+    /// operations through the tool pipeline with audit trail.
+    pub fn with_tool_dispatcher(
+        mut self,
+        dispatcher: Arc<crate::tools::dispatch::ToolDispatcher>,
+    ) -> Self {
+        self.rebuild_state(|s| s.tool_dispatcher = Some(dispatcher));
         self
     }
 

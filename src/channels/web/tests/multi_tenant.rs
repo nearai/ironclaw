@@ -92,6 +92,7 @@ fn build_state(
         near_rpc_url: None,
         near_network: None,
         oauth_sweep_shutdown: None,
+        tool_dispatcher: None,
     })
 }
 

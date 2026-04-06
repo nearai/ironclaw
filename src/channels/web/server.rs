@@ -459,6 +459,9 @@ pub struct GatewayState {
     /// When this sender is dropped, the sweep loops exit gracefully.
     #[allow(dead_code)]
     pub oauth_sweep_shutdown: Option<tokio::sync::watch::Sender<()>>,
+    /// Channel-agnostic tool dispatcher for routing handler operations through
+    /// the tool pipeline with audit trail.
+    pub tool_dispatcher: Option<Arc<crate::tools::dispatch::ToolDispatcher>>,
 }
 
 /// Start the gateway HTTP server.
@@ -3480,6 +3483,7 @@ mod tests {
             near_rpc_url: None,
             near_network: None,
             oauth_sweep_shutdown: None,
+            tool_dispatcher: None,
         })
     }
 
