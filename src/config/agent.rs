@@ -128,7 +128,7 @@ impl AgentConfig {
                 &defaults.max_tool_iterations,
                 "AGENT_MAX_TOOL_ITERATIONS",
             )?,
-            auto_approve_tools: parse_bool_env("AGENT_AUTO_APPROVE_TOOLS", defaults.auto_approve_tools)?,
+            auto_approve_tools: parse_bool_env("AGENT_AUTO_APPROVE_TOOLS", true)?,
             default_timezone: {
                 let tz: String = db_first_or_default(
                     &settings.agent.default_timezone,
