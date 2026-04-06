@@ -1777,7 +1777,8 @@ impl Store {
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (id) DO UPDATE
             SET last_activity = NOW(),
-                source_channel = COALESCE(conversations.source_channel, EXCLUDED.source_channel)
+                source_channel = COALESCE(conversations.source_channel, EXCLUDED.source_channel),
+                thread_id = COALESCE(conversations.thread_id, EXCLUDED.thread_id)
             WHERE conversations.user_id = EXCLUDED.user_id
               AND conversations.channel = EXCLUDED.channel
             "#,
@@ -2151,6 +2152,27 @@ impl Store {
             )
             .await?;
         Ok(row.and_then(|r| r.get::<_, Option<String>>(0)))
+    }
+
+    pub async fn find_conversation_by_scope(
+        &self,
+        user_id: &str,
+        channel: &str,
+        thread_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT id FROM conversations
+                WHERE user_id = $1 AND channel = $2 AND thread_id = $3
+                ORDER BY last_activity DESC
+                LIMIT 1
+                "#,
+                &[&user_id, &channel, &thread_id],
+            )
+            .await?;
+        Ok(row.map(|r| r.get("id")))
     }
 
     /// Load messages for a conversation with cursor-based pagination.

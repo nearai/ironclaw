@@ -105,7 +105,8 @@ impl ConversationStore for LibSqlBackend {
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
                 ON CONFLICT (id) DO UPDATE SET
                     last_activity = excluded.last_activity,
-                    source_channel = COALESCE(conversations.source_channel, excluded.source_channel)
+                    source_channel = COALESCE(conversations.source_channel, excluded.source_channel),
+                    thread_id = COALESCE(conversations.thread_id, excluded.thread_id)
                 WHERE conversations.user_id = excluded.user_id
                   AND conversations.channel = excluded.channel
                 "#,
@@ -684,6 +685,42 @@ impl ConversationStore for LibSqlBackend {
         {
             Some(row) => Ok(get_opt_text(&row, 0)),
             None => Ok(None),
+        }
+    }
+
+    async fn find_conversation_by_scope(
+        &self,
+        user_id: &str,
+        channel: &str,
+        thread_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id FROM conversations
+                WHERE user_id = ?1 AND channel = ?2 AND thread_id = ?3
+                ORDER BY last_activity DESC
+                LIMIT 1
+                "#,
+                libsql::params![user_id, channel, thread_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            let id_str: String = row.get(0).map_err(|e| {
+                DatabaseError::Query(format!("Failed to read conversation id: {e}"))
+            })?;
+            let id = Uuid::parse_str(&id_str)
+                .map_err(|e| DatabaseError::Query(format!("Invalid conversation UUID: {e}")))?;
+            Ok(Some(id))
+        } else {
+            Ok(None)
         }
     }
 }
