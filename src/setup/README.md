@@ -508,6 +508,11 @@ to the DB via `persist_settings()` and loaded by `Config::from_db_with_toml()`
 after connection. API keys are stored encrypted in the secrets DB and injected
 via `inject_llm_keys_from_secrets()`.
 
+In the running web gateway, LLM backend/model changes are hot-reloaded when
+the daemon was started with the reload handle wired in. That means switching
+providers or models from the UI no longer depends on a Docker-only restart
+flow for supported local installs.
+
 **Invariant:** Both Layer 1 and Layer 2 must be written. If the database
 write fails, the wizard returns an error and the `.env` file is not written.
 

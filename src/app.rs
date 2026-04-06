@@ -16,7 +16,7 @@ use crate::context::ContextManager;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
-use crate::llm::{LlmProvider, RecordingLlm, SessionManager};
+use crate::llm::{LlmProvider, LlmReloadHandle, RecordingLlm, SessionManager};
 use crate::secrets::SecretsStore;
 use crate::tools::ToolRegistry;
 use crate::tools::mcp::{McpProcessManager, McpSessionManager};
@@ -36,6 +36,7 @@ pub struct AppComponents {
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     pub llm: Arc<dyn LlmProvider>,
     pub cheap_llm: Option<Arc<dyn LlmProvider>>,
+    pub llm_reload: Option<Arc<LlmReloadHandle>>,
     pub safety: Arc<SafetyLayer>,
     pub tools: Arc<ToolRegistry>,
     pub embeddings: Option<Arc<dyn EmbeddingProvider>>,
@@ -298,12 +299,13 @@ impl AppBuilder {
             Arc<dyn LlmProvider>,
             Option<Arc<dyn LlmProvider>>,
             Option<Arc<RecordingLlm>>,
+            Option<Arc<LlmReloadHandle>>,
         ),
         anyhow::Error,
     > {
-        let (llm, cheap_llm, recording_handle) =
+        let (llm, cheap_llm, recording_handle, llm_reload) =
             crate::llm::build_provider_chain(&self.config.llm, self.session.clone()).await?;
-        Ok((llm, cheap_llm, recording_handle))
+        Ok((llm, cheap_llm, recording_handle, llm_reload))
     }
 
     /// Phase 4: Initialize safety, tools, embeddings, and workspace.
@@ -850,11 +852,12 @@ impl AppBuilder {
             );
         }
 
-        let (llm, cheap_llm, recording_handle) = if let Some(llm) = self.llm_override.take() {
-            (llm, None, None)
-        } else {
-            self.init_llm().await?
-        };
+        let (llm, cheap_llm, recording_handle, llm_reload) =
+            if let Some(llm) = self.llm_override.take() {
+                (llm, None, None, None)
+            } else {
+                self.init_llm().await?
+            };
         let (safety, tools, embeddings, workspace, builder, credential_registry) =
             self.init_tools(&llm).await?;
 
@@ -981,6 +984,7 @@ impl AppBuilder {
             secrets_store: self.secrets_store,
             llm,
             cheap_llm,
+            llm_reload,
             safety,
             tools,
             embeddings,

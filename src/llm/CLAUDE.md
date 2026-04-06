@@ -26,6 +26,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `rig_adapter.rs` | Adapter bridging rig-core `CompletionModel` → `LlmProvider`; used by OpenAI, Anthropic, Ollama, Tinfoil |
 | `smart_routing.rs` | `SmartRoutingProvider` — 13-dimension complexity scorer routes cheap vs primary model |
 | `recording.rs` | `RecordingLlm` — trace capture for E2E replay testing (`IRONCLAW_RECORD_TRACE`) |
+| `runtime.rs` | `SwappableLlmProvider` and `LlmReloadHandle` for live provider-chain reloads |
 | `bedrock.rs` | AWS Bedrock provider via native Converse API (feature-gated: `--features bedrock`) |
 
 ## Provider Selection
@@ -207,6 +208,20 @@ Raw provider
 ```
 
 `build_provider_chain()` also returns a separate standalone cheap LLM provider (for heartbeat/evaluation tasks — not part of the decorator chain).
+
+## Runtime Hot Reload
+
+`runtime.rs` keeps the public `Arc<dyn LlmProvider>` stable while letting the
+inner provider chain be replaced when LLM settings change. The gateway's web
+settings handlers call the reload handle after persisting backend/model changes,
+so switching `llm_backend`, `selected_model`, or provider-specific model/URL
+settings can take effect without restarting the daemon when the reload handle
+is wired in.
+
+Key points:
+- `SwappableLlmProvider` caches model metadata while delegating requests to the current inner chain.
+- `LlmReloadHandle::reload()` rebuilds the raw provider chain from config and swaps the live providers in place.
+- `RecordingLlm` still wraps the swappable primary provider, so trace capture continues to follow the live backend.
 
 ## reasoning.rs Contents
 

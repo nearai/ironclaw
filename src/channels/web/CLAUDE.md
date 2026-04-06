@@ -208,6 +208,8 @@ Key fields:
 - `cost_guard` — `Option<Arc<CostGuard>>` — exposes token usage / cost totals in the status endpoint.
 - `startup_time` — `Instant` — used to compute uptime in the gateway status response.
 - `registry_entries` — `Vec<RegistryEntry>` — loaded once at startup from registry manifests; used by the available extensions API without hitting the network.
+- `llm_reload` / `llm_session_manager` — optional live-reload handles for rebuilding the active LLM provider chain after settings changes.
+- `active_config` — `Arc<RwLock<ActiveConfigSnapshot>>` so gateway status can reflect live provider/model changes without rebuilding the whole state tree.
 
 Subsystems are wired via `with_*` builder methods on `GatewayChannel` (`mod.rs`). Each call rebuilds `Arc<GatewayState>` — safe to call before `start()`, not after.
 
@@ -241,3 +243,14 @@ Classic agent approvals are in-memory, but engine v2 pauses live in the unified 
 3. Register the route in `start_server()` in `server.rs` under the correct router (`public`, `protected`, or `statics`).
 4. If it is an SSE or WebSocket endpoint, add its path to `allows_query_token_auth()` in `auth.rs`.
 5. If it requires a new `GatewayState` field, add it to the struct and to both the `GatewayChannel::new()` initializer and `rebuild_state()` in `mod.rs`, then add a `with_*` builder method.
+
+## Settings Hot Reload
+
+LLM-related settings updates handled by the gateway settings handlers now
+trigger a provider-chain reload when the gateway was built with the reload
+handle. In practice this means changing `llm_backend`, `selected_model`, or a
+provider-specific base URL/model field from the web UI can update the active
+daemon without requiring a Docker-only restart path.
+
+If the gateway was started without a reload handle, settings are still persisted
+as before; the new values apply on the next process start.

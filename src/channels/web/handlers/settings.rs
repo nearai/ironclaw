@@ -12,6 +12,7 @@ use secrecy::SecretString;
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use crate::config::Config;
 use crate::secrets::{CreateSecretParams, SecretsStore};
 
 /// Sentinel value the frontend sends to mean "key is unchanged, don't touch it".
@@ -139,6 +140,10 @@ pub async fn settings_set_handler(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+    if llm_setting_requires_reload(&key) {
+        reload_llm_after_settings_change(&state).await?;
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -260,6 +265,10 @@ pub async fn settings_delete_handler(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+    if llm_setting_requires_reload(&key) {
+        reload_llm_after_settings_change(&state).await?;
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -314,7 +323,69 @@ pub async fn settings_import_handler(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+    if body
+        .settings
+        .keys()
+        .any(|key| llm_setting_requires_reload(key))
+    {
+        reload_llm_after_settings_change(&state).await?;
+    }
+
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn llm_setting_requires_reload(key: &str) -> bool {
+    matches!(
+        key,
+        "llm_backend"
+            | "selected_model"
+            | "ollama_base_url"
+            | "openai_compatible_base_url"
+            | "bedrock_region"
+            | "bedrock_cross_region"
+            | "bedrock_profile"
+    )
+}
+
+async fn reload_llm_after_settings_change(state: &GatewayState) -> Result<(), StatusCode> {
+    let Some(reloader) = state.llm_reload.as_ref() else {
+        return Ok(());
+    };
+    let Some(store) = state.store.as_ref() else {
+        return Ok(());
+    };
+    let Some(session_manager) = state.llm_session_manager.as_ref() else {
+        return Ok(());
+    };
+
+    let config = Config::from_db_with_toml(
+        store.as_ref(),
+        &state.owner_id,
+        state.config_toml_path.as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to reload config for LLM hot reload: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    reloader
+        .reload(&config.llm, Arc::clone(session_manager))
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to hot-reload LLM provider: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let active_model = state
+        .llm_provider
+        .as_ref()
+        .map(|provider| provider.active_model_name())
+        .unwrap_or_else(|| config.llm.active_model_name());
+    let mut active_config = state.active_config.write().await;
+    active_config.llm_backend = config.llm.backend.clone();
+    active_config.llm_model = active_model;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -845,6 +916,7 @@ mod tests {
             workspace: None,
             workspace_pool: None,
             session_manager: None,
+            llm_session_manager: None,
             log_broadcaster: None,
             log_level_handle: None,
             extension_manager: None,
@@ -866,7 +938,11 @@ mod tests {
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            active_config: crate::channels::web::server::ActiveConfigSnapshot::default(),
+            llm_reload: None,
+            config_toml_path: None,
+            active_config: Arc::new(tokio::sync::RwLock::new(
+                crate::channels::web::server::ActiveConfigSnapshot::default(),
+            )),
             secrets_store: Some(secrets),
             db_auth: None,
             pairing_store: None,

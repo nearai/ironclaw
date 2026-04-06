@@ -38,7 +38,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | HTTP endpoints for Control UI | ✅ | ✅ | Web dashboard with chat, memory, jobs, logs, extensions |
 | Channel connection lifecycle | ✅ | ✅ | ChannelManager + WebSocket tracker |
 | Session management/routing | ✅ | ✅ | SessionManager exists |
-| Configuration hot-reload | ✅ | ❌ | |
+| Configuration hot-reload | ✅ | 🚧 | LLM backend/model settings hot-reload via web UI when the reload handle is available; broader config reload still pending |
 | Network modes (loopback/LAN/remote) | ✅ | 🚧 | HTTP only |
 | OpenAI-compatible HTTP API | ✅ | ✅ | /v1/chat/completions, per-request `model` override |
 | Canvas hosting | ✅ | ❌ | Agent-driven UI |

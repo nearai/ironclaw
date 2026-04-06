@@ -32,6 +32,7 @@ pub mod registry;
 pub mod response_cache;
 pub mod retry;
 mod rig_adapter;
+pub mod runtime;
 pub mod session;
 pub mod smart_routing;
 mod token_refreshing;
@@ -72,6 +73,7 @@ pub use registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
 pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use retry::{RetryConfig, RetryProvider};
 pub use rig_adapter::RigAdapter;
+pub use runtime::{LlmReloadHandle, SwappableLlmProvider};
 pub use session::{SessionConfig, SessionManager, create_session_manager};
 pub use smart_routing::{SmartRoutingConfig, SmartRoutingProvider, TaskComplexity};
 pub use token_refreshing::TokenRefreshingProvider;
@@ -542,18 +544,16 @@ fn create_cheap_provider_for_backend(
 ///
 /// This is the single source of truth for provider chain construction,
 /// called by both `main.rs` and `app.rs`.
+pub(crate) struct ProviderChainComponents {
+    pub primary: Arc<dyn LlmProvider>,
+    pub cheap: Option<Arc<dyn LlmProvider>>,
+}
+
 #[allow(clippy::type_complexity)]
-pub async fn build_provider_chain(
+pub(crate) async fn build_provider_chain_components(
     config: &LlmConfig,
     session: Arc<SessionManager>,
-) -> Result<
-    (
-        Arc<dyn LlmProvider>,
-        Option<Arc<dyn LlmProvider>>,
-        Option<Arc<RecordingLlm>>,
-    ),
-    LlmError,
-> {
+) -> Result<ProviderChainComponents, LlmError> {
     let llm: Arc<dyn LlmProvider> = if config.backend == "openai_codex" {
         create_openai_codex_provider(config).await?
     } else {
@@ -679,21 +679,54 @@ pub async fn build_provider_chain(
         llm
     };
 
-    // 6. Recording (trace capture for replay testing)
-    let recording_handle = RecordingLlm::from_env(llm.clone());
-    let llm: Arc<dyn LlmProvider> = if let Some(ref recorder) = recording_handle {
-        Arc::clone(recorder) as Arc<dyn LlmProvider>
-    } else {
-        llm
-    };
-
     // Standalone cheap LLM for heartbeat/evaluation (not part of the chain)
     let cheap_llm = create_cheap_llm_provider(config, session)?;
     if let Some(ref cheap) = cheap_llm {
         tracing::debug!("Cheap LLM provider initialized: {}", cheap.model_name());
     }
 
-    Ok((llm, cheap_llm, recording_handle))
+    Ok(ProviderChainComponents {
+        primary: llm,
+        cheap: cheap_llm,
+    })
+}
+
+#[allow(clippy::type_complexity)]
+pub async fn build_provider_chain(
+    config: &LlmConfig,
+    session: Arc<SessionManager>,
+) -> Result<
+    (
+        Arc<dyn LlmProvider>,
+        Option<Arc<dyn LlmProvider>>,
+        Option<Arc<RecordingLlm>>,
+        Option<Arc<LlmReloadHandle>>,
+    ),
+    LlmError,
+> {
+    let components = build_provider_chain_components(config, session.clone()).await?;
+
+    let primary_reload = Arc::new(SwappableLlmProvider::new(components.primary));
+    let cheap_reload = components
+        .cheap
+        .map(|cheap| Arc::new(SwappableLlmProvider::new(cheap)));
+    let reload_handle = Arc::new(LlmReloadHandle::new(
+        Arc::clone(&primary_reload),
+        cheap_reload.clone(),
+    ));
+
+    // 6. Recording (trace capture for replay testing)
+    let primary_provider: Arc<dyn LlmProvider> = primary_reload.clone();
+    let recording_handle = RecordingLlm::from_env(primary_provider.clone());
+    let llm: Arc<dyn LlmProvider> = if let Some(ref recorder) = recording_handle {
+        Arc::clone(recorder) as Arc<dyn LlmProvider>
+    } else {
+        primary_provider
+    };
+
+    let cheap_llm = cheap_reload.map(|cheap| cheap as Arc<dyn LlmProvider>);
+
+    Ok((llm, cheap_llm, recording_handle, Some(reload_handle)))
 }
 
 pub fn create_gemini_oauth_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {

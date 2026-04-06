@@ -4,6 +4,7 @@
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -71,6 +72,7 @@ use crate::channels::web::types::*;
 use crate::channels::web::util::{build_turns_from_db_messages, truncate_preview};
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
+use crate::llm::LlmReloadHandle;
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
@@ -383,6 +385,8 @@ pub struct GatewayState {
     pub workspace_pool: Option<Arc<WorkspacePool>>,
     /// Session manager for thread info.
     pub session_manager: Option<Arc<SessionManager>>,
+    /// LLM session manager for provider auth/session refresh.
+    pub llm_session_manager: Option<Arc<crate::llm::SessionManager>>,
     /// Log broadcaster for the logs SSE endpoint.
     pub log_broadcaster: Option<Arc<LogBroadcaster>>,
     /// Handle for changing the tracing log level at runtime.
@@ -405,6 +409,8 @@ pub struct GatewayState {
     pub ws_tracker: Option<Arc<crate::channels::web::ws::WsConnectionTracker>>,
     /// LLM provider for OpenAI-compatible API proxy.
     pub llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
+    /// Reload controller for hot-swapping the LLM provider chain.
+    pub llm_reload: Option<Arc<LlmReloadHandle>>,
     /// Skill registry for skill management API.
     pub skill_registry: Option<Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>>,
     /// Skill catalog for searching the ClawHub registry.
@@ -424,10 +430,12 @@ pub struct GatewayState {
     pub cost_guard: Option<Arc<crate::agent::cost_guard::CostGuard>>,
     /// Routine engine slot for manual routine triggering (filled at runtime).
     pub routine_engine: RoutineEngineSlot,
+    /// Optional TOML config overlay path used for reloading LLM settings.
+    pub config_toml_path: Option<PathBuf>,
     /// Server startup time for uptime calculation.
     pub startup_time: std::time::Instant,
     /// Snapshot of active (resolved) configuration for the frontend.
-    pub active_config: ActiveConfigSnapshot,
+    pub active_config: Arc<tokio::sync::RwLock<ActiveConfigSnapshot>>,
     /// Secrets store for admin secret provisioning.
     pub secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
     /// DB auth cache for invalidation on security-critical actions.
@@ -3203,6 +3211,8 @@ async fn gateway_status_handler(
         .map(|v| v.to_lowercase() == "true")
         .unwrap_or(false);
 
+    let active_config = state.active_config.read().await.clone();
+
     Json(GatewayStatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         sse_connections,
@@ -3213,9 +3223,9 @@ async fn gateway_status_handler(
         daily_cost,
         actions_this_hour,
         model_usage,
-        llm_backend: state.active_config.llm_backend.clone(),
-        llm_model: state.active_config.llm_model.clone(),
-        enabled_channels: state.active_config.enabled_channels.clone(),
+        llm_backend: active_config.llm_backend,
+        llm_model: active_config.llm_model,
+        enabled_channels: active_config.enabled_channels,
     })
 }
 
@@ -3447,6 +3457,7 @@ mod tests {
             workspace: None,
             workspace_pool: None,
             session_manager: None,
+            llm_session_manager: None,
             log_broadcaster: None,
             log_level_handle: None,
             extension_manager: ext_mgr,
@@ -3458,6 +3469,7 @@ mod tests {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: None,
             llm_provider: None,
+            llm_reload: None,
             skill_registry: None,
             skill_catalog: None,
             scheduler: None,
@@ -3467,8 +3479,9 @@ mod tests {
             registry_entries: vec![],
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+            config_toml_path: None,
             startup_time: std::time::Instant::now(),
-            active_config: ActiveConfigSnapshot::default(),
+            active_config: Arc::new(tokio::sync::RwLock::new(ActiveConfigSnapshot::default())),
             secrets_store: None,
             db_auth,
             pairing_store,

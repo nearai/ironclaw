@@ -303,7 +303,7 @@ impl LiveTestHarnessBuilder {
         );
 
         let session = Arc::new(SessionManager::new(SessionConfig::default()));
-        let (provider, cheap_llm, _) = ironclaw::llm::build_provider_chain(&config.llm, session)
+        let (provider, cheap_llm, _, _) = ironclaw::llm::build_provider_chain(&config.llm, session)
             .await
             .expect("Failed to build LLM provider chain for live test");
 

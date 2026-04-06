@@ -615,6 +615,9 @@ async fn async_main() -> anyhow::Result<()> {
     if let Some(ref gw_config) = config.channels.gateway {
         let mut gw = GatewayChannel::new(gw_config.clone(), config.owner_id.clone());
         gw = gw.with_llm_provider(Arc::clone(&components.llm));
+        if let Some(ref reload) = components.llm_reload {
+            gw = gw.with_llm_reload(Arc::clone(reload));
+        }
         if let Some(ref ws) = components.workspace {
             gw = gw.with_workspace(Arc::clone(ws));
         }
@@ -633,6 +636,7 @@ async fn async_main() -> anyhow::Result<()> {
             gw = gw.with_workspace_pool(pool);
         }
         gw = gw.with_session_manager(Arc::clone(&session_manager));
+        gw = gw.with_llm_session_manager(Arc::clone(&components.session));
         gw = gw.with_log_broadcaster(Arc::clone(&log_broadcaster));
         gw = gw.with_log_level_handle(Arc::clone(&log_level_handle));
         gw = gw.with_tool_registry(Arc::clone(&components.tools));
@@ -723,7 +727,7 @@ async fn async_main() -> anyhow::Result<()> {
         gw = gw.with_cost_guard(Arc::clone(&components.cost_guard));
         gw = gw.with_oauth(config.oauth.clone(), gw_config.port);
         {
-            let active_model = components.llm.model_name().to_string();
+            let active_model = components.llm.active_model_name();
             let mut enabled = channel_names.clone();
             enabled.push("gateway".into());
             gw = gw.with_active_config(ironclaw::channels::web::server::ActiveConfigSnapshot {
@@ -732,6 +736,7 @@ async fn async_main() -> anyhow::Result<()> {
                 enabled_channels: enabled,
             });
         }
+        gw = gw.with_config_toml_path(toml_path.map(std::path::PathBuf::from));
         if config.sandbox.enabled {
             gw = gw.with_prompt_queue(Arc::clone(&prompt_queue));
 
@@ -807,7 +812,7 @@ async fn async_main() -> anyhow::Result<()> {
     // ── Boot screen ────────────────────────────────────────────────────
 
     let boot_tool_count = components.tools.count();
-    let boot_llm_model = components.llm.model_name().to_string();
+    let boot_llm_model = components.llm.active_model_name();
     let boot_cheap_model = components
         .cheap_llm
         .as_ref()
