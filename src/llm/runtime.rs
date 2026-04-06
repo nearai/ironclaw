@@ -103,9 +103,9 @@ impl SwappableLlmProvider {
 
     /// Replace the inner provider chain with a freshly rebuilt provider.
     pub fn swap(&self, inner: Arc<dyn LlmProvider>) {
+        let snapshot = ProviderSnapshot::capture(inner.as_ref());
         *self.inner.write().expect("inner provider lock poisoned") = inner;
-        let current = self.current();
-        self.refresh_snapshot(current.as_ref());
+        self.apply_snapshot(snapshot);
     }
 
     fn current(&self) -> Arc<dyn LlmProvider> {
