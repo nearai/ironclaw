@@ -33,7 +33,9 @@ use crate::tools::mcp::auth::{
     authorize_mcp_server, canonical_resource_uri, discover_full_oauth_metadata,
     find_available_port, is_authenticated, register_client,
 };
-use crate::tools::mcp::config::{McpServerConfig, NEARAI_MCP_SERVER_NAME, nearai_mcp_display_title};
+use crate::tools::mcp::config::{
+    McpServerConfig, NEARAI_MCP_SERVER_NAME, nearai_mcp_display_title,
+};
 use crate::tools::mcp::session::McpSessionManager;
 use crate::tools::wasm::{WasmToolLoader, WasmToolRuntime, discover_tools};
 

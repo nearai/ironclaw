@@ -414,8 +414,9 @@ pub const NEARAI_MCP_SERVER_NAME: &str = "nearai";
 const NEARAI_MCP_REGISTRY_KEY: &str = "mcp-servers/nearai";
 
 /// Human-readable title for extension lists (from the embedded manifest when present).
-pub fn nearai_mcp_display_title() -> String {
-    crate::registry::embedded::load_embedded()
+pub(crate) fn nearai_mcp_display_title() -> String {
+    let catalog = crate::registry::embedded::load_embedded();
+    catalog
         .get(NEARAI_MCP_REGISTRY_KEY)
         .map(|m| m.display_name.clone())
         .filter(|s| !s.is_empty())
@@ -432,7 +433,8 @@ fn nearai_mcp_server_from_env() -> Option<McpServerConfig> {
     let base_url = crate::config::helpers::env_or_override("NEARAI_BASE_URL")?;
     let api_key = crate::config::helpers::env_or_override("NEARAI_API_KEY")?;
 
-    let manifest = crate::registry::embedded::load_embedded().get(NEARAI_MCP_REGISTRY_KEY);
+    let catalog = crate::registry::embedded::load_embedded();
+    let manifest = catalog.get(NEARAI_MCP_REGISTRY_KEY);
     let name = manifest
         .map(|m| m.name.as_str())
         .filter(|n| !n.is_empty())
@@ -440,7 +442,7 @@ fn nearai_mcp_server_from_env() -> Option<McpServerConfig> {
         .to_string();
     let description = manifest
         .and_then(|m| (!m.description.is_empty()).then_some(m.description.clone()))
-        .unwrap_or_else(|| "Hosted tools from NEAR AI".to_string());
+        .unwrap_or_else(|| "Use NEAR AI built-in tools like web search".to_string());
 
     let headers = HashMap::from([("Authorization".to_string(), format!("Bearer {}", api_key))]);
     let server = McpServerConfig::new(name, derive_nearai_mcp_url(&base_url))
@@ -464,22 +466,20 @@ pub async fn bootstrap_nearai_mcp_server(
         return Ok(false);
     };
 
-    if let Some(db) = db {
-        let mut servers = load_mcp_servers_from_db(db, user_id).await?;
-        if servers.get(&server.name).is_some() {
-            return Ok(false);
-        }
-        servers.upsert(server);
-        save_mcp_servers_to_db(db, user_id, &servers).await?;
-        return Ok(true);
-    }
+    let mut servers = match db {
+        Some(store) => load_mcp_servers_from_db(store, user_id).await?,
+        None => load_mcp_servers().await?,
+    };
 
-    let mut servers = load_mcp_servers().await?;
     if servers.get(&server.name).is_some() {
         return Ok(false);
     }
     servers.upsert(server);
-    save_mcp_servers(&servers).await?;
+
+    match db {
+        Some(store) => save_mcp_servers_to_db(store, user_id, &servers).await?,
+        None => save_mcp_servers(&servers).await?,
+    }
     Ok(true)
 }
 
@@ -1288,10 +1288,15 @@ mod tests {
         }
 
         let server = nearai_mcp_server_from_env().expect("server from env");
+        let catalog = crate::registry::embedded::load_embedded();
+        let expected_description = catalog
+            .get(super::NEARAI_MCP_REGISTRY_KEY)
+            .and_then(|m| (!m.description.is_empty()).then_some(m.description.clone()))
+            .unwrap_or_else(|| "Use NEAR AI built-in tools like web search".to_string());
         assert_eq!(server.name, NEARAI_MCP_SERVER_NAME);
-        assert!(
-            server.description.as_ref().is_some_and(|d| !d.is_empty()),
-            "description from embedded manifest or fallback"
+        assert_eq!(
+            server.description.as_deref(),
+            Some(expected_description.as_str())
         );
         assert_eq!(server.url, "https://cloud-api.near.ai/mcp");
         assert_eq!(
