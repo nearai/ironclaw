@@ -367,8 +367,18 @@ I18n.register('zh-CN', {
   'tool.running': '运行中',
   'tool.used': '{count} 个工具已使用',
   'tool.requiresApproval': '工具需要审批',
-  
-  
+
+  // 工具权限
+  'settings.tools': '工具',
+  'tools.alwaysAllow': '始终允许',
+  'tools.askEachTime': '每次询问',
+  'tools.disabled': '已禁用',
+  'tools.lockedTooltip': '始终需要审批',
+  'tools.defaultBadge': '默认',
+  'tools.noTools': '未注册任何工具',
+  'tools.saveFailed': '保存失败：{message}',
+
+
   // TEE
   'tee.loadingReport': '正在加载证明报告...',
   'tee.loadFailed': '无法加载证明报告',
@@ -468,6 +478,7 @@ I18n.register('zh-CN', {
   'config.telegramCommandLabel': '请在 Telegram 中发送：',
   'config.telegramStartOver': '重新开始',
   'config.telegramStartOverHint': 'Telegram 验证未完成。点击“重新开始”以生成新的验证码并重试。',
+  'config.telegramOpenBot': '在 Telegram 中打开机器人',
   'config.optional': '（可选）',
   'config.alreadySet': '（已设置 — 留空以保持不变）',
   'config.alreadyConfigured': '已配置',
@@ -655,4 +666,142 @@ I18n.register('zh-CN', {
 
   // Approval
   'approval.pressY': '按 Y 批准，N 拒绝',
+
+  // === 为 app.js 国际化补充 ===
+
+  // 认证（动态状态）
+  'auth.connecting': '连接中...',
+  'auth.connectingWallet': '正在连接钱包...',
+  'auth.signWithWallet': '使用钱包签名...',
+  'auth.verifying': '验证中...',
+  'auth.authenticated': '已认证',
+  'auth.notAuthenticated': '未认证',
+
+  // 聊天（动态）
+  'chat.authRequiredBeforeSend': '请先完成认证步骤再发送聊天消息。',
+  'chat.rateLimited': '速率受限，请稍候。',
+  'chat.imageTooBig': '图片 "{name}" 超过 5 MB 限制（{size} MB）',
+  'chat.maxImages': '每条消息最多允许 {n} 张图片',
+  'chat.readOnlyThread': '只读线程（外部渠道）',
+  'chat.threadCreateFailed': '创建线程失败：{message}',
+
+  // 通用（动态）
+  'common.copyFailed': '失败',
+  'common.retry': '重试',
+  'common.back': '← 返回',
+
+  // 记忆（动态）
+  'memory.savedPath': '已保存 {path}',
+  'memory.saveFailed': '保存失败：{message}',
+
+  // 日志（动态）
+  'logs.confirmClear': '清空所有日志？',
+
+  // 主题（动态）
+  'theme.label': '主题：{mode}',
+
+  // 线程类型
+  'thread.heartbeatAlerts': '心跳提醒',
+  'thread.routine': '定时任务',
+
+  // 扩展（动态）
+  'extensions.openingAuth': '正在为 {name} 打开认证',
+  'extensions.installFailed': '安装失败：{message}',
+  'extensions.activateFailed': '激活失败：{message}',
+  'extensions.setupLoadFailed': '加载安装程序失败：{message}',
+  'extensions.openingOAuth': '正在为 {name} 打开 OAuth 授权',
+  'extensions.configuredRestart': '已配置 {name}。请重启 IronClaw 以应用所有更改。',
+  'extensions.configFailed': '配置失败：{message}',
+  'extensions.invalidOAuthUrl': '服务器返回了无效的 OAuth URL',
+  'extensions.pairingApproved': '配对已批准',
+  'extensions.approveFailed': '批准失败',
+  'extensions.pairingError': '错误：{message}',
+  'extensions.nameRequired': '扩展名称是必填项',
+  'extensions.urlRequired': '需要 .tar.gz 包的 URL',
+  'extensions.installedName': '已安装 {name}',
+
+  // MCP（动态）
+  'mcp.serverNameRequired': '服务器名称是必填项',
+  'mcp.urlRequired': 'MCP 服务器 URL 是必填项',
+  'mcp.added': '已添加 MCP 服务器 {name}',
+  'mcp.addFailed': '添加 MCP 服务器失败：{message}',
+
+  // 技能（动态）
+  'skills.confirmInstallHub': '从 ClawHub 安装技能 "{name}"？',
+  'skills.nameRequired': '技能名称是必填项',
+  'skills.httpsRequired': 'URL 必须使用 HTTPS',
+  'skills.confirmInstall': '安装技能 "{name}"？',
+
+  // 任务（动态）
+  'jobs.confirmCancel': '取消此任务？',
+  'jobs.cancelled': '任务已取消',
+  'jobs.cancelFailed': '取消任务失败：{message}',
+  'jobs.restarted': '任务已作为 {id} 重新启动',
+  'jobs.restartFailed': '重新启动任务失败：{message}',
+  'jobs.state': '状态',
+  'jobs.startedLabel': '已开始',
+  'jobs.completedLabel': '已完成',
+  'jobs.duration': '持续时间',
+  'jobs.autoScroll': '自动滚动',
+  'jobs.followUpPlaceholder': '发送后续提示...',
+  'jobs.signalDone': '标记完成',
+  'jobs.done': '完成',
+
+  // 定时任务（动态）
+  'routines.loadFailed': '加载定时任务失败：{message}',
+  'routines.id': '定时任务 ID',
+  'routines.enabled': '已启用',
+  'routines.runCount': '运行次数',
+  'routines.failures': '失败次数',
+  'routines.nextFire': '下次执行',
+  'routines.created': '创建于',
+  'routines.triggered': '定时任务已触发',
+  'routines.toggled': '定时任务{status}',
+  'routines.toggleFailed': '切换失败：{message}',
+  'routines.confirmDelete': '删除定时任务 "{name}"？',
+  'routines.deleted': '定时任务已删除',
+  'routines.deleteFailed': '删除失败：{message}',
+
+  // 使命（动态）
+  'missions.stepInstalled': '已安装',
+  'missions.stepConfigured': '已配置',
+  'missions.stepAwaitingPairing': '等待配对',
+  'missions.stepActive': '运行中',
+  'missions.pause': '暂停',
+  'missions.resume': '恢复',
+  'missions.fire': '执行',
+  'missions.loadFailed': '加载使命失败：{message}',
+  'missions.threadsToday': '今日线程',
+  'missions.totalThreads': '总线程数',
+  'missions.created': '创建于',
+  'missions.nextFire': '下次执行',
+  'missions.fireNow': '立即执行',
+  'missions.backToMission': '← 返回使命',
+  'missions.threadId': '线程 ID',
+  'missions.type': '类型',
+  'missions.steps': '步骤',
+  'missions.tokens': '令牌',
+  'missions.cost': '成本',
+  'missions.maxIterations': '最大迭代次数',
+  'missions.threadLoadFailed': '加载线程失败：{message}',
+  'missions.fired': '使命已执行 — 线程 {id}',
+  'missions.notFired': '使命未执行（已终止或预算耗尽）',
+  'missions.fireFailed': '执行失败：{message}',
+  'missions.paused': '使命已暂停',
+  'missions.pauseFailed': '暂停失败：{message}',
+  'missions.resumed': '使命已恢复',
+  'missions.resumeFailed': '恢复失败：{message}',
+
+  // TEE（动态）
+  'tee.reportCopied': '证明报告已复制',
+  'tee.copyFailed': '复制报告失败',
+
+  // 设置（动态）
+  'settings.saveFailed': '保存 {key} 失败：{message}',
+
+  // 扩展（更多）
+  'extensions.toolsLabel': '工具：{list}',
+
+  // 技能（更多）
+  'skills.viewOnClawHub': '在 ClawHub 上查看',
 });

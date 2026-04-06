@@ -759,6 +759,7 @@ pub async fn start_server(
         .route("/i18n/index.js", get(i18n_index_handler))
         .route("/i18n/en.js", get(i18n_en_handler))
         .route("/i18n/zh-CN.js", get(i18n_zh_handler))
+        .route("/i18n/ko.js", get(i18n_ko_handler))
         .route("/i18n-app.js", get(i18n_app_handler));
 
     // Project file serving (behind auth to prevent unauthorized file access).
@@ -952,6 +953,16 @@ async fn i18n_zh_handler() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         include_str!("static/i18n/zh-CN.js"),
+    )
+}
+
+async fn i18n_ko_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/i18n/ko.js"),
     )
 }
 

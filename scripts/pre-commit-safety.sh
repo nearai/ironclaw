@@ -12,6 +12,9 @@
 #   5. Multi-step DB operations without transaction wrapping
 #   6. .unwrap(), .expect(), assert!() in production code (panics)
 #
+# Also runs check-i18n-parity.sh when src/channels/web/static/i18n/*.js
+# files are staged, to ensure every language pack has the same key set.
+#
 # Suppress individual lines with an inline "// safety: <reason>" comment.
 
 set -euo pipefail
@@ -38,6 +41,37 @@ resolve_base_ref() {
     echo "pre-commit-safety: ensure your repository has an upstream or a local main/master branch." >&2
     exit 1
 }
+
+# i18n parity: when any language pack changes, all languages must stay in sync.
+# Run before the .rs-focused checks so it fires even when no .rs files change.
+if git diff --cached --quiet 2>/dev/null; then
+    I18N_CHANGED=$(git diff --name-only -- 'src/channels/web/static/i18n/*.js' 2>/dev/null || true)
+else
+    I18N_CHANGED=$(git diff --cached --name-only -- 'src/channels/web/static/i18n/*.js' 2>/dev/null || true)
+fi
+if [ -n "$I18N_CHANGED" ]; then
+    # Resolve script location even when invoked via a symlink (the
+    # pre-commit hook is typically a symlink at .git/hooks/pre-commit
+    # pointing to this file in scripts/). Walk symlinks until we find the
+    # real path, then use its parent directory.
+    SOURCE="${BASH_SOURCE[0]:-$0}"
+    while [ -L "$SOURCE" ]; do
+        LINK_TARGET="$(readlink "$SOURCE")"
+        case "$LINK_TARGET" in
+            /*) SOURCE="$LINK_TARGET" ;;
+            *)  SOURCE="$(cd "$(dirname "$SOURCE")" && pwd)/$LINK_TARGET" ;;
+        esac
+    done
+    SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+    if ! "$SCRIPT_DIR/check-i18n-parity.sh"; then
+        echo ""
+        echo "Commit blocked: i18n parity check failed."
+        echo "Every key added to en.js must also be added to all other language files (zh-CN.js, ko.js, ...)."
+        echo "Placeholder tokens like {name} must match across all languages."
+        echo "To bypass: git commit --no-verify"
+        exit 1
+    fi
+fi
 
 # Support both pre-commit hook (staged files) and standalone (all changed vs base)
 if git diff --cached --quiet 2>/dev/null; then

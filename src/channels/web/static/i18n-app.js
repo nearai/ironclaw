@@ -57,7 +57,8 @@ function switchLanguage(lang) {
     }
 
     // Show toast notification
-    showToast(I18n.t('language.switch') + ': ' + (lang === 'zh-CN' ? '简体中文' : 'English'));
+    const labels = { 'en': 'English', 'zh-CN': '简体中文', 'ko': '한국어' };
+    showToast(I18n.t('language.switch') + ': ' + (labels[lang] || lang));
   }
 }
 
