@@ -914,6 +914,19 @@ async def test_auth_card_with_oauth(page):
     assert "slack" in await oauth_btn.text_content()
 
 
+async def test_auth_card_oauth_link_opens_in_new_tab(page):
+    """OAuth auth card link should open in a new tab without opener access."""
+    auth_url = "https://accounts.google.com/o/oauth2/v2/auth?client_id=test"
+    await _show_auth_card(page, extension_name="gmail", auth_url=auth_url)
+
+    oauth_link = page.locator(SEL["auth_card"]).locator(SEL["auth_oauth_btn"])
+    assert await oauth_link.get_attribute("href") == auth_url
+    assert await oauth_link.get_attribute("target") == "_blank"
+    rel = await oauth_link.get_attribute("rel")
+    assert rel is not None
+    assert "noopener" in rel.split()
+
+
 async def test_auth_card_with_setup_url(page):
     """Auth card with setup_url shows a 'Get your token' link."""
     await _show_auth_card(page, extension_name="openai", setup_url="https://platform.openai.com/api-keys")

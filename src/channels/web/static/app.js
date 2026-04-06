@@ -1940,13 +1940,16 @@ function showAuthCard(data) {
   links.className = 'auth-links';
 
   if (data.auth_url) {
-    const oauthBtn = document.createElement('button');
-    oauthBtn.className = 'auth-oauth';
-    oauthBtn.textContent = I18n.t('authRequired.authenticateWith', {name: data.extension_name});
-    oauthBtn.addEventListener('click', () => {
-      openOAuthUrl(data.auth_url);
-    });
-    links.appendChild(oauthBtn);
+    const parsedAuthUrl = parseHttpsOAuthUrl(data.auth_url);
+    if (parsedAuthUrl) {
+      const oauthLink = document.createElement('a');
+      oauthLink.className = 'auth-oauth';
+      oauthLink.href = parsedAuthUrl.href;
+      oauthLink.target = '_blank';
+      oauthLink.rel = 'noopener';
+      oauthLink.textContent = I18n.t('authRequired.authenticateWith', {name: data.extension_name});
+      links.appendChild(oauthLink);
+    }
   }
 
   if (data.setup_url) {
@@ -3859,7 +3862,7 @@ function currentUserIsAdmin() {
 // Rejects javascript:, data:, and other non-HTTPS schemes to prevent URL-injection.
 // Uses the URL constructor to safely parse and validate the scheme, which also
 // handles non-string values (objects, null, etc.) that would throw on .startsWith().
-function openOAuthUrl(url) {
+function parseHttpsOAuthUrl(url) {
   let parsed;
   try {
     parsed = new URL(url);
@@ -3869,8 +3872,14 @@ function openOAuthUrl(url) {
   } catch (e) {
     console.warn('Blocked invalid/non-HTTPS OAuth URL:', url, e.message);
     showToast('Invalid OAuth URL returned by server', 'error');
-    return;
+    return null;
   }
+  return parsed;
+}
+
+function openOAuthUrl(url) {
+  const parsed = parseHttpsOAuthUrl(url);
+  if (!parsed) return;
   window.open(parsed.href, '_blank', 'width=600,height=700');
 }
 
