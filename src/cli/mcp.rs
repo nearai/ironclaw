@@ -654,7 +654,7 @@ async fn connect_db() -> (Option<Arc<dyn Database>>, String) {
     (db, owner_id)
 }
 
-/// Load MCP servers (DB if available, else disk), after NEAR AI env bootstrap when applicable.
+/// Load MCP servers (DB if available, else disk), after NEAR AI MCP server env bootstrap when applicable.
 async fn load_servers(
     db: Option<&dyn Database>,
     owner_id: &str,
