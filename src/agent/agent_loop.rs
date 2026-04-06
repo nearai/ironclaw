@@ -20,7 +20,7 @@ use crate::agent::session::ThreadState;
 use crate::agent::session_manager::SessionManager;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
 use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, Router, Scheduler, SchedulerDeps};
-use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse};
+use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
 use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
 use crate::context::ContextManager;
 use crate::db::Database;
@@ -309,6 +309,30 @@ impl Agent {
 
     pub(super) fn store(&self) -> Option<&Arc<dyn Database>> {
         self.deps.store.as_ref()
+    }
+
+    async fn respond_then_done(
+        &self,
+        message: &IncomingMessage,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        self.channels.respond(message, response).await?;
+        if let Err(e) = self
+            .channels
+            .send_status(
+                &message.channel,
+                StatusUpdate::Status("Done".into()),
+                &message.metadata,
+            )
+            .await
+        {
+            tracing::warn!(
+                channel = %message.channel,
+                error = %e,
+                "Failed to send Done status after response"
+            );
+        }
+        Ok(())
     }
 
     pub(crate) fn llm(&self) -> &Arc<dyn LlmProvider> {
@@ -955,8 +979,7 @@ impl Agent {
                             modified: Some(new_content),
                         }) => {
                             if let Err(e) = self
-                                .channels
-                                .respond(&message, OutgoingResponse::text(new_content))
+                                .respond_then_done(&message, OutgoingResponse::text(new_content))
                                 .await
                             {
                                 tracing::error!(
@@ -968,8 +991,7 @@ impl Agent {
                         }
                         _ => {
                             if let Err(e) = self
-                                .channels
-                                .respond(&message, OutgoingResponse::text(response))
+                                .respond_then_done(&message, OutgoingResponse::text(response))
                                 .await
                             {
                                 tracing::error!(
@@ -998,8 +1020,10 @@ impl Agent {
                 Err(e) => {
                     tracing::error!("Error handling message: {}", e);
                     if let Err(send_err) = self
-                        .channels
-                        .respond(&message, OutgoingResponse::text(format!("Error: {}", e)))
+                        .respond_then_done(
+                            &message,
+                            OutgoingResponse::text(format!("Error: {}", e)),
+                        )
                         .await
                     {
                         tracing::error!(
@@ -1464,8 +1488,7 @@ impl Agent {
                     //   message. This is acceptable for the current
                     //   single-user-per-thread model.
                     if let Err(e) = self
-                        .channels
-                        .respond(message, OutgoingResponse::text(outgoing.clone()))
+                        .respond_then_done(message, OutgoingResponse::text(outgoing.clone()))
                         .await
                     {
                         tracing::warn!(

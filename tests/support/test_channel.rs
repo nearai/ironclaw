@@ -18,6 +18,13 @@ use tokio_stream::wrappers::ReceiverStream;
 use ironclaw::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use ironclaw::error::ChannelError;
 
+/// Captured outbound event in the order it was emitted.
+#[derive(Clone, Debug)]
+pub enum CapturedEvent {
+    Response(OutgoingResponse),
+    Status(StatusUpdate),
+}
+
 // ---------------------------------------------------------------------------
 // TestChannel
 // ---------------------------------------------------------------------------
@@ -35,6 +42,8 @@ pub struct TestChannel {
     pub responses: Arc<Mutex<Vec<OutgoingResponse>>>,
     /// Captured status events.
     status_events: Arc<Mutex<Vec<StatusUpdate>>>,
+    /// Ordered log of responses and status events.
+    captured_events: Arc<Mutex<Vec<CapturedEvent>>>,
     /// Tracks when each tool started (by name). Supports nested/overlapping tools
     /// by using a Vec of start times per tool name.
     tool_start_times: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
@@ -66,6 +75,7 @@ impl TestChannel {
             rx: Mutex::new(Some(rx)),
             responses: Arc::new(Mutex::new(Vec::new())),
             status_events: Arc::new(Mutex::new(Vec::new())),
+            captured_events: Arc::new(Mutex::new(Vec::new())),
             tool_start_times: Arc::new(Mutex::new(HashMap::new())),
             tool_timings: Arc::new(Mutex::new(Vec::new())),
             user_id: user_id.into(),
@@ -162,6 +172,14 @@ impl TestChannel {
             .clone()
     }
 
+    /// Return the ordered log of emitted outbound events.
+    pub fn captured_events(&self) -> Vec<CapturedEvent> {
+        self.captured_events
+            .try_lock()
+            .expect("captured_events lock contention")
+            .clone()
+    }
+
     /// Return the names of all `ToolStarted` events captured so far.
     pub fn tool_calls_started(&self) -> Vec<String> {
         self.captured_status_events()
@@ -209,6 +227,7 @@ impl TestChannel {
     pub async fn clear(&self) {
         self.responses.lock().await.clear();
         self.status_events.lock().await.clear();
+        self.captured_events.lock().await.clear();
         self.tool_start_times.lock().await.clear();
         self.tool_timings.lock().await.clear();
     }
@@ -326,7 +345,11 @@ impl Channel for TestChannel {
         _msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        self.responses.lock().await.push(response);
+        self.responses.lock().await.push(response.clone());
+        self.captured_events
+            .lock()
+            .await
+            .push(CapturedEvent::Response(response));
         Ok(())
     }
 
@@ -357,7 +380,11 @@ impl Channel for TestChannel {
             }
             _ => {}
         }
-        self.status_events.lock().await.push(status);
+        self.status_events.lock().await.push(status.clone());
+        self.captured_events
+            .lock()
+            .await
+            .push(CapturedEvent::Status(status));
         Ok(())
     }
 
