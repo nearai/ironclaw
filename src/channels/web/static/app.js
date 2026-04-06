@@ -1121,6 +1121,7 @@ function addGeneratedImage(dataUrl, path, shouldScroll = true) {
 
 function rememberGeneratedImage(threadId, dataUrl, path) {
   if (!threadId || !dataUrl) return;
+  const normalizedPath = path || null;
   let images = generatedImagesByThread.get(threadId);
   if (!images) {
     if (generatedImagesByThread.size >= GENERATED_IMAGE_THREAD_CACHE_CAP) {
@@ -1136,10 +1137,10 @@ function rememberGeneratedImage(threadId, dataUrl, path) {
     generatedImagesByThread.delete(threadId);
     generatedImagesByThread.set(threadId, images);
   }
-  if (images.some(img => img.dataUrl === dataUrl && img.path === path)) {
+  if (images.some(img => img.dataUrl === dataUrl && img.path === normalizedPath)) {
     return;
   }
-  images.push({ dataUrl, path: path || null });
+  images.push({ dataUrl, path: normalizedPath });
   while (images.length > GENERATED_IMAGES_PER_THREAD_CAP) {
     images.shift();
   }
