@@ -142,14 +142,24 @@ pub trait Store: Send + Sync {
             docs.extend(self.list_memory_docs_by_owner(owner_id).await?);
         }
         docs.retain(|d| d.doc_type == crate::types::memory::DocType::Skill);
-        docs.sort_by_key(|doc| doc.id.0);
-        docs.dedup_by_key(|doc| doc.id);
         Ok(docs)
     }
 
     /// List all memory docs owned by a specific user across ALL projects.
-    async fn list_memory_docs_by_owner(&self, user_id: &str)
-    -> Result<Vec<MemoryDoc>, EngineError>;
+    ///
+    /// Default implementation fans out over `list_projects` + `list_memory_docs`.
+    /// Implementors with a flat store should override for efficiency.
+    async fn list_memory_docs_by_owner(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<MemoryDoc>, EngineError> {
+        let projects = self.list_projects(user_id).await?;
+        let mut docs = Vec::new();
+        for project in projects {
+            docs.extend(self.list_memory_docs(project.id, user_id).await?);
+        }
+        Ok(docs)
+    }
 
     // ── Capability lease operations ─────────────────────────
 
