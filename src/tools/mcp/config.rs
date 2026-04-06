@@ -413,16 +413,6 @@ pub const NEARAI_MCP_SERVER_NAME: &str = "nearai";
 
 const NEARAI_MCP_REGISTRY_KEY: &str = "mcp-servers/nearai";
 
-/// Human-readable title for extension lists (from the embedded manifest when present).
-pub(crate) fn nearai_mcp_display_title() -> String {
-    let catalog = crate::registry::embedded::load_embedded();
-    catalog
-        .get(NEARAI_MCP_REGISTRY_KEY)
-        .map(|m| m.display_name.clone())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "NEAR AI".to_string())
-}
-
 fn derive_nearai_mcp_url(base_url: &str) -> String {
     let base = base_url.trim_end_matches('/');
     let base = base.strip_suffix("/v1").unwrap_or(base);

@@ -33,9 +33,7 @@ use crate::tools::mcp::auth::{
     authorize_mcp_server, canonical_resource_uri, discover_full_oauth_metadata,
     find_available_port, is_authenticated, register_client,
 };
-use crate::tools::mcp::config::{
-    McpServerConfig, NEARAI_MCP_SERVER_NAME, nearai_mcp_display_title,
-};
+use crate::tools::mcp::config::McpServerConfig;
 use crate::tools::mcp::session::McpSessionManager;
 use crate::tools::wasm::{WasmToolLoader, WasmToolRuntime, discover_tools};
 
@@ -112,14 +110,6 @@ fn normalize_hosted_callback_url(callback_url: &str) -> String {
         normalized_callback_url.to_string()
     } else {
         format!("{normalized_callback_url}/oauth/callback")
-    }
-}
-
-fn mcp_display_name(server: &McpServerConfig) -> String {
-    if server.name == NEARAI_MCP_SERVER_NAME {
-        nearai_mcp_display_title()
-    } else {
-        server.name.clone()
     }
 }
 
@@ -1506,7 +1496,7 @@ impl ExtensionManager {
                             .get_with_kind(&server.name, Some(ExtensionKind::McpServer))
                             .await
                             .map(|e| e.display_name)
-                            .or_else(|| Some(mcp_display_name(server)));
+                            .or_else(|| Some(server.name.clone()));
                         extensions.push(InstalledExtension {
                             name: server.name.clone(),
                             kind: ExtensionKind::McpServer,
@@ -2978,9 +2968,16 @@ impl ExtensionManager {
             let mut token_exchange_extra_params = HashMap::new();
             token_exchange_extra_params.insert("resource".to_string(), resource.clone());
 
+            let display_name = self
+                .registry
+                .get_with_kind(&server.name, Some(ExtensionKind::McpServer))
+                .await
+                .map(|e| e.display_name)
+                .unwrap_or_else(|| server.name.clone());
+
             let flow = oauth_defaults::PendingOAuthFlow {
                 extension_name: name.to_string(),
-                display_name: mcp_display_name(server),
+                display_name,
                 token_url: metadata.token_endpoint,
                 client_id,
                 client_secret,
