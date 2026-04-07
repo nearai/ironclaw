@@ -318,7 +318,7 @@ impl Guest for SlackChannel {
                 }
 
                 if let Some(thread_ts) = thread_ts {
-                    track_active_thread(&metadata.channel, &thread_ts)?;
+                    let _ = track_active_thread(&metadata.channel, &thread_ts);
                 }
 
                 channel_host::log(
@@ -338,8 +338,82 @@ impl Guest for SlackChannel {
 
     fn on_status(_update: StatusUpdate) {}
 
-    fn on_broadcast(_user_id: String, _response: AgentResponse) -> Result<(), String> {
-        Err("broadcast not yet implemented for Slack channel".to_string())
+    fn on_broadcast(user_id: String, response: AgentResponse) -> Result<(), String> {
+        let target = resolve_broadcast_target(&user_id);
+        if target.is_empty() {
+            return Err(
+                "broadcast failed: no target specified. Use a Slack channel ID (C0...) or user ID (U0...), not a channel name."
+                    .to_string(),
+            );
+        }
+
+        if !looks_like_slack_id(&target) {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!(
+                    "Broadcast target '{}' does not look like a Slack ID (C/U/D/G prefix). \
+                     Slack API requires channel IDs, not names. This will likely fail.",
+                    target
+                ),
+            );
+        }
+
+        let payload =
+            build_broadcast_payload(&target, &response.content, response.thread_id.as_deref());
+        let payload_bytes = serde_json::to_vec(&payload)
+            .map_err(|e| format!("Failed to serialize broadcast payload: {}", e))?;
+
+        let headers = serde_json::json!({
+            "Content-Type": "application/json"
+        });
+
+        let result = channel_host::http_request(
+            "POST",
+            "https://slack.com/api/chat.postMessage",
+            &headers.to_string(),
+            Some(&payload_bytes),
+            None,
+        );
+
+        match result {
+            Ok(http_response) => {
+                if http_response.status != 200 {
+                    return Err(format!(
+                        "Slack API returned status {}",
+                        http_response.status
+                    ));
+                }
+
+                let slack_response: SlackPostMessageResponse =
+                    serde_json::from_slice(&http_response.body)
+                        .map_err(|e| format!("Failed to parse Slack response: {}", e))?;
+
+                if !slack_response.ok {
+                    return Err(format!(
+                        "Slack API error: {}",
+                        slack_response
+                            .error
+                            .unwrap_or_else(|| "unknown".to_string())
+                    ));
+                }
+
+                if let Some(ref thread_ts) = response.thread_id {
+                    let _ = track_active_thread(&target, thread_ts);
+                }
+
+                channel_host::log(
+                    channel_host::LogLevel::Debug,
+                    &format!(
+                        "Broadcast message to Slack target {}: ts={}",
+                        target,
+                        slack_response.ts.unwrap_or_default()
+                    ),
+                );
+
+                Ok(())
+            }
+            Err(e) => Err(format!("HTTP request failed: {}", e)),
+        }
     }
 
     fn on_shutdown() {
@@ -788,6 +862,42 @@ fn send_pairing_reply(channel_id: &str, code: &str) -> Result<(), String> {
     }
 }
 
+/// Normalize a broadcast target by stripping a leading `#` if present.
+///
+/// The message tool passes the target as `user_id` (e.g. `#C0123ABC`,
+/// `C0123ABC`, or `U0123ABC`). The Slack API expects a channel ID (C0...)
+/// or user ID (U0...), not a channel name.
+fn resolve_broadcast_target(raw: &str) -> String {
+    raw.strip_prefix('#').unwrap_or(raw).to_string()
+}
+
+/// Check if a string looks like a Slack ID (starts with C, U, D, or G followed by alphanumeric).
+fn looks_like_slack_id(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some('C' | 'U' | 'D' | 'G' | 'W') => {
+            chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        }
+        _ => false,
+    }
+}
+
+/// Build the JSON payload for a Slack `chat.postMessage` broadcast.
+fn build_broadcast_payload(
+    target: &str,
+    content: &str,
+    thread_ts: Option<&str>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "channel": target,
+        "text": content,
+    });
+    if let Some(ts) = thread_ts {
+        payload["thread_ts"] = serde_json::Value::String(ts.to_string());
+    }
+    payload
+}
+
 /// Strip leading bot mention from text.
 fn strip_bot_mention(text: &str) -> String {
     // Slack mentions look like <@U12345678>
@@ -991,5 +1101,57 @@ mod tests {
             now_millis - ACTIVE_THREAD_TTL_MS - 1,
             now_millis
         ));
+    }
+
+    #[test]
+    fn test_resolve_broadcast_target_strips_hash() {
+        assert_eq!(resolve_broadcast_target("#general"), "general");
+        assert_eq!(resolve_broadcast_target("#staging-eli5"), "staging-eli5");
+    }
+
+    #[test]
+    fn test_resolve_broadcast_target_preserves_ids() {
+        assert_eq!(resolve_broadcast_target("C0123ABC"), "C0123ABC");
+        assert_eq!(resolve_broadcast_target("U0123ABC"), "U0123ABC");
+    }
+
+    #[test]
+    fn test_resolve_broadcast_target_empty_input() {
+        assert_eq!(resolve_broadcast_target(""), "");
+        assert_eq!(resolve_broadcast_target("#"), "");
+    }
+
+    #[test]
+    fn test_build_broadcast_payload_without_thread() {
+        let payload = build_broadcast_payload("C0123", "hello world", None);
+        assert_eq!(payload["channel"], "C0123");
+        assert_eq!(payload["text"], "hello world");
+        assert!(payload.get("thread_ts").is_none());
+    }
+
+    #[test]
+    fn test_build_broadcast_payload_with_thread() {
+        let payload = build_broadcast_payload("C0123", "threaded reply", Some("1742486400.000100"));
+        assert_eq!(payload["channel"], "C0123");
+        assert_eq!(payload["text"], "threaded reply");
+        assert_eq!(payload["thread_ts"], "1742486400.000100");
+    }
+
+    #[test]
+    fn test_looks_like_slack_id_valid() {
+        assert!(looks_like_slack_id("C0123ABC"));
+        assert!(looks_like_slack_id("U0123ABC"));
+        assert!(looks_like_slack_id("D0123ABC"));
+        assert!(looks_like_slack_id("G0123ABC"));
+        assert!(looks_like_slack_id("W0123ABC"));
+    }
+
+    #[test]
+    fn test_looks_like_slack_id_invalid() {
+        assert!(!looks_like_slack_id("general"));
+        assert!(!looks_like_slack_id("staging-eli5"));
+        assert!(!looks_like_slack_id(""));
+        assert!(!looks_like_slack_id("C")); // too short, no second char
+        assert!(!looks_like_slack_id("c0123")); // lowercase
     }
 }
