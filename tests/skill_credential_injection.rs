@@ -60,7 +60,7 @@ fn make_skill(
         },
         prompt_content: prompt.to_string(),
         trust: SkillTrust::Trusted,
-        source: SkillSource::User(PathBuf::from("/tmp/test-skills")),
+        source: SkillSource::User(PathBuf::from("/tmp/test-skills")), // safety: dummy path in test, not used for I/O
         content_hash: format!("sha256:{}", name),
         compiled_patterns: vec![],
         lowercased_keywords: vec![],

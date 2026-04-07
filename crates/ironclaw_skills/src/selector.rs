@@ -278,7 +278,7 @@ mod tests {
             },
             prompt_content: "Test prompt".to_string(),
             trust: SkillTrust::Trusted,
-            source: SkillSource::User(PathBuf::from("/tmp/test")),
+            source: SkillSource::User(PathBuf::from("/tmp/test")), // safety: dummy path in test, not used for I/O
             content_hash: "sha256:000".to_string(),
             compiled_patterns: compiled,
             lowercased_keywords,

@@ -172,7 +172,7 @@ impl LiveTestHarness {
                             .take_while(|&i| i <= 200)
                             .last()
                             .unwrap_or(0);
-                        format!("{}…", &preview[..end])
+                        format!("{}…", &preview[..end]) // safety: end from char_indices(), always a valid boundary
                     } else {
                         preview
                     };

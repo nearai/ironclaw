@@ -6,7 +6,9 @@ import hmac
 import re
 import time
 import uuid
+from contextlib import asynccontextmanager
 
+import aiohttp
 import httpx
 
 # -- DOM Selectors --------------------------------------------------------
@@ -204,6 +206,54 @@ async def api_post(base_url: str, path: str, *, token: str = AUTH_TOKEN, **kwarg
             timeout=kwargs.pop("timeout", 10),
             **kwargs,
         )
+
+
+@asynccontextmanager
+async def sse_stream(
+    base_url: str,
+    path: str = "/api/chat/events",
+    *,
+    token: str = AUTH_TOKEN,
+    params: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float = 45,
+):
+    """Open an authenticated SSE stream and yield the aiohttp response."""
+    request_headers = {
+        "Accept": "text/event-stream",
+        "Authorization": f"Bearer {token}",
+    }
+    if headers:
+        request_headers.update(headers)
+    client_timeout = aiohttp.ClientTimeout(total=timeout, sock_read=timeout)
+    async with aiohttp.ClientSession(timeout=client_timeout) as session:
+        async with session.get(
+            f"{base_url}{path}",
+            params=params,
+            headers=request_headers,
+        ) as response:
+            yield response
+
+
+async def wait_for_sse_line(response, *, predicate, timeout: float = 40) -> str:
+    """Read SSE lines until ``predicate`` matches or the timeout expires."""
+    async with asyncio.timeout(timeout):
+        while True:
+            line = await response.content.readline()
+            if not line:
+                raise AssertionError("SSE stream closed before a matching line arrived")
+            decoded = line.decode("utf-8", errors="replace").rstrip("\r\n")
+            if predicate(decoded):
+                return decoded
+
+
+async def wait_for_sse_comment(response, timeout: float = 40) -> str:
+    """Wait for the next SSE keepalive/comment line."""
+    return await wait_for_sse_line(
+        response,
+        predicate=lambda line: line.startswith(":"),
+        timeout=timeout,
+    )
 
 
 async def create_member_user(

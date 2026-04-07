@@ -352,7 +352,7 @@ impl Database for LibSqlBackend {
 
     async fn migrate_default_owner(&self, owner_id: &str) -> Result<(), DatabaseError> {
         let conn = self.connect().await?;
-        conn.execute("BEGIN", ())
+        conn.execute("BEGIN", ()) // safety: this IS a transaction wrapping the batch update below
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
