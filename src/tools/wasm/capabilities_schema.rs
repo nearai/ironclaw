@@ -1256,8 +1256,7 @@ mod tests {
                     {
                         "name": "llm_backend",
                         "prompt": "LLM Provider",
-                        "setting_path": "llm_backend",
-
+                        "setting_path": "llm_backend"
                     },
                     {
                         "name": "selected_model",

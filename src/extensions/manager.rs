@@ -6621,8 +6621,7 @@ mod tests {
                         {
                             "name": "llm_backend",
                             "prompt": "Provider",
-                            "setting_path": "llm_backend",
-
+                            "setting_path": "llm_backend"
                         }
                     ]
                 }
