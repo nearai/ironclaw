@@ -1181,6 +1181,11 @@ pub trait Database:
     /// Rewrite all rows where user_id = 'default' to owner_id across all
     /// affected tables. Idempotent — safe to call on every startup.
     async fn migrate_default_owner(&self, owner_id: &str) -> Result<(), DatabaseError>;
+
+    /// Flush WAL to the main database file so it is safe to copy/upload.
+    async fn checkpoint(&self) -> Result<(), DatabaseError> {
+        Ok(()) // no-op for backends that don't need it
+    }
 }
 
 #[cfg(test)]

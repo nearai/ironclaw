@@ -970,6 +970,9 @@ async fn async_main() -> anyhow::Result<()> {
         .as_ref()
         .map(|db| Arc::clone(db) as Arc<dyn ironclaw::db::SettingsStore>);
 
+    // Capture db reference for WAL checkpoint on shutdown
+    let shutdown_db = components.db.as_ref().map(Arc::clone);
+
     let deps = AgentDeps {
         owner_id: config.owner_id.clone(),
         store: components.db,
@@ -1240,6 +1243,15 @@ async fn async_main() -> anyhow::Result<()> {
     agent.run().await?;
 
     // ── Shutdown ────────────────────────────────────────────────────────
+
+    // Checkpoint SQLite WAL so the .db file is self-contained before the
+    // container stops and the orchestrator uploads it to S3 for persistence.
+    if let Some(ref db) = shutdown_db {
+        match db.checkpoint().await {
+            Ok(()) => tracing::info!("SQLite WAL checkpoint completed"),
+            Err(e) => tracing::warn!("SQLite WAL checkpoint failed: {}", e),
+        }
+    }
 
     // Signal background tasks (SIGHUP handler, etc.) to gracefully shut down
     let _ = shutdown_tx.send(());

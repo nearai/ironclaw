@@ -173,7 +173,7 @@ function initApp() {
   connectLogSSE();
   startGatewayStatusPolling();
   // Fetch user profile and render avatar + account menu.
-  apiFetch('/api/profile').then(function(profile) {
+  apiFetch('api/profile').then(function(profile) {
     if (!profile) return;
     window._currentUser = profile;
     // Hide admin tabs for non-admin users.
@@ -231,7 +231,7 @@ function authenticate() {
   }
 
   // Test the token against the health-ish endpoint (chat/threads requires auth)
-  apiFetch('/api/chat/threads')
+  apiFetch('api/chat/threads')
     .then(() => {
       sessionStorage.setItem('ironclaw_token', token);
       initApp();
@@ -289,7 +289,7 @@ function showTokenForm() {
 }
 
 // Discover enabled providers and show corresponding buttons.
-fetch('/auth/providers', { credentials: 'include' })
+fetch('auth/providers', { credentials: 'include' })
   .then(function(r) { return r.ok ? r.json() : { providers: [] }; })
   .then(function(data) {
     var providers = data.providers || [];
@@ -305,7 +305,7 @@ fetch('/auth/providers', { credentials: 'include' })
       if (p === 'near') {
         btn.addEventListener('click', authenticateWithNear);
       } else {
-        btn.addEventListener('click', function() { window.location = '/auth/login/' + p; });
+        btn.addEventListener('click', function() { window.location = 'auth/login/' + p; });
       }
     });
     // When social providers are available, collapse the token form
@@ -335,7 +335,7 @@ async function authenticateWithNear() {
 
   try {
     // 1. Get challenge nonce from the server.
-    var challengeResp = await fetch('/auth/near/challenge', { credentials: 'include' });
+    var challengeResp = await fetch('auth/near/challenge', { credentials: 'include' });
     if (!challengeResp.ok) throw new Error('Failed to get challenge');
     var challenge = await challengeResp.json();
 
@@ -366,7 +366,7 @@ async function authenticateWithNear() {
 
     // 4. Send signature to server for verification.
     if (nearBtn) nearBtn.textContent = I18n.t('auth.verifying');
-    var verifyResp = await fetch('/auth/near/verify', {
+    var verifyResp = await fetch('auth/near/verify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -425,7 +425,7 @@ async function authenticateWithNear() {
     return;
   }
   // Probe for proxy-injected OIDC auth (no token needed from the client).
-  fetch('/api/gateway/status', { credentials: 'include' }).then(function(r) {
+  fetch('api/gateway/status', { credentials: 'include' }).then(function(r) {
     if (r.ok) {
       oidcProxyAuth = true;
       sessionStorage.setItem('ironclaw_oidc', '1');
@@ -502,7 +502,7 @@ function confirmRestart() {
 
   // Send restart command via chat
   console.log('[confirmRestart] Sending /restart command to server');
-  apiFetch('/api/chat/send', {
+  apiFetch('api/chat/send', {
     method: 'POST',
     body: {
       content: '/restart',
@@ -564,8 +564,8 @@ function connectSSE(lastEventIdOverride) {
 
   // In OIDC mode the reverse proxy provides auth; no query token needed.
   let chatSseUrl = (token && !oidcProxyAuth)
-    ? '/api/chat/events?token=' + encodeURIComponent(token)
-    : '/api/chat/events';
+    ? 'api/chat/events?token=' + encodeURIComponent(token)
+    : 'api/chat/events';
   const lastEventId = lastEventIdOverride || _lastSseEventId;
   if (lastEventId) {
     chatSseUrl += (chatSseUrl.includes('?') ? '&' : '?')
@@ -957,7 +957,7 @@ function sendMessage() {
     renderImagePreviews();
   }
 
-  apiFetch('/api/chat/send', {
+  apiFetch('api/chat/send', {
     method: 'POST',
     body: body,
   }).catch((err) => {
@@ -1180,7 +1180,7 @@ function filterSlashCommands(value) {
 }
 
 function sendApprovalAction(requestId, action) {
-  apiFetch('/api/chat/gate/resolve', {
+  apiFetch('api/chat/gate/resolve', {
     method: 'POST',
     body: {
       request_id: requestId,
@@ -2050,7 +2050,7 @@ function submitAuthToken(extensionName, tokenValue) {
 
   const isGateResolution = !!(card && card.getAttribute('data-request-id'));
   const requestId = card ? card.getAttribute('data-request-id') : null;
-  const request = isGateResolution ? apiFetch('/api/chat/gate/resolve', {
+  const request = isGateResolution ? apiFetch('api/chat/gate/resolve', {
     method: 'POST',
     body: {
       request_id: requestId,
@@ -2058,7 +2058,7 @@ function submitAuthToken(extensionName, tokenValue) {
       resolution: 'credential_provided',
       token: tokenValue.trim(),
     },
-  }) : apiFetch('/api/chat/auth-token', {
+  }) : apiFetch('api/chat/auth-token', {
     method: 'POST',
     body: {
       extension_name: extensionName,
@@ -2086,14 +2086,14 @@ function cancelAuth(extensionName) {
   const card = getAuthCard(extensionName);
   const threadId = card ? card.getAttribute('data-thread-id') : null;
   const requestId = card ? card.getAttribute('data-request-id') : null;
-  const request = requestId ? apiFetch('/api/chat/gate/resolve', {
+  const request = requestId ? apiFetch('api/chat/gate/resolve', {
     method: 'POST',
     body: {
       request_id: requestId,
       thread_id: threadId || currentThreadId || undefined,
       resolution: 'cancelled',
     },
-  }) : apiFetch('/api/chat/auth-cancel', {
+  }) : apiFetch('api/chat/auth-cancel', {
     method: 'POST',
     body: {
       extension_name: extensionName,
@@ -2139,7 +2139,7 @@ function setAuthFlowPending(pending, instructions) {
 
 function loadHistory(before) {
   clearSuggestionChips();
-  let historyUrl = '/api/chat/history?limit=50';
+  let historyUrl = 'api/chat/history?limit=50';
   if (currentThreadId) {
     historyUrl += '&thread_id=' + encodeURIComponent(currentThreadId);
   }
@@ -2382,7 +2382,7 @@ function loadThreads() {
     threadListEl.appendChild(renderSkeleton('row', 4));
   }
 
-  apiFetch('/api/chat/threads').then((data) => {
+  apiFetch('api/chat/threads').then((data) => {
     // Pinned assistant thread
     if (data.assistant_thread) {
       assistantThreadId = data.assistant_thread.id;
@@ -2503,7 +2503,7 @@ function switchThread(threadId) {
 }
 
 function createNewThread() {
-  apiFetch('/api/chat/thread/new', { method: 'POST' }).then((data) => {
+  apiFetch('api/chat/thread/new', { method: 'POST' }).then((data) => {
     currentThreadId = data.id || null;
     currentThreadIsReadOnly = false;
     document.getElementById('chat-messages').innerHTML = '';
@@ -2699,7 +2699,7 @@ document.getElementById('memory-search').addEventListener('input', (e) => {
 
 function loadMemoryTree() {
   // Only load top-level on first load (or refresh)
-  apiFetch('/api/memory/list?path=').then((data) => {
+  apiFetch('api/memory/list?path=').then((data) => {
     memoryTreeState = data.entries.map((e) => ({
       name: e.name,
       path: e.path,
@@ -2787,7 +2787,7 @@ function toggleExpand(node) {
   }
 
   // Lazy-load children
-  apiFetch('/api/memory/list?path=' + encodeURIComponent(node.path)).then((data) => {
+  apiFetch('api/memory/list?path=' + encodeURIComponent(node.path)).then((data) => {
     node.children = data.entries.map((e) => ({
       name: e.name,
       path: e.path,
@@ -2811,7 +2811,7 @@ function readMemoryFile(path) {
   // Exit edit mode if active
   cancelMemoryEdit();
 
-  apiFetch('/api/memory/read?path=' + encodeURIComponent(path)).then((data) => {
+  apiFetch('api/memory/read?path=' + encodeURIComponent(path)).then((data) => {
     currentMemoryContent = data.content;
     const viewer = document.getElementById('memory-viewer');
     // Render markdown if it's a .md file
@@ -2846,7 +2846,7 @@ function cancelMemoryEdit() {
 function saveMemoryEdit() {
   if (!currentMemoryPath) return;
   const content = document.getElementById('memory-edit-textarea').value;
-  apiFetch('/api/memory/write', {
+  apiFetch('api/memory/write', {
     method: 'POST',
     body: { path: currentMemoryPath, content: content },
   }).then(() => {
@@ -2873,7 +2873,7 @@ function searchMemory(query) {
   const normalizedQuery = normalizeSearchQuery(query);
   if (!normalizedQuery) return;
 
-  apiFetch('/api/memory/search', {
+  apiFetch('api/memory/search', {
     method: 'POST',
     body: { query: normalizedQuery, limit: 20 },
   }).then((data) => {
@@ -2930,8 +2930,8 @@ function connectLogSSE() {
   if (logEventSource) logEventSource.close();
 
   const logSseUrl = (token && !oidcProxyAuth)
-    ? '/api/logs/events?token=' + encodeURIComponent(token)
-    : '/api/logs/events';
+    ? 'api/logs/events?token=' + encodeURIComponent(token)
+    : 'api/logs/events';
   logEventSource = new EventSource(logSseUrl);
 
   logEventSource.addEventListener('log', (e) => {
@@ -3040,7 +3040,7 @@ function applyLogFilters() {
 // --- Server-side log level control ---
 
 function setServerLogLevel(level) {
-  apiFetch('/api/logs/level', {
+  apiFetch('api/logs/level', {
     method: 'PUT',
     body: { level },
   })
@@ -3051,7 +3051,7 @@ function setServerLogLevel(level) {
 }
 
 function loadServerLogLevel() {
-  apiFetch('/api/logs/level')
+  apiFetch('api/logs/level')
     .then(data => {
       document.getElementById('logs-server-level').value = data.level;
     })
@@ -3069,8 +3069,8 @@ function loadExtensions() {
 
   // Fetch extensions and registry in parallel
   Promise.all([
-    apiFetch('/api/extensions').catch(() => ({ extensions: [] })),
-    apiFetch('/api/extensions/registry').catch(function(err) { console.warn('registry fetch failed:', err); return { entries: [] }; }),
+    apiFetch('api/extensions').catch(() => ({ extensions: [] })),
+    apiFetch('api/extensions/registry').catch(function(err) { console.warn('registry fetch failed:', err); return { entries: [] }; }),
   ]).then(([extData, registryData]) => {
     // Render installed extensions (exclude wasm_channel and mcp_server — shown in their own tabs)
     var nonChannelExts = extData.extensions.filter(function(e) {
@@ -3151,7 +3151,7 @@ function renderAvailableExtensionCard(entry) {
   installBtn.addEventListener('click', function() {
     installBtn.disabled = true;
     installBtn.textContent = I18n.t('extensions.installing');
-    apiFetch('/api/extensions/install', {
+    apiFetch('api/extensions/install', {
       method: 'POST',
       body: { name: entry.name, kind: entry.kind },
     }).then(function(res) {
@@ -3252,7 +3252,7 @@ function renderMcpServerCard(entry, installedExt) {
     installBtn.addEventListener('click', function() {
       installBtn.disabled = true;
       installBtn.textContent = I18n.t('ext.installing');
-      apiFetch('/api/extensions/install', {
+      apiFetch('api/extensions/install', {
         method: 'POST',
         body: { name: entry.name, kind: entry.kind },
       }).then(function(res) {
@@ -3452,7 +3452,7 @@ function refreshCurrentSettingsTab() {
 }
 
 function activateExtension(name) {
-  apiFetch('/api/extensions/' + encodeURIComponent(name) + '/activate', { method: 'POST' })
+  apiFetch('api/extensions/' + encodeURIComponent(name) + '/activate', { method: 'POST' })
     .then((res) => {
       if (res.success) {
         // Even on success, the tool may need OAuth (e.g., WASM loaded but no token yet)
@@ -3487,7 +3487,7 @@ function activateExtension(name) {
 
 function removeExtension(name) {
   showConfirmModal(I18n.t('ext.confirmRemove', { name: name }), '', function() {
-    apiFetch('/api/extensions/' + encodeURIComponent(name) + '/remove', { method: 'POST' })
+    apiFetch('api/extensions/' + encodeURIComponent(name) + '/remove', { method: 'POST' })
       .then((res) => {
         if (!res.success) {
           showToast(I18n.t('ext.removeFailed', { message: res.message }), 'error');
@@ -3501,7 +3501,7 @@ function removeExtension(name) {
 }
 
 function showConfigureModal(name) {
-  apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup')
+  apiFetch('api/extensions/' + encodeURIComponent(name) + '/setup')
     .then((setup) => {
       const secrets = Array.isArray(setup.secrets) ? setup.secrets : [];
       const setupFields = Array.isArray(setup.fields) ? setup.fields : [];
@@ -3792,7 +3792,7 @@ function submitConfigureModal(name, fields, options) {
     setTelegramConfigureState(overlay, fields, 'waiting');
   }
 
-  apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup', {
+  apiFetch('api/extensions/' + encodeURIComponent(name) + '/setup', {
     method: 'POST',
     body: { secrets, fields: setupFields },
   })
@@ -3897,7 +3897,7 @@ function openOAuthUrl(url) {
 function loadPairingRequests(channel, container) {
   if (!currentUserIsAdmin()) return;
 
-  apiFetch('/api/pairing/' + encodeURIComponent(channel))
+  apiFetch('api/pairing/' + encodeURIComponent(channel))
     .then(data => {
       container.innerHTML = '';
       if (!data.requests || data.requests.length === 0) return;
@@ -3986,7 +3986,7 @@ function renderMemberPairingClaim(ext, container) {
 
 function approvePairing(channel, code, options) {
   options = options || {};
-  apiFetch('/api/pairing/' + encodeURIComponent(channel) + '/approve', {
+  apiFetch('api/pairing/' + encodeURIComponent(channel) + '/approve', {
     method: 'POST',
     body: { code },
   }).then(res => {
@@ -4102,8 +4102,8 @@ function loadJobs() {
   }
 
   Promise.all([
-    apiFetch('/api/jobs/summary'),
-    apiFetch('/api/jobs'),
+    apiFetch('api/jobs/summary'),
+    apiFetch('api/jobs'),
   ]).then(([summary, jobList]) => {
     renderJobsSummary(summary);
     renderJobsList(jobList.jobs);
@@ -4159,7 +4159,7 @@ function renderJobsList(jobs) {
 
 function cancelJob(jobId) {
   if (!confirm(I18n.t('jobs.confirmCancel'))) return;
-  apiFetch('/api/jobs/' + jobId + '/cancel', { method: 'POST' })
+  apiFetch('api/jobs/' + jobId + '/cancel', { method: 'POST' })
     .then(() => {
       showToast(I18n.t('jobs.cancelled'), 'success');
       if (currentJobId) openJobDetail(currentJobId);
@@ -4171,7 +4171,7 @@ function cancelJob(jobId) {
 }
 
 function restartJob(jobId) {
-  apiFetch('/api/jobs/' + jobId + '/restart', { method: 'POST' })
+  apiFetch('api/jobs/' + jobId + '/restart', { method: 'POST' })
     .then((res) => {
       showToast(I18n.t('jobs.restarted', { id: (res.new_job_id || '').substring(0, 8) }), 'success');
     })
@@ -4186,7 +4186,7 @@ function restartJob(jobId) {
 function openJobDetail(jobId) {
   currentJobId = jobId;
   currentJobSubTab = 'activity';
-  apiFetch('/api/jobs/' + jobId).then((job) => {
+  apiFetch('api/jobs/' + jobId).then((job) => {
     renderJobDetail(job);
   }).catch((err) => {
     addMessage('system', 'Failed to load job: ' + err.message);
@@ -4334,7 +4334,7 @@ function renderJobFiles(container, job) {
 
   container._jobId = job ? job.id : null;
 
-  apiFetch('/api/jobs/' + job.id + '/files/list?path=').then((data) => {
+  apiFetch('api/jobs/' + job.id + '/files/list?path=').then((data) => {
     jobFilesTreeState = data.entries.map((e) => ({
       name: e.name,
       path: e.path,
@@ -4424,7 +4424,7 @@ function toggleJobFileExpand(node) {
     return;
   }
   const jobId = getJobId();
-  apiFetch('/api/jobs/' + jobId + '/files/list?path=' + encodeURIComponent(node.path)).then((data) => {
+  apiFetch('api/jobs/' + jobId + '/files/list?path=' + encodeURIComponent(node.path)).then((data) => {
     node.children = data.entries.map((e) => ({
       name: e.name,
       path: e.path,
@@ -4443,7 +4443,7 @@ function readJobFile(path) {
   const viewer = document.querySelector('.job-files-viewer');
   if (!viewer) return;
   const jobId = getJobId();
-  apiFetch('/api/jobs/' + jobId + '/files/read?path=' + encodeURIComponent(path)).then((data) => {
+  apiFetch('api/jobs/' + jobId + '/files/read?path=' + encodeURIComponent(path)).then((data) => {
     viewer.innerHTML = '<div class="job-files-path">' + escapeHtml(path) + '</div>'
       + '<pre class="job-files-content">' + escapeHtml(data.content) + '</pre>';
   }).catch((err) => {
@@ -4497,7 +4497,7 @@ function renderJobActivity(container, job) {
   });
 
   // Load persisted events from DB, then catch up with any live SSE events
-  apiFetch('/api/jobs/' + job.id + '/events').then((data) => {
+  apiFetch('api/jobs/' + job.id + '/events').then((data) => {
     if (data.events && data.events.length > 0) {
       for (const evt of data.events) {
         appendActivityEvent(terminal, evt.event_type, evt.data);
@@ -4605,7 +4605,7 @@ function sendJobPrompt(jobId, done) {
   const content = input ? input.value.trim() : '';
   if (!content && !done) return;
 
-  apiFetch('/api/jobs/' + jobId + '/prompt', {
+  apiFetch('api/jobs/' + jobId + '/prompt', {
     method: 'POST',
     body: { content: content || '(done)', done: done },
   }).then(() => {
@@ -4636,8 +4636,8 @@ function loadRoutines() {
   if (table) table.style.display = '';
 
   Promise.all([
-    apiFetch('/api/routines/summary'),
-    apiFetch('/api/routines'),
+    apiFetch('api/routines/summary'),
+    apiFetch('api/routines'),
   ]).then(([summary, listData]) => {
     renderRoutinesSummary(summary);
     renderRoutinesList(listData.routines);
@@ -4700,7 +4700,7 @@ function renderRoutinesList(routines) {
 
 function openRoutineDetail(id) {
   currentRoutineId = id;
-  apiFetch('/api/routines/' + id).then((routine) => {
+  apiFetch('api/routines/' + id).then((routine) => {
     renderRoutineDetail(routine);
   }).catch((err) => {
     showToast(I18n.t('routines.loadFailed', { message: err.message }), 'error');
@@ -4822,7 +4822,7 @@ function renderRoutineDetail(routine) {
 }
 
 function triggerRoutine(id) {
-  apiFetch('/api/routines/' + id + '/trigger', { method: 'POST' })
+  apiFetch('api/routines/' + id + '/trigger', { method: 'POST' })
     .then(() => {
       showToast(I18n.t('routines.triggered'), 'success');
       if (currentRoutineId === id) openRoutineDetail(id);
@@ -4832,7 +4832,7 @@ function triggerRoutine(id) {
 }
 
 function toggleRoutine(id) {
-  apiFetch('/api/routines/' + id + '/toggle', { method: 'POST' })
+  apiFetch('api/routines/' + id + '/toggle', { method: 'POST' })
     .then((res) => {
       showToast(I18n.t('routines.toggled', { status: res.status || 'toggled' }), 'success');
       if (currentRoutineId) openRoutineDetail(currentRoutineId);
@@ -4843,7 +4843,7 @@ function toggleRoutine(id) {
 
 function deleteRoutine(id, name) {
   if (!confirm(I18n.t('routines.confirmDelete', { name: name }))) return;
-  apiFetch('/api/routines/' + id, { method: 'DELETE' })
+  apiFetch('api/routines/' + id, { method: 'DELETE' })
     .then(() => {
       showToast(I18n.t('routines.deleted'), 'success');
       if (currentRoutineId === id) closeRoutineDetail();
@@ -4864,8 +4864,8 @@ function loadMissions() {
   if (table) table.style.display = '';
 
   Promise.all([
-    apiFetch('/api/engine/missions/summary'),
-    apiFetch('/api/engine/missions'),
+    apiFetch('api/engine/missions/summary'),
+    apiFetch('api/engine/missions'),
   ]).then(([summary, listData]) => {
     renderMissionsSummary(summary);
     renderMissionsList(listData.missions);
@@ -4915,7 +4915,7 @@ function renderMissionsList(missions) {
 
 function openMissionDetail(id) {
   currentMissionId = id;
-  apiFetch('/api/engine/missions/' + id).then((data) => {
+  apiFetch('api/engine/missions/' + id).then((data) => {
     renderMissionDetail(data.mission);
   }).catch((err) => {
     showToast(I18n.t('missions.loadFailed', { message: err.message }), 'error');
@@ -5021,7 +5021,7 @@ function renderMissionDetail(m) {
 }
 
 function openEngineThread(threadId) {
-  apiFetch('/api/engine/threads/' + threadId).then((data) => {
+  apiFetch('api/engine/threads/' + threadId).then((data) => {
     var t = data.thread;
     var detail = document.getElementById('mission-detail');
 
@@ -5066,7 +5066,7 @@ function openEngineThread(threadId) {
 }
 
 function fireMission(id) {
-  apiFetch('/api/engine/missions/' + id + '/fire', { method: 'POST' })
+  apiFetch('api/engine/missions/' + id + '/fire', { method: 'POST' })
     .then((data) => {
       if (data.fired) {
         showToast(I18n.t('missions.fired', { id: data.thread_id }), 'success');
@@ -5080,7 +5080,7 @@ function fireMission(id) {
 }
 
 function pauseMission(id) {
-  apiFetch('/api/engine/missions/' + id + '/pause', { method: 'POST' })
+  apiFetch('api/engine/missions/' + id + '/pause', { method: 'POST' })
     .then(() => {
       showToast(I18n.t('missions.paused'), 'success');
       if (currentMissionId === id) openMissionDetail(id);
@@ -5090,7 +5090,7 @@ function pauseMission(id) {
 }
 
 function resumeMission(id) {
-  apiFetch('/api/engine/missions/' + id + '/resume', { method: 'POST' })
+  apiFetch('api/engine/missions/' + id + '/resume', { method: 'POST' })
     .then(() => {
       showToast(I18n.t('missions.resumed'), 'success');
       if (currentMissionId === id) openMissionDetail(id);
@@ -5124,7 +5124,7 @@ function formatRelativeTime(isoString) {
 // --- Users (admin) ---
 
 function loadUsers() {
-  apiFetch('/api/admin/users').then(function(data) {
+  apiFetch('api/admin/users').then(function(data) {
     renderUsersList(data.users || []);
   }).catch(function(err) {
     var tbody = document.getElementById('users-tbody');
@@ -5182,19 +5182,19 @@ function renderUsersList(users) {
 }
 
 function suspendUser(userId) {
-  apiFetch('/api/admin/users/' + userId + '/suspend', { method: 'POST' })
+  apiFetch('api/admin/users/' + userId + '/suspend', { method: 'POST' })
     .then(function() { loadUsers(); })
     .catch(function(e) { alert(I18n.t('users.failedSuspend') + ': ' + e.message); });
 }
 
 function activateUser(userId) {
-  apiFetch('/api/admin/users/' + userId + '/activate', { method: 'POST' })
+  apiFetch('api/admin/users/' + userId + '/activate', { method: 'POST' })
     .then(function() { loadUsers(); })
     .catch(function(e) { alert(I18n.t('users.failedActivate') + ': ' + e.message); });
 }
 
 function changeUserRole(userId, newRole) {
-  apiFetch('/api/admin/users/' + userId, {
+  apiFetch('api/admin/users/' + userId, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ role: newRole })
@@ -5206,7 +5206,7 @@ function changeUserRole(userId, newRole) {
 function createTokenForUser(userId, displayName) {
   var tokenName = prompt('Token name for ' + displayName + ':', 'api-token');
   if (!tokenName) return;
-  apiFetch('/api/tokens', {
+  apiFetch('api/tokens', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: tokenName, user_id: userId }),
@@ -5261,7 +5261,7 @@ document.getElementById('users-create-submit')?.addEventListener('click', functi
   var role = document.getElementById('user-role').value;
   if (!displayName) { alert(I18n.t('users.displayNameRequired')); return; }
 
-  apiFetch('/api/admin/users', {
+  apiFetch('api/admin/users', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -5312,7 +5312,7 @@ function shortModelName(model) {
 }
 
 function fetchGatewayStatus() {
-  apiFetch('/api/gateway/status').then(function(data) {
+  apiFetch('api/gateway/status').then(function(data) {
     // Update restart button visibility
     restartEnabled = data.restart_enabled || false;
     updateRestartButtonVisibility();
@@ -5490,7 +5490,7 @@ function installWasmExtension() {
     return;
   }
 
-  apiFetch('/api/extensions/install', {
+  apiFetch('api/extensions/install', {
     method: 'POST',
     body: { name: name, url: url, kind: 'wasm_tool' },
   }).then(function(res) {
@@ -5519,7 +5519,7 @@ function addMcpServer() {
     return;
   }
 
-  apiFetch('/api/extensions/install', {
+  apiFetch('api/extensions/install', {
     method: 'POST',
     body: { name: name, url: url, kind: 'mcp_server' },
   }).then(function(res) {
@@ -5541,7 +5541,7 @@ function addMcpServer() {
 function loadSkills() {
   var skillsList = document.getElementById('skills-list');
   skillsList.innerHTML = renderCardsSkeleton(3);
-  apiFetch('/api/skills').then(function(data) {
+  apiFetch('api/skills').then(function(data) {
     if (!data.skills || data.skills.length === 0) {
       skillsList.innerHTML = '<div class="empty-state">' + I18n.t('skills.noInstalled') + '</div>';
       return;
@@ -5616,7 +5616,7 @@ function searchClawHub() {
   var resultsDiv = document.getElementById('skill-search-results');
   resultsDiv.innerHTML = '<div class="empty-state">' + I18n.t('skills.searching') + '</div>';
 
-  apiFetch('/api/skills/search', {
+  apiFetch('api/skills/search', {
     method: 'POST',
     body: { query: query },
   }).then(function(data) {
@@ -5805,7 +5805,7 @@ function installSkill(nameOrSlug, url, btn) {
   var body = { name: nameOrSlug, slug: nameOrSlug };
   if (url) body.url = url;
 
-  apiFetch('/api/skills/install', {
+  apiFetch('api/skills/install', {
     method: 'POST',
     headers: { 'X-Confirm-Action': 'true' },
     body: body,
@@ -5825,7 +5825,7 @@ function installSkill(nameOrSlug, url, btn) {
 
 function removeSkill(name) {
   showConfirmModal(I18n.t('skills.confirmRemove', { name: name }), '', function() {
-    apiFetch('/api/skills/' + encodeURIComponent(name), {
+    apiFetch('api/skills/' + encodeURIComponent(name), {
       method: 'DELETE',
       headers: { 'X-Confirm-Action': 'true' },
     }).then(function(res) {
@@ -5866,7 +5866,7 @@ function loadToolsPermissions() {
   var container = document.getElementById('tools-permissions-list');
   if (!container) return;
   container.innerHTML = '<div class="empty-state">' + I18n.t('common.loading') + '</div>';
-  apiFetch('/api/settings/tools').then(function(data) {
+  apiFetch('api/settings/tools').then(function(data) {
     if (!data.tools || data.tools.length === 0) {
       container.innerHTML = '<div class="empty-state">' + I18n.t('tools.noTools') + '</div>';
       return;
@@ -5950,7 +5950,7 @@ function renderToolPermissionRow(tool) {
 }
 
 function setToolPermission(toolName, newState, rowEl) {
-  apiFetch('/api/settings/tools/' + encodeURIComponent(toolName), {
+  apiFetch('api/settings/tools/' + encodeURIComponent(toolName), {
     method: 'PUT',
     body: { state: newState },
   }).then(function(updated) {
@@ -6197,8 +6197,8 @@ function loadInferenceSettings() {
   container.innerHTML = renderSettingsSkeleton(6);
 
   Promise.all([
-    apiFetch('/api/settings/export'),
-    apiFetch('/api/gateway/status').catch(function() { return {}; }),
+    apiFetch('api/settings/export'),
+    apiFetch('api/gateway/status').catch(function() { return {}; }),
   ]).then(function(results) {
     var settings = results[0].settings || {};
     var status = results[1];
@@ -6268,7 +6268,7 @@ function loadStructuredSettings(containerId, settingsDefs) {
   var container = document.getElementById(containerId);
   container.innerHTML = renderSettingsSkeleton(8);
 
-  apiFetch('/api/settings/export').then(function(data) {
+  apiFetch('api/settings/export').then(function(data) {
     var settings = data.settings || {};
     container.innerHTML = '';
     renderStructuredSettingsInto(container, settingsDefs, settings, {});
@@ -6509,7 +6509,7 @@ function saveSetting(key, value) {
   var method = (value === null || value === undefined) ? 'DELETE' : 'PUT';
   var opts = { method: method };
   if (method === 'PUT') opts.body = { value: value };
-  apiFetch('/api/settings/' + encodeURIComponent(key), opts).then(function() {
+  apiFetch('api/settings/' + encodeURIComponent(key), opts).then(function() {
     var indicator = document.querySelector('.settings-saved-indicator[data-key="' + key + '"]');
     if (indicator) {
       if (_settingsSavedTimers[key]) clearTimeout(_settingsSavedTimers[key]);
@@ -6548,8 +6548,8 @@ function loadMcpServers() {
   mcpList.innerHTML = renderCardsSkeleton(2);
 
   Promise.all([
-    apiFetch('/api/extensions').catch(function() { return { extensions: [] }; }),
-    apiFetch('/api/extensions/registry').catch(function() { return { entries: [] }; }),
+    apiFetch('api/extensions').catch(function() { return { extensions: [] }; }),
+    apiFetch('api/extensions/registry').catch(function() { return { entries: [] }; }),
   ]).then(function(results) {
     var extData = results[0];
     var registryData = results[1];
@@ -6587,9 +6587,9 @@ function loadChannelsStatus() {
   container.innerHTML = renderCardsSkeleton(4);
 
   Promise.all([
-    apiFetch('/api/gateway/status').catch(function() { return {}; }),
-    apiFetch('/api/extensions').catch(function() { return { extensions: [] }; }),
-    apiFetch('/api/extensions/registry').catch(function() { return { entries: [] }; }),
+    apiFetch('api/gateway/status').catch(function() { return {}; }),
+    apiFetch('api/extensions').catch(function() { return { extensions: [] }; }),
+    apiFetch('api/extensions/registry').catch(function() { return { entries: [] }; }),
   ]).then(function(results) {
     var status = results[0];
     var extensions = results[1].extensions || [];
@@ -6757,7 +6757,7 @@ function loadNetworkingSettings() {
   var container = document.getElementById('settings-networking-content');
   container.innerHTML = renderSettingsSkeleton(4);
 
-  apiFetch('/api/settings/export').then(function(data) {
+  apiFetch('api/settings/export').then(function(data) {
     var settings = data.settings || {};
     container.innerHTML = '';
     renderStructuredSettingsInto(container, NETWORKING_SETTINGS, settings, {});
@@ -7008,7 +7008,7 @@ document.addEventListener('click', function(e) {
 });
 // Logout handler.
 document.getElementById('user-logout-btn').addEventListener('click', function() {
-  fetch('/auth/logout', { method: 'POST', credentials: 'include' })
+  fetch('auth/logout', { method: 'POST', credentials: 'include' })
     .finally(function() {
       sessionStorage.removeItem('ironclaw_token');
       sessionStorage.removeItem('ironclaw_oidc');
@@ -7200,7 +7200,7 @@ document.addEventListener('keydown', function(e) {
 // --- Settings Import/Export ---
 
 function exportSettings() {
-  apiFetch('/api/settings/export').then(function(data) {
+  apiFetch('api/settings/export').then(function(data) {
     var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
@@ -7226,7 +7226,7 @@ function importSettings() {
     reader.onload = function() {
       try {
         var data = JSON.parse(reader.result);
-        apiFetch('/api/settings/import', {
+        apiFetch('api/settings/import', {
           method: 'POST',
           body: data,
         }).then(function() {
@@ -7317,8 +7317,8 @@ function loadConfig() {
   list.innerHTML = '<div class="empty-state">' + I18n.t('common.loading') + '</div>';
 
   Promise.all([
-    apiFetch('/api/settings/export'),
-    apiFetch('/api/llm/providers').catch(function() { return []; }),
+    apiFetch('api/settings/export'),
+    apiFetch('api/llm/providers').catch(function() { return []; }),
   ]).then(function(results) {
     const s = (results[0] && results[0].settings) ? results[0].settings : {};
     _builtinProviders = Array.isArray(results[1]) ? results[1] : [];
@@ -7430,9 +7430,9 @@ function setActiveProvider(id) {
     null;
   const defaultModel = restoredModel;
   const modelUpdate = () => defaultModel
-    ? apiFetchVoid('/api/settings/selected_model', { method: 'PUT', body: { value: defaultModel } })
-    : apiFetchVoid('/api/settings/selected_model', { method: 'DELETE' });
-  apiFetchVoid('/api/settings/llm_backend', { method: 'PUT', body: { value: id } })
+    ? apiFetchVoid('api/settings/selected_model', { method: 'PUT', body: { value: defaultModel } })
+    : apiFetchVoid('api/settings/selected_model', { method: 'DELETE' });
+  apiFetchVoid('api/settings/llm_backend', { method: 'PUT', body: { value: id } })
     .then(() => modelUpdate())
     .then(() => {
       _activeLlmBackend = id;
@@ -7466,7 +7466,7 @@ function deleteCustomProvider(id) {
 }
 
 function saveCustomProviders() {
-  return apiFetchVoid('/api/settings/llm_custom_providers', { method: 'PUT', body: { value: _customProviders } });
+  return apiFetchVoid('api/settings/llm_custom_providers', { method: 'PUT', body: { value: _customProviders } });
 }
 
 function editCustomProvider(id) {
@@ -7603,7 +7603,7 @@ document.getElementById('test-provider-btn').addEventListener('click', () => {
     return;
   }
 
-  apiFetch('/api/llm/test_connection', {
+  apiFetch('api/llm/test_connection', {
     method: 'POST',
     body: {
       adapter, base_url: baseUrl,
@@ -7653,11 +7653,11 @@ document.getElementById('save-provider-btn').addEventListener('click', () => {
     const modelUpdate = () => {
       if (!isActive) return Promise.resolve();
       if (model) {
-        return apiFetchVoid('/api/settings/selected_model', { method: 'PUT', body: { value: model } });
+        return apiFetchVoid('api/settings/selected_model', { method: 'PUT', body: { value: model } });
       }
-      return apiFetchVoid('/api/settings/selected_model', { method: 'DELETE' });
+      return apiFetchVoid('api/settings/selected_model', { method: 'DELETE' });
     };
-    apiFetchVoid('/api/settings/llm_builtin_overrides', { method: 'PUT', body: { value: _builtinOverrides } })
+    apiFetchVoid('api/settings/llm_builtin_overrides', { method: 'PUT', body: { value: _builtinOverrides } })
       .then(() => modelUpdate())
       .then(() => {
         if (isActive) _selectedModel = model;
@@ -7710,9 +7710,9 @@ document.getElementById('save-provider-btn').addEventListener('click', () => {
     const modelUpdate = () => {
       if (!isActive) return Promise.resolve();
       if (model) {
-        return apiFetchVoid('/api/settings/selected_model', { method: 'PUT', body: { value: model } });
+        return apiFetchVoid('api/settings/selected_model', { method: 'PUT', body: { value: model } });
       }
-      return apiFetchVoid('/api/settings/selected_model', { method: 'DELETE' });
+      return apiFetchVoid('api/settings/selected_model', { method: 'DELETE' });
     };
     saveCustomProviders().then(() => modelUpdate()).then(() => {
       if (isActive) _selectedModel = model;
@@ -7818,7 +7818,7 @@ document.getElementById('fetch-models-btn').addEventListener('click', () => {
   // Resolve provider_id so the backend can look up vaulted API keys.
   const providerId = _configuringBuiltinId || document.getElementById('provider-id').value.trim();
 
-  apiFetch('/api/llm/list_models', {
+  apiFetch('api/llm/list_models', {
     method: 'POST',
     body: {
       adapter, base_url: baseUrl,

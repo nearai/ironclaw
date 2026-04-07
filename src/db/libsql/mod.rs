@@ -399,6 +399,14 @@ impl Database for LibSqlBackend {
             }
         }
     }
+
+    async fn checkpoint(&self) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        conn.query("PRAGMA wal_checkpoint(TRUNCATE)", ())
+            .await
+            .map_err(|e| DatabaseError::Query(format!("WAL checkpoint failed: {}", e)))?;
+        Ok(())
+    }
 }
 
 // ==================== Row conversion helpers ====================
