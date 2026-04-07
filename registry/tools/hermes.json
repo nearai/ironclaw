@@ -21,7 +21,7 @@
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/jmiller18899-lab/hermes-agent/releases/download/v0.1.0/hermes_tool.wasm",
-      "sha256": null
+      "sha256": "cef1d251e553f2cc273a0c0639792e31fef0ec86ac55df091c1aff81c94d19c5"
     }
   },
   "auth_summary": {

@@ -1,67 +1,28 @@
 {
-  "name": "hermes",
+  "wit_version": "0.3.0",
   "description": "Hermes reasoning engine — deep reasoning, code generation, and analysis via NousResearch models",
-  "tools": [
-    {
-      "name": "hermes_chat",
-      "description": "Send a message to Hermes for general reasoning and conversation",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "message": { "type": "string", "description": "The message or question to send to Hermes" },
-          "model": { "type": "string", "description": "Model to use (default: NousResearch/Hermes-3-Llama-3.1-8B)" },
-          "system": { "type": "string", "description": "Custom system prompt (optional)" },
-          "temperature": { "type": "number", "description": "Sampling temperature 0-2 (default: 0.7)" }
-        },
-        "required": ["message"]
+  "http": {
+    "allowlist": [
+      {
+        "host": "hermes-agent-production-61e5.up.railway.app",
+        "path_prefix": "/v1/",
+        "methods": ["GET", "POST"]
+      }
+    ],
+    "credentials": {
+      "hermes_api_key": {
+        "secret_name": "HERMES_API_KEY",
+        "location": { "type": "bearer" },
+        "host_patterns": ["hermes-agent-production-61e5.up.railway.app"]
       }
     },
-    {
-      "name": "hermes_analyze",
-      "description": "Send content to Hermes for structured analysis with a specific task directive",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "content": { "type": "string", "description": "The content to analyze" },
-          "task": { "type": "string", "description": "The analysis task (e.g., summarize, find bugs, evaluate architecture)" },
-          "model": { "type": "string", "description": "Model to use (optional)" }
-        },
-        "required": ["content", "task"]
-      }
+    "rate_limit": {
+      "requests_per_minute": 30,
+      "requests_per_hour": 500
     },
-    {
-      "name": "hermes_code",
-      "description": "Generate code using Hermes with language-specific optimization",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "prompt": { "type": "string", "description": "Description of the code to generate" },
-          "language": { "type": "string", "description": "Target programming language (default: rust)" },
-          "model": { "type": "string", "description": "Model to use (optional)" }
-        },
-        "required": ["prompt"]
-      }
-    },
-    {
-      "name": "hermes_models",
-      "description": "List available models on the Hermes deployment",
-      "parameters": { "type": "object", "properties": {}, "required": [] }
-    }
-  ],
-  "capabilities": {
-    "http": {
-      "allowlist": [
-        { "host": "hermes-agent-production-61e5.up.railway.app", "path_prefix": "/v1/" }
-      ],
-      "rate_limit": { "requests_per_minute": 30, "requests_per_hour": 500 }
-    },
-    "secrets": { "allowed_names": ["HERMES_API_KEY"] }
+    "timeout_secs": 30
   },
-  "credentials": {
-    "hermes_api_key": {
-      "secret_name": "HERMES_API_KEY",
-      "location": { "type": "bearer" },
-      "host_patterns": ["hermes-agent-production-61e5.up.railway.app"]
-    }
+  "secrets": {
+    "allowed_names": ["HERMES_API_KEY"]
   }
 }
