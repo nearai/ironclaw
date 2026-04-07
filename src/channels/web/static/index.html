@@ -14,6 +14,7 @@
   <script src="/i18n/index.js"></script>
   <script src="/i18n/en.js"></script>
   <script src="/i18n/zh-CN.js"></script>
+  <script src="/i18n/ko.js"></script>
 
   <script
     src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.3/purify.min.js"
@@ -168,6 +169,7 @@
         <div class="language-menu" id="language-menu" style="display: none;">
           <button type="button" class="language-option" data-action="switch-language" data-lang="en">English</button>
           <button type="button" class="language-option" data-action="switch-language" data-lang="zh-CN">简体中文</button>
+          <button type="button" class="language-option" data-action="switch-language" data-lang="ko">한국어</button>
         </div>
       </div>
 
@@ -392,6 +394,7 @@
           <button class="settings-subtab" data-settings-subtab="mcp" data-i18n="settings.mcp">MCP</button>
           <button class="settings-subtab" data-settings-subtab="skills" data-i18n="tab.skills">Skills</button>
           <button class="settings-subtab" data-settings-subtab="users" data-i18n="settings.users">Users</button>
+          <button class="settings-subtab" data-settings-subtab="tools" data-i18n="settings.tools">Tools</button>
           <button class="settings-theme-toggle" id="settings-theme-toggle" data-i18n="theme.tooltipSystem" title="Toggle theme">Theme</button>
         </div>
         <div class="settings-content">
@@ -525,6 +528,16 @@
                 <tbody id="users-tbody"></tbody>
               </table>
               <div id="users-empty" class="empty-state" style="display:none" data-i18n="users.emptyState">No users found. Create the first user to get started.</div>
+            </div>
+          </div>
+          <div class="settings-subpanel" id="settings-tools">
+            <div class="extensions-container">
+              <div class="extensions-section">
+                <h3 data-i18n="settings.tools">Tool Permissions</h3>
+                <div id="tools-permissions-list">
+                  <div class="empty-state" data-i18n="common.loading">Loading...</div>
+                </div>
+              </div>
             </div>
           </div>
         </div>

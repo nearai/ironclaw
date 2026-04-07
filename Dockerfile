@@ -29,7 +29,6 @@ COPY crates/ crates/
 COPY build.rs build.rs
 COPY src/ src/
 COPY tests/ tests/
-COPY benches/ benches/
 COPY migrations/ migrations/
 COPY registry/ registry/
 COPY channels-src/ channels-src/
@@ -57,7 +56,6 @@ COPY crates/ crates/
 COPY build.rs build.rs
 COPY src/ src/
 COPY tests/ tests/
-COPY benches/ benches/
 COPY migrations/ migrations/
 COPY registry/ registry/
 COPY channels-src/ channels-src/
@@ -77,7 +75,11 @@ COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw
 COPY --from=builder /app/migrations /app/migrations
 
 # Non-root user
-RUN adduser --disabled-password --uid 1000 ironclaw
+ENV HOME=/home/ironclaw
+RUN useradd -m -d /home/ironclaw -u 1000 ironclaw \
+    && mkdir -p /home/ironclaw/.ironclaw \
+    && chown -R ironclaw:ironclaw /home/ironclaw
+WORKDIR /home/ironclaw
 USER ironclaw
 
 EXPOSE 3000

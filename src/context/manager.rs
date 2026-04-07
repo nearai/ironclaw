@@ -29,13 +29,17 @@ impl ContextManager {
         }
     }
 
-    /// Create a new job context.
+    /// Create a new job context with no owner (test helper only).
+    ///
+    /// Production code must use `create_job_for_user()` with an explicit user_id.
+    /// The sentinel `"<unset>"` makes accidental DB writes immediately visible.
+    #[cfg(test)]
     pub async fn create_job(
         &self,
         title: impl Into<String>,
         description: impl Into<String>,
     ) -> Result<Uuid, JobError> {
-        self.create_job_for_user("default", title, description)
+        self.create_job_for_user("<unset>", title, description)
             .await
     }
 
@@ -971,11 +975,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_job_uses_default_user() {
+    async fn create_job_uses_unset_sentinel() {
         let manager = ContextManager::new(5);
         let job_id = manager.create_job("Test", "desc").await.unwrap();
         let ctx = manager.get_context(job_id).await.unwrap();
-        assert_eq!(ctx.user_id, "default");
+        // create_job() is test-only and uses "<unset>" to make accidental
+        // production writes immediately visible rather than silently using "default".
+        assert_eq!(ctx.user_id, "<unset>");
     }
 
     #[tokio::test]

@@ -7,7 +7,7 @@ use crate::config::helpers::{
     validate_operator_base_url,
 };
 use crate::error::ConfigError;
-use crate::llm::SessionManager;
+use crate::llm::{BedrockConfig, SessionManager};
 use crate::settings::Settings;
 use crate::workspace::EmbeddingProvider;
 
@@ -19,7 +19,7 @@ pub const DEFAULT_EMBEDDING_CACHE_SIZE: usize = 10_000;
 pub struct EmbeddingsConfig {
     /// Whether embeddings are enabled.
     pub enabled: bool,
-    /// Provider to use: "openai", "nearai", or "ollama"
+    /// Provider to use: "openai", "nearai", "ollama", or "bedrock"
     pub provider: String,
     /// OpenAI API key (for OpenAI provider).
     pub openai_api_key: Option<SecretString>,
@@ -65,6 +65,7 @@ pub(crate) fn default_dimension_for_model(model: &str) -> usize {
         "text-embedding-3-small" => 1536,
         "text-embedding-3-large" => 3072,
         "text-embedding-ada-002" => 1536,
+        "amazon.titan-embed-text-v2:0" => 1024,
         "nomic-embed-text" => 768,
         "mxbai-embed-large" => 1024,
         "all-minilm" => 384,
@@ -84,11 +85,16 @@ impl EmbeddingsConfig {
             "EMBEDDING_PROVIDER",
         )?;
 
-        let model = db_first_or_default(
-            &settings.embeddings.model,
-            &defaults.model,
-            "EMBEDDING_MODEL",
-        )?;
+        let model = if provider == "bedrock" {
+            optional_env("EMBEDDING_MODEL")?
+                .unwrap_or_else(|| "amazon.titan-embed-text-v2:0".to_string())
+        } else {
+            db_first_or_default(
+                &settings.embeddings.model,
+                &defaults.model,
+                "EMBEDDING_MODEL",
+            )?
+        };
 
         // ollama_base_url lives on the top-level Settings, not the embeddings
         // sub-struct. Use a manual DB > env > default chain.
@@ -106,6 +112,13 @@ impl EmbeddingsConfig {
         // Dimension depends on the resolved model, not on a DB setting — env-only.
         let dimension =
             parse_optional_env("EMBEDDING_DIMENSION", default_dimension_for_model(&model))?;
+        if provider == "bedrock" && !matches!(dimension, 256 | 512 | 1024) {
+            return Err(ConfigError::InvalidValue {
+                key: "EMBEDDING_DIMENSION".to_string(),
+                message: "Bedrock Titan v2 embeddings support only 256, 512, or 1024 dimensions"
+                    .to_string(),
+            });
+        }
 
         let enabled = db_first_bool(
             settings.embeddings.enabled,
@@ -152,10 +165,11 @@ impl EmbeddingsConfig {
     /// Returns `None` if embeddings are disabled or the required credentials
     /// are missing. The `nearai_base_url` and `session` are needed only for
     /// the NEAR AI provider but must be passed unconditionally.
-    pub fn create_provider(
+    pub async fn create_provider(
         &self,
         nearai_base_url: &str,
         session: Arc<SessionManager>,
+        bedrock_config: Option<&BedrockConfig>,
     ) -> Option<Arc<dyn EmbeddingProvider>> {
         if !self.enabled {
             tracing::debug!("Embeddings disabled (set EMBEDDING_ENABLED=true to enable)");
@@ -173,6 +187,44 @@ impl EmbeddingsConfig {
                     crate::workspace::NearAiEmbeddings::new(nearai_base_url, session)
                         .with_model(&self.model, self.dimension),
                 ))
+            }
+            "bedrock" => {
+                #[cfg(feature = "bedrock")]
+                {
+                    let Some(bedrock) = bedrock_config else {
+                        tracing::warn!(
+                            "Embeddings configured for Bedrock but no Bedrock config is available"
+                        );
+                        return None;
+                    };
+                    tracing::debug!(
+                        "Embeddings enabled via Bedrock (model: {}, region: {}, dim: {})",
+                        self.model,
+                        bedrock.region,
+                        self.dimension,
+                    );
+                    match crate::workspace::BedrockEmbeddings::new(
+                        bedrock,
+                        &self.model,
+                        self.dimension,
+                    )
+                    .await
+                    {
+                        Ok(provider) => Some(Arc::new(provider) as Arc<dyn EmbeddingProvider>),
+                        Err(e) => {
+                            tracing::warn!("Failed to initialize Bedrock embeddings provider: {e}");
+                            None
+                        }
+                    }
+                }
+                #[cfg(not(feature = "bedrock"))]
+                {
+                    let _ = bedrock_config;
+                    tracing::warn!(
+                        "Embeddings configured for Bedrock but the `bedrock` feature is disabled"
+                    );
+                    None
+                }
             }
             "ollama" => {
                 tracing::debug!(
@@ -414,6 +466,62 @@ mod tests {
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("EMBEDDING_CACHE_SIZE");
+        }
+    }
+
+    #[cfg(feature = "bedrock")]
+    #[test]
+    fn bedrock_provider_defaults_to_titan_v2() {
+        let _guard = lock_env();
+        clear_embedding_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("EMBEDDING_ENABLED", "true");
+            std::env::set_var("EMBEDDING_PROVIDER", "bedrock");
+        }
+
+        let settings = Settings::default();
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(config.provider, "bedrock");
+        assert_eq!(config.model, "amazon.titan-embed-text-v2:0");
+        assert_eq!(config.dimension, 1024);
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_ENABLED");
+            std::env::remove_var("EMBEDDING_PROVIDER");
+        }
+    }
+
+    #[cfg(feature = "bedrock")]
+    #[test]
+    fn bedrock_dimension_validation_rejects_unsupported_values() {
+        let _guard = lock_env();
+        clear_embedding_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("EMBEDDING_ENABLED", "true");
+            std::env::set_var("EMBEDDING_PROVIDER", "bedrock");
+            std::env::set_var("EMBEDDING_DIMENSION", "1536");
+        }
+
+        let settings = Settings::default();
+        let result = EmbeddingsConfig::resolve(&settings);
+        assert!(
+            result.is_err(),
+            "unsupported bedrock dimensions should fail"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("256, 512, or 1024"),
+            "error should mention valid dimensions: {err}"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_ENABLED");
+            std::env::remove_var("EMBEDDING_PROVIDER");
+            std::env::remove_var("EMBEDDING_DIMENSION");
         }
     }
 }

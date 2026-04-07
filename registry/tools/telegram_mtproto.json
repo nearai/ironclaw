@@ -1,5 +1,5 @@
 {
-  "name": "telegram-mtproto",
+  "name": "telegram_mtproto",
   "display_name": "Telegram Tool",
   "kind": "tool",
   "version": "0.2.1",

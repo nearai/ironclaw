@@ -656,8 +656,27 @@ mod tests {
         assert!(validate_base_url("https://[::]", "TEST").is_err());
     }
 
+    /// Some local DNS resolvers (ISP/router-level captive portals, ad-injecting
+    /// providers) hijack lookups for non-existent domains and return a public
+    /// IP instead of NXDOMAIN. On those networks, RFC 6761 ".invalid" lookups
+    /// succeed even though they shouldn't, which makes any test that asserts
+    /// "DNS resolution failure" unreliable. Detect that case and skip the test.
+    fn invalid_tld_resolves_locally() -> bool {
+        use std::net::ToSocketAddrs;
+        ("ironclaw-dns-hijack-probe.invalid", 443u16)
+            .to_socket_addrs()
+            .is_ok()
+    }
+
     #[test]
     fn validate_base_url_rejects_dns_failure() {
+        if invalid_tld_resolves_locally() {
+            eprintln!(
+                "skipping validate_base_url_rejects_dns_failure: \
+                 local DNS resolver hijacks .invalid lookups"
+            );
+            return;
+        }
         // .invalid TLD is guaranteed to never resolve (RFC 6761)
         let result = validate_base_url("https://ssrf-test.invalid", "TEST");
         assert!(result.is_err());

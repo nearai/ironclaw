@@ -135,8 +135,8 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 |--------|------|-------------|
 | GET | `/api/logs/events` | Live log stream (SSE) |
 | GET/PUT | `/api/logs/level` | Get/set log level at runtime |
-| GET | `/api/pairing/{channel}` | List pending pairing requests |
-| POST | `/api/pairing/{channel}/approve` | Approve a pairing request |
+| GET | `/api/pairing/{channel}` | Admin-only list of pending pairing requests |
+| POST | `/api/pairing/{channel}/approve` | Authenticated user self-claims a pairing code |
 | GET | `/api/gateway/status` | Server uptime, connected clients, config |
 | POST | `/v1/chat/completions` | OpenAI-compatible LLM proxy |
 | GET | `/v1/models` | OpenAI-compatible model list |
@@ -181,6 +181,8 @@ The SSE contract — every field is `#[serde(tag = "type")]`:
 
 **SSE serialization:** Events use `#[serde(tag = "type")]` — the wire format is `{"type":"<variant>", ...fields}`. The SSE frame's `event:` field is set to the same string as `type` for easy `addEventListener` use in the browser.
 
+**SSE event IDs / reconnect:** Chat SSE frames now also include an `id:` field in the form `<boot_uuid>:<counter>`. Browser reconnects can supply the last seen ID either via the standard `Last-Event-ID` header or the `last_event_id` query parameter (used by the web UI because `EventSource` reconnect state is recreated in JavaScript). IDs are process-scoped: after a server restart, old IDs are ignored and the client rebuilds thread history from `/api/chat/history`. **Note:** Event IDs are only available on the SSE `subscribe()` path. `subscribe_raw()` (used by WebSocket and the Responses API) returns `AppEvent` without IDs — WebSocket clients rely on their own reconnect semantics rather than event-ID dedup.
+
 **WebSocket envelope:** Over WebSocket, SSE events are wrapped as `{"type":"event","event_type":"<variant>","data":{...}}`. Ping/pong uses `{"type":"ping"}` / `{"type":"pong"}`. Client-to-server messages (`message`, `approval`, `auth_token`, `auth_cancel`) are defined in `WsClientMessage` in `types.rs`.
 
 **To add a new SSE event:** Use the `add-sse-event` skill (`/add-sse-event`). It scaffolds the Rust variant, serialization, broadcast call, and frontend handler. Also add a matching arm to `WsServerMessage::from_sse_event()` in `types.rs`.
@@ -216,7 +218,7 @@ Subsystems are wired via `with_*` builder methods on `GatewayChannel` (`mod.rs`)
 Both SSE and WebSocket share the same `SseManager` broadcast channel. Key characteristics:
 
 - **Broadcast buffer:** 256 events. A slow client that falls behind will miss events — the `BroadcastStream` silently drops lagged events. SSE clients are expected to reconnect and re-fetch history.
-- **Max connections:** 100 total (SSE + WebSocket combined). Connections beyond the limit receive a 503 / are immediately dropped.
+- **Max connections:** `GATEWAY_MAX_CONNECTIONS` (default `100`) total across SSE + WebSocket. Connections beyond the limit receive a 503 / are immediately dropped.
 - **SSE keepalive:** Axum's `KeepAlive` sends an empty event every **30 seconds** to prevent proxy timeouts.
 - **WebSocket:** Two tasks per connection — a sender task (broadcast → WS frames) and a receiver loop (WS frames → agent). When the client disconnects, the sender is aborted and both the SSE connection counter and WS tracker counter are decremented.
 

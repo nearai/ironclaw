@@ -1,7 +1,61 @@
-"""Scenario 3: SSE reconnection preserves history."""
+"""SSE and connectivity end-to-end coverage for issue #1784."""
 
-import pytest
-from helpers import SEL
+import asyncio
+
+from helpers import (
+    AUTH_TOKEN,
+    SEL,
+    api_get,
+    api_post,
+    send_chat_and_wait_for_terminal_message,
+    sse_stream,
+    wait_for_sse_comment,
+)
+
+
+async def _open_gateway_page(browser, base_url: str):
+    """Open an authenticated page against a specific gateway base URL."""
+    context = await browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    await page.goto(f"{base_url}/?token={AUTH_TOKEN}")
+    await page.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
+    await page.wait_for_function("() => !!currentThreadId", timeout=15000)
+    await _wait_for_connected(page, timeout=15000)
+    return context, page
+
+
+async def _wait_for_connected(page, *, timeout: int = 10000) -> None:
+    """Wait until the frontend reports an active SSE connection."""
+    status = page.locator(SEL["sse_status"])
+    await status.wait_for(state="visible", timeout=timeout)
+    deadline = asyncio.get_running_loop().time() + (timeout / 1000)
+    while asyncio.get_running_loop().time() < deadline:
+        if await status.text_content() == "Connected":
+            return
+        await asyncio.sleep(0.2)
+    raise AssertionError("SSE status did not return to Connected before timeout")
+
+
+async def _wait_for_last_event_id(page, *, timeout: int = 15000) -> str:
+    """Wait until the browser has recorded at least one SSE event ID."""
+    await page.wait_for_function(
+        "() => !!(window.__e2e && window.__e2e.lastSseEventId)",
+        timeout=timeout,
+    )
+    return await page.evaluate("() => window.__e2e.lastSseEventId")
+
+
+async def _wait_for_turn_in_history(base_url: str, thread_id: str, expected_response: str) -> None:
+    """Poll chat history until the expected assistant response is persisted."""
+    deadline = asyncio.get_running_loop().time() + 20
+    while asyncio.get_running_loop().time() < deadline:
+        response = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}")
+        assert response.status_code == 200, response.text
+        turns = response.json()["turns"]
+        if any((turn.get("response") or "") == expected_response for turn in turns):
+            return
+        await asyncio.sleep(0.5)
+    raise AssertionError(f"Timed out waiting for history to contain response: {expected_response}")
 
 
 async def test_sse_status_shows_connected(page):
@@ -14,64 +68,160 @@ async def test_sse_status_shows_connected(page):
 
 async def test_sse_reconnect_after_disconnect(page):
     """After programmatic disconnect, SSE should reconnect and show Connected."""
-    # Verify initial connection
-    await page.wait_for_function(
-        'document.getElementById("sse-status").textContent === "Connected"',
-        timeout=5000,
-    )
-
-    # Close the EventSource to simulate disconnect
+    await _wait_for_connected(page, timeout=5000)
     await page.evaluate("if (eventSource) eventSource.close()")
-
-    # Reconnect
     await page.evaluate("connectSSE()")
-
-    # Wait for reconnection
-    await page.wait_for_function(
-        'document.getElementById("sse-status").textContent === "Connected"',
-        timeout=10000,
-    )
+    await _wait_for_connected(page, timeout=10000)
     status = page.locator(SEL["sse_status"])
-    text = await status.text_content()
-    assert text == "Connected"
+    assert await status.text_content() == "Connected"
 
 
 async def test_sse_reconnect_preserves_chat_history(page):
     """Messages sent before disconnect should still be visible after reconnect."""
-    # Send a message and wait for the full response
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.fill("Hello")
-    await chat_input.press("Enter")
-
-    assistant_msg = page.locator(SEL["message_assistant"]).last
-    await assistant_msg.wait_for(state="visible", timeout=15000)
-
-    # Wait for the turn to be fully persisted in the database
+    await send_chat_and_wait_for_terminal_message(page, "Hello")
     await page.wait_for_timeout(3000)
 
-    # Capture the assistant response text before disconnect
-    response_text = await assistant_msg.text_content()
-    assert len(response_text) > 0, "Assistant response should not be empty"
-
-    # Simulate disconnect and reconnect
     await page.evaluate("if (eventSource) eventSource.close()")
     await page.evaluate("connectSSE()")
-
-    # Wait for reconnection
-    await page.wait_for_function(
-        'document.getElementById("sse-status").textContent === "Connected"',
-        timeout=10000,
-    )
-
-    # loadHistory() is called on reconnect; wait for it to complete
+    await _wait_for_connected(page, timeout=10000)
     await page.wait_for_timeout(3000)
 
-    # After reconnect, at least the user message should be visible
-    # (loadHistory clears DOM and repopulates from DB)
     total_messages = await page.locator("#chat-messages .message").count()
-    assert total_messages >= 1, \
-        "Expected at least 1 message after reconnect history load"
+    assert total_messages >= 1, "Expected at least 1 message after reconnect history load"
 
-    # If the turn was fully persisted, both user and assistant should appear
     user_msgs = await page.locator(SEL["message_user"]).count()
     assert user_msgs >= 1, "User message should be preserved after reconnect"
+
+
+async def test_sse_keepalive_comments_arrive(managed_gateway_server):
+    """Idle SSE connections should receive keepalive comments within 30 seconds."""
+    async with sse_stream(managed_gateway_server.base_url, timeout=50) as response:
+        assert response.status == 200
+        keepalive = await wait_for_sse_comment(response, timeout=40)
+        assert keepalive.startswith(":")
+
+
+async def test_multiple_tabs_receive_same_response(browser, managed_gateway_server):
+    """A message sent in one tab should fan out to another tab via SSE."""
+    ctx_a, page_a = await _open_gateway_page(browser, managed_gateway_server.base_url)
+    ctx_b, page_b = await _open_gateway_page(browser, managed_gateway_server.base_url)
+
+    try:
+        before_b = await page_b.locator(SEL["message_assistant"]).count()
+        result_a = await send_chat_and_wait_for_terminal_message(page_a, "What is 2+2?")
+        assert result_a["role"] == "assistant"
+        assert "4" in result_a["text"], result_a
+
+        await page_b.wait_for_function(
+            """(count) => document.querySelectorAll('#chat-messages .message.assistant').length > count""",
+            arg=before_b,
+            timeout=15000,
+        )
+        assistant_b = await page_b.locator(SEL["message_assistant"]).last.text_content()
+        assert assistant_b is not None
+        assert "4" in assistant_b, assistant_b
+    finally:
+        await ctx_a.close()
+        await ctx_b.close()
+
+
+async def test_reconnect_after_server_restart_rebuilds_history(browser, managed_gateway_server):
+    """After a server restart, reconnect should reload chat history from the DB."""
+    context, page = await _open_gateway_page(browser, managed_gateway_server.base_url)
+
+    try:
+        result = await send_chat_and_wait_for_terminal_message(page, "What is 2+2?")
+        assert result["role"] == "assistant"
+        assert "4" in result["text"], result
+
+        thread_id = await page.evaluate("() => currentThreadId")
+        assert thread_id is not None
+
+        async with page.expect_response(
+            lambda response: (
+                response.request.method == "GET"
+                and response.ok
+                and response.url.startswith(
+                    f"{managed_gateway_server.base_url}/api/chat/history"
+                )
+                and f"thread_id={thread_id}" in response.url
+            ),
+            timeout=30000,
+        ):
+            await managed_gateway_server.restart()
+            await _wait_for_connected(page, timeout=30000)
+
+        user_texts = await page.locator(SEL["message_user"]).all_text_contents()
+        assistant_texts = await page.locator(SEL["message_assistant"]).all_text_contents()
+        assert any("2+2" in text or "2 + 2" in text for text in user_texts), user_texts
+        assert any("4" in text for text in assistant_texts), assistant_texts
+    finally:
+        await context.close()
+
+
+async def test_reconnect_with_stale_last_event_id_does_not_duplicate_messages(
+    browser,
+    managed_gateway_server,
+):
+    """Reconnecting with an older event ID should rebuild history without duplicates."""
+    context, page = await _open_gateway_page(browser, managed_gateway_server.base_url)
+
+    try:
+        first_result = await send_chat_and_wait_for_terminal_message(page, "Hello")
+        assert first_result["role"] == "assistant"
+        old_event_id = await _wait_for_last_event_id(page)
+        thread_id = await page.evaluate("() => currentThreadId")
+        assert thread_id is not None
+
+        await page.evaluate("if (eventSource) eventSource.close()")
+
+        response = await api_post(
+            managed_gateway_server.base_url,
+            "/api/chat/send",
+            json={"content": "What is 2+2?", "thread_id": thread_id},
+        )
+        assert response.status_code == 202, response.text
+        await _wait_for_turn_in_history(
+            managed_gateway_server.base_url,
+            thread_id,
+            "The answer is 4.",
+        )
+
+        async with page.expect_response(
+            lambda response: (
+                response.request.method == "GET"
+                and response.ok
+                and response.url.startswith(
+                    f"{managed_gateway_server.base_url}/api/chat/history"
+                )
+                and f"thread_id={thread_id}" in response.url
+            ),
+            timeout=20000,
+        ):
+            await page.evaluate("(eventId) => connectSSE(eventId)", old_event_id)
+            await _wait_for_connected(page, timeout=20000)
+
+        user_texts = await page.locator(SEL["message_user"]).all_text_contents()
+        assistant_texts = await page.locator(SEL["message_assistant"]).all_text_contents()
+
+        two_plus_two_users = [
+            text for text in user_texts if "2+2" in text or "2 + 2" in text
+        ]
+        four_answers = [text for text in assistant_texts if "The answer is 4." in text]
+
+        assert len(two_plus_two_users) == 1, user_texts
+        assert len(four_answers) == 1, assistant_texts
+    finally:
+        await context.close()
+
+
+async def test_connection_limit_returns_503_for_excess_sse_connection(limited_gateway_server):
+    """Excess SSE connections should be rejected once the configured cap is reached."""
+    async with sse_stream(limited_gateway_server.base_url, timeout=15) as first:
+        assert first.status == 200
+        async with sse_stream(limited_gateway_server.base_url, timeout=15) as second:
+            assert second.status == 200
+            async with sse_stream(limited_gateway_server.base_url, timeout=15) as third:
+                body = await third.text()
+                assert third.status == 503, body
+                assert "Too many connections" in body

@@ -17,6 +17,27 @@ use crate::extensions::ExtensionManager;
 use crate::pairing::PairingStore;
 use crate::secrets::SecretsStore;
 
+pub(crate) fn reserved_wasm_channel_names() -> Vec<&'static str> {
+    use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
+
+    let mut reserved: Vec<&str> = vec![
+        "cli",
+        "repl",
+        "http",
+        "signal",
+        "slack-relay",
+        "secret_save",
+    ];
+    reserved.extend(TRUSTED_APPROVAL_CHANNELS);
+    reserved.push(BOOTSTRAP_SOURCE_CHANNEL);
+    reserved
+}
+
+pub(crate) fn is_reserved_wasm_channel_name(name: &str) -> bool {
+    let name_lower = name.to_ascii_lowercase();
+    reserved_wasm_channel_names().contains(&name_lower.as_str())
+}
+
 /// Result of WASM channel setup.
 pub struct WasmChannelSetup {
     pub channels: Vec<(String, Box<dyn crate::channels::Channel>)>,
@@ -35,6 +56,7 @@ pub async fn setup_wasm_channels(
     extension_manager: Option<&Arc<ExtensionManager>>,
     database: Option<&Arc<dyn Database>>,
     registered_channel_names: &[String],
+    ownership_cache: Arc<crate::ownership::OwnershipCache>,
 ) -> Option<WasmChannelSetup> {
     let runtime = match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
         Ok(r) => Arc::new(r),
@@ -44,7 +66,12 @@ pub async fn setup_wasm_channels(
         }
     };
 
-    let pairing_store = Arc::new(PairingStore::new());
+    let pairing_store = if let Some(db) = database {
+        Arc::new(PairingStore::new(Arc::clone(db), ownership_cache))
+    } else {
+        tracing::warn!("No database available for WASM channels; DM pairing will not persist");
+        Arc::new(PairingStore::new_noop())
+    };
     let settings_store: Option<Arc<dyn crate::db::SettingsStore>> =
         database.map(|db| Arc::clone(db) as Arc<dyn crate::db::SettingsStore>);
     let mut loader = WasmChannelLoader::new(
@@ -77,26 +104,12 @@ pub async fn setup_wasm_channels(
     // channel and bypass cross-channel authorization checks.
     //
     // This list includes:
-    // - All built-in channel names (prevent impersonation)
+    // - All native/built-in channel names (prevent impersonation)
     // - Trusted approval channels from session::TRUSTED_APPROVAL_CHANNELS
     // - The bootstrap sentinel (universal approval wildcard)
-    use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
-
-    let mut reserved: Vec<&str> = vec![
-        "cli",
-        "repl",
-        "http",
-        "signal",
-        "telegram",
-        "slack-relay",
-        "secret_save",
-    ];
-    reserved.extend(TRUSTED_APPROVAL_CHANNELS);
-    reserved.push(BOOTSTRAP_SOURCE_CHANNEL);
-
     for loaded in results.loaded {
         let name_lower = loaded.name().to_ascii_lowercase();
-        if reserved.contains(&name_lower.as_str()) {
+        if is_reserved_wasm_channel_name(&name_lower) {
             tracing::warn!(
                 channel = %loaded.name(),
                 "Rejected WASM channel with reserved name"
@@ -229,7 +242,7 @@ async fn register_channel(
         if channel_name == TELEGRAM_CHANNEL_NAME
             && let Some(store) = settings_store
             && let Ok(Some(serde_json::Value::String(username))) = store
-                .get_setting("default", &bot_username_setting_key(&channel_name))
+                .get_setting(&config.owner_id, &bot_username_setting_key(&channel_name))
                 .await
             && !username.trim().is_empty()
         {
@@ -240,7 +253,13 @@ async fn register_channel(
         // The credential injection system only replaces placeholders in URLs
         // and headers, so channels like Feishu that exchange app_id + app_secret
         // for a tenant token need the raw values in their config.
-        inject_channel_secrets_into_config(&channel_name, secrets_store, &mut config_updates).await;
+        inject_channel_secrets_into_config(
+            &channel_name,
+            &config.owner_id,
+            secrets_store,
+            &mut config_updates,
+        )
+        .await;
 
         if !config_updates.is_empty() {
             channel_arc.update_config(config_updates).await;
@@ -447,6 +466,7 @@ pub async fn inject_channel_credentials(
 /// keys `app_id`, `app_secret`, and `verification_token`.
 async fn inject_channel_secrets_into_config(
     channel_name: &str,
+    owner_id: &str,
     secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
     config_updates: &mut std::collections::HashMap<String, serde_json::Value>,
 ) {
@@ -465,7 +485,7 @@ async fn inject_channel_secrets_into_config(
     };
 
     for &(config_key, secret_name) in secret_config_mappings {
-        match secrets.get_decrypted("default", secret_name).await {
+        match secrets.get_decrypted(owner_id, secret_name).await {
             Ok(decrypted) => {
                 config_updates.insert(
                     config_key.to_string(),
@@ -497,22 +517,12 @@ async fn inject_channel_secrets_into_config(
 
 #[cfg(test)]
 mod tests {
+    use super::reserved_wasm_channel_names;
     use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
 
     /// Build the same reserved-name list that `setup_wasm_channels` uses.
     fn reserved_names() -> Vec<&'static str> {
-        let mut reserved: Vec<&str> = vec![
-            "cli",
-            "repl",
-            "http",
-            "signal",
-            "telegram",
-            "slack-relay",
-            "secret_save",
-        ];
-        reserved.extend(TRUSTED_APPROVAL_CHANNELS);
-        reserved.push(BOOTSTRAP_SOURCE_CHANNEL);
-        reserved
+        reserved_wasm_channel_names()
     }
 
     #[test]
@@ -556,7 +566,7 @@ mod tests {
     #[test]
     fn non_reserved_names_allowed() {
         let reserved = reserved_names();
-        let allowed = ["discord", "my-custom-channel", "slack-bot"];
+        let allowed = ["discord", "telegram", "my-custom-channel", "slack-bot"];
         for name in allowed {
             assert!(
                 !reserved.contains(&name),
