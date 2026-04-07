@@ -1,11 +1,22 @@
 {
   "name": "hermes",
-  "description": "Hermes reasoning engine — NousResearch multi-model AI for deep reasoning, code generation, and analysis tasks",
+  "display_name": "Hermes",
+  "kind": "tool",
   "version": "0.1.0",
-  "kind": "WasmTool",
+  "wit_version": "0.3.0",
+  "description": "Hermes reasoning engine — NousResearch multi-model AI for deep reasoning, code generation, and analysis tasks",
+  "keywords": [
+    "hermes",
+    "reasoning",
+    "code-generation",
+    "analysis",
+    "multi-model",
+    "nous-research"
+  ],
   "source": {
-    "repository": "https://github.com/jmiller18899-lab/hermes-agent",
-    "directory": "tools-src/hermes"
+    "dir": "tools-src/hermes",
+    "capabilities": "hermes-tool.capabilities.json",
+    "crate_name": "hermes-tool"
   },
   "artifacts": {
     "wasm32-wasip2": {
@@ -13,11 +24,17 @@
       "sha256": null
     }
   },
-  "auth": {
-    "hint": "manual",
-    "env_key": "HERMES_API_KEY",
-    "prompt": "Enter your Hermes API key (from your Railway deployment)"
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Hermes",
+    "secrets": [
+      "HERMES_API_KEY"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://hermes-agent-production-61e5.up.railway.app/v1"
   },
-  "tags": ["ai", "reasoning", "llm", "hermes", "nous-research"],
-  "keywords": ["hermes", "reasoning", "code-generation", "analysis", "multi-model"]
+  "tags": [
+    "ai",
+    "reasoning"
+  ]
 }
