@@ -9485,6 +9485,10 @@ mod tests {
         // have their colon URL-encoded to %3A, as this breaks the validation endpoint.
         // Previously: form_urlencoded::byte_serialize encoded the token, causing 404s.
         // Fixed by removing URL-encoding and using the token directly.
+
+        // Hold the env mutex to prevent concurrent tests from setting
+        // TELEGRAM_TEST_API_BASE_ENV while we read it.
+        let _guard = crate::config::helpers::lock_env();
         let token = "123456789:AABBccDDeeFFgg_Test-Token";
 
         let url = telegram_bot_api_url(token, "getMe");

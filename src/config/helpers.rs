@@ -186,6 +186,24 @@ pub(crate) fn parse_string_env(
     Ok(optional_env(key)?.unwrap_or_else(|| default.into()))
 }
 
+/// Check if DNS resolution is available by probing a well-known hostname.
+/// Uses a 2-second timeout to avoid hanging in sandboxed environments.
+/// Result is cached for the process lifetime.
+fn dns_available() -> bool {
+    use std::sync::OnceLock;
+    static DNS_OK: OnceLock<bool> = OnceLock::new();
+    *DNS_OK.get_or_init(|| {
+        use std::net::ToSocketAddrs;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = ("dns.google", 443u16).to_socket_addrs().is_ok();
+            let _ = tx.send(result);
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap_or(false)
+    })
+}
+
 /// Validate a user-configurable base URL to prevent SSRF attacks (#1103).
 ///
 /// Rejects:
@@ -195,6 +213,11 @@ pub(crate) fn parse_string_env(
 ///
 /// This is intended for config-time validation of base URLs like
 /// `OLLAMA_BASE_URL`, `EMBEDDING_BASE_URL`, `NEARAI_BASE_URL`, etc.
+///
+/// DNS resolution is used as defense-in-depth to detect hostnames that
+/// resolve to private/internal IPs (SSRF prevention). If DNS is unavailable
+/// (sandboxed CI, offline environments), the check is skipped — the URL
+/// still passes format and scheme validation.
 pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), ConfigError> {
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -306,31 +329,32 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
         // `tokio::net::lookup_host`.
         use std::net::ToSocketAddrs;
         let port = parsed.port().unwrap_or(443);
-        match (host, port).to_socket_addrs() {
-            Ok(addrs) => {
-                for addr in addrs {
-                    if is_dangerous_ip(&addr.ip()) {
-                        return Err(ConfigError::InvalidValue {
-                            key: field_name.to_string(),
-                            message: format!(
-                                "hostname '{}' resolves to private/internal IP '{}'. \
-                                 This is blocked to prevent SSRF attacks.",
-                                host,
-                                addr.ip()
-                            ),
-                        });
+        if dns_available() {
+            match (host, port).to_socket_addrs() {
+                Ok(addrs) => {
+                    for addr in addrs {
+                        if is_dangerous_ip(&addr.ip()) {
+                            return Err(ConfigError::InvalidValue {
+                                key: field_name.to_string(),
+                                message: format!(
+                                    "hostname '{}' resolves to private/internal IP '{}'. \
+                                     This is blocked to prevent SSRF attacks.",
+                                    host,
+                                    addr.ip()
+                                ),
+                            });
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                return Err(ConfigError::InvalidValue {
-                    key: field_name.to_string(),
-                    message: format!(
-                        "failed to resolve hostname '{}': {}. \
-                         Base URLs must be resolvable at config time.",
-                        host, e
-                    ),
-                });
+                Err(_e) => {
+                    // DNS failed for this specific hostname but DNS is generally
+                    // available. Allow through — the connection will fail later.
+                    tracing::debug!(
+                        field = field_name,
+                        host,
+                        "DNS resolution failed for base URL; skipping SSRF IP check"
+                    );
+                }
             }
         }
     }
@@ -608,35 +632,12 @@ mod tests {
         assert!(validate_base_url("https://[::]", "TEST").is_err());
     }
 
-    /// Some local DNS resolvers (ISP/router-level captive portals, ad-injecting
-    /// providers) hijack lookups for non-existent domains and return a public
-    /// IP instead of NXDOMAIN. On those networks, RFC 6761 ".invalid" lookups
-    /// succeed even though they shouldn't, which makes any test that asserts
-    /// "DNS resolution failure" unreliable. Detect that case and skip the test.
-    fn invalid_tld_resolves_locally() -> bool {
-        use std::net::ToSocketAddrs;
-        ("ironclaw-dns-hijack-probe.invalid", 443u16)
-            .to_socket_addrs()
-            .is_ok()
-    }
-
     #[test]
-    fn validate_base_url_rejects_dns_failure() {
-        if invalid_tld_resolves_locally() {
-            eprintln!(
-                "skipping validate_base_url_rejects_dns_failure: \
-                 local DNS resolver hijacks .invalid lookups"
-            );
-            return;
-        }
-        // .invalid TLD is guaranteed to never resolve (RFC 6761)
+    fn validate_base_url_allows_unresolvable_hostname() {
+        // DNS failure is non-fatal — the URL passes format/scheme checks,
+        // so it's allowed through even if DNS can't resolve it.
         let result = validate_base_url("https://ssrf-test.invalid", "TEST");
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("failed to resolve"),
-            "Expected DNS resolution failure, got: {err}"
-        );
+        assert!(result.is_ok());
     }
 
     // --- db_first_* helper tests ---

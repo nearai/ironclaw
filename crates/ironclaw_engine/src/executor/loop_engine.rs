@@ -617,8 +617,10 @@ mod tests {
         let outcome = exec.run().await.unwrap();
         assert!(matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "Done!"));
         assert_eq!(exec.thread.step_count, 2);
-        // Should have: system(nudge not counted), assistant+actions, action_result, assistant
-        assert!(exec.thread.messages.len() >= 3);
+        // The orchestrator syncs intermediate messages to internal_messages;
+        // the visible transcript (messages) gets only the final response.
+        let all_msgs = exec.thread.messages.len() + exec.thread.internal_messages.len();
+        assert!(all_msgs >= 3);
     }
 
     #[tokio::test]
@@ -735,10 +737,15 @@ mod tests {
             matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "The answer is 42")
         );
         assert_eq!(exec.thread.step_count, 2);
-        // Should have nudge system message
+        // Nudge message lives in internal_messages (orchestrator working state)
+        let all_messages: Vec<&crate::types::message::ThreadMessage> = exec
+            .thread
+            .messages
+            .iter()
+            .chain(exec.thread.internal_messages.iter())
+            .collect();
         assert!(
-            exec.thread
-                .messages
+            all_messages
                 .iter()
                 .any(|m| m.content.contains("did not include any tool calls"))
         );
@@ -873,13 +880,14 @@ mod tests {
             matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "done, x was 30")
         );
         assert_eq!(exec.thread.step_count, 2);
-        // The output metadata from first step should be in messages
-        assert!(
-            exec.thread
-                .messages
-                .iter()
-                .any(|m| m.content.contains("x = 30"))
-        );
+        // The output metadata from first step lives in internal_messages
+        let all_messages: Vec<&crate::types::message::ThreadMessage> = exec
+            .thread
+            .messages
+            .iter()
+            .chain(exec.thread.internal_messages.iter())
+            .collect();
+        assert!(all_messages.iter().any(|m| m.content.contains("x = 30")));
     }
 
     #[tokio::test]
