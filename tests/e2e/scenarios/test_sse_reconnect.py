@@ -33,7 +33,7 @@ async def _wait_for_connected(page, *, timeout: int = 10000) -> None:
     ``disconnected`` class before SSE even connects.
     """
     await page.wait_for_function(
-        "() => window.sseHasConnectedBefore === true",
+        "() => typeof sseHasConnectedBefore !== 'undefined' && sseHasConnectedBefore === true",
         timeout=timeout,
     )
 

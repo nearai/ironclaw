@@ -1114,7 +1114,7 @@ async def page(ironclaw_server, browser):
     await pg.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
     # Wait for SSE connection (onopen sets sseHasConnectedBefore = true)
     await pg.wait_for_function(
-        "() => window.sseHasConnectedBefore === true",
+        "() => typeof sseHasConnectedBefore !== 'undefined' && sseHasConnectedBefore === true",
         timeout=10000,
     )
     yield pg
