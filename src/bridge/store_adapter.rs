@@ -732,6 +732,8 @@ fn slugify(title: &str, id: &str) -> String {
 fn serialize_knowledge_doc(doc: &MemoryDoc) -> String {
     let mut frontmatter = String::from("---\n");
     frontmatter.push_str(&format!("id: \"{}\"\n", doc.id.0));
+    frontmatter.push_str(&format!("project_id: \"{}\"\n", doc.project_id.0));
+    frontmatter.push_str(&format!("user_id: \"{}\"\n", doc.user_id));
     frontmatter.push_str(&format!("doc_type: \"{:?}\"\n", doc.doc_type));
     frontmatter.push_str(&format!("title: \"{}\"\n", doc.title.replace('"', "\\\"")));
     if !doc.tags.is_empty() {
@@ -832,11 +834,23 @@ fn deserialize_knowledge_doc(content: &str) -> Option<MemoryDoc> {
         .cloned()
         .unwrap_or(serde_json::json!({}));
 
-    // project_id is not in frontmatter — use nil UUID (assigned at load time)
+    let project_id = yaml
+        .get("project_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        .map(ProjectId)
+        .unwrap_or(ProjectId(uuid::Uuid::nil()));
+
+    let user_id = yaml
+        .get("user_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("legacy")
+        .to_string();
+
     Some(MemoryDoc {
         id: DocId(id),
-        project_id: ProjectId(uuid::Uuid::nil()),
-        user_id: "legacy".to_string(),
+        project_id,
+        user_id,
         doc_type,
         title,
         content: body.to_string(),
