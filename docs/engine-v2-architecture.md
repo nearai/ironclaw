@@ -118,7 +118,7 @@ The bridge connects the engine to existing IronClaw infrastructure:
 
 Set `ENGINE_V2=true` environment variable. The router in `src/bridge/router.rs` intercepts messages and routes them through the engine instead of the v1 agent loop.
 
-For trace debugging: `IRONCLAW_RECORD_TRACE=1` writes full JSON traces to `engine_trace_*.json`.
+For trace debugging set `IRONCLAW_RECORD_TRACE=1`. Engine v2 reuses the host crate's `RecordingLlm` (see `src/llm/recording.rs`) — the engine's `LlmBackend` is wired to the same provider chain, so LLM interactions are captured in the standard `trace_*.json` fixture file (configurable via `IRONCLAW_TRACE_OUTPUT`). There is no separate engine trace file.
 
 ## Memory System
 
