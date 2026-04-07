@@ -1008,16 +1008,6 @@ fn extract_credential_name(error_msg: &str) -> Option<String> {
 }
 
 fn is_v1_only_tool(name: &str) -> bool {
-    // Note: routine_* tools were originally v1-only because v2 introduced
-    // missions as a goal-oriented replacement. In practice routines are
-    // still the canonical scheduling primitive (cron / event / system_event)
-    // and several skills (routine-advisor, ironclaw-workflow-orchestrator,
-    // delegation) instruct the LLM to call routine_create. The routine
-    // engine itself runs as a background task regardless of the v1/v2
-    // foreground execution engine, and its tool execute() methods are pure
-    // (they read/write the routine store, not v1 engine state). So we let
-    // v2 surface and execute them via the normal tool path. Missions and
-    // routines coexist; the LLM picks based on the user's request.
     matches!(
         name,
         "create_job"
@@ -1026,6 +1016,13 @@ fn is_v1_only_tool(name: &str) -> bool {
             | "cancel-job"
             | "build_software"
             | "build-software"
+            | "routine_create"
+            | "routine_list"
+            | "routine_fire"
+            | "routine_pause"
+            | "routine_resume"
+            | "routine_update"
+            | "routine_delete"
     )
 }
 
@@ -1384,26 +1381,15 @@ mod tests {
 
     // ── is_v1_only_tool tests ──────────────────────────────────
 
-    /// Routines were originally classified as v1-only because v2 introduced
-    /// missions as a goal-oriented replacement. In practice both abstractions
-    /// coexist and the LLM should be able to call routine_* in either engine.
-    /// This test pins the new policy: routine_* are NOT v1-only.
     #[test]
-    fn routine_tools_are_not_v1_only() {
-        assert!(!is_v1_only_tool("routine_create"));
-        assert!(!is_v1_only_tool("routine_list"));
-        assert!(!is_v1_only_tool("routine_fire"));
-        assert!(!is_v1_only_tool("routine_delete"));
-        assert!(!is_v1_only_tool("routine_pause"));
-        assert!(!is_v1_only_tool("routine_resume"));
-        assert!(!is_v1_only_tool("routine_update"));
-    }
-
-    #[test]
-    fn job_and_build_tools_remain_v1_only() {
-        assert!(is_v1_only_tool("create_job"));
-        assert!(is_v1_only_tool("cancel_job"));
-        assert!(is_v1_only_tool("build_software"));
+    fn routine_tools_are_v1_only() {
+        assert!(is_v1_only_tool("routine_create"));
+        assert!(is_v1_only_tool("routine_list"));
+        assert!(is_v1_only_tool("routine_fire"));
+        assert!(is_v1_only_tool("routine_delete"));
+        assert!(is_v1_only_tool("routine_pause"));
+        assert!(is_v1_only_tool("routine_resume"));
+        assert!(is_v1_only_tool("routine_update"));
     }
 
     #[test]
