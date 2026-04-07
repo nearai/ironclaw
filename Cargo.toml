@@ -187,6 +187,8 @@ jsonwebtoken = "9"
 mime_guess = "2.0.5"
 clap_complete = "4.5.0"
 lru = "0.16.3"
+# WeChat SILK decoding currently relies on silk-rs, which pulls bindgen/clang-sys.
+# Build hosts therefore need libclang plus a working C toolchain available.
 silk-rs = "0.2.0"
 
 # HTML to Markdown conversion (feature gated)

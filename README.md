@@ -87,6 +87,7 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 - Rust 1.85+
 - PostgreSQL 15+ with [pgvector](https://github.com/pgvector/pgvector) extension
 - NEAR AI account (authentication handled via setup wizard)
+- `libclang` and a working C toolchain if you build the WeChat voice/SILK path from source
 
 ## Download or Build
 
@@ -134,6 +135,9 @@ Install it with `cargo`, just make sure you have [Rust](https://rustup.rs) insta
 # Clone the repository
 git clone https://github.com/nearai/ironclaw.git
 cd ironclaw
+
+# If you are building the WeChat voice/SILK path, make sure libclang and a C
+# compiler are installed first because silk-rs uses bindgen at build time.
 
 # Build
 cargo build --release
