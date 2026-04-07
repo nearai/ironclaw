@@ -640,7 +640,8 @@ impl EffectBridgeAdapter {
                     });
                 }
                 ApprovalRequirement::UnlessAutoApproved => {
-                    let is_approved = self.auto_approved.read().await.contains(&lookup_name);
+                    let is_approved = self.auto_approve_tools
+                        || self.auto_approved.read().await.contains(&lookup_name);
                     if !is_approved && !approval_already_granted {
                         return Err(Self::gate_paused(
                             "approval",
@@ -1451,18 +1452,21 @@ mod tests {
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
 
-        // Approval runs before auth in the current adapter pipeline, so a
-        // missing-credential HTTP call that also needs approval pauses on the
-        // approval gate first.
+        // Auth preflight runs before the approval check in the adapter
+        // pipeline (see the order of `auth_manager.check_action_auth` vs
+        // `tool.requires_approval` in `execute_action`), so a missing-credential
+        // HTTP call surfaces an Authentication gate before any approval gate.
         match result {
             Err(EngineError::GatePaused { resume_kind, .. }) => match *resume_kind {
-                ironclaw_engine::ResumeKind::Approval { allow_always } => {
-                    assert!(allow_always);
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name, ..
+                } => {
+                    assert_eq!(credential_name, "github_token");
                 }
-                other => panic!("Expected Approval gate, got: {other:?}"),
+                other => panic!("Expected Authentication gate, got: {other:?}"),
             },
             other => {
-                panic!("Expected GatePaused for approval preflight, got: {other:?}");
+                panic!("Expected GatePaused for authentication preflight, got: {other:?}");
             }
         }
     }

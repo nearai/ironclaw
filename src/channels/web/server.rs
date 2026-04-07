@@ -4030,7 +4030,13 @@ mod tests {
         let secrets = test_secrets_store();
         let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
 
-        let channel_name = "test-failing-channel";
+        // Use underscore-only name: `canonicalize_extension_name` rewrites
+        // hyphens to underscores, but `configure`'s capabilities-file lookup
+        // does not fall back to the legacy hyphen form, so a hyphenated test
+        // channel name causes `Capabilities file not found` and the handler
+        // takes the `Err` branch (no `activated` field) instead of the
+        // intended "saved but activation failed" branch.
+        let channel_name = "test_failing_channel";
         std::fs::write(
             wasm_channels_dir
                 .path()
@@ -4156,8 +4162,12 @@ mod tests {
         use axum::body::Body;
         use tower::ServiceExt;
 
-        let secrets = test_secrets_store();
-        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets);
+        // DB-backed manager so the install path does not fall back to the
+        // developer's real `~/.ironclaw/mcp-servers.json` (which would
+        // panic with `AlreadyInstalled("notion")` on dev machines that
+        // already have a notion entry configured).
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir, _db_dir) =
+            test_ext_mgr_with_db().await;
         let mut server =
             crate::tools::mcp::McpServerConfig::new("notion", "https://mcp.notion.com/mcp");
         server.description = Some("Notion".to_string());
@@ -5305,6 +5315,58 @@ mod tests {
             vec![],
         ));
         (ext_mgr, wasm_tools_dir, wasm_channels_dir)
+    }
+
+    /// DB-backed `ExtensionManager` for tests that exercise MCP install/list
+    /// paths.
+    ///
+    /// `test_ext_mgr` builds the manager with `store: None`, which makes
+    /// `load_mcp_servers` fall back to the file-based path
+    /// `~/.ironclaw/mcp-servers.json`. Any test that calls `install` for an
+    /// MCP server with `store: None` will read the developer's real config
+    /// and may panic with `AlreadyInstalled("notion")` (or similar) on
+    /// machines that have configured MCP servers locally.
+    ///
+    /// This sibling builds an isolated in-memory libsql DB AND pre-seeds
+    /// an empty `mcp_servers` setting for the test user so that
+    /// `load_mcp_servers_from_db` does not silently fall back to disk
+    /// (it falls back when the DB has no entry, see `mcp/config.rs:625`).
+    async fn test_ext_mgr_with_db() -> (
+        Arc<ExtensionManager>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let secrets = test_secrets_store();
+        let tool_registry = Arc::new(ToolRegistry::new());
+        let mcp_sm = Arc::new(crate::tools::mcp::session::McpSessionManager::new());
+        let mcp_pm = Arc::new(crate::tools::mcp::process::McpProcessManager::new());
+        let wasm_tools_dir = tempfile::tempdir().expect("temp wasm tools dir");
+        let wasm_channels_dir = tempfile::tempdir().expect("temp wasm channels dir");
+        let (db, db_dir) = crate::testing::test_db().await;
+
+        // Pre-seed an empty servers list so the DB-backed loader does not
+        // fall back to `~/.ironclaw/mcp-servers.json` on dev machines.
+        let empty_servers = crate::tools::mcp::config::McpServersFile::default();
+        crate::tools::mcp::config::save_mcp_servers_to_db(db.as_ref(), "test", &empty_servers)
+            .await
+            .expect("seed empty mcp_servers setting");
+
+        let ext_mgr = Arc::new(ExtensionManager::new(
+            mcp_sm,
+            mcp_pm,
+            secrets,
+            tool_registry,
+            None,
+            None,
+            wasm_tools_dir.path().to_path_buf(),
+            wasm_channels_dir.path().to_path_buf(),
+            None,
+            "test".to_string(),
+            Some(db),
+            vec![],
+        ));
+        (ext_mgr, wasm_tools_dir, wasm_channels_dir, db_dir)
     }
 
     #[tokio::test]
