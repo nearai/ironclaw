@@ -770,6 +770,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                 &skills_snapshot,
                 &store_dyn,
                 project_id,
+                owner_id,
             )
             .await
             {

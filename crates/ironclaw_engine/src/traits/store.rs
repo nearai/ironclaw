@@ -142,6 +142,8 @@ pub trait Store: Send + Sync {
             docs.extend(self.list_memory_docs_by_owner(owner_id).await?);
         }
         docs.retain(|d| d.doc_type == crate::types::memory::DocType::Skill);
+        docs.sort_by_key(|d| d.id.0);
+        docs.dedup_by_key(|d| d.id);
         Ok(docs)
     }
 

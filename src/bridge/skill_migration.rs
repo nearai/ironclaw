@@ -32,8 +32,9 @@ pub async fn migrate_v1_skills(
     v1_registry: &SkillRegistry,
     store: &Arc<dyn Store>,
     project_id: ProjectId,
+    owner_id: &str,
 ) -> Result<usize, EngineError> {
-    migrate_v1_skill_list(v1_registry.skills(), store, project_id).await
+    migrate_v1_skill_list(v1_registry.skills(), store, project_id, owner_id).await
 }
 
 /// Migrate a snapshot of v1 skills to v2 MemoryDocs.
@@ -43,6 +44,7 @@ pub async fn migrate_v1_skill_list(
     v1_skills: &[LoadedSkill],
     store: &Arc<dyn Store>,
     project_id: ProjectId,
+    owner_id: &str,
 ) -> Result<usize, EngineError> {
     if v1_skills.is_empty() {
         return Ok(0);
@@ -73,7 +75,7 @@ pub async fn migrate_v1_skill_list(
             continue;
         }
 
-        let doc = v1_skill_to_memory_doc(skill, project_id);
+        let doc = v1_skill_to_memory_doc(skill, project_id, owner_id);
         store.save_memory_doc(&doc).await?;
         migrated += 1;
 
@@ -92,12 +94,12 @@ pub async fn migrate_v1_skill_list(
 }
 
 /// Convert a single v1 `LoadedSkill` to a v2 `MemoryDoc`.
-fn v1_skill_to_memory_doc(skill: &LoadedSkill, project_id: ProjectId) -> MemoryDoc {
-    let v2_source = match &skill.source {
-        SkillSource::Workspace(_) | SkillSource::User(_) | SkillSource::Installed(_) => {
-            V2SkillSource::Migrated
-        }
-        SkillSource::Bundled(_) => V2SkillSource::Migrated,
+fn v1_skill_to_memory_doc(skill: &LoadedSkill, project_id: ProjectId, owner_id: &str) -> MemoryDoc {
+    // User- and workspace-installed skills belong to the owner.
+    // Bundled and registry-installed skills are shared across all users.
+    let user_id = match &skill.source {
+        SkillSource::User(_) | SkillSource::Workspace(_) => owner_id,
+        SkillSource::Installed(_) | SkillSource::Bundled(_) => shared_owner_id(),
     };
 
     let meta = V2SkillMetadata {
@@ -105,7 +107,7 @@ fn v1_skill_to_memory_doc(skill: &LoadedSkill, project_id: ProjectId) -> MemoryD
         version: 1,
         description: skill.manifest.description.clone(),
         activation: skill.manifest.activation.clone(),
-        source: v2_source,
+        source: V2SkillSource::Migrated,
         trust: skill.trust,
         code_snippets: vec![], // v1 skills are prompt-only
         metrics: SkillMetrics::default(),
@@ -115,7 +117,7 @@ fn v1_skill_to_memory_doc(skill: &LoadedSkill, project_id: ProjectId) -> MemoryD
 
     let mut doc = MemoryDoc::new(
         project_id,
-        shared_owner_id(),
+        user_id,
         DocType::Skill,
         format!("skill:{}", skill.manifest.name),
         &skill.prompt_content,
@@ -159,12 +161,14 @@ mod tests {
     fn test_v1_skill_converts_to_memory_doc() {
         let skill = make_v1_skill("test-skill", "Test prompt content");
         let project_id = ProjectId::new();
-        let doc = v1_skill_to_memory_doc(&skill, project_id);
+        let doc = v1_skill_to_memory_doc(&skill, project_id, "alice");
 
         assert_eq!(doc.doc_type, DocType::Skill);
         assert_eq!(doc.title, "skill:test-skill");
         assert_eq!(doc.content, "Test prompt content");
         assert_eq!(doc.project_id, project_id);
+        // User-source skill must be owned by alice, not __shared__
+        assert_eq!(doc.user_id, "alice");
         assert!(doc.tags.contains(&"migrated_from_v1".to_string()));
 
         let meta: V2SkillMetadata = serde_json::from_value(doc.metadata).unwrap();
@@ -174,5 +178,25 @@ mod tests {
         assert_eq!(meta.trust, SkillTrust::Trusted);
         assert!(meta.code_snippets.is_empty());
         assert!(!meta.content_hash.is_empty());
+    }
+
+    #[test]
+    fn test_bundled_skill_migrates_as_shared() {
+        let mut skill = make_v1_skill("bundled-skill", "Bundled content");
+        skill.source = SkillSource::Bundled(PathBuf::from("/bundled"));
+        let project_id = ProjectId::new();
+        let doc = v1_skill_to_memory_doc(&skill, project_id, "alice");
+
+        assert_eq!(doc.user_id, shared_owner_id());
+    }
+
+    #[test]
+    fn test_installed_skill_migrates_as_shared() {
+        let mut skill = make_v1_skill("installed-skill", "Installed content");
+        skill.source = SkillSource::Installed(PathBuf::from("/installed"));
+        let project_id = ProjectId::new();
+        let doc = v1_skill_to_memory_doc(&skill, project_id, "alice");
+
+        assert_eq!(doc.user_id, shared_owner_id());
     }
 }
