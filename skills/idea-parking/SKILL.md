@@ -35,6 +35,16 @@ Manage ideas that are interesting but not yet actionable. Parked ideas live in `
 
 User says: "park this idea: do a comparison video of AWS vs GCP" or "save for later: investigate Rust WASM performance."
 
+This skill is only successful if the parked idea is actually persisted.
+Do not just acknowledge or summarize an idea.
+
+Execution order is mandatory:
+1. Call `memory_write` for `commitments/parked-ideas/<slug>.md`
+2. Only then confirm what was parked
+
+Never say an idea was "parked", "saved for later", or "resurfaced later"
+unless the corresponding `memory_write` succeeded.
+
 **Action:**
 1. Write to `commitments/parked-ideas/<slug>.md`:
 
@@ -53,7 +63,7 @@ tags: [<relevant tags>]
 <What would make this worth pursuing — a condition, event, or timeframe.>
 ```
 
-2. Confirm: "Parked: <title>. I'll resurface it when the time seems right."
+2. Confirm only after the write succeeds: "Parked: <title>. I'll resurface it when the time seems right."
 
 ## Listing parked ideas
 

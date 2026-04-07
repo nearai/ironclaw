@@ -37,6 +37,10 @@ Compose a summary of the user's current commitments. Used both in-conversation (
 3. `memory_tree("commitments/signals/pending/", depth=1)` — count pending signals (skip README.md)
 4. `memory_tree("commitments/resolved/", depth=1)` — count recently resolved
 
+Use `memory_tree` and `memory_read` for digest assembly. Do not use CodeAct,
+shell commands, or creative-generation tools to count or summarize
+commitments.
+
 ## Composing the digest
 
 Group commitments and present in this order:

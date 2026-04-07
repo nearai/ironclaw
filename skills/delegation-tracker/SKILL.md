@@ -36,6 +36,17 @@ Track commitments that depend on someone else. The triage routine will flag stal
 
 User says: "I asked Sarah to handle the deployment" or "tell ops to investigate staging" or "waiting on legal for the contract review."
 
+This skill is only successful if the delegation is persisted in workspace
+memory. Do not just acknowledge or summarize a delegation.
+
+Execution order is mandatory:
+1. Check for an existing matching commitment
+2. If needed, write or update the commitment in `commitments/open/`
+3. Only then confirm what was tracked
+
+Never say "tracked", "saved", or "I'll flag it" unless the corresponding
+`memory_write` succeeded.
+
 **Action:**
 1. Check if a matching commitment already exists in `commitments/open/` via `memory_search`
 2. If it exists: update the frontmatter — set `delegated_to: <person/team>`, `status: waiting`
@@ -62,7 +73,7 @@ tags: [delegation]
 - Last checked: never
 ```
 
-4. Confirm: "Tracked — waiting on <person> for <topic>. I'll flag it if there's no update by <date>."
+4. After the write succeeds, confirm: "Tracked — waiting on <person> for <topic>. I'll flag it if there's no update by <date>."
 
 ## When an update is received
 

@@ -154,6 +154,13 @@ impl TestRig {
         self.channel.tool_calls_started()
     }
 
+    /// Return the filtered list of captured responses so far.
+    ///
+    /// Mirrors the bootstrap-greeting filtering used by `wait_for_responses`.
+    pub async fn captured_responses(&self) -> Vec<OutgoingResponse> {
+        self.filter_responses(self.channel.captured_responses_async().await)
+    }
+
     /// Return `(name, success)` for all `ToolCompleted` events captured so far.
     pub fn tool_calls_completed(&self) -> Vec<(String, bool)> {
         self.channel.tool_calls_completed()

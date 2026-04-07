@@ -60,6 +60,18 @@ When uncertain, ask: "Was that a decision, or still thinking it through?"
 
 ## Recording
 
+This skill is only successful if the decision is actually persisted. Do not
+just summarize or acknowledge the decision.
+
+Execution order is mandatory:
+1. Call `memory_write` for `commitments/decisions/<date>-<slug>.md`
+2. If applicable, call `memory_write` for a follow-on commitment in `commitments/open/`
+3. If applicable, call `memory_write` for `context/intel/<slug>.md`
+4. Only then confirm to the user what was recorded
+
+Never say a decision was "captured", "recorded", or "saved" unless the
+corresponding `memory_write` call succeeded.
+
 Write to `commitments/decisions/<date>-<slug>.md` via `memory_write`:
 
 ```
@@ -95,10 +107,17 @@ tags: [<relevant tags>]
 1. If the decision creates an obligation (e.g., "we decided to migrate by Q2"), also create a commitment in `commitments/open/` following the commitment schema.
 2. Write an intelligence MemoryDoc to `context/intel/<slug>.md` with a brief summary: "Decided X on <date>. Rationale: <reason>." This makes the decision searchable as durable knowledge.
 
+For explicit requests like "record this decision", "log this decision", or
+"note the decision", default to doing all required writes immediately rather
+than asking a follow-up question unless the content is genuinely ambiguous.
+
 ## Outcome tracking
 
 The triage mission checks for decisions older than 7 days without an outcome. It prompts: "You decided <X> <N> days ago. How did it turn out?" When the user provides an outcome, update the decision file's `outcome` and `outcome_positive` fields.
 
 ## Confirmation
 
-After recording, briefly confirm: "Noted decision: <one-line summary>."
+After the write(s) succeed, briefly confirm:
+- where the decision was written
+- whether any follow-on commitment was created
+- one-line summary of the rationale

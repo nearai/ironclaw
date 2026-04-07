@@ -18,18 +18,29 @@ activation:
     - get back to
     - remind me
     - track this
+    - track this request
     - mark done
     - done with
     - commitment
     - obligation
     - overdue
     - owe them
+    - slack message from
+    - asked me to review
+    - can you review
+    - this week
   patterns:
     - "(?i)I (need|have|should|must|ought) to"
     - "(?i)(remind me|don't let me forget|make sure I)"
     - "(?i)(by|before|until) (monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|tonight|end of)"
     - "(?i)(promised|committed|agreed) (to|that)"
     - "(?i)(track|add|log) (this|that|a) (commitment|task|obligation)"
+    - "(?i).+ asked me to .+"
+    - "(?i)(team|slack|legal|finance|board|strategy|product|ops).+ asked me to .+"
+    - "(?i)(slack|email|dm|text) message from .+: .+"
+    - "(?i)can you (review|reply|comment on|look at|send) .+"
+    - "(?i)i need to review .+"
+    - "(?i).+ this week$"
   exclude_keywords:
     - setup commitments
     - install commitments
@@ -50,15 +61,37 @@ When the user says something that implies an obligation, promise, or deadline �
 
 **Triggers:** "I need to...", "I promised Sarah...", "I should get back to...", "The report is due Friday", "They asked me to review..."
 
+Treat these as especially strong passive-signal cases even if the user does
+not say "track this":
+- "The strategy team asked me to review the international expansion reforecast this week."
+- "Legal asked me to comment on the draft by Thursday."
+- "Slack message from Priya: can you review the OAuth callback edge case this week?"
+- "I need to review Sarah's deck before Friday."
+
+These should usually become `review`, `reply`, or `follow-up` signals with
+`immediacy: prompt` when the request is time-sensitive or comes from a named
+person/team.
+
+Treat inbound-message phrasings like these as strong passive signals too:
+- "Slack message from strategy: can you review the international expansion reforecast this week?"
+- "Email from legal: can you comment on the draft by Thursday?"
+
 **Action:**
 1. Check for duplicates: `memory_search` for key phrases within `commitments/`
 2. If no duplicate, call `memory_write` with:
    - `target`: `commitments/signals/pending/<slug>.md`
    - `append`: false
    - Content: signal frontmatter + description
-3. At a natural pause, briefly note: "I've tracked a commitment about [topic]."
+3. Only after the `memory_write` succeeds, at a natural pause briefly note:
+   "I've tracked a commitment about [topic]."
+
+Do not merely acknowledge or summarize an obligation. This mode is successful
+only if a signal is actually written to `commitments/signals/pending/`.
 
 Do NOT interrupt the conversation flow. Signal extraction is a side-effect.
+For commitment tracking, use `memory_tree`, `memory_read`, and `memory_write`.
+Do not use CodeAct, shell commands, or creative-generation tools unless the
+user explicitly asked for execution rather than tracking.
 
 **Signal template:**
 ```
@@ -80,7 +113,7 @@ promoted_to: null
 
 **Immediacy rules:**
 - `realtime`: production incidents, security alerts, stop-loss triggers, anything marked urgent by the user. If you detect a realtime signal, send a `message` immediately — do not wait for the next triage run.
-- `prompt`: urgent DMs from key people, trending topics (for creators), time-sensitive requests
+- `prompt`: urgent DMs from key people, trending topics (for creators), time-sensitive requests, or named-person/team asks like "the strategy team asked me to review..."
 - `batch`: most obligations — meeting action items, reports to read, tasks with multi-day deadlines
 
 **Signal destinations (set during triage, not initial extraction):**
@@ -93,10 +126,30 @@ promoted_to: null
 
 When the user explicitly asks to track something: "track this", "add a commitment", "I committed to X".
 
+If the user says "track this separately", "track this too", or otherwise
+introduces a second distinct obligation, create a new commitment file for that
+new item. Do not overwrite or silently reuse the previous commitment unless it
+is clearly the same obligation.
+
+Phrasings like "track this request from Slack", "track this request from email",
+or "track this review request" are explicit capture requests. They should go
+through Mode B and produce a persisted commitment or signal write, not just a
+summary response.
+
+Example:
+- User: "Track this: Sarah is going to deliver the Q2 budget proposal by Friday."
+- User later: "Track this separately: Bob is drafting the acquisition term sheet by Tuesday next week."
+- Required behavior: create a second distinct `memory_write` for Bob's term
+  sheet. Do not only confirm it in prose, and do not reuse Sarah's file.
+
 **Action:**
 1. Skip the signal stage — write directly to `commitments/open/<slug>.md`
 2. Ask for missing details ONLY if truly ambiguous. Infer reasonable defaults.
-3. Confirm briefly: "Tracked: [description], due [date], urgency [level]."
+3. Confirm briefly only after the write succeeds: "Tracked: [description], due [date], urgency [level]."
+
+This mode is only successful if a commitment file is actually written.
+For explicit capture, prefer direct `memory_write` updates to the workspace.
+Do not switch to CodeAct or shell execution for simple tracking tasks.
 
 **Commitment template:**
 ```
