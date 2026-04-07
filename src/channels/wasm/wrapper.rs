@@ -53,17 +53,19 @@ use crate::channels::wasm::schema::ChannelConfig;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
 use crate::pairing::PairingStore;
-use crate::safety::LeakDetector;
 use crate::secrets::SecretsStore;
-use crate::tools::wasm::LogLevel;
-use crate::tools::wasm::WasmResourceLimiter;
 use crate::tools::wasm::credential_injector::{
     InjectedCredentials, host_matches_pattern, inject_credential,
 };
+use crate::tools::wasm::{
+    LogLevel, WasmResourceLimiter, reject_private_ip, ssrf_safe_client_builder,
+};
+use ironclaw_safety::LeakDetector;
 
 const WEBSOCKET_EVENT_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue";
 const WEBSOCKET_EVENT_PROCESSING_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue_processing";
 const WEBSOCKET_EVENT_QUEUE_MAX_ITEMS: usize = 100;
+const TELEGRAM_TEST_API_BASE_ENV: &str = "IRONCLAW_TEST_TELEGRAM_API_BASE_URL";
 
 // Generate component model bindings from the WIT file
 wasmtime::component::bindgen!({
@@ -359,7 +361,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             "Parsed and injected request headers"
         );
 
-        let mut url = injected_url;
+        let mut logical_url = injected_url;
 
         // Leak scan runs on WASM-provided values BEFORE host credential injection.
         // This prevents false positives where the host-injected Bearer token
@@ -372,13 +374,23 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             .collect();
 
         leak_detector
-            .scan_http_request(&url, &header_vec, body.as_deref())
+            .scan_http_request(&logical_url, &header_vec, body.as_deref())
             .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
 
         // Inject pre-resolved host credentials (Bearer tokens, API keys, etc.)
         // after the leak scan so host-injected secrets don't trigger false positives.
-        if let Some(host) = extract_host_from_url(&url) {
-            self.inject_host_credentials(&host, &mut headers, &mut url);
+        if let Some(host) = extract_host_from_url(&logical_url) {
+            self.inject_host_credentials(&host, &mut headers, &mut logical_url);
+        }
+
+        let transport_url = rewrite_telegram_api_url_for_testing(&logical_url)
+            .unwrap_or_else(|| logical_url.clone());
+        if transport_url != logical_url {
+            tracing::info!(
+                logical_url = %logical_url,
+                transport_url = %transport_url,
+                "Rewriting Telegram API request to test base URL"
+            );
         }
 
         // Get the max response size from capabilities (default 10MB).
@@ -390,6 +402,9 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             .as_ref()
             .map(|h| h.max_response_bytes)
             .unwrap_or(10 * 1024 * 1024);
+
+        // Resolve hostname and reject private/internal IPs to prevent DNS rebinding.
+        reject_private_ip(&url)?;
 
         // Make the HTTP request using a dedicated single-threaded runtime.
         // We're inside spawn_blocking, so we can't rely on the main runtime's
@@ -406,18 +421,18 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         }
         let rt = self.http_runtime.as_ref().expect("just initialized");
         let result = rt.block_on(async {
-            let client = reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(10))
+            let client = ssrf_safe_client_builder()
+                .connect_timeout(Duration::from_secs(10))
                 .build()
                 .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
             let mut request = match method.to_uppercase().as_str() {
-                "GET" => client.get(&url),
-                "POST" => client.post(&url),
-                "PUT" => client.put(&url),
-                "DELETE" => client.delete(&url),
-                "PATCH" => client.patch(&url),
-                "HEAD" => client.head(&url),
+                "GET" => client.get(&transport_url),
+                "POST" => client.post(&transport_url),
+                "PUT" => client.put(&transport_url),
+                "DELETE" => client.delete(&transport_url),
+                "PATCH" => client.patch(&transport_url),
+                "HEAD" => client.head(&transport_url),
                 _ => return Err(format!("Unsupported HTTP method: {}", method)),
             };
 
@@ -506,7 +521,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             // safety layer before they reach the LLM, so we allow the polling
             // response to continue here to avoid poisoning the offset state.
             if let Ok(body_str) = std::str::from_utf8(&body)
-                && !should_skip_response_leak_scan(&url)
+                && !should_skip_response_leak_scan(&logical_url)
             {
                 leak_detector
                     .scan_and_clean(body_str)
@@ -631,30 +646,59 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         } else {
             serde_json::from_str(&meta_json).ok()
         };
-        match self.pairing_store.upsert_request(&channel, &id, meta) {
-            Ok(r) => Ok(near::agent::channel_host::PairingUpsertResult {
-                code: r.code,
-                created: r.created,
+        let store = self.pairing_store.clone();
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| "pairing host callback requires a Tokio runtime".to_string())?;
+        if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+            return Err("pairing host callback requires a multi-thread Tokio runtime".to_string());
+        }
+        let result: Result<crate::db::PairingRequestRecord, crate::error::DatabaseError> =
+            tokio::task::block_in_place(move || {
+                handle.block_on(async move { store.upsert_request(&channel, &id, meta).await })
+            });
+        match result {
+            Ok(req) => Ok(near::agent::channel_host::PairingUpsertResult {
+                code: req.code,
+                created: req.created,
             }),
             Err(e) => Err(e.to_string()),
         }
     }
 
-    fn pairing_is_allowed(
+    fn pairing_resolve_identity(
         &mut self,
         channel: String,
-        id: String,
-        username: Option<String>,
-    ) -> Result<bool, String> {
-        self.pairing_store
-            .is_sender_allowed(&channel, &id, username.as_deref())
-            .map_err(|e| e.to_string())
+        external_id: String,
+    ) -> Result<Option<String>, String> {
+        let store = self.pairing_store.clone();
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| "pairing host callback requires a Tokio runtime".to_string())?;
+        if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+            return Err("pairing host callback requires a multi-thread Tokio runtime".to_string());
+        }
+        let result: Result<Option<crate::ownership::Identity>, crate::error::DatabaseError> =
+            tokio::task::block_in_place(move || {
+                handle.block_on(async move { store.resolve_identity(&channel, &external_id).await })
+            });
+        match result {
+            Ok(Some(identity)) => Ok(Some(identity.owner_id.to_string())),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     fn pairing_read_allow_from(&mut self, channel: String) -> Result<Vec<String>, String> {
-        self.pairing_store
-            .read_allow_from(&channel)
-            .map_err(|e| e.to_string())
+        let store = self.pairing_store.clone();
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| "pairing host callback requires a Tokio runtime".to_string())?;
+        if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+            return Err("pairing host callback requires a multi-thread Tokio runtime".to_string());
+        }
+        let result: Result<Vec<String>, crate::error::DatabaseError> =
+            tokio::task::block_in_place(move || {
+                handle.block_on(async move { store.read_allow_from(&channel).await })
+            });
+        result.map_err(|e| e.to_string())
     }
 }
 
@@ -2298,63 +2342,16 @@ impl WasmChannel {
             StatusUpdate::StreamChunk(_) => {
                 // No-op, too noisy
             }
-            StatusUpdate::ApprovalNeeded {
-                tool_name,
-                description,
-                parameters,
-                allow_always,
-                ..
-            } => {
+            StatusUpdate::ApprovalNeeded { .. } => {
                 // WASM channels (Telegram, Slack, etc.) cannot render
                 // interactive approval overlays.  Send the approval prompt
                 // as an actual message so the user can reply yes/no.
                 self.cancel_typing_task().await;
 
-                let params_preview = parameters
-                    .as_object()
-                    .map(|obj| {
-                        obj.iter()
-                            .map(|(k, v)| {
-                                let val = match v {
-                                    serde_json::Value::String(s) => {
-                                        if s.chars().count() > 80 {
-                                            let truncated: String = s.chars().take(77).collect();
-                                            format!("\"{}...\"", truncated)
-                                        } else {
-                                            format!("\"{}\"", s)
-                                        }
-                                    }
-                                    other => {
-                                        let s = other.to_string();
-                                        if s.chars().count() > 80 {
-                                            let truncated: String = s.chars().take(77).collect();
-                                            format!("{}...", truncated)
-                                        } else {
-                                            s
-                                        }
-                                    }
-                                };
-                                format!("  {}: {}", k, val)
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    })
-                    .unwrap_or_default();
-
-                let reply_hint = if *allow_always {
-                    "Reply \"yes\" to approve, \"no\" to deny, or \"always\" to auto-approve."
-                } else {
-                    "Reply \"yes\" to approve or \"no\" to deny."
+                let Some(prompt) = crate::channels::ChatApprovalPrompt::from_status(&status) else {
+                    return Ok(());
                 };
-                let prompt = format!(
-                    "Approval needed: {tool_name}\n\
-                     {description}\n\
-                     \n\
-                     Parameters:\n\
-                     {params_preview}\n\
-                     \n\
-                     {reply_hint}"
-                );
+                let prompt = prompt.plain_text_message();
 
                 let metadata_json = serde_json::to_string(metadata).unwrap_or_default();
                 if let Err(e) = self
@@ -2462,7 +2459,6 @@ impl WasmChannel {
 
             // Convert to IncomingMessage
             let mut msg = IncomingMessage::new(&self.name, &resolved_user_id, &emitted.content)
-                .with_owner_id(&self.owner_scope_id)
                 .with_sender_id(&emitted.user_id);
 
             if let Some(name) = emitted.user_name {
@@ -2767,7 +2763,6 @@ impl WasmChannel {
             // Convert to IncomingMessage
             let mut msg =
                 IncomingMessage::new(dispatch.channel_name, &resolved_user_id, &emitted.content)
-                    .with_owner_id(dispatch.owner_scope_id)
                     .with_sender_id(&emitted.user_id);
 
             if let Some(name) = emitted.user_name {
@@ -2810,6 +2805,15 @@ impl WasmChannel {
                     dispatch.settings_store,
                 )
                 .await;
+            }
+
+            if emitted.content.trim().is_empty() && emitted.attachments.is_empty() {
+                tracing::debug!(
+                    channel = %dispatch.channel_name,
+                    user_id = %emitted.user_id,
+                    "Skipping empty emitted message"
+                );
+                continue;
             }
 
             // Send to stream — no locks held across this await
@@ -3181,7 +3185,7 @@ fn build_gateway_presence_update(
 fn discord_gateway_presence_status(
     channel_name: &str,
     workspace_store: &crate::channels::wasm::host::ChannelWorkspaceStore,
-    pairing_store: &PairingStore,
+    _pairing_store: &PairingStore,
 ) -> &'static str {
     use crate::tools::wasm::WorkspaceReader;
 
@@ -3190,14 +3194,6 @@ fn discord_gateway_presence_status(
         .read(&owner_key)
         .filter(|s| !s.is_empty())
         .is_some()
-    {
-        return "online";
-    }
-
-    if pairing_store
-        .read_allow_from(channel_name)
-        .ok()
-        .is_some_and(|v| !v.is_empty())
     {
         return "online";
     }
@@ -3813,24 +3809,11 @@ fn status_to_wit(
                 metadata_json,
             }
         }
-        StatusUpdate::ApprovalNeeded {
-            request_id,
-            tool_name,
-            description,
-            allow_always,
-            ..
-        } => {
-            let reply_hint = if *allow_always {
-                "yes (or /approve), no (or /deny), or always (or /always)"
-            } else {
-                "yes (or /approve) or no (or /deny)"
-            };
+        StatusUpdate::ApprovalNeeded { .. } => {
+            let prompt = crate::channels::ChatApprovalPrompt::from_status(status)?;
             wit_channel::StatusUpdate {
                 status: wit_channel::StatusType::ApprovalNeeded,
-                message: format!(
-                    "Approval needed for tool '{}'. {}\nRequest ID: {}\nReply with: {}.",
-                    tool_name, description, request_id, reply_hint
-                ),
+                message: prompt.plain_text_message(),
                 metadata_json,
             }
         }
@@ -3889,8 +3872,10 @@ fn status_to_wit(
             },
             metadata_json,
         },
-        // Suggestions and turn cost are web-gateway-only; skip for WASM channels
-        StatusUpdate::Suggestions { .. } | StatusUpdate::TurnCost { .. } => return None,
+        // Suggestions, turn cost, and skill activation are web-gateway-only; skip for WASM channels
+        StatusUpdate::Suggestions { .. }
+        | StatusUpdate::TurnCost { .. }
+        | StatusUpdate::SkillActivated { .. } => return None,
         StatusUpdate::ReasoningUpdate {
             narrative,
             decisions,
@@ -3986,6 +3971,31 @@ fn extract_host_from_url(url: &str) -> Option<String> {
             .unwrap_or(h)
             .to_lowercase()
     })
+}
+
+fn rewrite_telegram_api_url_for_testing(url: &str) -> Option<String> {
+    let override_base = std::env::var(TELEGRAM_TEST_API_BASE_ENV)
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())?;
+
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+
+    let host = parsed.host_str()?;
+    if !host.eq_ignore_ascii_case("api.telegram.org") {
+        return None;
+    }
+
+    let path = parsed.path().trim_start_matches('/');
+    let mut rewritten = format!("{override_base}/{path}");
+    if let Some(query) = parsed.query() {
+        rewritten.push('?');
+        rewritten.push_str(query);
+    }
+    Some(rewritten)
 }
 
 fn should_skip_response_leak_scan(url: &str) -> bool {
@@ -4166,20 +4176,19 @@ mod tests {
         PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
     use crate::channels::wasm::wrapper::{
-        EmitDispatchContext, HttpResponse, WasmChannel, WebsocketRuntimeConfig,
-        build_discord_gateway_presence_update, build_websocket_identify_message,
-        build_websocket_resume_message, discord_gateway_presence_status, drain_guest_logs,
-        parse_websocket_invalid_session, parse_websocket_ready_session,
-        should_warn_on_heartbeat_interval, uses_owner_broadcast_target,
-        websocket_heartbeat_sleep_duration, websocket_reconnect_backoff,
+        EmitDispatchContext, HttpResponse, TELEGRAM_TEST_API_BASE_ENV, WasmChannel,
+        WebsocketRuntimeConfig, build_discord_gateway_presence_update,
+        build_websocket_identify_message, build_websocket_resume_message,
+        discord_gateway_presence_status, drain_guest_logs, parse_websocket_invalid_session,
+        parse_websocket_ready_session, should_warn_on_heartbeat_interval,
+        uses_owner_broadcast_target, websocket_heartbeat_sleep_duration,
+        websocket_reconnect_backoff,
     };
     use crate::pairing::PairingStore;
     use crate::testing::credentials::TEST_TELEGRAM_BOT_TOKEN;
     use crate::tools::wasm::{
         Capabilities as ToolCapabilities, EndpointPattern, HttpCapability, LogLevel, ResourceLimits,
     };
-    use tempfile::tempdir;
-
     fn create_test_channel() -> WasmChannel {
         create_test_channel_with_owner_scope("default")
     }
@@ -4203,7 +4212,7 @@ mod tests {
             capabilities,
             owner_scope_id,
             "{}".to_string(),
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
             None,
         )
     }
@@ -4353,8 +4362,7 @@ mod tests {
     #[test]
     fn test_discord_gateway_presence_defaults_to_dnd() {
         let store = crate::channels::wasm::host::ChannelWorkspaceStore::new();
-        let pairing_dir = tempdir().unwrap();
-        let pairing_store = PairingStore::with_base_dir(pairing_dir.path().to_path_buf());
+        let pairing_store = PairingStore::new_noop();
 
         assert_eq!(
             discord_gateway_presence_status("discord", &store, &pairing_store),
@@ -4365,8 +4373,7 @@ mod tests {
     #[test]
     fn test_discord_gateway_presence_empty_owner_id_is_dnd() {
         let store = crate::channels::wasm::host::ChannelWorkspaceStore::new();
-        let pairing_dir = tempdir().unwrap();
-        let pairing_store = PairingStore::with_base_dir(pairing_dir.path().to_path_buf());
+        let pairing_store = PairingStore::new_noop();
         // Simulate on_start writing empty string when no owner_id is configured
         store.commit_writes(&[PendingWorkspaceWrite {
             path: "channels/discord/state/owner_id".to_string(),
@@ -4380,26 +4387,9 @@ mod tests {
     }
 
     #[test]
-    fn test_discord_gateway_presence_pairing_approved_is_online() {
-        let store = crate::channels::wasm::host::ChannelWorkspaceStore::new();
-        let pairing_dir = tempdir().unwrap();
-        let pairing_store = PairingStore::with_base_dir(pairing_dir.path().to_path_buf());
-        let request = pairing_store
-            .upsert_request("discord", "user-1", None)
-            .unwrap();
-        pairing_store.approve("discord", &request.code).unwrap();
-
-        assert_eq!(
-            discord_gateway_presence_status("discord", &store, &pairing_store),
-            "online"
-        );
-    }
-
-    #[test]
     fn test_discord_gateway_presence_owner_id_is_online() {
         let store = crate::channels::wasm::host::ChannelWorkspaceStore::new();
-        let pairing_dir = tempdir().unwrap();
-        let pairing_store = PairingStore::with_base_dir(pairing_dir.path().to_path_buf());
+        let pairing_store = PairingStore::new_noop();
         store.commit_writes(&[PendingWorkspaceWrite {
             path: "channels/discord/state/owner_id".to_string(),
             content: "owner-1".to_string(),
@@ -4547,7 +4537,7 @@ mod tests {
             &capabilities,
             &credentials,
             Vec::new(), // no host credentials in test
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
             timeout,
             &workspace_store,
         )
@@ -4602,6 +4592,50 @@ mod tests {
         assert_eq!(msg2.content, "Another message"); // safety: test-only assertion
 
         // No more messages
+        assert!(rx.try_recv().is_err()); // safety: test-only assertion
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_emitted_messages_skips_empty_messages_without_attachments() {
+        use crate::channels::wasm::host::EmittedMessage;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+
+        let rate_limiter = Arc::new(tokio::sync::RwLock::new(
+            crate::channels::wasm::host::ChannelEmitRateLimiter::new(
+                crate::channels::wasm::capabilities::EmitRateLimitConfig::default(),
+            ),
+        ));
+
+        let messages = vec![
+            EmittedMessage::new("user1", ""),
+            EmittedMessage::new("user2", "   "),
+            EmittedMessage::new("user3", "real message"),
+        ];
+
+        let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
+        let result = WasmChannel::dispatch_emitted_messages(
+            EmitDispatchContext {
+                channel_name: "test-channel",
+                owner_scope_id: "default",
+                owner_actor_id: None,
+                message_tx: &message_tx,
+                rate_limiter: &rate_limiter,
+                last_broadcast_metadata: &last_broadcast_metadata,
+                settings_store: None,
+            },
+            messages,
+        )
+        .await;
+
+        assert!(result.is_ok()); // safety: test-only assertion
+
+        let msg = rx
+            .try_recv()
+            .expect("Should receive only the non-empty message");
+        assert_eq!(msg.user_id, "user3"); // safety: test-only assertion
+        assert_eq!(msg.content, "real message"); // safety: test-only assertion
         assert!(rx.try_recv().is_err()); // safety: test-only assertion
     }
 
@@ -4662,7 +4696,7 @@ mod tests {
             capabilities,
             "default",
             "{}".to_string(),
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
             None,
         );
 
@@ -5438,7 +5472,7 @@ mod tests {
             ChannelCapabilities::default(),
             creds,
             Vec::new(),
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
         );
 
         let error = format!(
@@ -5472,7 +5506,7 @@ mod tests {
             ChannelCapabilities::default(),
             std::collections::HashMap::new(),
             Vec::new(),
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
         );
 
         let input = "some error message";
@@ -5503,7 +5537,7 @@ mod tests {
             ChannelCapabilities::default(),
             creds,
             host_creds,
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
         );
 
         // Error containing URL-encoded form of the credential
@@ -5536,11 +5570,45 @@ mod tests {
             ChannelCapabilities::default(),
             creds,
             Vec::new(),
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
         );
 
         let input = "should not match anything";
         assert_eq!(store.redact_credentials(input), input);
+    }
+
+    #[test]
+    fn test_http_request_rejects_private_ip_targets() {
+        let capabilities =
+            ChannelCapabilities::for_channel("test").with_tool_capabilities(ToolCapabilities {
+                http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                    "127.0.0.1",
+                )])),
+                ..Default::default()
+            });
+        let mut store = super::ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            capabilities,
+            std::collections::HashMap::new(),
+            Vec::new(),
+            Arc::new(PairingStore::new_noop()),
+        );
+
+        let result = super::near::agent::channel_host::Host::http_request(
+            &mut store,
+            "GET".to_string(),
+            "https://127.0.0.1:1/health".to_string(),
+            "{}".to_string(),
+            None,
+            Some(1_000),
+        );
+
+        assert!(result.is_err(), "loopback targets must be rejected");
+        assert!(
+            result.unwrap_err().contains("private/internal IP"),
+            "expected SSRF guard error"
+        );
     }
 
     #[test]
@@ -5557,6 +5625,32 @@ mod tests {
             "https://api.example.com/getUpdates"
         ));
         assert!(!should_skip_response_leak_scan("not a url"));
+    }
+
+    #[test]
+    fn test_rewrite_telegram_api_url_for_testing_uses_test_override() {
+        use super::rewrite_telegram_api_url_for_testing;
+
+        let _guard = crate::config::helpers::lock_env();
+        let original = std::env::var(TELEGRAM_TEST_API_BASE_ENV).ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var(TELEGRAM_TEST_API_BASE_ENV, "http://127.0.0.1:19001/");
+        }
+
+        let rewritten =
+            rewrite_telegram_api_url_for_testing("https://api.telegram.org/bot123/sendMessage")
+                .expect("Telegram URL should rewrite");
+        assert_eq!(rewritten, "http://127.0.0.1:19001/bot123/sendMessage");
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            if let Some(value) = original {
+                std::env::set_var(TELEGRAM_TEST_API_BASE_ENV, value);
+            } else {
+                std::env::remove_var(TELEGRAM_TEST_API_BASE_ENV);
+            }
+        }
     }
 
     /// Verify that WASM HTTP host functions work using a dedicated
@@ -5729,7 +5823,6 @@ mod tests {
 
         let msg = rx.try_recv().expect("Should receive message"); // safety: test-only assertion
         assert_eq!(msg.user_id, "owner-scope"); // safety: test-only assertion
-        assert_eq!(msg.owner_id, "owner-scope"); // safety: test-only assertion
         assert_eq!(msg.sender_id, "telegram-owner"); // safety: test-only assertion
         assert_eq!(msg.conversation_scope(), Some("12345")); // safety: test-only assertion
         let stored_metadata = last_broadcast_metadata.read().await.clone();
@@ -5771,7 +5864,6 @@ mod tests {
 
         let msg = rx.try_recv().expect("Should receive message"); // safety: test-only assertion
         assert_eq!(msg.user_id, "guest-42"); // safety: test-only assertion
-        assert_eq!(msg.owner_id, "owner-scope"); // safety: test-only assertion
         assert_eq!(msg.sender_id, "guest-42"); // safety: test-only assertion
         assert_eq!(msg.conversation_scope(), Some("999")); // safety: test-only assertion
         assert!(last_broadcast_metadata.read().await.is_none()); // safety: test-only assertion

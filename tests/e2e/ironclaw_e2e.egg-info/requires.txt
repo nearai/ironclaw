@@ -6,5 +6,8 @@ playwright>=1.40
 aiohttp>=3.9
 httpx>=0.27
 
+[telegram]
+telethon>=1.40
+
 [vision]
 anthropic>=0.40

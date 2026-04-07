@@ -500,6 +500,8 @@ pub struct PendingOAuthFlow {
     pub client_secret_expires_at: Option<u64>,
     /// When this flow was created (for expiry).
     pub created_at: std::time::Instant,
+    /// Whether successful OAuth should auto-activate `extension_name`.
+    pub auto_activate_extension: bool,
 }
 
 impl std::fmt::Debug for PendingOAuthFlow {
@@ -509,6 +511,7 @@ impl std::fmt::Debug for PendingOAuthFlow {
             .field("display_name", &self.display_name)
             .field("secret_name", &self.secret_name)
             .field("created_at", &self.created_at)
+            .field("auto_activate_extension", &self.auto_activate_extension)
             .finish_non_exhaustive()
     }
 }

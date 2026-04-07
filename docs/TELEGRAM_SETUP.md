@@ -33,7 +33,7 @@ ironclaw onboard
 When prompted, enable the Telegram channel and paste your bot token. The wizard will:
 
 - Validate the token
-- Optionally configure a webhook secret
+- Auto-generate a webhook secret for webhook mode
 - Set up tunnel (if you want webhook mode)
 
 ### 3. (Optional) Configure Tunnel for Webhooks
@@ -57,9 +57,10 @@ When an unknown user DMs your bot, they receive a pairing code. You must approve
 ### Flow
 
 1. Unknown user sends a message to your bot
-2. Bot replies: `To pair with this bot, run: ironclaw pairing approve telegram ABC12345`
-3. You run: `ironclaw pairing approve telegram ABC12345`
-4. User is added to the allow list; future messages are delivered
+2. Bot replies with a one-time pairing code
+3. The user enters that code in IronClaw's channel settings to claim the Telegram account
+4. CLI fallback: `ironclaw pairing approve telegram ABC12345`
+5. The user's Telegram identity is linked to the owner; future messages resolve to that owner and are delivered
 
 ### Commands
 

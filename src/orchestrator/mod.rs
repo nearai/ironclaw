@@ -122,6 +122,11 @@ pub async fn setup_orchestrator(
             claude_code_max_turns: config.claude_code.max_turns,
             claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
             claude_code_allowed_tools: config.claude_code.allowed_tools.clone(),
+            acp_memory_limit_mb: config.acp.memory_limit_mb,
+            acp_timeout_secs: config.acp.timeout_secs,
+            mcp_per_job_enabled: std::env::var("MCP_PER_JOB_ENABLED")
+                .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+                .unwrap_or(false),
         };
         let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
 
@@ -133,7 +138,7 @@ pub async fn setup_orchestrator(
             prompt_queue: Arc::clone(&prompt_queue),
             store: db.cloned(),
             secrets_store: secrets_store.cloned(),
-            user_id: "default".to_string(),
+            user_id: config.owner_id.clone(),
             job_owner_cache: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         };
 
@@ -149,6 +154,9 @@ pub async fn setup_orchestrator(
                 config.claude_code.model,
                 config.claude_code.max_turns
             );
+        }
+        if config.acp.enabled {
+            tracing::info!("ACP agent sandbox mode available");
         }
         (job_event_tx, Some(jm))
     } else {

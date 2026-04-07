@@ -53,6 +53,8 @@ use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+use ironclaw_safety::sensitive_paths::is_sensitive_path;
+
 use crate::context::JobContext;
 use crate::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::tool::{
@@ -556,6 +558,207 @@ pub struct ShellTool {
     sandbox_policy: SandboxPolicy,
 }
 
+/// Commands that read file contents. When these appear at the start of a command
+/// or after a pipe/semicolon, their arguments are checked against `is_sensitive_path`.
+///
+/// This is defense-in-depth: it catches obvious `cat ~/.ssh/id_rsa` patterns but
+/// cannot prevent all bypass techniques (shell aliases, variable expansion, etc.).
+/// Full mitigation requires filesystem-level sandboxing (seccomp/landlock).
+const FILE_READ_COMMANDS: &[&str] = &[
+    "cat", "head", "tail", "less", "more", "tac", "nl", "bat", "batcat", "cp", "mv", "scp",
+    "rsync", "source", ".", // shell source
+    "vim", "vi", "nano", "code", "strings", "xxd", "hexdump", "od", "file", "stat", "wc", "diff",
+    "cmp", "tar", "zip", "gzip", "bzip2", "xz", "zstd", "base64", "grep", "awk", "sed",
+];
+
+/// Check if a command attempts to access sensitive credential files.
+///
+/// Scans arguments of known file-reading commands and I/O redirection targets
+/// against `is_sensitive_path`. This is defense-in-depth — it catches obvious
+/// patterns but cannot prevent all bypass techniques:
+/// - Command substitution (`$(cat ...)`, `` `cat ...` ``) is partially covered
+///   by `detect_command_injection` upstream which flags `$(` patterns.
+/// - Shell aliases, variable expansion, and encoding bypass are not caught.
+/// - Full mitigation requires filesystem-level sandboxing (seccomp/landlock).
+fn check_sensitive_file_access(cmd: &str) -> Option<String> {
+    for segment in split_shell_segments(cmd) {
+        let segment = segment.trim();
+
+        // Check file-reading commands
+        if let Some(reason) = check_segment_file_commands(segment) {
+            return Some(reason);
+        }
+
+        // Check input redirection: `< ~/.ssh/id_rsa`
+        if let Some(reason) = check_redirect_target(segment, '<', "input redirection") {
+            return Some(reason);
+        }
+
+        // Check output redirection: `> ~/.ssh/authorized_keys` or `>> ~/.env`
+        // (write-path equivalent of the read-path protection)
+        if let Some(reason) = check_redirect_target(segment, '>', "output redirection") {
+            return Some(reason);
+        }
+    }
+
+    None
+}
+
+/// Split a command string on shell separators (`&&`, `||`, `|`, `;`).
+///
+/// Splits on multi-character operators first to avoid fragmenting `&&` into
+/// empty segments (which would happen with single-char `&` splitting).
+fn split_shell_segments(cmd: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let bytes = cmd.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        let is_double =
+            (bytes[i] == b'&' || bytes[i] == b'|') && i + 1 < len && bytes[i + 1] == bytes[i];
+        let is_single = bytes[i] == b'|' || bytes[i] == b';';
+        if is_double {
+            segments.push(&cmd[start..i]);
+            i += 2;
+            start = i;
+        } else if is_single {
+            segments.push(&cmd[start..i]);
+            i += 1;
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    segments.push(&cmd[start..]);
+    segments
+}
+
+/// Check a single command segment for file-reading commands targeting sensitive paths.
+fn check_segment_file_commands(segment: &str) -> Option<String> {
+    let segment = segment.trim().trim_start_matches('<').trim();
+
+    let mut tokens = segment.split_whitespace();
+    let cmd_name = tokens.next()?;
+
+    // Strip path prefix (e.g., /usr/bin/cat -> cat)
+    let base_cmd = cmd_name.rsplit('/').next().unwrap_or(cmd_name);
+
+    let is_file_cmd = FILE_READ_COMMANDS
+        .iter()
+        .any(|&fc| base_cmd.eq_ignore_ascii_case(fc));
+
+    if !is_file_cmd {
+        return None;
+    }
+
+    for token in tokens {
+        if token.starts_with('-') {
+            // Check for --flag=value patterns where value may be a sensitive path
+            if let Some(eq_pos) = token.find('=') {
+                let value = &token[eq_pos + 1..];
+                let expanded = expand_tilde(strip_shell_quotes(value));
+                if is_sensitive_path(&expanded) {
+                    return Some(format!(
+                        "Access denied: flag value in '{}' targets a sensitive credential path",
+                        token
+                    ));
+                }
+            }
+            continue;
+        }
+        // Strip surrounding quotes that pass through from shell syntax
+        let unquoted = strip_shell_quotes(token);
+        let expanded = expand_tilde(unquoted);
+        if is_sensitive_path(&expanded) {
+            return Some(format!(
+                "Access denied: '{}' targets a sensitive credential path",
+                unquoted
+            ));
+        }
+    }
+    None
+}
+
+/// Strip surrounding single or double quotes from a shell token.
+fn strip_shell_quotes(token: &str) -> &str {
+    let bytes = token.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &token[1..token.len() - 1];
+        }
+    }
+    token
+}
+
+/// Check for I/O redirection (`<`, `>`, `>>`) targeting a sensitive path.
+///
+/// Scans for ALL occurrences of the operator in the segment, not just the first.
+/// Also detects process substitution `<(cmd)` and checks tokens inside for sensitive paths.
+fn check_redirect_target(segment: &str, operator: char, label: &str) -> Option<String> {
+    let bytes = segment.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == operator as u8 {
+            let mut after_start = i + 1;
+
+            // Detect process substitution: <(...)
+            if operator == '<' && after_start < bytes.len() && bytes[after_start] == b'(' {
+                // Find the matching closing paren
+                if let Some(close) = segment[after_start..].find(')') {
+                    let inner = &segment[after_start + 1..after_start + close];
+                    // Check each whitespace token inside the process substitution
+                    for token in inner.split_whitespace() {
+                        let unquoted = strip_shell_quotes(token);
+                        let expanded = expand_tilde(unquoted);
+                        if is_sensitive_path(&expanded) {
+                            return Some(format!(
+                                "Access denied: process substitution targets sensitive path '{}'",
+                                unquoted
+                            ));
+                        }
+                    }
+                }
+                i = after_start;
+                i += 1;
+                continue;
+            }
+
+            // Skip a second `>` for append redirection (`>>`)
+            if operator == '>' && after_start < bytes.len() && bytes[after_start] == b'>' {
+                after_start += 1;
+            }
+            let after = &segment[after_start..];
+            let after = after.trim();
+            let path_token = after.split_whitespace().next().unwrap_or("");
+            if !path_token.is_empty() {
+                let unquoted = strip_shell_quotes(path_token);
+                let expanded = expand_tilde(unquoted);
+                if is_sensitive_path(&expanded) {
+                    return Some(format!(
+                        "Access denied: {} targets sensitive path '{}'",
+                        label, unquoted
+                    ));
+                }
+            }
+            // Advance past the token we just checked
+            i = after_start;
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Expand `~/` prefix to the user's home directory.
+fn expand_tilde(token: &str) -> PathBuf {
+    if let (Some(rest), Some(home)) = (token.strip_prefix("~/"), dirs::home_dir()) {
+        return home.join(rest);
+    }
+    PathBuf::from(token)
+}
+
 impl std::fmt::Debug for ShellTool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ShellTool")
@@ -796,6 +999,13 @@ impl ShellTool {
             )));
         }
 
+        // Check for file-reading commands targeting sensitive credential paths.
+        // Defense-in-depth: catches obvious patterns like `cat ~/.ssh/id_rsa`
+        // but cannot prevent all shell-level bypass techniques.
+        if let Some(reason) = check_sensitive_file_access(cmd) {
+            return Err(ToolError::NotAuthorized(reason));
+        }
+
         // Determine working directory
         let cwd = workdir
             .map(PathBuf::from)
@@ -855,7 +1065,8 @@ impl Tool for ShellTool {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout in seconds (optional, default 120)"
+                    "description": "Timeout in seconds (optional, default 120)",
+                    "minimum": 1
                 }
             },
             "required": ["command"]
@@ -869,8 +1080,41 @@ impl Tool for ShellTool {
     ) -> Result<ToolOutput, ToolError> {
         let command = require_str(&params, "command")?;
 
-        let workdir = params.get("workdir").and_then(|v| v.as_str());
-        let timeout = params.get("timeout").and_then(|v| v.as_u64());
+        let workdir = match params.get("workdir") {
+            None => None,
+            Some(v) if v.is_null() => None,
+            Some(v) => {
+                let s = v.as_str().ok_or_else(|| {
+                    ToolError::InvalidParameters("workdir must be a string".to_string())
+                })?;
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            }
+        };
+
+        let timeout = match params.get("timeout") {
+            None => None,
+            Some(v) if v.is_null() => None,
+            Some(v) => {
+                let n = v.as_u64().ok_or_else(|| {
+                    ToolError::InvalidParameters(
+                        "timeout must be a positive integer number of seconds".to_string(),
+                    )
+                })?;
+
+                if n == 0 {
+                    return Err(ToolError::InvalidParameters(
+                        "timeout must be greater than 0".to_string(),
+                    ));
+                }
+
+                Some(n)
+            }
+        };
 
         let start = std::time::Instant::now();
         let (output, exit_code) = self
@@ -952,16 +1196,159 @@ fn truncate_for_error(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    async fn execute_shell(
+        tool: &ShellTool,
+        params: serde_json::Value,
+    ) -> Result<ToolOutput, ToolError> {
+        tool.execute(params, &JobContext::default()).await
+    }
+
+    fn assert_invalid_parameters(result: Result<ToolOutput, ToolError>, expected_message: &str) {
+        match result {
+            Err(ToolError::InvalidParameters(message)) => {
+                assert_eq!(message, expected_message);
+            }
+            Err(other) => panic!("expected InvalidParameters, got {other:?}"),
+            Ok(output) => panic!("expected InvalidParameters, got success: {output:?}"),
+        }
+    }
 
     #[tokio::test]
     async fn test_echo_command() {
         let tool = ShellTool::new();
-        let ctx = JobContext::default();
-
-        let result = tool
-            .execute(serde_json::json!({"command": "echo hello"}), &ctx)
+        let result = execute_shell(&tool, serde_json::json!({"command": "echo hello"}))
             .await
             .unwrap();
+
+        let output = result.result.get("output").unwrap().as_str().unwrap();
+        assert!(output.contains("hello"));
+        assert_eq!(result.result.get("exit_code").unwrap().as_i64().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_execute_treats_blank_workdir_as_none() {
+        let temp_dir = TempDir::new().unwrap();
+        let tool = ShellTool::new().with_working_dir(temp_dir.path().to_path_buf());
+
+        for workdir in ["", "   "] {
+            let result = execute_shell(
+                &tool,
+                serde_json::json!({
+                    "command": "pwd",
+                    "workdir": workdir
+                }),
+            )
+            .await
+            .unwrap();
+
+            let output = result
+                .result
+                .get("output")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .trim();
+            let output_path = PathBuf::from(output).canonicalize().unwrap();
+            let expected_path = temp_dir.path().canonicalize().unwrap();
+            assert_eq!(output_path, expected_path);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_non_string_workdir() {
+        let tool = ShellTool::new();
+        let result = execute_shell(
+            &tool,
+            serde_json::json!({
+                "command": "pwd",
+                "workdir": 42
+            }),
+        )
+        .await;
+
+        assert_invalid_parameters(result, "workdir must be a string");
+    }
+
+    #[tokio::test]
+    async fn test_execute_treats_missing_or_null_timeout_as_none() {
+        let tool = ShellTool::new();
+
+        for params in [
+            serde_json::json!({"command": "echo hello"}),
+            serde_json::json!({"command": "echo hello", "timeout": null}),
+        ] {
+            let result = execute_shell(&tool, params).await.unwrap();
+            let output = result.result.get("output").unwrap().as_str().unwrap();
+            assert!(output.contains("hello"));
+            assert_eq!(result.result.get("exit_code").unwrap().as_i64().unwrap(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_non_numeric_timeout_string() {
+        let tool = ShellTool::new();
+        let result = execute_shell(
+            &tool,
+            serde_json::json!({
+                "command": "echo hello",
+                "timeout": "abc"
+            }),
+        )
+        .await;
+
+        assert_invalid_parameters(
+            result,
+            "timeout must be a positive integer number of seconds",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_zero_timeout() {
+        let tool = ShellTool::new();
+        let result = execute_shell(
+            &tool,
+            serde_json::json!({
+                "command": "echo hello",
+                "timeout": 0
+            }),
+        )
+        .await;
+
+        assert_invalid_parameters(result, "timeout must be greater than 0");
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_float_timeout() {
+        let tool = ShellTool::new();
+        let result = execute_shell(
+            &tool,
+            serde_json::json!({
+                "command": "echo hello",
+                "timeout": 3.5
+            }),
+        )
+        .await;
+
+        assert_invalid_parameters(
+            result,
+            "timeout must be a positive integer number of seconds",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_accepts_valid_timeout() {
+        let tool = ShellTool::new();
+        let result = execute_shell(
+            &tool,
+            serde_json::json!({
+                "command": "echo hello",
+                "timeout": 30
+            }),
+        )
+        .await
+        .unwrap();
 
         let output = result.result.get("output").unwrap().as_str().unwrap();
         assert!(output.contains("hello"));
@@ -1508,5 +1895,122 @@ mod tests {
         assert_eq!(r2, RiskLevel::High); // safety: test code
         let r3 = classify_command_risk("DROP table users;");
         assert_eq!(r3, RiskLevel::High); // safety: test code
+    }
+
+    // ── Sensitive file access tests ──────────────────────────────────
+
+    #[test]
+    fn sensitive_file_access_blocks_cat_ssh() {
+        assert!(check_sensitive_file_access("cat /home/user/.ssh/id_rsa").is_some());
+        assert!(check_sensitive_file_access("cat ~/.ssh/id_rsa").is_some());
+    }
+
+    #[test]
+    fn sensitive_file_access_blocks_head_tail_less() {
+        assert!(check_sensitive_file_access("head -20 /home/user/.env").is_some());
+        assert!(check_sensitive_file_access("tail /home/user/.aws/credentials").is_some());
+        assert!(check_sensitive_file_access("less /home/user/.gnupg/secring.gpg").is_some());
+    }
+
+    #[test]
+    fn sensitive_file_access_blocks_piped_commands() {
+        assert!(check_sensitive_file_access("cat /home/user/.env | grep KEY").is_some());
+        assert!(check_sensitive_file_access("echo ok; cat /home/user/.ssh/id_rsa").is_some());
+    }
+
+    #[test]
+    fn sensitive_file_access_blocks_chained_commands() {
+        // && and || are split correctly (not fragmented into single &)
+        assert!(check_sensitive_file_access("echo ok && cat /home/user/.ssh/id_rsa").is_some());
+        assert!(check_sensitive_file_access("false || cat /home/user/.env").is_some());
+    }
+
+    #[test]
+    fn sensitive_file_access_blocks_cp_mv() {
+        assert!(check_sensitive_file_access("cp /home/user/.ssh/id_rsa /tmp/stolen").is_some());
+        assert!(check_sensitive_file_access("mv /home/user/.aws/credentials /tmp/").is_some());
+    }
+
+    #[test]
+    fn sensitive_file_access_blocks_input_redirection() {
+        assert!(check_sensitive_file_access("wc -l < /home/user/.ssh/id_rsa").is_some());
+    }
+
+    #[test]
+    fn sensitive_file_access_blocks_output_redirection() {
+        // Writing to sensitive paths via > and >>
+        assert!(
+            check_sensitive_file_access("echo pwned > /home/user/.ssh/authorized_keys").is_some()
+        );
+        assert!(check_sensitive_file_access("echo extra >> /home/user/.env").is_some());
+    }
+
+    #[test]
+    fn sensitive_file_access_allows_normal_files() {
+        assert!(check_sensitive_file_access("cat /home/user/code/main.rs").is_none());
+        assert!(check_sensitive_file_access("head README.md").is_none());
+        assert!(check_sensitive_file_access("tail -f /var/log/syslog").is_none());
+        assert!(check_sensitive_file_access("ls -la").is_none());
+        assert!(check_sensitive_file_access("cargo build").is_none());
+        // Normal output redirection is fine
+        assert!(check_sensitive_file_access("echo hello > /tmp/output.txt").is_none());
+    }
+
+    #[test]
+    fn sensitive_file_access_allows_env_example() {
+        assert!(check_sensitive_file_access("cat /app/.env.example").is_none());
+    }
+
+    #[test]
+    fn sensitive_file_access_blocks_full_path_commands() {
+        assert!(check_sensitive_file_access("/usr/bin/cat /home/user/.ssh/id_rsa").is_some());
+    }
+
+    #[test]
+    fn sensitive_file_access_strips_quotes() {
+        // Quoted paths should still be caught
+        assert!(check_sensitive_file_access(r#"cat "/home/user/.ssh/id_rsa""#).is_some());
+        assert!(check_sensitive_file_access("cat '/home/user/.ssh/id_rsa'").is_some());
+        assert!(check_sensitive_file_access(r#"head "/home/user/.env""#).is_some());
+    }
+
+    #[test]
+    fn sensitive_file_access_blocks_grep_awk_sed() {
+        assert!(check_sensitive_file_access("grep SECRET /home/user/.env").is_some());
+        assert!(check_sensitive_file_access("awk '{print}' /home/user/.ssh/id_rsa").is_some());
+        assert!(check_sensitive_file_access("sed -n '1p' /home/user/.env").is_some());
+    }
+
+    #[test]
+    fn sensitive_file_access_blocks_multiple_redirects() {
+        // Multiple redirects in a single segment — both should be checked
+        assert!(
+            check_sensitive_file_access(
+                "echo ok > /tmp/safe.txt > /home/user/.ssh/authorized_keys"
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn split_shell_segments_handles_operators() {
+        let segs = split_shell_segments("echo a && echo b || echo c | grep d ; echo e");
+        assert_eq!(segs.len(), 5);
+        assert_eq!(segs[0].trim(), "echo a");
+        assert!(segs[1].trim().starts_with("echo b"));
+    }
+
+    #[test]
+    fn sensitive_file_access_blocks_process_substitution() {
+        // <(cat ~/.ssh/id_rsa) should be caught even though it's not a plain redirect
+        assert!(
+            check_sensitive_file_access("diff <(cat /home/user/.ssh/id_rsa) /dev/null").is_some()
+        );
+    }
+
+    #[test]
+    fn sensitive_file_access_blocks_flag_equals_path() {
+        // --file=/home/user/.env should be caught even though the token starts with -
+        assert!(check_sensitive_file_access("grep --file=/home/user/.env pattern").is_some());
     }
 }

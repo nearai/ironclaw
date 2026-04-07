@@ -61,6 +61,33 @@ impl ConversationStore for LibSqlBackend {
         Ok(id)
     }
 
+    async fn add_conversation_message_if_empty(
+        &self,
+        conversation_id: Uuid,
+        role: &str,
+        content: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.connect().await?;
+        let id = Uuid::new_v4();
+        let now = fmt_ts(&Utc::now());
+        let conv_str = conversation_id.to_string();
+        let result = conn
+            .execute(
+                "INSERT INTO conversation_messages (id, conversation_id, role, content, created_at) \
+                 SELECT ?1, ?2, ?3, ?4, ?5 \
+                 WHERE NOT EXISTS ( \
+                     SELECT 1 FROM conversation_messages WHERE conversation_id = ?2 \
+                 )",
+                params![id.to_string(), conv_str, role, content, now],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        if result > 0 {
+            self.touch_conversation(conversation_id).await?;
+        }
+        Ok(result > 0)
+    }
+
     async fn ensure_conversation(
         &self,
         id: Uuid,

@@ -18,9 +18,8 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::context::JobContext;
 use crate::llm::recording::{HttpExchangeRequest, HttpExchangeResponse, HttpInterceptor};
-use crate::safety::LeakDetector;
 use crate::secrets::{DecryptedSecret, SecretsStore};
-use crate::tools::tool::{Tool, ToolError, ToolOutput};
+use crate::tools::tool::{Tool, ToolDiscoverySummary, ToolError, ToolOutput};
 use crate::tools::wasm::capabilities::Capabilities;
 use crate::tools::wasm::credential_injector::{
     InjectedCredentials, host_matches_pattern, inject_credential,
@@ -29,6 +28,8 @@ use crate::tools::wasm::error::WasmError;
 use crate::tools::wasm::host::{HostState, LogLevel};
 use crate::tools::wasm::limits::{ResourceLimits, WasmResourceLimiter};
 use crate::tools::wasm::runtime::{EPOCH_TICK_INTERVAL, PreparedModule, WasmToolRuntime};
+use crate::tools::wasm::ssrf_safe_client_builder;
+use ironclaw_safety::LeakDetector;
 
 // Generate component model bindings from the WIT file.
 //
@@ -415,9 +416,8 @@ impl near::agent::host::Host for StoreData {
         });
 
         let result = rt.block_on(async {
-            let client = reqwest::Client::builder()
+            let client = ssrf_safe_client_builder()
                 .connect_timeout(Duration::from_secs(10))
-                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
@@ -585,6 +585,8 @@ pub struct WasmToolWrapper {
     description: String,
     /// Compact and discovery schemas for this tool.
     schemas: WasmToolSchemas,
+    /// Optional curated discovery guidance surfaced by `tool_info`.
+    discovery_summary: Option<ToolDiscoverySummary>,
     /// Injected credentials for HTTP requests (e.g., OAuth tokens).
     /// Keys are placeholder names like "GOOGLE_ACCESS_TOKEN".
     credentials: HashMap<String, String>,
@@ -836,6 +838,7 @@ impl WasmToolWrapper {
         Self {
             description: prepared.description.clone(),
             schemas: WasmToolSchemas::new(prepared.schema.clone()),
+            discovery_summary: None,
             runtime,
             prepared,
             capabilities,
@@ -879,6 +882,12 @@ impl WasmToolWrapper {
         } else {
             self.schemas = self.schemas.with_override(schema);
         }
+        self
+    }
+
+    /// Override the curated discovery summary.
+    pub fn with_discovery_summary(mut self, summary: ToolDiscoverySummary) -> Self {
+        self.discovery_summary = Some(summary);
         self
     }
 
@@ -1098,6 +1107,10 @@ impl Tool for WasmToolWrapper {
         self.schemas.discovery()
     }
 
+    fn discovery_summary(&self) -> Option<ToolDiscoverySummary> {
+        self.discovery_summary.clone()
+    }
+
     /// Compose the tool schema for LLM function calling.
     ///
     /// When the advertised schema is permissive (no typed properties), appends
@@ -1149,6 +1162,7 @@ impl Tool for WasmToolWrapper {
         let capabilities = self.capabilities.clone();
         let description = self.description.clone();
         let schemas = self.schemas.clone();
+        let discovery_summary = self.discovery_summary.clone();
         let credentials = self.credentials.clone();
 
         // Execute in blocking task with timeout
@@ -1159,6 +1173,7 @@ impl Tool for WasmToolWrapper {
                 capabilities,
                 description,
                 schemas,
+                discovery_summary,
                 credentials,
                 secrets_store: None, // Not needed in blocking task
                 oauth_refresh: None, // Already used above for pre-refresh
@@ -1306,9 +1321,8 @@ async fn refresh_oauth_token(
         return false;
     }
 
-    let client = match reqwest::Client::builder()
+    let client = match ssrf_safe_client_builder()
         .timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(c) => c,
@@ -1608,84 +1622,13 @@ fn extract_host_from_url(url: &str) -> Option<String> {
     })
 }
 
-/// Resolve the URL's hostname and reject connections to private/internal IP addresses.
-/// This prevents DNS rebinding attacks where an attacker's domain resolves to an
-/// internal IP after passing the allowlist check.
 fn reject_private_ip(url: &str) -> Result<(), String> {
-    let parsed = url::Url::parse(url).map_err(|e| format!("Failed to parse URL: {e}"))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(format!("Unsupported URL scheme: {}", parsed.scheme()));
-    }
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err("URL contains userinfo (@) which is not allowed".to_string());
-    }
-
-    let host = parsed
-        .host_str()
-        .map(|h| {
-            h.strip_prefix('[')
-                .and_then(|v| v.strip_suffix(']'))
-                .unwrap_or(h)
-        })
-        .ok_or_else(|| "Failed to parse host from URL".to_string())?;
-
-    // If the host is already an IP, check it directly
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        return if is_private_ip(ip) {
-            Err(format!(
-                "HTTP request to private/internal IP {} is not allowed",
-                ip
-            ))
-        } else {
-            Ok(())
-        };
-    }
-
-    // Resolve DNS and check all addresses
-    use std::net::ToSocketAddrs;
-    // Port 0 is a placeholder; ToSocketAddrs needs host:port but the port
-    // doesn't affect which IPs the hostname resolves to.
-    let addrs: Vec<_> = format!("{}:0", host)
-        .to_socket_addrs()
-        .map_err(|e| format!("DNS resolution failed for {}: {}", host, e))?
-        .collect();
-
-    if addrs.is_empty() {
-        return Err(format!("DNS resolution returned no addresses for {}", host));
-    }
-
-    for addr in &addrs {
-        if is_private_ip(addr.ip()) {
-            return Err(format!(
-                "DNS rebinding detected: {} resolved to private IP {}",
-                host,
-                addr.ip()
-            ));
-        }
-    }
-
-    Ok(())
+    crate::tools::wasm::reject_private_ip(url)
 }
 
-/// Check if an IP address belongs to a private/internal range.
+#[cfg(test)]
 fn is_private_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()           // 127.0.0.0/8
-            || v4.is_private()         // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-            || v4.is_link_local()      // 169.254.0.0/16
-            || v4.is_unspecified()     // 0.0.0.0
-            || v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64 // 100.64.0.0/10 (CGNAT)
-        }
-        std::net::IpAddr::V6(v6) => {
-            v6.is_loopback()           // ::1
-            || v6.is_unspecified()     // ::
-            // fc00::/7 (unique local)
-            || (v6.segments()[0] & 0xFE00) == 0xFC00
-            // fe80::/10 (link-local)
-            || (v6.segments()[0] & 0xFFC0) == 0xFE80
-        }
-    }
+    crate::tools::wasm::is_private_ip(ip)
 }
 
 fn schema_contains_container_properties(schema: &serde_json::Value) -> bool {
@@ -3058,6 +3001,27 @@ mod tests {
         assert_eq!(wrapper.discovery_schema(), typed_schema); // safety: test-only assertion
     }
 
+    #[tokio::test]
+    async fn test_wrapper_returns_curated_discovery_summary() {
+        let runtime = Arc::new(WasmToolRuntime::new(WasmRuntimeConfig::for_testing()).unwrap()); // safety: test-only setup
+        let prepared = runtime
+            .prepare("github", b"\0asm\x0d\0\x01\0", None)
+            .await
+            .unwrap(); // safety: test-only setup
+
+        let summary = crate::tools::tool::ToolDiscoverySummary {
+            always_required: vec!["action".into()],
+            notes: vec!["Use tool_info for the full schema".into()],
+            ..crate::tools::tool::ToolDiscoverySummary::default()
+        };
+
+        let wrapper =
+            super::WasmToolWrapper::new(Arc::clone(&runtime), prepared, Capabilities::default())
+                .with_discovery_summary(summary.clone());
+
+        assert_eq!(wrapper.discovery_summary(), Some(summary));
+    }
+
     #[test]
     fn test_build_tool_usage_hint_detects_nullable_container_properties() {
         let schema = serde_json::json!({
@@ -3081,7 +3045,7 @@ mod tests {
     /// tool's own legitimate outbound request.
     #[test]
     fn test_leak_scan_runs_before_credential_injection() {
-        use crate::safety::LeakDetector;
+        use ironclaw_safety::LeakDetector;
 
         // Simulate pre-injection headers: WASM only sees the placeholder, not the real token.
         let raw_headers: Vec<(String, String)> = vec![

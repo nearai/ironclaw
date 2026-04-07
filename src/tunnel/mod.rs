@@ -190,7 +190,7 @@ pub fn create_tunnel(config: &TunnelProviderConfig) -> Result<Option<Box<dyn Tun
 ///
 /// Prefers the webhook server (`HTTP_PORT`) since that's where webhook routes
 /// (Telegram, etc.) are served. Falls back to the gateway port if configured,
-/// otherwise defaults to 0.0.0.0:8080 (the same fallback the webhook server
+/// otherwise defaults to 127.0.0.1:8080 (the same fallback the webhook server
 /// uses in main.rs when no HTTP config is present).
 fn resolve_tunnel_target(channels: &crate::config::ChannelsConfig) -> (&str, u16) {
     if let Some(ref http) = channels.http {
@@ -199,7 +199,7 @@ fn resolve_tunnel_target(channels: &crate::config::ChannelsConfig) -> (&str, u16
     if let Some(ref gw) = channels.gateway {
         return (gw.host.as_str(), gw.port);
     }
-    ("0.0.0.0", 8080)
+    ("127.0.0.1", 8080)
 }
 
 /// Start a managed tunnel if configured and no static URL is already set.
@@ -428,6 +428,7 @@ mod tests {
             host: "127.0.0.1".to_string(),
             port: 3000,
             auth_token: None,
+            max_connections: 100,
             workspace_read_scopes: Vec::new(),
             oidc: None,
             memory_layers: Vec::new(),
@@ -441,6 +442,7 @@ mod tests {
             host: host.to_string(),
             port,
             auth_token: None,
+            max_connections: 100,
             workspace_read_scopes: Vec::new(),
             memory_layers: Vec::new(),
             oidc: None,
@@ -454,9 +456,9 @@ mod tests {
 
     #[test]
     fn tunnel_target_prefers_http_port() {
-        let channels = channels_with_http("0.0.0.0", 8080);
+        let channels = channels_with_http("127.0.0.1", 8080);
         let (host, port) = resolve_tunnel_target(&channels);
-        assert_eq!(host, "0.0.0.0"); // safety: test-only
+        assert_eq!(host, "127.0.0.1"); // safety: test-only
         assert_eq!(port, 8080); // safety: test-only
     }
 
@@ -473,7 +475,7 @@ mod tests {
         let channels = channels_neither();
         let (host, port) = resolve_tunnel_target(&channels);
         // Matches the webhook server's hardcoded fallback in main.rs
-        assert_eq!(host, "0.0.0.0"); // safety: test-only
+        assert_eq!(host, "127.0.0.1"); // safety: test-only
         assert_eq!(port, 8080); // safety: test-only
     }
 
@@ -490,11 +492,11 @@ mod tests {
     fn tunnel_target_no_http_no_gateway_matches_webhook_fallback() {
         // When HTTP_PORT is not set and gateway is not configured (e.g. WASM
         // channels exist but no explicit HTTP config), the webhook server in
-        // main.rs binds to 0.0.0.0:8080 as a hardcoded fallback. The tunnel
+        // main.rs binds to 127.0.0.1:8080 as a hardcoded fallback. The tunnel
         // must target the same address so webhook traffic reaches the right
         // server.
         let channels = channels_neither();
         let (host, port) = resolve_tunnel_target(&channels);
-        assert_eq!((host, port), ("0.0.0.0", 8080)); // safety: test-only
+        assert_eq!((host, port), ("127.0.0.1", 8080)); // safety: test-only
     }
 }

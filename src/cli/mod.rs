@@ -14,6 +14,7 @@
 //! - Viewing gateway logs (`logs`)
 //! - Checking system health (`status`)
 
+pub mod acp;
 mod channels;
 mod completion;
 mod config;
@@ -35,6 +36,7 @@ mod skills;
 pub mod status;
 mod tool;
 
+pub use acp::{AcpCommand, run_acp_command};
 pub use channels::{ChannelsCommand, run_channels_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
@@ -92,6 +94,14 @@ pub struct Cli {
     /// Skip first-run onboarding check
     #[arg(long, global = true)]
     pub no_onboard: bool,
+
+    /// Auto-approve tool execution (shell, file writes, HTTP, etc.)
+    ///
+    /// Skips interactive approval prompts for standard tools. Destructive
+    /// operations still require explicit approval. Other safeguards remain
+    /// active: rate limits, hooks, authentication gates.
+    #[arg(long, global = true)]
+    pub auto_approve: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -288,9 +298,17 @@ pub enum Command {
         orchestrator_url: String,
 
         /// Maximum iterations before stopping.
-        #[arg(long, default_value = "50")]
+        #[arg(long, env = "IRONCLAW_MAX_ITERATIONS", default_value = "50")]
         max_iterations: u32,
     },
+
+    /// Manage ACP (Agent Client Protocol) agents
+    #[command(
+        subcommand,
+        about = "Manage ACP agents",
+        long_about = "Add, list, remove, or test ACP-compliant coding agents.\nExample: ironclaw acp add goose --command goose --arg \"--stdio\""
+    )]
+    Acp(AcpCommand),
 
     /// Run as a Claude Code bridge inside a Docker container (internal use).
     /// Spawns the `claude` CLI and streams output back to the orchestrator.
@@ -311,6 +329,19 @@ pub enum Command {
         /// Claude model to use (e.g. "sonnet", "opus").
         #[arg(long, default_value = "sonnet")]
         model: String,
+    },
+
+    /// Run as an ACP bridge inside a Docker container (internal use).
+    /// Spawns an ACP-compliant agent and streams output back to the orchestrator.
+    #[command(hide = true)]
+    AcpBridge {
+        /// Job ID to execute.
+        #[arg(long)]
+        job_id: uuid::Uuid,
+
+        /// URL of the orchestrator's internal API.
+        #[arg(long, default_value = "http://host.docker.internal:50051")]
+        orchestrator_url: String,
     },
 }
 
@@ -352,7 +383,7 @@ pub async fn run_routines_cli(
         .await
         .map_err(|e| anyhow::anyhow!("{e:#}"))?;
 
-    let user_id = std::env::var("IRONCLAW_OWNER_ID").unwrap_or_else(|_| "default".to_string());
+    let user_id = config.owner_id.clone();
     run_routines_command(routines_cmd.clone(), db, &user_id).await
 }
 
@@ -366,7 +397,12 @@ pub async fn run_memory_command(mem_cmd: &MemoryCommand) -> anyhow::Result<()> {
 
     let embeddings = config
         .embeddings
-        .create_provider(&config.llm.nearai.base_url, session);
+        .create_provider(
+            &config.llm.nearai.base_url,
+            session,
+            config.llm.bedrock.as_ref(),
+        )
+        .await;
 
     let db: Arc<dyn crate::db::Database> = crate::db::connect_from_config(&config.database)
         .await

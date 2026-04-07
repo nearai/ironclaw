@@ -215,7 +215,7 @@ fn setup_tunnel_ngrok() -> Result<TunnelSettings, ChannelSetupError> {
 
 async fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> {
     // Check if cloudflared binary is on PATH
-    let cloudflared_found = crate::skills::gating::binary_exists("cloudflared");
+    let cloudflared_found = ironclaw_skills::gating::binary_exists("cloudflared");
 
     if !cloudflared_found {
         print_error("cloudflared not found in PATH.");
@@ -508,8 +508,8 @@ pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, Cha
         print_info("Note: Ports below 1024 may require root privileges");
     }
 
-    let host =
-        optional_input("Host", Some("default: 0.0.0.0"))?.unwrap_or_else(|| "0.0.0.0".to_string());
+    let host = optional_input("Host", Some("default: 127.0.0.1"))?
+        .unwrap_or_else(|| "127.0.0.1".to_string());
 
     // Generate a webhook secret
     if confirm("Generate a webhook secret for authentication?", true)? {
@@ -1336,6 +1336,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_public_https_url_fails_closed_on_dns_error() {
+        // Some local DNS resolvers (ISP/router captive portals, ad-injecting
+        // providers) hijack lookups for non-existent domains and return a
+        // public IP instead of NXDOMAIN. On those networks, RFC 6761
+        // ".invalid" lookups succeed and this test cannot run. Detect and skip.
+        //
+        // Use the async resolver with a short timeout so the probe never
+        // blocks the tokio runtime: a flaky/slow upstream DNS server would
+        // otherwise stall the whole test suite.
+        let probe = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::net::lookup_host(("ironclaw-dns-hijack-probe.invalid", 443u16)),
+        )
+        .await;
+        let hijacked = matches!(probe, Ok(Ok(_)));
+        if hijacked {
+            eprintln!(
+                "skipping test_validate_public_https_url_fails_closed_on_dns_error: \
+                 local DNS resolver hijacks .invalid lookups"
+            );
+            return;
+        }
         let err = validate_public_https_url("https://should-not-resolve.invalid/api")
             .await
             .unwrap_err()

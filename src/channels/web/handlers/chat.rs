@@ -1,231 +1,27 @@
-//! Chat handlers: send, approval, auth, SSE events, WebSocket, history, threads.
+//! Chat handlers: SSE events, WebSocket, threads, and shared helpers.
+//!
+//! NOTE: The primary chat handlers (chat_send_handler, chat_approval_handler,
+//! chat_auth_token_handler, chat_auth_cancel_handler, chat_history_handler)
+//! live in server.rs where routes are registered. Do NOT add duplicates here.
 
 use std::sync::Arc;
 
-use axum::{
-    Json,
-    extract::{Query, State, WebSocketUpgrade},
-    http::StatusCode,
-    response::IntoResponse,
-};
-use serde::Deserialize;
-use uuid::Uuid;
-
-use crate::channels::IncomingMessage;
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::channels::web::util::{
     build_turns_from_db_messages, tool_error_for_display, truncate_preview,
 };
+use axum::{
+    Json,
+    extract::{Query, State, WebSocketUpgrade},
+    http::{HeaderMap, HeaderName, StatusCode},
+    response::IntoResponse,
+};
+use serde::Deserialize;
+use uuid::Uuid;
 
-pub async fn chat_send_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(identity): AuthenticatedUser,
-    Json(req): Json<SendMessageRequest>,
-) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
-    if !state.chat_rate_limiter.check(&identity.user_id) {
-        return Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            "Rate limit exceeded. Try again shortly.".to_string(),
-        ));
-    }
-
-    let mut msg = IncomingMessage::new("gateway", &identity.user_id, &req.content);
-
-    if let Some(ref thread_id) = req.thread_id {
-        msg = msg.with_thread(thread_id);
-        msg = msg.with_metadata(serde_json::json!({"thread_id": thread_id}));
-    }
-
-    let msg_id = msg.id;
-    let thread_id = msg.thread_id.clone();
-
-    // Clone sender to avoid holding RwLock read guard across send().await
-    let tx = {
-        let tx_guard = state.msg_tx.read().await;
-        tx_guard
-            .as_ref()
-            .ok_or((
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Channel not started".to_string(),
-            ))?
-            .clone()
-    };
-
-    tx.send(msg).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Channel closed".to_string(),
-        )
-    })?;
-
-    tracing::debug!(
-        message_id = %msg_id,
-        thread_id = ?thread_id,
-        content_len = req.content.len(),
-        "Message queued to agent loop"
-    );
-
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(SendMessageResponse {
-            message_id: msg_id,
-            status: "accepted",
-        }),
-    ))
-}
-
-pub async fn chat_approval_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(identity): AuthenticatedUser,
-    Json(req): Json<ApprovalRequest>,
-) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
-    let (approved, always) = match req.action.as_str() {
-        "approve" => (true, false),
-        "always" => (true, true),
-        "deny" => (false, false),
-        other => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("Unknown action: {}", other),
-            ));
-        }
-    };
-
-    let request_id = Uuid::parse_str(&req.request_id).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Invalid request_id (expected UUID)".to_string(),
-        )
-    })?;
-
-    // Build a structured ExecApproval submission as JSON, sent through the
-    // existing message pipeline so the agent loop picks it up.
-    let approval = crate::agent::submission::Submission::ExecApproval {
-        request_id,
-        approved,
-        always,
-    };
-    let content = serde_json::to_string(&approval).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to serialize approval: {}", e),
-        )
-    })?;
-
-    let mut msg = IncomingMessage::new("gateway", &identity.user_id, content);
-
-    if let Some(ref thread_id) = req.thread_id {
-        msg = msg.with_thread(thread_id);
-    }
-
-    let msg_id = msg.id;
-
-    // Clone sender to avoid holding RwLock read guard across send().await
-    let tx = {
-        let tx_guard = state.msg_tx.read().await;
-        tx_guard
-            .as_ref()
-            .ok_or((
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Channel not started".to_string(),
-            ))?
-            .clone()
-    };
-
-    tx.send(msg).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Channel closed".to_string(),
-        )
-    })?;
-
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(SendMessageResponse {
-            message_id: msg_id,
-            status: "accepted",
-        }),
-    ))
-}
-
-/// Submit an auth token directly to the extension manager, bypassing the message pipeline.
-///
-/// The token never touches the LLM, chat history, or SSE stream.
-pub async fn chat_auth_token_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Json(req): Json<AuthTokenRequest>,
-) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Extension manager not available".to_string(),
-    ))?;
-
-    match ext_mgr
-        .configure_token(&req.extension_name, &req.token, &user.user_id)
-        .await
-    {
-        Ok(result) => {
-            let mut resp = ActionResponse::ok(result.message.clone());
-            resp.activated = Some(result.activated);
-            resp.auth_url = result.auth_url.clone();
-            resp.verification = result.verification.clone();
-            resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
-
-            if result.verification.is_some() {
-                state.sse.broadcast_for_user(
-                    &user.user_id,
-                    AppEvent::AuthRequired {
-                        extension_name: req.extension_name.clone(),
-                        instructions: Some(result.message),
-                        auth_url: None,
-                        setup_url: None,
-                    },
-                );
-            } else {
-                clear_auth_mode(&state, &user.user_id).await;
-
-                state.sse.broadcast_for_user(
-                    &user.user_id,
-                    AppEvent::AuthCompleted {
-                        extension_name: req.extension_name.clone(),
-                        success: true,
-                        message: result.message,
-                    },
-                );
-            }
-
-            Ok(Json(resp))
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
-                state.sse.broadcast_for_user(
-                    &user.user_id,
-                    AppEvent::AuthRequired {
-                        extension_name: req.extension_name.clone(),
-                        instructions: Some(msg.clone()),
-                        auth_url: None,
-                        setup_url: None,
-                    },
-                );
-            }
-            Ok(Json(ActionResponse::fail(msg)))
-        }
-    }
-}
-
-/// Cancel an in-progress auth flow.
-pub async fn chat_auth_cancel_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(identity): AuthenticatedUser,
-    Json(_req): Json<AuthCancelRequest>,
-) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    clear_auth_mode(&state, &identity.user_id).await;
-    Ok(Json(ActionResponse::ok("Auth cancelled")))
-}
+// ── Shared helpers used by server.rs handlers ──────────────────────────
 
 /// Clear pending auth mode on the active thread.
 pub async fn clear_auth_mode(state: &GatewayState, user_id: &str) {
@@ -240,14 +36,42 @@ pub async fn clear_auth_mode(state: &GatewayState, user_id: &str) {
     }
 }
 
+// ── SSE / WebSocket handlers ───────────────────────────────────────────
+
 pub async fn chat_events_handler(
+    Query(params): Query<ChatEventsQuery>,
+    headers: HeaderMap,
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    state.sse.subscribe(Some(user.user_id)).ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Too many connections".to_string(),
+    let sse = state
+        .sse
+        .subscribe(Some(user.user_id), extract_last_event_id(&params, &headers))
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Too many connections".to_string(),
+        ))?;
+    Ok((
+        [("X-Accel-Buffering", "no"), ("Cache-Control", "no-cache")],
+        sse,
     ))
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ChatEventsQuery {
+    pub last_event_id: Option<String>,
+}
+
+pub(crate) fn extract_last_event_id(
+    params: &ChatEventsQuery,
+    headers: &HeaderMap,
+) -> Option<String> {
+    params.last_event_id.clone().or_else(|| {
+        headers
+            .get(HeaderName::from_static("last-event-id"))
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned)
+    })
 }
 
 pub async fn chat_ws_handler(
@@ -284,6 +108,8 @@ pub async fn chat_ws_handler(
         crate::channels::web::ws::handle_ws_connection(socket, state, identity)
     }))
 }
+
+// ── Thread management and history handlers ────────────────────────────
 
 #[derive(Deserialize)]
 pub struct HistoryQuery {
@@ -364,7 +190,7 @@ pub async fn chat_history_handler(
             turns,
             has_more,
             oldest_timestamp,
-            pending_approval: None,
+            pending_gate: None,
         }));
     }
 
@@ -407,22 +233,22 @@ pub async fn chat_history_handler(
                 })
                 .collect();
 
-            let pending_approval = thread
-                .pending_approval
-                .as_ref()
-                .map(|pa| PendingApprovalInfo {
-                    request_id: pa.request_id.to_string(),
-                    tool_name: pa.tool_name.clone(),
-                    description: pa.description.clone(),
-                    parameters: serde_json::to_string_pretty(&pa.parameters).unwrap_or_default(),
-                });
+            let pending_gate = thread.pending_approval.as_ref().map(|pa| PendingGateInfo {
+                request_id: pa.request_id.to_string(),
+                thread_id: thread_id.to_string(),
+                gate_name: "approval".into(),
+                tool_name: pa.tool_name.clone(),
+                description: pa.description.clone(),
+                parameters: serde_json::to_string_pretty(&pa.parameters).unwrap_or_default(),
+                resume_kind: serde_json::json!({"Approval":{"allow_always":true}}),
+            });
 
             return Ok(Json(HistoryResponse {
                 thread_id,
                 turns,
                 has_more: false,
                 oldest_timestamp: None,
-                pending_approval,
+                pending_gate,
             }));
         }
     }
@@ -442,7 +268,7 @@ pub async fn chat_history_handler(
                 turns,
                 has_more,
                 oldest_timestamp,
-                pending_approval: None,
+                pending_gate: None,
             }));
         }
     }
@@ -453,7 +279,7 @@ pub async fn chat_history_handler(
         turns: Vec::new(),
         has_more: false,
         oldest_timestamp: None,
-        pending_approval: None,
+        pending_gate: None,
     }))
 }
 
@@ -625,6 +451,7 @@ pub async fn chat_new_thread_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::web::util::build_turns_from_db_messages;
 
     #[test]
     fn test_build_turns_from_db_messages_complete() {

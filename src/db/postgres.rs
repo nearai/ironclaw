@@ -16,8 +16,9 @@ use crate::agent::routine::{Routine, RoutineRun, RunStatus};
 use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
-    ApiTokenRecord, ConversationStore, Database, JobStore, RoutineStore, SandboxStore,
-    SettingsStore, ToolFailureStore, UserRecord, UserStore, WorkspaceStore,
+    ApiTokenRecord, ChannelPairingStore, ConversationStore, Database, IdentityStore, JobStore,
+    PairingRequestRecord, RoutineStore, SandboxStore, SettingsStore, ToolFailureStore,
+    UserIdentityRecord, UserRecord, UserStore, WorkspaceStore,
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
@@ -25,7 +26,8 @@ use crate::history::{
     LlmCallRecord, SandboxJobRecord, SandboxJobSummary, SettingRow, Store,
 };
 use crate::workspace::{
-    MemoryChunk, MemoryDocument, Repository, SearchConfig, SearchResult, WorkspaceEntry,
+    DocumentVersion, MemoryChunk, MemoryDocument, Repository, SearchConfig, SearchResult,
+    VersionSummary, WorkspaceEntry,
 };
 
 /// PostgreSQL database backend.
@@ -61,6 +63,47 @@ impl Database for PgBackend {
     async fn run_migrations(&self) -> Result<(), DatabaseError> {
         self.store.run_migrations().await
     }
+
+    async fn migrate_default_owner(&self, owner_id: &str) -> Result<(), DatabaseError> {
+        let mut client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        // Only tables with a real `user_id` column participate in the legacy
+        // 'default' -> owner rewrite. `dynamic_tools` is intentionally excluded:
+        // it is ownerless today and scoped by `scope`, not `user_id`.
+        let tables = [
+            "conversations",
+            "memory_documents",
+            "heartbeat_state",
+            "secrets",
+            "wasm_tools",
+            "routines",
+            "settings",
+            "agent_jobs",
+            "api_tokens",
+        ];
+        for table in &tables {
+            tx.execute(
+                &format!(
+                    "UPDATE {} SET user_id = $1 WHERE user_id = 'default'",
+                    table
+                ),
+                &[&owner_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("migrate_default_owner {table}: {e}")))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
 }
 
 // ==================== ConversationStore ====================
@@ -91,6 +134,30 @@ impl ConversationStore for PgBackend {
         self.store
             .add_conversation_message(conversation_id, role, content)
             .await
+    }
+
+    async fn add_conversation_message_if_empty(
+        &self,
+        conversation_id: Uuid,
+        role: &str,
+        content: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        let id = Uuid::new_v4();
+        let result = conn
+            .execute(
+                "INSERT INTO conversation_messages (id, conversation_id, role, content) \
+                 SELECT $1, $2, $3, $4 \
+                 WHERE NOT EXISTS ( \
+                     SELECT 1 FROM conversation_messages WHERE conversation_id = $2 \
+                 )",
+                &[&id, &conversation_id, &role, &content],
+            )
+            .await?;
+        if result > 0 {
+            self.store.touch_conversation(conversation_id).await?;
+        }
+        Ok(result > 0)
     }
 
     async fn ensure_conversation(
@@ -805,6 +872,69 @@ impl WorkspaceStore for PgBackend {
             .list_directory_multi(user_ids, agent_id, directory)
             .await
     }
+
+    // ==================== Metadata ====================
+
+    async fn update_document_metadata(
+        &self,
+        id: Uuid,
+        metadata: &serde_json::Value,
+    ) -> Result<(), WorkspaceError> {
+        self.repo.update_document_metadata(id, metadata).await
+    }
+
+    async fn find_config_documents(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+    ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
+        self.repo.find_config_documents(user_id, agent_id).await
+    }
+
+    // ==================== Versioning ====================
+
+    async fn save_version(
+        &self,
+        document_id: Uuid,
+        content: &str,
+        content_hash: &str,
+        changed_by: Option<&str>,
+    ) -> Result<i32, WorkspaceError> {
+        self.repo
+            .save_version(document_id, content, content_hash, changed_by)
+            .await
+    }
+
+    async fn get_version(
+        &self,
+        document_id: Uuid,
+        version: i32,
+    ) -> Result<DocumentVersion, WorkspaceError> {
+        self.repo.get_version(document_id, version).await
+    }
+
+    async fn list_versions(
+        &self,
+        document_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<VersionSummary>, WorkspaceError> {
+        self.repo.list_versions(document_id, limit).await
+    }
+
+    async fn get_latest_version_number(
+        &self,
+        document_id: Uuid,
+    ) -> Result<Option<i32>, WorkspaceError> {
+        self.repo.get_latest_version_number(document_id).await
+    }
+
+    async fn prune_versions(
+        &self,
+        document_id: Uuid,
+        keep_count: i32,
+    ) -> Result<u64, WorkspaceError> {
+        self.repo.prune_versions(document_id, keep_count).await
+    }
 }
 
 // ==================== UserStore ====================
@@ -813,6 +943,35 @@ impl WorkspaceStore for PgBackend {
 impl UserStore for PgBackend {
     async fn create_user(&self, user: &UserRecord) -> Result<(), DatabaseError> {
         self.store.create_user(user).await
+    }
+
+    async fn get_or_create_user(&self, user: UserRecord) -> Result<(), DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        client
+            .execute(
+                "INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 ON CONFLICT (id) DO NOTHING",
+                &[
+                    &user.id,
+                    &user.email,
+                    &user.display_name,
+                    &user.status,
+                    &user.role,
+                    &user.created_at,
+                    &user.updated_at,
+                    &user.last_login_at,
+                    &user.created_by,
+                    &user.metadata,
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("get_or_create_user: {e}")))?;
+        Ok(())
     }
 
     async fn get_user(&self, id: &str) -> Result<Option<UserRecord>, DatabaseError> {
@@ -916,5 +1075,474 @@ impl UserStore for PgBackend {
         self.store
             .create_user_with_token(user, token_name, token_hash, token_prefix, expires_at)
             .await
+    }
+}
+
+// ==================== ChannelPairingStore ====================
+
+#[async_trait]
+impl ChannelPairingStore for PgBackend {
+    async fn resolve_channel_identity(
+        &self,
+        channel: &str,
+        external_id: &str,
+    ) -> Result<Option<crate::ownership::Identity>, DatabaseError> {
+        use crate::ownership::{Identity, OwnerId, UserRole};
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let row = client
+            .query_opt(
+                "SELECT ci.owner_id, u.role
+                 FROM channel_identities ci
+                 JOIN users u ON u.id = ci.owner_id
+                 WHERE ci.channel = $1 AND ci.external_id = $2
+                   AND u.status = 'active'",
+                &[&channel, &external_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(row.map(|r| {
+            let owner_id: String = r.get(0);
+            let role_str: String = r.get(1);
+            let role = if role_str.eq_ignore_ascii_case("admin") {
+                UserRole::Admin
+            } else {
+                UserRole::Member
+            };
+            Identity::new(OwnerId::from(owner_id), role)
+        }))
+    }
+
+    async fn read_allow_from(&self, channel: &str) -> Result<Vec<String>, DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let rows = client
+            .query(
+                "SELECT ci.external_id
+                 FROM channel_identities ci
+                 JOIN users u ON u.id = ci.owner_id
+                 WHERE ci.channel = $1
+                   AND u.status = 'active'
+                 ORDER BY ci.external_id ASC",
+                &[&channel],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(rows.into_iter().map(|row| row.get(0)).collect())
+    }
+
+    async fn upsert_pairing_request(
+        &self,
+        channel: &str,
+        external_id: &str,
+        meta: Option<serde_json::Value>,
+    ) -> Result<PairingRequestRecord, DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let mut client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        // Serialize upserts for the same normalized sender key so PostgreSQL
+        // preserves the single-live-code guarantee that libSQL gets from
+        // BEGIN IMMEDIATE.
+        let lock_key = format!(
+            "{}:{}:{}:{}",
+            channel.len(),
+            channel,
+            external_id.len(),
+            external_id
+        );
+        tx.query(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&lock_key],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        // Return existing valid pending request if present
+        let existing = tx
+            .query_opt(
+                "SELECT id, channel, external_id, code, created_at, expires_at
+                 FROM pairing_requests
+                 WHERE channel = $1 AND external_id = $2
+                   AND approved_at IS NULL AND expires_at > NOW()
+                 ORDER BY created_at DESC LIMIT 1",
+                &[&channel, &external_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        if let Some(row) = existing {
+            tx.commit()
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            return Ok(PairingRequestRecord {
+                id: row.get(0),
+                channel: row.get(1),
+                external_id: row.get(2),
+                code: row.get(3),
+                created: false,
+                created_at: row.get(4),
+                expires_at: row.get(5),
+            });
+        }
+
+        let expires_at = chrono::Utc::now() + chrono::Duration::minutes(15);
+        let meta_json: Option<serde_json::Value> = meta;
+
+        // Retry loop: regenerate code on UNIQUE violation (code collision)
+        for attempt in 0..3 {
+            let code = crate::db::generate_pairing_code();
+            match tx
+                .query_one(
+                    "INSERT INTO pairing_requests (id, channel, external_id, code, meta, expires_at)
+                     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)
+                     RETURNING id, channel, external_id, code, created_at, expires_at",
+                    &[&channel, &external_id, &code, &meta_json, &expires_at],
+                )
+                .await
+            {
+                Ok(row) => {
+                    tx.commit()
+                        .await
+                        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                    return Ok(PairingRequestRecord {
+                        id: row.get(0),
+                        channel: row.get(1),
+                        external_id: row.get(2),
+                        code: row.get(3),
+                        created: true,
+                        created_at: row.get(4),
+                        expires_at: row.get(5),
+                    });
+                }
+                Err(e) => {
+                    let is_unique = e
+                        .code()
+                        .is_some_and(|c| *c == tokio_postgres::error::SqlState::UNIQUE_VIOLATION);
+                    if attempt < 2 && is_unique {
+                        continue;
+                    }
+                    return Err(DatabaseError::Query(e.to_string()));
+                }
+            }
+        }
+
+        Err(DatabaseError::Query(
+            "failed to generate unique pairing code after 3 attempts".to_string(),
+        ))
+    }
+
+    async fn approve_pairing(
+        &self,
+        channel: &str,
+        code: &str,
+        owner_id: &str,
+    ) -> Result<(), DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let mut client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let row = tx
+            .query_opt(
+                "SELECT id, channel, external_id FROM pairing_requests
+                 WHERE UPPER(code) = UPPER($1)
+                   AND channel = $2
+                   AND approved_at IS NULL
+                   AND expires_at > NOW()
+                 FOR UPDATE",
+                &[&code, &channel],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+            .ok_or_else(|| DatabaseError::NotFound {
+                entity: "pairing_request".to_string(),
+                id: code.to_string(),
+            })?;
+
+        let req_id: uuid::Uuid = row.get(0);
+        let channel: String = row.get(1);
+        let external_id: String = row.get(2);
+
+        tx.execute(
+            "UPDATE pairing_requests SET owner_id = $1, approved_at = NOW() WHERE id = $2",
+            &[&owner_id, &req_id],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        tx.execute(
+            "INSERT INTO channel_identities (id, owner_id, channel, external_id)
+             VALUES (gen_random_uuid(), $1, $2, $3)
+             ON CONFLICT (channel, external_id) DO UPDATE SET owner_id = $1",
+            &[&owner_id, &channel, &external_id],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn list_pending_pairings(
+        &self,
+        channel: &str,
+    ) -> Result<Vec<PairingRequestRecord>, DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let rows = client
+            .query(
+                "SELECT id, channel, external_id, code, created_at, expires_at
+                 FROM pairing_requests
+                 WHERE channel = $1 AND approved_at IS NULL AND expires_at > NOW()
+                 ORDER BY created_at ASC",
+                &[&channel],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(rows
+            .iter()
+            .map(|r| PairingRequestRecord {
+                id: r.get(0),
+                channel: r.get(1),
+                external_id: r.get(2),
+                code: r.get(3),
+                created: false,
+                created_at: r.get(4),
+                expires_at: r.get(5),
+            })
+            .collect())
+    }
+
+    async fn remove_channel_identity(
+        &self,
+        channel: &str,
+        external_id: &str,
+    ) -> Result<(), DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        client
+            .execute(
+                "DELETE FROM channel_identities WHERE channel = $1 AND external_id = $2",
+                &[&channel, &external_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+}
+
+// ==================== IdentityStore ====================
+
+fn row_to_identity(row: &tokio_postgres::Row) -> UserIdentityRecord {
+    UserIdentityRecord {
+        id: row.get("id"),
+        user_id: row.get("user_id"),
+        provider: row.get("provider"),
+        provider_user_id: row.get("provider_user_id"),
+        email: row.get("email"),
+        email_verified: row.get("email_verified"),
+        display_name: row.get("display_name"),
+        avatar_url: row.get("avatar_url"),
+        raw_profile: row.get("raw_profile"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+#[async_trait]
+impl IdentityStore for PgBackend {
+    async fn get_identity_by_provider(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+    ) -> Result<Option<UserIdentityRecord>, DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        let row = conn
+            .query_opt(
+                "SELECT id, user_id, provider, provider_user_id, email, email_verified, \
+                 display_name, avatar_url, raw_profile, created_at, updated_at \
+                 FROM user_identities WHERE provider = $1 AND provider_user_id = $2",
+                &[&provider, &provider_user_id],
+            )
+            .await?;
+        Ok(row.as_ref().map(row_to_identity))
+    }
+
+    async fn list_identities_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<UserIdentityRecord>, DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        let rows = conn
+            .query(
+                "SELECT id, user_id, provider, provider_user_id, email, email_verified, \
+                 display_name, avatar_url, raw_profile, created_at, updated_at \
+                 FROM user_identities WHERE user_id = $1 ORDER BY created_at",
+                &[&user_id],
+            )
+            .await?;
+        Ok(rows.iter().map(row_to_identity).collect())
+    }
+
+    async fn create_identity(&self, identity: &UserIdentityRecord) -> Result<(), DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        conn.execute(
+            "INSERT INTO user_identities \
+             (id, user_id, provider, provider_user_id, email, email_verified, \
+              display_name, avatar_url, raw_profile, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            &[
+                &identity.id,
+                &identity.user_id,
+                &identity.provider,
+                &identity.provider_user_id,
+                &identity.email,
+                &identity.email_verified,
+                &identity.display_name,
+                &identity.avatar_url,
+                &identity.raw_profile,
+                &identity.created_at,
+                &identity.updated_at,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn update_identity_profile(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+        display_name: Option<&str>,
+        avatar_url: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        conn.execute(
+            "UPDATE user_identities SET display_name = COALESCE($3, display_name), \
+             avatar_url = COALESCE($4, avatar_url), updated_at = NOW() \
+             WHERE provider = $1 AND provider_user_id = $2",
+            &[&provider, &provider_user_id, &display_name, &avatar_url],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn find_identity_by_verified_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<UserIdentityRecord>, DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        let row = conn
+            .query_opt(
+                "SELECT id, user_id, provider, provider_user_id, email, email_verified, \
+                 display_name, avatar_url, raw_profile, created_at, updated_at \
+                 FROM user_identities WHERE LOWER(email) = LOWER($1) AND email_verified = true LIMIT 1",
+                &[&email],
+            )
+            .await?;
+        Ok(row.as_ref().map(row_to_identity))
+    }
+
+    async fn create_user_with_identity(
+        &self,
+        user: &UserRecord,
+        identity: &UserIdentityRecord,
+    ) -> Result<(), DatabaseError> {
+        let mut conn = self.store.pool().get().await?;
+        let tx = conn.transaction().await?;
+
+        tx.execute(
+            "INSERT INTO users (id, email, display_name, status, role, created_at, \
+             updated_at, last_login_at, created_by, metadata) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            &[
+                &user.id,
+                &user.email,
+                &user.display_name,
+                &user.status,
+                &user.role,
+                &user.created_at,
+                &user.updated_at,
+                &user.last_login_at,
+                &user.created_by,
+                &user.metadata,
+            ],
+        )
+        .await?;
+
+        tx.execute(
+            "INSERT INTO user_identities \
+             (id, user_id, provider, provider_user_id, email, email_verified, \
+              display_name, avatar_url, raw_profile, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            &[
+                &identity.id,
+                &identity.user_id,
+                &identity.provider,
+                &identity.provider_user_id,
+                &identity.email,
+                &identity.email_verified,
+                &identity.display_name,
+                &identity.avatar_url,
+                &identity.raw_profile,
+                &identity.created_at,
+                &identity.updated_at,
+            ],
+        )
+        .await?;
+
+        // Atomically promote to admin if this is the only user in the table.
+        // Under READ COMMITTED, two concurrent transactions could both see
+        // COUNT(*)=1 (each sees its own uncommitted insert). Use an advisory
+        // lock to serialize the first-user election across transactions.
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtext('first_user_admin_election'))",
+            &[],
+        )
+        .await?;
+        tx.execute(
+            "UPDATE users SET role = 'admin' \
+             WHERE id = $1 AND (SELECT COUNT(*) FROM users) = 1",
+            &[&user.id],
+        )
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
     }
 }

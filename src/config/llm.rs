@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Once;
 
 use secrecy::SecretString;
 
@@ -10,7 +11,14 @@ use crate::llm::registry::{ProviderProtocol, ProviderRegistry};
 use crate::llm::session::SessionConfig;
 use crate::settings::Settings;
 
+static LOG_LLM_BACKEND_RESOLUTION: Once = Once::new();
+
 impl LlmConfig {
+    fn selected_model_override(settings: &Settings) -> Option<String> {
+        crate::llm::normalized_model_override(settings.selected_model.as_deref())
+            .map(str::to_string)
+    }
+
     /// Create a test-friendly config without reading env vars.
     #[cfg(feature = "libsql")]
     pub fn for_testing() -> Self {
@@ -52,7 +60,7 @@ impl LlmConfig {
         settings: &Settings,
         default: &str,
     ) -> Result<String, ConfigError> {
-        if let Some(model) = settings.selected_model.clone() {
+        if let Some(model) = Self::selected_model_override(settings) {
             Ok(model)
         } else if let Some(model) = optional_env(env_var)? {
             Ok(model)
@@ -72,13 +80,15 @@ impl LlmConfig {
         } else {
             ("nearai".to_string(), "default")
         };
-        tracing::info!(
-            backend = %backend,
-            source = %backend_source,
-            db_llm_backend = ?settings.llm_backend,
-            custom_providers_count = settings.llm_custom_providers.len(),
-            "Resolving LLM backend"
-        );
+        LOG_LLM_BACKEND_RESOLUTION.call_once(|| {
+            tracing::debug!(
+                backend = %backend,
+                source = %backend_source,
+                db_llm_backend = ?settings.llm_backend,
+                custom_providers_count = settings.llm_custom_providers.len(),
+                "Resolving LLM backend"
+            );
+        });
         // Warn operators when a DB-persisted value silently overrides LLM_BACKEND.
         if backend_source == "db:llm_backend"
             && let Ok(env_val) = std::env::var("LLM_BACKEND")
@@ -142,7 +152,7 @@ impl LlmConfig {
             optional_env("NEARAI_API_KEY")?.map(SecretString::from)
         };
         // Model priority: selected_model (DB) > builtin_overrides (DB) > env > default
-        let nearai_model = if let Some(model) = settings.selected_model.clone() {
+        let nearai_model = if let Some(model) = Self::selected_model_override(settings) {
             model
         } else if let Some(model) = nearai_override.and_then(|o| o.model.clone()) {
             model
@@ -206,9 +216,7 @@ impl LlmConfig {
                 tracing::info!("BEDROCK_REGION not set, defaulting to us-east-1");
             }
             let region = explicit_region.unwrap_or_else(|| "us-east-1".to_string());
-            let model = settings
-                .selected_model
-                .clone()
+            let model = Self::selected_model_override(settings)
                 .or(optional_env("BEDROCK_MODEL")?)
                 .ok_or_else(|| ConfigError::MissingRequired {
                     key: "BEDROCK_MODEL".to_string(),
@@ -247,9 +255,7 @@ impl LlmConfig {
         // Resolve OpenAI Codex config
         let openai_codex = if is_openai_codex {
             // Model: settings.selected_model > OPENAI_CODEX_MODEL > OPENAI_MODEL > default
-            let model = settings
-                .selected_model
-                .clone()
+            let model = Self::selected_model_override(settings)
                 .or(optional_env("OPENAI_CODEX_MODEL")?)
                 .or(optional_env("OPENAI_MODEL")?)
                 .unwrap_or_else(|| "gpt-5.3-codex".to_string());
@@ -360,9 +366,7 @@ impl LlmConfig {
             )?;
         }
 
-        let model = settings
-            .selected_model
-            .clone()
+        let model = Self::selected_model_override(settings)
             .or(optional_env("LLM_MODEL")?)
             .or_else(|| custom.default_model.clone())
             .unwrap_or_default();
@@ -534,9 +538,7 @@ impl LlmConfig {
         }
 
         // Resolve model: selected_model (DB) > per-provider override (DB) > env var > registry default
-        let model = settings
-            .selected_model
-            .clone()
+        let model = Self::selected_model_override(settings)
             .or_else(|| {
                 settings
                     .llm_builtin_overrides
@@ -2153,6 +2155,40 @@ mod tests {
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("GROQ_BASE_URL");
+        }
+    }
+
+    #[test]
+    fn selected_model_override_ignores_default_sentinel() {
+        let settings = Settings {
+            selected_model: Some(" default ".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(LlmConfig::selected_model_override(&settings), None);
+    }
+
+    #[test]
+    fn nearai_resolve_ignores_default_selected_model() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::set_var("NEARAI_MODEL", "env-model");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("nearai".to_string()),
+            selected_model: Some("default".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(cfg.nearai.model, "env-model");
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("NEARAI_MODEL");
         }
     }
 }

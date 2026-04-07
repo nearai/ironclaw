@@ -67,14 +67,13 @@ pub struct IncomingMessage {
     pub id: Uuid,
     /// Channel this message came from.
     pub channel: String,
-    /// Storage/persistence scope for this interaction.
+    /// Resolved owner identity for this message.
     ///
     /// For owner-capable channels this is the stable instance owner ID when the
-    /// configured owner is speaking; otherwise it can be a guest/sender-scoped
-    /// identifier to preserve isolation.
+    /// configured owner is speaking; for pairing-aware channels (e.g. WASM) this
+    /// is the result of `pairing_resolve_identity`; for non-pairing channels
+    /// (HTTP, web, REPL) it comes directly from the authenticated token.
     pub user_id: String,
-    /// Stable instance owner scope for this IronClaw deployment.
-    pub owner_id: String,
     /// Channel-specific sender/actor identifier.
     pub sender_id: String,
     /// Optional display name.
@@ -110,7 +109,6 @@ impl IncomingMessage {
         Self {
             id: Uuid::new_v4(),
             channel: channel.into(),
-            owner_id: user_id.clone(),
             sender_id: user_id.clone(),
             user_id,
             user_name: None,
@@ -130,12 +128,6 @@ impl IncomingMessage {
         let thread_id = thread_id.into();
         self.conversation_scope_id = Some(thread_id.clone());
         self.thread_id = Some(thread_id);
-        self
-    }
-
-    /// Set the stable owner scope for this message.
-    pub fn with_owner_id(mut self, owner_id: impl Into<String>) -> Self {
-        self.owner_id = owner_id.into();
         self
     }
 
@@ -201,28 +193,26 @@ impl IncomingMessage {
 }
 
 /// Extract a channel-specific proactive routing target from message metadata.
+///
+/// Checked keys (first match wins):
+/// - `signal_target` — Signal phone number or group ID
+/// - `chat_id` — Telegram chat ID
+/// - `channel_id` — Slack channel/DM ID (used by channel-relay)
+/// - `target` — generic fallback
 pub fn routing_target_from_metadata(metadata: &serde_json::Value) -> Option<String> {
-    metadata
-        .get("signal_target")
-        .and_then(|value| match value {
+    // Helper to extract a string or numeric value from a JSON key.
+    let extract = |key: &str| -> Option<String> {
+        metadata.get(key).and_then(|value| match value {
             serde_json::Value::String(s) => Some(s.clone()),
             serde_json::Value::Number(n) => Some(n.to_string()),
             _ => None,
         })
-        .or_else(|| {
-            metadata.get("chat_id").and_then(|value| match value {
-                serde_json::Value::String(s) => Some(s.clone()),
-                serde_json::Value::Number(n) => Some(n.to_string()),
-                _ => None,
-            })
-        })
-        .or_else(|| {
-            metadata.get("target").and_then(|value| match value {
-                serde_json::Value::String(s) => Some(s.clone()),
-                serde_json::Value::Number(n) => Some(n.to_string()),
-                _ => None,
-            })
-        })
+    };
+
+    extract("signal_target")
+        .or_else(|| extract("chat_id"))
+        .or_else(|| extract("channel_id"))
+        .or_else(|| extract("target"))
 }
 
 /// Stream of incoming messages.
@@ -355,7 +345,23 @@ pub enum StatusUpdate {
         output_tokens: u64,
         cost_usd: String,
     },
+    /// Skills activated for this conversation turn.
+    SkillActivated { skill_names: Vec<String> },
 }
+
+/// Shared chat-style approval prompt formatting used by non-web channels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatApprovalPrompt {
+    pub request_id: String,
+    pub tool_name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+    pub allow_always: bool,
+}
+
+const APPROVAL_PARAMETER_PREVIEW_BYTES: usize = 1200;
+const APPROVAL_PARAMETER_TRUNCATION_SUFFIX: &str = "\n... [parameters truncated]";
+const APPROVAL_SUMMARY_DESCRIPTION_BYTES: usize = 120;
 
 impl StatusUpdate {
     /// Build a `ToolCompleted` status with redacted parameters.
@@ -386,6 +392,131 @@ impl StatusUpdate {
                 None
             },
         }
+    }
+}
+
+impl ChatApprovalPrompt {
+    /// Build a shared chat approval prompt from a status update.
+    pub fn from_status(status: &StatusUpdate) -> Option<Self> {
+        let StatusUpdate::ApprovalNeeded {
+            request_id,
+            tool_name,
+            description,
+            parameters,
+            allow_always,
+        } = status
+        else {
+            return None;
+        };
+
+        Some(Self {
+            request_id: request_id.clone(),
+            tool_name: tool_name.clone(),
+            description: description.clone(),
+            parameters: parameters.clone(),
+            allow_always: *allow_always,
+        })
+    }
+
+    fn truncated_text(input: &str, max_bytes: usize, suffix: &str) -> String {
+        if input.len() <= max_bytes {
+            return input.to_string();
+        }
+
+        let budget = max_bytes.saturating_sub(suffix.len());
+        let end = crate::util::floor_char_boundary(input, budget);
+        format!("{}{}", &input[..end], suffix)
+    }
+
+    /// Pretty-printed tool parameters for display, bounded for chat channels.
+    pub fn parameters_preview(&self) -> String {
+        let rendered = serde_json::to_string_pretty(&self.parameters)
+            .unwrap_or_else(|_| self.parameters.to_string());
+        Self::truncated_text(
+            &rendered,
+            APPROVAL_PARAMETER_PREVIEW_BYTES,
+            APPROVAL_PARAMETER_TRUNCATION_SUFFIX,
+        )
+    }
+
+    /// Shared reply vocabulary summary for compact status surfaces.
+    pub fn reply_summary(&self) -> &'static str {
+        if self.allow_always {
+            "yes (or /approve), no (or /deny), or always (or /always)"
+        } else {
+            "yes (or /approve) or no (or /deny)"
+        }
+    }
+
+    /// Compact approval summary for fallback/accessibility surfaces.
+    pub fn summary_text(&self) -> String {
+        let description = Self::truncated_text(
+            &self.description.replace('\n', " "),
+            APPROVAL_SUMMARY_DESCRIPTION_BYTES,
+            "...",
+        );
+        format!(
+            "Approval needed for {}: {} (Request ID: {}). Reply with {}.",
+            self.tool_name,
+            description,
+            self.request_id,
+            self.reply_summary()
+        )
+    }
+
+    fn markdown_parameters_preview(&self) -> String {
+        self.parameters_preview().replace('`', "\\`")
+    }
+
+    /// Approval prompt formatted for plain-text chat channels.
+    pub fn plain_text_message(&self) -> String {
+        let mut lines = vec![
+            format!("Approval needed: {}", self.tool_name),
+            self.description.clone(),
+            String::new(),
+            format!("Request ID: {}", self.request_id),
+            "Parameters:".to_string(),
+            self.parameters_preview(),
+            String::new(),
+            "Reply with:".to_string(),
+            "- yes, y, approve, or /approve to approve this request".to_string(),
+        ];
+
+        if self.allow_always {
+            lines.push(format!(
+                "- always, a, or /always to approve this request and auto-approve future {} requests",
+                self.tool_name
+            ));
+        }
+
+        lines.push("- no, n, deny, or /deny to deny this request".to_string());
+        lines.join("\n")
+    }
+
+    /// Approval prompt formatted for Markdown-capable chat channels.
+    pub fn markdown_message(&self) -> String {
+        let mut lines = vec![
+            "⚠️ *Approval Required*".to_string(),
+            String::new(),
+            format!("*Request ID:* `{}`", self.request_id),
+            format!("*Tool:* {}", self.tool_name),
+            format!("*Description:* {}", self.description),
+            "*Parameters:*".to_string(),
+            format!("```json\n{}\n```", self.markdown_parameters_preview()),
+            String::new(),
+            "Reply with:".to_string(),
+            "• `yes`, `y`, `approve`, or `/approve` - Approve this request".to_string(),
+        ];
+
+        if self.allow_always {
+            lines.push(format!(
+                "• `always`, `a`, or `/always` - Approve this request and auto-approve future {} requests",
+                self.tool_name
+            ));
+        }
+
+        lines.push("• `no`, `n`, `deny`, or `/deny` - Deny this request".to_string());
+        lines.join("\n")
     }
 }
 
@@ -611,5 +742,121 @@ mod tests {
     fn test_incoming_message_with_timezone() {
         let msg = IncomingMessage::new("test", "user1", "hello").with_timezone("America/New_York");
         assert_eq!(msg.timezone.as_deref(), Some("America/New_York"));
+    }
+
+    #[test]
+    fn routing_target_extracts_slack_channel_id() {
+        // Slack relay messages carry channel_id in metadata — this must be
+        // picked up for proactive broadcasts to land in the correct channel
+        // instead of falling back to sender_id (which routes to DMs).
+        let metadata = serde_json::json!({
+            "team_id": "T05CUBCSQPL",
+            "channel_id": "C088K6C3SQZ",
+            "sender_id": "UCBGL1WNS",
+        });
+        assert_eq!(
+            routing_target_from_metadata(&metadata).as_deref(),
+            Some("C088K6C3SQZ"),
+        );
+    }
+
+    #[test]
+    fn routing_target_prefers_signal_over_channel_id() {
+        let metadata = serde_json::json!({
+            "signal_target": "+15551234567",
+            "channel_id": "C088K6C3SQZ",
+        });
+        assert_eq!(
+            routing_target_from_metadata(&metadata).as_deref(),
+            Some("+15551234567"),
+        );
+    }
+
+    #[test]
+    fn routing_target_prefers_chat_id_over_channel_id() {
+        let metadata = serde_json::json!({
+            "chat_id": "123456789",
+            "channel_id": "C088K6C3SQZ",
+        });
+        assert_eq!(
+            routing_target_from_metadata(&metadata).as_deref(),
+            Some("123456789"),
+        );
+    }
+
+    #[test]
+    fn routing_target_returns_none_for_empty_metadata() {
+        let metadata = serde_json::json!({});
+        assert!(routing_target_from_metadata(&metadata).is_none());
+    }
+
+    #[test]
+    fn chat_approval_prompt_plain_text_includes_all_reply_forms() {
+        let prompt = ChatApprovalPrompt::from_status(&StatusUpdate::ApprovalNeeded {
+            request_id: "req-123".into(),
+            tool_name: "http".into(),
+            description: "Fetch weather data".into(),
+            parameters: serde_json::json!({"url": "https://api.weather.test"}),
+            allow_always: true,
+        })
+        .expect("approval prompt");
+
+        let text = prompt.plain_text_message();
+        assert!(text.contains("Request ID: req-123"));
+        assert!(text.contains("approve, or /approve"));
+        assert!(text.contains("always, a, or /always"));
+        assert!(text.contains("deny, or /deny"));
+    }
+
+    #[test]
+    fn chat_approval_prompt_hides_always_when_not_allowed() {
+        let prompt = ChatApprovalPrompt::from_status(&StatusUpdate::ApprovalNeeded {
+            request_id: "req-456".into(),
+            tool_name: "shell".into(),
+            description: "Run command".into(),
+            parameters: serde_json::json!({"command": "rm -rf /tmp/demo"}),
+            allow_always: false,
+        })
+        .expect("approval prompt");
+
+        let markdown = prompt.markdown_message();
+        assert!(markdown.contains("`/approve`"));
+        assert!(markdown.contains("`/deny`"));
+        assert!(!markdown.contains("`/always`"));
+    }
+
+    #[test]
+    fn chat_approval_prompt_truncates_large_parameters() {
+        let prompt = ChatApprovalPrompt::from_status(&StatusUpdate::ApprovalNeeded {
+            request_id: "req-789".into(),
+            tool_name: "http".into(),
+            description: "Fetch large payload".into(),
+            parameters: serde_json::json!({
+                "body": "x".repeat(APPROVAL_PARAMETER_PREVIEW_BYTES + 200),
+            }),
+            allow_always: true,
+        })
+        .expect("approval prompt");
+
+        let preview = prompt.parameters_preview();
+        assert!(preview.contains("[parameters truncated]"));
+        assert!(preview.len() <= APPROVAL_PARAMETER_PREVIEW_BYTES);
+    }
+
+    #[test]
+    fn chat_approval_prompt_escapes_backticks_in_markdown_parameters() {
+        let prompt = ChatApprovalPrompt::from_status(&StatusUpdate::ApprovalNeeded {
+            request_id: "req-999".into(),
+            tool_name: "shell".into(),
+            description: "Run command".into(),
+            parameters: serde_json::json!({
+                "command": "printf '```danger```'"
+            }),
+            allow_always: true,
+        })
+        .expect("approval prompt");
+
+        let markdown = prompt.markdown_message();
+        assert!(markdown.contains("\\`\\`\\`danger\\`\\`\\`"));
     }
 }

@@ -28,18 +28,13 @@ use crate::error::{ChannelError, Error};
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
-use crate::safety::SafetyLayer;
-use crate::skills::SkillRegistry;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
+use ironclaw_safety::SafetyLayer;
+use ironclaw_skills::SkillRegistry;
 
 /// Static greeting persisted to DB and broadcast on first launch.
 ///
-/// Sent before the LLM is involved so the user sees something immediately.
-/// The conversational onboarding (profile building, channel setup) happens
-/// organically in the subsequent turns driven by BOOTSTRAP.md.
-const BOOTSTRAP_GREETING: &str = include_str!("../workspace/seeds/GREETING.md");
-
 /// Collapse a tool output string into a single-line preview for display.
 pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
     let collapsed: String = output
@@ -162,7 +157,7 @@ pub struct AgentDeps {
     pub workspace: Option<Arc<Workspace>>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
     pub skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
-    pub skill_catalog: Option<Arc<crate::skills::catalog::SkillCatalog>>,
+    pub skill_catalog: Option<Arc<ironclaw_skills::catalog::SkillCatalog>>,
     pub skills_config: SkillsConfig,
     pub hooks: Arc<HookRegistry>,
     /// Cost enforcement guardrails (daily budget, hourly rate limits).
@@ -189,8 +184,8 @@ pub struct AgentDeps {
 /// The main agent that coordinates all components.
 pub struct Agent {
     pub(super) config: AgentConfig,
-    pub(super) deps: AgentDeps,
-    pub(super) channels: Arc<ChannelManager>,
+    pub(crate) deps: AgentDeps,
+    pub(crate) channels: Arc<ChannelManager>,
     pub(super) context_manager: Arc<ContextManager>,
     pub(super) scheduler: Arc<Scheduler>,
     pub(super) router: Router,
@@ -203,6 +198,9 @@ pub struct Agent {
     /// the engine to gateway/manual trigger entry points.
     pub(super) routine_engine_slot:
         Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>,
+    /// Engine v2 mission manager for firing learning missions (set after engine init).
+    pub(crate) mission_manager_slot:
+        Arc<tokio::sync::RwLock<Option<Arc<ironclaw_engine::MissionManager>>>>,
 }
 
 impl Agent {
@@ -249,7 +247,7 @@ impl Agent {
                 store: deps
                     .store
                     .as_ref()
-                    .map(|db| crate::tenant::AdminScope::new(Arc::clone(db))),
+                    .map(|db| crate::tenant::SystemScope::new(Arc::clone(db))),
                 hooks: deps.hooks.clone(),
             },
         );
@@ -274,6 +272,7 @@ impl Agent {
             hygiene_config,
             routine_config,
             routine_engine_slot: Arc::new(tokio::sync::RwLock::new(None)),
+            mission_manager_slot: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
@@ -286,8 +285,19 @@ impl Agent {
         self.routine_engine_slot = slot;
     }
 
-    async fn routine_engine(&self) -> Option<Arc<crate::agent::routine_engine::RoutineEngine>> {
+    pub(super) async fn routine_engine(
+        &self,
+    ) -> Option<Arc<crate::agent::routine_engine::RoutineEngine>> {
         self.routine_engine_slot.read().await.clone()
+    }
+
+    /// Set the engine v2 mission manager (called after engine init).
+    pub async fn set_mission_manager(&self, mgr: Arc<ironclaw_engine::MissionManager>) {
+        *self.mission_manager_slot.write().await = Some(mgr);
+    }
+
+    pub(crate) async fn mission_manager(&self) -> Option<Arc<ironclaw_engine::MissionManager>> {
+        self.mission_manager_slot.read().await.clone()
     }
 
     // Convenience accessors
@@ -301,48 +311,79 @@ impl Agent {
         self.deps.store.as_ref()
     }
 
-    pub(super) fn llm(&self) -> &Arc<dyn LlmProvider> {
+    pub(crate) fn llm(&self) -> &Arc<dyn LlmProvider> {
         &self.deps.llm
     }
 
+    pub(crate) fn config(&self) -> &AgentConfig {
+        &self.config
+    }
+
     /// Get the cheap/fast LLM provider, falling back to the main one.
-    pub(super) fn cheap_llm(&self) -> &Arc<dyn LlmProvider> {
+    pub(crate) fn cheap_llm(&self) -> &Arc<dyn LlmProvider> {
         self.deps.cheap_llm.as_ref().unwrap_or(&self.deps.llm)
     }
 
-    pub(super) fn safety(&self) -> &Arc<SafetyLayer> {
+    pub(crate) fn safety(&self) -> &Arc<SafetyLayer> {
         &self.deps.safety
     }
 
-    pub(super) fn tools(&self) -> &Arc<ToolRegistry> {
+    pub(crate) fn tools(&self) -> &Arc<ToolRegistry> {
         &self.deps.tools
     }
 
-    pub(super) fn workspace(&self) -> Option<&Arc<Workspace>> {
+    pub(crate) fn workspace(&self) -> Option<&Arc<Workspace>> {
         self.deps.workspace.as_ref()
     }
 
-    pub(super) fn hooks(&self) -> &Arc<HookRegistry> {
+    pub(crate) fn hooks(&self) -> &Arc<HookRegistry> {
         &self.deps.hooks
     }
 
-    pub(super) fn cost_guard(&self) -> &Arc<crate::agent::cost_guard::CostGuard> {
-        &self.deps.cost_guard
+    /// Build platform metadata for self-awareness in system prompts.
+    pub(crate) async fn platform_info(&self) -> ironclaw_engine::PlatformInfo {
+        let active_channels = self.channels.channel_names().await;
+        let database_backend = std::env::var("DATABASE_BACKEND")
+            .ok()
+            .or_else(|| self.deps.store.as_ref().map(|_| "postgres".to_string()));
+        ironclaw_engine::PlatformInfo {
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            llm_backend: Some(self.deps.llm_backend.clone()),
+            model_name: Some(self.deps.llm.active_model_name()),
+            database_backend,
+            active_channels,
+            owner_id: Some(self.deps.owner_id.clone()),
+            repo_url: Some("https://github.com/nearai/ironclaw".to_string()),
+        }
     }
-
     /// Build a tenant-scoped execution context for the given user.
     ///
     /// This is the standard entry point for per-user operations. The returned
     /// [`TenantCtx`] provides a [`TenantScope`] that auto-binds `user_id` on
     /// every database operation and a per-user rate limiter.
     pub(super) async fn tenant_ctx(&self, user_id: &str) -> crate::tenant::TenantCtx {
+        use crate::ownership::{Identity, OwnerId, UserRole};
+        // Bridge: creates Member identity from raw string.
+        // Will be replaced by OwnershipCache lookup in Task 9.
+        let identity = Identity::new(OwnerId::from(user_id), UserRole::Member);
+        self.tenant_ctx_with_identity(identity).await
+    }
+
+    /// Build a tenant-scoped execution context from a resolved `Identity`.
+    ///
+    /// Preferred over [`tenant_ctx`](Self::tenant_ctx) once the call site has a
+    /// full `Identity` available.
+    pub(super) async fn tenant_ctx_with_identity(
+        &self,
+        identity: crate::ownership::Identity,
+    ) -> crate::tenant::TenantCtx {
+        let user_id = identity.owner_id.as_str();
         let rate = self.deps.tenant_rates.get_or_create(user_id).await;
 
-        let store = self
-            .deps
-            .store
-            .as_ref()
-            .map(|db| crate::tenant::TenantScope::new(user_id, Arc::clone(db)));
+        let store =
+            self.deps.store.as_ref().map(|db| {
+                crate::tenant::TenantScope::with_identity(identity.clone(), Arc::clone(db))
+            });
 
         // Reuse the owner workspace if user matches, otherwise create per-user.
         // Per-user workspaces are seeded on first creation so they get identity
@@ -367,7 +408,7 @@ impl Agent {
         };
 
         crate::tenant::TenantCtx::new(
-            user_id,
+            identity,
             store,
             workspace,
             Arc::clone(&self.deps.cost_guard),
@@ -375,92 +416,101 @@ impl Agent {
         )
     }
 
-    /// Get an admin-scoped database accessor for cross-tenant operations.
+    /// Get a system-scoped database accessor for cross-tenant operations.
     ///
     /// Only for system-level components (heartbeat, routine engine, self-repair,
     /// scheduler). Handler code should use [`tenant_ctx()`](Self::tenant_ctx) instead.
-    pub(super) fn admin_store(&self) -> Option<crate::tenant::AdminScope> {
+    pub(super) fn system_store(&self) -> Option<crate::tenant::SystemScope> {
         self.deps
             .store
             .as_ref()
-            .map(|db| crate::tenant::AdminScope::new(Arc::clone(db)))
+            .map(|db| crate::tenant::SystemScope::new(Arc::clone(db)))
     }
 
     pub(super) fn skill_registry(&self) -> Option<&Arc<std::sync::RwLock<SkillRegistry>>> {
         self.deps.skill_registry.as_ref()
     }
 
-    pub(super) fn skill_catalog(&self) -> Option<&Arc<crate::skills::catalog::SkillCatalog>> {
+    pub(super) fn skill_catalog(&self) -> Option<&Arc<ironclaw_skills::catalog::SkillCatalog>> {
         self.deps.skill_catalog.as_ref()
     }
 
     /// Select active skills for a message using deterministic prefiltering.
+    /// Select skills for a message. Returns (active skills, rewritten message).
+    ///
+    /// Skills are selected in two ways:
+    /// 1. **Explicit**: `/skill-name` in the message force-activates that skill.
+    ///    The `/skill-name` is replaced with the skill's description so the
+    ///    sentence reads naturally for the LLM.
+    /// 2. **Implicit**: keyword/pattern scoring against the message content.
     pub(super) fn select_active_skills(
         &self,
         message_content: &str,
-    ) -> Vec<crate::skills::LoadedSkill> {
-        if let Some(registry) = self.skill_registry() {
-            let guard = match registry.read() {
-                Ok(g) => g,
-                Err(e) => {
-                    tracing::error!("Skill registry lock poisoned: {}", e);
-                    return vec![];
-                }
-            };
-            let available = guard.skills();
-            let skills_cfg = &self.deps.skills_config;
-            let selected = crate::skills::prefilter_skills(
-                message_content,
-                available,
-                skills_cfg.max_active_skills,
-                skills_cfg.max_context_tokens,
-            );
-
-            if !selected.is_empty() {
-                tracing::debug!(
-                    "Selected {} skill(s) for message: {}",
-                    selected.len(),
-                    selected
-                        .iter()
-                        .map(|s| s.name())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
+    ) -> (Vec<ironclaw_skills::LoadedSkill>, String) {
+        let Some(registry) = self.skill_registry() else {
+            return (vec![], message_content.to_string());
+        };
+        let guard = match registry.read() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!("Skill registry lock poisoned: {}", e);
+                return (vec![], message_content.to_string());
             }
+        };
+        let available = guard.skills();
 
-            selected.into_iter().cloned().collect()
-        } else {
-            vec![]
+        // Phase 1: Extract explicit /skill-name mentions
+        let (explicit, rewritten) =
+            ironclaw_skills::extract_skill_mentions(message_content, available);
+
+        // Phase 2: Score-based selection on the rewritten message
+        let skills_cfg = &self.deps.skills_config;
+        let scored = ironclaw_skills::prefilter_skills(
+            &rewritten,
+            available,
+            skills_cfg.max_active_skills,
+            skills_cfg.max_context_tokens,
+        );
+
+        // Merge: explicit mentions first, then scored (dedup by name)
+        let mut selected: Vec<ironclaw_skills::LoadedSkill> =
+            explicit.into_iter().cloned().collect();
+        for skill in scored {
+            if !selected
+                .iter()
+                .any(|s| s.manifest.name == skill.manifest.name)
+            {
+                selected.push(skill.clone());
+            }
         }
+
+        if !selected.is_empty() {
+            tracing::debug!(
+                "Selected {} skill(s) for message: {}",
+                selected.len(),
+                selected
+                    .iter()
+                    .map(|s| s.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+
+        (selected, rewritten)
     }
 
     /// Run the agent main loop.
     pub async fn run(self) -> Result<(), Error> {
-        // Proactive bootstrap: persist the static greeting to DB *before*
-        // starting channels so the first web client sees it via history.
-        let bootstrap_thread_id = if self
-            .workspace()
-            .is_some_and(|ws| ws.take_bootstrap_pending())
+        // Bootstrap greeting is now handled by chat_threads_handler in server.rs
+        // when the assistant conversation is first created with zero messages.
+
+        // Eagerly initialize engine v2 so gateway API endpoints can serve
+        // data (projects, missions, threads) before the first chat message.
+        if self.config.engine_v2
+            && let Err(e) = crate::bridge::init_engine(&self).await
         {
-            tracing::debug!(
-                "Fresh workspace detected — persisting static bootstrap greeting to DB"
-            );
-            if let Some(store) = self.store() {
-                let thread_id = store
-                    .get_or_create_assistant_conversation("default", "gateway")
-                    .await
-                    .ok();
-                if let Some(id) = thread_id {
-                    self.persist_assistant_response(id, "gateway", "default", BOOTSTRAP_GREETING)
-                        .await;
-                }
-                thread_id
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+            tracing::debug!("engine v2: eager init failed: {e}");
+        }
 
         // Start channels
         let mut message_stream = self.channels.start_all().await?;
@@ -471,8 +521,8 @@ impl Agent {
             self.config.stuck_threshold,
             self.config.max_repair_attempts,
         );
-        if let Some(admin) = self.admin_store() {
-            self_repair = self_repair.with_store(admin);
+        if let Some(system) = self.system_store() {
+            self_repair = self_repair.with_store(system);
         }
         if let Some(ref builder) = self.deps.builder {
             self_repair = self_repair.with_builder(Arc::clone(builder), Arc::clone(self.tools()));
@@ -482,6 +532,11 @@ impl Agent {
         let repair_channels = self.channels.clone();
         let repair_owner_id = self.owner_id().to_string();
         let repair_handle = tokio::spawn(async move {
+            // Track jobs that have already been escalated to ManualRequired
+            // to prevent sending duplicate notifications every repair cycle.
+            let mut notified_manual: std::collections::HashSet<uuid::Uuid> =
+                std::collections::HashSet::new();
+
             loop {
                 tokio::time::sleep(repair_interval).await;
 
@@ -502,19 +557,31 @@ impl Agent {
                         }
                         Ok(RepairResult::Failed { message }) => {
                             tracing::error!("Repair failed: {}", message);
-                            Some(format!(
-                                "Job {} was stuck for {}s, recovery failed permanently: {}",
-                                job.job_id,
-                                job.stuck_duration.as_secs(),
-                                message
-                            ))
+                            // Dedup: only notify once per job (same pattern as ManualRequired)
+                            if notified_manual.insert(job.job_id) {
+                                Some(format!(
+                                    "Job {} was stuck for {}s, recovery failed permanently: {}",
+                                    job.job_id,
+                                    job.stuck_duration.as_secs(),
+                                    message
+                                ))
+                            } else {
+                                None
+                            }
                         }
                         Ok(RepairResult::ManualRequired { message }) => {
                             tracing::warn!("Manual intervention needed: {}", message);
-                            Some(format!(
-                                "Job {} needs manual intervention: {}",
-                                job.job_id, message
-                            ))
+                            // Only notify once per job to prevent notification spam.
+                            // The job should have been transitioned to Failed by
+                            // repair_stuck_job, but guard against that failing too.
+                            if notified_manual.insert(job.job_id) {
+                                Some(format!(
+                                    "Job {} needs manual intervention: {}",
+                                    job.job_id, message
+                                ))
+                            } else {
+                                None
+                            }
                         }
                         Ok(RepairResult::Retry { message }) => {
                             tracing::warn!("Repair needs retry: {}", message);
@@ -668,13 +735,13 @@ impl Agent {
                         .unwrap_or_default();
 
                     if config.multi_tenant {
-                        if let Some(admin) = self.admin_store() {
+                        if let Some(system) = self.system_store() {
                             Some(spawn_multi_user_heartbeat(
                                 config,
                                 hygiene,
                                 self.cheap_llm().clone(),
                                 Some(notify_tx),
-                                admin,
+                                system,
                             ))
                         } else {
                             tracing::warn!("Multi-tenant heartbeat requires a database store");
@@ -687,7 +754,7 @@ impl Agent {
                             workspace.clone(),
                             self.cheap_llm().clone(),
                             Some(notify_tx),
-                            self.admin_store(),
+                            self.system_store(),
                         ))
                     }
                 } else {
@@ -711,7 +778,7 @@ impl Agent {
 
                     let engine = Arc::new(RoutineEngine::new(
                         rt_config.clone(),
-                        crate::tenant::AdminScope::new(Arc::clone(store)),
+                        crate::tenant::SystemScope::new(Arc::clone(store)),
                         self.llm().clone(),
                         Arc::clone(workspace),
                         notify_tx,
@@ -836,29 +903,6 @@ impl Agent {
         // broadcast the greeting via SSE for any clients already connected.
         // The greeting was already persisted to DB before start_all(), so
         // clients that connect after this point will see it via history.
-        if let Some(id) = bootstrap_thread_id {
-            // Use get_or_create_session (not resolve_thread) to avoid creating
-            // an orphan thread. Then insert the DB-sourced thread directly.
-            let session = self.session_manager.get_or_create_session("default").await;
-            {
-                use crate::agent::session::Thread;
-                let mut sess = session.lock().await;
-                // Bootstrap thread has no incoming message -- use the
-                // "__bootstrap__" sentinel so approvals from any channel are
-                // permitted. None means "deny by default" (fail-closed).
-                let thread = Thread::with_id(id, sess.id, Some("__bootstrap__"));
-                sess.active_thread = Some(id);
-                sess.threads.entry(id).or_insert(thread);
-            }
-            self.session_manager
-                .register_thread("default", "gateway", id, session)
-                .await;
-
-            let mut out = OutgoingResponse::text(BOOTSTRAP_GREETING.to_string());
-            out.thread_id = Some(id.to_string());
-            let _ = self.channels.broadcast("gateway", "default", out).await;
-        }
-
         // Main message loop
         tracing::debug!("Agent {} ready and listening", self.config.name);
 
@@ -1118,6 +1162,56 @@ impl Agent {
             }
         }
 
+        // Engine V2 routing (Strategy C: parallel deployment)
+        if self.config.engine_v2 {
+            match &submission {
+                Submission::UserInput { content } => {
+                    return crate::bridge::handle_with_engine(self, message, content).await;
+                }
+                Submission::ApprovalResponse { approved, always } => {
+                    // If there's a pending auth, "cancel"/"no" should clear the
+                    // auth flow, not be treated as an approval response.
+                    // Route through handle_with_engine so PendingAuth is checked.
+                    if crate::bridge::has_pending_auth(&message.user_id).await {
+                        let content = &message.content;
+                        return crate::bridge::handle_with_engine(self, message, content).await;
+                    }
+                    return crate::bridge::handle_approval(self, message, *approved, *always).await;
+                }
+                Submission::ExecApproval {
+                    request_id,
+                    approved,
+                    always,
+                } => {
+                    return crate::bridge::handle_exec_approval(
+                        self,
+                        message,
+                        *request_id,
+                        *approved,
+                        *always,
+                    )
+                    .await;
+                }
+                Submission::Interrupt => {
+                    return crate::bridge::handle_interrupt(self, message).await;
+                }
+                Submission::NewThread => {
+                    return crate::bridge::handle_new_thread(self, message).await;
+                }
+                Submission::Clear => {
+                    return crate::bridge::handle_clear(self, message).await;
+                }
+                Submission::Expected { description } => {
+                    return crate::bridge::handle_expected(self, message, description).await;
+                }
+                // Undo/Redo/Resume/SwitchThread: v1-only (engine has no undo;
+                // thread switching is implicit via ConversationManager).
+                // Compact/Summarize/Suggest: orthogonal to engine (compaction is internal).
+                // Heartbeat/SystemCommand/JobStatus/JobCancel/Quit: v1 infrastructure.
+                _ => {}
+            }
+        }
+
         // Hydrate thread from DB if it's a historical thread not in memory
         if let Some(external_thread_id) = message.conversation_scope() {
             tracing::trace!(
@@ -1308,34 +1402,6 @@ impl Agent {
         // Build per-tenant execution context once; threaded through all handlers.
         let tenant = self.tenant_ctx(&message.user_id).await;
 
-        // Per-user bootstrap: if this user's workspace was just seeded (fresh),
-        // persist the static greeting to their assistant conversation and
-        // broadcast it so the web client shows it immediately.
-        if tenant
-            .workspace()
-            .is_some_and(|ws| ws.take_bootstrap_pending())
-        {
-            tracing::info!(
-                user_id = message.user_id,
-                "Fresh user workspace — persisting bootstrap greeting"
-            );
-            if let Some(store) = tenant.store()
-                && let Ok(conv_id) = store
-                    .get_or_create_assistant_conversation(&message.channel)
-                    .await
-            {
-                let _ = store
-                    .add_conversation_message(conv_id, "assistant", BOOTSTRAP_GREETING)
-                    .await;
-                let mut out = OutgoingResponse::text(BOOTSTRAP_GREETING.to_string());
-                out.thread_id = Some(conv_id.to_string());
-                let _ = self
-                    .channels
-                    .broadcast(&message.channel, &message.user_id, out)
-                    .await;
-            }
-        }
-
         let session_for_empty_exit = Arc::clone(&session);
 
         // Process based on submission type
@@ -1481,6 +1547,10 @@ impl Agent {
             Submission::Heartbeat => self.process_heartbeat().await,
             Submission::Summarize => self.process_summarize(session, thread_id).await,
             Submission::Suggest => self.process_suggest(session, thread_id).await,
+            Submission::Expected { description } => {
+                self.process_expected(session, thread_id, &description, &message.user_id)
+                    .await
+            }
             Submission::JobStatus { job_id } => {
                 self.process_job_status(&tenant, job_id.as_deref()).await
             }
@@ -1509,6 +1579,41 @@ impl Agent {
             }
             Submission::ApprovalResponse { approved, always } => {
                 self.process_approval(message, session, thread_id, None, approved, always)
+                    .await
+            }
+            Submission::Plan { sub } => {
+                use crate::agent::submission::PlanSubcommand;
+                let rewritten = match sub {
+                    PlanSubcommand::Create { description } => {
+                        format!("[PLAN MODE] Create a plan for: {description}")
+                    }
+                    PlanSubcommand::Approve { plan_ref } => {
+                        let r = plan_ref.as_deref().unwrap_or("the most recent plan");
+                        format!(
+                            "[PLAN MODE] Approve and execute plan {r}. \
+                             Create a mission from the plan content using mission_create, \
+                             then fire it with mission_fire."
+                        )
+                    }
+                    PlanSubcommand::Status { plan_ref } => {
+                        let r = plan_ref.as_deref().unwrap_or("the most recent plan");
+                        format!(
+                            "[PLAN MODE] Show status of plan {r}. \
+                             Check the associated mission's thread_history, \
+                             current_focus, and approach_history."
+                        )
+                    }
+                    PlanSubcommand::Revise { plan_ref, feedback } => {
+                        let r = plan_ref.as_deref().unwrap_or("the most recent plan");
+                        format!("[PLAN MODE] Revise plan {r} based on: {feedback}")
+                    }
+                    PlanSubcommand::List => {
+                        "[PLAN MODE] List all plans. Search memory for plan documents \
+                         and show their status."
+                            .to_string()
+                    }
+                };
+                self.process_user_input(message, tenant, session, thread_id, &rewritten)
                     .await
             }
         };

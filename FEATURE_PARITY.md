@@ -97,6 +97,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Cron/heartbeat topic targeting | ✅ | ❌ | Messages land in correct topic |
 | DM topics support | ✅ | ❌ | Agent/topic bindings in DMs and agent-scoped SessionKeys |
 | Persistent ACP topic binding | ✅ | ❌ | ACP harness sessions can pin to Telegram forum or DM topics |
+| sendVoice (voice note replies) | ✅ | ✅ | audio/ogg attachments sent as voice notes; prerequisite for TTS (#90) |
 
 ### Discord-Specific Features (since Feb 2025)
 
@@ -349,6 +350,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | MMR re-ranking | ✅ | ❌ | Maximal marginal relevance for result diversity |
 | LLM-based query expansion | ✅ | ❌ | Expand FTS queries via LLM |
 | OpenAI embeddings | ✅ | ✅ | |
+| Bedrock embeddings | ❌ | ✅ | Reuses Bedrock region/profile auth for Titan Text Embeddings V2 |
 | Gemini embeddings | ✅ | ❌ | |
 | Local embeddings | ✅ | ❌ | |
 | SQLite-vec backend | ✅ | ❌ | IronClaw uses PostgreSQL |

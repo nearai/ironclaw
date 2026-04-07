@@ -15,13 +15,13 @@ use crate::error::{Error, JobError};
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
-use crate::safety::SafetyLayer;
-use crate::tenant::AdminScope;
+use crate::tenant::SystemScope;
 use crate::tools::{
     ApprovalContext, ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_error,
     prepare_tool_params,
 };
 use crate::worker::job::{Worker, WorkerDeps};
+use ironclaw_safety::SafetyLayer;
 
 /// Message to send to a worker.
 #[derive(Debug)]
@@ -52,7 +52,7 @@ struct ScheduledSubtask {
 pub struct SchedulerDeps {
     pub tools: Arc<ToolRegistry>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
-    pub store: Option<AdminScope>,
+    pub store: Option<SystemScope>,
     pub hooks: Arc<HookRegistry>,
 }
 
@@ -64,7 +64,7 @@ pub struct Scheduler {
     safety: Arc<SafetyLayer>,
     tools: Arc<ToolRegistry>,
     extension_manager: Option<Arc<ExtensionManager>>,
-    store: Option<AdminScope>,
+    store: Option<SystemScope>,
     hooks: Arc<HookRegistry>,
     /// SSE manager for live job event streaming.
     sse_tx: Option<Arc<crate::channels::web::sse::SseManager>>,
@@ -747,8 +747,8 @@ mod tests {
         CompletionRequest, CompletionResponse, LlmError, LlmProvider, ToolCompletionRequest,
         ToolCompletionResponse,
     };
-    use crate::safety::SafetyLayer;
     use crate::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput};
+    use ironclaw_safety::SafetyLayer;
     use rust_decimal_macros::dec;
 
     /// Minimal LLM provider stub for scheduler tests that don't exercise LLM calls.
@@ -805,6 +805,7 @@ mod tests {
             multi_tenant: false,
             max_llm_concurrent_per_user: None,
             max_jobs_concurrent_per_user: None,
+            engine_v2: false,
         };
         let cm = Arc::new(ContextManager::new(5));
         let llm: Arc<dyn LlmProvider> = Arc::new(StubLlm);

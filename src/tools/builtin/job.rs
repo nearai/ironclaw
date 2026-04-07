@@ -21,7 +21,7 @@ use crate::context::{ContextManager, JobContext, JobState};
 use crate::db::Database;
 use crate::history::SandboxJobRecord;
 use crate::orchestrator::auth::CredentialGrant;
-use crate::orchestrator::job_manager::{ContainerJobManager, JobMode};
+use crate::orchestrator::job_manager::{ContainerJobManager, JobCreationParams, JobMode};
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 use ironclaw_common::AppEvent;
@@ -355,13 +355,14 @@ impl CreateJobTool {
     }
 
     /// Execute via sandboxed Docker container.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_sandbox(
         &self,
         task: &str,
         explicit_dir: Option<PathBuf>,
         wait: bool,
         mode: JobMode,
-        credential_grants: Vec<CredentialGrant>,
+        params: JobCreationParams,
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
@@ -376,7 +377,7 @@ impl CreateJobTool {
         let project_dir_str = project_dir.display().to_string();
 
         // Serialize credential grants so restarts can reload them.
-        let credential_grants_json = match serde_json::to_string(&credential_grants) {
+        let credential_grants_json = match serde_json::to_string(&params.credential_grants) {
             Ok(json) => json,
             Err(e) => {
                 tracing::warn!(
@@ -414,16 +415,21 @@ impl CreateJobTool {
             credential_grants_json,
         });
 
-        // Persist the job mode to DB
-        if mode == JobMode::ClaudeCode
+        // Persist the job mode to DB (for non-default modes).
+        // For ACP, store "acp:<agent_name>" so restarts know which agent to use.
+        if mode != JobMode::Worker
             && let Some(store) = self.store.clone()
         {
             let job_id_copy = job_id;
+            let mode_str = if mode == JobMode::Acp
+                && let Some(ref agent) = params.acp_agent
+            {
+                format!("acp:{}", agent.name)
+            } else {
+                mode.as_str().to_string()
+            };
             tokio::spawn(async move {
-                if let Err(e) = store
-                    .update_sandbox_job_mode(job_id_copy, "claude_code")
-                    .await
-                {
+                if let Err(e) = store.update_sandbox_job_mode(job_id_copy, &mode_str).await {
                     tracing::warn!(job_id = %job_id_copy, "Failed to set job mode: {}", e);
                 }
             });
@@ -431,7 +437,7 @@ impl CreateJobTool {
 
         // Create the container job with the pre-determined job_id.
         let _token = jm
-            .create_job(job_id, task, Some(project_dir), mode, credential_grants)
+            .create_job(job_id, task, Some(project_dir), mode, params)
             .await
             .map_err(|e| {
                 self.update_status(
@@ -834,9 +840,15 @@ impl Tool for CreateJobTool {
                     },
                     "mode": {
                         "type": "string",
-                        "enum": ["worker", "claude_code"],
+                        "enum": ["worker", "claude_code", "acp"],
                         "description": "Execution mode. 'worker' (default) uses the IronClaw sub-agent. \
-                                        'claude_code' uses Claude Code CLI for full agentic software engineering."
+                                        'claude_code' uses Claude Code CLI. \
+                                        'acp' uses an ACP-compliant agent (Goose, Codex, Gemini CLI)."
+                    },
+                    "agent_name": {
+                        "type": "string",
+                        "description": "Name of the ACP agent to use (from 'ironclaw acp list'). \
+                                        Required when mode is 'acp'."
                     },
                     "project_dir": {
                         "type": "string",
@@ -849,6 +861,18 @@ impl Tool for CreateJobTool {
                                         secrets store (via 'ironclaw tool auth' or web UI). Example: \
                                         {\"github_token\": \"GITHUB_TOKEN\", \"npm_token\": \"NPM_TOKEN\"}",
                         "additionalProperties": { "type": "string" }
+                    },
+                    "mcp_servers": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional list of MCP server names to make available in the container. \
+                                        If omitted, the full master config is mounted. If empty, no MCP servers \
+                                        are available. Only effective when MCP_PER_JOB_ENABLED=true."
+                    },
+                    "max_iterations": {
+                        "type": "integer",
+                        "description": "Maximum number of agent loop iterations for the worker. \
+                                        Defaults to 50, capped at 500. Use lower values for simple tasks."
                     }
                 },
                 "required": ["title", "description"]
@@ -898,7 +922,33 @@ impl Tool for CreateJobTool {
 
             let mode = match params.get("mode").and_then(|v| v.as_str()) {
                 Some("claude_code") => JobMode::ClaudeCode,
+                Some("acp") => JobMode::Acp,
                 _ => JobMode::Worker,
+            };
+
+            // Resolve ACP agent config when mode is ACP.
+            let acp_agent = if mode == JobMode::Acp {
+                let agent_name = require_str(&params, "agent_name")?;
+                Some(
+                    crate::config::acp::get_enabled_acp_agent_for_user(
+                        self.store.as_deref(),
+                        &ctx.user_id,
+                        agent_name,
+                    )
+                    .await
+                    .map_err(|e| match e {
+                        crate::config::acp::AcpConfigError::AgentNotFound { .. }
+                        | crate::config::acp::AcpConfigError::AgentDisabled { .. } => {
+                            ToolError::InvalidParameters(e.to_string())
+                        }
+                        _ => ToolError::ExecutionFailed(format!(
+                            "failed to load ACP agent '{}': {}",
+                            agent_name, e
+                        )),
+                    })?,
+                )
+            } else {
+                None
             };
 
             let explicit_dir = params
@@ -909,10 +959,45 @@ impl Tool for CreateJobTool {
             // Parse and validate credential grants
             let credential_grants = self.parse_credentials(&params, &ctx.user_id).await?;
 
+            // Parse optional MCP server filter and iteration cap.
+            // Validate types: warn if present but wrong type so callers know why it was ignored.
+            let mcp_servers: Option<Vec<String>> = match params.get("mcp_servers") {
+                Some(v) if v.is_array() => v.as_array().map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                }),
+                Some(_) => {
+                    tracing::warn!("mcp_servers parameter is not an array — ignoring");
+                    None
+                }
+                None => None,
+            };
+            let max_iterations: Option<u32> = match params.get("max_iterations") {
+                Some(v) if v.is_u64() || v.is_i64() => v.as_u64().map(|n| n.clamp(1, 500) as u32),
+                Some(_) => {
+                    tracing::warn!("max_iterations parameter is not a number — ignoring");
+                    None
+                }
+                None => None,
+            };
+
             // Combine title and description into the task prompt for the sub-agent.
             let task = format!("{}\n\n{}", title, description);
-            self.execute_sandbox(&task, explicit_dir, wait, mode, credential_grants, ctx)
-                .await
+            self.execute_sandbox(
+                &task,
+                explicit_dir,
+                wait,
+                mode,
+                JobCreationParams {
+                    credential_grants,
+                    mcp_servers,
+                    max_iterations,
+                    acp_agent,
+                },
+                ctx,
+            )
+            .await
         } else {
             self.execute_local(title, description, ctx).await
         }
@@ -1568,7 +1653,7 @@ mod tests {
                 None,
                 false,
                 JobMode::Worker,
-                vec![],
+                JobCreationParams::default(),
                 &JobContext::default(),
             )
             .await;
@@ -1584,9 +1669,15 @@ mod tests {
     async fn test_list_jobs_tool() {
         let manager = Arc::new(ContextManager::new(5));
 
-        // Create some jobs
-        manager.create_job("Job 1", "Desc 1").await.unwrap(); // safety: test
-        manager.create_job("Job 2", "Desc 2").await.unwrap(); // safety: test
+        // Create jobs owned by "default" to match JobContext::default()'s user_id.
+        manager
+            .create_job_for_user("default", "Job 1", "Desc 1")
+            .await
+            .unwrap(); // safety: test
+        manager
+            .create_job_for_user("default", "Job 2", "Desc 2")
+            .await
+            .unwrap(); // safety: test
 
         let tool = ListJobsTool::new(manager);
 
@@ -1601,7 +1692,11 @@ mod tests {
     #[tokio::test]
     async fn test_job_status_tool() {
         let manager = Arc::new(ContextManager::new(5));
-        let job_id = manager.create_job("Test Job", "Description").await.unwrap(); // safety: test
+        // Create job owned by "default" to match JobContext::default()'s user_id.
+        let job_id = manager
+            .create_job_for_user("default", "Test Job", "Description")
+            .await
+            .unwrap(); // safety: test
 
         let tool = JobStatusTool::new(manager);
 
@@ -2263,5 +2358,70 @@ mod tests {
         let cm = ContextManager::new(5);
         let result = resolve_job_id("not-hex-at-all!", &cm).await;
         assert!(result.is_err()); // safety: test
+    }
+
+    // ── ACP mode tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_sandbox_schema_includes_acp_mode() {
+        let manager = Arc::new(ContextManager::new(5));
+        let jm = Arc::new(ContainerJobManager::new(
+            crate::orchestrator::job_manager::ContainerJobConfig::default(),
+            crate::orchestrator::TokenStore::new(),
+        ));
+        let tool = CreateJobTool::new(manager).with_sandbox(jm, None);
+        let schema = tool.parameters_schema();
+        let mode_enum = schema["properties"]["mode"]["enum"].as_array().unwrap(); // safety: test
+        let modes: Vec<&str> = mode_enum.iter().map(|v| v.as_str().unwrap()).collect(); // safety: test
+        assert!(modes.contains(&"acp"), "mode enum must include 'acp'");
+        assert!(modes.contains(&"worker"));
+        assert!(modes.contains(&"claude_code"));
+    }
+
+    #[test]
+    fn test_sandbox_schema_includes_agent_name() {
+        let manager = Arc::new(ContextManager::new(5));
+        let jm = Arc::new(ContainerJobManager::new(
+            crate::orchestrator::job_manager::ContainerJobConfig::default(),
+            crate::orchestrator::TokenStore::new(),
+        ));
+        let tool = CreateJobTool::new(manager).with_sandbox(jm, None);
+        let schema = tool.parameters_schema();
+        let props = schema.get("properties").unwrap().as_object().unwrap(); // safety: test
+        assert!(
+            /* safety: test */
+            props.contains_key("agent_name"),
+            "sandbox schema must expose agent_name for ACP mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_acp_mode_requires_agent_name() {
+        let manager = Arc::new(ContextManager::new(5));
+        let jm = Arc::new(ContainerJobManager::new(
+            crate::orchestrator::job_manager::ContainerJobConfig::default(),
+            crate::orchestrator::TokenStore::new(),
+        ));
+        let tool = CreateJobTool::new(manager).with_sandbox(jm, None);
+
+        let params = serde_json::json!({
+            "title": "Test ACP job",
+            "description": "Test task",
+            "mode": "acp"
+            // no agent_name — should fail
+        });
+        let result = tool.execute(params, &JobContext::default()).await;
+        assert!(result.is_err()); // safety: test
+        let err = result.unwrap_err().to_string(); // safety: test
+        assert!(
+            err.contains("agent_name"),
+            "error should mention missing agent_name, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_job_mode_acp_as_str() {
+        assert_eq!(JobMode::Acp.as_str(), "acp");
+        assert_eq!(JobMode::Acp.to_string(), "acp");
     }
 }

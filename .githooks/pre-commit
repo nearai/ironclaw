@@ -22,3 +22,16 @@ if $NEEDS_CHECK; then
         exit 1
     fi
 fi
+
+# i18n parity: when any language pack changes, all languages must stay in sync.
+if echo "$STAGED" | grep -qE '^src/channels/web/static/i18n/.*\.js$'; then
+    echo "pre-commit: checking i18n parity..."
+    if ! ./scripts/check-i18n-parity.sh; then
+        echo ""
+        echo "Commit blocked: i18n parity check failed."
+        echo "Every key added to en.js must also be added to all other language files (zh-CN.js, ko.js, ...)."
+        echo "Placeholder tokens like {name} must match across all languages."
+        echo "To bypass: git commit --no-verify"
+        exit 1
+    fi
+fi
