@@ -96,6 +96,7 @@ fn execute_inner(params_str: &str, context: Option<&str>) -> Result<String, Stri
                 .tool_slug
                 .as_deref()
                 .ok_or("missing 'tool_slug' for execute action")?;
+            validate_tool_slug(tool_slug)?;
             let action_params = params.params.unwrap_or(serde_json::json!({}));
             execute_action(
                 tool_slug,
@@ -194,10 +195,11 @@ fn get_with_retry(
             );
         }
 
-        // Retry only on transient server errors (5xx). 429 is not retried
-        // because the WASM host has no sleep/backoff — immediate retries would
-        // just repeat the rate-limit response and waste request budget.
-        if attempt < MAX_RETRIES && resp.status >= 500 {
+        // Retry on 429 and 5xx to align with github/web-search tool convention.
+        // NOTE: The WASM host has no sleep primitive, so retries are immediate.
+        // This still helps when a sliding-window rate limiter resets between
+        // the original request and the retry (sub-second windows are common).
+        if attempt < MAX_RETRIES && (resp.status == 429 || resp.status >= 500) {
             near::agent::host::log(
                 near::agent::host::LogLevel::Warn,
                 &format!(
@@ -397,6 +399,20 @@ fn find_active_account(tool_slug: &str, app: &str, entity_id: &str) -> Result<St
 }
 
 // ---------------------------------------------------------------------------
+// Validation helpers
+// ---------------------------------------------------------------------------
+
+/// Defense-in-depth: reject tool slugs that could cause path traversal.
+/// The WASM host allowlist already normalises paths and rejects `..` segments,
+/// but we validate here too (same pattern as the `github` tool).
+fn validate_tool_slug(s: &str) -> Result<(), String> {
+    if s.is_empty() || s.contains("..") || s.contains('/') || s.contains('\\') {
+        return Err(format!("invalid tool_slug: \"{s}\""));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // URL helpers
 // ---------------------------------------------------------------------------
 
@@ -475,8 +491,12 @@ fn extract_entity_id(context: Option<&str>) -> String {
         .and_then(|v| {
             v.get("entity_id")
                 .or_else(|| v.get("user_id"))
-                .and_then(|e| e.as_str())
-                .map(String::from)
+                .and_then(|e| {
+                    e.as_str()
+                        .map(String::from)
+                        .or_else(|| e.as_u64().map(|n| n.to_string()))
+                        .or_else(|| e.as_i64().map(|n| n.to_string()))
+                })
         })
         .unwrap_or_else(|| "default".to_string())
 }
@@ -544,6 +564,33 @@ mod tests {
     #[test]
     fn test_extract_entity_id_defaults_on_malformed_json() {
         assert_eq!(extract_entity_id(Some("not json")), "default");
+    }
+
+    #[test]
+    fn test_extract_entity_id_numeric_user_id() {
+        let ctx = r#"{"user_id": 12345}"#;
+        assert_eq!(extract_entity_id(Some(ctx)), "12345");
+    }
+
+    #[test]
+    fn test_extract_entity_id_numeric_entity_id() {
+        let ctx = r#"{"entity_id": 99, "user_id": "user-1"}"#;
+        assert_eq!(extract_entity_id(Some(ctx)), "99");
+    }
+
+    #[test]
+    fn test_validate_tool_slug_valid() {
+        assert!(validate_tool_slug("GMAIL_SEND_EMAIL").is_ok());
+        assert!(validate_tool_slug("slack-post").is_ok());
+    }
+
+    #[test]
+    fn test_validate_tool_slug_rejects_traversal() {
+        assert!(validate_tool_slug("..").is_err());
+        assert!(validate_tool_slug("foo/../bar").is_err());
+        assert!(validate_tool_slug("foo/bar").is_err());
+        assert!(validate_tool_slug("foo\\bar").is_err());
+        assert!(validate_tool_slug("").is_err());
     }
 
     #[test]
