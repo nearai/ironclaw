@@ -132,12 +132,16 @@ fn is_system_prompt_file(path: &str) -> bool {
 /// Indexing the excluded paths floods the DB connection pool under
 /// multi-tenant load.
 fn is_engine_runtime_path(path: &str) -> bool {
-    // Guard against path traversal: `engine/.runtime/../knowledge/foo.md` would
-    // pass a naive starts_with check but refers to a semantic document.
+    // normalize_path() does not resolve '..' segments — this guard is
+    // load-bearing. Without it, `engine/.runtime/../knowledge/foo.md`
+    // would pass the starts_with check but refer to a semantic document.
     !path.contains("..")
         && (path.starts_with("engine/.runtime/")
             || path.starts_with("engine/projects/")
-            || path == "engine/orchestrator/failures.json")
+            || path == "engine/orchestrator/failures.json"
+            // Auto-generated per-workspace README — regenerated at engine-turn
+            // frequency; should not accumulate version rows.
+            || path == "engine/README.md")
 }
 
 /// Shared sanitizer instance — avoids rebuilding Aho-Corasick + regexes on every write.

@@ -87,6 +87,12 @@ impl ConversationManager {
 
         for conversation in conversations {
             if convs.contains_key(&conversation.id) {
+                // Still upsert the index — it may be missing if a prior
+                // get_or_create_conversation inserted the conv but then rolled
+                // back the index entry on a failed save_conversation.
+                index
+                    .entry((conversation.channel.clone(), conversation.user_id.clone()))
+                    .or_insert(conversation.id);
                 continue;
             }
             index.insert(
