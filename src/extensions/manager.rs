@@ -5145,7 +5145,8 @@ impl ExtensionManager {
         name: &str,
         user_id: &str,
     ) -> Result<ExtensionSetupSchema, ExtensionError> {
-        Self::validate_extension_name(name)?;
+        let canonical = canonicalize_extension_name(name)?;
+        let name = canonical.as_str();
         let kind = self.determine_installed_kind(name, user_id).await?;
         match kind {
             ExtensionKind::WasmChannel => {
@@ -5415,7 +5416,8 @@ impl ExtensionManager {
         fields: &std::collections::HashMap<String, String>,
         user_id: &str,
     ) -> Result<ConfigureResult, ExtensionError> {
-        Self::validate_extension_name(name)?;
+        let canonical = canonicalize_extension_name(name)?;
+        let name = canonical.as_str();
         let kind = self.determine_installed_kind(name, user_id).await?;
 
         // Load allowed secret names and tool setup field definitions from capabilities.

@@ -3016,11 +3016,13 @@ async fn extensions_setup_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    let canonical_name = crate::extensions::naming::canonicalize_extension_name(&name)
+        .unwrap_or_else(|_| name.clone());
     let kind = ext_mgr
         .list(None, false, &user.user_id)
         .await
         .ok()
-        .and_then(|list| list.into_iter().find(|e| e.name == name))
+        .and_then(|list| list.into_iter().find(|e| e.name == canonical_name))
         .map(|e| e.kind.to_string())
         .unwrap_or_default();
 

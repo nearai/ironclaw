@@ -9,13 +9,19 @@ async def test_send_message_and_receive_response(page):
     chat_input = page.locator(SEL["chat_input"])
     await chat_input.wait_for(state="visible", timeout=5000)
 
+    # Count existing messages (onboarding greeting may already be present)
+    before_count = await page.locator(SEL["message_assistant"]).count()
+
     # Send message
     await chat_input.fill("What is 2+2?")
     await chat_input.press("Enter")
 
-    # Wait for assistant response
-    assistant_msg = page.locator(SEL["message_assistant"]).last
-    await assistant_msg.wait_for(state="visible", timeout=15000)
+    # Wait for a NEW assistant message to appear
+    await page.wait_for_function(
+        "(before) => document.querySelectorAll('#chat-messages .message.assistant').length > before",
+        arg=before_count,
+        timeout=15000,
+    )
 
     # Verify user message
     user_msgs = page.locator(SEL["message_user"])
@@ -25,6 +31,7 @@ async def test_send_message_and_receive_response(page):
     assert "2+2" in user_text or "2 + 2" in user_text
 
     # Verify assistant response contains "4" (from mock LLM canned response)
+    assistant_msg = page.locator(SEL["message_assistant"]).last
     assistant_text = await assistant_msg.text_content()
     assert "4" in assistant_text, f"Expected '4' in response, got: '{assistant_text}'"
 
