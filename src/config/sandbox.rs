@@ -34,6 +34,16 @@ pub struct SandboxModeConfig {
     pub reaper_interval_secs: u64,
     /// Containers older than this with no active job are reaped (seconds). Default: 600 (10 min).
     pub orphan_threshold_secs: u64,
+    /// Whether to use a persistent session container.
+    pub persistent: bool,
+    /// Extra bind-mount volumes (e.g., `"~/.ssh:/home/sandbox/.ssh:ro"`).
+    pub extra_volumes: Vec<String>,
+    /// Use host networking instead of bridge.
+    pub host_network: bool,
+    /// Run as root (UID 0) inside the container.
+    pub run_as_root: bool,
+    /// Extra environment variables (`"KEY=value"`).
+    pub extra_env: Vec<String>,
 }
 
 impl Default for SandboxModeConfig {
@@ -50,6 +60,11 @@ impl Default for SandboxModeConfig {
             extra_allowed_domains: Vec::new(),
             reaper_interval_secs: 300,
             orphan_threshold_secs: 600,
+            persistent: false,
+            extra_volumes: Vec::new(),
+            host_network: false,
+            run_as_root: false,
+            extra_env: Vec::new(),
         }
     }
 }
@@ -87,6 +102,28 @@ impl SandboxModeConfig {
             });
         }
 
+        let home = dirs::home_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "~".to_string());
+
+        let extra_volumes = optional_env("SANDBOX_EXTRA_VOLUMES")?
+            .map(|s| {
+                s.split(',')
+                    .map(|v| expand_tilde(v.trim(), &home))
+                    .filter(|v| !v.is_empty())
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                ss.extra_volumes
+                    .iter()
+                    .map(|v| expand_tilde(v, &home))
+                    .collect()
+            });
+
+        let extra_env = optional_env("SANDBOX_EXTRA_ENV")?
+            .map(|s| split_env_entries(&s))
+            .unwrap_or_else(|| ss.extra_env.clone());
+
         Ok(Self {
             enabled: db_first_bool(ss.enabled, defaults.enabled, "SANDBOX_ENABLED")?,
             policy: db_first_or_default(&ss.policy, &defaults.policy, "SANDBOX_POLICY")?,
@@ -116,6 +153,11 @@ impl SandboxModeConfig {
             extra_allowed_domains: extra_domains,
             reaper_interval_secs,
             orphan_threshold_secs,
+            persistent: parse_bool_env("SANDBOX_PERSISTENT", ss.persistent)?,
+            extra_volumes,
+            host_network: parse_bool_env("SANDBOX_HOST_NETWORK", ss.host_network)?,
+            run_as_root: parse_bool_env("SANDBOX_RUN_AS_ROOT", ss.run_as_root)?,
+            extra_env,
         })
     }
 
@@ -154,6 +196,11 @@ impl SandboxModeConfig {
             image: self.image.clone(),
             auto_pull_image: self.auto_pull_image,
             proxy_port: 0, // Auto-assign
+            persistent: self.persistent,
+            extra_volumes: self.extra_volumes.clone(),
+            host_network: self.host_network,
+            run_as_root: self.run_as_root,
+            extra_env: self.extra_env.clone(),
         }
     }
 }
@@ -342,6 +389,49 @@ impl ClaudeCodeConfig {
     }
 }
 
+/// Split an env-var list on commas, but only when the comma separates
+/// two `KEY=value` entries. A comma inside a value (e.g., `FOO=a,b`)
+/// is preserved.
+fn split_env_entries(input: &str) -> Vec<String> {
+    let mut entries = Vec::new();
+    let mut current = String::new();
+
+    let mut push_trimmed = |s: &str| {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            entries.push(trimmed.to_string());
+        }
+    };
+
+    for part in input.split(',') {
+        if current.is_empty() || part.contains('=') {
+            push_trimmed(&current);
+            current = part.to_string();
+        } else {
+            current.push(',');
+            current.push_str(part);
+        }
+    }
+    push_trimmed(&current);
+    entries
+}
+
+/// Expand leading `~` in a volume spec to the given home directory.
+///
+/// Docker does not expand `~` in bind-mount paths, so we do it at config
+/// parse time. Only the host portion (before the first `:`) is expanded.
+fn expand_tilde(spec: &str, home: &str) -> String {
+    if !(spec.starts_with("~/") || spec == "~") {
+        return spec.to_string();
+    }
+    if let Some((host_path, rest)) = spec.split_once(':') {
+        let expanded = host_path.replacen('~', home, 1);
+        format!("{expanded}:{rest}")
+    } else {
+        spec.replacen('~', home, 1)
+    }
+}
+
 /// Parse the OAuth access token from a Claude Code credentials JSON blob.
 ///
 /// Expected shape: `{"claudeAiOauth": {"accessToken": "sk-ant-oat01-..."}}`
@@ -447,6 +537,7 @@ mod tests {
             reaper_interval_secs: 300,
             orphan_threshold_secs: 600,
             allow_full_access: false,
+            ..Default::default()
         };
         assert!(!cfg.enabled);
         assert_eq!(cfg.policy, "full_access");
@@ -472,6 +563,7 @@ mod tests {
             reaper_interval_secs: 300,
             orphan_threshold_secs: 600,
             allow_full_access: false,
+            ..Default::default()
         };
         let sc = mode.to_sandbox_config();
         assert!(sc.enabled);
@@ -807,5 +899,107 @@ mod tests {
         assert!(!cfg.enabled);
         assert_eq!(cfg.memory_limit_mb, 8192);
         assert_eq!(cfg.timeout_secs, 3600);
+    }
+
+    // ── Persistent sandbox config tests ─────────────────────────────
+
+    #[test]
+    fn persistent_defaults_are_off() {
+        let cfg = SandboxModeConfig::default();
+        assert!(!cfg.persistent);
+        assert!(cfg.extra_volumes.is_empty());
+        assert!(!cfg.host_network);
+        assert!(!cfg.run_as_root);
+        assert!(cfg.extra_env.is_empty());
+    }
+
+    #[test]
+    fn persistent_fields_propagate_to_sandbox_config() {
+        let mode = SandboxModeConfig {
+            persistent: true,
+            extra_volumes: vec!["/data:/data:ro".to_string()],
+            host_network: true,
+            run_as_root: true,
+            extra_env: vec!["FOO=bar".to_string()],
+            ..Default::default()
+        };
+        let sc = mode.to_sandbox_config();
+        assert!(sc.persistent);
+        assert_eq!(sc.extra_volumes, vec!["/data:/data:ro"]);
+        assert!(sc.host_network);
+        assert!(sc.run_as_root);
+        assert_eq!(sc.extra_env, vec!["FOO=bar"]);
+    }
+
+    #[test]
+    fn expand_tilde_expands_host_path() {
+        let expanded = expand_tilde("~/.ssh:/home/sandbox/.ssh:ro", "/home/testuser");
+        assert_eq!(expanded, "/home/testuser/.ssh:/home/sandbox/.ssh:ro");
+    }
+
+    #[test]
+    fn expand_tilde_leaves_absolute_paths_alone() {
+        let spec = "/opt/data:/data:rw";
+        assert_eq!(expand_tilde(spec, "/home/testuser"), spec);
+    }
+
+    #[test]
+    fn expand_tilde_handles_no_colon() {
+        let expanded = expand_tilde("~/somepath", "/home/testuser");
+        assert_eq!(expanded, "/home/testuser/somepath");
+    }
+
+    #[test]
+    fn persistent_env_overrides_settings() {
+        let _guard = crate::config::helpers::lock_env();
+        let settings = crate::settings::Settings::default();
+
+        unsafe { std::env::set_var("SANDBOX_PERSISTENT", "true") };
+        unsafe { std::env::set_var("SANDBOX_HOST_NETWORK", "true") };
+        unsafe { std::env::set_var("SANDBOX_RUN_AS_ROOT", "true") };
+        let cfg = SandboxModeConfig::resolve(&settings).expect("resolve");
+        unsafe { std::env::remove_var("SANDBOX_PERSISTENT") };
+        unsafe { std::env::remove_var("SANDBOX_HOST_NETWORK") };
+        unsafe { std::env::remove_var("SANDBOX_RUN_AS_ROOT") };
+
+        assert!(cfg.persistent);
+        assert!(cfg.host_network);
+        assert!(cfg.run_as_root);
+    }
+
+    #[test]
+    fn expand_tilde_ignores_tilde_user_syntax() {
+        let spec = "~otheruser/.ssh:/data:ro";
+        assert_eq!(expand_tilde(spec, "/home/me"), spec);
+    }
+
+    // ── split_env_entries tests ────────────────────────────────────
+
+    #[test]
+    fn split_env_entries_basic() {
+        assert_eq!(
+            split_env_entries("FOO=bar,BAZ=qux"),
+            vec!["FOO=bar", "BAZ=qux"]
+        );
+    }
+
+    #[test]
+    fn split_env_entries_comma_in_value() {
+        assert_eq!(split_env_entries("FOO=a,b,BAZ=c"), vec!["FOO=a,b", "BAZ=c"]);
+    }
+
+    #[test]
+    fn split_env_entries_trailing_commas_in_value() {
+        assert_eq!(split_env_entries("FOO=a,b,c"), vec!["FOO=a,b,c"]);
+    }
+
+    #[test]
+    fn split_env_entries_empty() {
+        assert!(split_env_entries("").is_empty());
+    }
+
+    #[test]
+    fn split_env_entries_single() {
+        assert_eq!(split_env_entries("SINGLE=val"), vec!["SINGLE=val"]);
     }
 }

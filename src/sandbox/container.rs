@@ -40,7 +40,7 @@ use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::models::HostConfig;
 use futures::StreamExt;
 
-use crate::sandbox::config::{ResourceLimits, SandboxPolicy};
+use crate::sandbox::config::{ResourceLimits, SandboxConfig, SandboxPolicy};
 use crate::sandbox::error::{Result, SandboxError};
 
 /// Output from container execution.
@@ -295,12 +295,13 @@ impl ContainerRunner {
         policy: SandboxPolicy,
         limits: &ResourceLimits,
         env: HashMap<String, String>,
+        config: &SandboxConfig,
     ) -> Result<ContainerOutput> {
         let start_time = std::time::Instant::now();
 
         // Create the container
         let container_id = self
-            .create_container(command, working_dir, policy, limits, env)
+            .create_container(command, working_dir, policy, limits, env, config)
             .await?;
 
         // Start the container
@@ -347,8 +348,11 @@ impl ContainerRunner {
         command: &str,
         working_dir: &str,
         limits: &ResourceLimits,
+        env: &[String],
     ) -> Result<ContainerOutput> {
         let start_time = std::time::Instant::now();
+
+        let env_refs: Vec<&str> = env.iter().map(String::as_str).collect();
 
         let exec = self
             .docker
@@ -359,6 +363,11 @@ impl ContainerRunner {
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),
                     working_dir: Some(working_dir),
+                    env: if env_refs.is_empty() {
+                        None
+                    } else {
+                        Some(env_refs)
+                    },
                     ..Default::default()
                 },
             )
@@ -379,84 +388,137 @@ impl ContainerRunner {
                 Ok(output)
             }
             Ok(Err(e)) => Err(e),
-            Err(_) => Err(SandboxError::Timeout(limits.timeout)),
+            Err(_) => {
+                // Best-effort: kill the orphaned exec process.
+                self.try_kill_exec(container_id, &exec.id).await;
+                Err(SandboxError::Timeout(limits.timeout))
+            }
         }
     }
 
-    /// Create a container with the appropriate configuration.
-    async fn create_container(
-        &self,
-        command: &str,
-        working_dir: &Path,
-        policy: SandboxPolicy,
-        limits: &ResourceLimits,
-        env: HashMap<String, String>,
-    ) -> Result<String> {
-        let working_dir_str = working_dir.display().to_string();
-
-        // Build environment variables
-        let mut env_vec: Vec<String> = env
-            .into_iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect();
-
-        // Add proxy environment (uses host.docker.internal for Mac/Windows, 172.17.0.1 for Linux)
-        let proxy_host = if cfg!(target_os = "linux") {
-            "172.17.0.1"
-        } else {
-            "host.docker.internal"
+    /// Best-effort cleanup of a timed-out exec process.
+    ///
+    /// Docker has no "kill exec" API, so we inspect the exec to get its
+    /// PID inside the container, then send SIGKILL via a lightweight exec.
+    async fn try_kill_exec(&self, container_id: &str, exec_id: &str) {
+        let pid = match self.docker.inspect_exec(exec_id).await {
+            Ok(info) => info.pid.unwrap_or(0),
+            Err(e) => {
+                tracing::warn!(exec_id, error = %e, "Failed to inspect timed-out exec");
+                return;
+            }
         };
+        if pid == 0 {
+            return; // Already exited or PID not available
+        }
+        let pid_str = pid.to_string();
+        let kill_exec = self
+            .docker
+            .create_exec(
+                container_id,
+                CreateExecOptions {
+                    cmd: Some(vec!["kill", "-9", &pid_str]),
+                    ..Default::default()
+                },
+            )
+            .await;
+        match kill_exec {
+            Ok(exec) => {
+                let _ = self.docker.start_exec(&exec.id, None).await;
+                tracing::warn!(exec_id, pid, "Killed orphaned exec process after timeout");
+            }
+            Err(e) => {
+                tracing::warn!(exec_id, pid, error = %e, "Failed to kill orphaned exec process");
+            }
+        }
+    }
 
-        if self.proxy_port > 0 && policy.is_sandboxed() {
-            env_vec.push(format!(
-                "http_proxy=http://{}:{}",
-                proxy_host, self.proxy_port
-            ));
-            env_vec.push(format!(
-                "https_proxy=http://{}:{}",
-                proxy_host, self.proxy_port
-            ));
-            env_vec.push(format!(
-                "HTTP_PROXY=http://{}:{}",
-                proxy_host, self.proxy_port
-            ));
-            env_vec.push(format!(
-                "HTTPS_PROXY=http://{}:{}",
-                proxy_host, self.proxy_port
-            ));
+    fn build_container_env(
+        &self,
+        env: HashMap<String, String>,
+        policy: SandboxPolicy,
+        config: &SandboxConfig,
+    ) -> Vec<String> {
+        let mut env_vec: Vec<String> = env.into_iter().map(|(k, v)| format!("{k}={v}")).collect();
+
+        // Add proxy environment when sandboxed and not using host networking.
+        // Host networking means the container shares the host's network namespace,
+        // so the proxy is unnecessary.
+        if self.proxy_port > 0 && policy.is_sandboxed() && !config.host_network {
+            let proxy_host = if cfg!(target_os = "linux") {
+                "172.17.0.1"
+            } else {
+                "host.docker.internal"
+            };
+            for key in ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"] {
+                env_vec.push(format!("{key}=http://{proxy_host}:{}", self.proxy_port));
+            }
         }
 
-        // Build volume mounts based on policy
-        let binds = match policy {
+        env_vec.extend(config.extra_env.iter().cloned());
+
+        env_vec
+    }
+
+    fn build_container_binds(
+        working_dir_str: &str,
+        policy: SandboxPolicy,
+        config: &SandboxConfig,
+    ) -> Vec<String> {
+        let mut binds = match policy {
             SandboxPolicy::ReadOnly => {
-                vec![format!("{}:/workspace:ro", working_dir_str)]
+                vec![format!("{working_dir_str}:/workspace:ro")]
             }
             SandboxPolicy::WorkspaceWrite => {
-                vec![format!("{}:/workspace:rw", working_dir_str)]
+                vec![format!("{working_dir_str}:/workspace:rw")]
             }
             SandboxPolicy::FullAccess => {
-                // Full access - mount more of the host
                 vec![
-                    format!("{}:/workspace:rw", working_dir_str),
+                    format!("{working_dir_str}:/workspace:rw"),
                     "/tmp:/tmp:rw".to_string(),
                 ]
             }
         };
 
-        let host_config = HostConfig {
+        binds.extend(config.extra_volumes.iter().cloned());
+
+        binds
+    }
+
+    fn build_capabilities(config: &SandboxConfig) -> (Vec<String>, Vec<String>) {
+        let cap_drop = vec!["ALL".to_string()];
+        let mut cap_add = vec!["CHOWN".to_string()];
+        if config.run_as_root {
+            cap_add.push("SYS_CHROOT".to_string());
+            if config.host_network {
+                cap_add.extend(["NET_RAW".to_string(), "NET_ADMIN".to_string()]);
+            }
+        }
+        (cap_drop, cap_add)
+    }
+
+    fn build_host_config(
+        binds: Vec<String>,
+        limits: &ResourceLimits,
+        config: &SandboxConfig,
+        auto_remove: bool,
+        readonly_rootfs: bool,
+    ) -> HostConfig {
+        let (cap_drop, cap_add) = Self::build_capabilities(config);
+        HostConfig {
             binds: Some(binds),
-            memory: Some((limits.memory_bytes) as i64),
+            memory: Some(limits.memory_bytes as i64),
             cpu_shares: Some(limits.cpu_shares as i64),
-            auto_remove: Some(true),
-            network_mode: Some("bridge".to_string()),
-            // Security: drop all capabilities and add back only what's needed
-            cap_drop: Some(vec!["ALL".to_string()]),
-            cap_add: Some(vec!["CHOWN".to_string()]),
-            // Prevent privilege escalation
+            auto_remove: Some(auto_remove),
+            network_mode: Some(if config.host_network {
+                "host".to_string()
+            } else {
+                "bridge".to_string()
+            }),
+            cap_drop: Some(cap_drop),
+            cap_add: Some(cap_add),
             security_opt: Some(vec!["no-new-privileges:true".to_string()]),
-            // Read-only root filesystem (workspace is still writable if policy allows)
-            readonly_rootfs: Some(policy != SandboxPolicy::FullAccess),
-            // Tmpfs mounts for /tmp and cargo cache
+            readonly_rootfs: Some(readonly_rootfs),
             tmpfs: Some(
                 [
                     ("/tmp".to_string(), "size=512M".to_string()),
@@ -469,36 +531,107 @@ impl ContainerRunner {
                 .collect(),
             ),
             ..Default::default()
-        };
+        }
+    }
 
-        let config = Config {
-            image: Some(self.image.clone()),
-            cmd: Some(vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                command.to_string(),
-            ]),
-            working_dir: Some("/workspace".to_string()),
-            env: Some(env_vec),
-            host_config: Some(host_config),
-            user: Some("1000:1000".to_string()), // Non-root user
-            ..Default::default()
-        };
+    fn container_user(config: &SandboxConfig) -> &'static str {
+        if config.run_as_root {
+            "0:0"
+        } else {
+            "1000:1000"
+        }
+    }
 
+    async fn register_container(
+        &self,
+        name_prefix: &str,
+        container_config: Config<String>,
+    ) -> Result<String> {
         let options = CreateContainerOptions {
-            name: format!("sandbox-{}", uuid::Uuid::new_v4()),
+            name: format!("{name_prefix}-{}", uuid::Uuid::new_v4()),
             ..Default::default()
         };
-
         let response = self
             .docker
-            .create_container(Some(options), config)
+            .create_container(Some(options), container_config)
             .await
             .map_err(|e| SandboxError::ContainerCreationFailed {
                 reason: e.to_string(),
             })?;
-
         Ok(response.id)
+    }
+
+    async fn create_container(
+        &self,
+        command: &str,
+        working_dir: &Path,
+        policy: SandboxPolicy,
+        limits: &ResourceLimits,
+        env: HashMap<String, String>,
+        config: &SandboxConfig,
+    ) -> Result<String> {
+        let working_dir_str = working_dir.display().to_string();
+        let env_vec = self.build_container_env(env, policy, config);
+        let binds = Self::build_container_binds(&working_dir_str, policy, config);
+        let host_config = Self::build_host_config(
+            binds,
+            limits,
+            config,
+            true,
+            policy != SandboxPolicy::FullAccess,
+        );
+
+        let container_config = Config {
+            image: Some(self.image.clone()),
+            entrypoint: Some(vec!["sh".to_string()]),
+            cmd: Some(vec!["-c".to_string(), command.to_string()]),
+            working_dir: Some("/workspace".to_string()),
+            env: Some(env_vec),
+            host_config: Some(host_config),
+            user: Some(Self::container_user(config).to_string()),
+            ..Default::default()
+        };
+
+        self.register_container("sandbox", container_config).await
+    }
+
+    /// Create a persistent session container.
+    ///
+    /// Unlike ephemeral containers, persistent containers:
+    /// - Run `sleep infinity` (kept alive for repeated exec calls)
+    /// - Have a writable root filesystem (allows package installs)
+    /// - Are NOT auto-removed (managed by SandboxManager::shutdown)
+    /// - Are labeled for identification by the container reaper
+    pub async fn create_persistent_container(
+        &self,
+        working_dir: &Path,
+        policy: SandboxPolicy,
+        limits: &ResourceLimits,
+        env: HashMap<String, String>,
+        config: &SandboxConfig,
+    ) -> Result<String> {
+        let working_dir_str = working_dir.display().to_string();
+        let env_vec = self.build_container_env(env, policy, config);
+        let binds = Self::build_container_binds(&working_dir_str, policy, config);
+        let host_config = Self::build_host_config(binds, limits, config, false, false);
+
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("ironclaw.persistent".to_string(), "true".to_string());
+
+        let container_config = Config {
+            image: Some(self.image.clone()),
+            entrypoint: Some(vec!["sleep".to_string()]),
+            cmd: Some(vec!["infinity".to_string()]),
+            working_dir: Some("/workspace".to_string()),
+            env: Some(env_vec),
+            host_config: Some(host_config),
+            user: Some(Self::container_user(config).to_string()),
+            labels: Some(labels),
+            ..Default::default()
+        };
+
+        self.register_container("sandbox-session", container_config)
+            .await
     }
 
     /// Wait for a container to complete and collect output.
@@ -778,6 +911,32 @@ mod tests {
             msg.contains("cannot resolve Dockerfile path"),
             "expected path resolution error, got: {msg}"
         );
+    }
+
+    #[test]
+    fn capabilities_restrict_net_to_host_network() {
+        use crate::sandbox::SandboxConfig;
+
+        // root + bridge: no NET_RAW/NET_ADMIN
+        let config = SandboxConfig {
+            run_as_root: true,
+            host_network: false,
+            ..Default::default()
+        };
+        let (_, cap_add) = ContainerRunner::build_capabilities(&config);
+        assert!(cap_add.contains(&"SYS_CHROOT".to_string()));
+        assert!(!cap_add.contains(&"NET_RAW".to_string()));
+        assert!(!cap_add.contains(&"NET_ADMIN".to_string()));
+
+        // root + host: NET_RAW/NET_ADMIN added
+        let config = SandboxConfig {
+            run_as_root: true,
+            host_network: true,
+            ..Default::default()
+        };
+        let (_, cap_add) = ContainerRunner::build_capabilities(&config);
+        assert!(cap_add.contains(&"NET_RAW".to_string()));
+        assert!(cap_add.contains(&"NET_ADMIN".to_string()));
     }
 
     #[tokio::test]

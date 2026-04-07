@@ -173,6 +173,11 @@ impl SandboxReaper {
 
             let labels = summary.labels.unwrap_or_default();
 
+            // Persistent session containers are managed by SandboxManager, not the reaper.
+            if labels.contains_key("ironclaw.persistent") {
+                continue;
+            }
+
             // Parse job_id from label (using configured label key for consistency)
             let job_id = match labels
                 .get(&self.config.container_label)

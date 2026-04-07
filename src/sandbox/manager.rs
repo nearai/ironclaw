@@ -29,13 +29,14 @@
 //! ```
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::RwLock;
 
 use bollard::Docker;
+use bollard::container::RemoveContainerOptions;
 
 use crate::sandbox::config::{ResourceLimits, SandboxConfig, SandboxPolicy};
 use crate::sandbox::container::{ContainerOutput, ContainerRunner, connect_docker};
@@ -80,12 +81,22 @@ impl From<ContainerOutput> for ExecOutput {
     }
 }
 
+/// State for a persistent session container.
+#[derive(Clone)]
+struct SessionContainer {
+    id: String,
+    /// Host path mounted at `/workspace` inside the container.
+    base_cwd: PathBuf,
+}
+
 /// Main sandbox manager.
 pub struct SandboxManager {
     config: SandboxConfig,
     proxy: Arc<RwLock<Option<HttpProxy>>>,
     docker: Arc<RwLock<Option<Docker>>>,
     initialized: std::sync::atomic::AtomicBool,
+    /// Container ID and base workspace path for persistent session mode.
+    session_container: Arc<RwLock<Option<SessionContainer>>>,
 }
 
 impl SandboxManager {
@@ -96,6 +107,7 @@ impl SandboxManager {
             proxy: Arc::new(RwLock::new(None)),
             docker: Arc::new(RwLock::new(None)),
             initialized: std::sync::atomic::AtomicBool::new(false),
+            session_container: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -160,8 +172,10 @@ impl SandboxManager {
 
         *self.docker.write().await = Some(docker);
 
-        // Start the network proxy if we're using a sandboxed policy
-        if self.config.policy.is_sandboxed() {
+        // Start the network proxy if we're using a sandboxed policy.
+        // Skip when host networking is enabled — the container shares the
+        // host's network namespace, so the proxy is unnecessary.
+        if self.config.policy.is_sandboxed() && !self.config.host_network {
             let proxy = NetworkProxyBuilder::from_config(&self.config)
                 .build_and_start(self.config.proxy_port)
                 .await?;
@@ -176,8 +190,19 @@ impl SandboxManager {
         Ok(())
     }
 
-    /// Shutdown the sandbox (stop proxy, clean up).
+    /// Shutdown the sandbox (stop proxy, remove session container, clean up).
     pub async fn shutdown(&self) {
+        // Remove persistent session container if one was created.
+        if let Some(session) = self.session_container.write().await.take()
+            && let Some(docker) = self.docker.read().await.as_ref()
+        {
+            let _ = Self::force_remove_container(docker, &session.id).await;
+            tracing::info!(
+                container = &session.id[..session.id.len().min(12)],
+                "Removed persistent session container"
+            );
+        }
+
         if let Some(proxy) = self.proxy.write().await.take() {
             proxy.stop().await;
         }
@@ -236,43 +261,16 @@ impl SandboxManager {
             self.initialize().await?;
         }
 
-        // Retry transient container failures (Docker daemon glitches, container
-        // creation races) up to MAX_SANDBOX_RETRIES times with exponential backoff.
-        const MAX_SANDBOX_RETRIES: u32 = 2;
-        let mut last_err: Option<SandboxError> = None;
-
-        for attempt in 0..=MAX_SANDBOX_RETRIES {
-            if attempt > 0 {
-                let delay = std::time::Duration::from_secs(1 << attempt); // 2s, 4s
-                tracing::warn!(
-                    attempt = attempt + 1,
-                    max_attempts = MAX_SANDBOX_RETRIES + 1,
-                    delay_secs = delay.as_secs(),
-                    "Retrying sandbox execution after transient failure"
-                );
-                tokio::time::sleep(delay).await;
-            }
-
-            match self
-                .try_execute_in_container(command, cwd, policy, env.clone())
-                .await
-            {
-                Ok(output) => return Ok(output),
-                Err(e) if is_transient_sandbox_error(&e) => {
-                    tracing::warn!(
-                        attempt = attempt + 1,
-                        error = %e,
-                        "Transient sandbox error, will retry"
-                    );
-                    last_err = Some(e);
-                }
-                Err(e) => return Err(e),
-            }
+        // Persistent mode: reuse a long-lived session container.
+        if self.config.persistent {
+            return self
+                .retry_transient(|| self.execute_in_session_container(command, cwd, env.clone()))
+                .await;
         }
 
-        Err(last_err.unwrap_or_else(|| SandboxError::ExecutionFailed {
-            reason: "all retry attempts exhausted".to_string(),
-        }))
+        // Ephemeral mode: one container per command, with transient retry.
+        self.retry_transient(|| self.try_execute_in_container(command, cwd, policy, env.clone()))
+            .await
     }
 
     /// Single attempt at container execution (no retry logic).
@@ -283,30 +281,12 @@ impl SandboxManager {
         policy: SandboxPolicy,
         env: HashMap<String, String>,
     ) -> Result<ExecOutput> {
-        let proxy_port = if let Some(proxy) = self.proxy.read().await.as_ref() {
-            proxy.addr().await.map(|a| a.port()).unwrap_or(0)
-        } else {
-            0
-        };
+        let runner = self.make_runner().await?;
+        let limits = self.resource_limits();
 
-        let docker =
-            self.docker
-                .read()
-                .await
-                .clone()
-                .ok_or_else(|| SandboxError::DockerNotAvailable {
-                    reason: "Docker connection not initialized".to_string(),
-                })?;
-        let runner = ContainerRunner::new(docker, self.config.image.clone(), proxy_port);
-
-        let limits = ResourceLimits {
-            memory_bytes: self.config.memory_limit_mb * 1024 * 1024,
-            cpu_shares: self.config.cpu_shares,
-            timeout: self.config.timeout,
-            max_output_bytes: 64 * 1024,
-        };
-
-        let container_output = runner.execute(command, cwd, policy, &limits, env).await?;
+        let container_output = runner
+            .execute(command, cwd, policy, &limits, env, &self.config)
+            .await?;
         Ok(container_output.into())
     }
 
@@ -406,6 +386,210 @@ impl SandboxManager {
             None
         }
     }
+
+    /// Whether persistent sandbox mode is enabled.
+    pub fn is_persistent(&self) -> bool {
+        self.config.persistent
+    }
+
+    async fn require_docker(&self) -> Result<Docker> {
+        self.docker
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| SandboxError::DockerNotAvailable {
+                reason: "Docker connection not initialized".to_string(),
+            })
+    }
+
+    fn resource_limits(&self) -> ResourceLimits {
+        ResourceLimits {
+            memory_bytes: self.config.memory_limit_mb * 1024 * 1024,
+            cpu_shares: self.config.cpu_shares,
+            timeout: self.config.timeout,
+            max_output_bytes: 64 * 1024,
+        }
+    }
+
+    /// Retry an async operation on transient sandbox errors with exponential backoff.
+    async fn retry_transient<F, Fut>(&self, mut op: F) -> Result<ExecOutput>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<ExecOutput>>,
+    {
+        const MAX_RETRIES: u32 = 2;
+        let mut last_err: Option<SandboxError> = None;
+
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                let delay = Duration::from_secs(1 << attempt); // 2s, 4s
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    max_attempts = MAX_RETRIES + 1,
+                    delay_secs = delay.as_secs(),
+                    "Retrying sandbox execution after transient failure"
+                );
+                tokio::time::sleep(delay).await;
+            }
+
+            match op().await {
+                Ok(output) => return Ok(output),
+                Err(e) if is_transient_sandbox_error(&e) => {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        error = %e,
+                        "Transient sandbox error, will retry"
+                    );
+                    last_err = Some(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| SandboxError::ExecutionFailed {
+            reason: "all retry attempts exhausted".to_string(),
+        }))
+    }
+
+    async fn make_runner(&self) -> Result<ContainerRunner> {
+        let docker = self.require_docker().await?;
+        let proxy_port = self.proxy_port().await.unwrap_or(0);
+        Ok(ContainerRunner::new(
+            docker,
+            self.config.image.clone(),
+            proxy_port,
+        ))
+    }
+
+    /// Ensure the persistent session container is running, creating it if needed.
+    ///
+    /// Uses a read-lock fast path when the container is already running.
+    /// Falls back to a write-lock to create or recreate the container.
+    async fn ensure_session_container(
+        &self,
+        cwd: &Path,
+        env: HashMap<String, String>,
+    ) -> Result<SessionContainer> {
+        let docker = self.require_docker().await?;
+
+        // Fast path: read-lock to check existing container.
+        {
+            let guard = self.session_container.read().await;
+            if let Some(session) = guard.as_ref()
+                && Self::is_container_running(&docker, &session.id).await
+            {
+                return Ok(session.clone());
+            }
+        }
+
+        // Slow path: write-lock to create or recreate.
+        let mut guard = self.session_container.write().await;
+
+        // Double-check: another task may have recreated while we waited for the lock.
+        if let Some(session) = guard.as_ref() {
+            if Self::is_container_running(&docker, &session.id).await {
+                return Ok(session.clone());
+            }
+
+            tracing::warn!(
+                container = &session.id[..session.id.len().min(12)],
+                "Persistent session container died; state will be lost. Recreating."
+            );
+            let _ = Self::force_remove_container(&docker, &session.id).await;
+        }
+
+        // Create a new session container.
+        let proxy_port = self.proxy_port().await.unwrap_or(0);
+        let runner = ContainerRunner::new(docker.clone(), self.config.image.clone(), proxy_port);
+        let limits = self.resource_limits();
+
+        let container_id = runner
+            .create_persistent_container(cwd, self.config.policy, &limits, env, &self.config)
+            .await?;
+
+        docker
+            .start_container(
+                &container_id,
+                None::<bollard::container::StartContainerOptions<String>>,
+            )
+            .await
+            .map_err(|e| SandboxError::ContainerStartFailed {
+                reason: e.to_string(),
+            })?;
+
+        tracing::info!(
+            container = &container_id[..container_id.len().min(12)],
+            "Created persistent session container"
+        );
+
+        let session = SessionContainer {
+            id: container_id,
+            base_cwd: cwd.to_path_buf(),
+        };
+        *guard = Some(session.clone());
+        Ok(session)
+    }
+
+    /// Check whether a container is still running via the Docker API.
+    async fn is_container_running(docker: &Docker, container_id: &str) -> bool {
+        match docker.inspect_container(container_id, None).await {
+            Ok(info) => info.state.and_then(|s| s.running).unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+
+    /// Force-remove a container, ignoring errors.
+    async fn force_remove_container(
+        docker: &Docker,
+        container_id: &str,
+    ) -> std::result::Result<(), bollard::errors::Error> {
+        docker
+            .remove_container(
+                container_id,
+                Some(RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+    }
+
+    /// Execute a command in the persistent session container.
+    async fn execute_in_session_container(
+        &self,
+        command: &str,
+        cwd: &Path,
+        env: HashMap<String, String>,
+    ) -> Result<ExecOutput> {
+        let env_vec: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let session = self.ensure_session_container(cwd, env).await?;
+        let runner = self.make_runner().await?;
+        let limits = self.resource_limits();
+
+        let working_dir = map_host_to_container_path(cwd, &session.base_cwd);
+
+        let container_output = runner
+            .exec_in_container(&session.id, command, &working_dir, &limits, &env_vec)
+            .await?;
+        Ok(container_output.into())
+    }
+}
+
+/// Map a host cwd to a container working directory relative to `/workspace`.
+///
+/// The container mounts `base_cwd` at `/workspace`, so a host path like
+/// `/home/user/project/src` becomes `/workspace/src`. Paths outside `base_cwd`
+/// fall back to `/workspace`.
+fn map_host_to_container_path(cwd: &Path, base_cwd: &Path) -> String {
+    cwd.strip_prefix(base_cwd)
+        .map(|rel| {
+            if rel.as_os_str().is_empty() {
+                "/workspace".to_string()
+            } else {
+                format!("/workspace/{}", rel.display())
+            }
+        })
+        .unwrap_or_else(|_| "/workspace".to_string())
 }
 
 impl Drop for SandboxManager {
@@ -488,6 +672,36 @@ impl SandboxManagerBuilder {
     /// Add domains to the network allowlist.
     pub fn allow_domains(mut self, domains: Vec<String>) -> Self {
         self.config.network_allowlist.extend(domains);
+        self
+    }
+
+    /// Enable persistent session container mode.
+    pub fn persistent(mut self, persistent: bool) -> Self {
+        self.config.persistent = persistent;
+        self
+    }
+
+    /// Set extra bind-mount volumes.
+    pub fn extra_volumes(mut self, volumes: Vec<String>) -> Self {
+        self.config.extra_volumes = volumes;
+        self
+    }
+
+    /// Enable host networking.
+    pub fn host_network(mut self, host_network: bool) -> Self {
+        self.config.host_network = host_network;
+        self
+    }
+
+    /// Run as root inside the container.
+    pub fn run_as_root(mut self, run_as_root: bool) -> Self {
+        self.config.run_as_root = run_as_root;
+        self
+    }
+
+    /// Set extra environment variables.
+    pub fn extra_env(mut self, extra_env: Vec<String>) -> Self {
+        self.config.extra_env = extra_env;
         self
     }
 
@@ -693,5 +907,66 @@ mod tests {
         assert!(!super::is_transient_sandbox_error(&SandboxError::Config {
             reason: "bad config".to_string()
         }));
+    }
+
+    #[test]
+    fn is_persistent_returns_config_value() {
+        let manager = SandboxManagerBuilder::new().persistent(false).build();
+        assert!(!manager.is_persistent());
+
+        let manager = SandboxManagerBuilder::new().persistent(true).build();
+        assert!(manager.is_persistent());
+    }
+
+    #[test]
+    fn builder_persistent_fields() {
+        let manager = SandboxManagerBuilder::new()
+            .persistent(true)
+            .extra_volumes(vec!["/data:/data:ro".to_string()])
+            .host_network(true)
+            .run_as_root(true)
+            .extra_env(vec!["FOO=bar".to_string()])
+            .build();
+
+        assert!(manager.config.persistent);
+        assert_eq!(manager.config.extra_volumes, vec!["/data:/data:ro"]);
+        assert!(manager.config.host_network);
+        assert!(manager.config.run_as_root);
+        assert_eq!(manager.config.extra_env, vec!["FOO=bar"]);
+    }
+
+    #[test]
+    fn working_dir_mapping_subdirectory() {
+        let base = PathBuf::from("/home/user/project");
+        let cwd = PathBuf::from("/home/user/project/src/lib");
+        assert_eq!(
+            super::map_host_to_container_path(&cwd, &base),
+            "/workspace/src/lib"
+        );
+    }
+
+    #[test]
+    fn working_dir_mapping_exact_match() {
+        let base = PathBuf::from("/home/user/project");
+        let cwd = PathBuf::from("/home/user/project");
+        assert_eq!(super::map_host_to_container_path(&cwd, &base), "/workspace");
+    }
+
+    #[test]
+    fn working_dir_mapping_outside_base() {
+        let base = PathBuf::from("/home/user/project");
+        let cwd = PathBuf::from("/tmp/other");
+        assert_eq!(super::map_host_to_container_path(&cwd, &base), "/workspace");
+    }
+
+    #[test]
+    fn session_container_clone() {
+        let session = super::SessionContainer {
+            id: "abc123".to_string(),
+            base_cwd: PathBuf::from("/home/user/project"),
+        };
+        let cloned = session.clone();
+        assert_eq!(cloned.id, "abc123");
+        assert_eq!(cloned.base_cwd, PathBuf::from("/home/user/project"));
     }
 }
