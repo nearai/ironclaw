@@ -81,9 +81,9 @@ impl ConversationManager {
     /// Restore persisted conversations for a user into the in-memory index.
     pub async fn bootstrap_user(&self, user_id: &str) -> Result<usize, EngineError> {
         let conversations = self.store.list_conversations(user_id).await?;
-        let count = conversations.len();
         let mut convs = self.conversations.write().await;
         let mut index = self.channel_user_index.write().await;
+        let mut inserted = 0usize;
 
         for conversation in conversations {
             if convs.contains_key(&conversation.id) {
@@ -94,9 +94,10 @@ impl ConversationManager {
                 conversation.id,
             );
             convs.insert(conversation.id, Arc::new(Mutex::new(conversation)));
+            inserted += 1;
         }
 
-        Ok(count)
+        Ok(inserted)
     }
 
     /// Get or create a conversation for a channel+user pair.
@@ -205,7 +206,6 @@ impl ConversationManager {
         // NOTE: do NOT add the user entry yet — it will be added after the thread
         // operation succeeds to avoid orphaned entries if the async op fails.
         let active_thread_ids = conv.active_threads.clone();
-        let entries_snapshot = conv.entries.clone();
         let channel_name = conv.channel.clone();
 
         // Async I/O to find the active foreground thread — allowed here because
@@ -243,9 +243,9 @@ impl ConversationManager {
             }
             None => {
                 // Build conversation history from prior entries for context continuity.
-                // The snapshot was taken before the current user entry was appended, so
-                // all entries in the snapshot are prior-turn history.
-                let history = build_history_from_entries(&entries_snapshot);
+                // Clone here (None branch only) — inject/resume paths don't need history,
+                // so deferring avoids an O(entries) allocation on those fast paths.
+                let history = build_history_from_entries(&conv.entries);
 
                 // Spawn new foreground thread with conversation history.
                 let thread_id = self
@@ -407,20 +407,25 @@ impl ConversationManager {
         Some(arc.lock().await.clone())
     }
 
-    /// Returns conversations for the given user. This is a best-effort snapshot:
-    /// each conversation is locked and read individually, so concurrent mutations
-    /// between locks may be partially visible. Not a point-in-time consistent view.
+    /// Returns conversations for the given user.
+    ///
+    /// Uses `channel_user_index` to pre-filter by user before acquiring any
+    /// per-conversation locks, keeping lock scope minimal. This is a best-effort
+    /// snapshot: each conversation is locked and read individually, so concurrent
+    /// mutations between locks may be partially visible.
     pub async fn list_conversations(&self, user_id: &str) -> Vec<ConversationSurface> {
         let arcs: Vec<Arc<Mutex<ConversationSurface>>> = {
             let convs = self.conversations.read().await;
-            convs.values().cloned().collect()
+            let index = self.channel_user_index.read().await;
+            index
+                .iter()
+                .filter(|((_, uid), _)| uid == user_id)
+                .filter_map(|(_, id)| convs.get(id).cloned())
+                .collect()
         };
-        let mut result = Vec::new();
+        let mut result = Vec::with_capacity(arcs.len());
         for arc in arcs {
-            let conv = arc.lock().await;
-            if conv.user_id == user_id {
-                result.push(conv.clone());
-            }
+            result.push(arc.lock().await.clone());
         }
         result
     }
