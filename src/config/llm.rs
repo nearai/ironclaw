@@ -689,6 +689,19 @@ mod tests {
         parse_extra_headers_with_key(val, "TEST_HEADERS")
     }
 
+    /// Stub NearAI URLs so `validate_base_url` doesn't attempt DNS lookups
+    /// on the default `private.near.ai` / `cloud-api.near.ai` endpoints.
+    /// Call this *before* setting test-specific values so that specific
+    /// overrides can take effect afterward.
+    /// Must be called under `ENV_MUTEX`.
+    fn stub_nearai_urls() {
+        // SAFETY: Only called under ENV_MUTEX in tests.
+        unsafe {
+            std::env::set_var("NEARAI_AUTH_URL", "http://localhost:0");
+            std::env::set_var("NEARAI_BASE_URL", "http://localhost:0");
+        }
+    }
+
     /// Clear all openai-compatible-related env vars.
     fn clear_openai_compatible_env() {
         // SAFETY: Only called under ENV_MUTEX in tests.
@@ -697,6 +710,7 @@ mod tests {
             std::env::remove_var("LLM_BASE_URL");
             std::env::remove_var("LLM_MODEL");
         }
+        stub_nearai_urls();
     }
 
     #[test]
@@ -842,6 +856,7 @@ mod tests {
             std::env::remove_var("OLLAMA_BASE_URL");
             std::env::remove_var("OLLAMA_MODEL");
         }
+        stub_nearai_urls();
     }
 
     #[test]
@@ -920,6 +935,7 @@ mod tests {
             std::env::remove_var("GROQ_API_KEY");
             std::env::remove_var("GROQ_MODEL");
         }
+        stub_nearai_urls();
 
         let settings = Settings {
             llm_backend: Some("groq".to_string()),
@@ -945,6 +961,7 @@ mod tests {
             std::env::remove_var("TINFOIL_API_KEY");
             std::env::remove_var("TINFOIL_MODEL");
         }
+        stub_nearai_urls();
 
         let settings = Settings {
             llm_backend: Some("tinfoil".to_string()),
@@ -973,6 +990,7 @@ mod tests {
             std::env::remove_var("ZAI_API_KEY");
             std::env::remove_var("ZAI_MODEL");
         }
+        stub_nearai_urls();
 
         let settings = Settings {
             llm_backend: Some("bigmodel".to_string()),
@@ -1001,6 +1019,7 @@ mod tests {
                 "Copilot-Integration-Id:custom-chat,X-Test:enabled",
             );
         }
+        stub_nearai_urls();
 
         let settings = Settings::default();
 
@@ -1044,6 +1063,7 @@ mod tests {
         unsafe {
             std::env::remove_var("LLM_BACKEND");
         }
+        stub_nearai_urls();
 
         let settings = Settings::default();
         let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
@@ -1110,6 +1130,7 @@ mod tests {
             unsafe {
                 std::env::set_var("LLM_BACKEND", alias);
             }
+            stub_nearai_urls();
             let settings = Settings::default();
             let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
             assert_eq!(
@@ -1185,6 +1206,7 @@ mod tests {
             std::env::remove_var("ANTHROPIC_MODEL");
             std::env::remove_var("ANTHROPIC_BASE_URL");
         }
+        stub_nearai_urls();
     }
 
     #[test]
@@ -1375,6 +1397,7 @@ mod tests {
         unsafe {
             std::env::remove_var("LLM_REQUEST_TIMEOUT_SECS");
         }
+        stub_nearai_urls();
         let config = LlmConfig::resolve(&Settings::default()).expect("resolve");
         assert_eq!(config.request_timeout_secs, 120);
     }
@@ -1386,6 +1409,7 @@ mod tests {
         unsafe {
             std::env::set_var("LLM_REQUEST_TIMEOUT_SECS", "300");
         }
+        stub_nearai_urls();
         let config = LlmConfig::resolve(&Settings::default()).expect("resolve");
         assert_eq!(config.request_timeout_secs, 300);
         // SAFETY: Cleanup
@@ -1404,6 +1428,7 @@ mod tests {
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("LLM_MODEL");
         }
+        stub_nearai_urls();
 
         let settings = Settings {
             llm_backend: Some("myprovider".to_string()),
@@ -1479,6 +1504,7 @@ mod tests {
             std::env::remove_var("OPENAI_CODEX_MODEL");
             std::env::remove_var("OPENAI_MODEL");
         }
+        stub_nearai_urls();
     }
 
     #[test]
@@ -1489,6 +1515,7 @@ mod tests {
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("GROQ_MODEL");
         }
+        stub_nearai_urls();
 
         let mut overrides = std::collections::HashMap::new();
         overrides.insert(
@@ -1541,6 +1568,7 @@ mod tests {
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("GROQ_MODEL");
         }
+        stub_nearai_urls();
 
         let mut overrides = std::collections::HashMap::new();
         overrides.insert(
@@ -1599,6 +1627,7 @@ mod tests {
             std::env::remove_var("GROQ_API_KEY");
             std::env::remove_var("GROQ_MODEL");
         }
+        stub_nearai_urls();
 
         let mut overrides = std::collections::HashMap::new();
         overrides.insert(
@@ -1738,6 +1767,7 @@ mod tests {
             std::env::set_var("GROQ_API_KEY", "gsk_from_env");
             std::env::remove_var("GROQ_MODEL");
         }
+        stub_nearai_urls();
 
         let mut overrides = std::collections::HashMap::new();
         overrides.insert(
@@ -1780,6 +1810,7 @@ mod tests {
             std::env::remove_var("LLM_BACKEND");
             std::env::set_var("GROQ_MODEL", "model-from-env");
         }
+        stub_nearai_urls();
 
         let mut overrides = std::collections::HashMap::new();
         overrides.insert(
@@ -1817,6 +1848,7 @@ mod tests {
             std::env::remove_var("LLM_BACKEND");
             std::env::set_var("LLM_MODEL", "model-from-env");
         }
+        stub_nearai_urls();
 
         let settings = Settings {
             llm_backend: Some("myprovider".to_string()),
@@ -1882,6 +1914,7 @@ mod tests {
             std::env::remove_var("LLM_BACKEND");
             std::env::set_var("NEARAI_MODEL", "nearai-from-env");
         }
+        stub_nearai_urls();
 
         let settings = Settings {
             llm_backend: Some("nearai".to_string()),
@@ -1909,6 +1942,7 @@ mod tests {
             std::env::remove_var("LLM_BACKEND");
             std::env::set_var("NEARAI_MODEL", "model-from-env");
         }
+        stub_nearai_urls();
 
         let mut overrides = std::collections::HashMap::new();
         overrides.insert(
@@ -1945,6 +1979,7 @@ mod tests {
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("NEARAI_MODEL");
         }
+        stub_nearai_urls();
 
         let mut overrides = std::collections::HashMap::new();
         overrides.insert(
@@ -1972,6 +2007,7 @@ mod tests {
     #[test]
     fn nearai_override_base_url_wins_over_env() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -2009,6 +2045,7 @@ mod tests {
     #[test]
     fn nearai_env_base_url_used_when_no_override() {
         let _guard = lock_env();
+        stub_nearai_urls();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -2041,6 +2078,7 @@ mod tests {
             std::env::remove_var("LLM_BACKEND");
             std::env::set_var("NEARAI_API_KEY", "key-from-env");
         }
+        stub_nearai_urls();
 
         let mut overrides = std::collections::HashMap::new();
         overrides.insert(
@@ -2076,12 +2114,23 @@ mod tests {
 
     #[test]
     fn nearai_base_url_auto_selects_when_no_override_or_env() {
+        use std::net::ToSocketAddrs;
+
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("NEARAI_BASE_URL");
             std::env::remove_var("NEARAI_API_KEY");
+            // Stub only NEARAI_AUTH_URL to avoid DNS lookup; leave
+            // NEARAI_BASE_URL unset so the auto-select logic is tested.
+            std::env::set_var("NEARAI_AUTH_URL", "http://localhost:0");
+        }
+
+        // This test relies on DNS resolution of private.near.ai / cloud-api.near.ai.
+        // Skip gracefully in offline/sandboxed environments.
+        if ("private.near.ai", 443_u16).to_socket_addrs().is_err() {
+            return;
         }
 
         // No API key → should default to private.near.ai
@@ -2129,6 +2178,7 @@ mod tests {
             std::env::remove_var("GROQ_API_KEY");
             std::env::remove_var("GROQ_MODEL");
         }
+        stub_nearai_urls();
 
         let mut overrides = std::collections::HashMap::new();
         overrides.insert(
@@ -2176,6 +2226,7 @@ mod tests {
             std::env::remove_var("LLM_BACKEND");
             std::env::set_var("NEARAI_MODEL", "env-model");
         }
+        stub_nearai_urls();
 
         let settings = Settings {
             llm_backend: Some("nearai".to_string()),

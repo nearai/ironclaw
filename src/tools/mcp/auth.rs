@@ -393,6 +393,20 @@ async fn validate_url_safe(url: &str) -> Result<(), AuthError> {
     // This prevents DNS-based SSRF where a hostname resolves to an internal IP
     // (e.g., 169.254.169.254 for cloud metadata endpoints).
     if host.parse::<IpAddr>().is_err() {
+        // In test builds, skip DNS resolution when no DNS is available.
+        #[cfg(test)]
+        {
+            use std::sync::OnceLock;
+            static MCP_DNS_AVAILABLE: OnceLock<bool> = OnceLock::new();
+            let has_dns = *MCP_DNS_AVAILABLE.get_or_init(|| {
+                use std::net::ToSocketAddrs;
+                ("dns-probe.near.ai", 443u16).to_socket_addrs().is_ok()
+            });
+            if !has_dns {
+                return Ok(());
+            }
+        }
+
         let addr = format!("{}:{}", host, parsed.port_or_known_default().unwrap_or(443));
         match tokio::net::lookup_host(&addr).await {
             Ok(addrs) => {

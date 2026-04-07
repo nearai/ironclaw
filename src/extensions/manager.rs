@@ -9481,6 +9481,10 @@ mod tests {
 
     #[test]
     fn test_telegram_token_colon_preserved_in_validation_url() {
+        // telegram_bot_api_url reads TELEGRAM_TEST_API_BASE_ENV, so hold the
+        // env mutex to prevent concurrent tests from setting the override.
+        let _guard = crate::config::helpers::lock_env();
+
         // Regression: Telegram tokens (format: numeric_id:alphanumeric_string) must NOT
         // have their colon URL-encoded to %3A, as this breaks the validation endpoint.
         // Previously: form_urlencoded::byte_serialize encoded the token, causing 404s.

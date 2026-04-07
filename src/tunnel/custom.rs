@@ -246,10 +246,16 @@ mod tests {
 
     #[tokio::test]
     async fn health_with_unreachable_url_is_false() {
-        // Use RFC 5737 TEST-NET-1 (192.0.2.0/24) for reliable failure even behind proxies.
+        // Use localhost on an unbound port to reliably get "connection refused"
+        // even when an HTTP proxy intercepts external traffic and returns a
+        // valid HTTP response (e.g. 403), which would make `send().is_ok()`
+        // return true.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind for port discovery");
+        let port = listener.local_addr().unwrap().port();
+        drop(listener); // release the port so nothing is listening
         let tunnel = CustomTunnel::new(
             "sleep 1".into(),
-            Some("http://192.0.2.1:9999/healthz".into()),
+            Some(format!("http://127.0.0.1:{port}/healthz")),
             None,
         );
         assert!(
