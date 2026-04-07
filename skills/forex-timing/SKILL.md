@@ -340,7 +340,7 @@ FINAL(bars)
 Recommend whether to transfer USD→INR now or wait, based on volatility regime, RSI(14), and DXY direction.  
 **USD/INR calibrated only.**
 
-**Parameters**: `from_currency` (e.g. `"USD"`), `to_currency` (e.g. `"INR"`).
+**Parameters**: `from_currency` (e.g. `"USD"`), `to_currency` (e.g. `"INR"`), `amount` (optional, number of units of `from_currency` the user intends to send — used to compute `could_save`).
 
 ```python
 # After helpers above:
@@ -381,9 +381,12 @@ hr      = hit_rate(vb, rb, dxy_dir if dxy_dir != "unknown" else None)
 
 current_rate = closes[-1]
 target_rate, projection = compute_cone(current_rate, daily_vol, vb, today_day)
-recommend = "now" if hr < 40.0 else "wait"
+recommend = "now" if hr < 45.0 else "wait"
 
 historical = [{"date": b["date"], "close": b["close"]} for b in bars[-30:]]
+
+amount = amount if isinstance(amount, (int, float)) else None
+could_save = round((target_rate - current_rate) * amount, 2) if amount is not None else None
 
 action_verb = "Transfer now" if recommend == "now" else "Wait — hold off"
 FINAL({
@@ -391,6 +394,7 @@ FINAL({
         f"{action_verb}. USD/INR is at {current_rate:.4f}; target {round(target_rate, 4):.4f}. "
         f"Regime: {vb} volatility, RSI {rsi_val} ({rb}), DXY {dxy_dir}. "
         f"Hit-rate for this regime: {round(hr, 1)}%."
+        + (f" If you wait, you could get ₹{could_save:,.2f} more on your transfer." if recommend == "wait" and could_save and could_save > 0 else "")
     ),
     "plot": {
         "historical":    historical,
@@ -403,6 +407,7 @@ FINAL({
         "dxy_direction": dxy_dir,
         "hit_rate_pct":  round(hr, 1),
         "recommend":     recommend,
+        "could_save":    could_save,
     },
 })
 ```

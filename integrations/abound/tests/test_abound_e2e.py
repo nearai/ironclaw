@@ -151,7 +151,7 @@ try:
     check("has output", len(response.output) > 0)
 
     agent_text = extract_agent_text(response)
-    print(f"  Agent response ({len(agent_text)} chars): {agent_text[:400]}")
+    print(f"  Agent response ({len(agent_text)} chars): {agent_text}")
 
     has_analysis = any(term in agent_text.lower() for term in [
         "wait", "now", "rate", "inr", "volatility", "rsi", "hit rate", "recommend",
