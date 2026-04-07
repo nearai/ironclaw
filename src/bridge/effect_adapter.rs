@@ -832,6 +832,7 @@ impl EffectBridgeAdapter {
                 let error_msg = format!("Tool '{}' failed: {}", lookup_name, e);
                 if error_msg.contains("authentication_required")
                     && let Some(cred_name) = extract_credential_name(&error_msg)
+                    && self.is_known_credential(&cred_name)
                 {
                     tracing::warn!(
                         credential = %cred_name,
@@ -863,6 +864,20 @@ impl EffectBridgeAdapter {
                     duration,
                 })
             }
+        }
+    }
+
+    /// Defense against credential-name injection: a tool can fabricate an
+    /// `authentication_required` error containing an attacker-chosen
+    /// `credential_name` to phish the user. We only honor the gate request
+    /// when the name corresponds to a credential the host has actually
+    /// registered. If the registry isn't wired (e.g., test harnesses without
+    /// credential injection), fall back to the existing behavior so we don't
+    /// regress unrelated callers.
+    fn is_known_credential(&self, credential_name: &str) -> bool {
+        match self.tools.credential_registry() {
+            Some(registry) => registry.has_secret(credential_name),
+            None => true,
         }
     }
 }

@@ -142,6 +142,23 @@ impl SharedCredentialRegistry {
         oauth_guard.retain(|name, _| !secret_names.contains(name));
     }
 
+    /// Check whether `secret_name` is registered. Used to validate
+    /// credential names extracted from tool error strings before treating
+    /// them as a real auth gate request — defends against tools fabricating
+    /// `credential_name` values to phish the user.
+    pub fn has_secret(&self, secret_name: &str) -> bool {
+        let guard = match self.mappings.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during has_secret; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+        guard.iter().any(|m| m.secret_name == secret_name)
+    }
+
     /// Check if any credential mapping matches this host (sync, for requires_approval).
     pub fn has_credentials_for_host(&self, host: &str) -> bool {
         let guard = match self.mappings.read() {

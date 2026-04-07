@@ -2286,7 +2286,7 @@ async fn await_thread_outcome(
 
                 // Extract credential name from the response text and validate
                 // it against the expected pattern (alphanumeric + underscores).
-                let cred_name = text
+                let parsed_cred_name = text
                     .split("credential_name")
                     .nth(1)
                     .and_then(|s| {
@@ -2300,8 +2300,28 @@ async fn await_thread_outcome(
                             && name.len() <= 64
                             && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                     })
-                    .unwrap_or("unknown")
-                    .to_string();
+                    .map(|s| s.to_string());
+
+                // Defense against credential-name injection: only honor a
+                // fallback auth gate when the parsed name is actually a
+                // registered credential. A tool that fabricates an
+                // `authentication_required` message with a chosen credential
+                // name must not be able to coerce the user into providing an
+                // unrelated secret. Test/embed harnesses without a credential
+                // registry preserve existing behavior.
+                let Some(cred_name) = parsed_cred_name.filter(|name| {
+                    agent
+                        .tools()
+                        .credential_registry()
+                        .is_none_or(|reg| reg.has_secret(name))
+                }) else {
+                    tracing::warn!(
+                        thread_id = %thread_id,
+                        "text-based auth fallback rejected unknown or missing credential name from tool output"
+                    );
+                    // Hand the original response back without inserting a gate.
+                    return Ok(Some(text.clone()));
+                };
 
                 // Look up setup instructions via AuthManager (or fall back to inline lookup)
                 let setup_hint = state
