@@ -1033,7 +1033,7 @@ impl WasmChannel {
 
     /// Load broadcast metadata from settings store on startup.
     ///
-    /// # Legacy migration (remove after ownership model rollout — see #2069)
+    /// # Legacy migration (remove after ownership model rollout — tracked in #2100)
     ///
     /// If no metadata is found under `self.owner_scope_id`, a second lookup
     /// under `"default"` is attempted for backward compatibility with instances
@@ -1054,7 +1054,7 @@ impl WasmChannel {
                     );
                 }
                 Ok(_) => {
-                    // LEGACY MIGRATION: remove after ownership model rollout — see #2069
+                    // LEGACY MIGRATION: remove after ownership model rollout — tracked in #2100
                     if self.owner_scope_id != "default" {
                         match store
                             .get_setting("default", &self.broadcast_metadata_key())
@@ -3132,7 +3132,7 @@ fn websocket_processing_queue_path(channel_name: &str) -> String {
     format!("channels/{channel_name}/{WEBSOCKET_EVENT_PROCESSING_QUEUE_RELATIVE_PATH}")
 }
 
-pub(crate) async fn resolve_websocket_identify_message(
+async fn resolve_websocket_identify_message(
     config: &WebsocketRuntimeConfig,
     store: Option<&(dyn SecretsStore + Send + Sync)>,
     owner_scope_id: &str,
@@ -4197,9 +4197,9 @@ mod tests {
         WebsocketRuntimeConfig, build_discord_gateway_presence_update,
         build_websocket_identify_message, build_websocket_resume_message,
         discord_gateway_presence_status, drain_guest_logs, parse_websocket_invalid_session,
-        parse_websocket_ready_session, resolve_websocket_identify_message,
-        should_warn_on_heartbeat_interval, uses_owner_broadcast_target,
-        websocket_heartbeat_sleep_duration, websocket_reconnect_backoff,
+        parse_websocket_ready_session, should_warn_on_heartbeat_interval,
+        uses_owner_broadcast_target, websocket_heartbeat_sleep_duration,
+        websocket_reconnect_backoff,
     };
     use crate::pairing::PairingStore;
     use crate::testing::credentials::TEST_TELEGRAM_BOT_TOKEN;
@@ -4312,6 +4312,7 @@ mod tests {
     /// not hardcoded "default".
     #[tokio::test]
     async fn test_resolve_websocket_identify_message_uses_owner_scope() {
+        use super::resolve_websocket_identify_message;
         use crate::secrets::SecretsStore;
         use crate::testing::credentials::test_secrets_store;
 

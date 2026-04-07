@@ -1559,6 +1559,12 @@ async fn resolve_host_credentials(
                     mapping.secret_name, user_id
                 )));
             }
+            Err(crate::secrets::SecretError::AccessDenied) => {
+                return Err(ToolError::NotAuthorized(format!(
+                    "access denied to credential '{}' for user '{}'",
+                    mapping.secret_name, user_id
+                )));
+            }
             Err(e) => {
                 return Err(ToolError::ExecutionFailed(format!(
                     "failed to resolve credential '{}' for user '{}': {e}",
