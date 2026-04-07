@@ -188,7 +188,8 @@ impl Tool for MemorySearchTool {
     }
 
     fn requires_sanitization(&self) -> bool {
-        false // Internal memory, trusted content
+        true // Memory content may originate from external sources (web fetch,
+             // file read, integrations) and must be scanned before reaching the LLM.
     }
 }
 
