@@ -1,0 +1,23 @@
+{
+  "name": "hermes",
+  "description": "Hermes reasoning engine — NousResearch multi-model AI for deep reasoning, code generation, and analysis tasks",
+  "version": "0.1.0",
+  "kind": "WasmTool",
+  "source": {
+    "repository": "https://github.com/jmiller18899-lab/hermes-agent",
+    "directory": "tools-src/hermes"
+  },
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/jmiller18899-lab/hermes-agent/releases/download/v0.1.0/hermes_tool.wasm",
+      "sha256": null
+    }
+  },
+  "auth": {
+    "hint": "manual",
+    "env_key": "HERMES_API_KEY",
+    "prompt": "Enter your Hermes API key (from your Railway deployment)"
+  },
+  "tags": ["ai", "reasoning", "llm", "hermes", "nous-research"],
+  "keywords": ["hermes", "reasoning", "code-generation", "analysis", "multi-model"]
+}
