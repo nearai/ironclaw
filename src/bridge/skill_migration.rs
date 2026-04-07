@@ -50,8 +50,11 @@ pub async fn migrate_v1_skill_list(
         return Ok(0);
     }
 
-    // Load existing skill docs to check for duplicates by content_hash
-    let existing_docs = store.list_shared_memory_docs(project_id).await?;
+    // Load existing skill docs (both owner-specific and shared) to check for
+    // duplicates by content_hash. User/Workspace skills migrate as owner_id,
+    // so we must include owner docs — otherwise they'd re-migrate every startup.
+    let mut existing_docs = store.list_shared_memory_docs(project_id).await?;
+    existing_docs.extend(store.list_memory_docs(project_id, owner_id).await?);
     let existing_hashes: std::collections::HashSet<String> = existing_docs
         .iter()
         .filter(|d| d.doc_type == DocType::Skill)

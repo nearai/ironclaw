@@ -149,13 +149,15 @@ pub trait Store: Send + Sync {
 
     /// List all memory docs owned by a specific user across ALL projects.
     ///
-    /// Default implementation fans out over `list_projects` + `list_memory_docs`.
+    /// Default implementation fans out over ALL projects via `list_all_projects`.
+    /// This is necessary for shared owners (`__shared__`, `system`) who don't own
+    /// any projects themselves but have docs stored inside other users' projects.
     /// Implementors with a flat store should override for efficiency.
     async fn list_memory_docs_by_owner(
         &self,
         user_id: &str,
     ) -> Result<Vec<MemoryDoc>, EngineError> {
-        let projects = self.list_projects(user_id).await?;
+        let projects = self.list_all_projects().await?;
         let mut docs = Vec::new();
         for project in projects {
             docs.extend(self.list_memory_docs(project.id, user_id).await?);
