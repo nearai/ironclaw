@@ -970,6 +970,30 @@ impl ExtensionManager {
         self.current_channel_owner_id(name).await.is_some()
     }
 
+    /// Whether any sender has been paired (via `channel_identities`) for this
+    /// WASM channel. Used by the gateway extensions list to derive a correct
+    /// `activation_status` instead of relying on `ext.active` as a proxy.
+    ///
+    /// Returns false if no DB-backed pairing store is available — the noop
+    /// pairing store cannot have rows. See nearai/ironclaw#1921.
+    pub async fn has_wasm_channel_pairing(&self, name: &str) -> bool {
+        let rt_guard = self.channel_runtime.read().await;
+        let Some(ref rt) = *rt_guard else {
+            return false;
+        };
+        match rt.pairing_store.read_allow_from(name).await {
+            Ok(allow) => !allow.is_empty(),
+            Err(error) => {
+                tracing::debug!(
+                    channel = %name,
+                    error = %error,
+                    "Failed to read paired senders from pairing store"
+                );
+                false
+            }
+        }
+    }
+
     pub(crate) async fn notification_target_for_channel(&self, name: &str) -> Option<String> {
         self.current_channel_owner_id(name)
             .await
@@ -9134,6 +9158,166 @@ mod tests {
 
         if manager.current_channel_owner_id("telegram").await != Some(12345_i64) {
             return Err("expected runtime fast-path owner id precedence".to_string());
+        }
+
+        Ok(())
+    }
+
+    /// Regression for nearai/ironclaw#1921 — caller-level coverage.
+    ///
+    /// The web extensions list handler used to derive
+    /// `activation_status` from `derive_activation_status(ext, has_owner_binding)`,
+    /// silently dropping the underlying classifier's `has_paired` axis. A
+    /// helper-level unit test on `derive_activation_status` could not catch
+    /// the bug because the wrapper hardcoded the dropped argument to `false`.
+    ///
+    /// This test goes through the real caller path:
+    ///   ExtensionManager::has_wasm_channel_pairing
+    ///     -> PairingStore::read_allow_from
+    ///       -> libsql channel_identities query
+    ///
+    /// It seeds a real `channel_identities` row via `PairingStore::approve`
+    /// and verifies the manager method reports `true`. If the manager method
+    /// stops querying the pairing store (or the pairing store's wiring breaks),
+    /// this test fails. Combined with the unit test for
+    /// `derive_activation_status`'s 3-argument signature, the wrapper-bug
+    /// shape from #1921 has nowhere to hide.
+    ///
+    /// See `.claude/rules/testing.md` ("Test Through the Caller, Not Just
+    /// the Helper") for the rule motivating this test.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_has_wasm_channel_pairing_reflects_db_backed_identities() -> Result<(), String>
+    {
+        use crate::db::{Database, UserStore};
+        use crate::ownership::{OwnerId, OwnershipCache};
+        use crate::pairing::PairingStore;
+
+        let dir = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
+        let db_path = dir.path().join("pairing-1921.db");
+
+        let db = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&db_path)
+                .await
+                .map_err(|e| format!("create local libsql backend failed: {e}"))?,
+        );
+        db.run_migrations()
+            .await
+            .map_err(|e| format!("run libsql migrations failed: {e}"))?;
+
+        // FK on channel_identities.owner_id requires a real user row.
+        db.get_or_create_user(crate::db::UserRecord {
+            id: "owner-1921".to_string(),
+            role: "member".to_string(),
+            display_name: "owner-1921".to_string(),
+            status: "active".to_string(),
+            email: None,
+            last_login_at: None,
+            created_by: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .map_err(|e| format!("get_or_create_user failed: {e}"))?;
+
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&tools_dir).ok();
+        std::fs::create_dir_all(&channels_dir).ok();
+
+        use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+        use crate::testing::credentials::TEST_CRYPTO_KEY;
+        use crate::tools::ToolRegistry;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let master_key = secrecy::SecretString::from(TEST_CRYPTO_KEY.to_string());
+        let crypto = Arc::new(
+            SecretsCrypto::new(master_key)
+                .map_err(|e| format!("create secrets crypto failed: {e}"))?,
+        );
+
+        let manager = ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::new(InMemorySecretsStore::new(crypto)),
+            Arc::new(ToolRegistry::new()),
+            None,
+            None,
+            tools_dir,
+            channels_dir,
+            None,
+            "owner-1921".to_string(),
+            Some(db.clone() as Arc<dyn crate::db::Database>),
+            Vec::new(),
+        );
+
+        // Wire a real DB-backed PairingStore into the channel runtime.
+        // The other runtime members can be stubs because this test only
+        // exercises the pairing-store read path.
+        let pairing_store = Arc::new(PairingStore::new(
+            db.clone() as Arc<dyn crate::db::Database>,
+            Arc::new(OwnershipCache::new()),
+        ));
+        let channels = Arc::new(crate::channels::ChannelManager::new());
+        let runtime = Arc::new(
+            crate::channels::wasm::WasmChannelRuntime::new(
+                crate::channels::wasm::WasmChannelRuntimeConfig::default(),
+            )
+            .map_err(|e| format!("runtime init failed: {e}"))?,
+        );
+        let router = Arc::new(crate::channels::wasm::WasmChannelRouter::new());
+        manager
+            .set_channel_runtime(
+                channels,
+                runtime,
+                Arc::clone(&pairing_store),
+                router,
+                std::collections::HashMap::new(),
+            )
+            .await;
+
+        // No identities yet → has_wasm_channel_pairing must report false.
+        if manager.has_wasm_channel_pairing("telegram").await {
+            return Err(
+                "has_wasm_channel_pairing returned true with no channel_identities seeded \
+                 (the pairing store is likely returning stale or wrong data)"
+                    .to_string(),
+            );
+        }
+
+        // Seed a real channel_identities row via the pairing store's
+        // public flow (upsert pending request → approve with code).
+        let request = pairing_store
+            .upsert_request("telegram", "user_2026", None)
+            .await
+            .map_err(|e| format!("upsert_request failed: {e}"))?;
+        pairing_store
+            .approve("telegram", &request.code, &OwnerId::from("owner-1921"))
+            .await
+            .map_err(|e| format!("approve failed: {e}"))?;
+
+        // The manager method must now reflect the new identity row. If it
+        // does not, the wrapper bug from #1921 is back in some form.
+        if !manager.has_wasm_channel_pairing("telegram").await {
+            return Err(
+                "has_wasm_channel_pairing returned false after seeding a channel_identities \
+                 row — the wrapper is silently dropping the paired-state axis (#1921)"
+                    .to_string(),
+            );
+        }
+
+        // Other channels with no identities must still report false to
+        // pin the channel-name dimension. (A bug that ignored the channel
+        // name and returned true for any channel with any identity in
+        // the table would slip through the previous assertion alone.)
+        if manager.has_wasm_channel_pairing("discord").await {
+            return Err(
+                "has_wasm_channel_pairing leaked across channel names — \
+                 'discord' has no identities but reported paired"
+                    .to_string(),
+            );
         }
 
         Ok(())

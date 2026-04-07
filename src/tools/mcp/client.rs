@@ -23,6 +23,30 @@ use crate::tools::mcp::session::McpSessionManager;
 use crate::tools::mcp::transport::McpTransport;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput};
 
+/// Tag identifying which constructor produced an `McpClient`.
+///
+/// Test-only: lets caller-level tests assert that `create_client_from_config`
+/// chose the right path (auth vs non-auth) given a server config. The client's
+/// runtime behavior is otherwise nearly identical between paths, so without
+/// this tag, the factory's path-selection logic is unobservable from outside.
+///
+/// See `.claude/rules/testing.md` ("Test Through the Caller, Not Just the
+/// Helper") for the rule motivating this hook.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum McpClientConstructor {
+    /// `McpClient::new` — bare unauthenticated client.
+    Plain,
+    /// `McpClient::new_with_name` — bare unauthenticated client with explicit name.
+    PlainNamed,
+    /// `McpClient::new_with_config` — test-only HTTP client from a config.
+    FromConfig,
+    /// `McpClient::new_authenticated` — OAuth-aware client.
+    Authenticated,
+    /// `McpClient::new_with_transport` — generic client with externally built transport.
+    WithTransport,
+}
+
 /// MCP client for communicating with MCP servers.
 ///
 /// Supports multiple transport types:
@@ -63,6 +87,11 @@ pub struct McpClient {
     /// Uses `OnceCell` to serialize concurrent callers so only one
     /// actually sends the request; subsequent calls return immediately.
     initialized: tokio::sync::OnceCell<InitializeResult>,
+
+    /// Test-only marker recording which constructor produced this client.
+    /// Used by caller-level tests to assert the factory chose the correct path.
+    #[cfg(test)]
+    constructor_kind: McpClientConstructor,
 }
 
 impl McpClient {
@@ -88,6 +117,8 @@ impl McpClient {
             server_config: None,
             custom_headers: HashMap::new(),
             initialized: tokio::sync::OnceCell::new(),
+            #[cfg(test)]
+            constructor_kind: McpClientConstructor::Plain,
         }
     }
 
@@ -113,6 +144,8 @@ impl McpClient {
             server_config: None,
             custom_headers: HashMap::new(),
             initialized: tokio::sync::OnceCell::new(),
+            #[cfg(test)]
+            constructor_kind: McpClientConstructor::PlainNamed,
         }
     }
 
@@ -156,6 +189,8 @@ impl McpClient {
             custom_headers: config.headers.clone(),
             initialized: tokio::sync::OnceCell::new(),
             server_config: Some(config),
+            #[cfg(test)]
+            constructor_kind: McpClientConstructor::FromConfig,
         })
     }
 
@@ -187,6 +222,8 @@ impl McpClient {
             server_config: Some(config),
             custom_headers,
             initialized: tokio::sync::OnceCell::new(),
+            #[cfg(test)]
+            constructor_kind: McpClientConstructor::Authenticated,
         }
     }
 
@@ -223,6 +260,8 @@ impl McpClient {
             server_config,
             custom_headers,
             initialized: tokio::sync::OnceCell::new(),
+            #[cfg(test)]
+            constructor_kind: McpClientConstructor::WithTransport,
         }
     }
 
@@ -258,6 +297,15 @@ impl McpClient {
     #[cfg(test)]
     pub(crate) fn transport(&self) -> &Arc<dyn McpTransport> {
         &self.transport
+    }
+
+    /// Which constructor produced this client (test-only).
+    ///
+    /// Used by caller-level tests to verify that path-selecting helpers like
+    /// `mcp::factory::create_client_from_config` chose the correct branch.
+    #[cfg(test)]
+    pub(crate) fn constructor_kind(&self) -> McpClientConstructor {
+        self.constructor_kind
     }
 
     /// Get the next request ID.
@@ -589,6 +637,8 @@ impl Clone for McpClient {
             server_config: self.server_config.clone(),
             custom_headers: self.custom_headers.clone(),
             initialized: tokio::sync::OnceCell::new(),
+            #[cfg(test)]
+            constructor_kind: self.constructor_kind,
         }
     }
 }

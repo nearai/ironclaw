@@ -609,8 +609,21 @@ async def test_install_wasm_channel_triggers_configure(page):
 
 
 async def test_install_with_auth_url_opens_popup_and_shows_auth_prompt(page):
-    """Install responses with auth_url should surface the same auth prompt used elsewhere."""
-    await page.evaluate("window.open = (url) => { window._lastOpenedUrl = url; }")
+    """Install responses with auth_url should surface the same auth prompt used elsewhere.
+
+    Regression for nearai/ironclaw#1502: the OAuth popup must be opened with
+    target='_blank' so the user lands in a new tab. The mock captures every
+    argument the production caller passes to window.open — silently dropping
+    target/features here would be the exact bug shape that caused #1502 to
+    ship in the first place. See .claude/rules/testing.md ("Mock hygiene
+    corollary").
+    """
+    await page.evaluate(
+        "window._lastOpenCall = null;"
+        "window.open = (url, target, features) => {"
+        "  window._lastOpenCall = { url, target, features };"
+        "}"
+    )
     await mock_ext_apis(page, registry=[_REGISTRY_WASM])
 
     async def handle_install(route):
@@ -628,12 +641,16 @@ async def test_install_with_auth_url_opens_popup_and_shows_auth_prompt(page):
     await install_btn.click()
 
     await page.wait_for_function(
-        "() => window._lastOpenedUrl !== null && window._lastOpenedUrl !== undefined",
+        "() => window._lastOpenCall !== null",
         timeout=5000,
     )
-    opened = await page.evaluate("window._lastOpenedUrl")
-    assert opened is not None, "window.open was not called"
-    assert "example.com" in opened
+    call = await page.evaluate("window._lastOpenCall")
+    assert call is not None, "window.open was not called"
+    assert "example.com" in call["url"], f"unexpected URL: {call['url']}"
+    assert call["target"] == "_blank", (
+        f"OAuth popup must open in a new tab (target='_blank'), got "
+        f"{call['target']!r} — see nearai/ironclaw#1502"
+    )
     await page.locator(SEL["auth_card"] + '[data-extension-name="registry-tool"]').wait_for(
         state="visible", timeout=5000
     )
@@ -795,8 +812,16 @@ async def test_configure_modal_save_success(page):
 
 
 async def test_configure_modal_save_oauth(page):
-    """Save response with auth_url opens a popup and shows the global auth prompt."""
-    await page.evaluate("window.open = (url) => { window._lastOpenedUrl = url; }")
+    """Save response with auth_url opens a popup and shows the global auth prompt.
+
+    Regression for nearai/ironclaw#1502: see test_install_with_auth_url_opens_popup_and_shows_auth_prompt.
+    """
+    await page.evaluate(
+        "window._lastOpenCall = null;"
+        "window.open = (url, target, features) => {"
+        "  window._lastOpenCall = { url, target, features };"
+        "}"
+    )
 
     async def handle_setup(route):
         if route.request.method == "GET":
@@ -818,10 +843,16 @@ async def test_configure_modal_save_oauth(page):
     await page.locator(SEL["configure_input"]).fill("ignored")
     await page.locator(SEL["configure_save_btn"]).click()
 
-    await page.wait_for_function("() => window._lastOpenedUrl !== null && window._lastOpenedUrl !== undefined", timeout=5000)
-    opened = await page.evaluate("window._lastOpenedUrl")
-    assert opened is not None, "window.open was not called"
-    assert "oauth" in opened or "example.com" in opened
+    await page.wait_for_function("() => window._lastOpenCall !== null", timeout=5000)
+    call = await page.evaluate("window._lastOpenCall")
+    assert call is not None, "window.open was not called"
+    assert "oauth" in call["url"] or "example.com" in call["url"], (
+        f"unexpected URL: {call['url']}"
+    )
+    assert call["target"] == "_blank", (
+        f"OAuth popup must open in a new tab (target='_blank'), got "
+        f"{call['target']!r} — see nearai/ironclaw#1502"
+    )
     await page.locator(SEL["auth_card"] + '[data-extension-name="test-ext"]').wait_for(
         state="visible", timeout=5000
     )
@@ -1256,8 +1287,16 @@ async def test_activate_failure_shows_error_toast(page):
 
 
 async def test_activate_with_auth_url_opens_popup_and_shows_auth_prompt(page):
-    """Activate response with auth_url calls window.open and shows the auth prompt."""
-    await page.evaluate("window.open = (url) => { window._lastOpenedUrl = url; }")
+    """Activate response with auth_url calls window.open and shows the auth prompt.
+
+    Regression for nearai/ironclaw#1502: see test_install_with_auth_url_opens_popup_and_shows_auth_prompt.
+    """
+    await page.evaluate(
+        "window._lastOpenCall = null;"
+        "window.open = (url, target, features) => {"
+        "  window._lastOpenCall = { url, target, features };"
+        "}"
+    )
     await mock_ext_apis(page, installed=[_MCP_INACTIVE])
 
     async def handle_activate(route):
@@ -1270,10 +1309,14 @@ async def test_activate_with_auth_url_opens_popup_and_shows_auth_prompt(page):
     await activate_btn.wait_for(state="visible", timeout=5000)
     await activate_btn.click()
 
-    await page.wait_for_function("() => window._lastOpenedUrl !== null && window._lastOpenedUrl !== undefined", timeout=5000)
-    opened = await page.evaluate("window._lastOpenedUrl")
-    assert opened is not None, "window.open was not called"
-    assert "example.com" in opened
+    await page.wait_for_function("() => window._lastOpenCall !== null", timeout=5000)
+    call = await page.evaluate("window._lastOpenCall")
+    assert call is not None, "window.open was not called"
+    assert "example.com" in call["url"], f"unexpected URL: {call['url']}"
+    assert call["target"] == "_blank", (
+        f"OAuth popup must open in a new tab (target='_blank'), got "
+        f"{call['target']!r} — see nearai/ironclaw#1502"
+    )
     await page.locator(
         SEL["auth_card"] + '[data-extension-name="test-mcp-inactive"]'
     ).wait_for(state="visible", timeout=5000)

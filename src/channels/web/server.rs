@@ -2594,11 +2594,15 @@ async fn extensions_list_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let mut owner_bound_channels = std::collections::HashSet::new();
+    let mut paired_channels = std::collections::HashSet::new();
     for ext in &installed {
-        if ext.kind == crate::extensions::ExtensionKind::WasmChannel
-            && ext_mgr.has_wasm_channel_owner_binding(&ext.name).await
-        {
-            owner_bound_channels.insert(ext.name.clone());
+        if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
+            if ext_mgr.has_wasm_channel_owner_binding(&ext.name).await {
+                owner_bound_channels.insert(ext.name.clone());
+            }
+            if ext_mgr.has_wasm_channel_pairing(&ext.name).await {
+                paired_channels.insert(ext.name.clone());
+            }
         }
     }
     let extensions = installed
@@ -2607,6 +2611,7 @@ async fn extensions_list_handler(
             let activation_status =
                 crate::channels::web::handlers::extensions::derive_activation_status(
                     &ext,
+                    paired_channels.contains(&ext.name),
                     owner_bound_channels.contains(&ext.name),
                 );
             ExtensionInfo {
