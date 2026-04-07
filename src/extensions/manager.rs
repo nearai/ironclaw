@@ -5604,28 +5604,28 @@ impl ExtensionManager {
 
             stored_fields.insert(field_name.clone(), trimmed.to_string());
 
-            if let Some(field_def) = field_def {
-                if let Some(setting_path) = &field_def.setting_path {
-                    Self::validate_setup_setting_path(name, setting_path)?;
-                    let store = self.store.as_ref().ok_or_else(|| {
-                        ExtensionError::Other(
-                            "Settings store unavailable for setup field persistence".to_string(),
-                        )
+            if let Some(field_def) = field_def
+                && let Some(setting_path) = &field_def.setting_path
+            {
+                Self::validate_setup_setting_path(name, setting_path)?;
+                let store = self.store.as_ref().ok_or_else(|| {
+                    ExtensionError::Other(
+                        "Settings store unavailable for setup field persistence".to_string(),
+                    )
+                })?;
+                store
+                    .set_setting(
+                        &self.user_id,
+                        setting_path,
+                        &serde_json::Value::String(trimmed.to_string()),
+                    )
+                    .await
+                    .map_err(|e| {
+                        ExtensionError::Other(format!(
+                            "Failed to set '{}' for extension '{}': {}",
+                            setting_path, name, e
+                        ))
                     })?;
-                    store
-                        .set_setting(
-                            &self.user_id,
-                            setting_path,
-                            &serde_json::Value::String(trimmed.to_string()),
-                        )
-                        .await
-                        .map_err(|e| {
-                            ExtensionError::Other(format!(
-                                "Failed to set '{}' for extension '{}': {}",
-                                setting_path, name, e
-                            ))
-                        })?;
-                }
             }
         }
 
