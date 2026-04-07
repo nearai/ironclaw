@@ -525,7 +525,7 @@ pub trait JobStore: Send + Sync {
     /// System jobs are instantly-completed job records that serve as FK anchors
     /// for `ActionRecord`s created by non-agent callers (gateway handlers, CLI
     /// commands, routine engines). They have `category = 'system'` and
-    /// `status = 'Completed'`.
+    /// `status = 'completed'` (snake_case to match `JobState::Completed.to_string()`).
     async fn create_system_job(&self, user_id: &str, source: &str) -> Result<Uuid, DatabaseError>;
 }
 

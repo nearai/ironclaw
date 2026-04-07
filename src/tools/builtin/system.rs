@@ -1,8 +1,11 @@
-//! System introspection and configuration tools.
+//! System introspection tools.
 //!
-//! These tools replace hardcoded system commands (`/tools`, `/skills`, `/model`,
-//! `/version`) with proper `Tool` implementations that go through the standard
-//! dispatch pipeline with audit trail. They work in both v1 and v2 engines.
+//! These tools replace hardcoded system commands (`/tools`, `/version`) with
+//! proper `Tool` implementations that go through the standard dispatch
+//! pipeline with audit trail. They work in both v1 and v2 engines.
+//!
+//! Future tools (`system_skills_list`, `system_model_get/set`) are planned
+//! as part of #2049's Phase 4 follow-up.
 
 use std::sync::Arc;
 use std::time::Instant;

@@ -839,7 +839,7 @@ impl Workspace {
             .await
     }
 
-    /// Resolve effective metadata for a document path.
+    /// Resolve effective metadata for a document path in the primary scope.
     ///
     /// Resolution chain: document's own metadata → nearest ancestor `.config` → defaults.
     ///
@@ -847,20 +847,32 @@ impl Workspace {
     /// then finds the nearest ancestor in-memory — O(1) DB queries instead of
     /// O(depth) serial queries walking up the directory tree.
     pub async fn resolve_metadata(&self, path: &str) -> DocumentMetadata {
+        self.resolve_metadata_in_scope(&self.user_id, path).await
+    }
+
+    /// Resolve effective metadata for a document path within a specific scope.
+    ///
+    /// Used by layer-aware writes (`write_to_layer`, `append_to_layer`) so
+    /// that schema validation, indexing, versioning, and hygiene flags are
+    /// taken from the **target** layer's `.config` chain — not the primary
+    /// user_id's. Without this, writes to non-primary layers would apply
+    /// metadata from the wrong scope and could silently use the wrong
+    /// schema or skip flags.
+    pub async fn resolve_metadata_in_scope(&self, scope: &str, path: &str) -> DocumentMetadata {
         let path = normalize_path(path);
 
-        // 1. Document's own metadata
+        // 1. Document's own metadata in the target scope.
         let doc_meta = self
             .storage
-            .get_document_by_path(&self.user_id, self.agent_id, &path)
+            .get_document_by_path(scope, self.agent_id, &path)
             .await
             .ok()
             .map(|d| d.metadata);
 
-        // 2. Find nearest ancestor .config using a single query + in-memory match
+        // 2. Find nearest ancestor .config in the target scope.
         let config_meta = self
             .storage
-            .find_config_documents(&self.user_id, self.agent_id)
+            .find_config_documents(scope, self.agent_id)
             .await
             .ok()
             .and_then(|configs| find_nearest_config(&path, &configs));
@@ -1192,8 +1204,10 @@ impl Workspace {
             .get_or_create_document_by_path(&scope, self.agent_id, &path)
             .await?;
 
-        // Resolve metadata once — shared by schema validation, versioning, and indexing.
-        let metadata = self.resolve_metadata(&path).await;
+        // Resolve metadata in the *target layer's scope* — not the primary
+        // user_id — so the layer's own `.config` chain governs schema,
+        // indexing, and versioning for this write.
+        let metadata = self.resolve_metadata_in_scope(&scope, &path).await;
 
         // Schema validation: if metadata carries a JSON Schema, validate content.
         if let Some(ref schema) = metadata.schema {
@@ -1201,7 +1215,7 @@ impl Workspace {
         }
 
         let _ = self
-            .maybe_save_version(doc.id, &doc.content, &metadata, Some(&self.user_id))
+            .maybe_save_version(doc.id, &doc.content, &metadata, Some(&scope))
             .await;
 
         self.storage.update_document(doc.id, content).await?;
@@ -1250,8 +1264,9 @@ impl Workspace {
             format!("{}\n\n{}", doc.content, content)
         };
 
-        // Resolve metadata once — shared by schema validation, versioning, and indexing.
-        let metadata = self.resolve_metadata(&path).await;
+        // Resolve metadata in the *target layer's scope* so the layer's own
+        // `.config` chain governs schema, indexing, and versioning.
+        let metadata = self.resolve_metadata_in_scope(&scope, &path).await;
 
         // Schema validation: validate the combined content after append.
         if let Some(ref schema) = metadata.schema {
@@ -1259,7 +1274,7 @@ impl Workspace {
         }
 
         let _ = self
-            .maybe_save_version(doc.id, &doc.content, &metadata, Some(&self.user_id))
+            .maybe_save_version(doc.id, &doc.content, &metadata, Some(&scope))
             .await;
 
         self.storage.update_document(doc.id, &new_content).await?;

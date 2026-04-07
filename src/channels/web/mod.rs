@@ -198,8 +198,8 @@ impl GatewayChannel {
             near_nonce_store: self.state.near_nonce_store.clone(),
             near_rpc_url: self.state.near_rpc_url.clone(),
             near_network: self.state.near_network.clone(),
-            oauth_sweep_shutdown: None,
-            tool_dispatcher: None, // sweep tasks are managed by with_oauth
+            oauth_sweep_shutdown: None, // sweep tasks are managed by with_oauth
+            tool_dispatcher: None,
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);

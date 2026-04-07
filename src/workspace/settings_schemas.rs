@@ -8,7 +8,11 @@
 
 use serde_json::{Value, json};
 
+use crate::error::WorkspaceError;
 use crate::workspace::document::system_paths::SETTINGS_PREFIX;
+
+/// Maximum allowed length for a settings key.
+const MAX_SETTINGS_KEY_LEN: usize = 128;
 
 /// Return the JSON Schema for a known settings key, or `None` for unknown keys.
 pub fn schema_for_key(key: &str) -> Option<Value> {
@@ -21,18 +25,23 @@ pub fn schema_for_key(key: &str) -> Option<Value> {
             "type": "string",
             "description": "Currently selected model name"
         })),
+        // Schema mirrors `CustomLlmProviderSettings` in `src/settings.rs`.
         "llm_custom_providers" => Some(json!({
             "type": "array",
             "description": "User-defined LLM provider configurations",
             "items": {
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string" },
-                    "protocol": { "type": "string" },
-                    "base_url": { "type": "string" },
-                    "model": { "type": "string" }
+                    "id":            { "type": "string" },
+                    "name":          { "type": "string" },
+                    "adapter":       { "type": "string" },
+                    "base_url":      { "type": ["string", "null"] },
+                    "default_model": { "type": ["string", "null"] },
+                    "api_key":       { "type": ["string", "null"] },
+                    "builtin":       { "type": "boolean" }
                 },
-                "required": ["name"]
+                "required": ["id", "name", "adapter"],
+                "additionalProperties": false
             }
         })),
         "llm_builtin_overrides" => Some(json!({
@@ -52,7 +61,50 @@ pub fn schema_for_key(key: &str) -> Option<Value> {
     }
 }
 
+/// Validate a settings key against path-traversal and structural rules.
+///
+/// Settings keys are concatenated into workspace paths under
+/// `.system/settings/{key}.json`, so they must not contain path separators
+/// or relative-path segments that could escape the prefix. Allowed: ASCII
+/// alphanumerics, `_`, `-`, and `.` (but not `..`).
+pub fn validate_settings_key(key: &str) -> Result<(), WorkspaceError> {
+    let reject = |reason: &str| WorkspaceError::SchemaValidation {
+        path: format!("{SETTINGS_PREFIX}{key}"),
+        errors: vec![format!("invalid settings key: {reason}")],
+    };
+
+    if key.is_empty() {
+        return Err(reject("key is empty"));
+    }
+    if key.len() > MAX_SETTINGS_KEY_LEN {
+        return Err(reject(&format!(
+            "key longer than {MAX_SETTINGS_KEY_LEN} chars"
+        )));
+    }
+    if key.contains('/') || key.contains('\\') {
+        return Err(reject("path separators are not allowed"));
+    }
+    if key.contains("..") {
+        return Err(reject("'..' is not allowed"));
+    }
+    if key.starts_with('.') {
+        return Err(reject("leading '.' is not allowed"));
+    }
+    if !key
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err(reject(
+            "only ASCII alphanumerics, '_', '-', and '.' are allowed",
+        ));
+    }
+    Ok(())
+}
+
 /// Build the path for a settings document in the workspace.
+///
+/// Caller is responsible for validating the key with [`validate_settings_key`]
+/// first; this function does not re-validate.
 pub fn settings_path(key: &str) -> String {
     format!("{SETTINGS_PREFIX}{key}.json")
 }
@@ -81,5 +133,37 @@ mod tests {
             settings_path("llm_backend"),
             ".system/settings/llm_backend.json"
         );
+    }
+
+    #[test]
+    fn validate_settings_key_accepts_normal_keys() {
+        assert!(validate_settings_key("llm_backend").is_ok());
+        assert!(validate_settings_key("selected_model").is_ok());
+        assert!(validate_settings_key("tool_permissions.shell").is_ok());
+        assert!(validate_settings_key("a-b-c").is_ok());
+    }
+
+    #[test]
+    fn validate_settings_key_rejects_path_traversal() {
+        assert!(validate_settings_key("../etc/passwd").is_err());
+        assert!(validate_settings_key("foo/../bar").is_err());
+        assert!(validate_settings_key("foo/bar").is_err());
+        assert!(validate_settings_key("foo\\bar").is_err());
+        assert!(validate_settings_key(".hidden").is_err());
+    }
+
+    #[test]
+    fn validate_settings_key_rejects_empty_and_too_long() {
+        assert!(validate_settings_key("").is_err());
+        let long = "a".repeat(MAX_SETTINGS_KEY_LEN + 1);
+        assert!(validate_settings_key(&long).is_err());
+    }
+
+    #[test]
+    fn validate_settings_key_rejects_disallowed_chars() {
+        assert!(validate_settings_key("foo bar").is_err());
+        assert!(validate_settings_key("foo:bar").is_err());
+        assert!(validate_settings_key("foo*bar").is_err());
+        assert!(validate_settings_key("foo$bar").is_err());
     }
 }

@@ -24,6 +24,8 @@ use crate::context::{ActionRecord, JobContext};
 use crate::db::Database;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::tool::{ToolError, ToolOutput};
+use crate::tools::{prepare_tool_params, redact_params};
+use ironclaw_safety::SafetyLayer;
 
 /// Identifies where a tool dispatch originated.
 ///
@@ -55,30 +57,47 @@ impl std::fmt::Display for DispatchSource {
 
 /// Channel-agnostic tool dispatcher with audit trail.
 ///
-/// Wraps `ToolRegistry` + `Database` to provide a single dispatch function
-/// that any caller can use to execute tools with proper `ActionRecord` persistence.
+/// Wraps `ToolRegistry` + `SafetyLayer` + `Database` to provide a single
+/// dispatch function that any caller can use to execute tools with the
+/// same safety pipeline as the agent worker (param normalization, schema
+/// validation, sensitive-param redaction, per-tool timeout, output
+/// sanitization) plus `ActionRecord` persistence.
 pub struct ToolDispatcher {
     registry: Arc<ToolRegistry>,
+    safety: Arc<SafetyLayer>,
     store: Arc<dyn Database>,
 }
 
 impl ToolDispatcher {
     /// Create a new dispatcher.
-    pub fn new(registry: Arc<ToolRegistry>, store: Arc<dyn Database>) -> Self {
-        Self { registry, store }
+    pub fn new(
+        registry: Arc<ToolRegistry>,
+        safety: Arc<SafetyLayer>,
+        store: Arc<dyn Database>,
+    ) -> Self {
+        Self {
+            registry,
+            safety,
+            store,
+        }
     }
 
     /// Execute a tool by name with the given parameters.
     ///
-    /// 1. Resolves the tool from the registry
-    /// 2. Creates or reuses a job_id for FK integrity
-    /// 3. Builds a minimal `JobContext`
-    /// 4. Calls `Tool::execute()`
-    /// 5. Persists an `ActionRecord`
-    /// 6. Returns the `ToolOutput`
+    /// Pipeline (mirrors `Worker::execute_tool`):
+    /// 1. Resolve the tool from the registry
+    /// 2. Normalize parameters via `prepare_tool_params`
+    /// 3. Validate parameters via `SafetyLayer::validator()`
+    /// 4. Redact sensitive parameters for logging and audit
+    /// 5. Create a fresh system job for FK integrity
+    /// 6. Execute with the tool's per-tool timeout
+    /// 7. Sanitize the result via `SafetyLayer::sanitize_tool_output`
+    /// 8. Persist an `ActionRecord` with redacted params and sanitized output
+    /// 9. Return the original `ToolOutput`
     ///
     /// Approval checks are skipped — channel-initiated operations are
-    /// user-confirmed by definition.
+    /// user-confirmed by definition. Audit-trail persistence failures are
+    /// logged via `tracing::warn!` but do not mask the tool result.
     pub async fn dispatch(
         &self,
         tool_name: &str,
@@ -91,9 +110,34 @@ impl ToolDispatcher {
                 ToolError::ExecutionFailed(format!("tool not found: {tool_name}"))
             })?;
 
-        // Always create a fresh system job for audit trail. Each dispatch
-        // becomes its own group of actions — sequence_num starts at 0 with
-        // no risk of UNIQUE(job_id, sequence_num) collision.
+        // 1. Normalize parameters (coerce types, fill defaults).
+        let normalized_params = prepare_tool_params(tool.as_ref(), &params);
+
+        // 2. Schema validation.
+        let validation = self
+            .safety
+            .validator()
+            .validate_tool_params(&normalized_params);
+        if !validation.is_valid {
+            let details = validation
+                .errors
+                .iter()
+                .map(|e| format!("{}: {}", e.field, e.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(ToolError::InvalidParameters(format!(
+                "Invalid tool parameters: {details}"
+            )));
+        }
+
+        // 3. Redact sensitive params for log + audit. Sensitive values are
+        //    still passed to the tool itself (via normalized_params), but
+        //    never appear in the audit row or the dispatch log.
+        let safe_params = redact_params(&normalized_params, tool.sensitive_params());
+
+        // 4. Create a fresh system job for audit trail. Each dispatch
+        //    becomes its own group of actions — sequence_num starts at 0
+        //    with no risk of UNIQUE(job_id, sequence_num) collision.
         let source_label = source.to_string();
         let job_id = self
             .store
@@ -108,24 +152,35 @@ impl ToolDispatcher {
             tool = %resolved_name,
             source = %source,
             user_id = %user_id,
+            params = %safe_params,
             "dispatching tool"
         );
 
-        let result = tool.execute(params.clone(), &ctx).await;
+        // 5. Execute with per-tool timeout.
+        let timeout = tool.execution_timeout();
+        let result = tokio::time::timeout(timeout, tool.execute(normalized_params, &ctx)).await;
         let elapsed = start.elapsed();
 
-        // Build and persist the ActionRecord. Awaited (not spawned) so that
-        // short-lived callers (CLI commands) cannot terminate before the
-        // audit row is written. Persistence failures are logged but do not
-        // mask the tool result, which is the more important signal.
-        let action = ActionRecord::new(0, &resolved_name, params);
-        let action = match &result {
+        let final_result: Result<ToolOutput, ToolError> = match result {
+            Ok(Ok(output)) => Ok(output),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(ToolError::Timeout(timeout)),
+        };
+
+        // 6. Build the ActionRecord with sanitized output (mirrors worker pattern).
+        let action = ActionRecord::new(0, &resolved_name, safe_params);
+        let action = match &final_result {
             Ok(output) => {
-                let raw = serde_json::to_string_pretty(&output.result).ok();
-                action.succeed(raw, output.result.clone(), elapsed)
+                let sanitized = serde_json::to_string_pretty(&output.result)
+                    .ok()
+                    .map(|s| self.safety.sanitize_tool_output(&resolved_name, &s).content);
+                action.succeed(sanitized, output.result.clone(), elapsed)
             }
             Err(e) => action.fail(e.to_string(), elapsed),
         };
+
+        // 7. Persist the audit record. Awaited (not spawned) so short-lived
+        //    callers (CLI commands) cannot terminate before the row is written.
         if let Err(e) = self.store.save_action(job_id, &action).await {
             warn!(
                 error = %e,
@@ -135,7 +190,7 @@ impl ToolDispatcher {
             );
         }
 
-        result
+        final_result
     }
 
     /// Access the underlying tool registry.

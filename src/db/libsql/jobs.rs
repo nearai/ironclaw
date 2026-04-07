@@ -509,6 +509,7 @@ impl JobStore for LibSqlBackend {
         let conn = self.connect().await?;
         let id = Uuid::new_v4();
         let now = Utc::now();
+        let status = JobState::Completed.to_string();
 
         conn.execute(
             r#"
@@ -523,7 +524,7 @@ impl JobStore for LibSqlBackend {
                 source,
                 format!("System operation: {source}"),
                 "system",
-                "Completed",
+                status,
                 "system",
                 user_id,
                 "0",  // actual_cost as TEXT decimal

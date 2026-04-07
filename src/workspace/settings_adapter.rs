@@ -2,7 +2,11 @@
 //!
 //! During migration, this adapter dual-writes settings to both the old
 //! `settings` table and workspace documents at `.system/settings/`.
-//! Reads prefer workspace, falling back to the legacy table.
+//! Per-key reads (`get_setting`, `get_setting_full`) prefer the workspace
+//! and fall back to the legacy table. Aggregate reads (`list_settings`,
+//! `get_all_settings`) currently always read from the legacy store, which
+//! remains the source of truth for "list everything" until migration is
+//! complete.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,7 +18,7 @@ use crate::db::{Database, SettingsStore};
 use crate::error::DatabaseError;
 use crate::history::SettingRow;
 use crate::workspace::Workspace;
-use crate::workspace::settings_schemas::{schema_for_key, settings_path};
+use crate::workspace::settings_schemas::{schema_for_key, settings_path, validate_settings_key};
 
 /// Implements `SettingsStore` by reading/writing workspace documents at
 /// `.system/settings/{key}.json`. Falls back to the legacy `settings` table
@@ -35,36 +39,50 @@ impl WorkspaceSettingsAdapter {
     /// Ensure the `.system/.config` document exists with system defaults.
     ///
     /// Called once during startup to seed the system folder configuration.
-    pub async fn ensure_system_config(&self) {
+    /// Errors are propagated so startup can fail fast if the system config
+    /// cannot be enforced — leaving `.system/` indexed by accident would
+    /// pollute search results with internal state.
+    ///
+    /// The `.config` doc's `metadata` column is what descendants inherit
+    /// via `find_nearest_config` — so we set `skip_indexing: true` (system
+    /// state should never appear in search) and explicitly `skip_versioning:
+    /// false` so all `.system/**` documents (settings, extension state,
+    /// skill manifests) ARE versioned for audit trail. The doc's content is
+    /// a human-readable JSON summary of what gets inherited.
+    pub async fn ensure_system_config(&self) -> Result<(), DatabaseError> {
         let config_path = ".system/.config";
-        match self.workspace.exists(config_path).await {
-            Ok(true) => {}
-            _ => {
-                let config_content = serde_json::json!({
-                    "skip_indexing": true,
-                    "skip_versioning": false,
-                    "hygiene": { "enabled": false }
-                });
-                if let Ok(doc) = self
-                    .workspace
-                    .write(config_path, &config_content.to_string())
-                    .await
-                {
-                    let _ = self
-                        .workspace
-                        .update_metadata(
-                            doc.id,
-                            &serde_json::json!({
-                                "skip_indexing": true,
-                                "skip_versioning": true,
-                                "hygiene": { "enabled": false }
-                            }),
-                        )
-                        .await;
-                    debug!("seeded .system/.config for workspace settings");
-                }
-            }
+        if self
+            .workspace
+            .exists(config_path)
+            .await
+            .map_err(|e| DatabaseError::Query(format!("workspace exists check failed: {e}")))?
+        {
+            return Ok(());
         }
+
+        let inherited_metadata = serde_json::json!({
+            "skip_indexing": true,
+            "skip_versioning": false,
+            "hygiene": { "enabled": false }
+        });
+        let doc = self
+            .workspace
+            .write(config_path, &inherited_metadata.to_string())
+            .await
+            .map_err(|e| DatabaseError::Query(format!("workspace write failed: {e}")))?;
+
+        // The .config doc's metadata column is the inheritance source for
+        // descendants. Mirror the JSON content so future readers see the
+        // same values via either path. `skip_versioning: false` is critical:
+        // changing it to `true` here would silently disable versioning for
+        // every document under `.system/**`.
+        self.workspace
+            .update_metadata(doc.id, &inherited_metadata)
+            .await
+            .map_err(|e| DatabaseError::Query(format!("workspace metadata update failed: {e}")))?;
+
+        debug!("seeded .system/.config for workspace settings");
+        Ok(())
     }
 
     /// Write a setting to workspace with optional schema in metadata.
@@ -73,6 +91,8 @@ impl WorkspaceSettingsAdapter {
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
+        validate_settings_key(key)
+            .map_err(|e| DatabaseError::Query(format!("invalid settings key '{key}': {e}")))?;
         let path = settings_path(key);
         let content = serde_json::to_string_pretty(value)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
@@ -94,10 +114,10 @@ impl WorkspaceSettingsAdapter {
             .map_err(|e| DatabaseError::Query(format!("workspace write failed: {e}")))?;
 
         // Persist the schema in metadata so future writes are validated
-        // automatically by the workspace write path.
+        // automatically by the workspace write path. Propagate errors so a
+        // metadata-update failure doesn't silently leave the doc un-typed.
         if let Some(schema) = schema_for_key(key) {
-            let _ = self
-                .workspace
+            self.workspace
                 .update_metadata(
                     doc.id,
                     &serde_json::json!({
@@ -105,7 +125,12 @@ impl WorkspaceSettingsAdapter {
                         "skip_indexing": true
                     }),
                 )
-                .await;
+                .await
+                .map_err(|e| {
+                    DatabaseError::Query(format!(
+                        "failed to persist schema metadata for '{key}': {e}"
+                    ))
+                })?;
         }
 
         Ok(())
@@ -116,6 +141,9 @@ impl WorkspaceSettingsAdapter {
         &self,
         key: &str,
     ) -> Result<Option<serde_json::Value>, DatabaseError> {
+        if validate_settings_key(key).is_err() {
+            return Ok(None);
+        }
         let path = settings_path(key);
         match self.workspace.read(&path).await {
             Ok(doc) => {
@@ -151,7 +179,11 @@ impl SettingsStore for WorkspaceSettingsAdapter {
         user_id: &str,
         key: &str,
     ) -> Result<Option<SettingRow>, DatabaseError> {
-        // Try workspace first
+        // Try workspace first (only for valid keys; invalid keys can never
+        // exist in workspace and must not be used to construct paths).
+        if validate_settings_key(key).is_err() {
+            return self.legacy_store.get_setting_full(user_id, key).await;
+        }
         let path = settings_path(key);
         if let Ok(doc) = self.workspace.read(&path).await
             && !doc.content.is_empty()
@@ -180,9 +212,11 @@ impl SettingsStore for WorkspaceSettingsAdapter {
     }
 
     async fn delete_setting(&self, user_id: &str, key: &str) -> Result<bool, DatabaseError> {
-        // Delete from both
-        let path = settings_path(key);
-        let _ = self.workspace.delete(&path).await;
+        // Delete from both. Skip workspace for invalid keys (cannot exist there).
+        if validate_settings_key(key).is_ok() {
+            let path = settings_path(key);
+            let _ = self.workspace.delete(&path).await;
+        }
         self.legacy_store.delete_setting(user_id, key).await
     }
 
@@ -204,11 +238,28 @@ impl SettingsStore for WorkspaceSettingsAdapter {
         user_id: &str,
         settings: &HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
-        // Dual-write each setting to workspace
+        // Dual-write each setting to workspace. Collect the first error so
+        // partial-migration state is observable, but always run the legacy
+        // write so the legacy table stays the source of truth during
+        // migration even if some workspace writes fail.
+        let mut workspace_error: Option<DatabaseError> = None;
         for (key, value) in settings {
-            let _ = self.write_to_workspace(key, value).await;
+            if let Err(e) = self.write_to_workspace(key, value).await {
+                debug!(key = %key, error = %e, "workspace write failed in set_all_settings");
+                if workspace_error.is_none() {
+                    workspace_error = Some(e);
+                }
+            }
         }
-        self.legacy_store.set_all_settings(user_id, settings).await
+
+        self.legacy_store
+            .set_all_settings(user_id, settings)
+            .await?;
+
+        if let Some(err) = workspace_error {
+            return Err(err);
+        }
+        Ok(())
     }
 
     async fn has_settings(&self, user_id: &str) -> Result<bool, DatabaseError> {
@@ -235,7 +286,7 @@ mod tests {
         let ws = Arc::new(Workspace::new_with_db("test_user", Arc::clone(&db)));
 
         let adapter = WorkspaceSettingsAdapter::new(ws, db);
-        adapter.ensure_system_config().await;
+        adapter.ensure_system_config().await.unwrap();
 
         // Write a setting
         adapter
@@ -274,7 +325,7 @@ mod tests {
         let ws = Arc::new(Workspace::new_with_db("test_user", Arc::clone(&db)));
 
         let adapter = WorkspaceSettingsAdapter::new(ws, db);
-        adapter.ensure_system_config().await;
+        adapter.ensure_system_config().await.unwrap();
 
         adapter
             .set_setting("test_user", "test_key", &serde_json::json!(42))

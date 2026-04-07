@@ -639,6 +639,7 @@ async fn async_main() -> anyhow::Result<()> {
         if let Some(ref db) = components.db {
             let dispatcher = Arc::new(ironclaw::tools::dispatch::ToolDispatcher::new(
                 Arc::clone(&components.tools),
+                Arc::clone(&components.safety),
                 Arc::clone(db),
             ));
             gw = gw.with_tool_dispatcher(dispatcher);

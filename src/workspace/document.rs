@@ -45,9 +45,11 @@ pub mod paths {
 /// runtime threads/steps/events). The dot-prefix follows the Unix convention
 /// for hidden internal state and signals "do not edit by hand".
 ///
-/// Documents under `.system/` are excluded from search results via folder
-/// `.config` metadata (`skip_indexing: true`) and are never auto-cleaned by
-/// hygiene. They ARE versioned for audit trail.
+/// Documents under `.system/` are excluded from search results via the
+/// folder `.config` metadata (`skip_indexing: true`) and are never auto-
+/// cleaned by hygiene. By default they ARE versioned for audit trail;
+/// individual files may opt out by setting `skip_versioning: true` on
+/// their own document metadata.
 pub mod system_paths {
     /// Root prefix for all machine-managed system state.
     #[allow(dead_code)] // Documents the convention; consumed via subdirectory constants

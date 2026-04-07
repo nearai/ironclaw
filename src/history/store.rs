@@ -209,6 +209,7 @@ impl Store {
         let conn = self.conn().await?;
         let id = Uuid::new_v4();
         let now = chrono::Utc::now();
+        let status = JobState::Completed.to_string();
 
         conn.execute(
             r#"
@@ -223,7 +224,7 @@ impl Store {
                 &source,
                 &format!("System operation: {source}"),
                 &Some("system"),
-                &"Completed",
+                &status,
                 &"system",
                 &user_id,
                 &rust_decimal::Decimal::ZERO,
