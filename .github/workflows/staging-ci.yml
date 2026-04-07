@@ -144,18 +144,18 @@ jobs:
       pr_number: ${{ steps.create-pr.outputs.pr_number }}
       promotion_branch: ${{ steps.branch.outputs.branch }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ needs.check-changes.outputs.current_head }}
-          fetch-depth: 0
-          persist-credentials: false
-
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
           app-id: ${{ secrets.GH_RELEASES_MANAGER_APP_ID }}
           private-key: ${{ secrets.GH_RELEASES_MANAGER_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.check-changes.outputs.current_head }}
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Set token
         id: token
@@ -511,7 +511,7 @@ jobs:
         with:
           ref: staging
           fetch-depth: 0
-          persist-credentials: false
+          # persist-credentials kept enabled — job pushes the staging-tested tag.
 
       - name: Update staging-tested tag
         run: |

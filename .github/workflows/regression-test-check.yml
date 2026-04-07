@@ -22,8 +22,8 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          git fetch origin "$BASE_REF"
-          git fetch origin "pull/${PR_NUMBER}/head:pr-head"
+          git fetch origin -- "$BASE_REF"
+          git fetch origin -- "pull/${PR_NUMBER}/head:pr-head"
 
       - name: Check for regression tests
         env:
