@@ -565,8 +565,19 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                     // thread_ts != ts means this is a reply in an existing thread
                     match fetch_thread_replies(&channel, &thread_ts) {
                         Ok(replies) if !replies.is_empty() => {
-                            let context = format_thread_context(&replies);
-                            format!("{context}{text}")
+                            // Filter out the current message to avoid duplicating it,
+                            // as conversations.replies includes the triggering message.
+                            let prior_replies: Vec<_> = replies
+                                .into_iter()
+                                .filter(|reply| reply.ts.as_deref() != Some(&ts))
+                                .collect();
+
+                            if prior_replies.is_empty() {
+                                text
+                            } else {
+                                let context = format_thread_context(&prior_replies);
+                                format!("{context}{text}")
+                            }
                         }
                         Ok(_) => text,
                         Err(e) => {
