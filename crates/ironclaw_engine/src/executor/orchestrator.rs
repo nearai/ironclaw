@@ -692,6 +692,32 @@ async fn handle_execute_code_step(
                 }
                 thread.events.push(event);
             }
+            // If the CodeAct snippet itself failed (Python SyntaxError, runtime
+            // error, etc.), surface it as an ActionFailed event so traces and
+            // observers see the failure. Without this, parse errors silently
+            // fall back to the LLM via the result dict and never warn callers.
+            if result.had_error {
+                let error_msg = if !result.stdout.is_empty() {
+                    let snippet: String = result.stdout.chars().take(500).collect();
+                    format!("CodeAct execution failed: {snippet}")
+                } else {
+                    "CodeAct execution failed (no stdout)".to_string()
+                };
+                let failed_event = ThreadEvent::new(
+                    thread.id,
+                    EventKind::ActionFailed {
+                        step_id: exec_ctx.step_id,
+                        action_name: "__codeact__".to_string(),
+                        call_id: String::new(),
+                        error: error_msg,
+                        params_summary: None,
+                    },
+                );
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(failed_event.clone());
+                }
+                thread.events.push(failed_event);
+            }
             thread.updated_at = chrono::Utc::now();
 
             let action_results: Vec<serde_json::Value> = result
@@ -906,20 +932,47 @@ async fn handle_execute_action(
         .await
     {
         Ok(r) => {
-            emit_and_record(
-                thread,
-                event_tx,
-                EventKind::ActionExecuted {
-                    step_id: exec_ctx.step_id,
-                    action_name: name.clone(),
-                    call_id: call_id.clone(),
-                    duration_ms: r.duration.as_millis() as u64,
-                    params_summary: ps.clone(),
-                },
-                &call_id,
-                &name,
-                &r.output,
-            );
+            // Effect adapters wrap tool errors as `Ok(ActionResult { is_error: true })`
+            // — surface them as `ActionFailed` so traces and observers see the
+            // failure. See `resolve_tool_future` in `scripting.rs` for the same
+            // pattern on the structured-tool path.
+            if r.is_error {
+                let error_msg = r
+                    .output
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| r.output.to_string());
+                emit_and_record(
+                    thread,
+                    event_tx,
+                    EventKind::ActionFailed {
+                        step_id: exec_ctx.step_id,
+                        action_name: name.clone(),
+                        call_id: call_id.clone(),
+                        error: error_msg,
+                        params_summary: ps.clone(),
+                    },
+                    &call_id,
+                    &name,
+                    &r.output,
+                );
+            } else {
+                emit_and_record(
+                    thread,
+                    event_tx,
+                    EventKind::ActionExecuted {
+                        step_id: exec_ctx.step_id,
+                        action_name: name.clone(),
+                        call_id: call_id.clone(),
+                        duration_ms: r.duration.as_millis() as u64,
+                        params_summary: ps.clone(),
+                    },
+                    &call_id,
+                    &name,
+                    &r.output,
+                );
+            }
             let result = serde_json::json!({
                 "action_name": r.action_name,
                 "output": r.output,
@@ -1348,12 +1401,30 @@ async fn execute_single_action(
 ) -> (serde_json::Value, EventKind, serde_json::Value) {
     match effects.execute_action(name, params, lease, exec_ctx).await {
         Ok(r) => {
-            let event = EventKind::ActionExecuted {
-                step_id: exec_ctx.step_id,
-                action_name: name.to_string(),
-                call_id: call_id.to_string(),
-                duration_ms: r.duration.as_millis() as u64,
-                params_summary: params_summary.clone(),
+            // Surface wrapped errors as ActionFailed (see resolve_tool_future
+            // and the parallel execute path for the same pattern).
+            let event = if r.is_error {
+                let error_msg = r
+                    .output
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| r.output.to_string());
+                EventKind::ActionFailed {
+                    step_id: exec_ctx.step_id,
+                    action_name: name.to_string(),
+                    call_id: call_id.to_string(),
+                    error: error_msg,
+                    params_summary: params_summary.clone(),
+                }
+            } else {
+                EventKind::ActionExecuted {
+                    step_id: exec_ctx.step_id,
+                    action_name: name.to_string(),
+                    call_id: call_id.to_string(),
+                    duration_ms: r.duration.as_millis() as u64,
+                    params_summary: params_summary.clone(),
+                }
             };
             let result_json = serde_json::json!({
                 "action_name": r.action_name,

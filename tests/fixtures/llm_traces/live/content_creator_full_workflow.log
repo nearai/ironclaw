@@ -1,0 +1,175 @@
+# Live Test Session: content_creator_full_workflow
+# Mode: Live
+# LLM calls: 10, Input tokens: 134480, Output tokens: 7291
+# Wall time: 84.3s, Cost: $0.0771
+# ──────────────────────────────────────────────────
+
+› I'm a YouTuber. Help me manage my content pipeline and publishing schedule across YouTube, TikTok, and Twitter — go ahead with sensible defaults, no configuration questions.
+  ○ Processing...
+  ○ Calling LLM...
+  ○ Step complete — 12777 in / 315 out tokens
+  ● memory_read(commitments/README.md)
+  ✗ memory_read(commitments/README.md): Tool 'memory_read' failed: Tool error: Tool memory_read execution failed: Execution failed: Read failed: Document not found: commitments/README.md for user default
+  ○ Calling LLM...
+  ○ Step complete — 12872 in / 939 out tokens
+  ● memory_write(commitments/README.md)
+  ✓ memory_write(commitments/README.md)
+  ○ Calling LLM...
+  ○ Step complete — 12922 in / 1120 out tokens
+  ● memory_write(commitments/open/README.md)
+  ✓ memory_write(commitments/open/README.md)
+  ● memory_write(commitments/resolved/README.md)
+  ✓ memory_write(commitments/resolved/README.md)
+  ● memory_write(commitments/signals/pending/README.md)
+  ✓ memory_write(commitments/signals/pending/README.md)
+  ● memory_write(commitments/signals/expired/README.md)
+  ✓ memory_write(commitments/signals/expired/README.md)
+  ● memory_write(commitments/decisions/README.md)
+  ✓ memory_write(commitments/decisions/README.md)
+  ● memory_write(commitments/parked-ideas/README.md)
+  ✓ memory_write(commitments/parked-ideas/README.md)
+  ● memory_write(commitments/content-pipeline/README.md)
+  ✓ memory_write(commitments/content-pipeline/README.md)
+  ○ Calling LLM...
+  ○ Step complete — 13257 in / 681 out tokens
+  ● mission_create(0 8,14,20 * * *)
+  ✓ mission_create(0 8,14,20 * * *)
+  ● mission_create(0 8 * * *)
+  ✓ mission_create(0 8 * * *)
+  ● mission_create(0 10 * * 1)
+  ✓ mission_create(0 10 * * 1)
+  ○ Calling LLM...
+  ○ Step complete — 13436 in / 268 out tokens
+  ● memory_write(commitments/calibration.md)
+  ✓ memory_write(commitments/calibration.md)
+  ○ Calling LLM...
+  ○ Step complete — 13485 in / 402 out tokens
+  ○ Calling LLM...
+  ○ Step complete — 13902 in / 1748 out tokens
+  ● memory_write(commitments/README.md)
+  ✓ memory_write(commitments/README.md)
+  ● memory_write(commitments/content-pipeline/README.md)
+  ✓ memory_write(commitments/content-pipeline/README.md)
+  ● mission_create(0 8,14,20 * * *)
+  ✓ mission_create(0 8,14,20 * * *)
+  ● mission_create(0 8 * * *)
+  ✓ mission_create(0 8 * * *)
+  ● mission_create(0 10 * * 1)
+  ✓ mission_create(0 10 * * 1)
+  ● memory_write(commitments/calibration.md)
+  ✓ memory_write(commitments/calibration.md)
+  ○ Calling LLM...
+  ○ Step complete — 15672 in / 372 out tokens
+  ○ Processing...
+  ○ Calling LLM...
+  ○ Step complete — 13004 in / 533 out tokens
+  ● time(%Y-%m-%d)
+  ✓ time(%Y-%m-%d)
+  ○ Calling LLM...
+  ○ Step complete — 13153 in / 913 out tokens
+  ● memory_write(commitments/open/tiktok-cuts-episode-47.md)
+  ✓ memory_write(commitments/open/tiktok-cuts-episode-47.md)
+  ● memory_write(commitments/open/twitter-thread-episode-47.md)
+  ✓ memory_write(commitments/open/twitter-thread-episode-47.md)
+  ● memory_write(commitments/parked-ideas/debugging-legacy-code-series.md)
+  ✓ memory_write(commitments/parked-ideas/debugging-legacy-code-series.md)
+  ● message(✅ **Tracked Distribution Tasks:**
+- **...)
+  ✓ message(✅ **Tracked Distribution Tasks:**
+- **...)
+  ○ Calling LLM...
+────────────────────────────────────────────────────
+
+
+Perfect! Your content creator system is now fully configured and ready to use. Here's what's been set up:
+
+## ✅ System Complete
+
+**Your Platforms:** YouTube, TikTok, Twitter
+
+**3 Active Missions:**
+1. **Triage** - Runs at 8am, 2pm, 8pm daily
+   - Flags sponsored deadlines < 3 days out as critical
+   - Exposes stalled content (2+ days no update)
+   - Trend signals expire after 6 hours
+   - Routes informational signals to intelligence
+
+2. **Morning Digest** - 8am daily
+   - Content pipeline status with stage tracking
+   - Publishing queue ready for distribution
+   - Fresh parked ideas to consider
+   - Engagement tasks and collaborations
+
+3. **Idea Resurface** - Mondays at 10am
+   - Reviews ideas parked > 2 weeks
+   - Suggests promoting timely ideas
+   - Matches ideas to recent trends
+
+## 🚀 How to Use
+
+**Start a new content piece:**
+- Say: `"new content piece: [title]"`
+- Creates a pipeline file tracking: idea → research → script → create → edit → thumbnail → publish → distribute → engage
+
+**Park an idea:**
+- Say: `"park this idea: [description]"`
+- Stored for weekly review
+
+**Cross-platform publishing:**
+- When you publish on YouTube, I'll auto-create distribution commitments for TikTok and Twitter
+
+**View your commitments:**
+- Say: `"show commitments"` for your digest
+
+Your system is live! Ready to track your first piece?
+
+
+Perfect! Your content creator system is now fully configured and ready to use. Here's what's been set up:
+
+## ✅ System Complete
+
+**Your Platforms:** YouTube, TikTok, Twitter
+
+**3 Active Missions:**
+1. **Triage** - Runs at 8am, 2pm, 8pm daily
+   - Flags sponsored deadlines < 3 days out as critical
+   - Exposes stalled content (2+ days no update)
+   - Trend signals expire after 6 hours
+   - Routes informational signals to intelligence
+
+2. **Morning Digest** - 8am daily
+   - Content pipeline status with stage tracking
+   - Publishing queue ready for distribution
+   - Fresh parked ideas to consider
+   - Engagement tasks and collaborations
+
+3. **Idea Resurface** - Mondays at 10am
+   - Reviews ideas parked > 2 weeks
+   - Suggests promoting timely ideas
+   - Matches ideas to recent trends
+
+## 🚀 How to Use
+
+**Start a new content piece:**
+- Say: `"new content piece: [title]"`
+- Creates a pipeline file tracking: idea → research → script → create → edit → thumbnail → publish → distribute → engage
+
+**Park an idea:**
+- Say: `"park this idea: [description]"`
+- Stored for weekly review
+
+**Cross-platform publishing:**
+- When you publish on YouTube, I'll auto-create distribution commitments for TikTok and Twitter
+
+**View your commitments:**
+- Say: `"show commitments"` for your digest
+
+Your system is live! Ready to track your first piece?
+✅ **Tracked Distribution Tasks:**
+- **TikTok cuts** for Episode 47 'AI Coding Tools' — due tomorrow evening
+- **Twitter thread** for Episode 47 — due tomorrow evening
+
+💡 **Parked Idea:**
+- "Series on debugging legacy code" — I'll resurface this when the timing feels right (typically after 2+ weeks or when you need evergreen content)
+
+**Quick win:** I can help draft the Twitter thread or extract TikTok highlights from your episode. Want me to proceed with either?

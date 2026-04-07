@@ -1,0 +1,115 @@
+# Live Test Session: ceo_full_workflow
+# Mode: Live
+# LLM calls: 9, Input tokens: 118843, Output tokens: 4465
+# Wall time: 63.7s, Cost: $0.0618
+# ──────────────────────────────────────────────────
+
+› I'm a CEO. Help me manage my day and track everything I'm delegating to my team — go ahead with sensible defaults, skip the configuration questions.
+  ○ Processing...
+  ○ Calling LLM...
+  ○ Step complete — 12688 in / 195 out tokens
+  ● memory_read(commitments/README.md)
+  ✗ memory_read(commitments/README.md): Tool 'memory_read' failed: Tool error: Tool memory_read execution failed: Execution failed: Read failed: Document not found: commitments/README.md for user default
+  ○ Calling LLM...
+  ○ Step complete — 12745 in / 1173 out tokens
+  ● memory_write(commitments/README.md)
+  ✓ memory_write(commitments/README.md)
+  ○ Calling LLM...
+  ○ Step complete — 12795 in / 530 out tokens
+  ● memory_write
+  ✓ memory_write
+  ● memory_write
+  ✓ memory_write
+  ● memory_write
+  ✓ memory_write
+  ● memory_write
+  ✓ memory_write
+  ● memory_write
+  ✓ memory_write
+  ● memory_write
+  ✓ memory_write
+  ○ Calling LLM...
+  ○ Step complete — 13112 in / 877 out tokens
+  ● mission_create(0 9,13,18 * * *)
+  ✓ mission_create(0 9,13,18 * * *)
+  ● mission_create(0 8,17 * * 1-5)
+  ✓ mission_create(0 8,17 * * 1-5)
+  ● memory_write(commitments/calibration.md)
+  ✓ memory_write(commitments/calibration.md)
+  ○ Calling LLM...
+  ○ Step complete — 13275 in / 143 out tokens
+  ● memory_read(commitments/README.md)
+  ✓ memory_read(commitments/README.md)
+  ○ Calling LLM...
+  ○ Step complete — 14325 in / 338 out tokens
+  ○ Processing...
+  ○ Calling LLM...
+  ○ Step complete — 13181 in / 246 out tokens
+  ● time(%Y-%m-%d %A)
+  ✓ time(%Y-%m-%d %A)
+  ○ Calling LLM...
+  ○ Step complete — 13309 in / 797 out tokens
+  ● memory_write(commitments/open/q2-budget-proposal-sarah.md)
+  ✓ memory_write(commitments/open/q2-budget-proposal-sarah.md)
+  ● memory_write(commitments/open/acquisition-term-sheet-bob.md)
+  ✓ memory_write(commitments/open/acquisition-term-sheet-bob.md)
+  ○ Calling LLM...
+  ○ Step complete — 13413 in / 166 out tokens
+────────────────────────────────────────────────────
+
+
+Your executive commitment system is ready:
+
+- **Triage** runs 3x daily (9am, 1pm, 6pm) — delegation follow-ups after 2 days, signals expire after 24h
+- **Digest** runs morning (8am) and evening (5pm) on weekdays — grouped by delegated vs owned vs decisions pending
+- I'll capture decisions from our conversations and track delegations automatically
+- For items I can handle (PR reviews, drafts, research), I'll ask your permission first
+- Say **"show commitments"** anytime, or **"who owes me what?"** for delegation status
+- Use **`/plan <description>`** to create a structured execution plan for complex initiatives
+- I start conservative — I'll learn your preferences over time as you confirm or override my suggestions
+
+The system is now tracking:
+- Open commitments and their status
+- Delegated items with follow-up reminders
+- Decisions made (with rationale and stakeholders)
+- Signals from meetings/channels (24h expiration)
+- Parked ideas for periodic review
+
+What would you like to delegate or decide on today?
+
+
+Your executive commitment system is ready:
+
+- **Triage** runs 3x daily (9am, 1pm, 6pm) — delegation follow-ups after 2 days, signals expire after 24h
+- **Digest** runs morning (8am) and evening (5pm) on weekdays — grouped by delegated vs owned vs decisions pending
+- I'll capture decisions from our conversations and track delegations automatically
+- For items I can handle (PR reviews, drafts, research), I'll ask your permission first
+- Say **"show commitments"** anytime, or **"who owes me what?"** for delegation status
+- Use **`/plan <description>`** to create a structured execution plan for complex initiatives
+- I start conservative — I'll learn your preferences over time as you confirm or override my suggestions
+
+The system is now tracking:
+- Open commitments and their status
+- Delegated items with follow-up reminders
+- Decisions made (with rationale and stakeholders)
+- Signals from meetings/channels (24h expiration)
+- Parked ideas for periodic review
+
+What would you like to delegate or decide on today?
+
+
+Perfect — I've captured both delegations:
+
+**1. Sarah — Q2 Budget Proposal**
+- Due: Friday (April 11, 2026)
+- Status: Open, delegated to Sarah
+- Follow-up: I'll flag if no update by Thursday
+
+**2. Bob — Acquisition Term Sheet**
+- Due: Tuesday, April 15, 2026
+- Status: Open, delegated to Bob
+- Follow-up: I'll flag if no update by Monday
+
+Both are now in the system and will show up when you ask "show commitments" or "who owes me what?"
+
+Anything else from that 1:1 I should track?

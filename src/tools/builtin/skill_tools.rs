@@ -298,6 +298,32 @@ impl Tool for SkillInstallTool {
         let start = std::time::Instant::now();
         let name = require_str(&params, "name")?;
 
+        // Idempotent: if a skill with this name is already loaded (from any
+        // source — local SKILL.md, bundled, previously installed), return
+        // success immediately without hitting the catalog. Without this
+        // shortcut, an agent that mis-interprets an active persona bundle
+        // as "needs to be installed" will trigger a 404 against the
+        // ClawHub registry for skills that exist only locally.
+        {
+            let guard = self
+                .registry
+                .read()
+                .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
+            if guard.has(name) {
+                return Ok(ToolOutput::success(
+                    serde_json::json!({
+                        "name": name,
+                        "status": "already_installed",
+                        "message": format!(
+                            "Skill '{}' is already active — no install needed.",
+                            name
+                        ),
+                    }),
+                    start.elapsed(),
+                ));
+            }
+        }
+
         let content = if let Some(raw) = params.get("content").and_then(|v| v.as_str()) {
             // Direct content provided
             raw.to_string()

@@ -82,6 +82,49 @@ impl LiveTestHarness {
         Some(judge_response(provider.as_ref(), &joined, criteria).await)
     }
 
+    /// Scan the captured status events and tool results for executor errors.
+    ///
+    /// Returns a list of error descriptions. The harness's `finish_strict`
+    /// helper panics if this list is non-empty, which is the default behavior
+    /// for live tests — any error in the trace is treated as a regression
+    /// that warrants investigation.
+    ///
+    /// Recognized error patterns:
+    /// - Failed tool calls (`ToolCompleted { success: false }`)
+    /// - Tool result previews containing `error`/`failed`/`SyntaxError`
+    /// - The exception is "Document not found": this is a benign signal that
+    ///   the agent probed for a workspace file that doesn't exist yet, and
+    ///   the agent is expected to recover by writing the file. We surface it
+    ///   as a soft warning but don't fail the test.
+    pub fn collect_trace_errors(&self) -> Vec<String> {
+        use ironclaw::channels::StatusUpdate;
+
+        let mut errors = Vec::new();
+        for event in self.rig.captured_status_events() {
+            match event {
+                StatusUpdate::ToolCompleted {
+                    name,
+                    success: false,
+                    error,
+                    ..
+                } => {
+                    let err = error.as_deref().unwrap_or("unknown error");
+                    if is_benign_error(err) {
+                        continue;
+                    }
+                    errors.push(format!("tool '{name}' failed: {err}"));
+                }
+                StatusUpdate::ToolResult { name, preview } => {
+                    if let Some(reason) = scan_preview_for_errors(&preview) {
+                        errors.push(format!("tool '{name}' result contains error: {reason}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        errors
+    }
+
     /// Flush the recorded trace (if live mode), save a human-readable session
     /// log, and shut down the agent.
     ///
@@ -100,6 +143,27 @@ impl LiveTestHarness {
             }
         }
         self.rig.shutdown();
+    }
+
+    /// Like `finish`, but panics if the trace contains any non-benign errors.
+    /// This is the default for live tests — any tool failure or executor
+    /// SyntaxError is treated as a regression.
+    pub async fn finish_strict(self, user_input: &str, responses: &[String]) {
+        let errors = self.collect_trace_errors();
+        if !errors.is_empty() {
+            // Save the log first so the test author can see what happened.
+            self.save_session_log(user_input, responses);
+            if let Some(ref recorder) = self.recording_handle {
+                let _ = recorder.flush().await;
+            }
+            self.rig.shutdown();
+            let joined = errors.join("\n  - ");
+            panic!(
+                "Live trace contains {} error(s) that warrant investigation:\n  - {joined}",
+                errors.len(),
+            );
+        }
+        self.finish(user_input, responses).await;
     }
 
     /// Write a human-readable session log.
@@ -465,6 +529,87 @@ pub async fn judge_response(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Errors that we expect during normal operation and should not fail tests on.
+///
+/// These are "the agent picked the wrong tool or wrong params, here's how to
+/// recover" messages that the LLM uses to self-correct. None of them indicate
+/// an engine bug. Engine bugs (Python SyntaxError, missing leases for FINAL,
+/// orphaned skill credentials, etc.) are still flagged.
+///
+/// Categories of benign errors:
+///
+/// 1. **Workspace probing**: agent calls `memory_read` to check whether a
+///    file exists before writing it. The tool returns a hard error instead
+///    of a "not found" sentinel, but the agent's recovery is normal.
+///
+/// 2. **Wrong tool selection**: agent calls `write_file` for a workspace
+///    file. The tool rejects with a clear "use memory_write instead"
+///    message and the agent retries with the right tool.
+///
+/// 3. **Wrong patch params**: agent calls `memory_write` with `old_string`
+///    but no `new_string`. The tool's error message tells the agent how to
+///    fix it and the agent retries.
+///
+/// 4. **Skill probe**: agent calls `skill_install` for a skill that's
+///    already loaded. The current skill_install short-circuits, but older
+///    traces may have hit the registry 404 path.
+fn is_benign_error(err: &str) -> bool {
+    let lower = err.to_lowercase();
+
+    // Workspace probing
+    if lower.contains("document not found") || lower.contains("path not found") {
+        return true;
+    }
+
+    // Wrong tool selection (write_file → memory_write guidance)
+    if lower.contains("use the memory_write tool")
+        || lower.contains("use the memory_read tool")
+        || lower.contains("use memory_write instead")
+        || lower.contains("use memory_read instead")
+    {
+        return true;
+    }
+
+    // Wrong patch params (memory_write patch mode confusion)
+    if lower.contains("new_string is required when old_string is provided")
+        || lower.contains("either 'content' (for write/append) or 'old_string'")
+    {
+        return true;
+    }
+
+    // Skill probe — installing a skill that already exists.
+    if lower.contains("skill") && lower.contains("already") && lower.contains("exists") {
+        return true;
+    }
+
+    false
+}
+
+/// Scan a tool result preview for executor-side errors that we want to flag.
+///
+/// Returns `Some(reason)` if the preview contains a Python SyntaxError,
+/// Monty traceback, or a JSON-style `"error"` payload that isn't a benign
+/// "document not found".
+fn scan_preview_for_errors(preview: &str) -> Option<String> {
+    // Python / Monty syntax errors from CodeAct execution
+    if preview.contains("SyntaxError") || preview.contains("Traceback (most recent call last)") {
+        return Some("Python SyntaxError in CodeAct execution".to_string());
+    }
+    // JSON-style error payloads from tool wrappers
+    if let Some(idx) = preview
+        .find("'error'")
+        .or_else(|| preview.find("\"error\""))
+        && let Some(rest) = preview.get(idx..)
+    {
+        // Extract a short snippet of the error message for the report.
+        let snippet: String = rest.chars().take(200).collect();
+        if !is_benign_error(&snippet) {
+            return Some(snippet);
+        }
+    }
+    None
+}
 
 /// Load LLM API keys from the user's real secrets store into process env vars.
 ///

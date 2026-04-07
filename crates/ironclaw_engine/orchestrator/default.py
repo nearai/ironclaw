@@ -656,6 +656,26 @@ def run_loop(context, goal, actions, state, config):
                 action_calls=calls,
             )
 
+            # Handle FINAL emitted as a structured tool call. FINAL is a
+            # CodeAct sentinel for completion — when the LLM tries to call
+            # it via tool_calls instead of inside a code block, the engine's
+            # action executor has no lease for it and the call fails. Treat
+            # any FINAL tool call as a completion signal: take the first
+            # argument (or content/answer/result) as the response text.
+            for c in calls:
+                if c.get("name", "") == "FINAL":
+                    params = c.get("params", {}) or {}
+                    answer = (
+                        params.get("answer")
+                        or params.get("result")
+                        or params.get("content")
+                        or params.get("text")
+                        or response.get("content", "")
+                        or ""
+                    )
+                    __transition_to__("completed", "FINAL via tool_calls")
+                    return complete_result(state, "completed", str(answer))
+
             # Execute all tool calls in parallel via the batch host function.
             # Rust handles preflight (lease/policy), parallel execution via
             # JoinSet, and event emission in call order.

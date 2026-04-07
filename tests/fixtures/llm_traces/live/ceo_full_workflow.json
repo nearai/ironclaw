@@ -1,0 +1,340 @@
+{
+  "model_name": "live-ceo_full_workflow",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "I'm a CEO. Help me manage my day and track everything I'm delegating to my team — go ahead with sensible defaults, skip the configuration questions."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "I'm a CEO. Help me manage my day and track everything I'm delegating to my team ",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-8a9c16b3e07e80d0",
+            "name": "memory_read",
+            "arguments": {
+              "path": "commitments/README.md"
+            }
+          }
+        ],
+        "input_tokens": 12688,
+        "output_tokens": 195
+      }
+    },
+    {
+      "response": {
+        "type": "user_input",
+        "content": "[Tool `memory_read` returned: {'error': \"Tool 'memory_read' failed: Tool error: Tool memory_read execution failed: Execution failed: Read failed: Document not found: commitments/README.md for user default\"}]"
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "[Tool `memory_read` returned: {'error': \"Tool 'memory_read' failed: Tool error: ",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-b9152f62c08a61bd",
+            "name": "memory_write",
+            "arguments": {
+              "content": "# Commitments Tracking System\n\n## Overview\n\nThis workspace tracks obligations, signals, decisions, and parked ideas for executive workflow management.\n\n## Directory Structure\n\n```\ncommitments/\n├── README.md           # This file\n├── open/               # Active commitments requiring attention\n├── resolved/           # Completed commitments\n├── signals/\n│   ├── pending/        # Signals awaiting triage\n│   └── expired/        # Stale signals (older than 24h)\n├── decisions/          # Recorded decisions with rationale\n├── parked-ideas/       # Ideas saved for later review\n├── intelligence/       # Informational signals routed here\n└── triage-log.md       # Triage execution history\n```\n\n## Schema Reference\n\n### Signals (in signals/pending/)\n\nSignals are raw inputs that may become commitments. Frontmatter:\n\n```yaml\ntype: signal\ncreated_at: 2024-01-15T10:30:00Z\nsource: meeting/sarah-standup\nimmediacy: real-time | high | normal | low\nexpires_at: 2024-01-16T10:30:00Z  # 24h for executives\ndestination: commitments/open/ or commitments/intelligence/\nconfidence: 0.0-1.0  # How certain this should become a commitment\n```\n\n### Commitments (in open/ or resolved/)\n\nFrontmatter:\n\n```yaml\ntype: commitment\ncreated_at: 2024-01-15T10:30:00Z\ntitle: Brief description\nstatus: open | waiting | in-progress | done\npriority: critical | high | normal | low\ndelegated_to: person-name  # If someone else owns this\nresolution_path: commitments/resolved/FILENAME.md  # When done\nstale_after: 7  # Days before flagging as stale\nlast_updated: 2024-01-15T10:30:00Z\n```\n\n### Decisions (in decisions/)\n\nFrontmatter:\n\n```yaml\ntype: decision\ncreated_at: 2024-01-15T10:30:00Z\ntitle: What was decided\nrationale: Why this decision was made\nstakeholders: [person1, person2]  # Who was present/informed\nimpact: team | product | company  # Scope of decision\nfollow_up: 2024-02-15  # When to assess outcome\noutcome: pending | validated | invalidated\n```\n\n### Parked Ideas (in parked-ideas/)\n\nFrontmatter:\n\n```yaml\ntype: idea\ncreated_at: 2024-01-15T10:30:00Z\ntitle: Brief description\ncontext: Where this came from\npriority: low  # Ideas start low\nresurface_at: 2024-02-15  # When to review again\nstatus: parked | active | discarded\n```\n\n## Workflow\n\n### Triage (3x daily: 9am, 1pm, 6pm)\n\n1. Check delegated items (status=waiting) — flag if not updated in 2 days\n2. Check overdue items — escalate urgency\n3. Expire signals older than 24h\n4. Promote high-confidence signals to commitments\n5. Route informational signals to intelligence/\n6. Log triage summary\n\n### Digest (morning 8am, evening 5pm, weekdays)\n\nGroup commitments by:\n- DELEGATED — items waiting on others\n- OWNED — items you need to act on\n- DECISIONS PENDING — items needing your decision\n- RECENT DECISIONS — decisions from last 7 days\n\n## Commands\n\n- \"show commitments\" — Get full digest\n- \"who owes me what?\" — Check delegation status\n- \"/plan <description>\" — Create structured execution plan\n\n## Calibration\n\n- Signal expiration: 24 hours (executives move fast)\n- Delegation follow-up: Draft polite check-in after 2 days\n- Most commitments are delegations, not personal tasks\n- Keep communications scannable: bullets, one-liners",
+              "force": true,
+              "target": "commitments/README.md"
+            }
+          }
+        ],
+        "input_tokens": 12745,
+        "output_tokens": 1173
+      }
+    },
+    {
+      "response": {
+        "type": "user_input",
+        "content": "[Tool `memory_write` returned: {'append': True, 'content_length': 3254, 'path': 'commitments/README.md', 'status': 'written'}]"
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "[Tool `memory_write` returned: {'append': True, 'content_length': 3254, 'path': ",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-b5981bd62cb646fc",
+            "name": "memory_write",
+            "arguments": {
+              "content": "# Open Commitments\n\nTrack all active commitments here. Each commitment file should include:\n- Title and description\n- Status (pending/in-progress/blocked)\n- Delegated to (if applicable)\n- Due date or expiration\n- Progress notes",
+              "path": "commitments/open/README.md"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-9c7ef2433ebe0a0e",
+            "name": "memory_write",
+            "arguments": {
+              "content": "# Resolved Commitments\n\nArchive of completed or closed commitments. Keep for reference and pattern analysis.",
+              "path": "commitments/resolved/README.md"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-936c40c0ec60286b",
+            "name": "memory_write",
+            "arguments": {
+              "content": "# Pending Signals\n\nActionable items extracted from conversations, emails, and meetings. Awaiting triage and commitment creation.",
+              "path": "commitments/signals/pending/README.md"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-8b5c4a3e7d47305f",
+            "name": "memory_write",
+            "arguments": {
+              "content": "# Expired Signals\n\nSignals that were not acted upon within 24 hours. Executives move fast - stale signals are noise.",
+              "path": "commitments/signals/expired/README.md"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-9ac00c3e9e52c5b1",
+            "name": "memory_write",
+            "arguments": {
+              "content": "# Decisions Log\n\nRecord of key decisions made, including:\n- Decision description\n- Rationale\n- People present\n- Date\n- Expected outcomes\n- Follow-up required",
+              "path": "commitments/decisions/README.md"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-a4fb3b8ad0acc7a1",
+            "name": "memory_write",
+            "arguments": {
+              "content": "# Parked Ideas\n\nIdea capture for concepts that aren't ready for execution. Resurfaced periodically for review.",
+              "path": "commitments/parked-ideas/README.md"
+            }
+          }
+        ],
+        "input_tokens": 12795,
+        "output_tokens": 530
+      }
+    },
+    {
+      "response": {
+        "type": "user_input",
+        "content": "[Tool `memory_write` returned: {'append': True, 'content_length': 227, 'path': 'daily/2026-04-07.md', 'status': 'written'}]"
+      }
+    },
+    {
+      "response": {
+        "type": "user_input",
+        "content": "[Tool `memory_write` returned: {'append': True, 'content_length': 108, 'path': 'daily/2026-04-07.md', 'status': 'written'}]"
+      }
+    },
+    {
+      "response": {
+        "type": "user_input",
+        "content": "[Tool `memory_write` returned: {'append': True, 'content_length': 128, 'path': 'daily/2026-04-07.md', 'status': 'written'}]"
+      }
+    },
+    {
+      "response": {
+        "type": "user_input",
+        "content": "[Tool `memory_write` returned: {'append': True, 'content_length': 116, 'path': 'daily/2026-04-07.md', 'status': 'written'}]"
+      }
+    },
+    {
+      "response": {
+        "type": "user_input",
+        "content": "[Tool `memory_write` returned: {'append': True, 'content_length': 157, 'path': 'daily/2026-04-07.md', 'status': 'written'}]"
+      }
+    },
+    {
+      "response": {
+        "type": "user_input",
+        "content": "[Tool `memory_write` returned: {'append': True, 'content_length': 110, 'path': 'daily/2026-04-07.md', 'status': 'written'}]"
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "[Tool `memory_write` returned: {'append': True, 'content_length': 110, 'path': '",
+        "min_message_count": 13
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-a46e0a2f0a0c121c",
+            "name": "mission_create",
+            "arguments": {
+              "cadence": "0 9,13,18 * * *",
+              "goal": "Executive triage. Read commitments/README.md for schema. Priority order: (1) Check delegated items (status=waiting, delegated_to set) — if not updated in 2 days, flag for follow-up and draft a polite check-in message. (2) Check overdue items — escalate urgency. (3) Expire signals older than 24 hours (executives move fast, stale signals are noise). (4) For signals with immediacy=realtime, broadcast immediately via message tool. (5) Promote high-confidence signals to commitments — default resolution_path to needs_decision for ambiguous items. (6) Route informational signals to intelligence (write MemoryDoc to context/intel/). (7) Append triage summary to commitments/triage-log.md. (8) If anything needs attention, send a concise alert — executives scan, not read.",
+              "name": "commitment-triage"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-b027252447424816",
+            "name": "mission_create",
+            "arguments": {
+              "cadence": "0 8,17 * * 1-5",
+              "goal": "Executive commitments digest. Read commitments/README.md for schema. Gather all open commitments via memory_tree and memory_read. Group by responsibility: (1) DELEGATED — items where delegated_to is set, with days since delegation and follow-up status. (2) OWNED — items you need to act on personally, sorted by urgency. For agent_can_handle items, note what the agent would do and ask permission. (3) DECISIONS PENDING — items with resolution_path=needs_decision. (4) RECENT DECISIONS — decisions captured in the last 7 days (from commitments/decisions/), including any needing outcome assessment. Keep each item to one line. End with pending signal count and 'Did I miss anything?' Send via message tool.",
+              "name": "commitment-digest"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-95403fa2c1e74984",
+            "name": "memory_write",
+            "arguments": {
+              "append": false,
+              "content": "# Executive Commitment Calibration\n\n- Group commitments by responsibility type in digests — delegated items shown separately from owned items\n- For delegation follow-ups, draft a polite check-in rather than a blunt status request\n- Only capture explicit decisions, not brainstorming or hypotheticals ('yeah let's do X' = decision; 'maybe we should' = not a decision)\n- Signal expiration is 24 hours — executives move fast, stale signals are noise\n- Most CEO commitments are delegations, not personal tasks — default delegated_to when someone else is mentioned\n- When capturing decisions, note who was present and what it affects — executives revisit decisions frequently\n- Keep all communications scannable: bullet points, one-liners, no paragraphs\n- Start conservative: surface everything, don't auto-promote signals or auto-dispatch agent_can_handle without approval",
+              "target": "commitments/calibration.md"
+            }
+          }
+        ],
+        "input_tokens": 13112,
+        "output_tokens": 877
+      }
+    },
+    {
+      "response": {
+        "type": "user_input",
+        "content": "[Tool `mission_create` returned: {'mission_id': '4fc67cb0-6924-48dd-8d56-42f7ad001d34', 'status': 'created'}]"
+      }
+    },
+    {
+      "response": {
+        "type": "user_input",
+        "content": "[Tool `mission_create` returned: {'mission_id': '77deb75d-e89f-4b04-a323-c0a5db358c90', 'status': 'created'}]"
+      }
+    },
+    {
+      "response": {
+        "type": "user_input",
+        "content": "[Tool `memory_write` returned: {'append': False, 'content_length': 876, 'path': 'commitments/calibration.md', 'status': 'written'}]"
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "[Tool `memory_write` returned: {'append': False, 'content_length': 876, 'path': ",
+        "min_message_count": 17
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-b1ad8cc00338714a",
+            "name": "memory_read",
+            "arguments": {
+              "path": "commitments/README.md"
+            }
+          }
+        ],
+        "input_tokens": 13275,
+        "output_tokens": 143
+      }
+    },
+    {
+      "response": {
+        "type": "user_input",
+        "content": "[Tool `memory_read` returned: {'content': '# Commitments Tracking System\\n\\n## Overview\\n\\nThis workspace tracks obligations, signals, decisions, and parked ideas for executive workflow management.\\n\\n## Directory Structure\\n\\n```\\ncommitments/\\n├── README.md           # This file\\n├── open/               # Active commitments requiring attention\\n├── resolved/           # Completed commitments\\n├── signals/\\n│   ├── pending/        # Signals awaiting triage\\n│   └── expired/        # Stale signals (older than 24h)\\n├── decisions/          # Recorded decisions with rationale\\n├── parked-ideas/       # Ideas saved for later review\\n├── intelligence/       # Informational signals routed here\\n└── triage-log.md       # Triage execution history\\n```\\n\\n## Schema Reference\\n\\n### Signals (in signals/pending/)\\n\\nSignals are raw inputs that may become commitments. Frontmatter:\\n\\n```yaml\\ntype: signal\\ncreated_at: 2024-01-15T10:30:00Z\\nsource: meeting/sarah-standup\\nimmediacy: real-time | high | normal | low\\nexpires_at: 2024-01-16T10:30:00Z  # 24h for executives\\ndestination: commitments/open/ or commitments/intelligence/\\nconfidence: 0.0-1.0  # How certain this should become a commitment\\n```\\n\\n### Commitments (in open/ or resolved/)\\n\\nFrontmatter:\\n\\n```yaml\\ntype: commitment\\ncreated_at: 2024-01-15T10:30:00Z\\ntitle: Brief description\\nstatus: open | waiting | in-progress | done\\npriority: critical | high | normal | low\\ndelegated_to: person-name  # If someone else owns this\\nresolution_path: commitments/resolved/FILENAME.md  # When done\\nstale_after: 7  # Days before flagging as stale\\nlast_updated: 2024-01-15T10:30:00Z\\n```\\n\\n### Decisions (in decisions/)\\n\\nFrontmatter:\\n\\n```yaml\\ntype: decision\\ncreated_at: 2024-01-15T10:30:00Z\\ntitle: What was decided\\nrationale: Why this decision was made\\nstakeholders: [person1, person2]  # Who was present/informed\\nimpact: team | product | company  # Scope of decision\\nfollow_up: 2024-02-15  # When to assess outcome\\noutcome: pending | validated | invalidated\\n```\\n\\n### Parked Ideas (in parked-ideas/)\\n\\nFrontmatter:\\n\\n```yaml\\ntype: idea\\ncreated_at: 2024-01-15T10:30:00Z\\ntitle: Brief description\\ncontext: Where this came from\\npriority: low  # Ideas start low\\nresurface_at: 2024-02-15  # When to review again\\nstatus: parked | active | discarded\\n```\\n\\n## Workflow\\n\\n### Triage (3x daily: 9am, 1pm, 6pm)\\n\\n1. Check delegated items (status=waiting) — flag if not updated in 2 days\\n2. Check overdue items — escalate urgency\\n3. Expire signals older than 24h\\n4. Promote high-confidence signals to commitments\\n5. Route informational signals to intelligence/\\n6. Log triage summary\\n\\n### Digest (morning 8am, evening 5pm, weekdays)\\n\\nGroup commitments by:\\n- DELEGATED — items waiting on others\\n- OWNED — items you need to act on\\n- DECISIONS PENDING — items needing your decision\\n- RECENT DECISIONS — decisions from last 7 days\\n\\n## Commands\\n\\n- \"show commitments\" — Get full digest\\n- \"who owes me what?\" — Check delegation status\\n- \"/plan <description>\" — Create structured execution plan\\n\\n## Calibration\\n\\n- Signal expiration: 24 hours (executives move fast)\\n- Delegation follow-up: Draft polite check-in after 2 days\\n- Most commitments are delegations, not personal tasks\\n- Keep communications scannable: bullets, one-liners', 'path': 'commitments/README.md', 'updated_at': '2026-04-07T04:09:26.600+00:00', 'word_count': 438}]"
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "[Tool `memory_read` returned: {'content': '# Commitments Tracking System\\n\\n## O",
+        "min_message_count": 19
+      },
+      "response": {
+        "type": "text",
+        "content": "\n\nYour executive commitment system is ready:\n\n- **Triage** runs 3x daily (9am, 1pm, 6pm) — delegation follow-ups after 2 days, signals expire after 24h\n- **Digest** runs morning (8am) and evening (5pm) on weekdays — grouped by delegated vs owned vs decisions pending\n- I'll capture decisions from our conversations and track delegations automatically\n- For items I can handle (PR reviews, drafts, research), I'll ask your permission first\n- Say **\"show commitments\"** anytime, or **\"who owes me what?\"** for delegation status\n- Use **`/plan <description>`** to create a structured execution plan for complex initiatives\n- I start conservative — I'll learn your preferences over time as you confirm or override my suggestions\n\nThe system is now tracking:\n- Open commitments and their status\n- Delegated items with follow-up reminders\n- Decisions made (with rationale and stakeholders)\n- Signals from meetings/channels (24h expiration)\n- Parked ideas for periodic review\n\nWhat would you like to delegate or decide on today?",
+        "input_tokens": 14325,
+        "output_tokens": 338
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "I just had a 1:1 with my team. Sarah is going to deliver the Q2 budget proposal ",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-8958c271a27e49ec",
+            "name": "time",
+            "arguments": {
+              "format_string": "%Y-%m-%d %A",
+              "operation": "now"
+            }
+          }
+        ],
+        "input_tokens": 13181,
+        "output_tokens": 246
+      }
+    },
+    {
+      "response": {
+        "type": "user_input",
+        "content": "[Tool `time` returned: {'iso': '2026-04-07T04:09:59.205046+00:00', 'unix': 1775534999, 'unix_millis': 1775534999205, 'utc_iso': '2026-04-07T04:09:59.205046+00:00'}]"
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "[Tool `time` returned: {'iso': '2026-04-07T04:09:59.205046+00:00', 'unix': 17755",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-a6befd2082871f4d",
+            "name": "memory_write",
+            "arguments": {
+              "append": false,
+              "content": "---\ntype: commitment\nstatus: open\nurgency: medium\ndue: 2026-04-11\ncreated_at: 2026-04-07\nstale_after: 2026-04-09\nowner: user\ndelegated_to: Sarah\nresolution_path: needs_decision\nsource_signal: null\nresolved_by: null\ntags: [budget, Q2, finance, delegation]\n---\n# Q2 Budget Proposal\nSarah is delivering the Q2 budget proposal by Friday (April 11).\n\n## Follow-up\n- Check status by Wednesday (April 9)\n- Review and approve/review the proposal\n- Decision needed on budget allocations\n\n## Resolution path\n- [ ] Sarah delivers draft\n- [ ] CEO reviews and provides feedback\n- [ ] Final approval needed",
+              "target": "commitments/open/q2-budget-proposal-sarah.md"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-95b7053c1aead032",
+            "name": "memory_write",
+            "arguments": {
+              "append": false,
+              "content": "---\ntype: commitment\nstatus: open\nurgency: medium\ndue: 2026-04-14\ncreated_at: 2026-04-07\nstale_after: 2026-04-12\nowner: user\ndelegated_to: Bob\nresolution_path: needs_decision\nsource_signal: null\nresolved_by: null\ntags: [acquisition, term-sheet, M&A, delegation]\n---\n# Acquisition Term Sheet\nBob is drafting the acquisition term sheet by Tuesday next week (April 14).\n\n## Follow-up\n- Check status by Sunday (April 12)\n- Review term sheet structure and key terms\n- Decision needed on negotiation strategy\n\n## Resolution path\n- [ ] Bob delivers draft term sheet\n- [ ] CEO reviews terms (valuation, conditions, timeline)\n- [ ] Legal review if needed\n- [ ] Negotiation strategy decision",
+              "target": "commitments/open/acquisition-term-sheet-bob.md"
+            }
+          }
+        ],
+        "input_tokens": 13309,
+        "output_tokens": 797
+      }
+    },
+    {
+      "response": {
+        "type": "user_input",
+        "content": "[Tool `memory_write` returned: {'append': False, 'content_length': 592, 'path': 'commitments/open/q2-budget-proposal-sarah.md', 'status': 'written'}]"
+      }
+    },
+    {
+      "response": {
+        "type": "user_input",
+        "content": "[Tool `memory_write` returned: {'append': False, 'content_length': 681, 'path': 'commitments/open/acquisition-term-sheet-bob.md', 'status': 'written'}]"
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "[Tool `memory_write` returned: {'append': False, 'content_length': 681, 'path': ",
+        "min_message_count": 9
+      },
+      "response": {
+        "type": "text",
+        "content": "\n\nPerfect — I've captured both delegations:\n\n**1. Sarah — Q2 Budget Proposal**\n- Due: Friday (April 11, 2026)\n- Status: Open, delegated to Sarah\n- Follow-up: I'll flag if no update by Thursday\n\n**2. Bob — Acquisition Term Sheet**\n- Due: Tuesday, April 15, 2026\n- Status: Open, delegated to Bob\n- Follow-up: I'll flag if no update by Monday\n\nBoth are now in the system and will show up when you ask \"show commitments\" or \"who owes me what?\"\n\nAnything else from that 1:1 I should track?",
+        "input_tokens": 13413,
+        "output_tokens": 166
+      }
+    }
+  ]
+}
