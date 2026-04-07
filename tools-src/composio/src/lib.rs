@@ -82,6 +82,13 @@ fn execute_inner(params_str: &str, context: Option<&str>) -> Result<String, Stri
 
     let entity_id = extract_entity_id(context);
 
+    // Validate params is an object when provided (schema declares it as such).
+    if let Some(ref p) = params.params {
+        if !p.is_object() {
+            return Err("'params' must be a JSON object".into());
+        }
+    }
+
     match params.action.as_str() {
         "list" => list_tools(params.app.as_deref()),
         "execute" => {
@@ -187,7 +194,10 @@ fn get_with_retry(
             );
         }
 
-        if attempt < MAX_RETRIES && (resp.status == 429 || resp.status >= 500) {
+        // Retry only on transient server errors (5xx). 429 is not retried
+        // because the WASM host has no sleep/backoff — immediate retries would
+        // just repeat the rate-limit response and waste request budget.
+        if attempt < MAX_RETRIES && resp.status >= 500 {
             near::agent::host::log(
                 near::agent::host::LogLevel::Warn,
                 &format!(
@@ -534,6 +544,27 @@ mod tests {
     #[test]
     fn test_extract_entity_id_defaults_on_malformed_json() {
         assert_eq!(extract_entity_id(Some("not json")), "default");
+    }
+
+    #[test]
+    fn test_params_deserialization_rejects_unknown_fields() {
+        let result: Result<Params, _> =
+            serde_json::from_str(r#"{"action": "list", "bogus": true}"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_params_accepts_valid_object_params() {
+        let p: Params =
+            serde_json::from_str(r#"{"action": "execute", "params": {"key": "val"}}"#).unwrap();
+        assert!(p.params.unwrap().is_object());
+    }
+
+    #[test]
+    fn test_params_accepts_null_params() {
+        let p: Params =
+            serde_json::from_str(r#"{"action": "list"}"#).unwrap();
+        assert!(p.params.is_none());
     }
 
     // -----------------------------------------------------------------------

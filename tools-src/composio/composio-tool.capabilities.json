@@ -2,35 +2,6 @@
   "version": "0.1.0",
   "wit_version": "0.3.0",
   "description": "Connect to 250+ apps (Gmail, GitHub, Slack, Notion, etc.) via Composio. Actions: list (browse tools), execute (run a tool), connect (OAuth-link an app), connected_accounts (list linked accounts). Authentication is handled via the 'composio_api_key' secret injected by the host.",
-  "parameters": {
-    "type": "object",
-    "properties": {
-      "action": {
-        "type": "string",
-        "enum": ["list", "execute", "connect", "connected_accounts"],
-        "description": "Action to perform"
-      },
-      "app": {
-        "type": "string",
-        "description": "App/toolkit slug (e.g., \"gmail\", \"github\", \"notion\")"
-      },
-      "tool_slug": {
-        "type": "string",
-        "description": "Tool action slug for execute (e.g., \"GMAIL_SEND_EMAIL\")"
-      },
-      "params": {
-        "type": "object",
-        "description": "Parameters for the tool action (JSON object)",
-        "additionalProperties": true
-      },
-      "connected_account_id": {
-        "type": "string",
-        "description": "Specific connected account ID (auto-resolved if omitted)"
-      }
-    },
-    "required": ["action"],
-    "additionalProperties": false
-  },
   "capabilities": {
     "http": {
       "allowlist": [
