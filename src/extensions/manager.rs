@@ -3250,8 +3250,7 @@ impl ExtensionManager {
         // 100 MB cap on decompressed entry size to prevent decompression bombs
         const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024;
 
-        let wasm_filename = format!("{}.wasm", name);
-        let caps_filename = format!("{}.capabilities.json", name);
+        let archive_names = crate::extensions::naming::ArchiveFilenames::new(name);
         let mut found_wasm = false;
         let mut found_caps = false;
         let mut fallback_wasm: Option<Vec<u8>> = None;
@@ -3293,11 +3292,11 @@ impl ExtensionManager {
             std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                 .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
 
-            if filename == wasm_filename {
+            if archive_names.is_wasm(filename) {
                 std::fs::write(target_wasm, &data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 found_wasm = true;
-            } else if filename == caps_filename {
+            } else if archive_names.is_caps(filename) {
                 std::fs::write(target_caps, &data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 found_caps = true;
@@ -3321,16 +3320,12 @@ impl ExtensionManager {
         if !found_wasm {
             if multiple_wasm_candidates {
                 return Err(ExtensionError::InstallFailed(format!(
-                    "tar.gz archive does not contain '{}' and has multiple .wasm entries",
-                    wasm_filename
+                    "{} and the archive has multiple .wasm entries",
+                    archive_names.wasm_not_found_msg()
                 )));
             }
-            let data = fallback_wasm.ok_or_else(|| {
-                ExtensionError::InstallFailed(format!(
-                    "tar.gz archive does not contain '{}'",
-                    wasm_filename
-                ))
-            })?;
+            let data = fallback_wasm
+                .ok_or_else(|| ExtensionError::InstallFailed(archive_names.wasm_not_found_msg()))?;
             std::fs::write(target_wasm, &data)
                 .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
             tracing::debug!(

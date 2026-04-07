@@ -107,6 +107,17 @@ let _connectionLostAt = null;
 let _reconnectAttempts = 0;
 let _lastSseEventId = null;
 
+// --- Turn Response Tracking State ---
+// Safety net for lost SSE response events (see #2079): tracks whether we
+// received a `response` event for the current turn so that a "Done" status
+// arriving without one can trigger a history reload.
+const DONE_WITHOUT_RESPONSE_TIMEOUT_MS = 1500;
+// Single-thread tracking is intentional: background thread events are already
+// filtered out by `isCurrentThread`, so only the active thread's turn state
+// matters here. Per-thread state is unnecessary.
+let _turnResponseReceived = false;
+let _doneWithoutResponseTimer = null;
+
 // --- Send Cooldown State ---
 let _sendCooldown = false;
 
@@ -585,6 +596,12 @@ function connectSSE(lastEventIdOverride) {
     var statusEl = document.getElementById('sse-status');
     if (statusEl) statusEl.textContent = I18n.t('status.connected');
     _reconnectAttempts = 0;
+    // Clear stale turn-tracking state from before the disconnect
+    _turnResponseReceived = false;
+    if (_doneWithoutResponseTimer) {
+      clearTimeout(_doneWithoutResponseTimer);
+      _doneWithoutResponseTimer = null;
+    }
 
     // Dismiss connection-lost banner and show reconnected flash
     if (_connectionLostTimer) {
@@ -670,6 +687,11 @@ function connectSSE(lastEventIdOverride) {
     const streamingMsg = document.querySelector('.message.assistant[data-streaming="true"]');
     if (streamingMsg) streamingMsg.removeAttribute('data-streaming');
 
+    _turnResponseReceived = true;
+    if (_doneWithoutResponseTimer) {
+      clearTimeout(_doneWithoutResponseTimer);
+      _doneWithoutResponseTimer = null;
+    }
     finalizeActivityGroup();
     addMessage('assistant', data.content);
     enableChatInput();
@@ -737,6 +759,10 @@ function connectSSE(lastEventIdOverride) {
     }
     if (lastAssistant) lastAssistant.setAttribute('data-streaming', 'true');
 
+    // Mark turn as having received content so the Done safety net
+    // does not trigger a spurious loadHistory() for streaming responses.
+    _turnResponseReceived = true;
+
     // Accumulate chunks and debounce rendering at 50ms intervals
     _streamBuffer += data.content;
     // Force flush when buffer exceeds 10K chars to prevent memory buildup
@@ -767,6 +793,19 @@ function connectSSE(lastEventIdOverride) {
     if (data.message === 'Done' || data.message === 'Awaiting approval') {
       finalizeActivityGroup();
       enableChatInput();
+      // Safety net (#2079): if "Done" arrives but we never received a
+      // `response` event for this turn, the message may have been lost
+      // (broadcast lag, proxy buffering, brief SSE disconnect). Reload
+      // history after a short delay so the user sees the answer.
+      if (!_turnResponseReceived && data.message === 'Done') {
+        if (!_doneWithoutResponseTimer) {
+          _doneWithoutResponseTimer = setTimeout(() => {
+            _doneWithoutResponseTimer = null;
+            if (currentThreadId) loadHistory();
+          }, DONE_WITHOUT_RESPONSE_TIMEOUT_MS);
+        }
+      }
+      _turnResponseReceived = false;
     }
   });
 
@@ -930,6 +969,11 @@ function clearSuggestionChips() {
 function sendMessage() {
   clearSuggestionChips();
   removeWelcomeCard();
+  _turnResponseReceived = false;
+  if (_doneWithoutResponseTimer) {
+    clearTimeout(_doneWithoutResponseTimer);
+    _doneWithoutResponseTimer = null;
+  }
   const input = document.getElementById('chat-input');
   if (authFlowPending) {
     showToast(I18n.t('chat.authRequiredBeforeSend'), 'info');
@@ -2528,6 +2572,11 @@ function switchToAssistant() {
 function switchThread(threadId) {
   clearSuggestionChips();
   finalizeActivityGroup();
+  _turnResponseReceived = false;
+  if (_doneWithoutResponseTimer) {
+    clearTimeout(_doneWithoutResponseTimer);
+    _doneWithoutResponseTimer = null;
+  }
   currentThreadId = threadId;
   unreadThreads.delete(threadId);
   hasMore = false;

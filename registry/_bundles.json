@@ -6,11 +6,11 @@
       "aliases": ["gws", "gsuite", "google workspace", "g suite"],
       "extensions": [
         "tools/gmail",
-        "tools/google-calendar",
-        "tools/google-docs",
-        "tools/google-drive",
-        "tools/google-sheets",
-        "tools/google-slides"
+        "tools/google_calendar",
+        "tools/google_docs",
+        "tools/google_drive",
+        "tools/google_sheets",
+        "tools/google_slides"
       ],
       "shared_auth": "google_oauth_token"
     },
@@ -32,9 +32,9 @@
       "extensions": [
         "tools/github",
         "tools/gmail",
-        "tools/google-calendar",
-        "tools/google-drive",
-        "tools/slack-tool",
+        "tools/google_calendar",
+        "tools/google_drive",
+        "tools/slack_tool",
         "channels/telegram",
         "channels/slack"
       ],
