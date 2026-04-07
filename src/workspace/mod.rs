@@ -112,6 +112,16 @@ fn is_system_prompt_file(path: &str) -> bool {
         .any(|p| path.eq_ignore_ascii_case(p))
 }
 
+/// Returns `true` for engine runtime state paths that should never be chunked
+/// or indexed for FTS/vector search.
+///
+/// These are JSON execution-state blobs written by the engine bridge on every
+/// turn (`engine/.runtime/threads/`, `engine/.runtime/steps/`, etc.).  Indexing
+/// them floods the DB connection pool under multi-tenant load.
+fn is_engine_runtime_path(path: &str) -> bool {
+    path.starts_with("engine/.runtime/")
+}
+
 /// Shared sanitizer instance — avoids rebuilding Aho-Corasick + regexes on every write.
 static SANITIZER: std::sync::LazyLock<Sanitizer> = std::sync::LazyLock::new(Sanitizer::new);
 
@@ -1015,6 +1025,24 @@ impl Workspace {
             .storage
             .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)
             .await?;
+
+        // Engine runtime state files are execution-state blobs, not semantic
+        // documents.  Skip the resolve_metadata DB query and all
+        // chunking/embedding work for them entirely.
+        if is_engine_runtime_path(&path) {
+            if doc.content == content {
+                return Ok(doc);
+            }
+            let skip_meta = DocumentMetadata {
+                skip_indexing: Some(true),
+                ..Default::default()
+            };
+            let _ = self
+                .maybe_save_version(doc.id, &doc.content, &skip_meta, Some(&self.user_id))
+                .await;
+            self.storage.update_document(doc.id, content).await?;
+            return self.storage.get_document_by_id(doc.id).await;
+        }
 
         // Short-circuit when content is unchanged: skip versioning and update,
         // but still reindex so metadata-driven flags (e.g. skip_indexing toggled
