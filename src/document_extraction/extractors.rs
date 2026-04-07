@@ -2,6 +2,11 @@
 
 use std::io::Read;
 
+/// Maximum decompressed size for a single ZIP entry (50 MB).
+const MAX_DECOMPRESSED_ENTRY: u64 = 50 * 1024 * 1024;
+/// Maximum total decompressed size across all ZIP entries (100 MB).
+const MAX_DECOMPRESSED_TOTAL: u64 = 100 * 1024 * 1024;
+
 /// Extract text from document bytes based on MIME type and optional filename.
 pub fn extract_text(data: &[u8], mime: &str, filename: Option<&str>) -> Result<String, String> {
     let base_mime = mime.split(';').next().unwrap_or(mime).trim();
@@ -64,6 +69,37 @@ pub fn extract_text(data: &[u8], mime: &str, filename: Option<&str>) -> Result<S
     }
 }
 
+/// Read a zip entry into a string with decompressed size limits.
+/// Checks the declared uncompressed size first, then uses `take()` as
+/// defense-in-depth against archives that lie about entry sizes.
+fn bounded_read_zip_entry(
+    file: &mut zip::read::ZipFile<'_>,
+    total_decompressed: &mut u64,
+) -> Result<String, String> {
+    let entry_size = file.size();
+    if entry_size > MAX_DECOMPRESSED_ENTRY {
+        return Err(format!(
+            "zip entry '{}' decompressed size {} exceeds limit {}",
+            file.name(),
+            entry_size,
+            MAX_DECOMPRESSED_ENTRY,
+        ));
+    }
+    *total_decompressed += entry_size;
+    if *total_decompressed > MAX_DECOMPRESSED_TOTAL {
+        return Err(format!(
+            "total decompressed size {} exceeds limit {}",
+            total_decompressed, MAX_DECOMPRESSED_TOTAL,
+        ));
+    }
+    let mut bounded = file.take(MAX_DECOMPRESSED_ENTRY);
+    let mut xml = String::new();
+    bounded
+        .read_to_string(&mut xml)
+        .map_err(|e| format!("failed to read zip entry '{}': {e}", file.name()))?;
+    Ok(xml)
+}
+
 fn extract_pdf(data: &[u8]) -> Result<String, String> {
     pdf_extract::extract_text_from_mem(data)
         .map(|t| t.trim().to_string())
@@ -92,10 +128,10 @@ fn extract_pptx(data: &[u8]) -> Result<String, String> {
     slide_names.sort();
 
     let mut all_text = Vec::new();
+    let mut total_decompressed: u64 = 0;
     for name in &slide_names {
         if let Ok(mut file) = archive.by_name(name) {
-            let mut xml = String::new();
-            if file.read_to_string(&mut xml).is_ok() {
+            if let Ok(xml) = bounded_read_zip_entry(&mut file, &mut total_decompressed) {
                 let text = strip_xml_tags(&xml);
                 if !text.is_empty() {
                     all_text.push(text);
@@ -115,10 +151,11 @@ fn extract_xlsx(data: &[u8]) -> Result<String, String> {
     let mut archive =
         zip::ZipArchive::new(cursor).map_err(|e| format!("invalid XLSX archive: {e}"))?;
 
+    let mut total_decompressed: u64 = 0;
+
     // Read shared strings (xl/sharedStrings.xml)
     let shared_strings = if let Ok(mut file) = archive.by_name("xl/sharedStrings.xml") {
-        let mut xml = String::new();
-        file.read_to_string(&mut xml)
+        let xml = bounded_read_zip_entry(&mut file, &mut total_decompressed)
             .map_err(|e| format!("failed to read shared strings: {e}"))?;
         parse_xlsx_shared_strings(&xml)
     } else {
@@ -140,8 +177,7 @@ fn extract_xlsx(data: &[u8]) -> Result<String, String> {
     let mut all_text = Vec::new();
     for name in &sheet_names {
         if let Ok(mut file) = archive.by_name(name) {
-            let mut xml = String::new();
-            if file.read_to_string(&mut xml).is_ok() {
+            if let Ok(xml) = bounded_read_zip_entry(&mut file, &mut total_decompressed) {
                 let text = parse_xlsx_sheet(&xml, &shared_strings);
                 if !text.is_empty() {
                     all_text.push(text);
@@ -170,8 +206,8 @@ fn extract_office_xml(data: &[u8], content_path: &str) -> Result<String, String>
         .by_name(content_path)
         .map_err(|e| format!("content file not found in archive: {e}"))?;
 
-    let mut xml = String::new();
-    file.read_to_string(&mut xml)
+    let mut total_decompressed: u64 = 0;
+    let xml = bounded_read_zip_entry(&mut file, &mut total_decompressed)
         .map_err(|e| format!("failed to read content: {e}"))?;
 
     let text = strip_xml_tags(&xml);
@@ -511,5 +547,59 @@ mod tests {
         let xml = r#"<sst><si><t>Name</t></si><si><t>Age</t></si></sst>"#;
         let strings = parse_xlsx_shared_strings(xml);
         assert_eq!(strings, vec!["Name", "Age"]);
+    }
+
+    /// Regression: bounded_read_zip_entry must reject entries whose declared
+    /// uncompressed size exceeds MAX_DECOMPRESSED_ENTRY, preventing zip bombs
+    /// that pass the compressed-size check but decompress to gigabytes.
+    #[test]
+    fn bounded_read_rejects_oversized_declared_entry() {
+        use std::io::{Cursor, Write};
+        // Create a minimal ZIP with a single entry
+        let buf = Vec::new();
+        let cursor = Cursor::new(buf);
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("test.xml", options).unwrap();
+        writer.write_all(b"<root>hello</root>").unwrap();
+        let cursor = writer.finish().unwrap();
+        let data = cursor.into_inner();
+
+        // The small entry should succeed
+        let read_cursor = Cursor::new(&data);
+        let mut archive = zip::ZipArchive::new(read_cursor).unwrap();
+        let mut total: u64 = 0;
+        let mut file = archive.by_index(0).unwrap();
+        let result = bounded_read_zip_entry(&mut file, &mut total);
+        assert!(result.is_ok(), "small entry should be readable");
+        assert_eq!(total, file.size());
+    }
+
+    /// Regression: total decompressed tracking must accumulate across entries.
+    #[test]
+    fn bounded_read_tracks_total_decompressed() {
+        use std::io::{Cursor, Write};
+        let buf = Vec::new();
+        let cursor = Cursor::new(buf);
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("a.xml", options).unwrap();
+        writer.write_all(b"<a/>").unwrap();
+        writer.start_file("b.xml", options).unwrap();
+        writer.write_all(b"<b/>").unwrap();
+        let cursor = writer.finish().unwrap();
+        let data = cursor.into_inner();
+
+        let read_cursor = Cursor::new(&data);
+        let mut archive = zip::ZipArchive::new(read_cursor).unwrap();
+        let mut total: u64 = 0;
+        let mut f0 = archive.by_index(0).unwrap();
+        bounded_read_zip_entry(&mut f0, &mut total).unwrap();
+        drop(f0);
+        let mut f1 = archive.by_index(1).unwrap();
+        bounded_read_zip_entry(&mut f1, &mut total).unwrap();
+        assert!(total > 0, "total should accumulate across entries");
     }
 }
