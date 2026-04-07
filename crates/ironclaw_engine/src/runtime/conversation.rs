@@ -452,11 +452,7 @@ impl ConversationManager {
     /// Test helper: track a thread in a conversation without accessing the
     /// internal HashMap directly.
     #[cfg(test)]
-    pub async fn track_thread_in_conversation(
-        &self,
-        conv_id: ConversationId,
-        thread_id: ThreadId,
-    ) {
+    pub async fn track_thread_in_conversation(&self, conv_id: ConversationId, thread_id: ThreadId) {
         let arc = self
             .get_conversation_lock(conv_id)
             .await
