@@ -5578,6 +5578,7 @@ input[type="checkbox"]:focus-visible {
   --accent: #059669;
   --accent-hover: #047857;
   --success: #059669;
+  --info: #2563eb;
   --warning: #d97706;
   --danger: #dc2626;
   --code-bg: #f0f0f2;
