@@ -96,6 +96,10 @@ pub struct ContainerJobConfig {
     /// Whether per-job MCP server filtering is enabled.
     /// When false, `mcp_servers` param on `create_job` is ignored.
     pub mcp_per_job_enabled: bool,
+    /// Whether Claude Code sandbox mode is available (from CLAUDE_CODE_ENABLED).
+    pub claude_code_enabled: bool,
+    /// Whether ACP agent mode is available (from ACP_ENABLED).
+    pub acp_enabled: bool,
 }
 
 impl Default for ContainerJobConfig {
@@ -114,6 +118,8 @@ impl Default for ContainerJobConfig {
             acp_memory_limit_mb: 4096,
             acp_timeout_secs: 1800,
             mcp_per_job_enabled: false,
+            claude_code_enabled: false,
+            acp_enabled: false,
         }
     }
 }
@@ -258,6 +264,25 @@ impl ContainerJobManager {
         }
     }
 
+    /// Whether Claude Code mode is enabled for job creation.
+    pub fn claude_code_enabled(&self) -> bool {
+        self.config.claude_code_enabled
+    }
+
+    /// Whether ACP agent mode is enabled for job creation.
+    pub fn acp_enabled(&self) -> bool {
+        self.config.acp_enabled
+    }
+
+    /// Whether the given job mode is allowed by the current configuration.
+    pub fn is_mode_enabled(&self, mode: JobMode) -> bool {
+        match mode {
+            JobMode::Worker => true,
+            JobMode::ClaudeCode => self.config.claude_code_enabled,
+            JobMode::Acp => self.config.acp_enabled,
+        }
+    }
+
     fn extend_acp_env(
         &self,
         env_vec: &mut Vec<String>,
@@ -311,6 +336,12 @@ impl ContainerJobManager {
         mode: JobMode,
         params: JobCreationParams,
     ) -> Result<String, OrchestratorError> {
+        if !self.is_mode_enabled(mode) {
+            return Err(OrchestratorError::ModeDisabled {
+                mode: mode.to_string(),
+            });
+        }
+
         // Generate auth token (stored in TokenStore, never logged)
         let token = self.token_store.create_token(job_id).await;
 
@@ -991,6 +1022,59 @@ mod tests {
     fn test_container_job_config_acp_timeout_default() {
         let config = ContainerJobConfig::default();
         assert_eq!(config.acp_timeout_secs, 1800);
+    }
+
+    #[test]
+    fn test_container_job_config_claude_code_disabled_by_default() {
+        let config = ContainerJobConfig::default();
+        assert!(!config.claude_code_enabled);
+    }
+
+    #[test]
+    fn test_container_job_config_acp_disabled_by_default() {
+        let config = ContainerJobConfig::default();
+        assert!(!config.acp_enabled);
+    }
+
+    #[test]
+    fn test_is_mode_enabled_matches_individual_accessors() {
+        let manager = ContainerJobManager::new(
+            ContainerJobConfig {
+                claude_code_enabled: true,
+                acp_enabled: false,
+                ..Default::default()
+            },
+            TokenStore::new(),
+        );
+        assert!(manager.is_mode_enabled(JobMode::Worker));
+        assert!(manager.is_mode_enabled(JobMode::ClaudeCode));
+        assert!(!manager.is_mode_enabled(JobMode::Acp));
+    }
+
+    #[tokio::test]
+    async fn test_create_job_rejects_disabled_mode() {
+        let manager = ContainerJobManager::new(
+            ContainerJobConfig {
+                claude_code_enabled: false,
+                acp_enabled: false,
+                ..Default::default()
+            },
+            TokenStore::new(),
+        );
+        let result = manager
+            .create_job(
+                Uuid::new_v4(),
+                "test task",
+                None,
+                JobMode::ClaudeCode,
+                JobCreationParams::default(),
+            )
+            .await;
+        let err = result.unwrap_err().to_string(); // safety: test
+        assert!(
+            err.contains("not enabled"),
+            "expected mode-disabled error, got: {err}"
+        );
     }
 
     #[test]
