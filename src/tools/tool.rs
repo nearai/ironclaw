@@ -161,6 +161,22 @@ pub enum ToolDomain {
     Container,
 }
 
+/// Which engine versions a tool is available in.
+///
+/// Used by `ToolRegistry::tool_definitions_for_engine()` to filter tools based
+/// on the active engine version. Tools default to `Both`; override
+/// `Tool::engine_compatibility()` for version-specific tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EngineCompatibility {
+    /// Available in both v1 (legacy agent loop) and v2 (engine threads).
+    Both,
+    /// Only available in v1 (legacy agent loop). Replaced by engine-native
+    /// capabilities in v2 (e.g. `routine_create` → `mission_create`).
+    V1Only,
+    /// Only available in v2 (engine threads/capabilities).
+    V2Only,
+}
+
 /// Error type for tool execution.
 #[derive(Debug, Error)]
 pub enum ToolError {
@@ -350,6 +366,16 @@ pub trait Tool: Send + Sync {
     /// Default: `Orchestrator` (safe for the main process).
     fn domain(&self) -> ToolDomain {
         ToolDomain::Orchestrator
+    }
+
+    /// Which engine versions this tool is available in.
+    ///
+    /// Default: `Both`. Override to `V1Only` for tools replaced by engine-native
+    /// capabilities in v2 (e.g. `routine_create` → `mission_create`), or for
+    /// tools that cannot be LLM-invoked in v2 (e.g. `ApprovalRequirement::Always`
+    /// tools with no interactive approval path).
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::Both
     }
 
     /// Parameter names whose values must be redacted before logging, hooks, and approvals.

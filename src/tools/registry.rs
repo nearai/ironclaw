@@ -23,7 +23,9 @@ use crate::tools::builtin::{
     ToolRemoveTool, ToolSearchTool, ToolUpgradeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolDiscoverySummary, ToolDomain};
+use crate::tools::tool::{
+    ApprovalRequirement, EngineCompatibility, Tool, ToolDiscoverySummary, ToolDomain,
+};
 use crate::tools::wasm::{
     Capabilities, OAuthRefreshConfig, ResourceLimits, SharedCredentialRegistry, WasmError,
     WasmStorageError, WasmToolRuntime, WasmToolStore, WasmToolWrapper,
@@ -295,6 +297,30 @@ impl ToolRegistry {
             .read()
             .await
             .values()
+            .map(Self::tool_definition)
+            .collect();
+        defs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        defs
+    }
+
+    /// Get tool definitions filtered by engine version compatibility.
+    ///
+    /// Returns tools whose `engine_compatibility()` is `Both` or matches the
+    /// requested version. Use this instead of `tool_definitions()` when building
+    /// the tool list for a specific engine version.
+    pub async fn tool_definitions_for_engine(
+        &self,
+        engine: EngineCompatibility,
+    ) -> Vec<ToolDefinition> {
+        let mut defs: Vec<ToolDefinition> = self
+            .tools
+            .read()
+            .await
+            .values()
+            .filter(|tool| {
+                let compat = tool.engine_compatibility();
+                compat == EngineCompatibility::Both || compat == engine
+            })
             .map(Self::tool_definition)
             .collect();
         defs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
@@ -1260,5 +1286,84 @@ mod tests {
         registry.retain_only(&[]).await;
         let after = registry.list().await.len();
         assert_eq!(before, after);
+    }
+
+    // ── engine compatibility tests ───────────────────────────────────────
+
+    /// Stub tool that returns V1Only engine compatibility.
+    struct V1OnlyTool;
+
+    #[async_trait::async_trait]
+    impl crate::tools::Tool for V1OnlyTool {
+        fn name(&self) -> &str {
+            "v1_only_stub"
+        }
+        fn description(&self) -> &str {
+            "test stub"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &crate::context::JobContext,
+        ) -> Result<crate::tools::ToolOutput, crate::tools::ToolError> {
+            unreachable!()
+        }
+        fn engine_compatibility(&self) -> EngineCompatibility {
+            EngineCompatibility::V1Only
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_definitions_for_engine_excludes_v1_only_from_v2() {
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool)).await;
+        registry.register(Arc::new(V1OnlyTool)).await;
+
+        let v2_defs = registry
+            .tool_definitions_for_engine(EngineCompatibility::V2Only)
+            .await;
+        let names: Vec<&str> = v2_defs.iter().map(|d| d.name.as_str()).collect();
+
+        assert!(
+            names.contains(&"echo"),
+            "Both-compatible tool should appear in v2"
+        );
+        assert!(
+            !names.contains(&"v1_only_stub"),
+            "V1Only tool must not appear in v2"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_definitions_for_engine_includes_v1_only_in_v1() {
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool)).await;
+        registry.register(Arc::new(V1OnlyTool)).await;
+
+        let v1_defs = registry
+            .tool_definitions_for_engine(EngineCompatibility::V1Only)
+            .await;
+        let names: Vec<&str> = v1_defs.iter().map(|d| d.name.as_str()).collect();
+
+        assert!(
+            names.contains(&"echo"),
+            "Both-compatible tool should appear in v1"
+        );
+        assert!(
+            names.contains(&"v1_only_stub"),
+            "V1Only tool should appear in v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn builtin_echo_tool_is_both_compatible() {
+        let registry = Arc::new(ToolRegistry::new());
+        registry.register_builtin_tools();
+
+        let echo = registry.get("echo").await.unwrap();
+        assert_eq!(echo.engine_compatibility(), EngineCompatibility::Both);
     }
 }

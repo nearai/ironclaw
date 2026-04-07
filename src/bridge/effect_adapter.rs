@@ -436,27 +436,15 @@ impl EffectBridgeAdapter {
             });
         }
 
-        if is_v1_only_tool(lookup_name) {
-            return Err(EngineError::Effect {
-                reason: format!(
-                    "Tool '{}' is not available in engine v2. \
-                     Tell the user to use the slash command instead (e.g. /routine, /job).",
-                    action_name
-                ),
-            });
-        }
-
-        if is_v1_auth_tool(lookup_name) {
-            return Err(EngineError::Effect {
-                reason: format!(
-                    "Tool '{}' is not available in engine v2. \
-                     Authentication is handled automatically by the kernel.",
-                    action_name
-                ),
-            });
-        }
-
         if let Some((_, tool)) = self.tools.get_resolved(action_name).await {
+            // Defense-in-depth: reject V1Only tools even if they somehow got
+            // a lease (e.g. via a stale capability registry or hallucination).
+            if tool.engine_compatibility() == crate::tools::EngineCompatibility::V1Only {
+                return Err(EngineError::Effect {
+                    reason: format!("Tool '{}' is not available in engine v2.", action_name),
+                });
+            }
+
             let requirement = tool.requires_approval(&parameters);
             match requirement {
                 ApprovalRequirement::Always => {
@@ -753,36 +741,33 @@ impl EffectExecutor for EffectBridgeAdapter {
         &self,
         _leases: &[CapabilityLease],
     ) -> Result<Vec<ActionDef>, EngineError> {
-        let tool_defs = self.tools.tool_definitions().await;
+        // Engine-version filtering is handled at the registry level: each tool
+        // declares its engine_compatibility(), and the registry excludes V1Only
+        // tools when asked for V2Only definitions. This replaces the old ad-hoc
+        // is_v1_only_tool() / is_v1_auth_tool() string-matching.
+        let tool_defs = self
+            .tools
+            .tool_definitions_for_engine(crate::tools::EngineCompatibility::V2Only)
+            .await;
 
-        // Build action defs, excluding v1-only tools and v1 auth tools
-        let mut actions = Vec::with_capacity(tool_defs.len());
-        for td in tool_defs {
-            // Skip tools that can't work in engine v2
-            if is_v1_only_tool(&td.name) {
-                continue;
-            }
-
-            // Skip v1 auth management tools — auth is kernel-level in v2
-            if is_v1_auth_tool(&td.name) {
-                continue;
-            }
-
-            let python_name = td.name.replace('-', "_");
-
-            actions.push(ActionDef {
-                name: python_name,
-                description: td.description,
-                parameters_schema: td.parameters,
-                effects: vec![],
-                // Approval is enforced at execute-time inside this adapter so
-                // thread-scoped one-shot approvals and auth-aware bypasses can
-                // participate. Advertising approval here would cause the engine
-                // policy preflight to interrupt before the adapter can apply
-                // those runtime checks.
-                requires_approval: false,
-            });
-        }
+        let actions = tool_defs
+            .into_iter()
+            .map(|td| {
+                let python_name = td.name.replace('-', "_");
+                ActionDef {
+                    name: python_name,
+                    description: td.description,
+                    parameters_schema: td.parameters,
+                    effects: vec![],
+                    // Approval is enforced at execute-time inside this adapter so
+                    // thread-scoped one-shot approvals and auth-aware bypasses can
+                    // participate. Advertising approval here would cause the engine
+                    // policy preflight to interrupt before the adapter can apply
+                    // those runtime checks.
+                    requires_approval: false,
+                }
+            })
+            .collect();
 
         Ok(actions)
     }
@@ -841,33 +826,33 @@ fn extract_credential_name(error_msg: &str) -> Option<String> {
     None
 }
 
-fn is_v1_only_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "create_job"
-            | "create-job"
-            | "cancel_job"
-            | "cancel-job"
-            | "build_software"
-            | "build-software"
-            | "routine_create"
-            | "routine_list"
-            | "routine_fire"
-            | "routine_pause"
-            | "routine_resume"
-            | "routine_update"
-            | "routine_delete"
-    )
-}
-
-/// Auth management tools from v1 that are now kernel-internal in v2.
-/// The LLM should not see or call these — auth is handled automatically.
-fn is_v1_auth_tool(name: &str) -> bool {
-    matches!(name, "tool_auth" | "tool-auth")
-}
-
 #[cfg(test)]
 mod tests {
+    // Legacy string-matching helpers — kept for their tests which document
+    // the v1-only tool set. Production code now uses Tool::engine_compatibility().
+    fn is_v1_only_tool(name: &str) -> bool {
+        matches!(
+            name,
+            "create_job"
+                | "create-job"
+                | "cancel_job"
+                | "cancel-job"
+                | "build_software"
+                | "build-software"
+                | "routine_create"
+                | "routine_list"
+                | "routine_fire"
+                | "routine_pause"
+                | "routine_resume"
+                | "routine_update"
+                | "routine_delete"
+        )
+    }
+
+    fn is_v1_auth_tool(name: &str) -> bool {
+        matches!(name, "tool_auth" | "tool-auth")
+    }
+
     use super::*;
     use crate::context::JobContext;
     use crate::tools::{Tool, ToolError, ToolOutput};
