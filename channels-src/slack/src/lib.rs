@@ -316,7 +316,11 @@ impl Guest for SlackChannel {
 
         let ts = post_slack_message(target, &response.content, response.thread_id.as_deref())?;
 
-        if let Some(ref thread_ts) = response.thread_id {
+        // Track the thread so replies to this broadcast are recognized as
+        // active threads. Use the explicit thread_id if provided, otherwise
+        // fall back to the message timestamp returned by Slack (which becomes
+        // the thread root if someone replies to this message).
+        if let Some(thread_ts) = response.thread_id.as_deref().or(ts.as_deref()) {
             if let Err(e) = track_active_thread(target, thread_ts) {
                 channel_host::log(
                     channel_host::LogLevel::Warn,
@@ -845,7 +849,7 @@ fn resolve_broadcast_target(raw: &str) -> &str {
     raw.strip_prefix('#').unwrap_or(raw)
 }
 
-/// Check if a string looks like a Slack ID (starts with C, U, D, or G followed by alphanumeric).
+/// Check if a string looks like a Slack ID (starts with C, U, D, G, or W followed by alphanumeric).
 fn looks_like_slack_id(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
