@@ -706,9 +706,10 @@ I18n.register('zh-CN', {
   'extensions.activateFailed': '激活失败：{message}',
   'extensions.setupLoadFailed': '加载安装程序失败：{message}',
   'extensions.openingOAuth': '正在为 {name} 打开 OAuth 授权',
-  'extensions.configuredRestart': '已配置 {name}。请重启 IronClaw 以应用所有更改。',
+
   'extensions.configFailed': '配置失败：{message}',
   'extensions.invalidOAuthUrl': '服务器返回了无效的 OAuth URL',
+  'extensions.pairingCodeRequired': '请输入配对码。',
   'extensions.pairingApproved': '配对已批准',
   'extensions.approveFailed': '批准失败',
   'extensions.pairingError': '错误：{message}',

@@ -707,9 +707,10 @@ I18n.register('en', {
   'extensions.activateFailed': 'Activate failed: {message}',
   'extensions.setupLoadFailed': 'Failed to load setup: {message}',
   'extensions.openingOAuth': 'Opening OAuth authorization for {name}',
-  'extensions.configuredRestart': 'Configured {name}. Restart IronClaw to apply all changes.',
+
   'extensions.configFailed': 'Configuration failed: {message}',
   'extensions.invalidOAuthUrl': 'Invalid OAuth URL returned by server',
+  'extensions.pairingCodeRequired': 'Pairing code is required.',
   'extensions.pairingApproved': 'Pairing approved',
   'extensions.approveFailed': 'Approve failed',
   'extensions.pairingError': 'Error: {message}',

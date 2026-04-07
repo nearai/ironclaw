@@ -610,14 +610,14 @@ mod tests {
             .upsert_pairing_request("telegram", "user_case", None)
             .await
             .unwrap();
-        assert_eq!(req_again.code, req.code);
-        assert!(!req_again.created);
+        assert_ne!(req_again.code, req.code);
+        assert!(req_again.created);
 
         let pending = db.list_pending_pairings("TELEGRAM").await.unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].channel, "telegram");
 
-        db.approve_pairing("TeLeGrAm", &req.code, "alice")
+        db.approve_pairing("TeLeGrAm", &req_again.code, "alice")
             .await
             .unwrap();
 

@@ -5485,7 +5485,6 @@ impl ExtensionManager {
                     optional: true,
                     setting_path: Some(format!("extensions.{name}.relay_url")),
                     input_type: crate::tools::wasm::ToolSetupFieldInputType::Text,
-                    restart_required: false,
                 }];
                 (std::collections::HashSet::new(), relay_fields)
             }
@@ -5573,7 +5572,6 @@ impl ExtensionManager {
                 .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
         }
 
-        let mut restart_required = false;
         let mut stored_fields = self.load_tool_setup_fields(name).await.unwrap_or_default();
 
         for (field_name, field_value) in fields {
@@ -5606,9 +5604,6 @@ impl ExtensionManager {
             stored_fields.insert(field_name.clone(), trimmed.to_string());
 
             if let Some(field_def) = field_def {
-                if field_def.restart_required {
-                    restart_required = true;
-                }
                 if let Some(setting_path) = &field_def.setting_path {
                     Self::validate_setup_setting_path(name, setting_path)?;
                     let store = self.store.as_ref().ok_or_else(|| {
@@ -5735,7 +5730,7 @@ impl ExtensionManager {
                         message,
                         activated: true,
                         pairing_required: false,
-                        restart_required,
+
                         auth_url,
                         verification: None,
                         onboarding_state: None,
@@ -5752,7 +5747,7 @@ impl ExtensionManager {
                         message: format!("Configuration saved for '{}'.", name),
                         activated: false,
                         pairing_required: false,
-                        restart_required,
+
                         auth_url: None,
                         verification: None,
                         onboarding_state: None,
@@ -5773,7 +5768,6 @@ impl ExtensionManager {
                     message: format!("Configuration saved for '{}'.", name),
                     activated: false,
                     pairing_required: false,
-                    restart_required,
                     auth_url: None,
                     verification: None,
                     onboarding_state: None,
@@ -5833,7 +5827,6 @@ impl ExtensionManager {
                     message,
                     activated: true,
                     pairing_required,
-                    restart_required,
                     auth_url: None,
                     verification: None,
                     onboarding_state,
@@ -5860,7 +5853,6 @@ impl ExtensionManager {
                     ),
                     activated: false,
                     pairing_required: false,
-                    restart_required,
                     auth_url: None,
                     verification: None,
                     onboarding_state: if kind == ExtensionKind::WasmChannel {
@@ -6604,7 +6596,6 @@ mod tests {
             optional: false,
             input_type: crate::tools::wasm::ToolSetupFieldInputType::Text,
             setting_path: Some("nearai.session_token".to_string()),
-            restart_required: false,
         };
 
         let provided = mgr
@@ -6630,7 +6621,7 @@ mod tests {
                             "name": "llm_backend",
                             "prompt": "Provider",
                             "setting_path": "llm_backend",
-                            "restart_required": true
+
                         }
                     ]
                 }
@@ -6656,10 +6647,6 @@ mod tests {
         assert!(
             !result.activated,
             "tool should not auto-activate without runtime"
-        );
-        assert!(
-            result.restart_required,
-            "backend switch should require restart"
         );
         assert_eq!(
             store

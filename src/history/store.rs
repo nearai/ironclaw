@@ -1856,7 +1856,7 @@ impl Store {
         let row = conn
             .query_opt(
                 r#"
-                SELECT id FROM conversations
+                SELECT id, source_channel FROM conversations
                 WHERE user_id = $1 AND channel = $2 AND metadata->>'thread_type' = 'assistant'
                 LIMIT 1
                 "#,
@@ -1865,7 +1865,20 @@ impl Store {
             .await?;
 
         if let Some(row) = row {
-            return Ok(row.get("id"));
+            let id: Uuid = row.get("id");
+            let source_channel: Option<String> = row.get("source_channel");
+            if source_channel.is_none() {
+                conn.execute(
+                    r#"
+                    UPDATE conversations
+                    SET source_channel = $2
+                    WHERE id = $1 AND source_channel IS NULL
+                    "#,
+                    &[&id, &channel],
+                )
+                .await?;
+            }
+            return Ok(id);
         }
 
         // Create a new assistant conversation
@@ -1873,10 +1886,10 @@ impl Store {
         let metadata = serde_json::json!({"thread_type": "assistant", "title": "Assistant"});
         conn.execute(
             r#"
-            INSERT INTO conversations (id, channel, user_id, metadata)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO conversations (id, channel, user_id, metadata, source_channel)
+            VALUES ($1, $2, $3, $4, $5)
             "#,
-            &[&id, &channel, &user_id, &metadata],
+            &[&id, &channel, &user_id, &metadata, &channel],
         )
         .await?;
 

@@ -3057,9 +3057,6 @@ async fn extensions_setup_submit_handler(
                 ActionResponse::fail(result.message)
             };
             resp.activated = Some(result.activated);
-            if result.restart_required || !result.activated {
-                resp.needs_restart = Some(true);
-            }
             resp.auth_url = result.auth_url.clone();
             resp.verification = result.verification.clone();
             resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());

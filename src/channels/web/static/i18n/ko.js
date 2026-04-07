@@ -706,9 +706,10 @@ I18n.register('ko', {
   'extensions.activateFailed': '활성화 실패: {message}',
   'extensions.setupLoadFailed': '설정 로드 실패: {message}',
   'extensions.openingOAuth': '{name}에 대한 OAuth 권한 부여를 여는 중',
-  'extensions.configuredRestart': '{name}이(가) 구성되었습니다. 모든 변경 사항을 적용하려면 IronClaw를 재시작하세요.',
+
   'extensions.configFailed': '구성 실패: {message}',
   'extensions.invalidOAuthUrl': '서버가 유효하지 않은 OAuth URL을 반환했습니다',
+  'extensions.pairingCodeRequired': '페어링 코드를 입력해주세요.',
   'extensions.pairingApproved': '페어링이 승인되었습니다',
   'extensions.approveFailed': '승인 실패',
   'extensions.pairingError': '오류: {message}',

@@ -350,6 +350,10 @@ struct TelegramConfig {
     /// When true, use polling mode even if tunnel_url is available.
     #[serde(default)]
     polling_enabled: bool,
+
+    /// Poll interval in milliseconds (default 30000).
+    #[serde(default)]
+    poll_interval_ms: Option<u32>,
 }
 
 fn webhook_mode(config: &TelegramConfig) -> bool {
@@ -532,8 +536,11 @@ impl Guest for TelegramChannel {
             // Clear any stale owner_id from a previous config
             let _ = channel_host::workspace_write(OWNER_ID_PATH, "");
             channel_host::log(
-                channel_host::LogLevel::Warn,
-                "No owner_id configured, bot is open to all users",
+                channel_host::LogLevel::Debug,
+                &format!(
+                    "No owner_id configured; dm_policy={}",
+                    config.dm_policy.as_deref().unwrap_or("pairing")
+                ),
             );
         }
 
@@ -591,7 +598,7 @@ impl Guest for TelegramChannel {
         // Configure polling only if not in webhook mode
         let poll = if !webhook_mode {
             Some(PollConfig {
-                interval_ms: 30000, // 30 seconds minimum
+                interval_ms: config.poll_interval_ms.unwrap_or(30000),
                 enabled: true,
             })
         } else {

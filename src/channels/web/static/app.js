@@ -2038,7 +2038,7 @@ function showSetupCard(data) {
     card.appendChild(instr);
   }
 
-  if (onboarding.setup_url) {
+  if (onboarding.setup_url && /^https?:\/\//i.test(onboarding.setup_url)) {
     const links = document.createElement('div');
     links.className = 'auth-links';
     const setupLink = document.createElement('a');
@@ -2187,7 +2187,7 @@ function showAuthCard(data) {
     links.appendChild(oauthBtn);
   }
 
-  if (data.setup_url) {
+  if (data.setup_url && /^https?:\/\//i.test(data.setup_url)) {
     const setupLink = document.createElement('a');
     setupLink.href = data.setup_url;
     setupLink.target = '_blank';
@@ -2206,7 +2206,6 @@ function showAuthCard(data) {
   const tokenInput = document.createElement('input');
   tokenInput.type = 'password';
   tokenInput.placeholder = data.instructions
-    || I18n.t('auth.extensionTokenPlaceholder')
     || I18n.t('auth.tokenPlaceholder');
   tokenInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') submitAuthToken(data.extension_name, tokenInput.value);
@@ -2313,7 +2312,7 @@ function showPairingCard(data) {
 
   const submitBtn = document.createElement('button');
   submitBtn.className = 'auth-submit pairing-submit';
-  submitBtn.textContent = 'Approve';
+  submitBtn.textContent = I18n.t('approval.approve');
   submitBtn.addEventListener('click', () => submitPairingCode(data.channel, codeInput.value, card));
 
   const cancelBtn = document.createElement('button');
@@ -3814,7 +3813,7 @@ function loadInlineChannelSetup(ext, container) {
         container.appendChild(text);
       }
 
-      if (onboarding.setup_url) {
+      if (onboarding.setup_url && /^https?:\/\//i.test(onboarding.setup_url)) {
         const links = document.createElement('div');
         links.className = 'auth-links';
         const link = document.createElement('a');
@@ -4147,8 +4146,6 @@ function submitConfigureModal(name, fields, options) {
           showToast(I18n.t('extensions.openingOAuth', { name: name }), 'info');
           openOAuthUrl(res.auth_url);
           refreshCurrentSettingsTab();
-        } else if (res.needs_restart) {
-          showToast(I18n.t('extensions.configuredRestart', { name: name }), 'info');
         }
         // For non-OAuth success: the server always broadcasts auth_completed SSE,
         // which will show the toast and refresh extensions — no need to do it here too.
@@ -4246,7 +4243,7 @@ function loadPairingRequests(channel, container, onboarding) {
 
       const manualBtn = document.createElement('button');
       manualBtn.className = 'btn-ext activate pairing-manual-submit';
-      manualBtn.textContent = 'Approve Code';
+      manualBtn.textContent = I18n.t('approval.approve');
       manualBtn.addEventListener('click', function() {
         approvePairing(channel, input.value, {
           onSuccess: function() {
@@ -4361,7 +4358,7 @@ function approvePairing(channel, code, options) {
   options = options || {};
   const normalizedCode = (code || '').trim().toUpperCase();
   if (!normalizedCode) {
-    const message = 'Pairing code is required.';
+    const message = I18n.t('extensions.pairingCodeRequired');
     if (typeof options.onError === 'function') {
       options.onError(message);
     } else {
