@@ -2683,10 +2683,11 @@ impl ExtensionManager {
 
         // Archives may use either underscored (canonical) or hyphenated (legacy)
         // filenames, so accept both forms.
-        let wasm_filename = format!("{}.wasm", name);
-        let alt_wasm_filename = format!("{}.wasm", name.replace('_', "-"));
-        let caps_filename = format!("{}.capabilities.json", name);
-        let alt_caps_filename = format!("{}.capabilities.json", name.replace('_', "-"));
+        let alt_name = name.replace('_', "-");
+        let wasm_filename = format!("{name}.wasm");
+        let alt_wasm_filename = format!("{alt_name}.wasm");
+        let caps_filename = format!("{name}.capabilities.json");
+        let alt_caps_filename = format!("{alt_name}.capabilities.json");
         let mut found_wasm = false;
 
         let entries = archive
@@ -2734,9 +2735,13 @@ impl ExtensionManager {
         }
 
         if !found_wasm {
+            let expected = if wasm_filename == alt_wasm_filename {
+                wasm_filename.clone()
+            } else {
+                format!("'{wasm_filename}' or '{alt_wasm_filename}'")
+            };
             return Err(ExtensionError::InstallFailed(format!(
-                "tar.gz archive does not contain '{}'",
-                wasm_filename
+                "tar.gz archive does not contain {expected}"
             )));
         }
 

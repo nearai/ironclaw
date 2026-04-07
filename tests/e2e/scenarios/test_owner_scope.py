@@ -136,7 +136,7 @@ async def _wait_for_http_thread(base_url: str, title_fragment: str, timeout: flo
     )
 
 
-async def _wait_for_pending_approval(
+async def _wait_for_pending_gate(
     base_url: str,
     thread_id: str,
     timeout: float = 20.0,
@@ -256,7 +256,7 @@ async def test_http_created_full_job_routine_is_visible_in_web_after_approval(
     )
 
     thread_id = await _wait_for_http_thread(ironclaw_server, routine_name)
-    pending = await _wait_for_pending_approval(ironclaw_server, thread_id)
+    pending = await _wait_for_pending_gate(ironclaw_server, thread_id)
     assert pending["tool_name"] == "routine_create"
     await _approve_pending_request(
         ironclaw_server,
