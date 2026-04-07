@@ -7567,8 +7567,8 @@ mod tests {
         telegram_bot_api_url, telegram_message_matches_verification_code,
     };
     use crate::extensions::{
-        ExtensionError, ExtensionKind, ExtensionSource, InstallResult, ToolAuthState,
-        VerificationChallenge,
+        AuthHint, ExtensionError, ExtensionKind, ExtensionSource, InstallResult, RegistryEntry,
+        ToolAuthState, VerificationChallenge,
     };
     use crate::pairing::PairingStore;
     use crate::secrets::CreateSecretParams;
@@ -7840,6 +7840,25 @@ mod tests {
         channels_dir: std::path::PathBuf,
         store: Option<Arc<dyn crate::db::Database>>,
     ) -> crate::extensions::manager::ExtensionManager {
+        make_test_manager_with_catalog(wasm_runtime, tools_dir, channels_dir, store, Vec::new())
+    }
+
+    /// Build an ExtensionManager seeded with explicit registry catalog entries.
+    ///
+    /// `make_test_manager_with_dirs` constructs the manager with an empty
+    /// catalog, which means `ExtensionRegistry::new()` only contains the
+    /// (conditional) channel-relay builtin and `registry.search("")` returns
+    /// nothing in tests. Use this helper when you need the manager's registry
+    /// to know about a specific tool/server entry — e.g. exercising
+    /// `latent_provider_actions` registry-discovery paths or
+    /// `ensure_extension_ready` auto-install paths.
+    fn make_test_manager_with_catalog(
+        wasm_runtime: Option<Arc<crate::tools::wasm::WasmToolRuntime>>,
+        tools_dir: std::path::PathBuf,
+        channels_dir: std::path::PathBuf,
+        store: Option<Arc<dyn crate::db::Database>>,
+        catalog_entries: Vec<RegistryEntry>,
+    ) -> crate::extensions::manager::ExtensionManager {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
         use crate::tools::mcp::process::McpProcessManager;
         use crate::tools::mcp::session::McpSessionManager;
@@ -7866,7 +7885,7 @@ mod tests {
             None,               // tunnel_url
             "test".to_string(), // user_id
             store,
-            vec![],
+            catalog_entries,
         )
     }
 
@@ -8214,36 +8233,60 @@ mod tests {
         );
     }
 
-    // TODO: this test was committed without the fixture work needed to make
-    // it pass. The default `make_test_manager_with_dirs` builds an
-    // `ExtensionRegistry::new()` whose `builtin_entries_with_relay(None)`
-    // returns an empty Vec, so `registry.search("")` finds no `web_search`
-    // entry and the latent action list is empty for the wasm-provider half.
-    //
-    // To unignore: extend `make_test_manager_with_dirs` (or add a sibling
-    // helper) to accept `catalog_entries: Vec<RegistryEntry>` and pass them
-    // through to `ExtensionManager::new`. Then construct a `RegistryEntry`
-    // with `name: "web_search"` (canonicalized form, as `canonicalize_entries`
-    // would produce) and `kind: ExtensionKind::WasmTool`. The test assertion
-    // should also be updated from `"web-search"` to `"web_search"` because
-    // the registry stores the canonical form.
+    /// Regression for nearai/ironclaw#1921's sibling: registry-backed wasm
+    /// tools that are not yet installed should appear as latent provider
+    /// actions so the agent can request them by name and trigger
+    /// auto-install. This pins the registry-discovery half of
+    /// `build_latent_wasm_provider_actions`, which the previous merge
+    /// silently broke when it lost the `user_id` parameter and the
+    /// `push_action` closure during a refactor.
+    ///
+    /// Note: action names use the canonical form (`web_search`) because the
+    /// registry runs every entry through `canonicalize_entries` on
+    /// construction.
     #[tokio::test]
-    #[ignore = "needs registry catalog seeding fixture; see TODO above"]
     async fn latent_provider_actions_include_registry_backed_uninstalled_wasm_tool() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let manager = make_test_manager_with_dirs(
+        let entry = RegistryEntry {
+            name: "web_search".to_string(),
+            display_name: "Web Search".to_string(),
+            kind: ExtensionKind::WasmTool,
+            description: "Search the web".to_string(),
+            keywords: vec!["search".into(), "web".into()],
+            source: ExtensionSource::WasmDownload {
+                wasm_url: "https://example.com/web_search.wasm".to_string(),
+                capabilities_url: None,
+            },
+            fallback_source: None,
+            auth_hint: AuthHint::CapabilitiesAuth,
+            version: None,
+        };
+        let manager = make_test_manager_with_catalog(
             None,
             dir.path().join("tools"),
             dir.path().join("channels"),
             None,
+            vec![entry],
         );
 
         let actions = manager.latent_provider_actions("test").await;
+        let web_search = actions
+            .iter()
+            .find(|action| action.action_name == "web_search")
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected registry-backed web_search latent action; got: {:?}",
+                    actions
+                        .iter()
+                        .map(|a| &a.action_name)
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(web_search.provider_extension, "web_search");
         assert!(
-            actions
-                .iter()
-                .any(|action| action.action_name == "web-search"),
-            "expected registry-backed web-search latent action"
+            web_search.description.contains("Search the web"),
+            "latent action description should carry the registry entry's description, got: {}",
+            web_search.description
         );
     }
 
@@ -8318,37 +8361,86 @@ mod tests {
         assert_eq!(action.action_name, "notion_search");
     }
 
-    // TODO: this test was committed without the fixture work needed to make
-    // it pass. The auto-install path requires three things that the default
-    // `make_test_manager_with_dirs` does not provide:
-    //   1. A `web_search` entry in the registry catalog (see the sibling
-    //      `latent_provider_actions_include_registry_backed_uninstalled_wasm_tool`
-    //      TODO for the helper extension needed).
-    //   2. A reachable install source — the registry's `WasmDownload` path
-    //      hits the network and `WasmBuildable` shells out to cargo. Both
-    //      are infeasible in a unit test. The test would need either a
-    //      pre-staged wasm binary in `wasm_tools_dir` plus a registry entry,
-    //      or an injectable install hook.
-    //   3. A `web-search-tool.capabilities.json` declaring `brave_api_key`
-    //      as a required secret, so that `first_missing_auth_secret_pub`
-    //      returns `Some("brave_api_key")`.
-    //
-    // Until the fixture story is built out (and likely promoted to
-    // `tests/extensions_integration.rs`), the test is ignored.
+    /// Auto-install path for registry-backed wasm tools.
+    ///
+    /// `ensure_extension_ready` should:
+    ///   1. See `web_search` is not installed,
+    ///   2. Look it up in the registry catalog,
+    ///   3. Run the buildable install path which copies the artifact and
+    ///      capabilities sidecar into `wasm_tools_dir`,
+    ///   4. Call `auth(name, user_id)` which loads the new capabilities file,
+    ///      finds an `auth.secret_name = "brave_api_key"` declaration with no
+    ///      OAuth config, and returns `AwaitingToken`,
+    ///   5. Map that to `EnsureReadyOutcome::NeedsAuth { credential_name:
+    ///      Some("brave_api_key"), .. }`.
+    ///
+    /// The fixture stages a fake wasm artifact at the build path
+    /// `find_wasm_artifact` searches and a capabilities sidecar in the same
+    /// directory (`install_wasm_files` copies both into `wasm_tools_dir`).
+    /// `WasmBuildable.build_dir` points at the tempdir, so no network and
+    /// no real `cargo` invocation are needed.
     #[tokio::test]
-    #[ignore = "needs registry catalog + install fixture + capabilities seeding; see TODO above"]
     async fn ensure_extension_ready_auto_installs_registry_wasm_tool_on_first_use() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let manager = make_test_manager_with_dirs(
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+
+        // Stage the buildable source layout that the install path expects:
+        //   <build_dir>/target/wasm32-wasip2/release/web_search.wasm
+        //   <build_dir>/web_search.capabilities.json
+        let build_dir = dir.path().join("build");
+        let artifact_dir = build_dir.join("target/wasm32-wasip2/release");
+        std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
+        let wasm_path = artifact_dir.join("web_search.wasm");
+        // Minimal valid wasm header (`\x00asm` + version 1) so any later
+        // validation reading the magic bytes is satisfied.
+        std::fs::write(&wasm_path, b"\x00asm\x01\x00\x00\x00").expect("write wasm");
+
+        let caps_path = build_dir.join("web_search.capabilities.json");
+        std::fs::write(
+            &caps_path,
+            serde_json::json!({
+                "description": "Test web search tool",
+                "auth": {
+                    "secret_name": "brave_api_key",
+                    "display_name": "Brave Search",
+                    "instructions": "Get an API key from https://api.search.brave.com/",
+                },
+            })
+            .to_string(),
+        )
+        .expect("write capabilities");
+
+        let entry = RegistryEntry {
+            name: "web_search".to_string(),
+            display_name: "Web Search".to_string(),
+            kind: ExtensionKind::WasmTool,
+            description: "Search the web via Brave Search".to_string(),
+            keywords: vec!["search".into(), "web".into()],
+            // `WasmBuildable.source_dir` is unused on the buildable install
+            // path (only `build_dir` + `crate_name` matter), but the field
+            // is required so we point it at the same tempdir for clarity.
+            source: ExtensionSource::WasmBuildable {
+                source_dir: build_dir.to_string_lossy().into_owned(),
+                build_dir: Some(build_dir.to_string_lossy().into_owned()),
+                crate_name: Some("web_search".to_string()),
+            },
+            fallback_source: None,
+            auth_hint: AuthHint::CapabilitiesAuth,
+            version: None,
+        };
+
+        let manager = make_test_manager_with_catalog(
             None,
-            dir.path().join("tools"),
-            dir.path().join("channels"),
+            tools_dir.clone(),
+            channels_dir,
             None,
+            vec![entry],
         );
 
         let outcome = manager
             .ensure_extension_ready(
-                "web-search",
+                "web_search",
                 "test",
                 crate::extensions::EnsureReadyIntent::UseCapability,
             )
@@ -8359,16 +8451,30 @@ mod tests {
             crate::extensions::EnsureReadyOutcome::NeedsAuth {
                 credential_name, ..
             } => {
-                assert_eq!(credential_name.as_deref(), Some("brave_api_key"));
+                assert_eq!(
+                    credential_name.as_deref(),
+                    Some("brave_api_key"),
+                    "auto-install path should surface the capabilities-declared secret name"
+                );
             }
-            other => panic!("expected needs auth outcome, got {other:?}"),
+            other => panic!("expected NeedsAuth outcome, got {other:?}"),
         }
 
+        // Auto-install must have produced the wasm file in the tools dir,
+        // so determine_installed_kind now resolves to WasmTool.
         let kind = manager
-            .determine_installed_kind("web-search", "test")
+            .determine_installed_kind("web_search", "test")
             .await
             .expect("installed kind");
         assert_eq!(kind, ExtensionKind::WasmTool);
+        assert!(
+            tools_dir.join("web_search.wasm").exists(),
+            "auto-install should have copied the wasm artifact into wasm_tools_dir"
+        );
+        assert!(
+            tools_dir.join("web_search.capabilities.json").exists(),
+            "auto-install should have copied the capabilities sidecar into wasm_tools_dir"
+        );
     }
 
     #[test]
