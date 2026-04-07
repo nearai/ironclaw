@@ -872,9 +872,7 @@ fn check_sender_permission(
                         sender_phone, result.code
                     ),
                 );
-                if result.created {
-                    let _ = send_pairing_reply(sender_phone, phone_number_id, &result.code);
-                }
+                let _ = send_pairing_reply(sender_phone, phone_number_id, &result.code);
             }
             Err(e) => {
                 channel_host::log(

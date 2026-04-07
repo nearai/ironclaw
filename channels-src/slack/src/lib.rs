@@ -737,9 +737,7 @@ fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool
                     channel_host::LogLevel::Info,
                     &format!("Pairing request for user {}: code {}", user_id, result.code),
                 );
-                if result.created {
-                    let _ = send_pairing_reply(channel_id, &result.code);
-                }
+                let _ = send_pairing_reply(channel_id, &result.code);
             }
             Err(e) => {
                 channel_host::log(

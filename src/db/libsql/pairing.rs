@@ -98,45 +98,18 @@ impl ChannelPairingStore for LibSqlBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let result = async {
-            // Return existing valid pending request
-            let mut rows = conn
-                .query(
-                    "SELECT id, channel, external_id, code, created_at, expires_at
-                     FROM pairing_requests
-                     WHERE channel = ?1 AND external_id = ?2
-                       AND approved_at IS NULL
-                       AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                     ORDER BY created_at DESC LIMIT 1",
-                    params![channel.as_str(), external_id],
-                )
-                .await
-                .map_err(|e| DatabaseError::Query(e.to_string()))?;
-
-            if let Some(row) = rows
-                .next()
-                .await
-                .map_err(|e| DatabaseError::Query(e.to_string()))?
-            {
-                let id_str: String = row
-                    .get(0)
-                    .map_err(|e| DatabaseError::Query(e.to_string()))?;
-                return Ok(PairingRequestRecord {
-                    id: uuid::Uuid::parse_str(&id_str)
-                        .map_err(|e| DatabaseError::Query(e.to_string()))?,
-                    channel: row
-                        .get(1)
-                        .map_err(|e| DatabaseError::Query(e.to_string()))?,
-                    external_id: row
-                        .get(2)
-                        .map_err(|e| DatabaseError::Query(e.to_string()))?,
-                    code: row
-                        .get(3)
-                        .map_err(|e| DatabaseError::Query(e.to_string()))?,
-                    created: false,
-                    created_at: get_ts(&row, 4),
-                    expires_at: get_ts(&row, 5),
-                });
-            }
+            let now = chrono::Utc::now();
+            let now_str = fmt_ts(&now);
+            conn.execute(
+                "UPDATE pairing_requests
+                 SET expires_at = ?3
+                 WHERE channel = ?1 AND external_id = ?2
+                   AND approved_at IS NULL
+                   AND expires_at > ?3",
+                params![channel.as_str(), external_id, now_str.as_str()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
             let now = chrono::Utc::now();
             let expires_at = now + chrono::Duration::minutes(15);
@@ -444,8 +417,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_upsert_returns_existing_pending_request() {
-        let (db, _dir) = setup_db().await;
+    async fn test_upsert_rotates_pending_request_code() {
+        let (db, _dir) = setup_db_with_user("alice").await;
 
         let r1 = db
             .upsert_pairing_request("telegram", "user123", None)
@@ -456,10 +429,21 @@ mod tests {
             .await
             .unwrap();
         assert!(r1.created, "first upsert should set created = true");
-        assert!(!r2.created, "second upsert should set created = false");
-        assert_eq!(
+        assert!(r2.created, "second upsert should create a fresh code");
+        assert_ne!(
             r1.code, r2.code,
-            "Should return existing request, not create new one"
+            "retrying pairing should rotate to a fresh code"
+        );
+
+        let err = db.approve_pairing("telegram", &r1.code, "alice").await;
+        assert!(
+            err.is_err(),
+            "retired pairing code should no longer approve"
+        );
+        assert_eq!(
+            db.list_pending_pairings("telegram").await.unwrap().len(),
+            1,
+            "only the latest pending request should remain active"
         );
     }
 

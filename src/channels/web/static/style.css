@@ -1841,6 +1841,61 @@ body {
   font-size: 12px;
 }
 
+.setup-card {
+  gap: var(--space-3);
+}
+
+.setup-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.setup-form.inline {
+  margin-top: 8px;
+}
+
+.setup-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.setup-label {
+  font-size: var(--text-sm);
+  color: var(--text);
+  font-weight: 500;
+}
+
+.setup-input-row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.setup-input {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-family: var(--font-mono);
+}
+
+.setup-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.setup-next-step {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
 /* Chat input */
 .chat-input {
   display: flex;
@@ -3530,6 +3585,27 @@ body {
   padding-top: 8px;
 }
 
+.ext-onboarding {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ext-onboarding-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.ext-onboarding-text {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
 .pairing-heading {
   font-size: var(--text-xs);
   color: var(--text-secondary);
@@ -3545,10 +3621,36 @@ body {
   margin-bottom: 4px;
 }
 
+.pairing-manual {
+  margin-bottom: 8px;
+}
+
 .pairing-help {
   font-size: var(--text-sm);
   color: var(--text-secondary);
   margin-bottom: 8px;
+  line-height: 1.5;
+}
+
+.pairing-restart {
+  color: var(--text-muted);
+}
+
+.pairing-manual-input {
+  flex: 1;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-family: inherit;
+}
+
+.pairing-manual-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
 .pairing-input {
@@ -3565,6 +3667,7 @@ body {
 .pairing-input:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
 .pairing-code {
@@ -3626,51 +3729,6 @@ body {
   line-height: 1.5;
 }
 
-.configure-verification {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin: 16px 0 0 0;
-  padding: 12px;
-  border-radius: 8px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-}
-
-.configure-verification-title {
-  font-size: var(--text-sm);
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.configure-verification-instructions {
-  font-size: var(--text-sm);
-  line-height: 1.5;
-  color: var(--text-secondary);
-}
-
-.configure-verification-code {
-  display: inline-block;
-  width: fit-content;
-  padding: 6px 10px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid var(--border);
-  color: var(--text-primary);
-  font-size: var(--text-sm);
-}
-
-.configure-verification-link {
-  width: fit-content;
-  color: var(--accent, var(--text-link, #4ea3ff));
-  font-size: var(--text-sm);
-  text-decoration: none;
-}
-
-.configure-verification-link:hover {
-  text-decoration: underline;
-}
-
 .configure-inline-error {
   margin: 16px 0 0 0;
   padding: 10px 12px;
@@ -3678,17 +3736,6 @@ body {
   background: rgba(220, 38, 38, 0.12);
   border: 1px solid rgba(220, 38, 38, 0.35);
   color: #fca5a5;
-  font-size: var(--text-sm);
-  line-height: 1.5;
-}
-
-.configure-inline-status {
-  margin: 16px 0 0 0;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  color: var(--text-secondary);
   font-size: var(--text-sm);
   line-height: 1.5;
 }

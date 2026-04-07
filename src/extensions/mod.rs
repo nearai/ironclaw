@@ -462,12 +462,18 @@ pub struct ConfigureResult {
     pub message: String,
     /// Whether the extension was successfully activated after configuration.
     pub activated: bool,
+    /// Whether the channel still needs a pairing approval step before it is usable.
+    pub pairing_required: bool,
     /// Whether a restart is required for the new configuration to take effect.
     pub restart_required: bool,
     /// OAuth authorization URL (if OAuth flow was started).
     pub auth_url: Option<String>,
-    /// Pending manual verification challenge (for Telegram owner binding, etc.).
+    /// Pending manual verification challenge, if the setup flow requires one.
     pub verification: Option<VerificationChallenge>,
+    /// Shared onboarding state for channels using guided setup/pairing.
+    pub onboarding_state: Option<crate::channels::web::types::ChannelOnboardingState>,
+    /// Shared onboarding copy/metadata for the web gateway UI.
+    pub onboarding: Option<crate::channels::web::types::ChannelOnboardingInfo>,
 }
 
 fn default_true() -> bool {
