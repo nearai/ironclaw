@@ -1,40 +1,15 @@
 """Scenario 2: Chat message round-trip via SSE streaming."""
 
 import pytest
-from helpers import SEL
+from helpers import SEL, send_chat_and_wait_for_terminal_message
 
 
 async def test_send_message_and_receive_response(page):
     """Type a message, receive a streamed response from mock LLM."""
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.wait_for(state="visible", timeout=5000)
+    result = await send_chat_and_wait_for_terminal_message(page, "What is 2+2?")
 
-    # Count existing messages (onboarding greeting may already be present)
-    assistant_selector = SEL["message_assistant"]
-    before_count = await page.locator(assistant_selector).count()
-
-    # Send message
-    await chat_input.fill("What is 2+2?")
-    await chat_input.press("Enter")
-
-    # Wait for a NEW assistant message to appear
-    await page.wait_for_function(
-        "([selector, before]) => document.querySelectorAll(selector).length > before",
-        arg=[assistant_selector, before_count],
-        timeout=15000,
-    )
-
-    # Verify user message
-    user_msgs = page.locator(SEL["message_user"])
-    assert await user_msgs.count() >= 1
-    last_user = user_msgs.last
-    user_text = await last_user.text_content()
-    assert "2+2" in user_text or "2 + 2" in user_text
-
-    # Verify assistant response contains "4" (from mock LLM canned response)
-    assistant_msg = page.locator(SEL["message_assistant"]).last
-    assistant_text = await assistant_msg.text_content()
-    assert "4" in assistant_text, f"Expected '4' in response, got: '{assistant_text}'"
+    assert result["role"] == "assistant"
+    assert "4" in result["text"], f"Expected '4' in response, got: '{result['text']}'"
 
 
 async def test_multiple_messages(page):
