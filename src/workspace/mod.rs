@@ -115,11 +115,26 @@ fn is_system_prompt_file(path: &str) -> bool {
 /// Returns `true` for engine runtime state paths that should never be chunked
 /// or indexed for FTS/vector search.
 ///
-/// These are JSON execution-state blobs written by the engine bridge on every
-/// turn (`engine/.runtime/threads/`, `engine/.runtime/steps/`, etc.).  Indexing
-/// them floods the DB connection pool under multi-tenant load.
+/// Covered prefixes / paths (all machine-generated blobs, not semantic docs):
+/// - `engine/.runtime/` — execution-state blobs (threads, steps, events, leases,
+///   conversations, compacted summaries) written by the bridge on every turn.
+/// - `engine/projects/` — project and mission JSON files serialised on every
+///   state mutation (e.g. `engine/projects/{slug}/project.json`,
+///   `engine/projects/{slug}/missions/{slug}/mission.json`).
+/// - `engine/orchestrator/failures.json` — orchestrator failure-tracker blob,
+///   updated at engine-turn frequency.
+///
+/// Semantic content that is intentionally KEPT indexed:
+/// - `engine/knowledge/` — summaries, lessons, plans, specs, notes.
+/// - `engine/orchestrator/v{N}.py` — versioned orchestrator code.
+/// - `engine/orchestrator/*.md` — prompt overlays.
+///
+/// Indexing the excluded paths floods the DB connection pool under
+/// multi-tenant load.
 fn is_engine_runtime_path(path: &str) -> bool {
     path.starts_with("engine/.runtime/")
+        || path.starts_with("engine/projects/")
+        || path == "engine/orchestrator/failures.json"
 }
 
 /// Shared sanitizer instance — avoids rebuilding Aho-Corasick + regexes on every write.
@@ -1035,8 +1050,10 @@ impl Workspace {
             }
             let skip_meta = DocumentMetadata {
                 skip_indexing: Some(true),
+                skip_versioning: Some(true),
                 ..Default::default()
             };
+            // Fail-open: versioning failures must not block state writes.
             let _ = self
                 .maybe_save_version(doc.id, &doc.content, &skip_meta, Some(&self.user_id))
                 .await;
@@ -2887,5 +2904,66 @@ mod versioning_tests {
         let result = ws.patch("test.md", " cruel", "", false).await.unwrap();
 
         assert_eq!(result.document.content, "hello world");
+    }
+
+    // T2: engine/projects/ paths skip FTS/vector indexing; engine/knowledge/ paths do not.
+    #[tokio::test]
+    async fn engine_projects_path_skips_indexing_but_knowledge_does_not() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Write to an engine/projects/ path — should skip chunking entirely.
+        ws.write(
+            "engine/projects/test-proj--abc12345/project.json",
+            r#"{"id":"abc12345","name":"test-proj"}"#,
+        )
+        .await
+        .unwrap();
+
+        // No chunks should exist for this document.
+        let chunks = ws
+            .storage
+            .get_chunks_without_embeddings("test_version", None, 100)
+            .await
+            .unwrap();
+        assert!(
+            chunks.is_empty(),
+            "engine/projects/ write must not produce any chunks, got: {chunks:?}"
+        );
+
+        // Write to an engine/knowledge/ path — should be indexed normally.
+        ws.write(
+            "engine/knowledge/lessons/lesson-one--abc12345.md",
+            "This is a lesson learned from the last run.",
+        )
+        .await
+        .unwrap();
+
+        // At least one chunk should now exist for the knowledge document.
+        let chunks = ws
+            .storage
+            .get_chunks_without_embeddings("test_version", None, 100)
+            .await
+            .unwrap();
+        assert!(
+            !chunks.is_empty(),
+            "engine/knowledge/ write must produce chunks for FTS/vector indexing"
+        );
+    }
+
+    // T3: writes to engine/.runtime/ paths produce zero version rows.
+    #[tokio::test]
+    async fn runtime_path_writes_produce_no_versions() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        let path = "engine/.runtime/threads/test-thread.json";
+        let doc = ws.write(path, "v1").await.unwrap();
+        ws.write(path, "v2").await.unwrap();
+
+        let versions = ws.list_versions(doc.id, 50).await.unwrap();
+        assert_eq!(
+            versions.len(),
+            0,
+            "runtime path writes must not accumulate version rows, got: {versions:?}"
+        );
     }
 }
