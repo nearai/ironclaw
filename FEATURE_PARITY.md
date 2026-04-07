@@ -38,6 +38,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | HTTP endpoints for Control UI | ✅ | ✅ | Web dashboard with chat, memory, jobs, logs, extensions |
 | Channel connection lifecycle | ✅ | ✅ | ChannelManager + WebSocket tracker |
 | Session management/routing | ✅ | ✅ | SessionManager exists |
+| Visible Stop control during active chat turns | ✅ | 🚧 | Send button swaps to Stop; `/api/chat/interrupt` cancels the running turn |
 | Configuration hot-reload | ✅ | ❌ | |
 | Network modes (loopback/LAN/remote) | ✅ | 🚧 | HTTP only |
 | OpenAI-compatible HTTP API | ✅ | ✅ | /v1/chat/completions, per-request `model` override |

@@ -239,6 +239,7 @@ let _doneWithoutResponseTimer = null;
 // --- Send Cooldown State ---
 let _sendCooldown = false;
 let _recentLocalPairingApprovals = new Map();
+let _turnRunning = false;
 
 // --- Slash Commands ---
 
@@ -840,6 +841,7 @@ function connectSSE(lastEventIdOverride) {
     if (streamingMsg) streamingMsg.removeAttribute('data-streaming');
 
     _turnResponseReceived = true;
+    setTurnRunning(false);
     if (_doneWithoutResponseTimer) {
       clearTimeout(_doneWithoutResponseTimer);
       _doneWithoutResponseTimer = null;
@@ -862,6 +864,7 @@ function connectSSE(lastEventIdOverride) {
       if (data.thread_id) debouncedLoadThreads();
       return;
     }
+    setTurnRunning(true);
     clearSuggestionChips();
     showActivityThinking(data.message);
   });
@@ -877,12 +880,14 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('tool_started', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
+    setTurnRunning(true);
     addToolCard(data.name);
   });
 
   addTrackedEventListener('tool_completed', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
+    setTurnRunning(true);
     completeToolCard(data.name, data.success, data.error, data.parameters);
 
     // Show restart modal only when the restart tool succeeds
@@ -900,6 +905,7 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('stream_chunk', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
+    setTurnRunning(true);
     finalizeActivityGroup();
 
     // Mark the active assistant message as streaming
@@ -942,8 +948,9 @@ function connectSSE(lastEventIdOverride) {
     // the agentic loop finished, so re-enable input as a safety net in case
     // the response SSE event is empty or lost.
     // Status text is not displayed — inline activity cards handle visual feedback.
-    if (data.message === 'Done' || data.message === 'Awaiting approval') {
+    if (data.message === 'Done' || data.message === 'Awaiting approval' || data.message === 'Interrupted') {
       finalizeActivityGroup();
+      setTurnRunning(false);
       enableChatInput();
       // Safety net (#2079): if "Done" arrives but we never received a
       // `response` event for this turn, the message may have been lost
@@ -972,6 +979,7 @@ function connectSSE(lastEventIdOverride) {
     const forCurrentThread = !hasThread || isCurrentThread(data.thread_id);
 
     if (forCurrentThread) {
+      setTurnRunning(false);
       showApproval(data);
     } else {
       // Keep thread list fresh when approval is requested in a background thread.
@@ -1004,11 +1012,13 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('gate_required', (e) => {
     const data = JSON.parse(e.data);
+    setTurnRunning(false);
     handleGateRequired(data);
   });
 
   addTrackedEventListener('gate_resolved', (e) => {
     const data = JSON.parse(e.data);
+    setTurnRunning(false);
     handleGateResolved(data);
   });
 
@@ -1027,6 +1037,7 @@ function connectSSE(lastEventIdOverride) {
       const data = JSON.parse(e.data);
       if (!isCurrentThread(data.thread_id)) return;
       finalizeActivityGroup();
+      setTurnRunning(false);
       addMessage('system', 'Error: ' + data.message);
       enableChatInput();
     }
@@ -1195,10 +1206,12 @@ function sendMessage() {
     renderImagePreviews();
   }
 
+  setTurnRunning(true);
   apiFetch('/api/chat/send', {
     method: 'POST',
     body: body,
   }).catch((err) => {
+    setTurnRunning(false);
     // Handle rate limiting (429)
     if (err.status === 429) {
       showToast(I18n.t('chat.rateLimited'), 'error');
@@ -1229,6 +1242,36 @@ function sendMessage() {
   });
 }
 
+function interruptCurrentTurn() {
+  if (!currentThreadId) return;
+  apiFetch('/api/chat/interrupt', {
+    method: 'POST',
+    body: { thread_id: currentThreadId },
+  }).then(() => {
+    setTurnRunning(false);
+  }).catch((err) => {
+    addMessage('system', 'Failed to interrupt current turn: ' + err.message);
+  });
+}
+
+function setTurnRunning(running) {
+  _turnRunning = !!running;
+  const btn = document.getElementById('send-btn');
+  if (btn) {
+    btn.textContent = _turnRunning ? (I18n.t('chat.stop') || 'Stop') : I18n.t('chat.send');
+    btn.title = _turnRunning ? (I18n.t('chat.stop') || 'Stop the current turn') : I18n.t('chat.send');
+    btn.classList.toggle('btn-cancel', _turnRunning);
+  }
+}
+
+function handleChatActionButton() {
+  if (_turnRunning) {
+    interruptCurrentTurn();
+  } else {
+    sendMessage();
+  }
+}
+
 function enableChatInput() {
   if (currentThreadIsReadOnly || authFlowPending) return;
   const input = document.getElementById('chat-input');
@@ -1237,6 +1280,7 @@ function enableChatInput() {
     input.disabled = false;
   }
   if (btn) btn.disabled = false;
+  setTurnRunning(_turnRunning);
 }
 
 // --- Image Upload ---
@@ -2946,7 +2990,12 @@ function loadHistory(before) {
       // Show processing indicator if the last turn is still in-progress
       var lastTurn = data.turns.length > 0 ? data.turns[data.turns.length - 1] : null;
       if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
+        setTurnRunning(true);
         showActivityThinking('Processing...');
+      } else if (lastTurn && lastTurn.state === 'Interrupted') {
+        setTurnRunning(false);
+      } else {
+        setTurnRunning(false);
       }
       if (data.pending_gate) {
         handleGateRequired({
@@ -3263,6 +3312,7 @@ function disableChatInputReadOnly() {
     input.placeholder = I18n.t('chat.readOnlyThread');
   }
   if (btn) btn.disabled = true;
+  setTurnRunning(false);
 }
 
 function switchToAssistant() {
@@ -3382,7 +3432,10 @@ chatInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
     e.preventDefault();
     hideSlashAutocomplete();
-    sendMessage();
+    if (_turnRunning) {
+      return;
+    }
+    handleChatActionButton();
   }
 });
 chatInput.addEventListener('input', () => {
@@ -8052,7 +8105,7 @@ document.getElementById('restart-btn').addEventListener('click', () => triggerRe
 document.getElementById('thread-new-btn').addEventListener('click', () => createNewThread());
 document.getElementById('thread-toggle-btn').addEventListener('click', () => toggleThreadSidebar());
 document.getElementById('assistant-thread').addEventListener('click', () => switchToAssistant());
-document.getElementById('send-btn').addEventListener('click', () => sendMessage());
+document.getElementById('send-btn').addEventListener('click', () => handleChatActionButton());
 document.getElementById('memory-edit-btn').addEventListener('click', () => startMemoryEdit());
 document.getElementById('memory-save-btn').addEventListener('click', () => saveMemoryEdit());
 document.getElementById('memory-cancel-btn').addEventListener('click', () => cancelMemoryEdit());

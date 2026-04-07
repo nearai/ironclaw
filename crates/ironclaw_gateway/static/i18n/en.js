@@ -118,6 +118,7 @@ I18n.register('en', {
   'chat.assistant': 'Assistant',
   'chat.conversations': 'Conversations',
   'chat.send': 'Send',
+  'chat.stop': 'Stop',
   'chat.attachImages': 'Attach Images',
   'chat.scrollToBottom': 'Scroll to bottom',
   'chat.empty': 'Select a file to view content',

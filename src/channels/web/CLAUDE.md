@@ -30,6 +30,7 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/chat/send` | Send message → queues to agent loop |
+| POST | `/api/chat/interrupt` | Stop the active turn and cancel the running agent loop |
 | GET | `/api/chat/events` | SSE stream of agent events |
 | GET | `/api/chat/ws` | WebSocket alternative to SSE |
 | GET | `/api/chat/history` | Paginated turn history for a thread |

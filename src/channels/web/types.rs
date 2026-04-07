@@ -30,6 +30,11 @@ pub struct SendMessageResponse {
     pub status: &'static str,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct InterruptRequest {
+    pub thread_id: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ThreadInfo {
     pub id: Uuid,

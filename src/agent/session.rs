@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::llm::{ChatMessage, ToolCall, generate_tool_call_id};
@@ -280,6 +281,9 @@ pub struct Thread {
     /// Channel that created this thread (for approval authorization).
     #[serde(default)]
     pub source_channel: Option<String>,
+    /// Cancellation token for the active turn. Not persisted.
+    #[serde(skip, default)]
+    pub turn_cancel: Option<CancellationToken>,
 }
 
 /// Maximum number of messages that can be queued while a thread is processing.
@@ -329,6 +333,7 @@ impl Thread {
             pending_auth: None,
             pending_messages: VecDeque::new(),
             source_channel: source_channel.map(String::from),
+            turn_cancel: None,
         }
     }
 
@@ -347,6 +352,7 @@ impl Thread {
             pending_auth: None,
             pending_messages: VecDeque::new(),
             source_channel: source_channel.map(String::from),
+            turn_cancel: None,
         }
     }
 
@@ -411,6 +417,7 @@ impl Thread {
         let turn_number = self.turns.len();
         let turn = Turn::new(turn_number, user_input);
         self.turns.push(turn);
+        self.turn_cancel = Some(CancellationToken::new());
         self.state = ThreadState::Processing;
         self.updated_at = Utc::now();
         // turn_number was len() before push, so it's a valid index after push
@@ -422,6 +429,7 @@ impl Thread {
         if let Some(turn) = self.turns.last_mut() {
             turn.complete(response);
         }
+        self.turn_cancel = None;
         self.state = ThreadState::Idle;
         self.updated_at = Utc::now();
     }
@@ -431,6 +439,7 @@ impl Thread {
         if let Some(turn) = self.turns.last_mut() {
             turn.fail(error);
         }
+        self.turn_cancel = None;
         self.state = ThreadState::Idle;
         self.updated_at = Utc::now();
     }
@@ -471,12 +480,20 @@ impl Thread {
 
     /// Interrupt the current turn and discard any queued messages.
     pub fn interrupt(&mut self) {
+        if let Some(token) = self.turn_cancel.as_ref() {
+            token.cancel();
+        }
         if let Some(turn) = self.turns.last_mut() {
             turn.interrupt();
         }
         self.pending_messages.clear();
         self.state = ThreadState::Interrupted;
         self.updated_at = Utc::now();
+    }
+
+    /// Get a clone of the active turn cancellation token.
+    pub fn current_turn_cancel(&self) -> Option<CancellationToken> {
+        self.turn_cancel.clone()
     }
 
     /// Resume after interruption.
