@@ -172,6 +172,8 @@ fn make_sandbox_job(user_id: &str, task: &str) -> crate::history::SandboxJobReco
         started_at: Some(now),
         completed_at: Some(now),
         credential_grants_json: "[]".to_string(),
+        mcp_servers: None,
+        max_iterations: None,
     }
 }
 

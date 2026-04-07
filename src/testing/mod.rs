@@ -1407,6 +1407,8 @@ mod tests {
             started_at: None,
             completed_at: None,
             credential_grants_json: "[]".to_string(),
+            mcp_servers: None,
+            max_iterations: None,
         };
 
         // Create
@@ -1502,6 +1504,8 @@ mod tests {
             started_at: None,
             completed_at: None,
             credential_grants_json: "[]".to_string(),
+            mcp_servers: None,
+            max_iterations: None,
         };
         db.save_sandbox_job(&job).await.expect("save");
 
@@ -1544,6 +1548,8 @@ mod tests {
             started_at: Some(chrono::Utc::now()),
             completed_at: None,
             credential_grants_json: "[]".to_string(),
+            mcp_servers: None,
+            max_iterations: None,
         };
         db.save_sandbox_job(&job).await.expect("save job");
 
