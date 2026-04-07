@@ -24,7 +24,7 @@ use crate::tools::builtin::{
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{
-    ApprovalRequirement, EngineCompatibility, Tool, ToolDiscoverySummary, ToolDomain,
+    ApprovalRequirement, EngineCompatibility, EngineVersion, Tool, ToolDiscoverySummary, ToolDomain,
 };
 use crate::tools::wasm::{
     Capabilities, OAuthRefreshConfig, ResourceLimits, SharedCredentialRegistry, WasmError,
@@ -303,15 +303,16 @@ impl ToolRegistry {
         defs
     }
 
-    /// Get tool definitions filtered by engine version compatibility.
+    /// Get tool definitions filtered by engine version.
     ///
     /// Returns tools whose `engine_compatibility()` is `Both` or matches the
     /// requested version. Use this instead of `tool_definitions()` when building
     /// the tool list for a specific engine version.
-    pub async fn tool_definitions_for_engine(
-        &self,
-        engine: EngineCompatibility,
-    ) -> Vec<ToolDefinition> {
+    pub async fn tool_definitions_for_engine(&self, version: EngineVersion) -> Vec<ToolDefinition> {
+        let version_specific = match version {
+            EngineVersion::V1 => EngineCompatibility::V1Only,
+            EngineVersion::V2 => EngineCompatibility::V2Only,
+        };
         let mut defs: Vec<ToolDefinition> = self
             .tools
             .read()
@@ -319,7 +320,7 @@ impl ToolRegistry {
             .values()
             .filter(|tool| {
                 let compat = tool.engine_compatibility();
-                compat == EngineCompatibility::Both || compat == engine
+                compat == EngineCompatibility::Both || compat == version_specific
             })
             .map(Self::tool_definition)
             .collect();
@@ -1323,7 +1324,7 @@ mod tests {
         registry.register(Arc::new(V1OnlyTool)).await;
 
         let v2_defs = registry
-            .tool_definitions_for_engine(EngineCompatibility::V2Only)
+            .tool_definitions_for_engine(EngineVersion::V2)
             .await;
         let names: Vec<&str> = v2_defs.iter().map(|d| d.name.as_str()).collect();
 
@@ -1344,7 +1345,7 @@ mod tests {
         registry.register(Arc::new(V1OnlyTool)).await;
 
         let v1_defs = registry
-            .tool_definitions_for_engine(EngineCompatibility::V1Only)
+            .tool_definitions_for_engine(EngineVersion::V1)
             .await;
         let names: Vec<&str> = v1_defs.iter().map(|d| d.name.as_str()).collect();
 

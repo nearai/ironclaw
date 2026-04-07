@@ -163,9 +163,8 @@ pub enum ToolDomain {
 
 /// Which engine versions a tool is available in.
 ///
-/// Used by `ToolRegistry::tool_definitions_for_engine()` to filter tools based
-/// on the active engine version. Tools default to `Both`; override
-/// `Tool::engine_compatibility()` for version-specific tools.
+/// Declared by each tool via `Tool::engine_compatibility()`. Tools default to
+/// `Both`; override for version-specific tools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EngineCompatibility {
     /// Available in both v1 (legacy agent loop) and v2 (engine threads).
@@ -175,6 +174,20 @@ pub enum EngineCompatibility {
     V1Only,
     /// Only available in v2 (engine threads/capabilities).
     V2Only,
+}
+
+/// Engine version selector for filtering tools.
+///
+/// Used by `ToolRegistry::tool_definitions_for_engine()` as the filter
+/// parameter. Separate from `EngineCompatibility` to avoid the footgun of
+/// passing `Both` as a filter (which would confusingly exclude version-specific
+/// tools).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EngineVersion {
+    /// V1 legacy agent loop.
+    V1,
+    /// V2 engine threads/capabilities.
+    V2,
 }
 
 /// Error type for tool execution.

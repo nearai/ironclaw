@@ -441,7 +441,12 @@ impl EffectBridgeAdapter {
             // a lease (e.g. via a stale capability registry or hallucination).
             if tool.engine_compatibility() == crate::tools::EngineCompatibility::V1Only {
                 return Err(EngineError::Effect {
-                    reason: format!("Tool '{}' is not available in engine v2.", action_name),
+                    reason: format!(
+                        "Tool '{}' is v1-only and not available in engine v2. \
+                         Use the equivalent v2 workflow (e.g. mission_create instead of \
+                         routine_create) or the appropriate slash command.",
+                        action_name
+                    ),
                 });
             }
 
@@ -747,7 +752,7 @@ impl EffectExecutor for EffectBridgeAdapter {
         // is_v1_only_tool() / is_v1_auth_tool() string-matching.
         let tool_defs = self
             .tools
-            .tool_definitions_for_engine(crate::tools::EngineCompatibility::V2Only)
+            .tool_definitions_for_engine(crate::tools::EngineVersion::V2)
             .await;
 
         let actions = tool_defs
@@ -828,31 +833,6 @@ fn extract_credential_name(error_msg: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    // Legacy string-matching helpers — kept for their tests which document
-    // the v1-only tool set. Production code now uses Tool::engine_compatibility().
-    fn is_v1_only_tool(name: &str) -> bool {
-        matches!(
-            name,
-            "create_job"
-                | "create-job"
-                | "cancel_job"
-                | "cancel-job"
-                | "build_software"
-                | "build-software"
-                | "routine_create"
-                | "routine_list"
-                | "routine_fire"
-                | "routine_pause"
-                | "routine_resume"
-                | "routine_update"
-                | "routine_delete"
-        )
-    }
-
-    fn is_v1_auth_tool(name: &str) -> bool {
-        matches!(name, "tool_auth" | "tool-auth")
-    }
-
     use super::*;
     use crate::context::JobContext;
     use crate::tools::{Tool, ToolError, ToolOutput};
@@ -1196,47 +1176,6 @@ mod tests {
     fn extract_credential_returns_none_for_json_without_credential() {
         let msg = r#"Tool 'http' failed: {"error":"not_found","message":"404"}"#;
         assert_eq!(extract_credential_name(msg), None);
-    }
-
-    // ── is_v1_only_tool tests ──────────────────────────────────
-
-    #[test]
-    fn routine_tools_are_v1_only() {
-        assert!(is_v1_only_tool("routine_create"));
-        assert!(is_v1_only_tool("routine_list"));
-        assert!(is_v1_only_tool("routine_fire"));
-        assert!(is_v1_only_tool("routine_delete"));
-        assert!(is_v1_only_tool("routine_pause"));
-        assert!(is_v1_only_tool("routine_resume"));
-        assert!(is_v1_only_tool("routine_update"));
-    }
-
-    #[test]
-    fn mission_tools_are_not_v1_only() {
-        assert!(!is_v1_only_tool("mission_create"));
-        assert!(!is_v1_only_tool("mission_list"));
-        assert!(!is_v1_only_tool("mission_fire"));
-        assert!(!is_v1_only_tool("http"));
-        assert!(!is_v1_only_tool("web_search"));
-    }
-
-    // ── is_v1_auth_tool tests ─────────────────────────────────
-
-    #[test]
-    fn auth_tools_are_v1_auth() {
-        assert!(is_v1_auth_tool("tool_auth"));
-        assert!(is_v1_auth_tool("tool-auth"));
-        assert!(!is_v1_auth_tool("tool_activate"));
-        assert!(!is_v1_auth_tool("tool-activate"));
-    }
-
-    #[test]
-    fn non_auth_tools_are_not_v1_auth() {
-        assert!(!is_v1_auth_tool("tool_install"));
-        assert!(!is_v1_auth_tool("tool-install"));
-        assert!(!is_v1_auth_tool("http"));
-        assert!(!is_v1_auth_tool("tool_search"));
-        assert!(!is_v1_auth_tool("tool_list"));
     }
 
     // ── Pre-flight auth gate integration test ─────────────────

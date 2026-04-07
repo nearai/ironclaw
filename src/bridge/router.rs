@@ -525,7 +525,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     let mut capabilities = CapabilityRegistry::new();
     let tool_defs = agent
         .tools()
-        .tool_definitions_for_engine(crate::tools::EngineCompatibility::V2Only)
+        .tool_definitions_for_engine(crate::tools::EngineVersion::V2)
         .await;
     if !tool_defs.is_empty() {
         capabilities.register(Capability {

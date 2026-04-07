@@ -212,7 +212,7 @@ impl Agent {
         // (normal iterations) and without (force_text final iteration).
         let initial_tool_defs = self
             .tools()
-            .tool_definitions_for_engine(crate::tools::EngineCompatibility::V1Only)
+            .tool_definitions_for_engine(crate::tools::EngineVersion::V1)
             .await;
         let initial_tool_defs = if !active_skills.is_empty() {
             crate::skills::attenuate_tools(&initial_tool_defs, &active_skills).tools
@@ -410,7 +410,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         let tool_defs = self
             .agent
             .tools()
-            .tool_definitions_for_engine(crate::tools::EngineCompatibility::V1Only)
+            .tool_definitions_for_engine(crate::tools::EngineVersion::V1)
             .await;
 
         // Apply trust-based tool attenuation if skills are active.
