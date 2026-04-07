@@ -7,7 +7,6 @@ use futures::StreamExt;
 use serde::Deserialize;
 use silk_rs::decode_silk;
 
-use crate::channels::wasm::capabilities::ChannelCapabilities;
 use crate::channels::wasm::host::{Attachment, ChannelHostState};
 
 const AES_BLOCK_SIZE: usize = 16;
@@ -21,11 +20,10 @@ struct WechatAttachmentExtras {
 }
 
 pub(crate) async fn hydrate_attachment_for_channel(
-    channel_name: &str,
-    capabilities: &ChannelCapabilities,
+    host_state: &mut ChannelHostState,
     attachment: &mut Attachment,
 ) {
-    if !should_hydrate_wechat_attachment(channel_name, attachment) {
+    if !should_hydrate_wechat_attachment(host_state.channel_name(), attachment) {
         return;
     }
 
@@ -34,14 +32,14 @@ pub(crate) async fn hydrate_attachment_for_channel(
     };
     let Some(encoded_aes_key) = wechat_aes_key(&attachment.extras_json) else {
         tracing::warn!(
-            channel = %channel_name,
+            channel = %host_state.channel_name(),
             attachment_id = %attachment.id,
             "Skipping WeChat attachment hydration: missing AES key metadata"
         );
         return;
     };
 
-    match download_wechat_attachment_bytes(channel_name, capabilities, source_url).await {
+    match download_wechat_attachment_bytes(host_state, source_url).await {
         Ok(ciphertext) => match decrypt_wechat_attachment_bytes(&ciphertext, &encoded_aes_key) {
             Ok(plaintext) => {
                 attachment.size_bytes = Some(plaintext.len() as u64);
@@ -52,7 +50,7 @@ pub(crate) async fn hydrate_attachment_for_channel(
                     && let Err(error) = maybe_transcode_wechat_silk_attachment(attachment)
                 {
                     tracing::warn!(
-                        channel = %channel_name,
+                        channel = %host_state.channel_name(),
                         attachment_id = %attachment.id,
                         error = %error,
                         "Failed to transcode WeChat SILK attachment; preserving raw SILK"
@@ -61,7 +59,7 @@ pub(crate) async fn hydrate_attachment_for_channel(
             }
             Err(error) => {
                 tracing::warn!(
-                    channel = %channel_name,
+                    channel = %host_state.channel_name(),
                     attachment_id = %attachment.id,
                     error = %error,
                     "Failed to decrypt WeChat attachment"
@@ -70,7 +68,7 @@ pub(crate) async fn hydrate_attachment_for_channel(
         },
         Err(error) => {
             tracing::warn!(
-                channel = %channel_name,
+                channel = %host_state.channel_name(),
                 attachment_id = %attachment.id,
                 error = %error,
                 "Failed to download WeChat attachment"
@@ -106,12 +104,11 @@ fn wechat_aes_key(extras_json: &str) -> Option<String> {
 }
 
 async fn download_wechat_attachment_bytes(
-    channel_name: &str,
-    capabilities: &ChannelCapabilities,
+    host_state: &mut ChannelHostState,
     source_url: &str,
 ) -> Result<Vec<u8>, String> {
-    let host_state = ChannelHostState::new(channel_name, capabilities.clone());
     host_state.check_http_allowed(source_url, "GET")?;
+    host_state.record_http_request()?;
 
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
@@ -349,7 +346,8 @@ mod tests {
         hydrate_attachment_for_channel, maybe_transcode_wechat_silk_attachment, pcm_s16le_to_wav,
         should_hydrate_wechat_attachment,
     };
-    use crate::channels::wasm::ChannelCapabilities;
+    use crate::channels::wasm::{ChannelCapabilities, ChannelHostState};
+    use crate::tools::wasm::{Capabilities, EndpointPattern, HttpCapability};
     use base64::Engine as _;
 
     fn make_attachment() -> Attachment {
@@ -408,9 +406,37 @@ mod tests {
     async fn hydration_skips_when_metadata_is_missing() {
         let mut attachment = make_attachment();
         let caps = ChannelCapabilities::for_channel("wechat");
-        hydrate_attachment_for_channel("wechat", &caps, &mut attachment).await;
+        let mut host_state = ChannelHostState::new("wechat", caps);
+        hydrate_attachment_for_channel(&mut host_state, &mut attachment).await;
         assert!(attachment.data.is_empty());
         assert_eq!(attachment.size_bytes, None);
+    }
+
+    #[test]
+    fn wechat_attachment_downloads_consume_host_http_budget() {
+        let caps = ChannelCapabilities::for_channel("wechat").with_tool_capabilities(
+            Capabilities::default().with_http(HttpCapability::new(vec![
+                EndpointPattern::host("novac2c.cdn.weixin.qq.com")
+                    .with_path_prefix("/c2c/download")
+                    .with_methods(vec!["GET".to_string()]),
+            ])),
+        );
+        let mut host_state = ChannelHostState::new("wechat", caps);
+        let url = "https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=test";
+
+        for _ in 0..50 {
+            host_state
+                .check_http_allowed(url, "GET")
+                .expect("allowlisted request");
+            host_state
+                .record_http_request()
+                .expect("request budget available");
+        }
+
+        let error = host_state
+            .record_http_request()
+            .expect_err("51st request should exceed per-execution budget");
+        assert!(error.contains("Too many HTTP requests in single execution"));
     }
 
     #[test]

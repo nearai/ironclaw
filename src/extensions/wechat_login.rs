@@ -124,8 +124,9 @@ pub(crate) async fn start_login(
     base_url: &str,
     bot_type: &str,
 ) -> Result<(PendingWechatLogin, InteractiveLoginStartResult), ExtensionError> {
-    let qr = fetch_qr_code(base_url, bot_type).await?;
-    Ok(build_pending_login(user_id, base_url, bot_type, qr))
+    let base_url = validate_wechat_login_base_url(base_url)?;
+    let qr = fetch_qr_code(&base_url, bot_type).await?;
+    Ok(build_pending_login(user_id, &base_url, bot_type, qr))
 }
 
 pub(crate) async fn poll_login(
@@ -296,7 +297,8 @@ fn ensure_trailing_slash(base_url: &str) -> String {
 }
 
 async fn fetch_qr_code(base_url: &str, bot_type: &str) -> Result<QrCodeResponse, ExtensionError> {
-    let base = ensure_trailing_slash(base_url);
+    let base_url = validate_wechat_login_base_url(base_url)?;
+    let base = ensure_trailing_slash(&base_url);
     let url = format!(
         "{base}ilink/bot/get_bot_qrcode?bot_type={}",
         urlencoding::encode(bot_type)
@@ -328,7 +330,8 @@ async fn fetch_qr_code(base_url: &str, bot_type: &str) -> Result<QrCodeResponse,
 }
 
 async fn poll_qr_status(base_url: &str, qrcode: &str) -> Result<QrStatusResponse, ExtensionError> {
-    let base = ensure_trailing_slash(base_url);
+    let base_url = validate_wechat_login_base_url(base_url)?;
+    let base = ensure_trailing_slash(&base_url);
     let url = format!(
         "{base}ilink/bot/get_qrcode_status?qrcode={}",
         urlencoding::encode(qrcode)
@@ -380,7 +383,7 @@ async fn poll_qr_status(base_url: &str, qrcode: &str) -> Result<QrStatusResponse
 mod tests {
     use super::{
         MAX_QR_REFRESH_COUNT, QrCodeResponse, QrStatusResponse, WechatLoginPollOutcome,
-        build_pending_login, handle_poll_status,
+        build_pending_login, handle_poll_status, start_login,
     };
     use crate::extensions::ExtensionError;
 
@@ -559,6 +562,20 @@ mod tests {
             Ok(_) => panic!("untrusted host should fail"),
             Err(error) => error,
         };
+
+        match error {
+            ExtensionError::AuthFailed(message) => {
+                assert!(message.contains("untrusted base URL host"));
+            }
+            other => panic!("expected AuthFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_start_login_rejects_untrusted_base_url_before_http() {
+        let error = start_login("owner", "https://evil.example", "3")
+            .await
+            .expect_err("untrusted host should fail before fetching QR");
 
         match error {
             ExtensionError::AuthFailed(message) => {

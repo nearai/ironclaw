@@ -873,13 +873,14 @@ fn apply_emitted_metadata(mut msg: IncomingMessage, metadata_json: &str) -> Inco
 fn apply_owner_scope_metadata(mut msg: IncomingMessage, owner_scope_id: &str) -> IncomingMessage {
     match &mut msg.metadata {
         serde_json::Value::Object(map) => {
-            map.entry("owner_id".to_string())
-                .or_insert_with(|| serde_json::Value::String(owner_scope_id.to_string()));
+            map.insert(
+                "owner_id".to_string(),
+                serde_json::Value::String(owner_scope_id.to_string()),
+            );
         }
-        serde_json::Value::Null => {
+        _ => {
             msg = msg.with_metadata(serde_json::json!({ "owner_id": owner_scope_id }));
         }
-        _ => {}
     }
     msg
 }
@@ -2464,6 +2465,8 @@ impl WasmChannel {
             tx.clone()
         };
 
+        let mut hydration_host_state = ChannelHostState::new(&self.name, self.capabilities.clone());
+
         for emitted in messages {
             if emitted.content.trim().is_empty() && emitted.attachments.is_empty() {
                 tracing::debug!(
@@ -2519,7 +2522,7 @@ impl WasmChannel {
             // Convert attachments
             if !attachments.is_empty() {
                 let incoming_attachments =
-                    convert_emitted_attachments(&self.name, &self.capabilities, attachments).await;
+                    convert_emitted_attachments(&mut hydration_host_state, attachments).await;
                 msg = msg.with_attachments(incoming_attachments);
             }
 
@@ -2777,6 +2780,9 @@ impl WasmChannel {
             tx.clone()
         };
 
+        let mut hydration_host_state =
+            ChannelHostState::new(dispatch.channel_name, dispatch.capabilities.clone());
+
         for emitted in messages {
             let EmittedMessage {
                 user_id,
@@ -2819,12 +2825,8 @@ impl WasmChannel {
 
             // Convert attachments
             if !attachments.is_empty() {
-                let incoming_attachments = convert_emitted_attachments(
-                    dispatch.channel_name,
-                    dispatch.capabilities,
-                    attachments,
-                )
-                .await;
+                let incoming_attachments =
+                    convert_emitted_attachments(&mut hydration_host_state, attachments).await;
                 msg = msg.with_attachments(incoming_attachments);
             }
 
@@ -4126,15 +4128,13 @@ async fn resolve_channel_host_credentials(
 const MAX_TOTAL_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
 
 async fn convert_emitted_attachments(
-    channel_name: &str,
-    capabilities: &ChannelCapabilities,
+    hydration_host_state: &mut ChannelHostState,
     attachments: Vec<crate::channels::wasm::host::Attachment>,
 ) -> Vec<crate::channels::IncomingAttachment> {
     let mut hydrated = attachments;
     for attachment in &mut hydrated {
         crate::channels::wasm::attachment_hydration::hydrate_attachment_for_channel(
-            channel_name,
-            capabilities,
+            hydration_host_state,
             attachment,
         )
         .await;
@@ -5947,6 +5947,51 @@ mod tests {
         assert_eq!(msg.sender_id, "guest-42"); // safety: test-only assertion
         assert_eq!(msg.conversation_scope(), Some("999")); // safety: test-only assertion
         assert!(last_broadcast_metadata.read().await.is_none()); // safety: test-only assertion
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_emitted_messages_overwrites_guest_owner_id_metadata() {
+        use crate::channels::wasm::host::EmittedMessage;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        let capabilities =
+            crate::channels::wasm::capabilities::ChannelCapabilities::for_channel("telegram");
+        let rate_limiter = Arc::new(tokio::sync::RwLock::new(
+            crate::channels::wasm::host::ChannelEmitRateLimiter::new(
+                crate::channels::wasm::capabilities::EmitRateLimitConfig::default(),
+            ),
+        ));
+        let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
+
+        let messages = vec![
+            EmittedMessage::new("guest-42", "Hello from guest")
+                .with_metadata(r#"{"chat_id":999,"owner_id":"spoofed-owner"}"#),
+        ];
+
+        let result = WasmChannel::dispatch_emitted_messages(
+            EmitDispatchContext {
+                channel_name: "telegram",
+                capabilities: &capabilities,
+                owner_scope_id: "owner-scope",
+                owner_actor_id: Some("telegram-owner"),
+                message_tx: &message_tx,
+                rate_limiter: &rate_limiter,
+                last_broadcast_metadata: &last_broadcast_metadata,
+                settings_store: None,
+            },
+            messages,
+        )
+        .await;
+
+        assert!(result.is_ok()); // safety: test-only assertion
+
+        let msg = rx.try_recv().expect("Should receive message"); // safety: test-only assertion
+        assert_eq!(msg.user_id, "guest-42"); // safety: test-only assertion
+        assert_eq!(msg.sender_id, "guest-42"); // safety: test-only assertion
+        assert_eq!(msg.conversation_scope(), Some("999")); // safety: test-only assertion
+        assert_eq!(msg.metadata["owner_id"], "owner-scope"); // safety: test-only assertion
+        assert_eq!(msg.metadata["chat_id"], 999); // safety: test-only assertion
     }
 
     #[tokio::test]
