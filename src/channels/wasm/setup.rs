@@ -572,12 +572,12 @@ async fn inject_channel_settings_into_config(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use super::reserved_wasm_channel_names;
     use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
     use crate::db::{Database, SettingsStore};
     use crate::secrets::{CreateSecretParams, SecretsStore};
     use crate::testing::credentials::test_secrets_store;
+    use std::sync::Arc;
 
     /// Build the same reserved-name list that `setup_wasm_channels` uses.
     fn reserved_names() -> Vec<&'static str> {
