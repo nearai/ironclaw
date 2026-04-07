@@ -16,5 +16,15 @@ services:
       timeout: 3s
       retries: 5
 
+  hermes:
+    build:
+      context: ./hermes
+      dockerfile: Dockerfile
+    volumes:
+      - ./hermes/data:/opt/data
+    env_file:
+      - ./hermes/.env.example
+    restart: unless-stopped
+
 volumes:
   pgdata:
