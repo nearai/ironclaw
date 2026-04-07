@@ -60,7 +60,7 @@ impl SafetyLayer {
                 while cut > 0 && !output.is_char_boundary(cut) {
                     cut -= 1;
                 }
-                let truncated = &output[..cut];
+                let truncated = &output[..cut]; // safety: cut is validated by is_char_boundary loop above
                 let notice = format!(
                     "\n\n[... truncated: showing {}/{} bytes. Use the json tool with \
                  source_tool_call_id to query the full output.]",

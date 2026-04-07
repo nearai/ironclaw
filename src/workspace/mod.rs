@@ -2269,7 +2269,7 @@ fn find_nearest_config(path: &str, configs: &[MemoryDocument]) -> Option<serde_j
     // Walk up the path looking for the nearest ancestor .config
     let mut current = path;
     while let Some(slash_pos) = current.rfind('/') {
-        let parent = &current[..slash_pos];
+        let parent = &current[..slash_pos]; // safety: slash_pos from rfind('/') on a UTF-8 string; '/' is single-byte ASCII
         let config_path = format!("{}/{CONFIG_FILE_NAME}", parent);
         if let Some(meta) = config_map.get(config_path.as_str()) {
             return Some((*meta).clone());

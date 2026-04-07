@@ -92,7 +92,7 @@ impl ChannelPairingStore for LibSqlBackend {
         let channel = crate::pairing::normalize_channel_name(channel);
         let conn = self.connect().await?;
 
-        // BEGIN IMMEDIATE acquires a write lock upfront, preventing concurrent upserts
+        // safety: BEGIN IMMEDIATE acquires a write lock upfront, preventing concurrent upserts
         conn.execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -216,7 +216,7 @@ impl ChannelPairingStore for LibSqlBackend {
         let channel = crate::pairing::normalize_channel_name(channel);
         let conn = self.connect().await?;
 
-        // BEGIN IMMEDIATE acquires a write lock upfront, preventing concurrent approvals
+        // safety: BEGIN IMMEDIATE acquires a write lock upfront, preventing concurrent approvals
         conn.execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
