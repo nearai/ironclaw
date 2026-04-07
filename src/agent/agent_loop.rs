@@ -1186,6 +1186,10 @@ impl Agent {
                     )
                     .await;
                 }
+                Submission::ExternalCallback { request_id } => {
+                    return crate::bridge::handle_external_callback(self, message, *request_id)
+                        .await;
+                }
                 Submission::Interrupt => {
                     return crate::bridge::handle_interrupt(self, message).await;
                 }
@@ -1571,6 +1575,9 @@ impl Agent {
                 )
                 .await
             }
+            Submission::ExternalCallback { .. } => Ok(SubmissionResult::Error {
+                message: "External callbacks require ENGINE_V2".to_string(),
+            }),
             Submission::ApprovalResponse { approved, always } => {
                 self.process_approval(message, session, thread_id, None, approved, always)
                     .await

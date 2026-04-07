@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 use crate::context::ContextManager;
 use crate::db::{Database, UserStore};
 use crate::extensions::ExtensionManager;
+use crate::llm::recording::HttpInterceptor;
 use crate::llm::{LlmProvider, ToolDefinition};
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::secrets::SecretsStore;
@@ -129,6 +130,8 @@ pub struct ToolRegistry {
     db: Option<Arc<dyn Database>>,
     /// Shared rate limiter for built-in tool invocations.
     rate_limiter: RateLimiter,
+    /// Optional HTTP interceptor propagated into registered WASM wrappers.
+    http_interceptor: Option<Arc<dyn HttpInterceptor>>,
     /// Reference to the message tool for setting context per-turn.
     message_tool: RwLock<Option<Arc<crate::tools::builtin::MessageTool>>>,
 }
@@ -153,6 +156,7 @@ impl ToolRegistry {
             role_lookup: None,
             db: None,
             rate_limiter: RateLimiter::new(),
+            http_interceptor: None,
             message_tool: RwLock::new(None),
         }
     }
@@ -177,6 +181,11 @@ impl ToolRegistry {
 
     pub fn with_role_lookup(mut self, role_lookup: Arc<dyn UserStore>) -> Self {
         self.role_lookup = Some(role_lookup);
+        self
+    }
+
+    pub fn with_http_interceptor(mut self, interceptor: Arc<dyn HttpInterceptor>) -> Self {
+        self.http_interceptor = Some(interceptor);
         self
     }
 
@@ -846,6 +855,9 @@ impl ToolRegistry {
         }
         if let Some(oauth) = oauth_refresh.clone() {
             wrapper = wrapper.with_oauth_refresh(oauth);
+        }
+        if let Some(interceptor) = &self.http_interceptor {
+            wrapper = wrapper.with_http_interceptor(Arc::clone(interceptor));
         }
 
         // Register the tool

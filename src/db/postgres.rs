@@ -1542,6 +1542,8 @@ impl IdentityStore for PgBackend {
         )
         .await?;
 
+        Store::seed_initial_assistant_thread(&tx, &user.id, user.created_at).await?;
+
         tx.commit().await?;
         Ok(())
     }

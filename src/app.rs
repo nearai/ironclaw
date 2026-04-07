@@ -16,6 +16,7 @@ use crate::context::ContextManager;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
+use crate::llm::recording::HttpInterceptor;
 use crate::llm::{LlmProvider, RecordingLlm, SessionManager};
 use crate::secrets::SecretsStore;
 use crate::tools::ToolRegistry;
@@ -53,6 +54,7 @@ pub struct AppComponents {
     pub skill_catalog: Option<Arc<SkillCatalog>>,
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
     pub recording_handle: Option<Arc<RecordingLlm>>,
+    pub http_interceptor: Option<Arc<dyn HttpInterceptor>>,
     pub session: Arc<SessionManager>,
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
@@ -318,6 +320,7 @@ impl AppBuilder {
             Option<Arc<Workspace>>,
             Option<Arc<dyn crate::tools::SoftwareBuilder>>,
             Arc<SharedCredentialRegistry>,
+            Option<Arc<dyn HttpInterceptor>>,
         ),
         anyhow::Error,
     > {
@@ -333,6 +336,10 @@ impl AppBuilder {
         if let Some(ref ss) = self.secrets_store {
             tools_builder =
                 tools_builder.with_credentials(Arc::clone(&credential_registry), Arc::clone(ss));
+        }
+        let http_interceptor = crate::http_intercept::remap_from_env();
+        if let Some(ref interceptor) = http_interceptor {
+            tools_builder = tools_builder.with_http_interceptor(Arc::clone(interceptor));
         }
         let tools = Arc::new(tools_builder);
         tools.register_builtin_tools();
@@ -464,6 +471,7 @@ impl AppBuilder {
             workspace,
             builder,
             credential_registry,
+            http_interceptor,
         ))
     }
 
@@ -861,7 +869,7 @@ impl AppBuilder {
         } else {
             self.init_llm().await?
         };
-        let (safety, tools, embeddings, workspace, builder, credential_registry) =
+        let (safety, tools, embeddings, workspace, builder, credential_registry, http_interceptor) =
             self.init_tools(&llm).await?;
 
         // Create hook registry early so runtime extension activation can register hooks.
@@ -1011,6 +1019,7 @@ impl AppBuilder {
             skill_catalog,
             cost_guard,
             recording_handle,
+            http_interceptor,
             session: self.session,
             catalog_entries,
             dev_loaded_tool_names,

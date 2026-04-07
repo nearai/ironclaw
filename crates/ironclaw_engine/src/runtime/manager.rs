@@ -217,12 +217,21 @@ impl ThreadManager {
         }
 
         if let Some(ref call_id) = resolved_call_id {
-            thread
-                .messages
-                .retain(|existing| !is_resolved_call_message(existing, call_id));
+            let preserve_assistant_call = injected_message.as_ref().is_some_and(|message| {
+                message.role == MessageRole::ActionResult
+                    && message.action_call_id.as_deref() == Some(call_id.as_str())
+            });
+            thread.messages.retain(|existing| {
+                if preserve_assistant_call {
+                    !is_resolved_action_result_message(existing, call_id)
+                } else {
+                    !is_resolved_call_message(existing, call_id)
+                }
+            });
         }
 
         if let Some(message) = injected_message {
+            thread.add_internal_message(message.clone());
             thread.add_message(message);
         }
 
@@ -604,6 +613,10 @@ fn is_resolved_call_message(message: &ThreadMessage, call_id: &str) -> bool {
             .action_calls
             .as_ref()
             .is_some_and(|calls| calls.iter().any(|call| call.id == call_id))
+}
+
+fn is_resolved_action_result_message(message: &ThreadMessage, call_id: &str) -> bool {
+    message.role == MessageRole::ActionResult && message.action_call_id.as_deref() == Some(call_id)
 }
 
 #[cfg(test)]

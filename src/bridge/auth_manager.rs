@@ -567,11 +567,16 @@ impl AuthManager {
         let pending_flow = launch.flow;
 
         if use_gateway {
-            let mut pending_flows = ext_mgr.pending_oauth_flows().write().await;
-            pending_flows.retain(|_, flow| {
-                !(flow.secret_name == credential_name && flow.user_id == user_id)
-            });
-            pending_flows.insert(launch.expected_state.clone(), pending_flow);
+            let auth_result = ext_mgr
+                .start_hosted_oauth_flow(
+                    credential_name.to_string(),
+                    crate::extensions::ExtensionKind::WasmTool,
+                    launch.auth_url.clone(),
+                    launch.expected_state.clone(),
+                    pending_flow,
+                )
+                .await;
+            return auth_result.auth_url().map(ToString::to_string);
         } else {
             let listener = oauth::bind_callback_listener().await.ok()?;
             let display_name = pending_flow.display_name.clone();

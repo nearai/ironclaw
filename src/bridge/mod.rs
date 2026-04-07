@@ -13,6 +13,7 @@ mod store_adapter;
 
 pub use effect_adapter::EffectBridgeAdapter;
 pub use router::{
+    AuthCallbackContinuation,
     // DTO types
     EngineMissionDetail,
     EngineMissionInfo,
@@ -33,6 +34,7 @@ pub use router::{
     handle_clear,
     handle_exec_approval,
     handle_expected,
+    handle_external_callback,
     handle_interrupt,
     handle_new_thread,
     handle_with_engine,

@@ -946,17 +946,24 @@ async def test_auth_card_submit_success(page):
         submit_called.append(True)
         await route.fulfill(status=200, content_type="application/json", body=json.dumps({"success": True, "message": "Authenticated!"}))
 
-    await page.route("**/api/chat/auth-token", handle_auth)
+    await page.route("**/api/chat/gate/resolve", handle_auth)
 
     # Test click submit
-    await _show_auth_card(page, extension_name="myext", instructions="Enter token")
+    await _show_auth_card(
+        page,
+        extension_name="myext",
+        instructions="Enter token",
+        request_id="11111111-1111-1111-1111-111111111111",
+    )
     await page.locator(SEL["auth_token_input"]).fill("valid-token-123")
     await page.locator(SEL["auth_submit_btn"]).click()
     await page.locator(SEL["auth_card"]).wait_for(state="hidden", timeout=5000)
     assert len(submit_called) >= 1
 
     # Test Enter key submit (re-show card for a different extension)
-    await page.evaluate("showAuthCard({extension_name: 'myext2', instructions: 'Again'})")
+    await page.evaluate(
+        "showAuthCard({extension_name: 'myext2', instructions: 'Again', request_id: '33333333-3333-3333-3333-333333333333'})"
+    )
     await page.locator(SEL["auth_card"]).wait_for(state="visible", timeout=5000)
     await page.locator(SEL["auth_token_input"]).fill("another-token")
     await page.locator(SEL["auth_token_input"]).press("Enter")
@@ -976,8 +983,12 @@ async def test_auth_card_submit_error(page):
     async def handle_auth(route):
         await route.fulfill(status=200, content_type="application/json", body=json.dumps({"success": False, "message": "Bad token"}))
 
-    await page.route("**/api/chat/auth-token", handle_auth)
-    await _show_auth_card(page, extension_name="myext")
+    await page.route("**/api/chat/gate/resolve", handle_auth)
+    await _show_auth_card(
+        page,
+        extension_name="myext",
+        request_id="55555555-5555-5555-5555-555555555555",
+    )
     await page.locator(SEL["auth_token_input"]).fill("wrong-token")
     await page.locator(SEL["auth_submit_btn"]).click()
 
@@ -994,8 +1005,12 @@ async def test_auth_card_cancel_removes_card(page):
     async def handle_cancel(route):
         await route.fulfill(status=200, content_type="application/json", body="{}")
 
-    await page.route("**/api/chat/auth-cancel", handle_cancel)
-    await _show_auth_card(page, extension_name="myext")
+    await page.route("**/api/chat/gate/resolve", handle_cancel)
+    await _show_auth_card(
+        page,
+        extension_name="myext",
+        request_id="77777777-7777-7777-7777-777777777777",
+    )
     await page.locator(SEL["auth_cancel_btn"]).click()
     await page.locator(SEL["auth_card"]).wait_for(state="hidden", timeout=3000)
 

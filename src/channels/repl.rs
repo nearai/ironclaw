@@ -570,6 +570,19 @@ impl Channel for ReplChannel {
         _msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        let approval_prompt_already_rendered = self
+            .pending_approval
+            .lock()
+            .ok()
+            .and_then(|guard| *guard)
+            .is_some()
+            && response.content.contains("requires approval");
+        if approval_prompt_already_rendered {
+            self.stdin_locked.store(false, Ordering::Relaxed);
+            self.finish_single_message_turn().await;
+            return Ok(());
+        }
+
         let width = fmt::term_width();
 
         // If we were streaming, the content was already printed via StreamChunk.

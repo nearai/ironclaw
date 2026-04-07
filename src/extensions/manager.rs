@@ -1353,6 +1353,24 @@ impl ExtensionManager {
         }
     }
 
+    pub async fn start_hosted_oauth_flow(
+        &self,
+        name: String,
+        kind: ExtensionKind,
+        auth_url: String,
+        expected_state: String,
+        flow: crate::cli::oauth_defaults::PendingOAuthFlow,
+    ) -> AuthResult {
+        self.start_gateway_oauth_flow(HostedOAuthFlowStart {
+            name,
+            kind,
+            auth_url,
+            expected_state,
+            flow,
+        })
+        .await
+    }
+
     /// Broadcast an extension status change to the web UI via SSE.
     async fn broadcast_extension_status(&self, name: &str, status: &str, message: Option<&str>) {
         if let Some(ref sse) = *self.sse_manager.read().await {
@@ -1508,7 +1526,31 @@ impl ExtensionManager {
         intent: EnsureReadyIntent,
     ) -> Result<EnsureReadyOutcome, ExtensionError> {
         let name = canonicalize_extension_name(name)?;
-        let kind = self.determine_installed_kind(&name, user_id).await?;
+        let kind = match self.determine_installed_kind(&name, user_id).await {
+            Ok(kind) => kind,
+            Err(ExtensionError::NotInstalled(_))
+                if matches!(
+                    intent,
+                    EnsureReadyIntent::UseCapability
+                        | EnsureReadyIntent::PostInstall
+                        | EnsureReadyIntent::ExplicitActivate
+                ) =>
+            {
+                let entry = self
+                    .registry
+                    .get(&name)
+                    .await
+                    .ok_or_else(|| ExtensionError::NotInstalled(name.clone()))?;
+                tracing::info!(
+                    extension = %name,
+                    kind = %entry.kind,
+                    "Auto-installing registry extension on first use"
+                );
+                self.install_from_entry(&entry, user_id).await?;
+                self.determine_installed_kind(&name, user_id).await?
+            }
+            Err(err) => return Err(err),
+        };
 
         match self.auth(&name, user_id).await? {
             auth_result @ AuthResult {
@@ -1633,6 +1675,13 @@ impl ExtensionManager {
 
     pub async fn latent_provider_actions(&self, user_id: &str) -> Vec<LatentProviderAction> {
         let mut actions = Vec::new();
+        let mut seen_actions = HashSet::new();
+
+        let mut push_action = |action: LatentProviderAction| {
+            if seen_actions.insert(action.action_name.clone()) {
+                actions.push(action);
+            }
+        };
 
         if let Ok(servers) = self.load_mcp_servers(user_id).await {
             for server in servers.servers {
@@ -1640,7 +1689,9 @@ impl ExtensionManager {
                     .is_extension_active(&server.name, ExtensionKind::McpServer)
                     .await
                 {
-                    actions.extend(self.latent_actions_for_mcp_server(&server));
+                    for action in self.latent_actions_for_mcp_server(&server) {
+                        push_action(action);
+                    }
                 }
             }
         }
@@ -1689,7 +1740,7 @@ impl ExtensionManager {
                         .map(|entry| entry.description)
                         .unwrap_or_else(|| format!("Use the '{}' tool provider.", name))
                 };
-                actions.push(LatentProviderAction {
+                push_action(LatentProviderAction {
                     action_name: name.clone(),
                     provider_extension: name.clone(),
                     description: format!(
@@ -1699,6 +1750,43 @@ impl ExtensionManager {
                     parameters_schema: serde_json::json!({"type":"object"}),
                 });
             }
+        }
+
+        for result in self.registry.search("").await {
+            let entry = result.entry;
+            if !matches!(
+                entry.kind,
+                ExtensionKind::WasmTool | ExtensionKind::McpServer
+            ) {
+                continue;
+            }
+            if self
+                .determine_installed_kind(&entry.name, user_id)
+                .await
+                .is_ok()
+            {
+                continue;
+            }
+
+            let description = match entry.kind {
+                ExtensionKind::McpServer => format!(
+                    "{} The runtime will install, connect, and authenticate this provider automatically before concrete provider actions become available.",
+                    entry.description
+                ),
+                ExtensionKind::WasmTool => format!(
+                    "{} The runtime will install and authenticate this provider automatically before use.",
+                    entry.description
+                ),
+                ExtensionKind::WasmChannel
+                | ExtensionKind::ChannelRelay
+                | ExtensionKind::AcpAgent => continue,
+            };
+            push_action(LatentProviderAction {
+                action_name: entry.name.clone(),
+                provider_extension: entry.name,
+                description,
+                parameters_schema: serde_json::json!({"type":"object"}),
+            });
         }
 
         actions.sort_by(|a, b| a.action_name.cmp(&b.action_name));
@@ -3889,7 +3977,10 @@ impl ExtensionManager {
             client_id_secret_name: None,
             client_secret_secret_name: None,
             client_secret_expires_at: None,
-            auto_activate_extension: kind == ExtensionKind::WasmChannel,
+            auto_activate_extension: matches!(
+                kind,
+                ExtensionKind::WasmChannel | ExtensionKind::WasmTool
+            ),
         });
         let pending_flow = launch.flow;
 
@@ -8065,6 +8156,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn latent_provider_actions_include_registry_backed_uninstalled_wasm_tool() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let manager = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+        );
+
+        let actions = manager.latent_provider_actions("test").await;
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.action_name == "web-search"),
+            "expected registry-backed web-search latent action"
+        );
+    }
+
+    #[tokio::test]
     async fn latent_provider_actions_include_cached_inactive_mcp_tools() {
         let dir = tempfile::tempdir().expect("temp dir");
         let manager = make_test_manager_with_dirs(
@@ -8133,6 +8243,41 @@ mod tests {
             .expect("latent provider action");
         assert_eq!(action.provider_extension, "notion");
         assert_eq!(action.action_name, "notion_search");
+    }
+
+    #[tokio::test]
+    async fn ensure_extension_ready_auto_installs_registry_wasm_tool_on_first_use() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let manager = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+        );
+
+        let outcome = manager
+            .ensure_extension_ready(
+                "web-search",
+                "test",
+                crate::extensions::EnsureReadyIntent::UseCapability,
+            )
+            .await
+            .expect("ensure ready");
+
+        match outcome {
+            crate::extensions::EnsureReadyOutcome::NeedsAuth {
+                credential_name, ..
+            } => {
+                assert_eq!(credential_name.as_deref(), Some("brave_api_key"));
+            }
+            other => panic!("expected needs auth outcome, got {other:?}"),
+        }
+
+        let kind = manager
+            .determine_installed_kind("web-search", "test")
+            .await
+            .expect("installed kind");
+        assert_eq!(kind, ExtensionKind::WasmTool);
     }
 
     #[test]

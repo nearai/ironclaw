@@ -52,15 +52,12 @@ fn gate_display_parameters(pending: &PendingGate) -> serde_json::Value {
 }
 
 fn resumed_action_result_message(
+    call_id: &str,
     action_name: &str,
     output: &serde_json::Value,
 ) -> ironclaw_engine::ThreadMessage {
     let rendered = serde_json::to_string_pretty(output).unwrap_or_else(|_| output.to_string());
-    ironclaw_engine::ThreadMessage::user(format!(
-        "The pending action '{action_name}' has already been executed.\n\
-         Do not call it again unless the user explicitly asks.\n\
-         Continue from this result:\n{rendered}"
-    ))
+    ironclaw_engine::ThreadMessage::action_result(call_id, action_name, rendered)
 }
 
 fn resolved_call_id_for_pending_action(
@@ -121,7 +118,10 @@ async fn notify_pending_gate(
                 parameters: serde_json::to_string_pretty(&display_parameters)
                     .unwrap_or_else(|_| display_parameters.to_string()),
                 resume_kind: serde_json::to_value(&pending.resume_kind).unwrap_or_default(),
-                thread_id: Some(pending.thread_id.to_string()),
+                thread_id: pending
+                    .scope_thread_id
+                    .clone()
+                    .or_else(|| Some(pending.thread_id.to_string())),
             },
         );
     }
@@ -258,6 +258,7 @@ async fn execute_pending_gate_action(
                     pending.thread_id,
                     message.user_id.clone(),
                     Some(resumed_action_result_message(
+                        &resolved_call_id,
                         &pending.action_name,
                         &result.output,
                     )),
@@ -294,6 +295,7 @@ async fn execute_pending_gate_action(
                 gate_name,
                 user_id: message.user_id.clone(),
                 thread_id: pending.thread_id,
+                scope_thread_id: pending.scope_thread_id.clone(),
                 conversation_id: pending.conversation_id,
                 source_channel: message.channel.clone(),
                 action_name: action_name.clone(),
@@ -308,8 +310,20 @@ async fn execute_pending_gate_action(
                 resume_kind: *resume_kind,
                 created_at: chrono::Utc::now(),
                 expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
-                original_message: None,
+                // Preserve the initiating user prompt when a resumed gate
+                // immediately chains into another gate (for example approval
+                // followed by authentication). OAuth callback replay depends
+                // on this being the original request, not the approval payload.
+                original_message: pending
+                    .original_message
+                    .clone()
+                    .or_else(|| Some(message.content.clone())),
                 resume_output: resume_output.map(|value| *value),
+                approval_already_granted: approval_already_granted
+                    || matches!(
+                        pending.resume_kind,
+                        ironclaw_engine::ResumeKind::Approval { .. }
+                    ),
             };
             insert_and_notify_pending_gate(agent, state, message, pending_gate).await
         }
@@ -860,13 +874,18 @@ async fn resolve_pending_gate_for_user(
     thread_id_hint: Option<&str>,
 ) -> PendingGateResolution {
     let hinted_uuid = parse_scope_uuid(thread_id_hint);
+    let hinted_scope = thread_id_hint;
     let candidates: Vec<_> = pending_gates
         .list_for_user(user_id)
         .await
         .into_iter()
         .filter(|gate| {
-            hinted_uuid
-                .is_none_or(|hint| gate.thread_id.0 == hint || gate.conversation_id.0 == hint)
+            hinted_scope.is_none_or(|hint| {
+                gate.scope_thread_id.as_deref() == Some(hint)
+                    || hinted_uuid.is_none_or(|uuid| {
+                        gate.thread_id.0 == uuid || gate.conversation_id.0 == uuid
+                    })
+            })
         })
         .collect();
 
@@ -905,16 +924,30 @@ pub async fn get_engine_pending_gate(
     }
 }
 
+pub enum AuthCallbackContinuation {
+    None,
+    ResolveGateExternal {
+        channel: String,
+        thread_scope: Option<String>,
+        request_id: uuid::Uuid,
+    },
+    ReplayMessage {
+        channel: String,
+        thread_scope: Option<String>,
+        content: String,
+    },
+}
+
 pub async fn resolve_engine_auth_callback(
     user_id: &str,
     credential_name: &str,
-) -> Result<bool, Error> {
+) -> Result<AuthCallbackContinuation, Error> {
     let Some(lock) = ENGINE_STATE.get() else {
-        return Ok(false);
+        return Ok(AuthCallbackContinuation::None);
     };
     let guard = lock.read().await;
     let Some(state) = guard.as_ref() else {
-        return Ok(false);
+        return Ok(AuthCallbackContinuation::None);
     };
 
     let mut matching: Vec<_> = state
@@ -934,61 +967,34 @@ pub async fn resolve_engine_auth_callback(
         .collect();
 
     if matching.is_empty() {
-        return Ok(false);
+        return Ok(AuthCallbackContinuation::None);
     }
 
     matching.sort_by_key(|gate| gate.created_at);
     let pending = matching.pop().unwrap(); // safety: is_empty() checked above
-    if pending.resume_output.is_none() {
+
+    if pending.action_name == "authentication_fallback" {
+        if let Some(content) = pending.original_message.clone() {
+            return Ok(AuthCallbackContinuation::ReplayMessage {
+                channel: pending.source_channel,
+                thread_scope: pending.scope_thread_id,
+                content,
+            });
+        }
         tracing::warn!(
             user_id = %user_id,
             credential_name = %credential_name,
             thread_id = %pending.thread_id,
-            "OAuth callback matched a pending auth gate without resume_output; leaving thread waiting"
+            "OAuth callback matched authentication fallback without a replayable request"
         );
-        return Ok(false);
+        return Ok(AuthCallbackContinuation::None);
     }
 
-    let key = pending.key();
-    if let Err(e) = state.pending_gates.discard(&key).await {
-        tracing::debug!(
-            user_id = %user_id,
-            credential_name = %credential_name,
-            error = %e,
-            "Pending auth gate disappeared before OAuth callback resume"
-        );
-        return Ok(false);
-    }
-
-    if let Some(ref sse) = state.sse {
-        sse.broadcast_for_user(
-            user_id,
-            AppEvent::GateResolved {
-                request_id: pending.request_id.to_string(),
-                gate_name: pending.gate_name.clone(),
-                tool_name: pending.action_name.clone(),
-                resolution: "external_callback".into(),
-                message: "OAuth callback received. Resuming execution.".into(),
-                thread_id: Some(pending.thread_id.to_string()),
-            },
-        );
-    }
-
-    state
-        .thread_manager
-        .resume_thread(
-            pending.thread_id,
-            user_id.to_string(),
-            pending.resume_output.as_ref().map(|resume_output| {
-                resumed_action_result_message(&pending.action_name, resume_output)
-            }),
-            None,
-            Some(pending.call_id.clone()),
-        )
-        .await
-        .map_err(|e| engine_err("resume oauth callback", e))?;
-
-    Ok(true)
+    Ok(AuthCallbackContinuation::ResolveGateExternal {
+        channel: pending.source_channel,
+        thread_scope: pending.scope_thread_id,
+        request_id: pending.request_id,
+    })
 }
 
 /// Handle an approval response (yes/no/always) for engine v2.
@@ -1137,6 +1143,84 @@ pub async fn handle_exec_approval(
     Ok(Some("No matching pending approval found.".into()))
 }
 
+pub async fn handle_external_callback(
+    agent: &Agent,
+    message: &IncomingMessage,
+    request_id: uuid::Uuid,
+) -> Result<Option<String>, Error> {
+    init_engine(agent).await?;
+
+    let lock = ENGINE_STATE
+        .get()
+        .ok_or_else(|| engine_err("init", "engine state not initialized"))?;
+    let guard = lock.read().await;
+    let state = guard
+        .as_ref()
+        .ok_or_else(|| engine_err("init", "engine state is empty"))?;
+
+    if let Some(thread_id) = parse_engine_thread_id(message.conversation_scope())
+        && let Some(gate) = state
+            .pending_gates
+            .peek(&crate::gate::pending::PendingGateKey {
+                user_id: message.user_id.clone(),
+                thread_id,
+            })
+            .await
+        && gate.request_id == request_id.to_string()
+        && matches!(
+            gate.resume_kind,
+            ironclaw_engine::ResumeKind::Authentication { .. }
+        )
+    {
+        drop(guard);
+        return resolve_gate(
+            agent,
+            message,
+            thread_id,
+            request_id,
+            ironclaw_engine::GateResolution::ExternalCallback {
+                payload: serde_json::Value::Null,
+            },
+        )
+        .await;
+    }
+
+    let pending = state
+        .pending_gates
+        .list_for_user(&message.user_id)
+        .await
+        .into_iter()
+        .find(|gate| {
+            matches!(
+                gate.resume_kind,
+                ironclaw_engine::ResumeKind::Authentication { .. }
+            ) && gate.request_id == request_id
+        });
+    drop(guard);
+
+    if let Some(pending) = pending {
+        return resolve_gate(
+            agent,
+            message,
+            pending.thread_id,
+            request_id,
+            ironclaw_engine::GateResolution::ExternalCallback {
+                payload: serde_json::Value::Null,
+            },
+        )
+        .await;
+    }
+
+    debug!(
+        user_id = %message.user_id,
+        request_id = %request_id,
+        "engine v2: no matching pending auth gate for external callback"
+    );
+    Ok(Some(
+        "No matching pending authentication gate found.".into(),
+    ))
+}
+
 /// Resolve a unified pending gate.
 ///
 /// This is the single entry point for resolving gates stored in the
@@ -1202,7 +1286,10 @@ pub async fn resolve_gate(
                         }
                         .into(),
                         message: "Gate approved. Resuming execution.".into(),
-                        thread_id: Some(pending.thread_id.to_string()),
+                        thread_id: pending
+                            .scope_thread_id
+                            .clone()
+                            .or_else(|| Some(pending.thread_id.to_string())),
                     },
                 );
             }
@@ -1251,7 +1338,10 @@ pub async fn resolve_gate(
                         tool_name: pending.action_name.clone(),
                         resolution: "denied".into(),
                         message: "Gate denied.".into(),
-                        thread_id: Some(pending.thread_id.to_string()),
+                        thread_id: pending
+                            .scope_thread_id
+                            .clone()
+                            .or_else(|| Some(pending.thread_id.to_string())),
                     },
                 );
             }
@@ -1297,7 +1387,10 @@ pub async fn resolve_gate(
                         tool_name: pending.action_name.clone(),
                         resolution: "cancelled".into(),
                         message: "Gate cancelled.".into(),
-                        thread_id: Some(pending.thread_id.to_string()),
+                        thread_id: pending
+                            .scope_thread_id
+                            .clone()
+                            .or_else(|| Some(pending.thread_id.to_string())),
                     },
                 );
             }
@@ -1329,7 +1422,10 @@ pub async fn resolve_gate(
                             tool_name: pending.action_name.clone(),
                             resolution: "credential_provided".into(),
                             message: "Credential received. Resuming execution.".into(),
-                            thread_id: Some(pending.thread_id.to_string()),
+                            thread_id: pending
+                                .scope_thread_id
+                                .clone()
+                                .or_else(|| Some(pending.thread_id.to_string())),
                         },
                     );
                 }
@@ -1435,6 +1531,7 @@ pub async fn resolve_gate(
                             pending.thread_id,
                             message.user_id.clone(),
                             Some(resumed_action_result_message(
+                                &pending.call_id,
                                 &pending.action_name,
                                 &resume_output,
                             )),
@@ -1445,7 +1542,12 @@ pub async fn resolve_gate(
                         .map_err(|e| engine_err("resume error", e))?;
                 } else {
                     return execute_pending_gate_action(
-                        agent, state, message, &pending, false, None,
+                        agent,
+                        state,
+                        message,
+                        &pending,
+                        pending.approval_already_granted,
+                        None,
                     )
                     .await;
                 }
@@ -1467,7 +1569,10 @@ pub async fn resolve_gate(
                         tool_name: pending.action_name.clone(),
                         resolution: "external_callback".into(),
                         message: "External callback received. Resuming execution.".into(),
-                        thread_id: Some(pending.thread_id.to_string()),
+                        thread_id: pending
+                            .scope_thread_id
+                            .clone()
+                            .or_else(|| Some(pending.thread_id.to_string())),
                     },
                 );
             }
@@ -1478,6 +1583,7 @@ pub async fn resolve_gate(
                         pending.thread_id,
                         message.user_id.clone(),
                         Some(resumed_action_result_message(
+                            &pending.call_id,
                             &pending.action_name,
                             &resume_output,
                         )),
@@ -1487,8 +1593,15 @@ pub async fn resolve_gate(
                     .await
                     .map_err(|e| engine_err("resume error", e))?;
             } else {
-                return execute_pending_gate_action(agent, state, message, &pending, false, None)
-                    .await;
+                return execute_pending_gate_action(
+                    agent,
+                    state,
+                    message,
+                    &pending,
+                    pending.approval_already_granted,
+                    None,
+                )
+                .await;
             }
         }
     }
@@ -2204,6 +2317,7 @@ async fn await_thread_outcome(
                     gate_name: "authentication".into(),
                     user_id: message.user_id.clone(),
                     thread_id,
+                    scope_thread_id: message.conversation_scope().map(str::to_string),
                     conversation_id: conv_id,
                     source_channel: message.channel.clone(),
                     action_name: "authentication_fallback".into(),
@@ -2220,6 +2334,7 @@ async fn await_thread_outcome(
                     expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
                     original_message: Some(message.content.clone()),
                     resume_output: None,
+                    approval_already_granted: false,
                 };
                 if let Err(e) = state.pending_gates.insert(pending).await {
                     tracing::debug!(error = %e, "failed to store fallback auth gate");
@@ -2277,6 +2392,7 @@ async fn await_thread_outcome(
                 gate_name: gate_name.clone(),
                 user_id: message.user_id.clone(),
                 thread_id,
+                scope_thread_id: message.conversation_scope().map(str::to_string),
                 conversation_id: conv_id,
                 source_channel: message.channel.clone(),
                 action_name: action_name.clone(),
@@ -2291,8 +2407,9 @@ async fn await_thread_outcome(
                 resume_kind: resume_kind.clone(),
                 created_at: chrono::Utc::now(),
                 expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
-                original_message: None,
+                original_message: Some(message.content.clone()),
                 resume_output,
+                approval_already_granted: false,
             };
 
             if let Err(e) = state.pending_gates.insert(pending.clone()).await {
@@ -3576,6 +3693,7 @@ mod tests {
             gate_name: resume_kind.kind_name().to_string(),
             user_id: user_id.into(),
             thread_id,
+            scope_thread_id: None,
             conversation_id: ironclaw_engine::ConversationId::new(),
             source_channel: "web".into(),
             action_name: "shell".into(),
@@ -3588,6 +3706,7 @@ mod tests {
             expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
             original_message: None,
             resume_output: None,
+            approval_already_granted: false,
         }
     }
 

@@ -58,6 +58,7 @@ pub mod extensions;
 pub mod gate;
 pub mod history;
 pub mod hooks;
+pub mod http_intercept;
 #[cfg(feature = "import")]
 pub mod import;
 pub mod llm;

@@ -966,10 +966,17 @@ async fn async_main() -> anyhow::Result<()> {
         recorder.snapshot_memory(ws).await;
     }
 
-    let http_interceptor = components
-        .recording_handle
-        .as_ref()
-        .map(|r| r.http_interceptor());
+    let http_interceptor = ironclaw::http_intercept::chain(
+        [
+            components.http_interceptor.clone(),
+            components
+                .recording_handle
+                .as_ref()
+                .map(|r| r.http_interceptor()),
+        ]
+        .into_iter()
+        .flatten(),
+    );
     // Clone context_manager for the reaper before it's moved into Agent::new()
     let reaper_context_manager = Arc::clone(&components.context_manager);
 

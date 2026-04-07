@@ -305,6 +305,7 @@ mod tests {
             gate_name: "approval".into(),
             user_id: user_id.into(),
             thread_id,
+            scope_thread_id: None,
             conversation_id: ConversationId::new(),
             source_channel: channel.into(),
             action_name: "shell".into(),
@@ -317,6 +318,7 @@ mod tests {
             expires_at: Utc::now() + Duration::seconds(expires_in_secs),
             original_message: None,
             resume_output: None,
+            approval_already_granted: false,
         }
     }
 

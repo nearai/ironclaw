@@ -1798,7 +1798,7 @@ function showJobCard(data) {
 
 // --- Auth card ---
 
-function handleAuthRequired(data) {
+async function handleAuthRequired(data) {
   if (data.thread_id && !isCurrentThread(data.thread_id)) {
     unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
     debouncedLoadThreads();
@@ -1806,6 +1806,36 @@ function handleAuthRequired(data) {
   }
   if (data.extension_name && getConfigureOverlay(data.extension_name)) {
     return;
+  }
+  const existingCard = data.extension_name ? getAuthCard(data.extension_name) : getAuthCard();
+  if (existingCard && !data.request_id) {
+    const existingRequestId = existingCard.getAttribute('data-request-id');
+    const existingThreadId = existingCard.getAttribute('data-thread-id');
+    const incomingThreadId = data.thread_id || currentThreadId || null;
+    if (existingRequestId && (!existingThreadId || !incomingThreadId || existingThreadId === incomingThreadId)) {
+      return;
+    }
+  }
+  if (!data.request_id) {
+    const threadId = data.thread_id || currentThreadId || null;
+    if (threadId) {
+      try {
+        const history = await apiFetch('/api/chat/history?thread_id=' + encodeURIComponent(threadId));
+        const pendingGate = history && history.pending_gate;
+        if (pendingGate && pendingGate.request_id) {
+          const resumeKind = parseGateResumeKind(pendingGate.resume_kind);
+          if (resumeKind && resumeKind.type === 'authentication') {
+            handleGateRequired({
+              ...pendingGate,
+              thread_id: pendingGate.thread_id || threadId,
+            });
+            return;
+          }
+        }
+      } catch (_) {
+        // Fall through to the legacy card when pending-gate hydration fails.
+      }
+    }
   }
   setAuthFlowPending(true, data.instructions);
   if (data.auth_url || data.instructions) {
@@ -1864,8 +1894,12 @@ function handleGateResolved(data) {
     return;
   }
   document.querySelectorAll('.approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]').forEach((el) => el.remove());
-  if (data.resolution === 'credential_provided' || data.resolution === 'cancelled') {
-    removeAuthCard(data.tool_name);
+  if (
+    data.resolution === 'credential_provided'
+    || data.resolution === 'cancelled'
+    || data.resolution === 'external_callback'
+  ) {
+    removeAuthCard();
     enableChatInput();
   }
 }

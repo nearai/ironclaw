@@ -17,6 +17,18 @@ CANNED_RESPONSES = [
     (re.compile(r"empty routine response", re.IGNORECASE), ""),
     (re.compile(r"hello|hi|hey", re.IGNORECASE), "Hello! How can I help you today?"),
     (re.compile(r"2\s*\+\s*2|two plus two", re.IGNORECASE), "The answer is 4."),
+    (
+        re.compile(r"Tool `gmail` returned:.*Quarterly update", re.IGNORECASE | re.DOTALL),
+        "You have one unread Gmail message from ceo@example.com: Quarterly update.",
+    ),
+    (
+        re.compile(r"Tool `http` returned:.*Budget Q1\.xlsx", re.IGNORECASE | re.DOTALL),
+        "I found these Google Drive files: Budget Q1.xlsx and Roadmap.md.",
+    ),
+    (
+        re.compile(r"Tool `mock_mcp_mock_search` returned:", re.IGNORECASE | re.DOTALL),
+        "Mock MCP search completed successfully.",
+    ),
     (re.compile(r"skill|install", re.IGNORECASE), "I can help you with skills management."),
     (re.compile(r"html.?test|injection.?test", re.IGNORECASE),
      'Here is some content: <script>alert("xss")</script> and <img src=x onerror="alert(1)">'
@@ -63,6 +75,14 @@ TOOL_CALL_PATTERNS = [
             "action": "list_messages",
             "query": "is:unread",
             "max_results": 1,
+        },
+    ),
+    (
+        re.compile(r"fetch latest news|latest news", re.IGNORECASE),
+        "web-search",
+        lambda _: {
+            "query": "latest news",
+            "count": 5,
         },
     ),
     (
@@ -248,6 +268,7 @@ TOOL_CALL_PATTERNS = [
 # Runtime-configurable mock API URL for github tool call tests.
 # Set via POST /__mock/set_github_api_url with {"url": "http://..."}
 _github_api_url: str = "https://api.github.com"
+_last_chat_request: dict | None = None
 
 
 def _new_oauth_state() -> dict:
@@ -548,7 +569,9 @@ async def _dispatch_special_response(
 
 async def chat_completions(request: web.Request) -> web.StreamResponse:
     """Handle POST /v1/chat/completions and /chat/completions."""
+    global _last_chat_request
     body = await request.json()
+    _last_chat_request = body
     messages = body.get("messages", [])
     stream = body.get("stream", False)
     has_tools = bool(body.get("tools"))
@@ -960,8 +983,12 @@ def main():
     async def get_github_api_url(request: web.Request) -> web.Response:
         return web.json_response({"url": _github_api_url})
 
+    async def get_last_chat_request(request: web.Request) -> web.Response:
+        return web.json_response(_last_chat_request or {})
+
     app.router.add_post("/__mock/set_github_api_url", set_github_api_url)
     app.router.add_get("/__mock/github_api_url", get_github_api_url)
+    app.router.add_get("/__mock/last_chat_request", get_last_chat_request)
     # Mock MCP server endpoints
     app.router.add_post("/mcp", mcp_endpoint)
     app.router.add_post("/mcp-400", mcp_endpoint_400)

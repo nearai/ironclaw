@@ -7,6 +7,8 @@ use chrono::{DateTime, Utc};
 #[cfg(feature = "postgres")]
 use deadpool_postgres::{Config, Pool};
 use rust_decimal::Decimal;
+#[cfg(feature = "postgres")]
+use tokio_postgres::GenericClient;
 use uuid::Uuid;
 
 #[cfg(feature = "postgres")]
@@ -15,6 +17,8 @@ use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 #[cfg(feature = "postgres")]
 use crate::error::DatabaseError;
+#[cfg(feature = "postgres")]
+use crate::workspace::GREETING_SEED;
 
 /// Record for an LLM call to be persisted.
 #[derive(Debug, Clone)]
@@ -2327,10 +2331,43 @@ use crate::db::{ApiTokenRecord, UserRecord};
 
 #[cfg(feature = "postgres")]
 impl Store {
+    pub(crate) async fn seed_initial_assistant_thread(
+        client: &impl GenericClient,
+        user_id: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<(), DatabaseError> {
+        let conversation_id = Uuid::new_v4();
+        let message_id = Uuid::new_v4();
+        let metadata = serde_json::json!({
+            "thread_type": "assistant",
+            "title": "Assistant",
+        });
+        client
+            .execute(
+                r#"
+                INSERT INTO conversations (id, channel, user_id, metadata, started_at, last_activity)
+                VALUES ($1, 'gateway', $2, $3, $4, $4)
+                "#,
+                &[&conversation_id, &user_id, &metadata, &created_at],
+            )
+            .await?;
+        client
+            .execute(
+                r#"
+                INSERT INTO conversation_messages (id, conversation_id, role, content, created_at)
+                VALUES ($1, $2, 'assistant', $3, $4)
+                "#,
+                &[&message_id, &conversation_id, &GREETING_SEED, &created_at],
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Create a new user record.
     pub async fn create_user(&self, user: &UserRecord) -> Result<(), DatabaseError> {
-        let conn = self.conn().await?;
-        conn.execute(
+        let mut conn = self.conn().await?;
+        let tx = conn.transaction().await?;
+        tx.execute(
             r#"
             INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -2349,6 +2386,8 @@ impl Store {
             ],
         )
         .await?;
+        Self::seed_initial_assistant_thread(&tx, &user.id, user.created_at).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -2531,6 +2570,8 @@ impl Store {
             ],
         )
         .await?;
+
+        Self::seed_initial_assistant_thread(&tx, &user.id, user.created_at).await?;
 
         tx.commit().await?;
 
