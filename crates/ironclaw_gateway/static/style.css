@@ -11,6 +11,7 @@
   --accent-hover: #2fc48d;
   --accent-soft: rgba(52, 211, 153, 0.15);
   --success: #34d399;
+  --info: #60a5fa;
   --warning: #F5A623;
   --danger: #E64C4C;
   --code-bg: #111113;
@@ -1644,7 +1645,7 @@ body {
 /* Tool calls summary (persisted between user/assistant messages) */
 .tool-calls-summary {
   background: var(--bg-secondary);
-  border-left: 3px solid var(--warning);
+  border-left: 3px solid var(--info);
   padding: 6px 12px;
   margin: 4px 0;
   font-size: 0.85em;
@@ -5661,6 +5662,7 @@ input[type="checkbox"]:focus-visible {
   --accent: #059669;
   --accent-hover: #047857;
   --success: #059669;
+  --info: #2563eb;
   --warning: #d97706;
   --danger: #dc2626;
   --code-bg: #f0f0f2;
