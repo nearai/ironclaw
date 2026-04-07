@@ -33,6 +33,41 @@ use crate::workspace::Workspace;
 use ironclaw_safety::SafetyLayer;
 use ironclaw_skills::SkillRegistry;
 
+/// Outcome of [`Agent::handle_message`] — drives the run-loop's response/Done dispatch.
+///
+/// Distinguishes "no response, turn is over" from "no response, turn is paused"
+/// so the run loop can decide whether to emit the terminal `Done` status. Sending
+/// `Done` after a pause (e.g. while awaiting tool approval) is incorrect because
+/// the thread is not in a terminal state, and would also trip the web UI's
+/// missing-response safety net (see #2079).
+#[derive(Debug)]
+enum HandleOutcome {
+    /// Shutdown signal (e.g. `/quit`). Run loop should break.
+    Shutdown,
+    /// Send this content via the channel, then emit terminal `Done`.
+    Respond(String),
+    /// No response to send, but the turn is complete — emit `Done` only.
+    NoResponse,
+    /// Turn is paused (awaiting approval/auth/etc). Do not emit `Done`.
+    Pending,
+}
+
+impl HandleOutcome {
+    /// Convert a legacy `Option<String>` return into a [`HandleOutcome`].
+    ///
+    /// `None` → `Shutdown`, empty string → `NoResponse`, otherwise `Respond`.
+    /// Used to wrap bridge handlers that still return `Option<String>`. Bridge
+    /// approval flows return non-empty descriptive text, so they never need the
+    /// `Pending` variant — only the v1 `process_user_input` path does.
+    fn from_legacy(opt: Option<String>) -> Self {
+        match opt {
+            None => HandleOutcome::Shutdown,
+            Some(s) if s.is_empty() => HandleOutcome::NoResponse,
+            Some(s) => HandleOutcome::Respond(s),
+        }
+    }
+}
+
 /// Static greeting persisted to DB and broadcast on first launch.
 ///
 /// Collapse a tool output string into a single-line preview for display.
@@ -992,7 +1027,7 @@ impl Agent {
             self.store_extracted_documents(&message).await;
 
             match self.handle_message(&message).await {
-                Ok(Some(response)) if !response.is_empty() => {
+                Ok(HandleOutcome::Respond(response)) => {
                     // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
                     let event = crate::hooks::HookEvent::Outbound {
                         user_id: message.user_id.clone(),
@@ -1035,18 +1070,28 @@ impl Agent {
                         }
                     }
                 }
-                Ok(Some(empty)) => {
-                    // Empty response, nothing to send (e.g. approval handled via send_status).
-                    // Still send Done so the client knows the turn is complete.
+                Ok(HandleOutcome::NoResponse) => {
+                    // Empty response (e.g. routine consumed the message, silent reply).
+                    // Send Done so the client knows the turn is complete.
                     tracing::debug!(
                         channel = %message.channel,
                         user = %message.user_id,
-                        empty_len = empty.len(),
                         "Suppressed empty response (not sent to channel)"
                     );
                     self.send_done(&message).await;
                 }
-                Ok(None) => {
+                Ok(HandleOutcome::Pending) => {
+                    // Turn paused awaiting user action (approval, auth, etc).
+                    // Do NOT emit Done — the thread is not in a terminal state.
+                    // The relevant ApprovalNeeded/AuthRequired status was already
+                    // sent by the inner handler before returning.
+                    tracing::debug!(
+                        channel = %message.channel,
+                        user = %message.user_id,
+                        "Turn paused (Pending); suppressing Done"
+                    );
+                }
+                Ok(HandleOutcome::Shutdown) => {
                     // Shutdown signal received (/quit, /exit, /shutdown)
                     tracing::debug!("Shutdown command received, exiting...");
                     break;
@@ -1153,7 +1198,7 @@ impl Agent {
         }
     }
 
-    async fn handle_message(&self, message: &IncomingMessage) -> Result<Option<String>, Error> {
+    async fn handle_message(&self, message: &IncomingMessage) -> Result<HandleOutcome, Error> {
         // Log sensitive details at debug level for troubleshooting
         tracing::debug!(
             message_id = %message.id,
@@ -1174,7 +1219,7 @@ impl Agent {
                 channel = %message.channel,
                 "Forwarding internal message"
             );
-            return Ok(Some(message.content.clone()));
+            return Ok(HandleOutcome::Respond(message.content.clone()));
         }
 
         // Set message tool context for this turn (current channel and target)
@@ -1204,10 +1249,16 @@ impl Agent {
             };
             match self.hooks().run(&event).await {
                 Err(crate::hooks::HookError::Rejected { reason }) => {
-                    return Ok(Some(format!("[Message rejected: {}]", reason)));
+                    return Ok(HandleOutcome::Respond(format!(
+                        "[Message rejected: {}]",
+                        reason
+                    )));
                 }
                 Err(err) => {
-                    return Ok(Some(format!("[Message blocked by hook policy: {}]", err)));
+                    return Ok(HandleOutcome::Respond(format!(
+                        "[Message blocked by hook policy: {}]",
+                        err
+                    )));
                 }
                 Ok(crate::hooks::HookOutcome::Continue {
                     modified: Some(new_content),
@@ -1220,11 +1271,16 @@ impl Agent {
             }
         }
 
-        // Engine V2 routing (Strategy C: parallel deployment)
+        // Engine V2 routing (Strategy C: parallel deployment).
+        // Bridge handlers return `Option<String>` legacy results; wrap with
+        // `HandleOutcome::from_legacy`. Bridge approval flows emit non-empty
+        // descriptive text, so they map to `Respond` (not `Pending`).
         if self.config.engine_v2 {
             match &submission {
                 Submission::UserInput { content } => {
-                    return crate::bridge::handle_with_engine(self, message, content).await;
+                    return crate::bridge::handle_with_engine(self, message, content)
+                        .await
+                        .map(HandleOutcome::from_legacy);
                 }
                 Submission::ApprovalResponse { approved, always } => {
                     // If there's a pending auth, "cancel"/"no" should clear the
@@ -1232,9 +1288,13 @@ impl Agent {
                     // Route through handle_with_engine so PendingAuth is checked.
                     if crate::bridge::has_pending_auth(&message.user_id).await {
                         let content = &message.content;
-                        return crate::bridge::handle_with_engine(self, message, content).await;
+                        return crate::bridge::handle_with_engine(self, message, content)
+                            .await
+                            .map(HandleOutcome::from_legacy);
                     }
-                    return crate::bridge::handle_approval(self, message, *approved, *always).await;
+                    return crate::bridge::handle_approval(self, message, *approved, *always)
+                        .await
+                        .map(HandleOutcome::from_legacy);
                 }
                 Submission::ExecApproval {
                     request_id,
@@ -1248,19 +1308,28 @@ impl Agent {
                         *approved,
                         *always,
                     )
-                    .await;
+                    .await
+                    .map(HandleOutcome::from_legacy);
                 }
                 Submission::Interrupt => {
-                    return crate::bridge::handle_interrupt(self, message).await;
+                    return crate::bridge::handle_interrupt(self, message)
+                        .await
+                        .map(HandleOutcome::from_legacy);
                 }
                 Submission::NewThread => {
-                    return crate::bridge::handle_new_thread(self, message).await;
+                    return crate::bridge::handle_new_thread(self, message)
+                        .await
+                        .map(HandleOutcome::from_legacy);
                 }
                 Submission::Clear => {
-                    return crate::bridge::handle_clear(self, message).await;
+                    return crate::bridge::handle_clear(self, message)
+                        .await
+                        .map(HandleOutcome::from_legacy);
                 }
                 Submission::Expected { description } => {
-                    return crate::bridge::handle_expected(self, message, description).await;
+                    return crate::bridge::handle_expected(self, message, description)
+                        .await
+                        .map(HandleOutcome::from_legacy);
                 }
                 // Undo/Redo/Resume/SwitchThread: v1-only (engine has no undo;
                 // thread switching is implicit via ConversationManager).
@@ -1278,7 +1347,7 @@ impl Agent {
                 "Hydrating thread from DB"
             );
             if let Some(rejection) = self.maybe_hydrate_thread(message, external_thread_id).await {
-                return Ok(Some(format!("Error: {}", rejection)));
+                return Ok(HandleOutcome::Respond(format!("Error: {}", rejection)));
             }
         }
 
@@ -1315,7 +1384,9 @@ impl Agent {
                         "Blocked approval for thread with no pending approval"
                     );
                     drop(sess);
-                    return Ok(Some("Error: no pending approval on this thread".into()));
+                    return Ok(HandleOutcome::Respond(
+                        "Error: no pending approval on this thread".into(),
+                    ));
                 }
 
                 let authorized = crate::agent::session::is_approval_authorized(
@@ -1330,7 +1401,7 @@ impl Agent {
                         "Blocked cross-channel approval attempt"
                     );
                     drop(sess);
-                    return Ok(Some(
+                    return Ok(HandleOutcome::Respond(
                         "Error: approval not authorized for this channel".into(),
                     ));
                 }
@@ -1398,7 +1469,7 @@ impl Agent {
                 // If this was a user message (possibly a pasted token), return an
                 // explicit error instead of forwarding it to the LLM/history.
                 if matches!(submission, Submission::UserInput { .. }) {
-                    return Ok(Some(format!(
+                    return Ok(HandleOutcome::Respond(format!(
                         "Authentication for **{}** expired. Please try again.",
                         pending.extension_name
                     )));
@@ -1409,7 +1480,8 @@ impl Agent {
                     Submission::UserInput { content } => {
                         return self
                             .process_auth_token(message, &pending, content, session, thread_id)
-                            .await;
+                            .await
+                            .map(HandleOutcome::from_legacy);
                     }
                     _ => {
                         // Any control submission (interrupt, undo, etc.) cancels auth mode
@@ -1450,9 +1522,9 @@ impl Agent {
                     "Consumed inbound user message with matching event-triggered routine(s)"
                 );
                 return if single_message_repl {
-                    Ok(None)
+                    Ok(HandleOutcome::Shutdown)
                 } else {
-                    Ok(Some(String::new()))
+                    Ok(HandleOutcome::NoResponse)
                 };
             }
         }
@@ -1577,16 +1649,18 @@ impl Agent {
                         .handle_reasoning_command(&args, &session, thread_id)
                         .await;
                     return match result {
-                        SubmissionResult::Response { content } => Ok(Some(content)),
-                        SubmissionResult::Ok { message } => Ok(message),
+                        SubmissionResult::Response { content } => {
+                            Ok(HandleOutcome::Respond(content))
+                        }
+                        SubmissionResult::Ok { message } => Ok(HandleOutcome::from_legacy(message)),
                         SubmissionResult::Error { message } => {
-                            Ok(Some(format!("Error: {}", message)))
+                            Ok(HandleOutcome::Respond(format!("Error: {}", message)))
                         }
                         _ => {
                             if is_single_message_repl(message) {
-                                Ok(None)
+                                Ok(HandleOutcome::Shutdown)
                             } else {
-                                Ok(Some(String::new()))
+                                Ok(HandleOutcome::NoResponse)
                             }
                         }
                     };
@@ -1612,7 +1686,7 @@ impl Agent {
                 self.process_job_status(&tenant, job_id.as_deref()).await
             }
             Submission::JobCancel { job_id } => self.process_job_cancel(&tenant, &job_id).await,
-            Submission::Quit => return Ok(None),
+            Submission::Quit => return Ok(HandleOutcome::Shutdown),
             Submission::SwitchThread { thread_id: target } => {
                 self.process_switch_thread(message, target).await
             }
@@ -1675,15 +1749,18 @@ impl Agent {
             }
         };
 
-        // Convert SubmissionResult to response string
+        // Convert SubmissionResult to a HandleOutcome.
         match result? {
             SubmissionResult::Response { content } => {
-                // Suppress silent replies (e.g. from group chat "nothing to say" responses)
+                // Suppress silent replies (e.g. from group chat "nothing to say" responses).
+                // Silent replies exit single-message REPL invocations.
                 if crate::llm::is_silent_reply(&content) {
                     tracing::debug!("Suppressing silent reply token");
-                    Ok(None)
+                    Ok(HandleOutcome::Shutdown)
+                } else if content.is_empty() {
+                    Ok(HandleOutcome::NoResponse)
                 } else {
-                    Ok(Some(content))
+                    Ok(HandleOutcome::Respond(content))
                 }
             }
             SubmissionResult::Ok {
@@ -1701,18 +1778,22 @@ impl Agent {
                     };
 
                 if should_exit {
-                    Ok(None)
+                    Ok(HandleOutcome::Shutdown)
                 } else {
-                    Ok(output_message)
+                    Ok(HandleOutcome::from_legacy(output_message))
                 }
             }
-            SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
-            SubmissionResult::Interrupted => Ok(Some("Interrupted.".into())),
+            SubmissionResult::Error { message } => {
+                Ok(HandleOutcome::Respond(format!("Error: {}", message)))
+            }
+            SubmissionResult::Interrupted => Ok(HandleOutcome::Respond("Interrupted.".into())),
             SubmissionResult::NeedApproval { .. } => {
                 // ApprovalNeeded status was already sent by thread_ops.rs before
-                // returning this result. Empty string signals the caller to skip
-                // respond() (no duplicate text).
-                Ok(Some(String::new()))
+                // returning this result. The thread is now in AwaitingApproval —
+                // do NOT emit a terminal Done because the turn is paused, not
+                // complete. Sending Done here would also trip the web UI's
+                // missing-response safety net (see #2079).
+                Ok(HandleOutcome::Pending)
             }
         }
     }
