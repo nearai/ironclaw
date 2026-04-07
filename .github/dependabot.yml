@@ -6,9 +6,36 @@ updates:
       interval: weekly
     open-pull-requests-limit: 10
     groups:
-      dependencies:
+      tokio-ecosystem:
+        patterns:
+          - "tokio*"
+          - "hyper*"
+          - "axum*"
+          - "tower*"
+      serialization:
+        patterns:
+          - "serde*"
+          - "prost*"
+      wasm:
+        patterns:
+          - "wasmtime*"
+          - "wit-*"
+          - "wasm-*"
+          - "cargo-component*"
+      everything-else:
         patterns:
           - "*"
+        exclude-patterns:
+          - "tokio*"
+          - "hyper*"
+          - "axum*"
+          - "tower*"
+          - "serde*"
+          - "prost*"
+          - "wasmtime*"
+          - "wit-*"
+          - "wasm-*"
+          - "cargo-component*"
 
   - package-ecosystem: github-actions
     directory: "/"
