@@ -4664,6 +4664,8 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        let capabilities =
+            crate::channels::wasm::capabilities::ChannelCapabilities::for_channel("test-channel");
 
         let rate_limiter = Arc::new(tokio::sync::RwLock::new(
             crate::channels::wasm::host::ChannelEmitRateLimiter::new(
@@ -4681,6 +4683,7 @@ mod tests {
         let result = WasmChannel::dispatch_emitted_messages(
             EmitDispatchContext {
                 channel_name: "test-channel",
+                capabilities: &capabilities,
                 owner_scope_id: "default",
                 owner_actor_id: None,
                 message_tx: &message_tx,
