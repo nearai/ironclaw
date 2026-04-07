@@ -107,6 +107,13 @@ let _connectionLostAt = null;
 let _reconnectAttempts = 0;
 let _lastSseEventId = null;
 
+// --- Turn Response Tracking State ---
+// Safety net for lost SSE response events (see #2079): tracks whether we
+// received a `response` event for the current turn so that a "Done" status
+// arriving without one can trigger a history reload.
+let _turnResponseReceived = false;
+let _doneWithoutResponseTimer = null;
+
 // --- Send Cooldown State ---
 let _sendCooldown = false;
 
@@ -670,6 +677,11 @@ function connectSSE(lastEventIdOverride) {
     const streamingMsg = document.querySelector('.message.assistant[data-streaming="true"]');
     if (streamingMsg) streamingMsg.removeAttribute('data-streaming');
 
+    _turnResponseReceived = true;
+    if (_doneWithoutResponseTimer) {
+      clearTimeout(_doneWithoutResponseTimer);
+      _doneWithoutResponseTimer = null;
+    }
     finalizeActivityGroup();
     addMessage('assistant', data.content);
     enableChatInput();
@@ -767,6 +779,19 @@ function connectSSE(lastEventIdOverride) {
     if (data.message === 'Done' || data.message === 'Awaiting approval') {
       finalizeActivityGroup();
       enableChatInput();
+      // Safety net (#2079): if "Done" arrives but we never received a
+      // `response` event for this turn, the message may have been lost
+      // (broadcast lag, proxy buffering, brief SSE disconnect). Reload
+      // history after a short delay so the user sees the answer.
+      if (!_turnResponseReceived && data.message === 'Done') {
+        if (!_doneWithoutResponseTimer) {
+          _doneWithoutResponseTimer = setTimeout(() => {
+            _doneWithoutResponseTimer = null;
+            if (currentThreadId) loadHistory();
+          }, 1500);
+        }
+      }
+      _turnResponseReceived = false;
     }
   });
 
@@ -930,6 +955,7 @@ function clearSuggestionChips() {
 function sendMessage() {
   clearSuggestionChips();
   removeWelcomeCard();
+  _turnResponseReceived = false;
   const input = document.getElementById('chat-input');
   if (authFlowPending) {
     showToast(I18n.t('chat.authRequiredBeforeSend'), 'info');
