@@ -990,6 +990,44 @@ mod tests {
     }
 
     #[test]
+    fn registry_provider_zai_coding_plan_endpoint() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("ZAI_API_KEY");
+            std::env::remove_var("ZAI_MODEL");
+        }
+
+        let mut settings = Settings {
+            llm_backend: Some("zai".to_string()),
+            selected_model: Some("glm-5".to_string()),
+            ..Default::default()
+        };
+
+        // Set the base_url override for Z.AI to use the coding endpoint
+        settings.llm_builtin_overrides.insert(
+            "zai".to_string(),
+            LlmBuiltinOverride {
+                api_key: None,
+                model: None,
+                base_url: Some("https://api.z.ai/api/coding/paas/v4".to_string()),
+            },
+        );
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(cfg.backend, "zai");
+        let provider = cfg.provider.expect("provider config should be present");
+        assert_eq!(provider.provider_id, "zai");
+        assert_eq!(provider.model, "glm-5");
+        assert_eq!(
+            provider.base_url, "https://api.z.ai/api/coding/paas/v4",
+            "Z.AI base_url override should use coding endpoint"
+        );
+        assert_eq!(provider.protocol, ProviderProtocol::OpenAiCompletions);
+    }
+
+    #[test]
     fn registry_provider_resolves_github_copilot_alias() {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.

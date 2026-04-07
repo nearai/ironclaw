@@ -1798,6 +1798,33 @@ impl SetupWizard {
                     }
                 }
                 self.llm_api_key = Some(SecretString::from(existing));
+
+                // Z.AI-specific: Ask if user wants to use the coding plan endpoint
+                if backend == "zai" {
+                    println!();
+                    print_info("Z.AI offers two API endpoints:");
+                    print_info(
+                        "  • General endpoint: https://api.z.ai/api/paas/v4 (for all scenarios)",
+                    );
+                    print_info(
+                        "  • Coding endpoint:  https://api.z.ai/api/coding/paas/v4 (coding-optimized)",
+                    );
+                    println!();
+                    if confirm("Use the coding-optimized endpoint?", false)
+                        .map_err(SetupError::Io)?
+                    {
+                        // Store the coding endpoint URL in the provider overrides
+                        self.settings
+                            .llm_builtin_overrides
+                            .entry("zai".to_string())
+                            .or_default()
+                            .base_url = Some("https://api.z.ai/api/coding/paas/v4".to_string());
+                        print_info("Coding endpoint enabled. Use this for coding tasks only.");
+                    } else {
+                        print_info("Using general endpoint (suitable for all scenarios).");
+                    }
+                }
+
                 print_success(&format!("{display_name} configured (from env)"));
                 return Ok(());
             }
@@ -1833,6 +1860,28 @@ impl SetupWizard {
 
         // Cache key in memory for model fetching later in the wizard
         self.llm_api_key = Some(SecretString::from(key_str.to_string()));
+
+        // Z.AI-specific: Ask if user wants to use the coding plan endpoint
+        if backend == "zai" {
+            println!();
+            print_info("Z.AI offers two API endpoints:");
+            print_info("  • General endpoint: https://api.z.ai/api/paas/v4 (for all scenarios)");
+            print_info(
+                "  • Coding endpoint:  https://api.z.ai/api/coding/paas/v4 (coding-optimized)",
+            );
+            println!();
+            if confirm("Use the coding-optimized endpoint?", false).map_err(SetupError::Io)? {
+                // Store the coding endpoint URL in the provider overrides
+                self.settings
+                    .llm_builtin_overrides
+                    .entry("zai".to_string())
+                    .or_default()
+                    .base_url = Some("https://api.z.ai/api/coding/paas/v4".to_string());
+                print_info("Coding endpoint enabled. Use this for coding tasks only.");
+            } else {
+                print_info("Using general endpoint (suitable for all scenarios).");
+            }
+        }
 
         print_success(&format!("{display_name} configured"));
         Ok(())
