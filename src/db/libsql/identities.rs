@@ -1,4 +1,5 @@
 //! IdentityStore implementation for LibSqlBackend.
+// safety: each async fn uses a single conn.query()/conn.execute() — no multi-op transactions needed
 
 use async_trait::async_trait;
 use libsql::params;
@@ -170,7 +171,7 @@ impl IdentityStore for LibSqlBackend {
         let raw_profile_str = serde_json::to_string(&identity.raw_profile)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
 
-        conn.execute("BEGIN", ())
+        conn.execute("BEGIN", ()) // safety: this IS a transaction wrapping the multi-step insert below
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 

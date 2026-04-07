@@ -394,7 +394,7 @@ mod tests {
                 ')' => {
                     depth -= 1;
                     if depth == 0 {
-                        let answer = remaining[..i].trim();
+                        let answer = remaining[..i].trim(); // safety: i is from char_indices(), always a valid boundary
                         if !answer.is_empty() {
                             return Some(answer.to_string());
                         }

@@ -497,7 +497,7 @@ fn truncate(s: &str, max_len: usize) -> &str {
         while end > 0 && !s.is_char_boundary(end) {
             end -= 1;
         }
-        &s[..end]
+        &s[..end] // safety: end is validated by is_char_boundary loop above
     }
 }
 
