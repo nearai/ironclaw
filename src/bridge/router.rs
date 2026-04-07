@@ -966,12 +966,10 @@ pub async fn resolve_engine_auth_callback(
         })
         .collect();
 
-    if matching.is_empty() {
-        return Ok(AuthCallbackContinuation::None);
-    }
-
     matching.sort_by_key(|gate| gate.created_at);
-    let pending = matching.pop().unwrap(); // safety: is_empty() checked above
+    let Some(pending) = matching.pop() else {
+        return Ok(AuthCallbackContinuation::None);
+    };
 
     if pending.action_name == "authentication_fallback" {
         if let Some(content) = pending.original_message.clone() {

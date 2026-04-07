@@ -306,10 +306,10 @@ where
         Ok(token) => Ok(Some(token.expose().to_string())),
         Err(SecretError::NotFound(_)) => Ok(None),
         Err(SecretError::Expired) => {
-            tracing::info!(target = "auth", subject = %log_name, "Access token expired, attempting refresh");
+            tracing::debug!(target = "auth", subject = %log_name, "Access token expired, attempting refresh");
             match refresh().await {
                 Ok(token) => {
-                    tracing::info!(target = "auth", subject = %log_name, "Access token refreshed successfully");
+                    tracing::debug!(target = "auth", subject = %log_name, "Access token refreshed successfully");
                     Ok(Some(token))
                 }
                 Err(error) => Err(error),
@@ -591,7 +591,7 @@ async fn maybe_refresh_before_read(
         return false;
     }
 
-    tracing::info!(
+    tracing::debug!(
         secret_name = %secret_name,
         "Access token expired or near expiry, attempting refresh"
     );

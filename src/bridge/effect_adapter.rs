@@ -22,9 +22,9 @@ use ironclaw_engine::{
 use crate::bridge::auth_manager::{AuthCheckResult, AuthManager};
 use crate::context::JobContext;
 use crate::hooks::{HookEvent, HookOutcome, HookRegistry};
+use crate::tools::permissions::{PermissionState, effective_permission};
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::{ApprovalRequirement, ToolRegistry};
-use crate::tools::permissions::{PermissionState, effective_permission};
 use ironclaw_safety::SafetyLayer;
 
 /// Wraps the existing tool pipeline to implement the engine's `EffectExecutor`.
@@ -633,7 +633,10 @@ impl EffectBridgeAdapter {
                 match db.get_all_settings(&context.user_id).await {
                     Ok(db_map) => {
                         let settings = crate::settings::Settings::from_db_map(&db_map);
-                        Some(effective_permission(&lookup_name, &settings.tool_permissions))
+                        Some(effective_permission(
+                            &lookup_name,
+                            &settings.tool_permissions,
+                        ))
                     }
                     Err(error) => {
                         tracing::warn!(

@@ -1575,7 +1575,7 @@ impl ExtensionManager {
                     .get(&name)
                     .await
                     .ok_or_else(|| ExtensionError::NotInstalled(name.clone()))?;
-                tracing::info!(
+                tracing::debug!(
                     extension = %name,
                     kind = %entry.kind,
                     "Auto-installing registry extension on first use"
@@ -2710,11 +2710,19 @@ impl ExtensionManager {
             )
             .await;
         }
-        if let Some(ref store) = self.store {
+        let result = if let Some(ref store) = self.store {
             crate::tools::mcp::config::add_mcp_server_db(store.as_ref(), user_id, config).await
         } else {
             crate::tools::mcp::config::add_mcp_server(config).await
+        };
+        if result.is_ok() {
+            // A newly configured MCP server may have a matching registry
+            // entry that was previously surfaced as a latent provider
+            // action. Drop the cache so the next listing reflects its
+            // installed/active status.
+            self.invalidate_latent_wasm_provider_actions_cache().await;
         }
+        result
     }
 
     async fn update_mcp_server(
@@ -2751,12 +2759,16 @@ impl ExtensionManager {
         }
         let mut servers = self.load_mcp_servers(user_id).await?;
         servers.upsert(config);
-        if let Some(ref store) = self.store {
+        let result = if let Some(ref store) = self.store {
             crate::tools::mcp::config::save_mcp_servers_to_db(store.as_ref(), user_id, &servers)
                 .await
         } else {
             crate::tools::mcp::config::save_mcp_servers(&servers).await
+        };
+        if result.is_ok() {
+            self.invalidate_latent_wasm_provider_actions_cache().await;
         }
+        result
     }
 
     async fn remove_mcp_server(
@@ -2764,11 +2776,18 @@ impl ExtensionManager {
         name: &str,
         user_id: &str,
     ) -> Result<(), crate::tools::mcp::config::ConfigError> {
-        if let Some(ref store) = self.store {
+        let result = if let Some(ref store) = self.store {
             crate::tools::mcp::config::remove_mcp_server_db(store.as_ref(), user_id, name).await
         } else {
             crate::tools::mcp::config::remove_mcp_server(name).await
+        };
+        if result.is_ok() {
+            // Removing a server flips it back to the latent/uninstalled
+            // state; drop the cache so the registry-discovery path can
+            // resurface it as a latent provider action.
+            self.invalidate_latent_wasm_provider_actions_cache().await;
         }
+        result
     }
 
     // ── Private helpers ──────────────────────────────────────────────────
@@ -8325,6 +8344,66 @@ mod tests {
         assert_eq!(
             search.parameters_schema["properties"]["query"]["type"],
             "string"
+        );
+    }
+
+    /// Regression: configuring or removing an MCP server must invalidate
+    /// the cached `latent_wasm_provider_actions` map. The cache is built by
+    /// scanning the registry for uninstalled `WasmTool`/`McpServer` entries;
+    /// without invalidation, a registry-backed MCP entry that the user just
+    /// configured (or just removed) would remain in the stale cache and
+    /// either be filtered as "active" forever, or reappear as latent until
+    /// some unrelated operation evicted the cache.
+    #[tokio::test]
+    async fn latent_wasm_provider_actions_cache_invalidates_on_mcp_changes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "warm_cache_tool",
+            r#"{ "description": "warm the cache" }"#,
+        );
+        let manager =
+            make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+
+        // Warm the per-user latent cache.
+        let _ = manager.latent_provider_actions("test").await;
+        assert!(
+            manager
+                .latent_wasm_provider_actions
+                .read()
+                .await
+                .contains_key("test"),
+            "cache should be populated after first call"
+        );
+
+        // add_mcp_server must invalidate the cache.
+        let server = McpServerConfig::new("notion", "https://mcp.notion.com/mcp");
+        manager
+            .add_mcp_server(server, "test")
+            .await
+            .expect("add mcp server");
+        assert!(
+            manager.latent_wasm_provider_actions.read().await.is_empty(),
+            "cache should be cleared after add_mcp_server"
+        );
+
+        // Re-warm the cache, then verify remove_mcp_server invalidates it.
+        let _ = manager.latent_provider_actions("test").await;
+        assert!(
+            manager
+                .latent_wasm_provider_actions
+                .read()
+                .await
+                .contains_key("test"),
+            "cache should be repopulated"
+        );
+        manager
+            .remove_mcp_server("notion", "test")
+            .await
+            .expect("remove mcp server");
+        assert!(
+            manager.latent_wasm_provider_actions.read().await.is_empty(),
+            "cache should be cleared after remove_mcp_server"
         );
     }
 
