@@ -287,6 +287,17 @@ fn validate_base_url_with_policy(
             || host_lower.ends_with(".localhost")
     };
 
+    if scheme == "http" && policy == BaseUrlPolicy::StrictSsrf && !is_localhost_name() {
+        return Err(ConfigError::InvalidValue {
+            key: field_name.to_string(),
+            message: format!(
+                "HTTP (non-TLS) is only allowed for localhost, got '{}'. \
+                 Use HTTPS for remote endpoints.",
+                host
+            ),
+        });
+    }
+
     let resolved_ips = if let Ok(ip) = normalized_host.parse::<IpAddr>() {
         vec![ip]
     } else {
@@ -571,6 +582,20 @@ mod tests {
     fn validate_base_url_rejects_http_remote() {
         assert!(validate_base_url("http://evil.example.com", "TEST").is_err());
         assert!(validate_base_url("http://192.168.1.1", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_http_remote_without_dns_resolution() {
+        let result = validate_base_url("http://ssrf-test.invalid", "TEST");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("only allowed for localhost"),
+            "strict HTTP validation should short-circuit before DNS lookup: {err}"
+        );
+        assert!(
+            !err.contains("failed to resolve"),
+            "strict HTTP validation should not require DNS resolution: {err}"
+        );
     }
 
     #[test]
