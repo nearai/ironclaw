@@ -220,12 +220,14 @@ fn classify_ip(ip: &std::net::IpAddr) -> IpClass {
 
     match ip {
         IpAddr::V4(v4) => {
-            if v4.is_unspecified() || v4.is_multicast() || *v4 == Ipv4Addr::new(169, 254, 169, 254)
+            if v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_link_local()
+                || *v4 == Ipv4Addr::new(169, 254, 169, 254)
             {
                 IpClass::AlwaysBlocked
             } else if v4.is_private()
                 || v4.is_loopback()
-                || v4.is_link_local()
                 || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
             {
                 IpClass::PrivateOrLoopback
@@ -238,10 +240,9 @@ fn classify_ip(ip: &std::net::IpAddr) -> IpClass {
                 classify_ip(&IpAddr::V4(v4))
             } else if v6.is_unspecified() || v6.octets()[0] == 0xff {
                 IpClass::AlwaysBlocked
-            } else if v6.is_loopback()
-                || (v6.octets()[0] & 0xfe) == 0xfc
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
-            {
+            } else if (v6.segments()[0] & 0xffc0) == 0xfe80 {
+                IpClass::AlwaysBlocked
+            } else if v6.is_loopback() || (v6.octets()[0] & 0xfe) == 0xfc {
                 IpClass::PrivateOrLoopback
             } else {
                 IpClass::Public
@@ -684,6 +685,12 @@ mod tests {
     fn validate_operator_base_url_still_rejects_public_http_and_metadata() {
         assert!(validate_operator_base_url("http://8.8.8.8/v1", "TEST").is_err());
         assert!(validate_operator_base_url("https://169.254.169.254/v1", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_operator_base_url_rejects_link_local_ips() {
+        assert!(validate_operator_base_url("http://169.254.1.10:8000/v1", "TEST").is_err());
+        assert!(validate_operator_base_url("https://[fe80::1]/v1", "TEST").is_err());
     }
 
     // --- db_first_* helper tests ---

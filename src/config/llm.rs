@@ -361,7 +361,7 @@ impl LlmConfig {
         if base_url.is_empty() {
             tracing::warn!(id = %custom.id, "Custom provider has no base_url configured — requests will fail");
         } else {
-            validate_base_url(
+            validate_operator_base_url(
                 &base_url,
                 &format!("custom provider '{}' base_url", custom.id),
             )?;

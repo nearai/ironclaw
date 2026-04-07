@@ -3774,6 +3774,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_llm_list_models_requires_admin_role() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let state = test_gateway_state(None);
+        let app = Router::new()
+            .route("/api/llm/list_models", post(llm_list_models_handler))
+            .with_state(state);
+
+        let req_body = serde_json::json!({
+            "adapter": "openai",
+            "base_url": "http://127.0.0.1:9/v1"
+        });
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/llm/list_models")
+            .header("content-type", "application/json")
+            .body(Body::from(req_body.to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn test_extensions_setup_submit_telegram_verification_does_not_broadcast_auth_required() {
         use axum::body::Body;
         use tokio::time::{Duration, timeout};
