@@ -18,6 +18,13 @@ use tokio_stream::wrappers::ReceiverStream;
 use ironclaw::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use ironclaw::error::ChannelError;
 
+/// Captured outbound event in the order it was emitted.
+#[derive(Clone, Debug)]
+pub enum CapturedEvent {
+    Response(OutgoingResponse),
+    Status(StatusUpdate),
+}
+
 // ---------------------------------------------------------------------------
 // TestChannel
 // ---------------------------------------------------------------------------
@@ -35,6 +42,8 @@ pub struct TestChannel {
     pub responses: Arc<Mutex<Vec<OutgoingResponse>>>,
     /// Captured status events.
     status_events: Arc<Mutex<Vec<StatusUpdate>>>,
+    /// Ordered log of responses and status events.
+    captured_events: Arc<Mutex<Vec<CapturedEvent>>>,
     /// Tracks when each tool started (by name). Supports nested/overlapping tools
     /// by using a Vec of start times per tool name.
     tool_start_times: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
@@ -66,6 +75,7 @@ impl TestChannel {
             rx: Mutex::new(Some(rx)),
             responses: Arc::new(Mutex::new(Vec::new())),
             status_events: Arc::new(Mutex::new(Vec::new())),
+            captured_events: Arc::new(Mutex::new(Vec::new())),
             tool_start_times: Arc::new(Mutex::new(HashMap::new())),
             tool_timings: Arc::new(Mutex::new(Vec::new())),
             user_id: user_id.into(),
@@ -152,6 +162,31 @@ impl TestChannel {
         }
     }
 
+    /// Wait until a `Status("Done")` event has been captured, or `timeout` elapses.
+    ///
+    /// Returns `true` if the Done status was observed within the deadline.
+    pub async fn wait_for_done(&self, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut interval = Duration::from_millis(50);
+        let max_interval = Duration::from_millis(500);
+        loop {
+            {
+                let guard = self.status_events.lock().await;
+                if guard
+                    .iter()
+                    .any(|s| matches!(s, StatusUpdate::Status(msg) if msg == "Done"))
+                {
+                    return true;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(interval).await;
+            interval = (interval * 2).min(max_interval);
+        }
+    }
+
     /// Return a snapshot of all captured status events.
     ///
     /// Uses `try_lock` so it can be called from sync contexts in tests.
@@ -159,6 +194,14 @@ impl TestChannel {
         self.status_events
             .try_lock()
             .expect("captured_status_events lock contention")
+            .clone()
+    }
+
+    /// Return the ordered log of emitted outbound events.
+    pub fn captured_events(&self) -> Vec<CapturedEvent> {
+        self.captured_events
+            .try_lock()
+            .expect("captured_events lock contention")
             .clone()
     }
 
@@ -209,6 +252,7 @@ impl TestChannel {
     pub async fn clear(&self) {
         self.responses.lock().await.clear();
         self.status_events.lock().await.clear();
+        self.captured_events.lock().await.clear();
         self.tool_start_times.lock().await.clear();
         self.tool_timings.lock().await.clear();
     }
@@ -326,7 +370,11 @@ impl Channel for TestChannel {
         _msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        self.responses.lock().await.push(response);
+        self.responses.lock().await.push(response.clone());
+        self.captured_events
+            .lock()
+            .await
+            .push(CapturedEvent::Response(response));
         Ok(())
     }
 
@@ -357,7 +405,11 @@ impl Channel for TestChannel {
             }
             _ => {}
         }
-        self.status_events.lock().await.push(status);
+        self.status_events.lock().await.push(status.clone());
+        self.captured_events
+            .lock()
+            .await
+            .push(CapturedEvent::Status(status));
         Ok(())
     }
 
