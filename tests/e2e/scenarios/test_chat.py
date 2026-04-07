@@ -10,7 +10,8 @@ async def test_send_message_and_receive_response(page):
     await chat_input.wait_for(state="visible", timeout=5000)
 
     # Count existing messages (onboarding greeting may already be present)
-    before_count = await page.locator(SEL["message_assistant"]).count()
+    assistant_selector = SEL["message_assistant"]
+    before_count = await page.locator(assistant_selector).count()
 
     # Send message
     await chat_input.fill("What is 2+2?")
@@ -18,8 +19,8 @@ async def test_send_message_and_receive_response(page):
 
     # Wait for a NEW assistant message to appear
     await page.wait_for_function(
-        "(before) => document.querySelectorAll('#chat-messages .message.assistant').length > before",
-        arg=before_count,
+        "([selector, before]) => document.querySelectorAll(selector).length > before",
+        arg=[assistant_selector, before_count],
         timeout=15000,
     )
 
