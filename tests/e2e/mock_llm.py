@@ -242,6 +242,130 @@ TOOL_CALL_PATTERNS = [
             "mission_id": "00000000-0000-0000-0000-000000000001",
         },
     ),
+    # ---- Frontend customization via chat (PR #1725 widget system) ----
+    #
+    # These triggers let an E2E Playwright scenario drive the agent into
+    # writing layout / widget files into the workspace via the
+    # ``memory_write`` tool. Each phrase produces a single tool call so the
+    # mock LLM stays compatible with the existing one-tool-per-turn loop.
+    #
+    # 1. Move the top tab bar into a left side panel by writing the
+    #    ``.system/gateway/custom.css`` overlay file. The CSS targets the
+    #    real DOM nodes (`#app`, `.tab-bar`) defined in
+    #    ``crates/ironclaw_gateway/static/index.html``.
+    (
+        re.compile(r"customize:\s*move tab bar to left", re.IGNORECASE),
+        "memory_write",
+        lambda _: {
+            "target": ".system/gateway/custom.css",
+            "append": False,
+            "force": True,
+            "content": (
+                "/* e2e: tab bar to left side panel */\n"
+                "#app { display: flex; flex-direction: row; align-items: stretch; }\n"
+                ".tab-bar {\n"
+                "  flex-direction: column !important;\n"
+                "  width: 220px;\n"
+                "  min-height: 100vh;\n"
+                "  border-right: 1px solid var(--color-border, #333);\n"
+                "  align-items: stretch;\n"
+                "}\n"
+                ".tab-bar button { width: 100%; text-align: left; }\n"
+                ".tab-bar .tab-indicator { display: none; }\n"
+                ".tab-content { flex: 1; }\n"
+            ),
+        },
+    ),
+    # 2. Drop a widget *manifest* describing a "Skills Viewer" tab. The
+    #    widget id matches the directory name the agent will create next.
+    (
+        re.compile(r"customize:\s*create skills viewer manifest", re.IGNORECASE),
+        "memory_write",
+        lambda _: {
+            "target": ".system/gateway/widgets/skills-viewer/manifest.json",
+            "append": False,
+            "force": True,
+            "content": json.dumps(
+                {
+                    "id": "skills-viewer",
+                    "name": "Skills",
+                    "slot": "tab",
+                    "icon": "📚",
+                },
+                indent=2,
+            ),
+        },
+    ),
+    # 3. Drop the widget implementation. ``index.js`` is loaded as an ES
+    #    module by the gateway runtime; it calls the gateway skills API
+    #    via the authenticated ``IronClaw.api.fetch`` wrapper and renders
+    #    each skill as an editable card. The DOM is intentionally test
+    #    friendly (stable ids / data attributes) so Playwright can assert
+    #    on it without scraping styles.
+    (
+        re.compile(r"customize:\s*install skills viewer code", re.IGNORECASE),
+        "memory_write",
+        lambda _: {
+            "target": ".system/gateway/widgets/skills-viewer/index.js",
+            "append": False,
+            "force": True,
+            "content": (
+                "IronClaw.registerWidget({\n"
+                "  id: 'skills-viewer',\n"
+                "  name: 'Skills',\n"
+                "  slot: 'tab',\n"
+                "  icon: '📚',\n"
+                "  init: async function(container, api) {\n"
+                "    container.setAttribute('data-testid', 'skills-viewer-root');\n"
+                "    container.innerHTML = '<div class=\"sv-header\">' +\n"
+                "      '<h2 data-testid=\"skills-viewer-title\">Workspace Skills</h2>' +\n"
+                "      '</div>' +\n"
+                "      '<div class=\"sv-list\" data-testid=\"skills-viewer-list\">' +\n"
+                "      '<div data-testid=\"skills-viewer-status\">Loading…</div>' +\n"
+                "      '</div>';\n"
+                "    var listEl = container.querySelector('[data-testid=\"skills-viewer-list\"]');\n"
+                "    try {\n"
+                "      var resp = await api.fetch('/api/skills');\n"
+                "      var data = await resp.json();\n"
+                "      var skills = (data && data.skills) || [];\n"
+                "      if (!skills.length) {\n"
+                "        listEl.innerHTML = '<div data-testid=\"skills-viewer-empty\">' +\n"
+                "          'No skills installed yet.' +\n"
+                "          '</div>';\n"
+                "        return;\n"
+                "      }\n"
+                "      listEl.innerHTML = '';\n"
+                "      skills.forEach(function(s) {\n"
+                "        var card = document.createElement('div');\n"
+                "        card.className = 'sv-card';\n"
+                "        card.dataset.testid = 'skills-viewer-card';\n"
+                "        card.dataset.skillName = s.name || '';\n"
+                "        var title = document.createElement('div');\n"
+                "        title.className = 'sv-card-title';\n"
+                "        title.textContent = s.name || '(unnamed)';\n"
+                "        var body = document.createElement('pre');\n"
+                "        body.className = 'sv-card-body';\n"
+                "        body.textContent = (s.description || '').slice(0, 200);\n"
+                "        var edit = document.createElement('button');\n"
+                "        edit.type = 'button';\n"
+                "        edit.className = 'sv-card-edit';\n"
+                "        edit.dataset.testid = 'skills-viewer-edit';\n"
+                "        edit.textContent = 'Edit';\n"
+                "        card.appendChild(title);\n"
+                "        card.appendChild(body);\n"
+                "        card.appendChild(edit);\n"
+                "        listEl.appendChild(card);\n"
+                "      });\n"
+                "    } catch (e) {\n"
+                "      listEl.innerHTML = '<div data-testid=\"skills-viewer-error\">' +\n"
+                "        'Failed to load skills: ' + (e && e.message ? e.message : e) +\n"
+                "        '</div>';\n"
+                "    }\n"
+                "  }\n"
+                "});\n"
+            ),
+        },
+    ),
 ]
 
 

@@ -8365,7 +8365,17 @@ IronClaw.api = {
  */
 function _addWidgetTab(def) {
   var tabBar = document.querySelector('.tab-bar');
-  var tabContent = document.querySelector('.tab-content') || document.getElementById('tab-content');
+  // Tab panels live as siblings of `.tab-bar` inside `#app`. Earlier
+  // versions of this code looked for a dedicated `.tab-content` /
+  // `#tab-content` element that the gateway HTML never actually shipped,
+  // so widget tabs were silently queued forever. Use the parent of the
+  // first existing `.tab-panel` (falling back to `#app`) so widgets mount
+  // into the same container as the built-in tabs.
+  var existingPanel = document.querySelector('.tab-panel');
+  var tabContent = (existingPanel && existingPanel.parentNode)
+    || document.querySelector('.tab-content')
+    || document.getElementById('tab-content')
+    || document.getElementById('app');
   if (!tabBar || !tabContent) {
     // DOM not ready yet — queue for later
     IronClaw._widgetInitQueue.push(def);
