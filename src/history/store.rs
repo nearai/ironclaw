@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use deadpool_postgres::{Config, Pool};
 use rust_decimal::Decimal;
 #[cfg(feature = "postgres")]
-use tokio_postgres::GenericClient;
+use deadpool_postgres::GenericClient;
 use uuid::Uuid;
 
 #[cfg(feature = "postgres")]
