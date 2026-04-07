@@ -65,6 +65,12 @@ struct KnownDivergence {
     name: &'static str,
     /// The current (canonical) SQL content, embedded at compile time.
     sql: &'static str,
+    /// The exact set of historical bad checksums we are willing to rewrite
+    /// for this migration. **The fix-up only fires when the stored checksum
+    /// matches one of these literals** — any other divergence (manual
+    /// tampering, hardware corruption, an unknown future regression) is
+    /// left alone so refinery can still abort startup loudly.
+    known_bad_checksums: &'static [u64],
     /// Human-readable explanation of why this divergence exists, surfaced
     /// in the realignment warning log so future entries are not coupled to
     /// the V6/#1328 wording.
@@ -75,6 +81,11 @@ const KNOWN_DIVERGENCES: &[KnownDivergence] = &[KnownDivergence {
     version: 6,
     name: "routines",
     sql: include_str!("../../migrations/V6__routines.sql"),
+    // The single historical bad checksum: V6 with `notify_user TEXT,`
+    // (the post-#1151 / v0.19.0 fresh-install variant). Computed from
+    // `git show 878a67cd:migrations/V6__routines.sql`. Pinned by the
+    // `v6_known_bad_checksum_matches_post_1151_content` test below.
+    known_bad_checksums: &[11230857244097235596],
     explanation: "Migration content matches the v0.18.0 release; the schema \
                   change introduced in PR #1151 is applied incrementally by \
                   V13__owner_scope_notify_targets.",
@@ -117,16 +128,39 @@ pub async fn realign_diverged_checksums(client: &mut PgClient) -> Result<(), Dat
         })?;
         let canonical_checksum = migration.checksum().to_string();
 
-        // `IS DISTINCT FROM` (rather than `<>`) is NULL-safe: refinery's
-        // `checksum` column is `NOT NULL` in practice, but using the
-        // NULL-aware operator means a corrupted row with a NULL checksum
-        // is also picked up for repair instead of being silently skipped.
+        // Defensive: the canonical checksum must never appear in the bad
+        // list, otherwise we'd be rewriting already-correct rows. This is
+        // a programming error in `KNOWN_DIVERGENCES`, not a runtime
+        // condition, so failing loudly here is appropriate.
+        debug_assert!(
+            !divergence
+                .known_bad_checksums
+                .contains(&migration.checksum()),
+            "{migration_label}: canonical checksum is listed as known-bad",
+        );
+
+        // Only rewrite rows whose stored checksum is one of the known
+        // historical bad values for this migration. Any other divergence
+        // (manual tampering, hardware corruption, an unrelated future
+        // regression) is intentionally left alone so refinery still aborts
+        // startup loudly. See PR #2101 review by @serrrfirat.
+        let known_bad: Vec<String> = divergence
+            .known_bad_checksums
+            .iter()
+            .map(|c| c.to_string())
+            .collect();
+
         let updated = client
             .execute(
                 "UPDATE refinery_schema_history \
                  SET checksum = $1 \
-                 WHERE version = $2 AND name = $3 AND checksum IS DISTINCT FROM $1",
-                &[&canonical_checksum, &divergence.version, &divergence.name],
+                 WHERE version = $2 AND name = $3 AND checksum = ANY($4)",
+                &[
+                    &canonical_checksum,
+                    &divergence.version,
+                    &divergence.name,
+                    &known_bad,
+                ],
             )
             .await
             .map_err(|e| {
@@ -334,6 +368,30 @@ mod tests {
         eprintln!("wrote {}", lockfile_path.display());
     }
 
+    /// One-shot helper: print the canonical checksum for an arbitrary
+    /// SQL file path supplied via the `MIGRATION_CHECKSUM_PATH` env var.
+    /// Used to compute the historical bad V6 checksum for the
+    /// `KNOWN_DIVERGENCES` whitelist:
+    ///
+    /// ```text
+    /// MIGRATION_CHECKSUM_PATH=/tmp/v6_modified.sql \
+    ///   cargo test -p ironclaw -- --ignored \
+    ///   compute_checksum_for_external_file --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn compute_checksum_for_external_file() {
+        let path = std::env::var("MIGRATION_CHECKSUM_PATH").expect("MIGRATION_CHECKSUM_PATH");
+        let stem = std::path::Path::new(&path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap()
+            .to_string();
+        let sql = std::fs::read_to_string(&path).unwrap();
+        let migration = Migration::unapplied(&stem, &sql).unwrap();
+        eprintln!("{stem} = {}", migration.checksum());
+    }
+
     /// Sanity check that the embedded V6 SQL still hashes to the v0.18.0
     /// checksum. If this fails, V6 has been re-modified and issue #1328
     /// will recur on every existing PostgreSQL deployment.
@@ -365,6 +423,45 @@ mod tests {
              v0.18.0 checksum and issue #1328 will recur on every existing \
              PostgreSQL deployment. Revert your edit and put the schema \
              change in a new migration."
+        );
+    }
+
+    /// Pin the historical bad V6 checksum (the post-#1151 modified
+    /// content) so the realignment whitelist cannot drift. The fix-up
+    /// function rewrites *only* rows whose stored checksum matches a
+    /// value in `KNOWN_DIVERGENCES[..].known_bad_checksums`. If this
+    /// list is corrupted or accidentally widened, refinery's checksum
+    /// validation degrades from "narrowly exempt one historical row" to
+    /// "silently mask any V6 corruption". This sentinel ensures the V6
+    /// entry contains exactly one expected literal value.
+    ///
+    /// Source for the literal: `git show 878a67cd:migrations/V6__routines.sql`
+    /// (the commit from PR #1151 that introduced the divergence).
+    #[test]
+    fn v6_known_bad_checksum_matches_post_1151_content() {
+        const POST_1151_BAD_V6_CHECKSUM: u64 = 11230857244097235596;
+
+        let v6 = &KNOWN_DIVERGENCES[0];
+        assert_eq!(v6.version, 6);
+        assert_eq!(v6.name, "routines");
+        assert_eq!(
+            v6.known_bad_checksums,
+            &[POST_1151_BAD_V6_CHECKSUM],
+            "the V6 known-bad checksum list has been altered. The only \
+             value that should appear here is the SipHasher13 of \
+             `git show 878a67cd:migrations/V6__routines.sql`. Widening \
+             the list silently masks production database corruption — \
+             do not change this without a very good reason."
+        );
+
+        // Also assert canonical and bad are distinct, otherwise the
+        // fix-up would no-op.
+        let canonical = Migration::unapplied("V6__routines", v6.sql)
+            .unwrap()
+            .checksum();
+        assert_ne!(
+            canonical, POST_1151_BAD_V6_CHECKSUM,
+            "canonical V6 checksum collides with known-bad — fix-up would no-op"
         );
     }
 }
