@@ -2681,8 +2681,7 @@ impl ExtensionManager {
         // 100 MB cap on decompressed entry size to prevent decompression bombs
         const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024;
 
-        let wasm_filename = format!("{}.wasm", name);
-        let caps_filename = format!("{}.capabilities.json", name);
+        let archive_names = crate::extensions::naming::ArchiveFilenames::new(name);
         let mut found_wasm = false;
 
         let entries = archive
@@ -2713,14 +2712,14 @@ impl ExtensionManager {
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
 
-            if filename == wasm_filename {
+            if archive_names.is_wasm(filename) {
                 let mut data = Vec::with_capacity(entry.size() as usize);
                 std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 std::fs::write(target_wasm, &data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 found_wasm = true;
-            } else if filename == caps_filename {
+            } else if archive_names.is_caps(filename) {
                 let mut data = Vec::with_capacity(entry.size() as usize);
                 std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
@@ -2730,10 +2729,9 @@ impl ExtensionManager {
         }
 
         if !found_wasm {
-            return Err(ExtensionError::InstallFailed(format!(
-                "tar.gz archive does not contain '{}'",
-                wasm_filename
-            )));
+            return Err(ExtensionError::InstallFailed(
+                archive_names.wasm_not_found_msg(),
+            ));
         }
 
         Ok(())
