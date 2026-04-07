@@ -406,6 +406,46 @@ async def test_text_always_intercepts_always(page):
     assert await chat_input.input_value() == "", "Input should be cleared after keyword interception"
 
 
+async def test_text_skips_resolved_card_targets_unresolved(page):
+    """Typing 'yes' should skip a resolved card and target the next unresolved one."""
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+
+    # Inject two approval cards
+    await page.evaluate("""
+        showApproval({
+            request_id: 'test-resolved-older',
+            thread_id: currentThreadId,
+            tool_name: 'http',
+            description: 'Older unresolved card',
+        });
+        showApproval({
+            request_id: 'test-resolved-newer',
+            thread_id: currentThreadId,
+            tool_name: 'shell',
+            description: 'Newer card (will be resolved)',
+        });
+    """)
+
+    older_card = page.locator('.approval-card[data-request-id="test-resolved-older"]')
+    newer_card = page.locator('.approval-card[data-request-id="test-resolved-newer"]')
+    await older_card.wait_for(state="visible", timeout=5000)
+    await newer_card.wait_for(state="visible", timeout=5000)
+
+    # Resolve the newer card via button click (it stays in DOM for 1.5s)
+    await newer_card.locator("button.approve").click()
+    newer_resolved = newer_card.locator(".approval-resolved")
+    await newer_resolved.wait_for(state="visible", timeout=5000)
+
+    # Now type "yes" — should skip the resolved newer card, target the older unresolved one
+    await chat_input.fill("yes")
+    await chat_input.press("Enter")
+
+    older_resolved = older_card.locator(".approval-resolved")
+    await older_resolved.wait_for(state="visible", timeout=5000)
+    assert await older_resolved.text_content() == "Approved"
+
+
 async def test_text_aliases_intercepted(page):
     """Various approval aliases ('y', 'n', 'approve', 'deny') should be intercepted."""
     chat_input = page.locator(SEL["chat_input"])
