@@ -2713,14 +2713,16 @@ impl ExtensionManager {
                 .unwrap_or("");
 
             if archive_names.is_wasm(filename) {
-                let mut data = Vec::with_capacity((entry.size() as usize).min(MAX_ENTRY_SIZE as usize));
+                let mut data =
+                    Vec::with_capacity((entry.size() as usize).min(MAX_ENTRY_SIZE as usize));
                 std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 std::fs::write(target_wasm, &data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 found_wasm = true;
             } else if archive_names.is_caps(filename) {
-                let mut data = Vec::with_capacity((entry.size() as usize).min(MAX_ENTRY_SIZE as usize));
+                let mut data =
+                    Vec::with_capacity((entry.size() as usize).min(MAX_ENTRY_SIZE as usize));
                 std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 std::fs::write(target_caps, &data)
