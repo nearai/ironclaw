@@ -274,7 +274,7 @@ def compact_if_needed(state, config):
 def score_skill(skill, message_lower, message_original):
     """Score a skill against a user message. Returns 0 if vetoed.
 
-    Scoring mirrors the v1 `ironclaw_skills::selector::score_skill`:
+    Scoring is aligned with the v1 `ironclaw_skills::selector::score_skill`:
       - exclude_keyword veto: any match => score 0
       - keyword: exact word = 10, substring = 5 (cap 30)
       - tag: substring = 3 (cap 15)
@@ -292,7 +292,11 @@ def score_skill(skill, message_lower, message_original):
 
     # Keyword scoring: exact word = 10, substring = 5 (cap 30)
     kw_score = 0
-    words = message_lower.split()
+    words = []
+    for word in message_lower.split():
+        trimmed = word.strip(".,!?;:'\"()[]{}<>`~@#$%^&*-_=+/\\|")
+        if trimmed:
+            words.append(trimmed)
     for kw in activation.get("keywords", []):
         kw_lower = kw.lower()
         if kw_lower in words:
