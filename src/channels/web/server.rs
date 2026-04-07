@@ -26,6 +26,7 @@ use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
+use crate::ownership::Owned;
 use axum::http::HeaderMap;
 
 use crate::agent::SessionManager;
@@ -2838,7 +2839,7 @@ async fn verify_project_ownership(state: &GatewayState, project_id: &str, user_i
         return false;
     };
     match store.get_sandbox_job(job_id).await {
-        Ok(Some(job)) => job.user_id == user_id,
+        Ok(Some(job)) => job.is_owned_by(user_id),
         _ => false,
     }
 }
@@ -3135,7 +3136,7 @@ async fn routines_runs_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
-    if routine.user_id != user.user_id {
+    if !routine.is_owned_by(&user.user_id) {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 

@@ -498,6 +498,12 @@ pub struct SandboxJobRecord {
     pub credential_grants_json: String,
 }
 
+impl crate::ownership::Owned for SandboxJobRecord {
+    fn owner_user_id(&self) -> &str {
+        &self.user_id
+    }
+}
+
 /// Summary of sandbox job counts grouped by status.
 #[derive(Debug, Clone, Default)]
 pub struct SandboxJobSummary {
@@ -520,6 +526,12 @@ pub struct AgentJobRecord {
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub failure_reason: Option<String>,
+}
+
+impl crate::ownership::Owned for AgentJobRecord {
+    fn owner_user_id(&self) -> &str {
+        &self.user_id
+    }
 }
 
 /// Summary counts for agent (non-sandbox) jobs.
