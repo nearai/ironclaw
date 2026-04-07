@@ -632,16 +632,13 @@ impl ShellTool {
         cmd: &str,
         workdir: &Path,
         timeout: Duration,
+        env: &HashMap<String, String>,
     ) -> Result<(String, i64), ToolError> {
-        // Override sandbox config timeout if needed
+        // Clone env once — SandboxManager takes ownership (needs it for retries).
+        let env = env.clone();
         let result = tokio::time::timeout(timeout, async {
             sandbox
-                .execute_with_policy(
-                    cmd,
-                    workdir,
-                    self.sandbox_policy,
-                    std::collections::HashMap::new(),
-                )
+                .execute_with_policy(cmd, workdir, self.sandbox_policy, env)
                 .await
         })
         .await;
@@ -821,7 +818,7 @@ impl ShellTool {
             && (sandbox.is_initialized() || sandbox.config().enabled)
         {
             return self
-                .execute_sandboxed(sandbox, cmd, &cwd, timeout_duration)
+                .execute_sandboxed(sandbox, cmd, &cwd, timeout_duration, extra_env)
                 .await;
         }
 
@@ -1772,5 +1769,56 @@ mod tests {
         );
         // Blocked commands must still be caught.
         assert!(tool.is_blocked("sudo rm -rf /").is_some());
+    }
+
+    #[tokio::test]
+    async fn sandbox_forwards_extra_env() {
+        // Regression: execute_sandboxed was passing HashMap::new() instead of
+        // forwarding extra_env to sandbox.execute_with_policy().
+        //
+        // Uses FullAccess + allow_full_access so execute_with_policy() bypasses
+        // Docker and runs directly on the host. This lets the test verify env
+        // forwarding through the full execute → execute_sandboxed →
+        // execute_with_policy chain without requiring a running container.
+        use crate::sandbox::SandboxPolicy;
+        use crate::tools::tool::Tool;
+
+        let manager = Arc::new(SandboxManager::new(SandboxConfig {
+            enabled: true,
+            policy: SandboxPolicy::FullAccess,
+            allow_full_access: true,
+            ..Default::default()
+        }));
+        let tool = ShellTool::new()
+            .with_sandbox(manager)
+            .with_sandbox_policy(SandboxPolicy::FullAccess);
+
+        let mut env = HashMap::new();
+        env.insert(
+            "IRONCLAW_TEST_SANDBOX_ENV".to_string(),
+            "forwarded_value_42".to_string(),
+        );
+        let ctx = crate::context::JobContext {
+            extra_env: std::sync::Arc::new(env),
+            ..Default::default()
+        };
+
+        let result = tool
+            .execute(
+                serde_json::json!({"command": "echo $IRONCLAW_TEST_SANDBOX_ENV"}),
+                &ctx,
+            )
+            .await
+            .expect("command should succeed");
+
+        let output = result
+            .result
+            .get("output")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            output.contains("forwarded_value_42"),
+            "extra_env must be forwarded through sandbox path, got: {output}"
+        );
     }
 }

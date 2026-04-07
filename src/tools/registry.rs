@@ -10,6 +10,7 @@ use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::llm::{LlmProvider, ToolDefinition};
 use crate::orchestrator::job_manager::ContainerJobManager;
+use crate::sandbox::SandboxManager;
 use crate::secrets::SecretsStore;
 use crate::tools::builder::{
     BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder, SoftwareBuilder,
@@ -400,7 +401,22 @@ impl ToolRegistry {
     /// capabilities needed for the software builder. Call this after
     /// `register_builtin_tools()` to enable code generation features.
     pub fn register_dev_tools(&self) {
-        self.register_sync(Arc::new(ShellTool::new()));
+        self.register_dev_tools_with_sandbox(None);
+    }
+
+    /// Register development tools with an optional sandbox manager.
+    ///
+    /// When a sandbox manager is provided, the shell tool routes commands
+    /// through the sandbox (persistent or ephemeral containers) instead of
+    /// executing them directly on the host. The sandbox policy is read from
+    /// the manager's config.
+    pub fn register_dev_tools_with_sandbox(&self, sandbox: Option<Arc<SandboxManager>>) {
+        let mut shell = ShellTool::new();
+        if let Some(sm) = sandbox {
+            let policy = sm.config().policy;
+            shell = shell.with_sandbox(sm).with_sandbox_policy(policy);
+        }
+        self.register_sync(Arc::new(shell));
         self.register_sync(Arc::new(ReadFileTool::new()));
         self.register_sync(Arc::new(WriteFileTool::new()));
         self.register_sync(Arc::new(ListDirTool::new()));
@@ -732,9 +748,10 @@ impl ToolRegistry {
         self: &Arc<Self>,
         llm: Arc<dyn LlmProvider>,
         config: Option<BuilderConfig>,
+        sandbox: Option<Arc<SandboxManager>>,
     ) -> Arc<dyn SoftwareBuilder> {
         // First register dev tools needed by the builder
-        self.register_dev_tools();
+        self.register_dev_tools_with_sandbox(sandbox);
 
         // Create the builder (arg order: config, llm, tools)
         let builder: Arc<dyn SoftwareBuilder> = Arc::new(LlmSoftwareBuilder::new(

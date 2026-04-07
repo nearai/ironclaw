@@ -124,6 +124,16 @@ impl AppBuilder {
         self.llm_override = Some(llm);
     }
 
+    /// Build a `SandboxManager` when sandbox is enabled, or `None` otherwise.
+    fn sandbox_for_tools(&self) -> Option<Arc<crate::sandbox::SandboxManager>> {
+        if self.config.sandbox.enabled {
+            let sc = self.config.sandbox.to_sandbox_config();
+            Some(Arc::new(crate::sandbox::SandboxManager::new(sc)))
+        } else {
+            None
+        }
+    }
+
     /// Phase 1: Initialize database backend.
     ///
     /// Creates the database connection, runs migrations, reloads config
@@ -443,12 +453,18 @@ impl AppBuilder {
             }
         }
 
+        let sandbox_for_tools = self.sandbox_for_tools();
+
         // Register builder tool if enabled
         let builder = if self.config.builder.enabled
             && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled)
         {
             let b = tools
-                .register_builder_tool(llm.clone(), Some(self.config.builder.to_builder_config()))
+                .register_builder_tool(
+                    llm.clone(),
+                    Some(self.config.builder.to_builder_config()),
+                    sandbox_for_tools.clone(),
+                )
                 .await;
             tracing::debug!("Builder mode enabled");
             Some(b)
@@ -812,12 +828,12 @@ impl AppBuilder {
             }
         }
 
-        // register_builder_tool() already calls register_dev_tools() internally,
-        // so only register them here when the builder didn't already do it.
+        // register_builder_tool() already calls register_dev_tools_with_sandbox()
+        // internally, so only register them here when the builder didn't already do it.
         let builder_registered_dev_tools = self.config.builder.enabled
             && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled);
         if self.config.agent.allow_local_tools && !builder_registered_dev_tools {
-            tools.register_dev_tools();
+            tools.register_dev_tools_with_sandbox(self.sandbox_for_tools());
         }
 
         Ok((
