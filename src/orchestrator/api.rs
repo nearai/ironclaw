@@ -249,6 +249,22 @@ async fn report_complete(
         tracing::error!(job_id = %job_id, "Failed to complete job cleanup: {}", e);
     }
 
+    // Safety-net broadcast: even if the worker's fire-and-forget post_event("result")
+    // was lost, this ensures job monitors receive the terminal signal and free the
+    // max_jobs slot. Consumers break on the first JobResult, so duplicates are harmless.
+    let status = if report.success { "completed" } else { "error" };
+    broadcast_app_event(
+        &state,
+        job_id,
+        AppEvent::JobResult {
+            job_id: job_id.to_string(),
+            status: status.to_string(),
+            session_id: None,
+            fallback_deliverable: None,
+        },
+    )
+    .await;
+
     Ok(Json(serde_json::json!({"status": "ok"})))
 }
 
@@ -370,8 +386,14 @@ async fn job_event_handler(
         },
     };
 
-    // Broadcast via the channel (if configured).
-    // Look up the job owner from the in-memory cache (populated at job creation).
+    broadcast_app_event(&state, job_id, app_event).await;
+
+    Ok(StatusCode::OK)
+}
+
+/// Broadcast an `AppEvent` through the job event channel, resolving the
+/// job owner from the in-memory cache (with DB fallback).
+async fn broadcast_app_event(state: &OrchestratorState, job_id: Uuid, event: AppEvent) {
     if let Some(ref tx) = state.job_event_tx {
         let cached_uid = state
             .job_owner_cache
@@ -385,12 +407,23 @@ async fn job_event_handler(
             None => {
                 // Cache miss: fall back to DB lookup and populate cache.
                 let uid = match state.store.as_ref() {
-                    Some(store) => store
-                        .get_sandbox_job(job_id)
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|j| j.user_id),
+                    Some(store) => match store.get_sandbox_job(job_id).await {
+                        Ok(Some(j)) => Some(j.user_id),
+                        Ok(None) => {
+                            tracing::debug!(
+                                job_id = %job_id,
+                                "No job found in DB for owner lookup"
+                            );
+                            None
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                job_id = %job_id,
+                                "DB fallback for job owner failed: {e}"
+                            );
+                            None
+                        }
+                    },
                     None => None,
                 };
                 if let Some(ref uid) = uid {
@@ -404,14 +437,8 @@ async fn job_event_handler(
             }
         };
 
-        if user_id.is_empty() {
-            let _ = tx.send((job_id, String::new(), app_event));
-        } else {
-            let _ = tx.send((job_id, user_id, app_event));
-        }
+        let _ = tx.send((job_id, user_id, event));
     }
-
-    Ok(StatusCode::OK)
 }
 
 /// Return the next queued follow-up prompt for a Claude Code bridge.
@@ -789,23 +816,9 @@ mod tests {
 
     #[tokio::test]
     async fn job_event_broadcasts_message() {
-        let (tx, mut rx) = broadcast::channel(16);
-        let token_store = TokenStore::new();
-        let jm = ContainerJobManager::new(ContainerJobConfig::default(), token_store.clone());
-        let state = OrchestratorState {
-            llm: Arc::new(StubLlm::default()),
-            job_manager: Arc::new(jm),
-            token_store: token_store.clone(),
-            job_event_tx: Some(tx),
-            prompt_queue: Arc::new(Mutex::new(HashMap::new())),
-            store: None,
-            secrets_store: None,
-            user_id: "<unset>".to_string(), // sentinel for tests only — real startup sets this from config.owner_id
-            job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
-        };
-
+        let (state, mut rx) = test_state_with_broadcast();
         let job_id = Uuid::new_v4();
-        let token = token_store.create_token(job_id).await;
+        let token = state.token_store.create_token(job_id).await;
         let router = OrchestratorApi::router(state);
 
         let payload = serde_json::json!({
@@ -847,23 +860,9 @@ mod tests {
 
     #[tokio::test]
     async fn job_event_handles_tool_use() {
-        let (tx, mut rx) = broadcast::channel(16);
-        let token_store = TokenStore::new();
-        let jm = ContainerJobManager::new(ContainerJobConfig::default(), token_store.clone());
-        let state = OrchestratorState {
-            llm: Arc::new(StubLlm::default()),
-            job_manager: Arc::new(jm),
-            token_store: token_store.clone(),
-            job_event_tx: Some(tx),
-            prompt_queue: Arc::new(Mutex::new(HashMap::new())),
-            store: None,
-            secrets_store: None,
-            user_id: "<unset>".to_string(), // sentinel for tests only — real startup sets this from config.owner_id
-            job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
-        };
-
+        let (state, mut rx) = test_state_with_broadcast();
         let job_id = Uuid::new_v4();
-        let token = token_store.create_token(job_id).await;
+        let token = state.token_store.create_token(job_id).await;
         let router = OrchestratorApi::router(state);
 
         let payload = serde_json::json!({
@@ -896,23 +895,9 @@ mod tests {
 
     #[tokio::test]
     async fn job_event_handles_unknown_type() {
-        let (tx, mut rx) = broadcast::channel(16);
-        let token_store = TokenStore::new();
-        let jm = ContainerJobManager::new(ContainerJobConfig::default(), token_store.clone());
-        let state = OrchestratorState {
-            llm: Arc::new(StubLlm::default()),
-            job_manager: Arc::new(jm),
-            token_store: token_store.clone(),
-            job_event_tx: Some(tx),
-            prompt_queue: Arc::new(Mutex::new(HashMap::new())),
-            store: None,
-            secrets_store: None,
-            user_id: "<unset>".to_string(), // sentinel for tests only — real startup sets this from config.owner_id
-            job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
-        };
-
+        let (state, mut rx) = test_state_with_broadcast();
         let job_id = Uuid::new_v4();
-        let token = token_store.create_token(job_id).await;
+        let token = state.token_store.create_token(job_id).await;
         let router = OrchestratorApi::router(state);
 
         let payload = serde_json::json!({
@@ -943,26 +928,7 @@ mod tests {
         let state = test_state();
         let job_id = Uuid::new_v4();
         let token = state.token_store.create_token(job_id).await;
-
-        // Insert a handle so update_worker_status has something to update
-        {
-            let mut containers = state.job_manager.containers.write().await;
-            containers.insert(
-                job_id,
-                crate::orchestrator::job_manager::ContainerHandle {
-                    job_id,
-                    container_id: "test-container".to_string(),
-                    state: crate::orchestrator::job_manager::ContainerState::Running,
-                    mode: crate::orchestrator::job_manager::JobMode::Worker,
-                    created_at: chrono::Utc::now(),
-                    project_dir: None,
-                    task_description: "test".to_string(),
-                    last_worker_status: None,
-                    worker_iteration: 0,
-                    completion_result: None,
-                },
-            );
-        }
+        insert_container_handle(&state, job_id).await;
 
         let jm = Arc::clone(&state.job_manager);
         let router = OrchestratorApi::router(state);
@@ -987,5 +953,177 @@ mod tests {
         let handle = jm.get_handle(job_id).await.unwrap();
         assert_eq!(handle.worker_iteration, 5);
         assert_eq!(handle.last_worker_status.as_deref(), Some("Iteration 5"));
+    }
+
+    // -- report_complete broadcast tests --
+
+    /// Helper: create state with a broadcast channel for event tests.
+    fn test_state_with_broadcast() -> (
+        OrchestratorState,
+        broadcast::Receiver<(Uuid, String, AppEvent)>,
+    ) {
+        let (tx, rx) = broadcast::channel(16);
+        let mut state = test_state();
+        state.job_event_tx = Some(tx);
+        (state, rx)
+    }
+
+    async fn insert_container_handle(state: &OrchestratorState, job_id: Uuid) {
+        let mut containers = state.job_manager.containers.write().await;
+        containers.insert(
+            job_id,
+            crate::orchestrator::job_manager::ContainerHandle {
+                job_id,
+                container_id: String::new(), // empty → skips Docker cleanup
+                state: crate::orchestrator::job_manager::ContainerState::Running,
+                mode: crate::orchestrator::job_manager::JobMode::Worker,
+                created_at: chrono::Utc::now(),
+                project_dir: None,
+                task_description: "test".to_string(),
+                last_worker_status: None,
+                worker_iteration: 0,
+                completion_result: None,
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn report_complete_broadcasts_job_result() {
+        let (state, mut rx) = test_state_with_broadcast();
+        let job_id = Uuid::new_v4();
+        let token = state.token_store.create_token(job_id).await;
+        insert_container_handle(&state, job_id).await;
+
+        let router = OrchestratorApi::router(state);
+        let payload = serde_json::json!({
+            "success": true,
+            "message": "ACP agent session completed",
+            "iterations": 3
+        });
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/complete", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let (recv_id, _recv_uid, event) = rx.recv().await.unwrap();
+        assert_eq!(recv_id, job_id);
+        match event {
+            AppEvent::JobResult {
+                job_id: jid,
+                status,
+                session_id,
+                fallback_deliverable,
+            } => {
+                assert_eq!(jid, job_id.to_string());
+                assert_eq!(status, "completed");
+                assert!(session_id.is_none());
+                assert!(fallback_deliverable.is_none());
+            }
+            other => panic!("Expected JobResult, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn report_complete_broadcasts_error_on_failure() {
+        let (state, mut rx) = test_state_with_broadcast();
+        let job_id = Uuid::new_v4();
+        let token = state.token_store.create_token(job_id).await;
+        insert_container_handle(&state, job_id).await;
+
+        let router = OrchestratorApi::router(state);
+        let payload = serde_json::json!({
+            "success": false,
+            "message": "Follow-up prompt failed: connection refused",
+            "iterations": 1
+        });
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/complete", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let (recv_id, _recv_uid, event) = rx.recv().await.unwrap();
+        assert_eq!(recv_id, job_id);
+        match event {
+            AppEvent::JobResult { status, .. } => {
+                assert_eq!(status, "error");
+            }
+            other => panic!("Expected JobResult, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn report_complete_works_without_broadcast_channel() {
+        let state = test_state(); // job_event_tx: None
+        let job_id = Uuid::new_v4();
+        let token = state.token_store.create_token(job_id).await;
+        insert_container_handle(&state, job_id).await;
+
+        let router = OrchestratorApi::router(state);
+        let payload = serde_json::json!({
+            "success": true,
+            "message": "done",
+            "iterations": 1
+        });
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/complete", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn report_complete_broadcast_uses_cached_user_id() {
+        let (state, mut rx) = test_state_with_broadcast();
+        let job_id = Uuid::new_v4();
+        let token = state.token_store.create_token(job_id).await;
+        insert_container_handle(&state, job_id).await;
+
+        // Pre-populate the owner cache.
+        state
+            .job_owner_cache
+            .write()
+            .unwrap()
+            .insert(job_id, "user-42".to_string());
+
+        let router = OrchestratorApi::router(state);
+        let payload = serde_json::json!({
+            "success": true,
+            "message": "done",
+            "iterations": 1
+        });
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/complete", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let (_recv_id, recv_uid, _event) = rx.recv().await.unwrap();
+        assert_eq!(recv_uid, "user-42");
     }
 }

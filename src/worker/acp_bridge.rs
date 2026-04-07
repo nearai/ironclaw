@@ -510,7 +510,7 @@ async fn run_follow_up_loop(
                     tracing::error!(job_id = %job_id, "{}", msg);
                     return Err(WorkerError::ExecutionFailed { reason: msg });
                 }
-                tracing::warn!(
+                tracing::debug!(
                     job_id = %job_id,
                     attempt = consecutive_poll_errors,
                     "Transient poll error: {}", e,
