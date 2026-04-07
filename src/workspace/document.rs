@@ -31,11 +31,20 @@ pub mod paths {
     pub const TOOLS: &str = "TOOLS.md";
     /// First-run ritual file; self-deletes after onboarding completes.
     pub const BOOTSTRAP: &str = "BOOTSTRAP.md";
+    /// Admin-defined system instructions shared with all users.
+    pub const SYSTEM: &str = "SYSTEM.md";
     /// User psychographic profile (JSON).
     pub const PROFILE: &str = "context/profile.json";
     /// Assistant behavioral directives (derived from profile).
     pub const ASSISTANT_DIRECTIVES: &str = "context/assistant-directives.md";
 }
+
+/// Well-known scope identifier for admin-defined content (e.g., system prompt).
+///
+/// Documents stored under this scope are readable by all workspaces when
+/// `admin_prompt_enabled` is set (multi-tenant mode). The double-underscore
+/// prefix prevents collision with real user IDs.
+pub const ADMIN_SCOPE: &str = "__admin__";
 
 /// Paths treated as identity documents for multi-scope isolation.
 ///

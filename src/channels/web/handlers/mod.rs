@@ -8,6 +8,7 @@ pub mod memory;
 pub mod routines;
 pub mod secrets;
 pub mod skills;
+pub mod system_prompt;
 pub mod tokens;
 pub mod users;
 

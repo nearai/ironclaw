@@ -252,10 +252,11 @@ impl WorkspacePool {
     }
 
     /// Build a workspace for a user, applying search config, embeddings,
-    /// global read scopes, and memory layers.
+    /// global read scopes, memory layers, and admin prompt.
     fn build_workspace(&self, user_id: &str) -> Workspace {
         let mut ws = Workspace::new_with_db(user_id, Arc::clone(&self.db))
-            .with_search_config(&self.search_config);
+            .with_search_config(&self.search_config)
+            .with_admin_prompt();
 
         if let Some(ref emb) = self.embeddings {
             ws = ws.with_embeddings_cached(Arc::clone(emb), self.embedding_cache_config.clone());
@@ -572,6 +573,12 @@ pub async fn start_server(
             "/api/admin/users/{user_id}/secrets/{name}",
             put(super::handlers::secrets::secrets_put_handler)
                 .delete(super::handlers::secrets::secrets_delete_handler),
+        )
+        // Admin system prompt
+        .route(
+            "/api/admin/system-prompt",
+            get(super::handlers::system_prompt::get_handler)
+                .put(super::handlers::system_prompt::put_handler),
         )
         // Usage reporting (admin)
         .route(
