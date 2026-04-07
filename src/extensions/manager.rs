@@ -468,6 +468,9 @@ pub struct ExtensionManager {
     wasm_tools_dir: PathBuf,
     wasm_channels_dir: PathBuf,
     latent_wasm_provider_actions: RwLock<HashMap<String, Vec<LatentProviderAction>>>,
+    /// Per-server URL cache for `mcp_supports_auth` metadata discovery.
+    /// Avoids re-issuing a network probe on every `list()` call.
+    mcp_auth_support_cache: RwLock<HashMap<String, bool>>,
 
     // WASM channel hot-activation infrastructure (set post-construction)
     channel_runtime: RwLock<Option<ChannelRuntimeState>>,
@@ -642,6 +645,7 @@ impl ExtensionManager {
             wasm_tools_dir,
             wasm_channels_dir,
             latent_wasm_provider_actions: RwLock::new(HashMap::new()),
+            mcp_auth_support_cache: RwLock::new(HashMap::new()),
             channel_runtime: RwLock::new(None),
             relay_channel_manager: RwLock::new(None),
             secrets,
@@ -2721,6 +2725,7 @@ impl ExtensionManager {
             // action. Drop the cache so the next listing reflects its
             // installed/active status.
             self.invalidate_latent_wasm_provider_actions_cache().await;
+            self.mcp_auth_support_cache.write().await.clear();
         }
         result
     }
@@ -2767,6 +2772,7 @@ impl ExtensionManager {
         };
         if result.is_ok() {
             self.invalidate_latent_wasm_provider_actions_cache().await;
+            self.mcp_auth_support_cache.write().await.clear();
         }
         result
     }
@@ -2786,6 +2792,7 @@ impl ExtensionManager {
             // state; drop the cache so the registry-discovery path can
             // resurface it as a latent provider action.
             self.invalidate_latent_wasm_provider_actions_cache().await;
+            self.mcp_auth_support_cache.write().await.clear();
         }
         result
     }
@@ -3948,10 +3955,16 @@ impl ExtensionManager {
             return true;
         }
 
+        // Cache hit: avoid the network probe on every list() call. Cache is
+        // keyed by server URL and invalidated when MCP server config changes.
+        if let Some(&cached) = self.mcp_auth_support_cache.read().await.get(&server.url) {
+            return cached;
+        }
+
         // Metadata discovery uses the bounded MCP OAuth client timeouts in
         // `discover_full_oauth_metadata()`, so this list-path probe cannot hang
         // indefinitely on a hostile or slow server URL.
-        match discover_full_oauth_metadata(&server.url).await {
+        let supports = match discover_full_oauth_metadata(&server.url).await {
             Ok(_) => true,
             Err(crate::tools::mcp::auth::AuthError::NotSupported) => false,
             Err(error) => {
@@ -3963,7 +3976,12 @@ impl ExtensionManager {
                 );
                 false
             }
-        }
+        };
+        self.mcp_auth_support_cache
+            .write()
+            .await
+            .insert(server.url.clone(), supports);
+        supports
     }
 
     async fn start_secret_oauth_flow(

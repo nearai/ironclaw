@@ -517,9 +517,19 @@ pub async fn refresh_oauth_access_token(
         }
     };
 
+    // Cap the response body at 64 KiB. Legitimate OAuth token responses are
+    // a few hundred bytes; a misbehaving or hostile token endpoint must not
+    // be able to OOM the process by streaming an unbounded body.
+    const MAX_TOKEN_BODY_BYTES: usize = 64 * 1024;
+
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body_bytes = response
+            .bytes()
+            .await
+            .map(|b| b.slice(..b.len().min(MAX_TOKEN_BODY_BYTES)))
+            .unwrap_or_default();
+        let body = String::from_utf8_lossy(&body_bytes);
         tracing::warn!(
             status = %status,
             body = %body,
@@ -528,7 +538,22 @@ pub async fn refresh_oauth_access_token(
         return false;
     }
 
-    let token_data: serde_json::Value = match response.json().await {
+    let body_bytes = match response.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to read token refresh response body");
+            return false;
+        }
+    };
+    if body_bytes.len() > MAX_TOKEN_BODY_BYTES {
+        tracing::warn!(
+            len = body_bytes.len(),
+            limit = MAX_TOKEN_BODY_BYTES,
+            "OAuth token refresh response exceeds size limit"
+        );
+        return false;
+    }
+    let token_data: serde_json::Value = match serde_json::from_slice(&body_bytes) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %e, "Failed to parse token refresh response");
