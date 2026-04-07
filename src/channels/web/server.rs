@@ -1165,18 +1165,21 @@ async fn index_handler(State(state): State<Arc<GatewayState>>) -> Response {
 
 async fn css_handler(State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
     // Append custom CSS from `.system/gateway/custom.css` if it exists.
-    let css = match &state.workspace {
+    //
+    // The hot path (no workspace overlay) borrows `assets::STYLE_CSS` directly
+    // via `Cow::Borrowed` so we don't allocate / copy the entire embedded
+    // stylesheet on every request. We only fall through to an owned
+    // `format!` when there's actually content to append.
+    let css: std::borrow::Cow<'static, str> = match &state.workspace {
         Some(ws) => match ws.read(".system/gateway/custom.css").await {
-            Ok(doc) if !doc.content.trim().is_empty() => {
-                format!(
-                    "{}\n/* --- custom overrides --- */\n{}",
-                    assets::STYLE_CSS,
-                    doc.content
-                )
-            }
-            _ => assets::STYLE_CSS.to_string(),
+            Ok(doc) if !doc.content.trim().is_empty() => std::borrow::Cow::Owned(format!(
+                "{}\n/* --- custom overrides --- */\n{}",
+                assets::STYLE_CSS,
+                doc.content
+            )),
+            _ => std::borrow::Cow::Borrowed(assets::STYLE_CSS),
         },
-        None => assets::STYLE_CSS.to_string(),
+        None => std::borrow::Cow::Borrowed(assets::STYLE_CSS),
     };
     (
         [

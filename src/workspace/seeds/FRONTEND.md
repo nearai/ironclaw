@@ -24,13 +24,13 @@ Write `.system/gateway/layout.json` to customize branding, tab order, and featur
 }
 ```
 
-Example: `memory_write path=".system/gateway/layout.json" content='{"branding":{"title":"Acme AI","colors":{"primary":"#e53e3e"}}}' append=false`
+Example: `memory_write target=".system/gateway/layout.json" content='{"branding":{"title":"Acme AI","colors":{"primary":"#e53e3e"}}}' append=false`
 
 ### Custom CSS
 
 Write `.system/gateway/custom.css` for style overrides:
 
-Example: `memory_write path=".system/gateway/custom.css" content="body { --bg-primary: #1a1a2e; }" append=false`
+Example: `memory_write target=".system/gateway/custom.css" content="body { --bg-primary: #1a1a2e; }" append=false`
 
 Common CSS variables: `--color-primary`, `--color-accent`, `--bg-primary`, `--bg-secondary`, `--bg-tertiary`, `--text-primary`, `--text-secondary`, `--border`, `--success`, `--error`, `--warning`.
 

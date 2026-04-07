@@ -117,20 +117,42 @@ pub(crate) async fn load_widget_manifests(workspace: &Workspace) -> Vec<WidgetMa
 
 /// Read and parse a single widget's `manifest.json`. Returns `None` (with a
 /// `warn!`) for parse failures and `None` silently when the file is missing.
-async fn read_widget_manifest(workspace: &Workspace, widget_name: &str) -> Option<WidgetManifest> {
-    let manifest_path = format!("{WIDGETS_DIR}{widget_name}/manifest.json");
+///
+/// Also enforces that `manifest.id` matches the on-disk directory name. The
+/// rest of the loader uses `directory_name` to compute file paths
+/// (`{WIDGETS_DIR}{directory_name}/index.js` etc.) while layout-config gating
+/// and the public `/api/frontend/widget/{id}/{*file}` endpoint key off
+/// `manifest.id`. If those drift, code can be loaded from one folder while
+/// the rest of the system thinks the widget lives somewhere else — both a
+/// correctness footgun for widget authors and an attack surface for path
+/// confusion. Reject the mismatch loudly instead of silently picking one.
+async fn read_widget_manifest(
+    workspace: &Workspace,
+    directory_name: &str,
+) -> Option<WidgetManifest> {
+    let manifest_path = format!("{WIDGETS_DIR}{directory_name}/manifest.json");
     let doc = workspace.read(&manifest_path).await.ok()?;
-    match serde_json::from_str::<WidgetManifest>(&doc.content) {
-        Ok(manifest) => Some(manifest),
+    let manifest = match serde_json::from_str::<WidgetManifest>(&doc.content) {
+        Ok(manifest) => manifest,
         Err(e) => {
             tracing::warn!(
                 path = %manifest_path,
                 error = %e,
                 "skipping widget with invalid manifest"
             );
-            None
+            return None;
         }
+    };
+    if manifest.id != directory_name {
+        tracing::warn!(
+            path = %manifest_path,
+            directory = directory_name,
+            manifest_id = %manifest.id,
+            "skipping widget: manifest.id does not match the on-disk directory name"
+        );
+        return None;
     }
+    Some(manifest)
 }
 
 /// Discover every widget in `.system/gateway/widgets/` and return the
@@ -304,5 +326,82 @@ mod tests {
         assert!(!is_safe_relative_path("./index.js"));
         assert!(!is_safe_relative_path("assets//icon.svg"));
         assert!(!is_safe_relative_path("assets\\..\\secrets"));
+    }
+
+    #[cfg(feature = "libsql")]
+    mod widget_loader {
+        use super::*;
+        use crate::db::libsql::LibSqlBackend;
+        use std::sync::Arc;
+
+        async fn make_workspace() -> (Workspace, tempfile::TempDir) {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let backend = LibSqlBackend::new_local(&dir.path().join("widget_loader.db"))
+                .await
+                .expect("libsql backend");
+            <LibSqlBackend as crate::db::Database>::run_migrations(&backend)
+                .await
+                .expect("migrations");
+            let db: Arc<dyn crate::db::Database> = Arc::new(backend);
+            (Workspace::new_with_db("widget_loader", db), dir)
+        }
+
+        async fn write_widget(ws: &Workspace, dir: &str, manifest_id: &str) {
+            let manifest = serde_json::json!({
+                "id": manifest_id,
+                "name": "Test",
+                "slot": "tab",
+            });
+            ws.write(
+                &format!("{WIDGETS_DIR}{dir}/manifest.json"),
+                &manifest.to_string(),
+            )
+            .await
+            .expect("write manifest");
+            ws.write(&format!("{WIDGETS_DIR}{dir}/index.js"), "/* test */")
+                .await
+                .expect("write index.js");
+        }
+
+        /// Regression: a widget whose `manifest.id` does not match the
+        /// directory name must be skipped. Otherwise the loader can mount
+        /// code from one folder under a different id, and
+        /// `/api/frontend/widget/{id}/{*file}` (which keys off the id) will
+        /// silently 404 because it looks under the wrong directory.
+        #[tokio::test]
+        async fn skips_widget_when_manifest_id_does_not_match_directory() {
+            let (ws, _dir) = make_workspace().await;
+            write_widget(&ws, "real-id", "spoofed-id").await;
+
+            let manifest = read_widget_manifest(&ws, "real-id").await;
+            assert!(
+                manifest.is_none(),
+                "widget with mismatched id must be rejected"
+            );
+
+            let layout = LayoutConfig::default();
+            let resolved = load_resolved_widgets(&ws, &layout).await;
+            assert!(
+                resolved.is_empty(),
+                "load_resolved_widgets must skip mismatched widgets"
+            );
+
+            let manifests = load_widget_manifests(&ws).await;
+            assert!(
+                manifests.is_empty(),
+                "load_widget_manifests must skip mismatched widgets"
+            );
+        }
+
+        /// Sanity check: matching id + directory mounts normally.
+        #[tokio::test]
+        async fn loads_widget_when_manifest_id_matches_directory() {
+            let (ws, _dir) = make_workspace().await;
+            write_widget(&ws, "skills-viewer", "skills-viewer").await;
+
+            let resolved = load_resolved_widgets(&ws, &LayoutConfig::default()).await;
+            assert_eq!(resolved.len(), 1);
+            assert_eq!(resolved[0].manifest.id, "skills-viewer");
+        }
     }
 }
