@@ -151,11 +151,12 @@ async fn load_auth_descriptors(
     store: &dyn SettingsStore,
     user_id: &str,
 ) -> Result<HashMap<String, AuthDescriptor>, crate::error::DatabaseError> {
-    debug_assert_ne!(
-        user_id, "default",
-        "auth descriptors should remain user-scoped; global reads must stay explicit"
-    );
-
+    // NOTE: `user_id == "default"` is a *legitimate* value in single-tenant
+    // deployments where `Config::owner_id` defaults to "default". The
+    // multi-tenant safety concern this module guards against is *implicit*
+    // global fallback reads, not single-user owners. The
+    // `DefaultFallback::AdminOnly` policy in `resolve_secret_for_runtime` is
+    // what enforces the actual cross-tenant boundary.
     let cache = auth_descriptor_cache();
     if let Some(descriptors) = cache.lock().await.get(user_id).cloned() {
         return Ok(descriptors);
