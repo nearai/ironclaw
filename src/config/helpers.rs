@@ -238,9 +238,10 @@ fn classify_ip(ip: &std::net::IpAddr) -> IpClass {
         IpAddr::V6(v6) => {
             if let Some(v4) = v6.to_ipv4_mapped() {
                 classify_ip(&IpAddr::V4(v4))
-            } else if v6.is_unspecified() || v6.octets()[0] == 0xff {
-                IpClass::AlwaysBlocked
-            } else if (v6.segments()[0] & 0xffc0) == 0xfe80 {
+            } else if v6.is_unspecified()
+                || v6.octets()[0] == 0xff
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+            {
                 IpClass::AlwaysBlocked
             } else if v6.is_loopback() || (v6.octets()[0] & 0xfe) == 0xfc {
                 IpClass::PrivateOrLoopback
