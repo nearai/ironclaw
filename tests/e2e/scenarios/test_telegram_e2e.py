@@ -282,51 +282,6 @@ async def wait_for_api_call(
 # ── tests ────────────────────────────────────────────────────────────────
 
 
-async def test_telegram_polling_mode_roundtrip(telegram_e2e_server):
-    """Updates queued via the mock API are picked up by the polling loop.
-
-    This test MUST run first: the polling task is started during the initial
-    channel activation and is not restarted by subsequent refresh_active_channel
-    calls.  Running after other tests that already activated the channel causes
-    the polling loop to be dead.
-    """
-    base_url = telegram_e2e_server["base_url"]
-    fake_tg_url = telegram_e2e_server["fake_tg_url"]
-    channels_dir = telegram_e2e_server["channels_dir"]
-
-    await activate_telegram(base_url, telegram_e2e_server["http_url"], fake_tg_url, channels_dir)
-
-    await reset_fake_tg(fake_tg_url)
-
-    # Queue an update via the mock control endpoint (simulates polling mode)
-    async with httpx.AsyncClient() as c:
-        await c.post(
-            f"{fake_tg_url}/__mock/queue_update",
-            json={
-                "update_id": 700,
-                "message": {
-                    "message_id": 70,
-                    "from": {
-                        "id": OWNER_USER_ID,
-                        "is_bot": False,
-                        "first_name": "E2E Tester",
-                    },
-                    "chat": {"id": OWNER_USER_ID, "type": "private"},
-                    "date": int(time.time()),
-                    "text": "hello",
-                },
-            },
-            timeout=5,
-        )
-
-    # Wait for the host polling loop to pick up the update and reply
-    messages = await wait_for_sent_messages(fake_tg_url, min_count=1, timeout=60)
-    assert len(messages) >= 1, f"Expected at least one reply, got: {messages}"
-    assert messages[-1]["chat_id"] == OWNER_USER_ID
-
-    # Receiving a reply for a queued update proves the polling path is active.
-
-
 async def test_telegram_setup_and_dm_roundtrip(telegram_e2e_server):
     """Full DM round-trip: setup → webhook → mock LLM → sendMessage."""
     base_url = telegram_e2e_server["base_url"]
@@ -614,6 +569,45 @@ async def test_telegram_long_message_chunking(telegram_e2e_server):
     assert len(total_text) > 4096, (
         f"Total text ({len(total_text)} chars) should exceed 4096"
     )
+
+
+async def test_telegram_polling_mode_roundtrip(telegram_e2e_server):
+    """Updates queued via the mock API are picked up by the polling loop."""
+    base_url = telegram_e2e_server["base_url"]
+    fake_tg_url = telegram_e2e_server["fake_tg_url"]
+    channels_dir = telegram_e2e_server["channels_dir"]
+
+    await activate_telegram(base_url, telegram_e2e_server["http_url"], fake_tg_url, channels_dir)
+
+    await reset_fake_tg(fake_tg_url)
+
+    # Queue an update via the mock control endpoint (simulates polling mode)
+    async with httpx.AsyncClient() as c:
+        await c.post(
+            f"{fake_tg_url}/__mock/queue_update",
+            json={
+                "update_id": 700,
+                "message": {
+                    "message_id": 70,
+                    "from": {
+                        "id": OWNER_USER_ID,
+                        "is_bot": False,
+                        "first_name": "E2E Tester",
+                    },
+                    "chat": {"id": OWNER_USER_ID, "type": "private"},
+                    "date": int(time.time()),
+                    "text": "hello",
+                },
+            },
+            timeout=5,
+        )
+
+    # Wait for the host polling loop to pick up the update and reply
+    messages = await wait_for_sent_messages(fake_tg_url, min_count=1, timeout=60)
+    assert len(messages) >= 1, f"Expected at least one reply, got: {messages}"
+    assert messages[-1]["chat_id"] == OWNER_USER_ID
+
+    # Receiving a reply for a queued update proves the polling path is active.
 
 
 async def test_telegram_markdown_fallback(telegram_e2e_server):

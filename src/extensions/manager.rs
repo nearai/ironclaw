@@ -2963,7 +2963,7 @@ impl ExtensionManager {
             .auth
             .as_ref()
             .and_then(|auth| auth.setup_url.clone());
-        let requires_pairing = self.current_channel_owner_id(name).await.is_none();
+        let requires_pairing = self.channel_requires_pairing(name).await;
         let credential_title = Some(match state {
             ChannelOnboardingState::SetupRequired => {
                 format!("Configure credentials for {display_name}")
@@ -4579,7 +4579,8 @@ impl ExtensionManager {
         // now-available credentials (e.g., setWebhook for Telegram).
         if cred_count > 0 || should_rerun_on_start {
             match existing_channel.call_on_start().await {
-                Ok(_config) => {
+                Ok(config) => {
+                    existing_channel.ensure_polling(&config).await;
                     tracing::info!(
                         channel = %name,
                         "Re-ran on_start after credential refresh (webhook re-registered)"

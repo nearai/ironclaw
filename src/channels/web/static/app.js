@@ -2044,6 +2044,7 @@ function showSetupCard(data) {
     const setupLink = document.createElement('a');
     setupLink.href = onboarding.setup_url;
     setupLink.target = '_blank';
+    setupLink.rel = 'noopener noreferrer';
     setupLink.textContent = I18n.t('authRequired.getToken');
     links.appendChild(setupLink);
     card.appendChild(links);
@@ -2191,6 +2192,7 @@ function showAuthCard(data) {
     const setupLink = document.createElement('a');
     setupLink.href = data.setup_url;
     setupLink.target = '_blank';
+    setupLink.rel = 'noopener noreferrer';
     setupLink.textContent = I18n.t('authRequired.getToken');
     links.appendChild(setupLink);
   }
@@ -3819,6 +3821,7 @@ function loadInlineChannelSetup(ext, container) {
         const link = document.createElement('a');
         link.href = onboarding.setup_url;
         link.target = '_blank';
+        link.rel = 'noopener noreferrer';
         link.textContent = I18n.t('authRequired.getToken');
         links.appendChild(link);
         container.appendChild(links);

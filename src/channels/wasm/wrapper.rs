@@ -2523,6 +2523,37 @@ impl WasmChannel {
         Ok(())
     }
 
+    /// Ensure the polling loop is running with the interval from `config`.
+    ///
+    /// Stops any existing polling task and starts a fresh one.  Safe to call
+    /// multiple times (e.g., from `refresh_active_channel` after re-running
+    /// `on_start`).
+    pub async fn ensure_polling(&self, config: &ChannelConfig) {
+        if let Some(poll_config) = &config.poll
+            && poll_config.enabled
+        {
+            let interval = match self
+                .capabilities
+                .validate_poll_interval(poll_config.interval_ms)
+            {
+                Ok(ms) => ms,
+                Err(e) => {
+                    tracing::warn!(channel = %self.name, error = %e, "Polling interval rejected");
+                    return;
+                }
+            };
+
+            // Drop old sender (stops a dead/stale polling task if any)
+            let _ = self.poll_shutdown_tx.write().await.take();
+
+            let (poll_shutdown_tx, poll_shutdown_rx) = oneshot::channel();
+            *self.poll_shutdown_tx.write().await = Some(poll_shutdown_tx);
+
+            self.start_polling(Duration::from_millis(interval as u64), poll_shutdown_rx);
+            tracing::debug!(channel = %self.name, interval_ms = interval, "Polling loop (re)started");
+        }
+    }
+
     /// Start the polling loop if configured.
     ///
     /// Since we can't hold `Arc<Self>` from `&self`, we pass all the components
