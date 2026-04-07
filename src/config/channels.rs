@@ -18,6 +18,7 @@ pub struct ChannelsConfig {
     pub http: Option<HttpConfig>,
     pub gateway: Option<GatewayConfig>,
     pub signal: Option<SignalConfig>,
+    pub dingtalk: Option<DingTalkConfig>,
     /// Directory containing WASM channel modules (default: ~/.ironclaw/channels/).
     pub wasm_channels_dir: std::path::PathBuf,
     /// Whether WASM channels are enabled.
@@ -25,6 +26,15 @@ pub struct ChannelsConfig {
     /// Per-channel owner user IDs. When set, the channel only responds to this user.
     /// Key: channel name (e.g., "telegram"), Value: owner user ID.
     pub wasm_channel_owner_ids: HashMap<String, i64>,
+}
+
+/// DingTalk (钉钉) channel configuration.
+#[derive(Debug, Clone)]
+pub struct DingTalkConfig {
+    pub enabled: bool,
+    pub client_id: String,
+    pub client_secret: SecretString,
+    pub robot_code: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -361,6 +371,25 @@ impl ChannelsConfig {
             None
         };
 
+        // DingTalk channel: enabled when DINGTALK_CLIENT_ID is set.
+        let dingtalk_client_id = optional_env("DINGTALK_CLIENT_ID")?;
+        let dingtalk = if let Some(client_id) = dingtalk_client_id {
+            let client_secret = optional_env("DINGTALK_CLIENT_SECRET")?.ok_or(
+                ConfigError::InvalidValue {
+                    key: "DINGTALK_CLIENT_SECRET".to_string(),
+                    message: "required when DINGTALK_CLIENT_ID is set".to_string(),
+                },
+            )?;
+            Some(DingTalkConfig {
+                enabled: true,
+                client_id,
+                client_secret: SecretString::from(client_secret),
+                robot_code: optional_env("DINGTALK_ROBOT_CODE")?,
+            })
+        } else {
+            None
+        };
+
         let cli_enabled = db_first_bool(cs.cli_enabled, defaults.cli_enabled, "CLI_ENABLED")?;
 
         Ok(Self {
@@ -370,6 +399,7 @@ impl ChannelsConfig {
             http,
             gateway,
             signal,
+            dingtalk,
             wasm_channels_dir: {
                 // DB-first: use settings if explicitly set, else env, else default.
                 // defaults.wasm_channels_dir is None, so any Some(..) is an explicit DB override.

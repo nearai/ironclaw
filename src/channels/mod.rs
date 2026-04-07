@@ -28,6 +28,7 @@
 //! See the [`wasm`] module for details.
 
 mod channel;
+pub mod dingtalk;
 mod http;
 mod manager;
 pub mod relay;
@@ -42,6 +43,7 @@ pub use channel::{
     IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate, ToolDecision,
     routing_target_from_metadata,
 };
+pub use dingtalk::DingTalkChannel;
 pub use http::{HttpChannel, HttpChannelState};
 pub use manager::ChannelManager;
 pub use repl::ReplChannel;
