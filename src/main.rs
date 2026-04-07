@@ -510,6 +510,22 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
+    // Add DingTalk channel if configured and not CLI-only mode.
+    if !cli.cli_only
+        && let Some(ref dingtalk_config) = config.channels.dingtalk
+    {
+        if dingtalk_config.enabled {
+            let dingtalk_channel = ironclaw::channels::DingTalkChannel::new(dingtalk_config.clone())
+                .map_err(|e| anyhow::anyhow!("DingTalk channel init failed: {e}"))?;
+            channel_names.push("dingtalk".to_string());
+            channels.add(Box::new(dingtalk_channel)).await;
+            tracing::info!(
+                client_id = %dingtalk_config.client_id,
+                "DingTalk channel enabled (Stream mode)"
+            );
+        }
+    }
+
     // Add HTTP channel if configured and not CLI-only mode.
     let mut webhook_server_addr: Option<std::net::SocketAddr> = None;
     #[cfg(unix)]
