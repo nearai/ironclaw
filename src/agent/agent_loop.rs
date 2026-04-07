@@ -979,6 +979,23 @@ impl Agent {
                     match self.hooks().run(&event).await {
                         Err(err) => {
                             tracing::warn!("BeforeOutbound hook blocked response: {}", err);
+                            // Still send Done so the client knows the turn is complete
+                            // even though the response was suppressed by the hook.
+                            if let Err(e) = self
+                                .channels
+                                .send_status(
+                                    &message.channel,
+                                    StatusUpdate::Status("Done".into()),
+                                    &message.metadata,
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    channel = %message.channel,
+                                    error = %e,
+                                    "Failed to send Done status after hook-blocked response"
+                                );
+                            }
                         }
                         Ok(crate::hooks::HookOutcome::Continue {
                             modified: Some(new_content),
@@ -1009,13 +1026,29 @@ impl Agent {
                     }
                 }
                 Ok(Some(empty)) => {
-                    // Empty response, nothing to send (e.g. approval handled via send_status)
+                    // Empty response, nothing to send (e.g. approval handled via send_status).
+                    // Still send Done so the client knows the turn is complete.
                     tracing::debug!(
                         channel = %message.channel,
                         user = %message.user_id,
                         empty_len = empty.len(),
                         "Suppressed empty response (not sent to channel)"
                     );
+                    if let Err(e) = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::Status("Done".into()),
+                            &message.metadata,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            channel = %message.channel,
+                            error = %e,
+                            "Failed to send Done status after empty response"
+                        );
+                    }
                 }
                 Ok(None) => {
                     // Shutdown signal received (/quit, /exit, /shutdown)
