@@ -336,6 +336,12 @@ impl ContainerJobManager {
         mode: JobMode,
         params: JobCreationParams,
     ) -> Result<String, OrchestratorError> {
+        if !self.is_mode_enabled(mode) {
+            return Err(OrchestratorError::ModeDisabled {
+                mode: mode.to_string(),
+            });
+        }
+
         // Generate auth token (stored in TokenStore, never logged)
         let token = self.token_store.create_token(job_id).await;
 
@@ -1043,6 +1049,32 @@ mod tests {
         assert!(manager.is_mode_enabled(JobMode::Worker));
         assert!(manager.is_mode_enabled(JobMode::ClaudeCode));
         assert!(!manager.is_mode_enabled(JobMode::Acp));
+    }
+
+    #[tokio::test]
+    async fn test_create_job_rejects_disabled_mode() {
+        let manager = ContainerJobManager::new(
+            ContainerJobConfig {
+                claude_code_enabled: false,
+                acp_enabled: false,
+                ..Default::default()
+            },
+            TokenStore::new(),
+        );
+        let result = manager
+            .create_job(
+                Uuid::new_v4(),
+                "test task",
+                None,
+                JobMode::ClaudeCode,
+                JobCreationParams::default(),
+            )
+            .await;
+        let err = result.unwrap_err().to_string(); // safety: test
+        assert!(
+            err.contains("not enabled"),
+            "expected mode-disabled error, got: {err}"
+        );
     }
 
     #[test]

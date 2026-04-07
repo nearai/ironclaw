@@ -452,10 +452,10 @@ impl CreateJobTool {
 
         // Persist the job mode to DB (for non-default modes).
         // For ACP, store "acp:<agent_name>" so restarts know which agent to use.
+        // Done synchronously so mode is available if the job needs restarting.
         if mode != JobMode::Worker
-            && let Some(store) = self.store.clone()
+            && let Some(ref store) = self.store
         {
-            let job_id_copy = job_id;
             let mode_str = if mode == JobMode::Acp
                 && let Some(ref agent) = params.acp_agent
             {
@@ -463,11 +463,9 @@ impl CreateJobTool {
             } else {
                 mode.as_str().to_string()
             };
-            tokio::spawn(async move {
-                if let Err(e) = store.update_sandbox_job_mode(job_id_copy, &mode_str).await {
-                    tracing::warn!(job_id = %job_id_copy, "Failed to set job mode: {}", e);
-                }
-            });
+            if let Err(e) = store.update_sandbox_job_mode(job_id, &mode_str).await {
+                tracing::warn!(job_id = %job_id, "Failed to set job mode: {}", e);
+            }
         }
 
         // Create the container job with the pre-determined job_id.
@@ -856,67 +854,70 @@ impl Tool for CreateJobTool {
 
     fn parameters_schema(&self) -> serde_json::Value {
         if self.sandbox_enabled() {
-            let mut props = serde_json::json!({
-                "title": {
+            let mut props = serde_json::Map::new();
+            props.insert(
+                "title".into(),
+                serde_json::json!({
                     "type": "string",
                     "description": "Clear description of what to accomplish"
-                },
-                "description": {
+                }),
+            );
+            props.insert(
+                "description".into(),
+                serde_json::json!({
                     "type": "string",
                     "description": "Full description of what needs to be done"
-                },
-                "wait": {
-                    "type": "boolean",
-                    "description": "If true (default), wait for the container to complete and return results. \
-                                    If false, start the container and return the job_id immediately."
-                },
-                "project_dir": {
-                    "type": "string",
-                    "description": "Path to an existing project directory to mount into the container. \
-                                    Must be under ~/.ironclaw/projects/. If omitted, a fresh directory is created."
-                },
-                "credentials": {
-                    "type": "object",
-                    "description": "Map of secret names to env var names. Each secret must exist in the \
-                                    secrets store (via 'ironclaw tool auth' or web UI). Example: \
-                                    {\"github_token\": \"GITHUB_TOKEN\", \"npm_token\": \"NPM_TOKEN\"}",
-                    "additionalProperties": { "type": "string" }
-                },
-                "mcp_servers": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Optional list of MCP server names to make available in the container. \
-                                    If omitted, the full master config is mounted. If empty, no MCP servers \
-                                    are available. Only effective when MCP_PER_JOB_ENABLED=true."
-                },
-                "max_iterations": {
-                    "type": "integer",
-                    "description": "Maximum number of agent loop iterations for the worker. \
-                                    Defaults to 50, capped at 500. Use lower values for simple tasks."
-                }
-            });
+                }),
+            );
+            props.insert("wait".into(), serde_json::json!({
+                "type": "boolean",
+                "description": "If true (default), wait for the container to complete and return results. \
+                                If false, start the container and return the job_id immediately."
+            }));
+            props.insert("project_dir".into(), serde_json::json!({
+                "type": "string",
+                "description": "Path to an existing project directory to mount into the container. \
+                                Must be under ~/.ironclaw/projects/. If omitted, a fresh directory is created."
+            }));
+            props.insert("credentials".into(), serde_json::json!({
+                "type": "object",
+                "description": "Map of secret names to env var names. Each secret must exist in the \
+                                secrets store (via 'ironclaw tool auth' or web UI). Example: \
+                                {\"github_token\": \"GITHUB_TOKEN\", \"npm_token\": \"NPM_TOKEN\"}",
+                "additionalProperties": { "type": "string" }
+            }));
+            props.insert("mcp_servers".into(), serde_json::json!({
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Optional list of MCP server names to make available in the container. \
+                                If omitted, the full master config is mounted. If empty, no MCP servers \
+                                are available. Only effective when MCP_PER_JOB_ENABLED=true."
+            }));
+            props.insert("max_iterations".into(), serde_json::json!({
+                "type": "integer",
+                "description": "Maximum number of agent loop iterations for the worker. \
+                                Defaults to 50, capped at 500. Use lower values for simple tasks."
+            }));
             let modes = self.available_modes();
-            if let Some(map) = props.as_object_mut() {
-                if modes.len() > 1 {
-                    map.insert(
-                        "mode".to_string(),
-                        serde_json::json!({
-                            "type": "string",
-                            "enum": modes,
-                            "description": self.mode_description(),
-                        }),
-                    );
-                }
-                if self.acp_enabled() {
-                    map.insert(
-                        "agent_name".to_string(),
-                        serde_json::json!({
-                            "type": "string",
-                            "description": "Name of the ACP agent to use (from 'ironclaw acp list'). \
-                                            Required when mode is 'acp'."
-                        }),
-                    );
-                }
+            if modes.len() > 1 {
+                props.insert(
+                    "mode".into(),
+                    serde_json::json!({
+                        "type": "string",
+                        "enum": modes,
+                        "description": self.mode_description(),
+                    }),
+                );
+            }
+            if self.acp_enabled() {
+                props.insert(
+                    "agent_name".into(),
+                    serde_json::json!({
+                        "type": "string",
+                        "description": "Name of the ACP agent to use (from 'ironclaw acp list'). \
+                                        Required when mode is 'acp'."
+                    }),
+                );
             }
             serde_json::json!({
                 "type": "object",
