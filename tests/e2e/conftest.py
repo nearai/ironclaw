@@ -1112,6 +1112,11 @@ async def page(ironclaw_server, browser):
     await pg.goto(f"{ironclaw_server}/?token={AUTH_TOKEN}")
     # Wait for the app to initialize (auth screen hidden, SSE connected)
     await pg.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
+    # Wait for SSE connection (dot loses 'disconnected' class)
+    await pg.wait_for_function(
+        "() => { const d = document.getElementById('sse-dot'); return d && !d.classList.contains('disconnected'); }",
+        timeout=10000,
+    )
     yield pg
     await context.close()
 

@@ -179,7 +179,7 @@ async def _wait_for_response(
 
         # Auto-approve pending approvals so the loop doesn't stall
         if auto_approve:
-            pending = history.get("pending_approval")
+            pending = history.get("pending_gate")
             if pending:
                 request_id = pending.get("request_id", "")
                 if request_id:

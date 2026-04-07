@@ -2681,8 +2681,12 @@ impl ExtensionManager {
         // 100 MB cap on decompressed entry size to prevent decompression bombs
         const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024;
 
+        // Archives may use either underscored (canonical) or hyphenated (legacy)
+        // filenames, so accept both forms.
         let wasm_filename = format!("{}.wasm", name);
+        let alt_wasm_filename = format!("{}.wasm", name.replace('_', "-"));
         let caps_filename = format!("{}.capabilities.json", name);
+        let alt_caps_filename = format!("{}.capabilities.json", name.replace('_', "-"));
         let mut found_wasm = false;
 
         let entries = archive
@@ -2713,14 +2717,14 @@ impl ExtensionManager {
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
 
-            if filename == wasm_filename {
+            if filename == wasm_filename || filename == alt_wasm_filename {
                 let mut data = Vec::with_capacity(entry.size() as usize);
                 std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 std::fs::write(target_wasm, &data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 found_wasm = true;
-            } else if filename == caps_filename {
+            } else if filename == caps_filename || filename == alt_caps_filename {
                 let mut data = Vec::with_capacity(entry.size() as usize);
                 std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
@@ -9428,6 +9432,10 @@ mod tests {
         // have their colon URL-encoded to %3A, as this breaks the validation endpoint.
         // Previously: form_urlencoded::byte_serialize encoded the token, causing 404s.
         // Fixed by removing URL-encoding and using the token directly.
+        //
+        // Hold the env mutex so concurrent tests that override
+        // IRONCLAW_TEST_TELEGRAM_API_BASE_URL don't change the base URL mid-read.
+        let _guard = crate::config::helpers::lock_env();
         let token = "123456789:AABBccDDeeFFgg_Test-Token";
 
         let url = telegram_bot_api_url(token, "getMe");
