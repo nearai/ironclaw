@@ -647,7 +647,9 @@ pub struct SkillSearchResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct SkillInstallRequest {
-    pub name: String,
+    /// Skill name or slug. Required for catalog installs; optional when `url`
+    /// or `content` is provided (the name is parsed from the SKILL.md content).
+    pub name: Option<String>,
     /// Registry slug (e.g. "owner/skill-name"). Preferred over `name` for
     /// constructing the download URL when fetching from ClawHub.
     pub slug: Option<String>,

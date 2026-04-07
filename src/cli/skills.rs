@@ -71,7 +71,7 @@ async fn dispatch_skills_command(cmd: SkillsCommand, config: &SkillsConfig) -> a
             if !config.clawhub_enabled {
                 anyhow::bail!(
                     "ClawHub registry is disabled (CLAWHUB_ENABLED=false). \
-                     Use 'ironclaw skills install --url <url>' for direct installs."
+                     Local skill management (list, info) is still available."
                 );
             }
             cmd_search(&query, json).await

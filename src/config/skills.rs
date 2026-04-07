@@ -12,7 +12,10 @@ use crate::settings::Settings;
 pub struct SkillsConfig {
     /// Whether the skills system is enabled.
     pub enabled: bool,
-    /// Whether the public ClawHub registry is accessible.
+    /// Whether the public ClawHub registry is accessible. When `false`, both
+    /// catalog lookups and URL-based skill installs are blocked (we cannot
+    /// distinguish a direct URL from a ClawHub mirror), leaving only inline
+    /// `content` installs available.
     pub clawhub_enabled: bool,
     /// Directory containing user-placed skills (default: ~/.ironclaw/skills/).
     /// Skills here are loaded with `Trusted` trust level.

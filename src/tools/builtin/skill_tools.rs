@@ -622,37 +622,54 @@ impl Tool for SkillInstallTool {
     }
 
     fn description(&self) -> &str {
-        "Install a skill from SKILL.md content, a URL, or by name from the ClawHub catalog."
+        if self.catalog.is_some() {
+            "Install a skill from SKILL.md content, a URL, or by name from the ClawHub catalog."
+        } else {
+            "Install a skill from SKILL.md content."
+        }
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Skill name or slug (from search results)"
-                },
-                "slug": {
-                    "type": "string",
-                    "description": "Registry slug from catalog search results; preferred when installing from ClawHub"
-                },
-                "url": {
-                    "type": "string",
-                    "description": "Direct URL to a SKILL.md file"
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Raw SKILL.md content to install directly"
-                },
-                "install_dependencies": {
-                    "type": "boolean",
-                    "description": "When true, also install companion skills declared in requires.skills. Defaults to false so dependency installs stay explicit in the approved tool call.",
-                    "default": false
+        if self.catalog.is_some() {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Skill name or slug (from search results)"
+                    },
+                    "slug": {
+                        "type": "string",
+                        "description": "Registry slug from catalog search results; preferred when installing from ClawHub"
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "Direct URL to a SKILL.md file"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Raw SKILL.md content to install directly"
+                    },
+                    "install_dependencies": {
+                        "type": "boolean",
+                        "description": "When true, also install companion skills declared in requires.skills. Defaults to false so dependency installs stay explicit in the approved tool call.",
+                        "default": false
+                    }
                 }
-            },
-            "required": ["name"]
-        })
+            })
+        } else {
+            // Disabled mode: only content installs allowed
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "Raw SKILL.md content to install directly"
+                    }
+                },
+                "required": ["content"]
+            })
+        }
     }
 
     async fn execute(
@@ -661,7 +678,10 @@ impl Tool for SkillInstallTool {
         _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let name = require_str(&params, "name")?;
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
         let install_dependencies = params
             .get("install_dependencies")
             .and_then(|v| v.as_bool())
@@ -678,7 +698,7 @@ impl Tool for SkillInstallTool {
         // shortcut, an agent that mis-interprets an active persona bundle
         // as "needs to be installed" will trigger a 404 against the
         // ClawHub registry for skills that exist only locally.
-        {
+        if let Some(name) = name {
             let guard = self
                 .registry
                 .read()
@@ -710,6 +730,12 @@ impl Tool for SkillInstallTool {
             fetch_skill_content(url).await.map_err(ToolError::from)?
         } else if let Some(ref catalog) = self.catalog {
             // Look up in catalog and fetch
+            let name = name.ok_or_else(|| {
+                ToolError::ExecutionFailed(
+                    "Provide 'name' (for catalog lookup), 'url', or 'content' to install a skill."
+                        .into(),
+                )
+            })?;
             let download_key = resolve_catalog_download_key(
                 catalog.as_ref(),
                 name,
@@ -725,8 +751,14 @@ impl Tool for SkillInstallTool {
                 .await
                 .map_err(ToolError::from)?
         } else {
+            // ClawHub disabled: only content installs are allowed. URL fetches
+            // are also blocked because we cannot distinguish a direct URL from
+            // a ClawHub mirror or proxy — disabling ClawHub must disable all
+            // remote skill fetching to honour the operator's intent.
             return Err(ToolError::ExecutionFailed(
-                "ClawHub registry is disabled. Provide a 'url' or 'content' parameter.".into(),
+                "ClawHub registry is disabled (CLAWHUB_ENABLED=false). \
+                 Only 'content' installs are available."
+                    .into(),
             ));
         };
 
@@ -1356,6 +1388,11 @@ mod tests {
         assert!(schema["properties"].get("slug").is_some());
         assert!(schema["properties"].get("url").is_some());
         assert!(schema["properties"].get("content").is_some());
+        // name should not be required (it is optional for URL/content installs)
+        assert!(
+            schema.get("required").is_none(),
+            "skill_install should have no required parameters"
+        );
     }
 
     #[test]
@@ -1431,7 +1468,74 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_skill_install_without_catalog_rejects_name_only() {
+    async fn test_skill_install_rejects_empty_params() {
+        let tool = SkillInstallTool::new(test_registry(), Some(test_catalog()));
+        let ctx = crate::context::JobContext::default();
+        let result = tool.execute(serde_json::json!({}), &ctx).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Provide") || err.contains("name"),
+            "Expected helpful error when no params given, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_skill_install_schema_disabled_only_content() {
+        let tool = SkillInstallTool::new(test_registry(), None);
+        let schema = tool.parameters_schema();
+        assert!(
+            schema["properties"].get("content").is_some(),
+            "disabled schema should include content"
+        );
+        assert!(
+            schema["properties"].get("url").is_none(),
+            "disabled schema should not include url"
+        );
+        assert!(
+            schema["properties"].get("name").is_none(),
+            "disabled schema should not include name"
+        );
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["content"]),
+            "content should be required when disabled"
+        );
+    }
+
+    #[test]
+    fn test_skill_install_description_disabled() {
+        let tool = SkillInstallTool::new(test_registry(), None);
+        assert!(
+            !tool.description().contains("URL"),
+            "disabled description should not mention URL"
+        );
+        assert!(
+            !tool.description().contains("ClawHub"),
+            "disabled description should not mention ClawHub"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_skill_install_blocks_url_when_clawhub_disabled() {
+        let tool = SkillInstallTool::new(test_registry(), None);
+        let ctx = crate::context::JobContext::default();
+        let result = tool
+            .execute(
+                serde_json::json!({"url": "https://example.com/SKILL.md"}),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("disabled"),
+            "Expected disabled error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_skill_install_blocks_name_when_clawhub_disabled() {
         let tool = SkillInstallTool::new(test_registry(), None);
         let ctx = crate::context::JobContext::default();
         let result = tool
@@ -1440,8 +1544,8 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("ClawHub") || err.contains("disabled"),
-            "Expected ClawHub disabled error, got: {err}"
+            err.contains("disabled"),
+            "Expected disabled error, got: {err}"
         );
     }
 

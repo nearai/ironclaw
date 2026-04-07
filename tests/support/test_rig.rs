@@ -873,6 +873,7 @@ impl TestRigBuilder {
         config.agent.max_tool_iterations = max_tool_iterations;
         config.safety.injection_check_enabled = injection_check;
         config.skills.enabled = enable_skills;
+        config.skills.clawhub_enabled = !clawhub_disabled;
         if let Some(v) = auto_approve_tools {
             config.agent.auto_approve_tools = v;
         }
@@ -1069,7 +1070,6 @@ impl TestRigBuilder {
                     .register_skill_tools(Arc::clone(&registry), catalog.clone());
                 components.skill_registry = Some(registry);
                 components.skill_catalog = catalog;
-                components.config.skills.clawhub_enabled = !clawhub_disabled;
             }
 
             // Register any extra test-specific tools.

@@ -311,6 +311,21 @@ impl ToolRegistry {
         tools.remove(&key)
     }
 
+    /// Unregister a tool (sync version for startup/registration paths).
+    pub fn unregister_sync(&self, name: &str) {
+        match self.tools.try_write() {
+            Ok(mut tools) => {
+                tools.remove(name);
+            }
+            Err(_) => {
+                tracing::debug!(
+                    tool = name,
+                    "unregister_sync: lock contested, skipping removal"
+                );
+            }
+        }
+    }
+
     /// Get a tool by name.
     ///
     /// Falls back to a hyphen→underscore alias when the exact name is not
@@ -743,7 +758,7 @@ impl ToolRegistry {
     ///
     /// These allow the LLM to manage prompt-level skills through conversation.
     /// When `catalog` is `None` (ClawHub disabled), `skill_search` is omitted
-    /// and `skill_install` only accepts direct URL or content.
+    /// and `skill_install` only accepts content installs.
     pub fn register_skill_tools(
         &self,
         registry: Arc<std::sync::RwLock<SkillRegistry>>,
@@ -765,6 +780,10 @@ impl ToolRegistry {
                 Arc::clone(catalog),
             )));
             count += 1;
+        } else {
+            // Ensure skill_search is removed if previously registered (e.g. when
+            // re-registering with catalog disabled after an initial registration).
+            self.unregister_sync("skill_search");
         }
 
         tracing::debug!(
@@ -1770,6 +1789,30 @@ mod tests {
         assert!(
             !registry.has("skill_search").await,
             "skill_search should not be registered without catalog"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_register_skill_tools_without_catalog_removes_prior_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = ToolRegistry::new();
+        let sr = Arc::new(std::sync::RwLock::new(ironclaw_skills::SkillRegistry::new(
+            dir.path().to_path_buf(),
+        )));
+        let catalog = Arc::new(ironclaw_skills::catalog::SkillCatalog::with_url(
+            "http://127.0.0.1:1",
+        ));
+        // First register with catalog (installs skill_search)
+        registry.register_skill_tools(Arc::clone(&sr), Some(catalog));
+        assert!(
+            registry.has("skill_search").await,
+            "skill_search should be registered with catalog"
+        );
+        // Re-register without catalog (should remove skill_search)
+        registry.register_skill_tools(sr, None);
+        assert!(
+            !registry.has("skill_search").await,
+            "skill_search should be removed when re-registering without catalog"
         );
     }
 }

@@ -691,52 +691,55 @@ impl Agent {
     ) -> Result<SubmissionResult, Error> {
         match command {
             "help" => {
-                let mut skills_section =
-                    String::from("Skills:\n  /skills             List installed skills\n");
-                if self.skill_catalog().is_some() {
-                    skills_section.push_str("  /skills search <q>  Search ClawHub registry\n");
-                }
+                let skills_search = if self.skill_catalog().is_some() {
+                    "  /skills search <q>  Search ClawHub registry\n"
+                } else {
+                    ""
+                };
                 Ok(SubmissionResult::response(format!(
-                    "System:\n\
-                     \x20 /help             Show this help\n\
-                     \x20 /model [name]     Show or switch the active model\n\
-                     \x20 /version          Show version info\n\
-                     \x20 /tools            List available tools\n\
-                     \x20 /debug            Toggle debug mode\n\
-                     \x20 /reasoning [N|all] Show agent reasoning for turns\n\
-                     \x20 /ping             Connectivity check\n\
-                     \n\
-                     Jobs:\n\
-                     \x20 /job <desc>       Create a new job\n\
-                     \x20 /status [id]      Check job status\n\
-                     \x20 /cancel <id>      Cancel a job\n\
-                     \x20 /list             List all jobs\n\
-                     \n\
-                     Plans:\n\
-                     \x20 /plan <desc>      Create an execution plan\n\
-                     \x20 /plan approve [ref] Approve and start execution\n\
-                     \x20 /plan status [ref]  Check plan progress\n\
-                     \x20 /plan revise [ref]  Revise with feedback\n\
-                     \x20 /plan list        List all plans\n\
-                     \n\
-                     Session:\n\
-                     \x20 /undo             Undo last turn\n\
-                     \x20 /redo             Redo undone turn\n\
-                     \x20 /compact          Compress context window\n\
-                     \x20 /clear            Clear current thread\n\
-                     \x20 /interrupt        Stop current operation\n\
-                     \x20 /new              New conversation thread\n\
-                     \x20 /thread <id>      Switch to thread\n\
-                     \x20 /resume           Resume a previous conversation\n\
-                     \n\
-                     {skills_section}\n\
-                     Agent:\n\
-                     \x20 /heartbeat        Run heartbeat check\n\
-                     \x20 /summarize        Summarize current thread\n\
-                     \x20 /suggest          Suggest next steps\n\
-                     \x20 /restart          Gracefully restart the process\n\
-                     \n\
-                     \x20 /quit             Exit"
+                    "\
+System:
+  /help             Show this help
+  /model [name]     Show or switch the active model
+  /version          Show version info
+  /tools            List available tools
+  /debug            Toggle debug mode
+  /reasoning [N|all] Show agent reasoning for turns
+  /ping             Connectivity check
+
+Jobs:
+  /job <desc>       Create a new job
+  /status [id]      Check job status
+  /cancel <id>      Cancel a job
+  /list             List all jobs
+
+Plans:
+  /plan <desc>      Create an execution plan
+  /plan approve [ref] Approve and start execution
+  /plan status [ref]  Check plan progress
+  /plan revise [ref]  Revise with feedback
+  /plan list        List all plans
+
+Session:
+  /undo             Undo last turn
+  /redo             Redo undone turn
+  /compact          Compress context window
+  /clear            Clear current thread
+  /interrupt        Stop current operation
+  /new              New conversation thread
+  /thread <id>      Switch to thread
+  /resume           Resume a previous conversation
+
+Skills:
+  /skills             List installed skills
+{skills_search}\
+Agent:
+  /heartbeat        Run heartbeat check
+  /summarize        Summarize current thread
+  /suggest          Suggest next steps
+  /restart          Gracefully restart the process
+
+  /quit             Exit"
                 )))
             }
 
