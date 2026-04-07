@@ -20,6 +20,7 @@ use crate::types::message::ThreadMessage;
 use crate::types::project::ProjectId;
 use crate::types::thread::{ThreadConfig, ThreadId, ThreadState, ThreadType};
 
+#[derive(Clone, Copy)]
 enum ActiveForeground {
     Running(ThreadId),
     Resumable(ThreadId),
@@ -126,26 +127,41 @@ impl ConversationManager {
         user_id: &str,
         thread_config: ThreadConfig,
     ) -> Result<ThreadId, EngineError> {
-        let mut convs = self.conversations.write().await;
-        let conv = convs.get_mut(&conversation_id).ok_or(EngineError::Store {
-            reason: format!("conversation {conversation_id} not found"),
-        })?;
+        // Phase 1: synchronous in-memory reads under the write lock — no I/O.
+        // Extract everything find_active_foreground needs before releasing the
+        // lock so that the async I/O calls happen lock-free.
+        let (active_thread_ids, entries_snapshot, channel_name) = {
+            let mut convs = self.conversations.write().await;
+            let conv = convs.get_mut(&conversation_id).ok_or(EngineError::Store {
+                reason: format!("conversation {conversation_id} not found"),
+            })?;
 
-        // Tenant isolation: verify the requesting user owns this conversation.
-        if conv.user_id != user_id {
-            return Err(EngineError::AccessDenied {
-                user_id: user_id.to_string(),
-                entity: format!("conversation {conversation_id}"),
-            });
-        }
+            // Tenant isolation: verify the requesting user owns this conversation.
+            if conv.user_id != user_id {
+                return Err(EngineError::AccessDenied {
+                    user_id: user_id.to_string(),
+                    entity: format!("conversation {conversation_id}"),
+                });
+            }
 
-        // Record the user entry
-        conv.add_entry(ConversationEntry::user(content));
+            // Record the user entry while we still hold the lock.
+            conv.add_entry(ConversationEntry::user(content));
 
-        // Check for an active foreground thread
-        let active_foreground = self.find_active_foreground(conv).await;
+            // Snapshot everything find_active_foreground needs so we can drop
+            // the lock before making any async calls.
+            (
+                conv.active_threads.clone(),
+                conv.entries.clone(),
+                conv.channel.clone(),
+            )
+        }; // write lock released here — no async awaits were held above
 
-        match active_foreground {
+        // Phase 2: async I/O outside the lock to find the active foreground
+        // thread (calls thread_manager.is_running and store.load_thread).
+        let active_foreground = self.find_active_foreground(&active_thread_ids).await;
+
+        // Phase 3: async I/O outside the lock — thread operations.
+        let thread_id = match active_foreground {
             Some(ActiveForeground::Running(thread_id)) => {
                 debug!(
                     conversation_id = %conversation_id,
@@ -155,8 +171,7 @@ impl ConversationManager {
                 self.thread_manager
                     .inject_message(thread_id, user_id, ThreadMessage::user(content))
                     .await?;
-                self.store.save_conversation(conv).await?;
-                Ok(thread_id)
+                thread_id
             }
             Some(ActiveForeground::Resumable(thread_id)) => {
                 debug!(
@@ -173,18 +188,14 @@ impl ConversationManager {
                         None,
                     )
                     .await?;
-                conv.add_entry(ConversationEntry::system_for_thread(
-                    thread_id,
-                    "Thread resumed",
-                ));
-                self.store.save_conversation(conv).await?;
-                Ok(thread_id)
+                thread_id
             }
             None => {
-                // Build conversation history from prior entries for context continuity
-                let history = build_history_from_entries(&conv.entries);
+                // Build conversation history from prior entries for context continuity.
+                // Use the snapshot taken under the lock (already includes the user entry).
+                let history = build_history_from_entries(&entries_snapshot);
 
-                // Spawn new foreground thread with conversation history
+                // Spawn new foreground thread with conversation history.
                 let thread_id = self
                     .thread_manager
                     .spawn_thread_with_history(
@@ -201,31 +212,60 @@ impl ConversationManager {
                 // Store the base channel name in thread metadata so the
                 // orchestrator can populate `source_channel` in the execution
                 // context (used by mission_create to default notify_channels).
-                let base_channel = conv
-                    .channel
+                let base_channel = channel_name
                     .split(':')
                     .next()
-                    .unwrap_or(&conv.channel)
+                    .unwrap_or(&channel_name)
                     .to_string();
                 self.thread_manager
                     .set_thread_metadata(thread_id, "source_channel", &base_channel)
                     .await;
 
-                conv.track_thread(thread_id);
-                conv.add_entry(ConversationEntry::system_for_thread(
-                    thread_id,
-                    "Thread started",
-                ));
-                self.store.save_conversation(conv).await?;
-
-                debug!(
-                    conversation_id = %conversation_id,
-                    thread_id = %thread_id,
-                    "spawned new foreground thread"
-                );
-                Ok(thread_id)
+                thread_id
             }
-        }
+        };
+
+        // Phase 4: re-acquire the write lock for the final in-memory mutations
+        // (track_thread / add_entry) and take the snapshot for DB persistence.
+        let conv_to_save = {
+            let mut convs = self.conversations.write().await;
+            let conv = convs.get_mut(&conversation_id).ok_or(EngineError::Store {
+                reason: format!("conversation {conversation_id} not found"),
+            })?;
+
+            match active_foreground {
+                Some(ActiveForeground::Running(_)) => {
+                    // No additional in-memory mutation needed; entry was already
+                    // added in Phase 1.
+                }
+                Some(ActiveForeground::Resumable(_)) => {
+                    conv.add_entry(ConversationEntry::system_for_thread(
+                        thread_id,
+                        "Thread resumed",
+                    ));
+                }
+                None => {
+                    conv.track_thread(thread_id);
+                    conv.add_entry(ConversationEntry::system_for_thread(
+                        thread_id,
+                        "Thread started",
+                    ));
+                    debug!(
+                        conversation_id = %conversation_id,
+                        thread_id = %thread_id,
+                        "spawned new foreground thread"
+                    );
+                }
+            }
+
+            conv.clone()
+        }; // write lock released here
+
+        // Phase 5: persist outside the lock so concurrent tenants are not
+        // serialized through this slow workspace/DB write.
+        self.store.save_conversation(&conv_to_save).await?;
+
+        Ok(thread_id)
     }
 
     /// Record a thread's outcome in its conversation.
@@ -328,9 +368,17 @@ impl ConversationManager {
             .collect()
     }
 
-    /// Find an active foreground thread in a conversation.
-    async fn find_active_foreground(&self, conv: &ConversationSurface) -> Option<ActiveForeground> {
-        for &tid in &conv.active_threads {
+    /// Find an active foreground thread given a snapshot of active thread IDs.
+    ///
+    /// Accepts a plain slice rather than a `&ConversationSurface` so callers
+    /// can drop the conversations write lock before invoking this method —
+    /// it performs async I/O (is_running, load_thread) that must not be held
+    /// under any lock.
+    async fn find_active_foreground(
+        &self,
+        active_thread_ids: &[ThreadId],
+    ) -> Option<ActiveForeground> {
+        for &tid in active_thread_ids {
             if self.thread_manager.is_running(tid).await {
                 return Some(ActiveForeground::Running(tid));
             }
