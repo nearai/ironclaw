@@ -7,7 +7,10 @@ use ironclaw_engine::{
     TokenUsage,
 };
 
-use crate::llm::{ChatMessage, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolDefinition};
+use crate::llm::{
+    ChatMessage, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolDefinition,
+    sanitize_tool_messages,
+};
 
 /// Wraps an existing `LlmProvider` to implement the engine's `LlmBackend` trait.
 pub struct LlmBridgeAdapter {
@@ -47,7 +50,8 @@ impl LlmBackend for LlmBridgeAdapter {
         let provider = self.provider_for_depth(config.depth);
 
         // Convert messages
-        let chat_messages: Vec<ChatMessage> = messages.iter().map(thread_msg_to_chat).collect();
+        let mut chat_messages: Vec<ChatMessage> = messages.iter().map(thread_msg_to_chat).collect();
+        sanitize_tool_messages(&mut chat_messages);
 
         // Convert actions to tool definitions
         let tools: Vec<ToolDefinition> = if config.force_text {
@@ -263,6 +267,200 @@ fn extract_code_block(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
+
+    use ironclaw_engine::{ActionCall, ActionDef, EffectType, LlmResponse, ThreadMessage};
+
+    use crate::error::LlmError;
+    use crate::llm::ToolCompletionResponse;
+
+    #[derive(Default)]
+    struct CapturingProviderState {
+        completion_requests: tokio::sync::Mutex<Vec<Vec<ChatMessage>>>,
+        tool_requests: tokio::sync::Mutex<Vec<Vec<ChatMessage>>>,
+    }
+
+    struct CapturingProvider {
+        state: Arc<CapturingProviderState>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for CapturingProvider {
+        fn model_name(&self) -> &str {
+            "capturing-provider"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            req: crate::llm::CompletionRequest,
+        ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            self.state
+                .completion_requests
+                .lock()
+                .await
+                .push(req.messages);
+
+            Ok(crate::llm::CompletionResponse {
+                content: "ok".to_string(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: crate::llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            req: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            self.state.tool_requests.lock().await.push(req.messages);
+
+            Ok(ToolCompletionResponse {
+                content: Some("ok".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: crate::llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    fn test_action(name: &str) -> ActionDef {
+        ActionDef {
+            name: name.to_string(),
+            description: format!("Test action {name}"),
+            parameters_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+            effects: vec![EffectType::ReadExternal],
+            requires_approval: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_rewrites_orphaned_action_results_before_provider_call() {
+        let state = Arc::new(CapturingProviderState::default());
+        let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
+            state: state.clone(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+        let messages = vec![
+            ThreadMessage::user("Find the docs"),
+            ThreadMessage::assistant("I checked a tool earlier."),
+            ThreadMessage::action_result("call_missing", "search", "result payload"),
+        ];
+
+        let output = adapter
+            .complete(
+                &messages,
+                &[test_action("search")],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        match output.response {
+            LlmResponse::Text(ref text) => assert_eq!(text, "ok"),
+            other => panic!("expected text response, got {other:?}"),
+        }
+
+        let tool_requests = state.tool_requests.lock().await;
+        let sent = tool_requests.last().unwrap();
+
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent[2].role, Role::User);
+        assert_eq!(sent[2].content, "[Tool `search` returned: result payload]");
+        assert!(sent[2].tool_call_id.is_none());
+        assert!(sent[2].name.is_none());
+    }
+
+    #[tokio::test]
+    async fn complete_without_tools_rewrites_orphaned_action_results_before_provider_call() {
+        let state = Arc::new(CapturingProviderState::default());
+        let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
+            state: state.clone(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+        let messages = vec![
+            ThreadMessage::user("Find the docs"),
+            ThreadMessage::assistant("I checked a tool earlier."),
+            ThreadMessage::action_result("call_missing", "search", "result payload"),
+        ];
+
+        let output = adapter
+            .complete(&messages, &[], &LlmCallConfig::default())
+            .await
+            .unwrap();
+
+        match output.response {
+            LlmResponse::Text(ref text) => assert_eq!(text, "ok"),
+            other => panic!("expected text response, got {other:?}"),
+        }
+
+        let completion_requests = state.completion_requests.lock().await;
+        let sent = completion_requests.last().unwrap();
+
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent[2].role, Role::User);
+        assert_eq!(sent[2].content, "[Tool `search` returned: result payload]");
+        assert!(sent[2].tool_call_id.is_none());
+        assert!(sent[2].name.is_none());
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_preserves_matched_action_results() {
+        let state = Arc::new(CapturingProviderState::default());
+        let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
+            state: state.clone(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+        let messages = vec![
+            ThreadMessage::user("Find the docs"),
+            ThreadMessage::assistant_with_actions(
+                Some("Using search".to_string()),
+                vec![ActionCall {
+                    id: "call_1".to_string(),
+                    action_name: "search".to_string(),
+                    parameters: serde_json::json!({"q": "docs"}),
+                }],
+            ),
+            ThreadMessage::action_result("call_1", "search", "result payload"),
+        ];
+
+        let output = adapter
+            .complete(
+                &messages,
+                &[test_action("search")],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        match output.response {
+            LlmResponse::Text(ref text) => assert_eq!(text, "ok"),
+            other => panic!("expected text response, got {other:?}"),
+        }
+
+        let tool_requests = state.tool_requests.lock().await;
+        let sent = tool_requests.last().unwrap();
+
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent[2].role, Role::Tool);
+        assert_eq!(sent[2].content, "result payload");
+        assert_eq!(sent[2].tool_call_id.as_deref(), Some("call_1"));
+        assert_eq!(sent[2].name.as_deref(), Some("search"));
+    }
 
     // ── extract_code_block tests ────────────────────────────
 

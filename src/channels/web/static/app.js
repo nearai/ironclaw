@@ -68,7 +68,7 @@ document.getElementById('settings-theme-toggle')?.addEventListener('click', () =
   const btn = document.getElementById('settings-theme-toggle');
   if (btn) {
     const mode = localStorage.getItem('ironclaw-theme') || 'system';
-    btn.textContent = 'Theme: ' + mode.charAt(0).toUpperCase() + mode.slice(1);
+    btn.textContent = I18n.t('theme.label', { mode: mode.charAt(0).toUpperCase() + mode.slice(1) });
   }
 });
 
@@ -105,6 +105,7 @@ const STREAM_DEBOUNCE_MS = 50;
 let _connectionLostTimer = null;
 let _connectionLostAt = null;
 let _reconnectAttempts = 0;
+let _lastSseEventId = null;
 
 // --- Send Cooldown State ---
 let _sendCooldown = false;
@@ -226,7 +227,7 @@ function authenticate() {
   const connectBtn = document.getElementById('auth-connect-btn');
   if (connectBtn) {
     connectBtn.disabled = true;
-    connectBtn.textContent = 'Connecting...';
+    connectBtn.textContent = I18n.t('auth.connecting');
   }
 
   // Test the token against the health-ish endpoint (chat/threads requires auth)
@@ -244,7 +245,7 @@ function authenticate() {
       // Reset Connect button on error
       if (connectBtn) {
         connectBtn.disabled = false;
-        connectBtn.textContent = 'Connect';
+        connectBtn.textContent = I18n.t('auth.connect');
       }
     });
 }
@@ -329,7 +330,7 @@ fetch('/auth/providers', { credentials: 'include' })
 async function authenticateWithNear() {
   var nearBtn = document.getElementById('auth-near-btn');
   var errEl = document.getElementById('auth-error');
-  if (nearBtn) { nearBtn.disabled = true; nearBtn.textContent = 'Connecting wallet...'; }
+  if (nearBtn) { nearBtn.disabled = true; nearBtn.textContent = I18n.t('auth.connectingWallet'); }
   if (errEl) errEl.textContent = '';
 
   try {
@@ -347,7 +348,7 @@ async function authenticateWithNear() {
     var connector = window._nearConnector;
 
     // 3. Connect wallet and request signature.
-    if (nearBtn) nearBtn.textContent = 'Sign with wallet...';
+    if (nearBtn) nearBtn.textContent = I18n.t('auth.signWithWallet');
     var wallet = await connector.connect();
     var accounts = await wallet.getAccounts();
     if (!accounts || accounts.length === 0) throw new Error('No NEAR account found');
@@ -364,7 +365,7 @@ async function authenticateWithNear() {
     });
 
     // 4. Send signature to server for verification.
-    if (nearBtn) nearBtn.textContent = 'Verifying...';
+    if (nearBtn) nearBtn.textContent = I18n.t('auth.verifying');
     var verifyResp = await fetch('/auth/near/verify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -390,7 +391,7 @@ async function authenticateWithNear() {
     initApp();
   } catch (err) {
     if (errEl) errEl.textContent = err.message || 'NEAR wallet login failed';
-    if (nearBtn) { nearBtn.disabled = false; nearBtn.textContent = 'Sign in with NEAR'; }
+    if (nearBtn) { nearBtn.disabled = false; nearBtn.textContent = I18n.t('auth.social.near'); }
   }
 }
 
@@ -551,7 +552,14 @@ function updateRestartButtonVisibility() {
 
 // --- SSE ---
 
-function connectSSE() {
+function rememberSseEventId(event) {
+  if (!event || !event.lastEventId) return;
+  _lastSseEventId = event.lastEventId;
+  window.__e2e = window.__e2e || {};
+  window.__e2e.lastSseEventId = event.lastEventId;
+}
+
+function connectSSE(lastEventIdOverride) {
   if (eventSource) eventSource.close();
 
   // In OIDC mode the reverse proxy provides auth; no query token needed.
@@ -559,7 +567,12 @@ function connectSSE() {
     ? '/api/chat/events?token=' + encodeURIComponent(token)
     : '/api/chat/events';
   if (window.isDebugMode) {
-    chatSseUrl += (chatSseUrl.indexOf('?') !== -1 ? '&' : '?') + 'debug=true';
+    chatSseUrl += (chatSseUrl.includes('?') ? '&' : '?') + 'debug=true';
+  }
+  const lastEventId = lastEventIdOverride || _lastSseEventId;
+  if (lastEventId) {
+    chatSseUrl += (chatSseUrl.includes('?') ? '&' : '?')
+      + 'last_event_id=' + encodeURIComponent(lastEventId);
   }
   eventSource = new EventSource(chatSseUrl);
 
@@ -567,6 +580,13 @@ function connectSSE() {
   if (typeof window.onDebugSSEConnect === 'function') {
     window.onDebugSSEConnect(eventSource);
   }
+
+  const addTrackedEventListener = (eventType, handler) => {
+    eventSource.addEventListener(eventType, (event) => {
+      rememberSseEventId(event);
+      handler(event);
+    });
+  };
 
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
@@ -582,7 +602,7 @@ function connectSSE() {
     const lostBanner = document.getElementById('connection-banner');
     if (lostBanner) {
       const wasDisconnectedLong = _connectionLostAt && (Date.now() - _connectionLostAt > 10000);
-      lostBanner.textContent = 'Reconnected';
+      lostBanner.textContent = I18n.t('connection.reconnected');
       lostBanner.className = 'connection-banner connection-banner-success';
       setTimeout(() => { lostBanner.remove(); }, 2000);
       _connectionLostAt = null;
@@ -619,7 +639,7 @@ function connectSSE() {
     // Update existing banner with attempt count
     const existingBanner = document.getElementById('connection-banner');
     if (existingBanner && existingBanner.classList.contains('connection-banner-warning')) {
-      existingBanner.textContent = 'Connection lost. Reconnecting... (attempt ' + _reconnectAttempts + ')';
+      existingBanner.textContent = I18n.t('connection.reconnecting', { count: _reconnectAttempts });
     }
 
     // Start connection-lost banner timer (3s delay)
@@ -630,13 +650,13 @@ function connectSSE() {
         // Only show if still disconnected
         const dot = document.getElementById('sse-dot');
         if (dot?.classList.contains('disconnected')) {
-          showConnectionBanner('Connection lost. Reconnecting... (attempt ' + _reconnectAttempts + ')', 'warning');
+          showConnectionBanner(I18n.t('connection.reconnecting', { count: _reconnectAttempts }), 'warning');
         }
       }, 3000);
     }
   };
 
-  eventSource.addEventListener('response', (e) => {
+  addTrackedEventListener('response', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) {
       if (data.thread_id) {
@@ -670,7 +690,7 @@ function connectSSE() {
     }
   });
 
-  eventSource.addEventListener('thinking', (e) => {
+  addTrackedEventListener('thinking', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) {
       if (data.thread_id) debouncedLoadThreads();
@@ -680,7 +700,7 @@ function connectSSE() {
     showActivityThinking(data.message);
   });
 
-  eventSource.addEventListener('suggestions', (e) => {
+  addTrackedEventListener('suggestions', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
     if (data.suggestions && data.suggestions.length > 0) {
@@ -688,13 +708,13 @@ function connectSSE() {
     }
   });
 
-  eventSource.addEventListener('tool_started', (e) => {
+  addTrackedEventListener('tool_started', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
     addToolCard(data.name);
   });
 
-  eventSource.addEventListener('tool_completed', (e) => {
+  addTrackedEventListener('tool_completed', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
     completeToolCard(data.name, data.success, data.error, data.parameters);
@@ -705,13 +725,13 @@ function connectSSE() {
     }
   });
 
-  eventSource.addEventListener('tool_result', (e) => {
+  addTrackedEventListener('tool_result', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
     setToolCardOutput(data.name, data.preview);
   });
 
-  eventSource.addEventListener('stream_chunk', (e) => {
+  addTrackedEventListener('stream_chunk', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
     finalizeActivityGroup();
@@ -742,7 +762,7 @@ function connectSSE() {
     }
   });
 
-  eventSource.addEventListener('status', (e) => {
+  addTrackedEventListener('status', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) {
       if (data.thread_id) debouncedLoadThreads();
@@ -758,12 +778,12 @@ function connectSSE() {
     }
   });
 
-  eventSource.addEventListener('job_started', (e) => {
+  addTrackedEventListener('job_started', (e) => {
     const data = JSON.parse(e.data);
     showJobCard(data);
   });
 
-  eventSource.addEventListener('approval_needed', (e) => {
+  addTrackedEventListener('approval_needed', (e) => {
     const data = JSON.parse(e.data);
     const hasThread = !!data.thread_id;
     const forCurrentThread = !hasThread || isCurrentThread(data.thread_id);
@@ -780,36 +800,36 @@ function connectSSE() {
     if (currentTab === 'settings') refreshCurrentSettingsTab();
   });
 
-  eventSource.addEventListener('auth_required', (e) => {
+  addTrackedEventListener('auth_required', (e) => {
     handleAuthRequired(JSON.parse(e.data));
   });
 
-  eventSource.addEventListener('auth_completed', (e) => {
+  addTrackedEventListener('auth_completed', (e) => {
     const data = JSON.parse(e.data);
     handleAuthCompleted(data);
   });
 
-  eventSource.addEventListener('gate_required', (e) => {
+  addTrackedEventListener('gate_required', (e) => {
     const data = JSON.parse(e.data);
     handleGateRequired(data);
   });
 
-  eventSource.addEventListener('gate_resolved', (e) => {
+  addTrackedEventListener('gate_resolved', (e) => {
     const data = JSON.parse(e.data);
     handleGateResolved(data);
   });
 
-  eventSource.addEventListener('extension_status', (e) => {
+  addTrackedEventListener('extension_status', (e) => {
     if (currentTab === 'settings') refreshCurrentSettingsTab();
   });
 
-  eventSource.addEventListener('image_generated', (e) => {
+  addTrackedEventListener('image_generated', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
     addGeneratedImage(data.data_url, data.path);
   });
 
-  eventSource.addEventListener('error', (e) => {
+  addTrackedEventListener('error', (e) => {
     if (e.data) {
       const data = JSON.parse(e.data);
       if (!isCurrentThread(data.thread_id)) return;
@@ -825,7 +845,7 @@ function connectSSE() {
     'job_status', 'job_result'
   ];
   for (const evtType of jobEventTypes) {
-    eventSource.addEventListener(evtType, (e) => {
+    addTrackedEventListener(evtType, (e) => {
       const data = JSON.parse(e.data);
       const jobId = data.job_id;
       if (!jobId) return;
@@ -849,7 +869,7 @@ function connectSSE() {
   }
 
   // Plan progress checklist
-  eventSource.addEventListener('plan_update', (e) => {
+  addTrackedEventListener('plan_update', (e) => {
     const data = JSON.parse(e.data);
     if (data.thread_id && !isCurrentThread(data.thread_id)) return;
     renderPlanChecklist(data);
@@ -920,7 +940,7 @@ function sendMessage() {
   removeWelcomeCard();
   const input = document.getElementById('chat-input');
   if (authFlowPending) {
-    showToast('Complete the auth step before sending chat messages.', 'info');
+    showToast(I18n.t('chat.authRequiredBeforeSend'), 'info');
     const tokenField = document.querySelector('.auth-card .auth-token-input input');
     if (tokenField) tokenField.focus();
     return;
@@ -951,7 +971,7 @@ function sendMessage() {
   }).catch((err) => {
     // Handle rate limiting (429)
     if (err.status === 429) {
-      showToast('Rate limited. Please wait.', 'error');
+      showToast(I18n.t('chat.rateLimited'), 'error');
       _sendCooldown = true;
       const sendBtn = document.getElementById('send-btn');
       if (sendBtn) sendBtn.disabled = true;
@@ -967,7 +987,7 @@ function sendMessage() {
       const retryLink = document.createElement('a');
       retryLink.className = 'retry-link';
       retryLink.href = '#';
-      retryLink.textContent = 'Retry';
+      retryLink.textContent = I18n.t('common.retry');
       retryLink.addEventListener('click', (e) => {
         e.preventDefault();
         if (userMsg.parentNode) userMsg.parentNode.removeChild(userMsg);
@@ -1024,11 +1044,11 @@ function handleImageFiles(files) {
   Array.from(files).forEach(file => {
     if (!file.type.startsWith('image/')) return;
     if (file.size > MAX_IMAGE_SIZE_BYTES) {
-      alert(`Image "${file.name}" exceeds 5 MB limit (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
+      alert(I18n.t('chat.imageTooBig', { name: file.name, size: (file.size / 1024 / 1024).toFixed(1) }));
       return;
     }
     if (stagedImages.length >= MAX_STAGED_IMAGES) {
-      alert(`Maximum ${MAX_STAGED_IMAGES} images allowed per message`);
+      alert(I18n.t('chat.maxImages', { n: MAX_STAGED_IMAGES }));
       return;
     }
     const reader = new FileReader();
@@ -1190,7 +1210,7 @@ function sendApprovalAction(requestId, action) {
     const actions = card.querySelector('.approval-actions');
     const label = document.createElement('span');
     label.className = 'approval-resolved';
-    const labelText = action === 'approve' ? 'Approved' : action === 'always' ? 'Always approved' : 'Denied';
+    const labelText = action === 'approve' ? I18n.t('approval.approved') : action === 'always' ? I18n.t('approval.alwaysApproved') : I18n.t('approval.denied');
     label.textContent = labelText;
     actions.appendChild(label);
     // Remove the card after showing the confirmation briefly
@@ -1251,11 +1271,11 @@ function copyMessage(btn) {
     || message.textContent
     || '';
   navigator.clipboard.writeText(text).then(() => {
-    btn.textContent = 'Copied';
-    setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
+    btn.textContent = I18n.t('message.copied');
+    setTimeout(() => { btn.textContent = I18n.t('message.copy'); }, 1200);
   }).catch(() => {
-    btn.textContent = 'Failed';
-    setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
+    btn.textContent = I18n.t('common.copyFailed');
+    setTimeout(() => { btn.textContent = I18n.t('message.copy'); }, 1200);
   });
 }
 
@@ -2257,8 +2277,8 @@ function createMessageElement(role, content) {
     const copyBtn = document.createElement('button');
     copyBtn.className = 'message-copy-btn';
     copyBtn.type = 'button';
-    copyBtn.setAttribute('aria-label', 'Copy message');
-    copyBtn.textContent = 'Copy';
+    copyBtn.setAttribute('aria-label', I18n.t('message.copy'));
+    copyBtn.textContent = I18n.t('message.copy');
     copyBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       copyMessage(copyBtn);
@@ -2334,8 +2354,8 @@ function removeScrollSpinner() {
 function threadTitle(thread) {
   if (thread.title) return thread.title;
   const ch = thread.channel || 'gateway';
-  if (thread.thread_type === 'heartbeat') return 'Heartbeat Alerts';
-  if (thread.thread_type === 'routine') return 'Routine';
+  if (thread.thread_type === 'heartbeat') return I18n.t('thread.heartbeatAlerts');
+  if (thread.thread_type === 'routine') return I18n.t('thread.routine');
   if (ch !== 'gateway') return ch.charAt(0).toUpperCase() + ch.slice(1);
   if (thread.turn_count === 0) return 'New chat';
   return thread.id.substring(0, 8);
@@ -2380,7 +2400,7 @@ function loadThreads() {
       const labelEl = document.getElementById('assistant-label');
       if (labelEl) {
         const at = data.assistant_thread;
-        labelEl.textContent = 'Assistant';
+        labelEl.textContent = I18n.t('thread.assistant');
       }
       const meta = document.getElementById('assistant-meta');
       meta.textContent = relativeTime(data.assistant_thread.updated_at);
@@ -2452,7 +2472,7 @@ function disableChatInputReadOnly() {
   const btn = document.getElementById('send-btn');
   if (input) {
     input.disabled = true;
-    input.placeholder = 'Read-only thread (external channel)';
+    input.placeholder = I18n.t('chat.readOnlyThread');
   }
   if (btn) btn.disabled = true;
 }
@@ -2499,7 +2519,7 @@ function createNewThread() {
     enableChatInput();
     loadThreads();
   }).catch((err) => {
-    showToast('Failed to create thread: ' + err.message, 'error');
+    showToast(I18n.t('chat.threadCreateFailed', { message: err.message }), 'error');
   });
 }
 
@@ -2838,11 +2858,11 @@ function saveMemoryEdit() {
     method: 'POST',
     body: { path: currentMemoryPath, content: content },
   }).then(() => {
-    showToast('Saved ' + currentMemoryPath, 'success');
+    showToast(I18n.t('memory.savedPath', { path: currentMemoryPath }), 'success');
     cancelMemoryEdit();
     readMemoryFile(currentMemoryPath);
   }).catch((err) => {
-    showToast('Save failed: ' + err.message, 'error');
+    showToast(I18n.t('memory.saveFailed', { message: err.message }), 'error');
   });
 }
 
@@ -3005,7 +3025,7 @@ function toggleLogsPause() {
 }
 
 function clearLogs() {
-  if (!confirm('Clear all logs?')) return;
+  if (!confirm(I18n.t('logs.confirmClear'))) return;
   document.getElementById('logs-output').innerHTML = '';
   logBuffer = [];
 }
@@ -3151,7 +3171,7 @@ function renderAvailableExtensionCard(entry) {
             extension_name: entry.name,
             auth_url: res.auth_url,
           });
-          showToast('Opening authentication for ' + entry.display_name, 'info');
+          showToast(I18n.t('extensions.openingAuth', { name: entry.display_name }), 'info');
           openOAuthUrl(res.auth_url);
         }
         refreshCurrentSettingsTab();
@@ -3160,11 +3180,11 @@ function renderAvailableExtensionCard(entry) {
           showConfigureModal(entry.name);
         }
       } else {
-        showToast('Install: ' + (res.message || 'unknown error'), 'error');
+        showToast(I18n.t('extensions.installFailed', { message: res.message || 'unknown error' }), 'error');
         refreshCurrentSettingsTab();
       }
     }).catch(function(err) {
-      showToast('Install failed: ' + err.message, 'error');
+      showToast(I18n.t('extensions.installFailed', { message: err.message }), 'error');
       refreshCurrentSettingsTab();
     });
   });
@@ -3194,7 +3214,7 @@ function renderMcpServerCard(entry, installedExt) {
   if (installedExt) {
     var authDot = document.createElement('span');
     authDot.className = 'ext-auth-dot ' + (installedExt.authenticated ? 'authed' : 'unauthed');
-    authDot.title = installedExt.authenticated ? 'Authenticated' : 'Not authenticated';
+    authDot.title = installedExt.authenticated ? I18n.t('auth.authenticated') : I18n.t('auth.notAuthenticated');
     header.appendChild(authDot);
   }
 
@@ -3307,7 +3327,7 @@ function renderExtensionCard(ext) {
   if (ext.kind !== 'wasm_channel') {
     const authDot = document.createElement('span');
     authDot.className = 'ext-auth-dot ' + (ext.authenticated ? 'authed' : 'unauthed');
-    authDot.title = ext.authenticated ? 'Authenticated' : 'Not authenticated';
+    authDot.title = ext.authenticated ? I18n.t('auth.authenticated') : I18n.t('auth.notAuthenticated');
     header.appendChild(authDot);
   }
 
@@ -3336,7 +3356,7 @@ function renderExtensionCard(ext) {
   if (ext.tools && ext.tools.length > 0) {
     const tools = document.createElement('div');
     tools.className = 'ext-tools';
-    tools.textContent = 'Tools: ' + ext.tools.join(', ');
+    tools.textContent = I18n.t('extensions.toolsLabel', { list: ext.tools.join(', ') });
     card.appendChild(tools);
   }
 
@@ -3449,7 +3469,7 @@ function activateExtension(name) {
             extension_name: name,
             auth_url: res.auth_url,
           });
-          showToast('Opening authentication for ' + name, 'info');
+          showToast(I18n.t('extensions.openingAuth', { name: name }), 'info');
           openOAuthUrl(res.auth_url);
         }
         refreshCurrentSettingsTab();
@@ -3461,16 +3481,16 @@ function activateExtension(name) {
           extension_name: name,
           auth_url: res.auth_url,
         });
-        showToast('Opening authentication for ' + name, 'info');
+        showToast(I18n.t('extensions.openingAuth', { name: name }), 'info');
         openOAuthUrl(res.auth_url);
       } else if (res.awaiting_token) {
         showConfigureModal(name);
       } else {
-        showToast('Activate failed: ' + res.message, 'error');
+        showToast(I18n.t('extensions.activateFailed', { message: res.message }), 'error');
       }
       refreshCurrentSettingsTab();
     })
-    .catch((err) => showToast('Activate failed: ' + err.message, 'error'));
+    .catch((err) => showToast(I18n.t('extensions.activateFailed', { message: err.message }), 'error'));
 }
 
 function removeExtension(name) {
@@ -3494,12 +3514,12 @@ function showConfigureModal(name) {
       const secrets = Array.isArray(setup.secrets) ? setup.secrets : [];
       const setupFields = Array.isArray(setup.fields) ? setup.fields : [];
       if (secrets.length === 0 && setupFields.length === 0) {
-        showToast('No configuration needed for ' + name, 'info');
+        showToast(I18n.t('extensions.noConfigNeeded', { name: name }), 'info');
         return;
       }
       renderConfigureModal(name, secrets, setupFields);
     })
-    .catch((err) => showToast('Failed to load setup: ' + err.message, 'error'));
+    .catch((err) => showToast(I18n.t('extensions.setupLoadFailed', { message: err.message }), 'error'));
 }
 
 function renderConfigureModal(name, secrets, setupFields) {
@@ -3809,11 +3829,11 @@ function submitConfigureModal(name, fields, options) {
             extension_name: name,
             auth_url: res.auth_url,
           });
-          showToast('Opening OAuth authorization for ' + name, 'info');
+          showToast(I18n.t('extensions.openingOAuth', { name: name }), 'info');
           openOAuthUrl(res.auth_url);
           refreshCurrentSettingsTab();
         } else if (res.needs_restart) {
-          showToast('Configured ' + name + '. Restart IronClaw to apply all changes.', 'info');
+          showToast(I18n.t('extensions.configuredRestart', { name: name }), 'info');
         }
         // For non-OAuth success: the server always broadcasts auth_completed SSE,
         // which will show the toast and refresh extensions — no need to do it here too.
@@ -3843,7 +3863,7 @@ function submitConfigureModal(name, fields, options) {
           setTelegramConfigureState(overlay, fields, 'idle');
         }
       }
-      showToast('Configuration failed: ' + err.message, 'error');
+      showToast(I18n.t('extensions.configFailed', { message: err.message }), 'error');
     });
 }
 
@@ -3874,7 +3894,7 @@ function openOAuthUrl(url) {
     }
   } catch (e) {
     console.warn('Blocked invalid/non-HTTPS OAuth URL:', url, e.message);
-    showToast('Invalid OAuth URL returned by server', 'error');
+    showToast(I18n.t('extensions.invalidOAuthUrl'), 'error');
     return;
   }
   window.open(parsed.href, '_blank', 'width=600,height=700');
@@ -3979,13 +3999,13 @@ function approvePairing(channel, code, options) {
     body: { code },
   }).then(res => {
     if (res.success) {
-      showToast('Pairing approved', 'success');
+      showToast(I18n.t('extensions.pairingApproved'), 'success');
       if (typeof options.onSuccess === 'function') options.onSuccess(res);
       refreshCurrentSettingsTab();
     } else {
-      showToast(res.message || 'Approve failed', 'error');
+      showToast(res.message || I18n.t('extensions.approveFailed'), 'error');
     }
-  }).catch(err => showToast('Error: ' + err.message, 'error'));
+  }).catch(err => showToast(I18n.t('extensions.pairingError', { message: err.message }), 'error'));
 }
 
 function startPairingPoll() {
@@ -4013,9 +4033,9 @@ function renderWasmChannelStepper(ext) {
   var status = ext.activation_status || 'installed';
 
   var steps = [
-    { label: 'Installed', key: 'installed' },
-    { label: 'Configured', key: 'configured' },
-    { label: status === 'pairing' ? 'Awaiting Pairing' : 'Active', key: 'active' },
+    { label: I18n.t('missions.stepInstalled'), key: 'installed' },
+    { label: I18n.t('missions.stepConfigured'), key: 'configured' },
+    { label: status === 'pairing' ? I18n.t('missions.stepAwaitingPairing') : I18n.t('missions.stepActive'), key: 'active' },
   ];
 
   var reachedIdx;
@@ -4146,25 +4166,25 @@ function renderJobsList(jobs) {
 }
 
 function cancelJob(jobId) {
-  if (!confirm('Cancel this job?')) return;
+  if (!confirm(I18n.t('jobs.confirmCancel'))) return;
   apiFetch('/api/jobs/' + jobId + '/cancel', { method: 'POST' })
     .then(() => {
-      showToast('Job cancelled', 'success');
+      showToast(I18n.t('jobs.cancelled'), 'success');
       if (currentJobId) openJobDetail(currentJobId);
       else loadJobs();
     })
     .catch((err) => {
-      showToast('Failed to cancel job: ' + err.message, 'error');
+      showToast(I18n.t('jobs.cancelFailed', { message: err.message }), 'error');
     });
 }
 
 function restartJob(jobId) {
   apiFetch('/api/jobs/' + jobId + '/restart', { method: 'POST' })
     .then((res) => {
-      showToast('Job restarted as ' + (res.new_job_id || '').substring(0, 8), 'success');
+      showToast(I18n.t('jobs.restarted', { id: (res.new_job_id || '').substring(0, 8) }), 'success');
     })
     .catch((err) => {
-      showToast('Failed to restart job: ' + err.message, 'error');
+      showToast(I18n.t('jobs.restartFailed', { message: err.message }), 'error');
     })
     .finally(() => {
       loadJobs();
@@ -4198,7 +4218,7 @@ function renderJobDetail(job) {
   const header = document.createElement('div');
   header.className = 'job-detail-header';
 
-  let headerHtml = '<button class="btn-back" data-action="close-job-detail">&larr; Back</button>'
+  let headerHtml = '<button class="btn-back" data-action="close-job-detail">' + escapeHtml(I18n.t('common.back')) + '</button>'
     + '<h2>' + escapeHtml(job.title) + '</h2>'
     + '<span class="badge ' + stateClass + '">' + escapeHtml(job.state) + '</span>';
 
@@ -4260,13 +4280,13 @@ function renderJobOverview(container, job) {
   // Metadata grid
   const grid = document.createElement('div');
   grid.className = 'job-meta-grid';
-  grid.innerHTML = metaItem('Job ID', job.id)
-    + metaItem('State', job.state)
-    + metaItem('Created', formatDate(job.created_at))
-    + metaItem('Started', formatDate(job.started_at))
-    + metaItem('Completed', formatDate(job.completed_at))
-    + metaItem('Duration', formatDuration(job.elapsed_secs))
-    + (job.job_mode ? metaItem('Mode', job.job_mode) : '');
+  grid.innerHTML = metaItem(I18n.t('jobs.id'), job.id)
+    + metaItem(I18n.t('jobs.state'), job.state)
+    + metaItem(I18n.t('jobs.created'), formatDate(job.created_at))
+    + metaItem(I18n.t('jobs.startedLabel'), formatDate(job.started_at))
+    + metaItem(I18n.t('jobs.completedLabel'), formatDate(job.completed_at))
+    + metaItem(I18n.t('jobs.duration'), formatDuration(job.elapsed_secs))
+    + (job.job_mode ? metaItem(I18n.t('jobs.mode'), job.job_mode) : '');
   container.appendChild(grid);
 
   // Description
@@ -4274,7 +4294,7 @@ function renderJobOverview(container, job) {
     const descSection = document.createElement('div');
     descSection.className = 'job-description';
     const descHeader = document.createElement('h3');
-    descHeader.textContent = 'Description';
+    descHeader.textContent = I18n.t('jobs.description');
     descSection.appendChild(descHeader);
     const descBody = document.createElement('div');
     descBody.className = 'job-description-body';
@@ -4288,7 +4308,7 @@ function renderJobOverview(container, job) {
     const timelineSection = document.createElement('div');
     timelineSection.className = 'job-timeline-section';
     const tlHeader = document.createElement('h3');
-    tlHeader.textContent = 'State Transitions';
+    tlHeader.textContent = I18n.t('jobs.stateTransitions');
     timelineSection.appendChild(tlHeader);
 
     const timeline = document.createElement('div');
@@ -4457,15 +4477,15 @@ function renderJobActivity(container, job) {
     + '<option value="tool_use">Tool Calls</option>'
     + '<option value="tool_result">Results</option>'
     + '</select>'
-    + '<label class="logs-checkbox"><input type="checkbox" id="activity-autoscroll" checked> Auto-scroll</label>'
+    + '<label class="logs-checkbox"><input type="checkbox" id="activity-autoscroll" checked> ' + escapeHtml(I18n.t('jobs.autoScroll')) + '</label>'
     + '</div>'
     + '<div class="activity-terminal" id="activity-terminal"></div>';
 
   if (job && job.can_prompt === true) {
     html += '<div class="activity-input-bar" id="activity-input-bar">'
-      + '<input type="text" id="activity-prompt-input" placeholder="Send follow-up prompt..." />'
-      + '<button id="activity-send-btn">Send</button>'
-      + '<button id="activity-done-btn" title="Signal done">Done</button>'
+      + '<input type="text" id="activity-prompt-input" placeholder="' + escapeHtml(I18n.t('jobs.followUpPlaceholder')) + '" />'
+      + '<button id="activity-send-btn">' + escapeHtml(I18n.t('chat.send')) + '</button>'
+      + '<button id="activity-done-btn" title="' + escapeHtml(I18n.t('jobs.signalDone')) + '">' + escapeHtml(I18n.t('jobs.done')) + '</button>'
       + '</div>';
   }
 
@@ -4691,7 +4711,7 @@ function openRoutineDetail(id) {
   apiFetch('/api/routines/' + id).then((routine) => {
     renderRoutineDetail(routine);
   }).catch((err) => {
-    showToast('Failed to load routine: ' + err.message, 'error');
+    showToast(I18n.t('routines.loadFailed', { message: err.message }), 'error');
   });
 }
 
@@ -4723,13 +4743,13 @@ function renderRoutineDetail(routine) {
 
   // Metadata grid
   html += '<div class="job-meta-grid">'
-    + metaItem('Routine ID', routine.id)
-    + metaItem('Enabled', routine.enabled ? 'Yes' : 'No')
-    + metaItem('Run Count', routine.run_count)
-    + metaItem('Failures', routine.consecutive_failures)
-    + metaItem('Last Run', formatDate(routine.last_run_at))
-    + metaItem('Next Fire', formatDate(routine.next_fire_at))
-    + metaItem('Created', formatDate(routine.created_at))
+    + metaItem(I18n.t('routines.id'), routine.id)
+    + metaItem(I18n.t('routines.enabled'), routine.enabled ? I18n.t('settings.on') : I18n.t('settings.off'))
+    + metaItem(I18n.t('routines.runCount'), routine.run_count)
+    + metaItem(I18n.t('routines.failures'), routine.consecutive_failures)
+    + metaItem(I18n.t('routines.lastRun'), formatDate(routine.last_run_at))
+    + metaItem(I18n.t('routines.nextFire'), formatDate(routine.next_fire_at))
+    + metaItem(I18n.t('routines.created'), formatDate(routine.created_at))
     + '</div>';
 
   // Description
@@ -4812,32 +4832,32 @@ function renderRoutineDetail(routine) {
 function triggerRoutine(id) {
   apiFetch('/api/routines/' + id + '/trigger', { method: 'POST' })
     .then(() => {
-      showToast('Routine triggered', 'success');
+      showToast(I18n.t('routines.triggered'), 'success');
       if (currentRoutineId === id) openRoutineDetail(id);
       else loadRoutines();
     })
-    .catch((err) => showToast('Trigger failed: ' + err.message, 'error'));
+    .catch((err) => showToast(I18n.t('routines.triggerFailed', { message: err.message }), 'error'));
 }
 
 function toggleRoutine(id) {
   apiFetch('/api/routines/' + id + '/toggle', { method: 'POST' })
     .then((res) => {
-      showToast('Routine ' + (res.status || 'toggled'), 'success');
+      showToast(I18n.t('routines.toggled', { status: res.status || 'toggled' }), 'success');
       if (currentRoutineId) openRoutineDetail(currentRoutineId);
       else loadRoutines();
     })
-    .catch((err) => showToast('Toggle failed: ' + err.message, 'error'));
+    .catch((err) => showToast(I18n.t('routines.toggleFailed', { message: err.message }), 'error'));
 }
 
 function deleteRoutine(id, name) {
-  if (!confirm('Delete routine "' + name + '"?')) return;
+  if (!confirm(I18n.t('routines.confirmDelete', { name: name }))) return;
   apiFetch('/api/routines/' + id, { method: 'DELETE' })
     .then(() => {
-      showToast('Routine deleted', 'success');
+      showToast(I18n.t('routines.deleted'), 'success');
       if (currentRoutineId === id) closeRoutineDetail();
       else loadRoutines();
     })
-    .catch((err) => showToast('Delete failed: ' + err.message, 'error'));
+    .catch((err) => showToast(I18n.t('routines.deleteFailed', { message: err.message }), 'error'));
 }
 
 // ── Missions ──────────────────────────────────────────────
@@ -4893,9 +4913,9 @@ function renderMissionsList(missions) {
       + '<td>' + m.thread_count + '</td>'
       + '<td><span class="badge ' + statusClass + '">' + escapeHtml(m.status) + '</span></td>'
       + '<td>'
-      + (m.status === 'Active' ? '<button class="btn-cancel" data-action="pause-mission" data-id="' + escapeHtml(m.id) + '">Pause</button> ' : '')
-      + (m.status === 'Paused' ? '<button class="btn-restart" data-action="resume-mission" data-id="' + escapeHtml(m.id) + '">Resume</button> ' : '')
-      + '<button class="btn-restart" data-action="fire-mission" data-id="' + escapeHtml(m.id) + '">Fire</button>'
+      + (m.status === 'Active' ? '<button class="btn-cancel" data-action="pause-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.pause')) + '</button> ' : '')
+      + (m.status === 'Paused' ? '<button class="btn-restart" data-action="resume-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.resume')) + '</button> ' : '')
+      + '<button class="btn-restart" data-action="fire-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.fire')) + '</button>'
       + '</td>'
       + '</tr>';
   }).join('');
@@ -4906,7 +4926,7 @@ function openMissionDetail(id) {
   apiFetch('/api/engine/missions/' + id).then((data) => {
     renderMissionDetail(data.mission);
   }).catch((err) => {
-    showToast('Failed to load mission: ' + err.message, 'error');
+    showToast(I18n.t('missions.loadFailed', { message: err.message }), 'error');
   });
 }
 
@@ -4929,7 +4949,7 @@ function renderMissionDetail(m) {
     : 'failed';
 
   let html = '<div class="job-detail-header">'
-    + '<button class="btn-back" data-action="close-mission-detail">&larr; Back</button>'
+    + '<button class="btn-back" data-action="close-mission-detail">' + escapeHtml(I18n.t('common.back')) + '</button>'
     + '<h2>' + escapeHtml(m.name) + '</h2>'
     + '<span class="badge ' + statusClass + '">' + escapeHtml(m.status) + '</span>'
     + '</div>';
@@ -4939,12 +4959,12 @@ function renderMissionDetail(m) {
     + '<div class="job-description-body">' + renderMarkdown(m.goal) + '</div></div>';
 
   html += '<div class="job-meta-grid">'
-    + metaItem('Cadence', m.cadence_type)
-    + metaItem('Status', m.status)
-    + metaItem('Threads Today', m.threads_today + ' / ' + (m.max_threads_per_day || '∞'))
-    + metaItem('Total Threads', m.thread_count)
-    + metaItem('Created', formatDate(m.created_at))
-    + metaItem('Next Fire', m.next_fire_at ? formatDate(m.next_fire_at) : 'N/A')
+    + metaItem(I18n.t('missions.cadence'), m.cadence_type)
+    + metaItem(I18n.t('missions.status'), m.status)
+    + metaItem(I18n.t('missions.threadsToday'), m.threads_today + ' / ' + (m.max_threads_per_day || '∞'))
+    + metaItem(I18n.t('missions.totalThreads'), m.thread_count)
+    + metaItem(I18n.t('missions.created'), formatDate(m.created_at))
+    + metaItem(I18n.t('missions.nextFire'), m.next_fire_at ? formatDate(m.next_fire_at) : I18n.t('common.noData'))
     + '</div>';
 
   if (m.current_focus) {
@@ -4997,12 +5017,12 @@ function renderMissionDetail(m) {
   // Action buttons
   html += '<div style="margin-top:16px;">';
   if (m.status === 'Active') {
-    html += '<button class="btn-cancel" data-action="pause-mission" data-id="' + escapeHtml(m.id) + '">Pause</button> ';
+    html += '<button class="btn-cancel" data-action="pause-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.pause')) + '</button> ';
   }
   if (m.status === 'Paused') {
-    html += '<button class="btn-restart" data-action="resume-mission" data-id="' + escapeHtml(m.id) + '">Resume</button> ';
+    html += '<button class="btn-restart" data-action="resume-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.resume')) + '</button> ';
   }
-  html += '<button class="btn-restart" data-action="fire-mission" data-id="' + escapeHtml(m.id) + '">Fire Now</button>';
+  html += '<button class="btn-restart" data-action="fire-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.fireNow')) + '</button>';
   html += '</div>';
 
   detail.innerHTML = html;
@@ -5019,20 +5039,20 @@ function openEngineThread(threadId) {
       : 'pending';
 
     var html = '<div class="job-detail-header">'
-      + '<button class="btn-back" data-action="back-to-mission">&larr; Back to Mission</button>'
+      + '<button class="btn-back" data-action="back-to-mission">' + escapeHtml(I18n.t('missions.backToMission')) + '</button>'
       + '<h2>Thread: ' + escapeHtml(t.goal) + '</h2>'
       + '<span class="badge ' + stateClass + '">' + escapeHtml(t.state) + '</span>'
       + '</div>';
 
     html += '<div class="job-meta-grid">'
-      + metaItem('Thread ID', t.id)
-      + metaItem('Type', t.thread_type)
-      + metaItem('Steps', t.step_count)
-      + metaItem('Tokens', t.total_tokens.toLocaleString())
-      + metaItem('Cost', t.total_cost_usd > 0 ? '$' + t.total_cost_usd.toFixed(4) : '-')
-      + metaItem('Max Iterations', t.max_iterations)
-      + metaItem('Created', formatDate(t.created_at))
-      + metaItem('Completed', t.completed_at ? formatDate(t.completed_at) : '-')
+      + metaItem(I18n.t('missions.threadId'), t.id)
+      + metaItem(I18n.t('missions.type'), t.thread_type)
+      + metaItem(I18n.t('missions.steps'), t.step_count)
+      + metaItem(I18n.t('missions.tokens'), t.total_tokens.toLocaleString())
+      + metaItem(I18n.t('missions.cost'), t.total_cost_usd > 0 ? '$' + t.total_cost_usd.toFixed(4) : '-')
+      + metaItem(I18n.t('missions.maxIterations'), t.max_iterations)
+      + metaItem(I18n.t('missions.created'), formatDate(t.created_at))
+      + metaItem(I18n.t('jobs.completedLabel'), t.completed_at ? formatDate(t.completed_at) : '-')
       + '</div>';
 
     if (t.messages && t.messages.length > 0) {
@@ -5049,7 +5069,7 @@ function openEngineThread(threadId) {
 
     detail.innerHTML = html;
   }).catch(function(err) {
-    showToast('Failed to load thread: ' + err.message, 'error');
+    showToast(I18n.t('missions.threadLoadFailed', { message: err.message }), 'error');
   });
 }
 
@@ -5057,34 +5077,34 @@ function fireMission(id) {
   apiFetch('/api/engine/missions/' + id + '/fire', { method: 'POST' })
     .then((data) => {
       if (data.fired) {
-        showToast('Mission fired — thread ' + data.thread_id, 'success');
+        showToast(I18n.t('missions.fired', { id: data.thread_id }), 'success');
       } else {
-        showToast('Mission not fired (terminal or budget exhausted)', 'warning');
+        showToast(I18n.t('missions.notFired'), 'warning');
       }
       if (currentMissionId === id) openMissionDetail(id);
       else loadMissions();
     })
-    .catch((err) => showToast('Fire failed: ' + err.message, 'error'));
+    .catch((err) => showToast(I18n.t('missions.fireFailed', { message: err.message }), 'error'));
 }
 
 function pauseMission(id) {
   apiFetch('/api/engine/missions/' + id + '/pause', { method: 'POST' })
     .then(() => {
-      showToast('Mission paused', 'success');
+      showToast(I18n.t('missions.paused'), 'success');
       if (currentMissionId === id) openMissionDetail(id);
       else loadMissions();
     })
-    .catch((err) => showToast('Pause failed: ' + err.message, 'error'));
+    .catch((err) => showToast(I18n.t('missions.pauseFailed', { message: err.message }), 'error'));
 }
 
 function resumeMission(id) {
   apiFetch('/api/engine/missions/' + id + '/resume', { method: 'POST' })
     .then(() => {
-      showToast('Mission resumed', 'success');
+      showToast(I18n.t('missions.resumed'), 'success');
       if (currentMissionId === id) openMissionDetail(id);
       else loadMissions();
     })
-    .catch((err) => showToast('Resume failed: ' + err.message, 'error'));
+    .catch((err) => showToast(I18n.t('missions.resumeFailed', { message: err.message }), 'error'));
 }
 
 function formatRelativeTime(isoString) {
@@ -5425,10 +5445,11 @@ function fetchTeeReport() {
 
 function renderTeePopover(report) {
   var popover = document.getElementById('tee-popover');
-  var digest = (teeInfo && teeInfo.image_digest) || 'N/A';
-  var fingerprint = report.tls_certificate_fingerprint || 'N/A';
+  var na = I18n.t('common.noData');
+  var digest = (teeInfo && teeInfo.image_digest) || na;
+  var fingerprint = report.tls_certificate_fingerprint || na;
   var reportData = report.report_data || '';
-  var vmConfig = report.vm_config || 'N/A';
+  var vmConfig = report.vm_config || na;
   var truncated = reportData.length > 32 ? reportData.slice(0, 32) + '...' : reportData;
   popover.innerHTML = '<div class="tee-popover-title">'
     + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>'
@@ -5449,9 +5470,9 @@ function copyTeeReport() {
   if (!teeReportCache) return;
   var combined = Object.assign({}, teeReportCache, teeInfo || {});
   navigator.clipboard.writeText(JSON.stringify(combined, null, 2)).then(function() {
-    showToast('Attestation report copied', 'success');
+    showToast(I18n.t('tee.reportCopied'), 'success');
   }).catch(function() {
-    showToast('Failed to copy report', 'error');
+    showToast(I18n.t('tee.copyFailed'), 'error');
   });
 }
 
@@ -5468,12 +5489,12 @@ document.getElementById('tee-shield').addEventListener('mouseleave', function() 
 function installWasmExtension() {
   var name = document.getElementById('wasm-install-name').value.trim();
   if (!name) {
-    showToast('Extension name is required', 'error');
+    showToast(I18n.t('extensions.nameRequired'), 'error');
     return;
   }
   var url = document.getElementById('wasm-install-url').value.trim();
   if (!url) {
-    showToast('URL to .tar.gz bundle is required', 'error');
+    showToast(I18n.t('extensions.urlRequired'), 'error');
     return;
   }
 
@@ -5482,27 +5503,27 @@ function installWasmExtension() {
     body: { name: name, url: url, kind: 'wasm_tool' },
   }).then(function(res) {
     if (res.success) {
-      showToast('Installed ' + name, 'success');
+      showToast(I18n.t('extensions.installedName', { name: name }), 'success');
       document.getElementById('wasm-install-name').value = '';
       document.getElementById('wasm-install-url').value = '';
       loadExtensions();
     } else {
-      showToast('Install failed: ' + (res.message || 'unknown error'), 'error');
+      showToast(I18n.t('extensions.installFailed', { message: res.message || 'unknown error' }), 'error');
     }
   }).catch(function(err) {
-    showToast('Install failed: ' + err.message, 'error');
+    showToast(I18n.t('extensions.installFailed', { message: err.message }), 'error');
   });
 }
 
 function addMcpServer() {
   var name = document.getElementById('mcp-install-name').value.trim();
   if (!name) {
-    showToast('Server name is required', 'error');
+    showToast(I18n.t('mcp.serverNameRequired'), 'error');
     return;
   }
   var url = document.getElementById('mcp-install-url').value.trim();
   if (!url) {
-    showToast('MCP server URL is required', 'error');
+    showToast(I18n.t('mcp.urlRequired'), 'error');
     return;
   }
 
@@ -5511,15 +5532,15 @@ function addMcpServer() {
     body: { name: name, url: url, kind: 'mcp_server' },
   }).then(function(res) {
     if (res.success) {
-      showToast('Added MCP server ' + name, 'success');
+      showToast(I18n.t('mcp.added', { name: name }), 'success');
       document.getElementById('mcp-install-name').value = '';
       document.getElementById('mcp-install-url').value = '';
       loadMcpServers();
     } else {
-      showToast('Failed to add MCP server: ' + (res.message || 'unknown error'), 'error');
+      showToast(I18n.t('mcp.addFailed', { message: res.message || 'unknown error' }), 'error');
     }
   }).catch(function(err) {
-    showToast('Failed to add MCP server: ' + err.message, 'error');
+    showToast(I18n.t('mcp.addFailed', { message: err.message }), 'error');
   });
 }
 
@@ -5671,7 +5692,7 @@ function renderCatalogSkillCard(entry, installedNames) {
   name.rel = 'noopener';
   name.style.textDecoration = 'none';
   name.style.color = 'inherit';
-  name.title = 'View on ClawHub';
+  name.title = I18n.t('skills.viewOnClawHub');
   header.appendChild(name);
 
   if (entry.version) {
@@ -5754,7 +5775,7 @@ function renderCatalogSkillCard(entry, installedNames) {
     installBtn.textContent = I18n.t('extensions.install');
     installBtn.addEventListener('click', (function(s, btn) {
       return function() {
-        if (!confirm('Install skill "' + s + '" from ClawHub?')) return;
+        if (!confirm(I18n.t('skills.confirmInstallHub', { name: s }))) return;
         btn.disabled = true;
         btn.textContent = I18n.t('extensions.installing');
         installSkill(s, null, btn);
@@ -5800,13 +5821,13 @@ function installSkill(nameOrSlug, url, btn) {
     if (res.success) {
       showToast(I18n.t('skills.installedSuccess', {name: nameOrSlug}), 'success');
     } else {
-      showToast('Install failed: ' + (res.message || 'unknown error'), 'error');
+      showToast(I18n.t('extensions.installFailed', { message: res.message || 'unknown error' }), 'error');
     }
     loadSkills();
-    if (btn) { btn.disabled = false; btn.textContent = 'Install'; }
+    if (btn) { btn.disabled = false; btn.textContent = I18n.t('extensions.install'); }
   }).catch(function(err) {
-    showToast('Install failed: ' + err.message, 'error');
-    if (btn) { btn.disabled = false; btn.textContent = 'Install'; }
+    showToast(I18n.t('extensions.installFailed', { message: err.message }), 'error');
+    if (btn) { btn.disabled = false; btn.textContent = I18n.t('extensions.install'); }
   });
 }
 
@@ -5830,13 +5851,13 @@ function removeSkill(name) {
 
 function installSkillFromForm() {
   var name = document.getElementById('skill-install-name').value.trim();
-  if (!name) { showToast('Skill name is required', 'error'); return; }
+  if (!name) { showToast(I18n.t('skills.nameRequired'), 'error'); return; }
   var url = document.getElementById('skill-install-url').value.trim() || null;
   if (url && !url.startsWith('https://')) {
-    showToast('URL must use HTTPS', 'error');
+    showToast(I18n.t('skills.httpsRequired'), 'error');
     return;
   }
-  if (!confirm('Install skill "' + name + '"?')) return;
+  if (!confirm(I18n.t('skills.confirmInstall', { name: name }))) return;
   installSkill(name, url, null);
   document.getElementById('skill-install-name').value = '';
   document.getElementById('skill-install-url').value = '';
@@ -6508,7 +6529,7 @@ function saveSetting(key, value) {
       showRestartBanner();
     }
   }).catch(function(err) {
-    showToast('Failed to save ' + key + ': ' + err.message, 'error');
+    showToast(I18n.t('settings.saveFailed', { key: key, message: err.message }), 'error');
   });
 }
 

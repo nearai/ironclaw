@@ -35,6 +35,7 @@ use crate::channels::relay::DEFAULT_RELAY_NAME;
 use crate::channels::web::auth::{
     AdminUser, AuthenticatedUser, CombinedAuthState, UserIdentity, auth_middleware,
 };
+use crate::channels::web::handlers::chat::chat_events_handler;
 use crate::channels::web::handlers::engine::{
     engine_mission_detail_handler, engine_mission_fire_handler, engine_mission_pause_handler,
     engine_mission_resume_handler, engine_missions_handler, engine_missions_summary_handler,
@@ -760,6 +761,7 @@ pub async fn start_server(
         .route("/i18n/index.js", get(i18n_index_handler))
         .route("/i18n/en.js", get(i18n_en_handler))
         .route("/i18n/zh-CN.js", get(i18n_zh_handler))
+        .route("/i18n/ko.js", get(i18n_ko_handler))
         .route("/i18n-app.js", get(i18n_app_handler))
         .route("/init.js", get(init_js_handler))
         .route("/debug-panel.js", get(debug_panel_js_handler))
@@ -946,6 +948,16 @@ async fn i18n_zh_handler() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         include_str!("static/i18n/zh-CN.js"),
+    )
+}
+
+async fn i18n_ko_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/i18n/ko.js"),
     )
 }
 
@@ -2032,30 +2044,6 @@ pub async fn clear_auth_mode(state: &GatewayState, user_id: &str) {
             thread.pending_auth = None;
         }
     }
-}
-
-#[derive(serde::Deserialize)]
-struct ChatEventsQuery {
-    #[serde(default)]
-    debug: bool,
-}
-
-async fn chat_events_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Query(query): Query<ChatEventsQuery>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let sse = state
-        .sse
-        .subscribe(Some(user.user_id), query.debug)
-        .ok_or((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Too many connections".to_string(),
-        ))?;
-    Ok((
-        [("X-Accel-Buffering", "no"), ("Cache-Control", "no-cache")],
-        sse,
-    ))
 }
 
 /// Check whether an Origin header value points to a local address.
@@ -3837,7 +3825,7 @@ mod tests {
 
         let token = "member-token-123";
         let hash = crate::channels::web::auth::hash_token(token);
-        db.create_api_token("member-1", "test-token", &hash, &token[..8], None)
+        db.create_api_token("member-1", "test-token", &hash, &token[..8], None) // safety: test-only, ASCII literal
             .await
             .expect("create api token");
 

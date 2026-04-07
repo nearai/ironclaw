@@ -34,6 +34,8 @@ pub struct EffectBridgeAdapter {
     tools: Arc<ToolRegistry>,
     safety: Arc<SafetyLayer>,
     hooks: Arc<HookRegistry>,
+    /// Global auto-approve mode from agent config/env.
+    auto_approve_tools: bool,
     /// Tools the user has approved with "always" (persists within session).
     auto_approved: RwLock<HashSet<String>>,
     /// Per-step tool call counter (reset externally between steps).
@@ -56,12 +58,19 @@ impl EffectBridgeAdapter {
             tools,
             safety,
             hooks,
+            auto_approve_tools: false,
             auto_approved: RwLock::new(HashSet::new()),
             call_count: std::sync::atomic::AtomicU32::new(0),
             rate_limiter: RateLimiter::new(),
             mission_manager: RwLock::new(None),
             auth_manager: RwLock::new(None),
         }
+    }
+
+    /// Mirror the v1 dispatcher behavior for globally auto-approved tools.
+    pub fn with_global_auto_approve(mut self, enabled: bool) -> Self {
+        self.auto_approve_tools = enabled;
+        self
     }
 
     /// Mark a tool as auto-approved (user said "always").
@@ -460,7 +469,8 @@ impl EffectBridgeAdapter {
                     });
                 }
                 ApprovalRequirement::UnlessAutoApproved => {
-                    let is_approved = self.auto_approved.read().await.contains(lookup_name);
+                    let is_approved = self.auto_approve_tools
+                        || self.auto_approved.read().await.contains(lookup_name);
                     if !is_approved && !approval_already_granted {
                         // Credential presence alone does NOT bypass approval.
                         // Credentials indicate the call *can* be authenticated,
@@ -915,7 +925,74 @@ mod tests {
         assert!(adapter.auto_approved.read().await.contains("shell"));
     }
 
+    #[tokio::test]
+    async fn global_auto_approve_skips_unless_auto_approved_gates() {
+        use ironclaw_safety::SafetyConfig;
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(ApprovalTestTool)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+        .with_global_auto_approve(true);
+
+        let result = adapter
+            .execute_action(
+                "approval_test",
+                serde_json::json!({"value": "x"}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_global_auto_approve"),
+                ),
+            )
+            .await
+            .expect("global auto-approve should bypass approval gate");
+
+        assert!(!result.is_error);
+    }
+
+    #[tokio::test]
+    async fn global_auto_approve_does_not_bypass_always_gates() {
+        use ironclaw_safety::SafetyConfig;
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(AlwaysApprovalTestTool)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+        .with_global_auto_approve(true);
+
+        let result = adapter
+            .execute_action(
+                "always_approval_test",
+                serde_json::json!({"value": "x"}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_global_auto_approve_always"),
+                ),
+            )
+            .await;
+
+        assert!(matches!(result, Err(EngineError::LeaseDenied { .. })));
+    }
+
     struct ApprovalTestTool;
+
+    struct AlwaysApprovalTestTool;
 
     #[async_trait]
     impl Tool for ApprovalTestTool {
@@ -949,6 +1026,41 @@ mod tests {
 
         fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
             ApprovalRequirement::UnlessAutoApproved
+        }
+    }
+
+    #[async_trait]
+    impl Tool for AlwaysApprovalTestTool {
+        fn name(&self) -> &str {
+            "always_approval_test"
+        }
+
+        fn description(&self) -> &str {
+            "Test tool that always requires explicit approval"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "value": { "type": "string" }
+                }
+            })
+        }
+
+        async fn execute(
+            &self,
+            params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({ "echo": params }),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+
+        fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+            ApprovalRequirement::Always
         }
     }
 

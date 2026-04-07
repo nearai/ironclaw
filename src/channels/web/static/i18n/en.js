@@ -359,6 +359,9 @@ I18n.register('en', {
   'language.en': 'English',
   'language.zhCN': '简体中文',
   'language.switch': 'Switch Language',
+  // Native name of THIS language pack — used by the language-switch
+  // toast so it always reads in the language just selected.
+  'language.name': 'English',
   
   // Tool Activity
   'tool.thinking': 'Thinking...',
@@ -708,4 +711,143 @@ I18n.register('en', {
   'debug.statsSseLastEvent': 'Last event',
   'debug.activityParams': 'Parameters',
   'debug.activityOutput': 'Output',
+
+  // === Added for app.js i18n coverage ===
+
+  // Auth (dynamic states)
+  'auth.connecting': 'Connecting...',
+  'auth.connectingWallet': 'Connecting wallet...',
+  'auth.signWithWallet': 'Sign with wallet...',
+  'auth.verifying': 'Verifying...',
+  'auth.authenticated': 'Authenticated',
+  'auth.notAuthenticated': 'Not authenticated',
+
+  // Chat (dynamic)
+  'chat.authRequiredBeforeSend': 'Complete the auth step before sending chat messages.',
+  'chat.rateLimited': 'Rate limited. Please wait.',
+  'chat.imageTooBig': 'Image "{name}" exceeds 5 MB limit ({size} MB)',
+  'chat.maxImages': 'Maximum {n} images allowed per message',
+  'chat.readOnlyThread': 'Read-only thread (external channel)',
+  'chat.threadCreateFailed': 'Failed to create thread: {message}',
+
+  // Common (dynamic)
+  'common.copyFailed': 'Failed',
+  'common.retry': 'Retry',
+  'common.back': '← Back',
+
+  // Memory (dynamic)
+  'memory.savedPath': 'Saved {path}',
+  'memory.saveFailed': 'Save failed: {message}',
+
+  // Logs (dynamic)
+  'logs.confirmClear': 'Clear all logs?',
+
+  // Theme (dynamic)
+  'theme.label': 'Theme: {mode}',
+
+  // Thread types
+  'thread.heartbeatAlerts': 'Heartbeat Alerts',
+  'thread.routine': 'Routine',
+
+  // Extensions (dynamic)
+  'extensions.openingAuth': 'Opening authentication for {name}',
+  'extensions.installFailed': 'Install failed: {message}',
+  'extensions.activateFailed': 'Activate failed: {message}',
+  'extensions.setupLoadFailed': 'Failed to load setup: {message}',
+  'extensions.openingOAuth': 'Opening OAuth authorization for {name}',
+  'extensions.configuredRestart': 'Configured {name}. Restart IronClaw to apply all changes.',
+  'extensions.configFailed': 'Configuration failed: {message}',
+  'extensions.invalidOAuthUrl': 'Invalid OAuth URL returned by server',
+  'extensions.pairingApproved': 'Pairing approved',
+  'extensions.approveFailed': 'Approve failed',
+  'extensions.pairingError': 'Error: {message}',
+  'extensions.nameRequired': 'Extension name is required',
+  'extensions.urlRequired': 'URL to .tar.gz bundle is required',
+  'extensions.installedName': 'Installed {name}',
+
+  // MCP (dynamic)
+  'mcp.serverNameRequired': 'Server name is required',
+  'mcp.urlRequired': 'MCP server URL is required',
+  'mcp.added': 'Added MCP server {name}',
+  'mcp.addFailed': 'Failed to add MCP server: {message}',
+
+  // Skills (dynamic)
+  'skills.confirmInstallHub': 'Install skill "{name}" from ClawHub?',
+  'skills.nameRequired': 'Skill name is required',
+  'skills.httpsRequired': 'URL must use HTTPS',
+  'skills.confirmInstall': 'Install skill "{name}"?',
+
+  // Jobs (dynamic)
+  'jobs.confirmCancel': 'Cancel this job?',
+  'jobs.cancelled': 'Job cancelled',
+  'jobs.cancelFailed': 'Failed to cancel job: {message}',
+  'jobs.restarted': 'Job restarted as {id}',
+  'jobs.restartFailed': 'Failed to restart job: {message}',
+  'jobs.state': 'State',
+  'jobs.startedLabel': 'Started',
+  'jobs.completedLabel': 'Completed',
+  'jobs.duration': 'Duration',
+  'jobs.autoScroll': 'Auto-scroll',
+  'jobs.followUpPlaceholder': 'Send follow-up prompt...',
+  'jobs.signalDone': 'Signal done',
+  'jobs.done': 'Done',
+  'jobs.mode': 'Mode',
+
+  // Routines (dynamic)
+  'routines.loadFailed': 'Failed to load routine: {message}',
+  'routines.id': 'Routine ID',
+  'routines.enabled': 'Enabled',
+  'routines.runCount': 'Run Count',
+  'routines.failures': 'Failures',
+  'routines.nextFire': 'Next Fire',
+  'routines.created': 'Created',
+  'routines.triggered': 'Routine triggered',
+  'routines.toggled': 'Routine {status}',
+  'routines.toggleFailed': 'Toggle failed: {message}',
+  'routines.confirmDelete': 'Delete routine "{name}"?',
+  'routines.deleted': 'Routine deleted',
+  'routines.deleteFailed': 'Delete failed: {message}',
+
+  // Missions (dynamic)
+  'missions.stepInstalled': 'Installed',
+  'missions.stepConfigured': 'Configured',
+  'missions.stepAwaitingPairing': 'Awaiting Pairing',
+  'missions.stepActive': 'Active',
+  'missions.pause': 'Pause',
+  'missions.resume': 'Resume',
+  'missions.fire': 'Fire',
+  'missions.loadFailed': 'Failed to load mission: {message}',
+  'missions.threadsToday': 'Threads Today',
+  'missions.totalThreads': 'Total Threads',
+  'missions.created': 'Created',
+  'missions.nextFire': 'Next Fire',
+  'missions.fireNow': 'Fire Now',
+  'missions.backToMission': '← Back to Mission',
+  'missions.threadId': 'Thread ID',
+  'missions.type': 'Type',
+  'missions.steps': 'Steps',
+  'missions.tokens': 'Tokens',
+  'missions.cost': 'Cost',
+  'missions.maxIterations': 'Max Iterations',
+  'missions.threadLoadFailed': 'Failed to load thread: {message}',
+  'missions.fired': 'Mission fired — thread {id}',
+  'missions.notFired': 'Mission not fired (terminal or budget exhausted)',
+  'missions.fireFailed': 'Fire failed: {message}',
+  'missions.paused': 'Mission paused',
+  'missions.pauseFailed': 'Pause failed: {message}',
+  'missions.resumed': 'Mission resumed',
+  'missions.resumeFailed': 'Resume failed: {message}',
+
+  // TEE (dynamic)
+  'tee.reportCopied': 'Attestation report copied',
+  'tee.copyFailed': 'Failed to copy report',
+
+  // Settings (dynamic)
+  'settings.saveFailed': 'Failed to save {key}: {message}',
+
+  // Extensions (more)
+  'extensions.toolsLabel': 'Tools: {list}',
+
+  // Skills (more)
+  'skills.viewOnClawHub': 'View on ClawHub',
 });

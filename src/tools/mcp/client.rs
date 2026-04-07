@@ -436,14 +436,7 @@ impl McpClient {
                     self.reinitialize_session().await?;
                     continue;
                 }
-                Err(ToolError::ExternalService(ref msg))
-                    if msg.contains("401")
-                        || msg.contains("Unauthorized")
-                        || (msg.contains("400") && {
-                            let lower = msg.to_ascii_lowercase();
-                            lower.contains("authorization") || lower.contains("authenticate")
-                        }) =>
-                {
+                Err(ToolError::ExternalService(ref msg)) if super::is_auth_error_message(msg) => {
                     if attempt == 0
                         && let Some(ref secrets) = self.secrets
                         && let Some(ref config) = self.server_config
@@ -466,10 +459,22 @@ impl McpClient {
                             }
                         }
                     }
-                    return Err(ToolError::ExternalService(format!(
-                        "MCP server '{}' requires authentication. Run: ironclaw mcp auth {}",
-                        self.server_name, self.server_name
-                    )));
+                    let auth_message = if self
+                        .server_config
+                        .as_ref()
+                        .is_some_and(|config| config.has_custom_auth_header())
+                    {
+                        format!(
+                            "MCP server '{}' rejected its configured Authorization header. Update the configured credential and try again.",
+                            self.server_name
+                        )
+                    } else {
+                        format!(
+                            "MCP server '{}' requires authentication. Run: ironclaw mcp auth {}",
+                            self.server_name, self.server_name
+                        )
+                    };
+                    return Err(ToolError::ExternalService(auth_message));
                 }
                 Err(e) => return Err(e),
             }

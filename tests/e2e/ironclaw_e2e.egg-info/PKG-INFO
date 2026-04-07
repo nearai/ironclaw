@@ -11,3 +11,5 @@ Requires-Dist: aiohttp>=3.9
 Requires-Dist: httpx>=0.27
 Provides-Extra: vision
 Requires-Dist: anthropic>=0.40; extra == "vision"
+Provides-Extra: telegram
+Requires-Dist: telethon>=1.40; extra == "telegram"
