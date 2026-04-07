@@ -164,15 +164,18 @@ impl MissionManager {
     /// For shared missions, the caller (web handler) must
     /// verify admin role before calling this. The engine only checks ownership.
     pub async fn pause_mission(&self, id: MissionId, user_id: &str) -> Result<(), EngineError> {
-        // Validate ownership. Shared missions require admin role (checked by caller).
-        if let Some(mission) = self.store.load_mission(id).await?
-            && !mission.is_owned_by(user_id)
-            && !mission.owner_id().is_shared()
-        {
-            return Err(EngineError::AccessDenied {
-                user_id: user_id.to_string(),
-                entity: format!("mission {id}"),
-            });
+        if let Some(mission) = self.store.load_mission(id).await? {
+            let allowed = if mission.owner_id().is_shared() {
+                crate::types::is_shared_owner(user_id)
+            } else {
+                mission.is_owned_by(user_id)
+            };
+            if !allowed {
+                return Err(EngineError::AccessDenied {
+                    user_id: user_id.to_string(),
+                    entity: format!("mission {id}"),
+                });
+            }
         }
         self.store
             .update_mission_status(id, MissionStatus::Paused)
@@ -187,15 +190,18 @@ impl MissionManager {
     /// For shared missions, the caller (web handler) must
     /// verify admin role before calling this. The engine only checks ownership.
     pub async fn resume_mission(&self, id: MissionId, user_id: &str) -> Result<(), EngineError> {
-        // Validate ownership. Shared missions require admin role (checked by caller).
-        if let Some(mission) = self.store.load_mission(id).await?
-            && !mission.is_owned_by(user_id)
-            && !mission.owner_id().is_shared()
-        {
-            return Err(EngineError::AccessDenied {
-                user_id: user_id.to_string(),
-                entity: format!("mission {id}"),
-            });
+        if let Some(mission) = self.store.load_mission(id).await? {
+            let allowed = if mission.owner_id().is_shared() {
+                crate::types::is_shared_owner(user_id)
+            } else {
+                mission.is_owned_by(user_id)
+            };
+            if !allowed {
+                return Err(EngineError::AccessDenied {
+                    user_id: user_id.to_string(),
+                    entity: format!("mission {id}"),
+                });
+            }
         }
         self.store
             .update_mission_status(id, MissionStatus::Active)
