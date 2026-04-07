@@ -3,7 +3,7 @@
 //! Records full execution traces to JSON files for debugging. Optionally
 //! runs a post-execution analysis to detect common issues.
 //!
-//! Enable with `ENGINE_V2_TRACE=1` env var. Traces are written to
+//! Enable with `IRONCLAW_RECORD_TRACE=1` env var. Traces are written to
 //! `engine_trace_{timestamp}.json` in the current directory.
 
 use std::path::PathBuf;
@@ -17,7 +17,7 @@ use crate::types::thread::{Thread, ThreadId, ThreadState};
 
 /// Check if trace recording is enabled.
 pub fn is_trace_enabled() -> bool {
-    std::env::var("ENGINE_V2_TRACE")
+    std::env::var("IRONCLAW_RECORD_TRACE")
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false)
 }

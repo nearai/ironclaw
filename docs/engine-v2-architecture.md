@@ -118,7 +118,7 @@ The bridge connects the engine to existing IronClaw infrastructure:
 
 Set `ENGINE_V2=true` environment variable. The router in `src/bridge/router.rs` intercepts messages and routes them through the engine instead of the v1 agent loop.
 
-For trace debugging: `ENGINE_V2_TRACE=1` writes full JSON traces to `engine_trace_*.json`.
+For trace debugging: `IRONCLAW_RECORD_TRACE=1` writes full JSON traces to `engine_trace_*.json`.
 
 ## Memory System
 

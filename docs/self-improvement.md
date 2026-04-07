@@ -207,7 +207,7 @@ The mission is capped at 5 threads per day (`max_threads_per_day: 5`).
 Enable trace logging to see the self-improvement loop in action:
 
 ```bash
-ENGINE_V2=true ENGINE_V2_TRACE=1 RUST_LOG=ironclaw_engine=debug cargo run
+ENGINE_V2=true IRONCLAW_RECORD_TRACE=1 RUST_LOG=ironclaw_engine=debug cargo run
 ```
 
 Look for:
