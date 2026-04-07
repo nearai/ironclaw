@@ -1149,14 +1149,8 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         const MAX_TOOL_OUTPUT_BYTES: usize = 50_000;
                         let truncated = output.len() > MAX_TOOL_OUTPUT_BYTES;
                         let capped = if truncated {
-                            let boundary = output
-                                .char_indices()
-                                .filter_map(|(i, c)| {
-                                    let end = i + c.len_utf8();
-                                    (end <= MAX_TOOL_OUTPUT_BYTES).then_some(end)
-                                })
-                                .next_back()
-                                .unwrap_or(0);
+                            let boundary =
+                                crate::util::floor_char_boundary(output, MAX_TOOL_OUTPUT_BYTES);
                             output[..boundary].to_string()
                         } else {
                             output.clone()

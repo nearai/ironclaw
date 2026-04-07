@@ -66,6 +66,7 @@ pub async fn handle_ws_connection(
     socket: WebSocket,
     state: Arc<GatewayState>,
     user: crate::channels::web::auth::UserIdentity,
+    debug: bool,
 ) {
     let (mut ws_sink, mut ws_stream) = socket.split();
 
@@ -77,8 +78,7 @@ pub async fn handle_ws_connection(
 
     // Subscribe to broadcast events (same source as SSE), scoped to this user.
     // Reject if we've hit the connection limit.
-    // TODO: Accept debug flag from WebSocket query params when needed.
-    let Some(raw_stream) = state.sse.subscribe_raw(Some(user.user_id.clone()), false) else {
+    let Some(raw_stream) = state.sse.subscribe_raw(Some(user.user_id.clone()), debug) else {
         tracing::warn!("WebSocket rejected: too many connections");
         // Decrement the WS tracker we already incremented above.
         if let Some(ref tracker) = tracker_for_drop {

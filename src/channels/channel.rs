@@ -383,7 +383,8 @@ impl StatusUpdate {
     ///
     /// Serializes the tool's input parameters as pretty JSON after replacing
     /// any keys listed in the tool's `sensitive_params()` with `"[REDACTED]"`.
-    /// Parameters are always included (for debug panel visibility).
+    /// Parameters are only included on failure; verbose clients see full output
+    /// via the `ToolResultFull` event instead.
     /// Error message is populated only on failure.
     ///
     /// Pass the resolved `Tool` reference (if available) so this method can

@@ -2072,6 +2072,7 @@ fn is_local_origin(origin: &str) -> bool {
 async fn chat_ws_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     headers: axum::http::HeaderMap,
+    Query(params): Query<super::handlers::chat::ChatEventsQuery>,
     ws: WebSocketUpgrade,
     State(state): State<Arc<GatewayState>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -2095,8 +2096,9 @@ async fn chat_ws_handler(
             "WebSocket origin not allowed".to_string(),
         ));
     }
+    let debug = params.debug;
     Ok(ws.on_upgrade(move |socket| {
-        crate::channels::web::ws::handle_ws_connection(socket, state, user)
+        crate::channels::web::ws::handle_ws_connection(socket, state, user, debug)
     }))
 }
 
@@ -3308,7 +3310,7 @@ fn estimate_tokens(text: &str) -> usize {
 
 async fn debug_prompt_handler(
     State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
+    AdminUser(user): AdminUser,
 ) -> Result<Json<DebugPromptResponse>, (StatusCode, String)> {
     let workspace = super::handlers::memory::resolve_workspace(&state, &user).await?;
 
@@ -3339,6 +3341,7 @@ async fn debug_prompt_handler(
     // Assemble full system prompt if workspace supports it, using the configured
     // default timezone rather than a fixed UTC value so this reconstruction more
     // closely matches runtime prompt generation.
+    // Empty string (the Default) and unrecognised strings both fall back to UTC.
     let prompt_tz = state
         .active_config
         .default_timezone
@@ -5354,5 +5357,52 @@ mod tests {
     fn test_is_local_origin_rejects_garbage() {
         assert!(!is_local_origin("not-a-url"));
         assert!(!is_local_origin(""));
+    }
+
+    // --- estimate_tokens tests ---
+
+    #[test]
+    fn test_estimate_tokens_empty_string() {
+        // Empty string has no words → returns the minimum overhead of 4.
+        assert_eq!(estimate_tokens(""), 4);
+    }
+
+    #[test]
+    fn test_estimate_tokens_ascii_english() {
+        // Simple English text: word-based heuristic (words * 1.3 + 4).
+        let text = "hello world foo bar";
+        let words = 4_usize;
+        let expected = ((words as f64) * 1.3) as usize + 4;
+        assert_eq!(estimate_tokens(text), expected);
+    }
+
+    #[test]
+    fn test_estimate_tokens_cjk() {
+        // CJK text has very long average "word" (each char is multi-byte),
+        // so the character-based path should be taken.
+        let text = "你好世界测试文字内容估算";
+        let chars = text.len();
+        let expected = (chars as f64 / 1.5) as usize + 4;
+        assert_eq!(estimate_tokens(text), expected);
+    }
+
+    #[test]
+    fn test_estimate_tokens_mixed_cjk_latin() {
+        // Mixed text: average byte-per-word > 10 → character-based path.
+        let text = "hello 你好 world 世界";
+        let words = text.split_whitespace().count();
+        let chars = text.len();
+        let result = estimate_tokens(text);
+        if chars / words > 10 {
+            assert_eq!(result, (chars as f64 / 1.5) as usize + 4);
+        } else {
+            assert_eq!(result, ((words as f64) * 1.3) as usize + 4);
+        }
+    }
+
+    #[test]
+    fn test_estimate_tokens_whitespace_only() {
+        // Only whitespace splits into zero words → returns 4.
+        assert_eq!(estimate_tokens("   \t\n  "), 4);
     }
 }

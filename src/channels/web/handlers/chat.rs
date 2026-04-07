@@ -82,6 +82,7 @@ pub(crate) fn extract_last_event_id(
 
 pub async fn chat_ws_handler(
     headers: axum::http::HeaderMap,
+    Query(params): Query<ChatEventsQuery>,
     ws: WebSocketUpgrade,
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(identity): AuthenticatedUser,
@@ -110,8 +111,9 @@ pub async fn chat_ws_handler(
             "WebSocket origin not allowed".to_string(),
         ));
     }
+    let debug = params.debug;
     Ok(ws.on_upgrade(move |socket| {
-        crate::channels::web::ws::handle_ws_connection(socket, state, identity)
+        crate::channels::web::ws::handle_ws_connection(socket, state, identity, debug)
     }))
 }
 
