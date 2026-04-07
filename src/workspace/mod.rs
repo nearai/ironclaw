@@ -1052,6 +1052,13 @@ impl Workspace {
         // documents.  Skip the resolve_metadata DB query and all
         // chunking/embedding work for them entirely.
         if is_engine_runtime_path(&path) {
+            // One-time cleanup: delete any chunks that were created before this
+            // guard existed. This is a no-op once the document has no chunks,
+            // and prevents stale chunks from polluting search results or
+            // consuming storage indefinitely.
+            // Fail-open: chunk deletion failure must not block state writes.
+            let _ = self.storage.delete_chunks(doc.id).await;
+
             if doc.content == content {
                 return Ok(doc);
             }
