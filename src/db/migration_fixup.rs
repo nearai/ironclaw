@@ -60,21 +60,21 @@ use crate::error::DatabaseError;
 /// release. Add a new entry here only if the same accident ever happens
 /// again — the immutability test in `migrations/checksums.lock` is the
 /// preferred guard.
-struct KnownDivergence {
-    version: i32,
-    name: &'static str,
+pub(crate) struct KnownDivergence {
+    pub(crate) version: i32,
+    pub(crate) name: &'static str,
     /// The current (canonical) SQL content, embedded at compile time.
-    sql: &'static str,
+    pub(crate) sql: &'static str,
     /// The exact set of historical bad checksums we are willing to rewrite
     /// for this migration. **The fix-up only fires when the stored checksum
     /// matches one of these literals** — any other divergence (manual
     /// tampering, hardware corruption, an unknown future regression) is
     /// left alone so refinery can still abort startup loudly.
-    known_bad_checksums: &'static [u64],
+    pub(crate) known_bad_checksums: &'static [u64],
     /// Human-readable explanation of why this divergence exists, surfaced
     /// in the realignment warning log so future entries are not coupled to
     /// the V6/#1328 wording.
-    explanation: &'static str,
+    pub(crate) explanation: &'static str,
 }
 
 const KNOWN_DIVERGENCES: &[KnownDivergence] = &[KnownDivergence {
@@ -95,6 +95,16 @@ const KNOWN_DIVERGENCES: &[KnownDivergence] = &[KnownDivergence {
 /// with the canonical checksum of the embedded migration. Must be called
 /// before `refinery::Runner::run_async`.
 pub async fn realign_diverged_checksums(client: &mut PgClient) -> Result<(), DatabaseError> {
+    realign_diverged_checksums_with(client, KNOWN_DIVERGENCES).await
+}
+
+/// Inner implementation that takes the divergence list as a parameter, so
+/// integration tests can drive it against synthetic rows without colliding
+/// with real V6 rows in a shared test database.
+pub(crate) async fn realign_diverged_checksums_with(
+    client: &mut PgClient,
+    divergences: &[KnownDivergence],
+) -> Result<(), DatabaseError> {
     // On a fresh install the history table does not yet exist. Refinery
     // will create it during the first `run_async()` call. There is nothing
     // to realign in that case.
@@ -115,7 +125,7 @@ pub async fn realign_diverged_checksums(client: &mut PgClient) -> Result<(), Dat
         return Ok(());
     }
 
-    for divergence in KNOWN_DIVERGENCES {
+    for divergence in divergences {
         // Compute the canonical checksum the same way refinery does
         // (SipHasher13 over name, version, sql in that order). Refinery
         // stores the resulting u64 as a decimal string in the `checksum`
@@ -131,8 +141,11 @@ pub async fn realign_diverged_checksums(client: &mut PgClient) -> Result<(), Dat
         // Defensive: the canonical checksum must never appear in the bad
         // list, otherwise we'd be rewriting already-correct rows. This is
         // a programming error in `KNOWN_DIVERGENCES`, not a runtime
-        // condition, so failing loudly here is appropriate.
-        debug_assert!(
+        // condition. Use `assert!` rather than `debug_assert!` so the
+        // guard remains in release builds — `KNOWN_DIVERGENCES` has at
+        // most a handful of entries, so the cost is one constant-time
+        // slice lookup per startup.
+        assert!(
             !divergence
                 .known_bad_checksums
                 .contains(&migration.checksum()),
@@ -463,5 +476,159 @@ mod tests {
             canonical, POST_1151_BAD_V6_CHECKSUM,
             "canonical V6 checksum collides with known-bad — fix-up would no-op"
         );
+    }
+
+    /// Integration test that drives `realign_diverged_checksums_with`
+    /// against a real PostgreSQL instance, codifying the manual smoke
+    /// test from PR #2101 and closing the last untested seam noted by
+    /// @serrrfirat. Skips gracefully if no database is reachable.
+    ///
+    /// To avoid racing real V6 rows in shared CI databases, the test
+    /// uses a synthetic version `99999` row with name `test_routines`
+    /// and a custom `KnownDivergence` slice — the production
+    /// `KNOWN_DIVERGENCES` constant is left untouched.
+    ///
+    /// Run with:
+    ///
+    /// ```text
+    /// DATABASE_URL=postgres://localhost/ironclaw_test \
+    ///     cargo test --features integration --lib \
+    ///     db::migration_fixup::tests::realign_repairs_known_bad_checksum_against_postgres
+    /// ```
+    #[cfg(feature = "integration")]
+    #[tokio::test]
+    async fn realign_repairs_known_bad_checksum_against_postgres() {
+        use deadpool_postgres::{Manager, Pool};
+        use tokio_postgres::{Config, NoTls};
+
+        let database_url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://localhost/ironclaw_test".to_string());
+        let config: Config = match database_url.parse() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipping: invalid DATABASE_URL ({e})");
+                return;
+            }
+        };
+        let mgr = Manager::new(config, NoTls);
+        let pool = match Pool::builder(mgr).max_size(2).build() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("skipping: failed to build pool ({e})");
+                return;
+            }
+        };
+        let mut client = match pool.get().await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipping: database unavailable ({e})");
+                return;
+            }
+        };
+
+        // Make sure refinery_schema_history exists. We can't rely on
+        // the test DB having had migrations run, so create it on
+        // demand using refinery's own DDL shape (4 columns matching
+        // the tokio_postgres driver in refinery 0.8.16).
+        client
+            .batch_execute(
+                "CREATE TABLE IF NOT EXISTS refinery_schema_history ( \
+                    version INT4 PRIMARY KEY, \
+                    name VARCHAR(255), \
+                    applied_on VARCHAR(255), \
+                    checksum VARCHAR(255))",
+            )
+            .await
+            .expect("create refinery_schema_history");
+
+        // Use a synthetic divergence so we don't touch any real V*
+        // row that another test or migration might depend on.
+        const TEST_VERSION: i32 = 99999;
+        const TEST_NAME: &str = "test_routines";
+        const TEST_SQL: &str = "-- synthetic test migration\nSELECT 1;\n";
+        // Compute the canonical checksum the same way the production
+        // code does, plus a deliberately-wrong "bad" value to seed.
+        let canonical = Migration::unapplied(&format!("V{TEST_VERSION}__{TEST_NAME}"), TEST_SQL)
+            .unwrap()
+            .checksum();
+        let bad: u64 = canonical.wrapping_add(1);
+        let test_divergences: &[KnownDivergence] = &[KnownDivergence {
+            version: TEST_VERSION,
+            name: TEST_NAME,
+            sql: TEST_SQL,
+            // Note: this is a `&'static [u64]` literal — `bad` is
+            // computed at runtime, so we use a slice we can build at
+            // runtime. The struct accepts a borrow with the same
+            // lifetime as the slice itself.
+            known_bad_checksums: Box::leak(Box::new([bad])),
+            explanation: "test fixture for PR #2101 integration test",
+        }];
+
+        // Clean any leftover row from a previous run, then seed the
+        // bad checksum.
+        client
+            .execute(
+                "DELETE FROM refinery_schema_history WHERE version = $1",
+                &[&TEST_VERSION],
+            )
+            .await
+            .expect("cleanup pre-run");
+        client
+            .execute(
+                "INSERT INTO refinery_schema_history (version, name, applied_on, checksum) \
+                 VALUES ($1, $2, $3, $4)",
+                &[
+                    &TEST_VERSION,
+                    &TEST_NAME,
+                    &"2026-01-01T00:00:00Z",
+                    &bad.to_string(),
+                ],
+            )
+            .await
+            .expect("seed bad checksum");
+
+        // Run the realignment with our synthetic divergence list.
+        super::realign_diverged_checksums_with(&mut client, test_divergences)
+            .await
+            .expect("realign");
+
+        // Assert the row now holds the canonical checksum.
+        let row = client
+            .query_one(
+                "SELECT checksum FROM refinery_schema_history WHERE version = $1",
+                &[&TEST_VERSION],
+            )
+            .await
+            .expect("read back row");
+        let stored: String = row.get(0);
+        assert_eq!(
+            stored,
+            canonical.to_string(),
+            "realign should have rewritten the bad checksum to canonical",
+        );
+
+        // Run the realignment a second time — it should be a no-op
+        // because the row no longer matches any known-bad value.
+        super::realign_diverged_checksums_with(&mut client, test_divergences)
+            .await
+            .expect("realign idempotent");
+        let row = client
+            .query_one(
+                "SELECT checksum FROM refinery_schema_history WHERE version = $1",
+                &[&TEST_VERSION],
+            )
+            .await
+            .expect("read back row 2");
+        let stored: String = row.get(0);
+        assert_eq!(stored, canonical.to_string(), "second run should no-op");
+
+        // Cleanup.
+        client
+            .execute(
+                "DELETE FROM refinery_schema_history WHERE version = $1",
+                &[&TEST_VERSION],
+            )
+            .await
+            .expect("cleanup post-run");
     }
 }
