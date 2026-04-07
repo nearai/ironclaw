@@ -856,15 +856,39 @@ async fn validate_channel_credentials(
         ))
     })?;
 
-    if response.status().is_success() {
-        Ok(())
+    let status = response.status();
+    let body = response.bytes().await.map_err(|e| {
+        ChannelSetupError::Network(format!("Failed to read validation response: {}", e))
+    })?;
+
+    if status.is_success() {
+        if let Some(error) = validation_endpoint_body_error(&body) {
+            Err(ChannelSetupError::Validation(error))
+        } else {
+            Ok(())
+        }
     } else {
         Err(ChannelSetupError::Validation(format!(
             "Validation endpoint returned HTTP {} from {}",
-            response.status(),
-            target
+            status, target
         )))
     }
+}
+
+fn validation_endpoint_body_error(body: &[u8]) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let errcode = parsed.get("errcode")?.as_i64()?;
+    if errcode == 0 {
+        return None;
+    }
+
+    let errmsg = parsed
+        .get("errmsg")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown error");
+    Some(format!(
+        "Validation endpoint returned errcode {errcode}: {errmsg}"
+    ))
 }
 
 async fn substitute_validation_placeholders(

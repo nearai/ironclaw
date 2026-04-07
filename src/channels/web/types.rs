@@ -415,6 +415,8 @@ pub struct SecretFieldInfo {
     pub name: String,
     pub prompt: String,
     pub optional: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation: Option<String>,
     /// Whether this secret is already stored.
     pub provided: bool,
     /// Whether the secret will be auto-generated if left empty.

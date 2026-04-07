@@ -87,6 +87,58 @@ fn oauth_scopes_secret_name(secret_name: &str) -> String {
     format!("{}_scopes", secret_name.to_lowercase())
 }
 
+fn validation_placeholder_regex() -> &'static regex::Regex {
+    static RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\{([^{}]+)\}").expect("valid regex"));
+    &RE
+}
+
+fn validation_endpoint_body_error(body: &[u8]) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let errcode = parsed.get("errcode")?.as_i64()?;
+    if errcode == 0 {
+        return None;
+    }
+
+    let errmsg = parsed
+        .get("errmsg")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown error");
+    Some(format!(
+        "Validation endpoint returned errcode {errcode}: {errmsg}"
+    ))
+}
+
+fn validate_setup_secret_value(
+    secret_name: &str,
+    value: &str,
+    validation: Option<&str>,
+) -> Result<(), ExtensionError> {
+    if value.chars().any(char::is_control) {
+        return Err(ExtensionError::ValidationFailed(format!(
+            "Secret '{}' contains disallowed control characters",
+            secret_name
+        )));
+    }
+
+    if let Some(pattern) = validation {
+        let re = regex::Regex::new(pattern).map_err(|e| {
+            ExtensionError::Config(format!(
+                "Invalid validation pattern for secret '{}': {}",
+                secret_name, e
+            ))
+        })?;
+        if !re.is_match(value) {
+            return Err(ExtensionError::ValidationFailed(format!(
+                "Secret '{}' does not match the expected format",
+                secret_name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 fn normalize_oauth_callback_path(path: &str) -> String {
     let trimmed_path = path.trim_end_matches('/');
     if trimmed_path.is_empty() {
@@ -3186,14 +3238,21 @@ impl ExtensionManager {
             return ToolAuthState::NoAuth;
         }
 
-        let all_provided = futures::future::join_all(
-            required
-                .iter()
-                .map(|s| self.secrets.exists(user_id, &s.name)),
-        )
+        let all_provided = futures::future::join_all(required.iter().map(|secret| async move {
+            let decrypted = match self.secrets.get_decrypted(user_id, &secret.name).await {
+                Ok(secret_value) => secret_value,
+                Err(_) => return false,
+            };
+            validate_setup_secret_value(
+                &secret.name,
+                decrypted.expose(),
+                secret.validation.as_deref(),
+            )
+            .is_ok()
+        }))
         .await
         .into_iter()
-        .all(|r| r.unwrap_or(false));
+        .all(std::convert::identity);
 
         if all_provided {
             ToolAuthState::Ready
@@ -5391,6 +5450,7 @@ impl ExtensionManager {
                         name: secret.name.clone(),
                         prompt: secret.prompt.clone(),
                         optional: secret.optional,
+                        validation: secret.validation.clone(),
                         provided,
                         auto_generate: secret.auto_generate.is_some(),
                     });
@@ -5428,6 +5488,7 @@ impl ExtensionManager {
                             name: secret.name.clone(),
                             prompt: secret.prompt.clone(),
                             optional: secret.optional,
+                            validation: None,
                             provided,
                             auto_generate: false,
                         });
@@ -5821,7 +5882,8 @@ impl ExtensionManager {
         let kind = self.determine_installed_kind(name, user_id).await?;
 
         // Load allowed secret names and tool setup field definitions from capabilities.
-        let mut channel_cap_file: Option<crate::channels::wasm::ChannelCapabilitiesFile> = None;
+        let mut channel_secret_defs: Vec<crate::channels::wasm::SecretSetupSchema> = Vec::new();
+        let mut channel_validation_endpoint: Option<String> = None;
         let (allowed_secrets, setup_fields): (
             std::collections::HashSet<String>,
             Vec<crate::tools::wasm::ToolFieldSetupSchema>,
@@ -5848,7 +5910,8 @@ impl ExtensionManager {
                     .iter()
                     .map(|s| s.name.clone())
                     .collect();
-                channel_cap_file = Some(cap_file);
+                channel_secret_defs = cap_file.setup.required_secrets.clone();
+                channel_validation_endpoint = cap_file.setup.validation_endpoint.clone();
                 (names, Vec::new())
             }
             ExtensionKind::WasmTool => {
@@ -5909,49 +5972,97 @@ impl ExtensionManager {
             .map(|f| (f.name.clone(), f))
             .collect();
 
+        let channel_secret_defs_by_name: std::collections::HashMap<
+            String,
+            crate::channels::wasm::SecretSetupSchema,
+        > = channel_secret_defs
+            .iter()
+            .cloned()
+            .map(|secret| (secret.name.clone(), secret))
+            .collect();
+
+        for (secret_name, secret_value) in secrets {
+            let trimmed_value = secret_value.trim();
+            if trimmed_value.is_empty() {
+                continue;
+            }
+            if let Some(secret_def) = channel_secret_defs_by_name.get(secret_name) {
+                validate_setup_secret_value(
+                    secret_name,
+                    trimmed_value,
+                    secret_def.validation.as_deref(),
+                )?;
+            }
+        }
+
         // Validate secrets against the validation_endpoint if declared in capabilities.
-        // The endpoint URL template uses {secret_name} placeholders that are
-        // substituted with the provided secret value before making the request.
-        if let Some(ref cap_file) = channel_cap_file
-            && let Some(ref endpoint_template) = cap_file.setup.validation_endpoint
-            && let Some(secret_def) = cap_file
-                .setup
-                .required_secrets
-                .iter()
-                .find(|s| !s.optional && secrets.contains_key(&s.name))
-            && let Some(token_value) = secrets.get(&secret_def.name)
-        {
-            let token = token_value.trim();
-            if !token.is_empty() {
-                // Telegram tokens contain colons (numeric_id:token_part) in the URL path,
-                // not query parameters, so URL-encoding breaks the endpoint.
-                // For other extensions, keep encoding to handle special chars in query parameters.
-                let url = if name == "telegram" {
-                    endpoint_template.replace(&format!("{{{}}}", secret_def.name), token)
+        // The endpoint URL template uses {secret_name} placeholders and resolves
+        // them from the submitted values first, then falls back to stored secrets.
+        if let Some(ref endpoint_template) = channel_validation_endpoint {
+            let placeholder_names: std::collections::BTreeSet<String> =
+                validation_placeholder_regex()
+                    .captures_iter(endpoint_template)
+                    .filter_map(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+                    .collect();
+
+            let mut validation_url = endpoint_template.to_string();
+            let mut all_placeholders_resolved = true;
+
+            for secret_name in placeholder_names {
+                let resolved_value = if let Some(value) = secrets
+                    .get(&secret_name)
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                {
+                    Some(value)
                 } else {
-                    let encoded =
-                        url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
-                    endpoint_template.replace(&format!("{{{}}}", secret_def.name), &encoded)
+                    self.secrets
+                        .get_decrypted(user_id, &secret_name)
+                        .await
+                        .ok()
+                        .map(|secret| secret.expose().trim().to_string())
+                        .filter(|value| !value.is_empty())
                 };
-                // SSRF defense: block private IPs, localhost, cloud metadata endpoints
-                crate::tools::builtin::skill_tools::validate_fetch_url(&url)
+
+                let Some(secret_value) = resolved_value else {
+                    all_placeholders_resolved = false;
+                    break;
+                };
+
+                let encoded =
+                    if name == TELEGRAM_CHANNEL_NAME && secret_name == "telegram_bot_token" {
+                        secret_value
+                    } else {
+                        url::form_urlencoded::byte_serialize(secret_value.as_bytes()).collect()
+                    };
+                validation_url = validation_url.replace(&format!("{{{secret_name}}}"), &encoded);
+            }
+
+            if all_placeholders_resolved {
+                crate::tools::builtin::skill_tools::validate_fetch_url(&validation_url)
                     .map_err(|e| ExtensionError::Other(format!("SSRF blocked: {}", e)))?;
-                let resp = reqwest::Client::builder()
+                let response = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(10))
                     .build()
                     .map_err(|e| ExtensionError::Other(e.to_string()))?
-                    .get(&url)
+                    .get(&validation_url)
                     .send()
                     .await
-                    // Transport errors are infrastructure failures, not token issues
                     .map_err(|e| {
                         ExtensionError::Other(format!("Token validation request failed: {}", e))
                     })?;
-                if !resp.status().is_success() {
+                let status = response.status();
+                let body = response.bytes().await.map_err(|e| {
+                    ExtensionError::Other(format!("Failed to read validation response: {}", e))
+                })?;
+                if !status.is_success() {
                     return Err(ExtensionError::ValidationFailed(format!(
                         "Invalid token (API returned {})",
-                        resp.status()
+                        status
                     )));
+                }
+                if let Some(error) = validation_endpoint_body_error(&body) {
+                    return Err(ExtensionError::ValidationFailed(error));
                 }
             }
         }
@@ -6056,8 +6167,8 @@ impl ExtensionManager {
         }
 
         // Auto-generate any missing secrets (channel-only feature)
-        if let Some(ref cap_file) = channel_cap_file {
-            for secret_def in &cap_file.setup.required_secrets {
+        if kind == ExtensionKind::WasmChannel {
+            for secret_def in &channel_secret_defs {
                 if let Some(ref auto_gen) = secret_def.auto_generate {
                     let already_provided = secrets
                         .get(&secret_def.name)
@@ -9050,6 +9161,116 @@ mod tests {
                 .unwrap_or(false),
             "configure_token should have stored SECRET_B (the first missing secret)"
         );
+    }
+
+    #[tokio::test]
+    async fn test_configure_wasm_channel_rejects_invalid_secret_format() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).expect("channels dir");
+
+        std::fs::write(channels_dir.join("wecom.wasm"), b"\0asm fake").expect("write wasm");
+        let caps = serde_json::json!({
+            "type": "channel",
+            "name": "wecom",
+            "setup": {
+                "required_secrets": [
+                    {
+                        "name": "wecom_corp_id",
+                        "prompt": "Enter your WeCom Corp ID",
+                        "validation": "^ww[a-zA-Z0-9]{16}$"
+                    }
+                ]
+            }
+        });
+        std::fs::write(
+            channels_dir.join("wecom.capabilities.json"),
+            serde_json::to_string(&caps).expect("serialize caps"),
+        )
+        .expect("write capabilities");
+
+        let mgr = make_manager_custom_dirs(dir.path().join("tools"), channels_dir);
+        let err = mgr
+            .configure(
+                "wecom",
+                &std::collections::HashMap::from([(
+                    "wecom_corp_id".to_string(),
+                    "not-a-corp-id".to_string(),
+                )]),
+                &std::collections::HashMap::new(),
+                "test",
+            )
+            .await
+            .expect_err("invalid corp id should fail validation");
+
+        assert!(
+            matches!(err, ExtensionError::ValidationFailed(_)),
+            "expected ValidationFailed, got {err:?}"
+        );
+        assert!(
+            !mgr.secrets
+                .exists("test", "wecom_corp_id")
+                .await
+                .unwrap_or(true),
+            "invalid secret must not be persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_channel_auth_status_treats_invalid_stored_secret_as_needs_setup() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).expect("channels dir");
+
+        std::fs::write(channels_dir.join("wecom.wasm"), b"\0asm fake").expect("write wasm");
+        let caps = serde_json::json!({
+            "type": "channel",
+            "name": "wecom",
+            "setup": {
+                "required_secrets": [
+                    {
+                        "name": "wecom_callback_encoding_aes_key",
+                        "prompt": "Enter your WeCom callback EncodingAESKey",
+                        "validation": "^[A-Za-z0-9]{43}$"
+                    }
+                ]
+            }
+        });
+        std::fs::write(
+            channels_dir.join("wecom.capabilities.json"),
+            serde_json::to_string(&caps).expect("serialize caps"),
+        )
+        .expect("write capabilities");
+
+        let mgr = make_manager_custom_dirs(dir.path().join("tools"), channels_dir);
+        mgr.secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new(
+                    "wecom_callback_encoding_aes_key",
+                    "bad key with spaces",
+                ),
+            )
+            .await
+            .expect("store invalid secret");
+
+        assert_eq!(
+            mgr.check_channel_auth_status("wecom", "test").await,
+            ToolAuthState::NeedsSetup
+        );
+    }
+
+    #[test]
+    fn validation_endpoint_body_error_extracts_errcode_message() {
+        let error = super::validation_endpoint_body_error(
+            br#"{"errcode":40013,"errmsg":"invalid corpid"}"#,
+        )
+        .expect("wecom errcode should be treated as failure");
+        assert_eq!(
+            error,
+            "Validation endpoint returned errcode 40013: invalid corpid"
+        );
+        assert!(super::validation_endpoint_body_error(br#"{"errcode":0,"errmsg":"ok"}"#).is_none());
     }
 
     #[tokio::test]

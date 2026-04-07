@@ -46,6 +46,9 @@ const RECENT_MSG_IDS_PATH: &str = "recent_msg_ids";
 
 const TEXT_CHUNK_LIMIT_BYTES: usize = 1800;
 const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
+const MAX_OUTBOUND_IMAGE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_OUTBOUND_VOICE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_OUTBOUND_VIDEO_BYTES: usize = 10 * 1024 * 1024;
 const MAX_RECENT_MSG_IDS: usize = 256;
 
 type Aes256CbcDec = Decryptor<Aes256>;
@@ -79,11 +82,54 @@ struct ParsedCallbackMessage {
     voice_recognition: Option<String>,
 }
 
+#[derive(Debug)]
+struct ParsedCallbackEvent {
+    event_id: String,
+    sender_id: Option<String>,
+    event_type: String,
+    event_key: Option<String>,
+    change_type: Option<String>,
+}
+
+#[derive(Debug)]
+enum ParsedCallbackPayload {
+    Message(ParsedCallbackMessage),
+    Event(ParsedCallbackEvent),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InboundMediaKind {
     Image,
     Voice,
     File,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutboundMediaKind {
+    Image,
+    Voice,
+    Video,
+    File,
+}
+
+impl OutboundMediaKind {
+    fn as_api_type(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Voice => "voice",
+            Self::Video => "video",
+            Self::File => "file",
+        }
+    }
+
+    fn max_bytes(self) -> usize {
+        match self {
+            Self::Image => MAX_OUTBOUND_IMAGE_BYTES,
+            Self::Voice => MAX_OUTBOUND_VOICE_BYTES,
+            Self::Video => MAX_OUTBOUND_VIDEO_BYTES,
+            Self::File => MAX_ATTACHMENT_BYTES,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,6 +150,16 @@ struct WecomSendResponse {
     errcode: i64,
     #[serde(default)]
     errmsg: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WecomUploadMediaResponse {
+    #[serde(default)]
+    errcode: i64,
+    #[serde(default)]
+    errmsg: String,
+    #[serde(default)]
+    media_id: Option<String>,
 }
 
 fn default_api_base() -> String {
@@ -221,12 +277,10 @@ fn decrypt_callback_message(
     Ok((xml, corp_id))
 }
 
-fn parse_callback_message_xml(xml: &str) -> Option<ParsedCallbackMessage> {
-    let msg_type = extract_xml_value(xml, "MsgType")?;
-    if msg_type == "event" {
-        return None;
-    }
-
+fn parse_callback_message_xml_with_type(
+    xml: &str,
+    msg_type: &str,
+) -> Option<ParsedCallbackMessage> {
     let msg_id =
         extract_xml_value(xml, "MsgId").unwrap_or_else(|| channel_host::now_millis().to_string());
     let sender_id = extract_xml_value(xml, "FromUserName")?;
@@ -236,7 +290,7 @@ fn parse_callback_message_xml(xml: &str) -> Option<ParsedCallbackMessage> {
     let mut media_kind = None;
     let mut voice_recognition = None;
 
-    match msg_type.as_str() {
+    match msg_type {
         "text" => {
             text = extract_xml_value(xml, "Content").or(Some(String::new()));
         }
@@ -254,6 +308,12 @@ fn parse_callback_message_xml(xml: &str) -> Option<ParsedCallbackMessage> {
             media_id = extract_xml_value(xml, "MediaId");
             media_kind = Some(InboundMediaKind::File);
         }
+        "location" => {
+            text = Some(format_location_message(xml));
+        }
+        "link" => {
+            text = Some(format_link_message(xml));
+        }
         _ => return None,
     }
 
@@ -265,6 +325,127 @@ fn parse_callback_message_xml(xml: &str) -> Option<ParsedCallbackMessage> {
         media_kind,
         voice_recognition,
     })
+}
+
+fn format_location_message(xml: &str) -> String {
+    let label = extract_xml_value(xml, "Label");
+    let poiname = extract_xml_value(xml, "Poiname");
+    let location_x = extract_xml_value(xml, "Location_X");
+    let location_y = extract_xml_value(xml, "Location_Y");
+    let scale = extract_xml_value(xml, "Scale");
+
+    let mut lines = Vec::new();
+    if let Some(label) = label.as_deref().filter(|value| !value.is_empty()) {
+        lines.push(format!("Shared location: {label}"));
+    } else if let Some(poiname) = poiname.as_deref().filter(|value| !value.is_empty()) {
+        lines.push(format!("Shared location: {poiname}"));
+    } else {
+        lines.push("Shared location".to_string());
+    }
+
+    if let (Some(location_x), Some(location_y)) = (
+        location_x.as_deref().filter(|value| !value.is_empty()),
+        location_y.as_deref().filter(|value| !value.is_empty()),
+    ) {
+        lines.push(format!("Coordinates: {location_x}, {location_y}"));
+    }
+    if let Some(scale) = scale.as_deref().filter(|value| !value.is_empty()) {
+        lines.push(format!("Scale: {scale}"));
+    }
+    if let Some(poiname) = poiname.as_deref().filter(|value| !value.is_empty()) {
+        if label.as_deref() != Some(poiname) {
+            lines.push(format!("POI: {poiname}"));
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn format_link_message(xml: &str) -> String {
+    let title = extract_xml_value(xml, "Title");
+    let description = extract_xml_value(xml, "Description");
+    let url = extract_xml_value(xml, "Url");
+
+    let mut lines = Vec::new();
+    if let Some(title) = title.as_deref().filter(|value| !value.is_empty()) {
+        lines.push(format!("Shared link: {title}"));
+    } else {
+        lines.push("Shared link".to_string());
+    }
+    if let Some(description) = description.as_deref().filter(|value| !value.is_empty()) {
+        lines.push(description.to_string());
+    }
+    if let Some(url) = url.as_deref().filter(|value| !value.is_empty()) {
+        lines.push(url.to_string());
+    }
+
+    lines.join("\n")
+}
+
+fn build_callback_event_id(
+    event_type: &str,
+    sender_id: Option<&str>,
+    create_time: Option<&str>,
+    event_key: Option<&str>,
+    change_type: Option<&str>,
+) -> String {
+    let mut parts = vec!["event".to_string(), event_type.to_string()];
+    if let Some(change_type) = change_type.filter(|value| !value.is_empty()) {
+        parts.push(change_type.to_string());
+    }
+    if let Some(event_key) = event_key.filter(|value| !value.is_empty()) {
+        parts.push(event_key.to_string());
+    }
+    if let Some(sender_id) = sender_id.filter(|value| !value.is_empty()) {
+        parts.push(sender_id.to_string());
+    }
+    if let Some(create_time) = create_time.filter(|value| !value.is_empty()) {
+        parts.push(create_time.to_string());
+    }
+    parts.join(":")
+}
+
+fn parse_callback_event_xml(xml: &str) -> Option<ParsedCallbackEvent> {
+    let event_type = extract_xml_value(xml, "Event")?;
+    let sender_id = extract_xml_value(xml, "FromUserName");
+    let create_time = extract_xml_value(xml, "CreateTime");
+    let event_key = extract_xml_value(xml, "EventKey");
+    let change_type = extract_xml_value(xml, "ChangeType");
+    let explicit_id = extract_xml_value(xml, "MsgId").filter(|value| !value.is_empty());
+    let event_id = explicit_id.unwrap_or_else(|| {
+        build_callback_event_id(
+            &event_type,
+            sender_id.as_deref(),
+            create_time.as_deref(),
+            event_key.as_deref(),
+            change_type.as_deref(),
+        )
+    });
+
+    Some(ParsedCallbackEvent {
+        event_id,
+        sender_id,
+        event_type,
+        event_key,
+        change_type,
+    })
+}
+
+fn parse_callback_payload_xml(xml: &str) -> Option<ParsedCallbackPayload> {
+    let msg_type = extract_xml_value(xml, "MsgType")?;
+    if msg_type == "event" {
+        return parse_callback_event_xml(xml).map(ParsedCallbackPayload::Event);
+    }
+
+    parse_callback_message_xml_with_type(xml, &msg_type).map(ParsedCallbackPayload::Message)
+}
+
+#[cfg(test)]
+fn parse_callback_message_xml(xml: &str) -> Option<ParsedCallbackMessage> {
+    match parse_callback_payload_xml(xml)? {
+        ParsedCallbackPayload::Message(parsed) => Some(parsed),
+        ParsedCallbackPayload::Event(_) => None,
+    }
 }
 
 fn load_allow_from() -> Vec<String> {
@@ -420,35 +601,81 @@ fn send_text_message(to_user: &str, content: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn classify_outbound_media(att: &Attachment) -> &'static str {
-    let mime = att.mime_type.to_ascii_lowercase();
-    if mime.starts_with("image/") {
-        "image"
+fn base_mime_type(mime_type: &str) -> &str {
+    mime_type.split(';').next().unwrap_or("").trim()
+}
+
+fn lowercase_filename_extension(filename: &str) -> Option<String> {
+    let (_, ext) = filename.rsplit_once('.')?;
+    let ext = ext.trim();
+    if ext.is_empty() {
+        None
     } else {
-        "file"
+        Some(ext.to_ascii_lowercase())
     }
 }
 
-fn upload_media(att: &Attachment) -> Result<String, String> {
+fn preferred_outbound_media_kind(att: &Attachment) -> OutboundMediaKind {
+    let mime = base_mime_type(&att.mime_type).to_ascii_lowercase();
+    let ext = lowercase_filename_extension(&att.filename);
+
+    if matches!(mime.as_str(), "image/jpeg" | "image/png")
+        || matches!(ext.as_deref(), Some("jpg" | "jpeg" | "png"))
+    {
+        OutboundMediaKind::Image
+    } else if matches!(mime.as_str(), "audio/amr" | "audio/x-amr") || ext.as_deref() == Some("amr")
+    {
+        OutboundMediaKind::Voice
+    } else if mime == "video/mp4" || ext.as_deref() == Some("mp4") {
+        OutboundMediaKind::Video
+    } else {
+        OutboundMediaKind::File
+    }
+}
+
+fn classify_outbound_media(att: &Attachment) -> OutboundMediaKind {
+    let preferred = preferred_outbound_media_kind(att);
+    if att.data.len() > preferred.max_bytes() {
+        OutboundMediaKind::File
+    } else {
+        preferred
+    }
+}
+
+fn validate_outbound_media_size(
+    media_kind: OutboundMediaKind,
+    size_bytes: usize,
+) -> Result<(), String> {
+    if size_bytes > media_kind.max_bytes() {
+        return Err(format!(
+            "WeCom {} attachment exceeds {} bytes",
+            media_kind.as_api_type(),
+            media_kind.max_bytes()
+        ));
+    }
+    Ok(())
+}
+
+fn upload_media(att: &Attachment, media_kind: OutboundMediaKind) -> Result<String, String> {
     let api_base = channel_host::workspace_read(API_BASE_PATH).unwrap_or_else(default_api_base);
     let access_token = get_valid_access_token(&api_base)?;
-    let media_type = classify_outbound_media(att);
     let url = format!(
         "{}/cgi-bin/media/upload?access_token={}&type={}",
         api_base.trim_end_matches('/'),
         access_token,
-        media_type
+        media_kind.as_api_type()
     );
+    let content_type = base_mime_type(&att.mime_type);
 
     let boundary = format!("----ironclaw-wecom-{}", channel_host::now_millis());
     let header = format!(
         "--{boundary}\r\nContent-Disposition: form-data; name=\"media\"; filename=\"{}\"; filelength={}\r\nContent-Type: {}\r\n\r\n",
         att.filename,
         att.data.len(),
-        if att.mime_type.is_empty() {
+        if content_type.is_empty() {
             "application/octet-stream"
         } else {
-            att.mime_type.as_str()
+            content_type
         }
     );
     let footer = format!("\r\n--{boundary}--\r\n");
@@ -477,19 +704,18 @@ fn upload_media(att: &Attachment) -> Result<String, String> {
         ));
     }
 
-    let parsed: serde_json::Value = serde_json::from_slice(&response.body)
+    let parsed: WecomUploadMediaResponse = serde_json::from_slice(&response.body)
         .map_err(|e| format!("Failed to parse WeCom media/upload response: {e}"))?;
-    if parsed["errcode"].as_i64().unwrap_or(0) != 0 {
+    if parsed.errcode != 0 {
         return Err(format!(
             "WeCom media/upload error {}: {}",
-            parsed["errcode"].as_i64().unwrap_or(-1),
-            parsed["errmsg"].as_str().unwrap_or("")
+            parsed.errcode, parsed.errmsg
         ));
     }
 
-    parsed["media_id"]
-        .as_str()
-        .map(ToOwned::to_owned)
+    parsed
+        .media_id
+        .filter(|s| !s.is_empty())
         .ok_or_else(|| "WeCom media/upload response missing media_id".to_string())
 }
 
@@ -500,14 +726,34 @@ fn send_media_message(to_user: &str, att: &Attachment) -> Result<(), String> {
     let agent_id_num = agent_id
         .parse::<u64>()
         .map_err(|e| format!("agent_id must be numeric: {e}"))?;
-    let media_type = classify_outbound_media(att);
-    let media_id = upload_media(att)?;
+    let preferred_kind = preferred_outbound_media_kind(att);
+    let media_kind = classify_outbound_media(att);
+    if preferred_kind != media_kind {
+        channel_host::log(
+            channel_host::LogLevel::Info,
+            &format!(
+                "WeCom attachment '{}' exceeded {} message limits; sending as file instead",
+                att.filename,
+                preferred_kind.as_api_type()
+            ),
+        );
+    }
+    validate_outbound_media_size(media_kind, att.data.len()).map_err(|_| {
+        format!(
+            "WeCom {} attachment '{}' exceeds {} bytes",
+            media_kind.as_api_type(),
+            att.filename,
+            media_kind.max_bytes()
+        )
+    })?;
+    let media_id = upload_media(att, media_kind)?;
 
     let url = format!(
         "{}/cgi-bin/message/send?access_token={}",
         api_base.trim_end_matches('/'),
         access_token
     );
+    let media_type = media_kind.as_api_type();
     let body = serde_json::json!({
         "touser": to_user,
         "msgtype": media_type,
@@ -766,6 +1012,30 @@ fn handle_callback_message(parsed: ParsedCallbackMessage) {
     });
 }
 
+fn handle_callback_event(event: ParsedCallbackEvent) {
+    if !should_process_message_id(&event.event_id) {
+        return;
+    }
+
+    let sender = event.sender_id.as_deref().unwrap_or("<unknown>");
+    let mut details = vec![format!("type={}", event.event_type)];
+    if let Some(change_type) = event.change_type.as_deref() {
+        details.push(format!("change_type={change_type}"));
+    }
+    if let Some(event_key) = event.event_key.as_deref() {
+        details.push(format!("event_key={event_key}"));
+    }
+
+    channel_host::log(
+        channel_host::LogLevel::Debug,
+        &format!(
+            "Ignoring WeCom callback event from {} ({})",
+            sender,
+            details.join(", ")
+        ),
+    );
+}
+
 struct WecomChannel;
 
 export!(WecomChannel);
@@ -889,8 +1159,11 @@ impl Guest for WecomChannel {
             return text_response(403, "corp_id mismatch");
         }
 
-        if let Some(parsed) = parse_callback_message_xml(&inner_xml) {
-            handle_callback_message(parsed);
+        if let Some(parsed) = parse_callback_payload_xml(&inner_xml) {
+            match parsed {
+                ParsedCallbackPayload::Message(message) => handle_callback_message(message),
+                ParsedCallbackPayload::Event(event) => handle_callback_event(event),
+            }
         }
 
         text_response(200, "success")
@@ -1036,6 +1309,54 @@ mod tests {
     }
 
     #[test]
+    fn parse_location_callback_message_xml_formats_text_content() {
+        let xml = r#"
+<xml>
+  <FromUserName><![CDATA[wangwu]]></FromUserName>
+  <MsgType><![CDATA[location]]></MsgType>
+  <Location_X>31.2304</Location_X>
+  <Location_Y>121.4737</Location_Y>
+  <Scale>15</Scale>
+  <Label><![CDATA[Shanghai Tower]]></Label>
+  <Poiname><![CDATA[Lujiazui]]></Poiname>
+  <MsgId>location-1</MsgId>
+</xml>
+"#;
+
+        let parsed = parse_callback_message_xml(xml).expect("parsed");
+        assert_eq!(parsed.msg_id, "location-1");
+        assert_eq!(
+            parsed.text.as_deref(),
+            Some(
+                "Shared location: Shanghai Tower\nCoordinates: 31.2304, 121.4737\nScale: 15\nPOI: Lujiazui"
+            )
+        );
+        assert!(parsed.media_id.is_none());
+    }
+
+    #[test]
+    fn parse_link_callback_message_xml_formats_text_content() {
+        let xml = r#"
+<xml>
+  <FromUserName><![CDATA[zhaoliu]]></FromUserName>
+  <MsgType><![CDATA[link]]></MsgType>
+  <Title><![CDATA[IronClaw Docs]]></Title>
+  <Description><![CDATA[Setup guide]]></Description>
+  <Url><![CDATA[https://example.com/docs]]></Url>
+  <MsgId>link-1</MsgId>
+</xml>
+"#;
+
+        let parsed = parse_callback_message_xml(xml).expect("parsed");
+        assert_eq!(parsed.msg_id, "link-1");
+        assert_eq!(
+            parsed.text.as_deref(),
+            Some("Shared link: IronClaw Docs\nSetup guide\nhttps://example.com/docs")
+        );
+        assert!(parsed.media_id.is_none());
+    }
+
+    #[test]
     fn parse_event_callback_message_xml_is_ignored() {
         let xml = r#"
 <xml>
@@ -1046,6 +1367,73 @@ mod tests {
 "#;
 
         assert!(parse_callback_message_xml(xml).is_none());
+    }
+
+    #[test]
+    fn parse_event_callback_xml_extracts_enter_agent_fields() {
+        let xml = r#"
+<xml>
+  <ToUserName><![CDATA[ww123]]></ToUserName>
+  <FromUserName><![CDATA[zhangsan]]></FromUserName>
+  <CreateTime>1710000001</CreateTime>
+  <MsgType><![CDATA[event]]></MsgType>
+  <Event><![CDATA[enter_agent]]></Event>
+  <AgentID>1000002</AgentID>
+</xml>
+"#;
+
+        let parsed = parse_callback_event_xml(xml).expect("parsed");
+        assert_eq!(parsed.sender_id.as_deref(), Some("zhangsan"));
+        assert_eq!(parsed.event_type, "enter_agent");
+        assert_eq!(parsed.event_key, None);
+        assert_eq!(parsed.change_type, None);
+        assert_eq!(parsed.event_id, "event:enter_agent:zhangsan:1710000001");
+    }
+
+    #[test]
+    fn parse_event_callback_xml_uses_event_key_and_change_type_in_dedupe_id() {
+        let xml = r#"
+<xml>
+  <FromUserName><![CDATA[zhangsan]]></FromUserName>
+  <CreateTime>1710000002</CreateTime>
+  <MsgType><![CDATA[event]]></MsgType>
+  <Event><![CDATA[change_contact]]></Event>
+  <ChangeType><![CDATA[update_user]]></ChangeType>
+  <EventKey><![CDATA[userid42]]></EventKey>
+</xml>
+"#;
+
+        let parsed = parse_callback_event_xml(xml).expect("parsed");
+        assert_eq!(parsed.event_type, "change_contact");
+        assert_eq!(parsed.change_type.as_deref(), Some("update_user"));
+        assert_eq!(parsed.event_key.as_deref(), Some("userid42"));
+        assert_eq!(
+            parsed.event_id,
+            "event:change_contact:update_user:userid42:zhangsan:1710000002"
+        );
+    }
+
+    #[test]
+    fn parse_callback_payload_xml_routes_event_payloads() {
+        let xml = r#"
+<xml>
+  <FromUserName><![CDATA[lisi]]></FromUserName>
+  <CreateTime>1710000003</CreateTime>
+  <MsgType><![CDATA[event]]></MsgType>
+  <Event><![CDATA[click]]></Event>
+  <EventKey><![CDATA[menu.help]]></EventKey>
+</xml>
+"#;
+
+        let parsed = parse_callback_payload_xml(xml).expect("parsed");
+        match parsed {
+            ParsedCallbackPayload::Event(event) => {
+                assert_eq!(event.sender_id.as_deref(), Some("lisi"));
+                assert_eq!(event.event_type, "click");
+                assert_eq!(event.event_key.as_deref(), Some("menu.help"));
+            }
+            ParsedCallbackPayload::Message(_) => panic!("expected event payload"),
+        }
     }
 
     #[test]
@@ -1117,5 +1505,95 @@ mod tests {
         assert!(!verify_callback_signature(
             token, timestamp, nonce, encrypted, "deadbeef"
         ));
+    }
+
+    fn make_outbound_attachment(filename: &str, mime_type: &str, size_bytes: usize) -> Attachment {
+        Attachment {
+            filename: filename.to_string(),
+            mime_type: mime_type.to_string(),
+            data: vec![0; size_bytes],
+        }
+    }
+
+    #[test]
+    fn base_mime_type_strips_parameters() {
+        assert_eq!(base_mime_type("audio/amr; codecs=amr"), "audio/amr");
+        assert_eq!(base_mime_type("image/png"), "image/png");
+        assert_eq!(base_mime_type(""), "");
+    }
+
+    #[test]
+    fn classify_outbound_media_maps_supported_wecom_types() {
+        assert_eq!(
+            classify_outbound_media(&make_outbound_attachment("photo.png", "image/png", 128)),
+            OutboundMediaKind::Image
+        );
+        assert_eq!(
+            classify_outbound_media(&make_outbound_attachment("voice.amr", "audio/amr", 128)),
+            OutboundMediaKind::Voice
+        );
+        assert_eq!(
+            classify_outbound_media(&make_outbound_attachment("clip.mp4", "video/mp4", 128)),
+            OutboundMediaKind::Video
+        );
+        assert_eq!(
+            classify_outbound_media(&make_outbound_attachment(
+                "report.pdf",
+                "application/pdf",
+                128
+            )),
+            OutboundMediaKind::File
+        );
+    }
+
+    #[test]
+    fn classify_outbound_media_uses_filename_extension_when_mime_is_generic() {
+        assert_eq!(
+            classify_outbound_media(&make_outbound_attachment(
+                "screenshot.jpeg",
+                "application/octet-stream",
+                128
+            )),
+            OutboundMediaKind::Image
+        );
+        assert_eq!(
+            classify_outbound_media(&make_outbound_attachment(
+                "recording.amr",
+                "application/octet-stream",
+                128
+            )),
+            OutboundMediaKind::Voice
+        );
+    }
+
+    #[test]
+    fn classify_outbound_media_falls_back_to_file_when_specific_media_is_too_large() {
+        assert_eq!(
+            classify_outbound_media(&make_outbound_attachment(
+                "photo.png",
+                "image/png",
+                MAX_OUTBOUND_IMAGE_BYTES + 1
+            )),
+            OutboundMediaKind::File
+        );
+        assert_eq!(
+            classify_outbound_media(&make_outbound_attachment(
+                "clip.mp4",
+                "video/mp4",
+                MAX_OUTBOUND_VIDEO_BYTES + 1
+            )),
+            OutboundMediaKind::File
+        );
+    }
+
+    #[test]
+    fn validate_outbound_media_size_rejects_oversized_files() {
+        assert!(
+            validate_outbound_media_size(OutboundMediaKind::File, MAX_ATTACHMENT_BYTES).is_ok()
+        );
+        assert!(
+            validate_outbound_media_size(OutboundMediaKind::File, MAX_ATTACHMENT_BYTES + 1)
+                .is_err()
+        );
     }
 }

@@ -3566,6 +3566,10 @@ function renderConfigureModal(name, secrets, setupFields) {
     input.type = 'password';
     input.name = secret.name;
     input.placeholder = secret.provided ? I18n.t('config.alreadySet') : '';
+    if (secret.validation) {
+      input.pattern = secret.validation;
+      input.title = 'Invalid format';
+    }
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') submitConfigureModal(name, fields);
     });
@@ -3587,7 +3591,7 @@ function renderConfigureModal(name, secrets, setupFields) {
 
     field.appendChild(inputRow);
     form.appendChild(field);
-    fields.push({ kind: 'secret', name: secret.name, input: input });
+    fields.push({ kind: 'secret', name: secret.name, input: input, validation: secret.validation || null });
   }
 
   for (const setupField of setupFields) {
@@ -3769,10 +3773,19 @@ function submitConfigureModal(name, fields, options) {
   options = options || {};
   const secrets = {};
   const setupFields = {};
+  const overlay = getConfigureOverlay(name) || document.querySelector('.configure-overlay');
+  clearConfigureInlineError(overlay);
   for (const f of fields) {
     const value = f.input.value.trim();
     if (!value) {
       continue;
+    }
+    if (f.kind === 'secret' && f.validation && typeof f.input.checkValidity === 'function' && !f.input.checkValidity()) {
+      setConfigureInlineError(overlay, f.input.validationMessage || 'Invalid field format');
+      if (typeof f.input.reportValidity === 'function') {
+        f.input.reportValidity();
+      }
+      return;
     }
     if (f.kind === 'secret') {
       secrets[f.name] = value;
@@ -3781,9 +3794,7 @@ function submitConfigureModal(name, fields, options) {
     }
   }
 
-  const overlay = getConfigureOverlay(name) || document.querySelector('.configure-overlay');
   const isTelegram = name === 'telegram';
-  clearConfigureInlineError(overlay);
 
   // Disable buttons to prevent double-submit
   var btns = overlay ? overlay.querySelectorAll('.configure-actions button') : [];

@@ -71,7 +71,7 @@ Use Bot WebSocket later in MVP+1 for:
 
 - multi-account
 - org directory sync
-- callback-based inbound app messages
+- bot websocket inbound / bot-session transport
 - advanced sender routing
 - video understanding
 - broad enterprise admin UX
@@ -180,6 +180,14 @@ Suggested initial default:
 - `3000-5000ms`
 
 This should be configurable in `wecom.capabilities.json`.
+
+Current constraint on this branch:
+
+- IronClaw's WASM channel polling interval has a minimum of 30000ms
+- that makes a 3000-5000ms callback merge window impractical without new
+  host-side timer or flush support
+- defer merge-window behavior until the host runtime can support sub-30s
+  callback bundle flushing cleanly
 
 ## Delivery Strategy
 

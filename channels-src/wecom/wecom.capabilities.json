@@ -17,26 +17,31 @@
       {
         "name": "wecom_corp_id",
         "prompt": "Enter your WeCom Corp ID (for example wwxxxx...)",
+        "validation": "^ww[a-zA-Z0-9]{16}$",
         "optional": false
       },
       {
         "name": "wecom_corp_secret",
         "prompt": "Enter your WeCom self-built app Corp Secret",
+        "validation": "^[A-Za-z0-9_-]{16,128}$",
         "optional": false
       },
       {
         "name": "wecom_agent_id",
         "prompt": "Enter your WeCom Agent ID (numeric)",
+        "validation": "^[1-9][0-9]{0,15}$",
         "optional": false
       },
       {
         "name": "wecom_callback_token",
         "prompt": "Enter your WeCom callback Token",
+        "validation": "^[A-Za-z0-9._~-]{3,128}$",
         "optional": false
       },
       {
         "name": "wecom_callback_encoding_aes_key",
         "prompt": "Enter your WeCom callback EncodingAESKey (43 chars)",
+        "validation": "^[A-Za-z0-9]{43}$",
         "optional": false
       }
     ],

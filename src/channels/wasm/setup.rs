@@ -207,7 +207,10 @@ async fn register_channel(
     let endpoints = vec![RegisteredEndpoint {
         channel_name: channel_name.clone(),
         path: webhook_path,
-        methods: vec!["POST".to_string()],
+        // Callback-style channels like WeCom need GET for URL verification and
+        // POST for normal delivery, so the registered metadata should reflect
+        // the actual catch-all router behavior.
+        methods: vec!["GET".to_string(), "POST".to_string()],
         require_secret: host_webhook_secret.is_some(),
     }];
 
