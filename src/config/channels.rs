@@ -19,6 +19,7 @@ pub struct ChannelsConfig {
     pub gateway: Option<GatewayConfig>,
     pub signal: Option<SignalConfig>,
     pub tui: Option<TuiChannelConfig>,
+    pub dingtalk: Option<DingTalkConfig>,
     /// Directory containing WASM channel modules (default: ~/.ironclaw/channels/).
     pub wasm_channels_dir: std::path::PathBuf,
     /// Whether WASM channels are enabled.
@@ -26,6 +27,15 @@ pub struct ChannelsConfig {
     /// Per-channel owner user IDs. When set, the channel only responds to this user.
     /// Key: channel name (e.g., "telegram"), Value: owner user ID.
     pub wasm_channel_owner_ids: HashMap<String, i64>,
+}
+
+/// DingTalk (钉钉) channel configuration.
+#[derive(Debug, Clone)]
+pub struct DingTalkConfig {
+    pub enabled: bool,
+    pub client_id: String,
+    pub client_secret: SecretString,
+    pub robot_code: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -368,6 +378,25 @@ impl ChannelsConfig {
             None
         };
 
+        // DingTalk channel: enabled when DINGTALK_CLIENT_ID is set.
+        let dingtalk_client_id = optional_env("DINGTALK_CLIENT_ID")?;
+        let dingtalk = if let Some(client_id) = dingtalk_client_id {
+            let client_secret = optional_env("DINGTALK_CLIENT_SECRET")?.ok_or(
+                ConfigError::InvalidValue {
+                    key: "DINGTALK_CLIENT_SECRET".to_string(),
+                    message: "required when DINGTALK_CLIENT_ID is set".to_string(),
+                },
+            )?;
+            Some(DingTalkConfig {
+                enabled: true,
+                client_id,
+                client_secret: SecretString::from(client_secret),
+                robot_code: optional_env("DINGTALK_ROBOT_CODE")?,
+            })
+        } else {
+            None
+        };
+
         let cli_enabled = db_first_bool(cs.cli_enabled, defaults.cli_enabled, "CLI_ENABLED")?;
         let cli_mode = db_first_optional_string(&cs.cli_mode, "CLI_MODE")?.unwrap_or_default();
         let tui = if cli_mode.eq_ignore_ascii_case("tui") {
@@ -387,6 +416,7 @@ impl ChannelsConfig {
             gateway,
             signal,
             tui,
+            dingtalk,
             wasm_channels_dir: {
                 // DB-first: use settings if explicitly set, else env, else default.
                 // defaults.wasm_channels_dir is None, so any Some(..) is an explicit DB override.
@@ -554,6 +584,7 @@ mod tests {
             gateway: None,
             signal: None,
             tui: None,
+            dingtalk: None,
             wasm_channels_dir: PathBuf::from("/tmp/channels"),
             wasm_channels_enabled: true,
             wasm_channel_owner_ids: HashMap::new(),
@@ -579,6 +610,7 @@ mod tests {
             gateway: None,
             signal: None,
             tui: None,
+            dingtalk: None,
             wasm_channels_dir: PathBuf::from("/opt/channels"),
             wasm_channels_enabled: false,
             wasm_channel_owner_ids: ids,
