@@ -58,6 +58,8 @@ struct Params {
     tool_slug: Option<String>,
     params: Option<serde_json::Value>,
     connected_account_id: Option<String>,
+    cursor: Option<String>,
+    limit: Option<u32>,
 }
 
 fn execute_inner(params_str: &str, context: Option<&str>) -> Result<String, String> {
@@ -90,7 +92,7 @@ fn execute_inner(params_str: &str, context: Option<&str>) -> Result<String, Stri
     }
 
     match params.action.as_str() {
-        "list" => list_tools(params.app.as_deref()),
+        "list" => list_tools(params.app.as_deref(), params.cursor.as_deref(), params.limit),
         "execute" => {
             let tool_slug = params
                 .tool_slug
@@ -245,15 +247,31 @@ fn unwrap_items(value: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
 // Actions
 // ---------------------------------------------------------------------------
 
-fn list_tools(app: Option<&str>) -> Result<String, String> {
-    let query: Vec<(&str, &str)> = match app {
-        Some(a) => vec![("toolkit_slug", a)],
-        None => vec![],
-    };
+fn list_tools(app: Option<&str>, cursor: Option<&str>, limit: Option<u32>) -> Result<String, String> {
+    let limit_str = limit.map(|l| l.to_string());
+    let mut query: Vec<(&str, &str)> = vec![("toolkit_versions", "latest")];
+    if let Some(a) = app {
+        query.push(("toolkit_slug", a));
+    }
+    if let Some(ref c) = cursor {
+        query.push(("cursor", c));
+    }
+    if let Some(ref l) = limit_str {
+        query.push(("limit", l));
+    }
     let result = api_get("/tools", &query)?;
-    // Return the items array directly for cleaner LLM consumption.
+
+    // Preserve pagination metadata (next_cursor, total) alongside items
+    // so callers can request subsequent pages.
     let items = unwrap_items(&result).cloned().unwrap_or_default();
-    serde_json::to_string(&items).map_err(|e| format!("Failed to serialize output: {e}"))
+    let mut output = serde_json::json!({ "items": items });
+    if let Some(next_cursor) = result.get("next_cursor").and_then(|v| v.as_str()) {
+        output["next_cursor"] = serde_json::json!(next_cursor);
+    }
+    if let Some(total) = result.get("total").and_then(|v| v.as_u64()) {
+        output["total"] = serde_json::json!(total);
+    }
+    serde_json::to_string(&output).map_err(|e| format!("Failed to serialize output: {e}"))
 }
 
 fn execute_action(
@@ -304,10 +322,10 @@ fn extract_auth_config_id(configs: &serde_json::Value, app: &str) -> Result<Stri
 }
 
 fn list_accounts(app: Option<&str>, entity_id: &str) -> Result<String, String> {
-    // v3 uses plural filter names: `user_ids`, `toolkit_slugs`
-    let mut query = vec![("user_ids", entity_id)];
+    // v3 documents these as array-valued params: `user_ids[]`, `toolkit_slugs[]`
+    let mut query = vec![("user_ids[]", entity_id)];
     if let Some(a) = app {
-        query.push(("toolkit_slugs", a));
+        query.push(("toolkit_slugs[]", a));
     }
     let result = api_get("/connected_accounts", &query)?;
     let items = unwrap_items(&result).cloned().unwrap_or_default();
@@ -316,18 +334,37 @@ fn list_accounts(app: Option<&str>, entity_id: &str) -> Result<String, String> {
 
 /// Look up the toolkit/app slug for a tool via the Composio API.
 ///
-/// Querying the API is more reliable than parsing the tool slug string,
-/// which breaks for multi-word app names (e.g., `GOOGLE_DRIVE_UPLOAD`
-/// would incorrectly resolve to `"google"` instead of `"google_drive"`).
+/// Uses the direct `GET /tools/{tool_slug}` endpoint for exact lookup,
+/// avoiding false negatives from search pagination/ranking. Falls back
+/// to the search endpoint if the direct lookup returns a non-item shape.
 fn lookup_app_for_tool(tool_slug: &str) -> Result<String, String> {
-    let tools = api_get("/tools", &[("search", tool_slug)])?;
-    extract_toolkit_slug(&tools, tool_slug)
+    // Direct slug endpoint — exact match, no pagination concerns.
+    let tool = api_get(
+        &format!("/tools/{}", url_encode(tool_slug)),
+        &[("toolkit_versions", "latest")],
+    )?;
+    extract_toolkit_slug_from_tool(&tool, tool_slug)
 }
 
-/// Extract the toolkit slug from a tools search response.
+/// Extract the toolkit slug from a single tool object (direct endpoint response).
 ///
 /// v3 nests the toolkit slug under `toolkit.slug`; falls back to
 /// `toolkit_slug` or `appName` for backward compatibility.
+fn extract_toolkit_slug_from_tool(tool: &serde_json::Value, tool_slug: &str) -> Result<String, String> {
+    tool.get("toolkit")
+        .and_then(|tk| tk.get("slug"))
+        .or_else(|| tool.get("toolkit_slug"))
+        .or_else(|| tool.get("appName"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_ascii_lowercase())
+        .ok_or_else(|| {
+            format!("could not determine app for tool \"{tool_slug}\" — verify the slug is correct")
+        })
+}
+
+/// Extract the toolkit slug from a paginated tools list response.
+///
+/// Scans the items array for an exact slug match (case-insensitive).
 fn extract_toolkit_slug(tools: &serde_json::Value, tool_slug: &str) -> Result<String, String> {
     let items = unwrap_items(tools).ok_or_else(|| {
         format!("could not determine app for tool \"{tool_slug}\" — unexpected response shape")
@@ -344,16 +381,7 @@ fn extract_toolkit_slug(tools: &serde_json::Value, tool_slug: &str) -> Result<St
             format!("could not determine app for tool \"{tool_slug}\" — verify the slug is correct")
         })?;
 
-    // v3: toolkit.slug; fallback: toolkit_slug, appName
-    tool.get("toolkit")
-        .and_then(|tk| tk.get("slug"))
-        .or_else(|| tool.get("toolkit_slug"))
-        .or_else(|| tool.get("appName"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_ascii_lowercase())
-        .ok_or_else(|| {
-            format!("tool \"{tool_slug}\" has no toolkit slug — verify the slug is correct")
-        })
+    extract_toolkit_slug_from_tool(tool, tool_slug)
 }
 
 /// Auto-resolve connected account for a tool slug.
@@ -366,10 +394,10 @@ fn resolve_account(tool_slug: &str, entity_id: &str) -> Result<String, String> {
 ///
 /// v3 uses `updated_at` (not `updatedAt`) and returns paginated items.
 fn find_active_account(tool_slug: &str, app: &str, entity_id: &str) -> Result<String, String> {
-    // v3 uses plural filter names
+    // v3 documents these as array-valued params
     let accounts = api_get(
         "/connected_accounts",
-        &[("user_ids", entity_id), ("toolkit_slugs", app)],
+        &[("user_ids[]", entity_id), ("toolkit_slugs[]", app)],
     )?;
 
     let items = unwrap_items(&accounts).ok_or_else(|| {
@@ -475,6 +503,14 @@ const SCHEMA: &str = r#"{
         "connected_account_id": {
             "type": "string",
             "description": "Specific connected account ID (auto-resolved if omitted)"
+        },
+        "cursor": {
+            "type": "string",
+            "description": "Pagination cursor for list action (from previous response's next_cursor)"
+        },
+        "limit": {
+            "type": "integer",
+            "description": "Max items per page for list action (default: API default ~20)"
         }
     },
     "required": ["action"],
@@ -591,6 +627,56 @@ mod tests {
         assert!(validate_tool_slug("foo/bar").is_err());
         assert!(validate_tool_slug("foo\\bar").is_err());
         assert!(validate_tool_slug("").is_err());
+    }
+
+    #[test]
+    fn test_params_with_cursor_and_limit() {
+        let p: Params = serde_json::from_str(
+            r#"{"action": "list", "cursor": "abc123", "limit": 50}"#,
+        )
+        .unwrap();
+        assert_eq!(p.cursor.as_deref(), Some("abc123"));
+        assert_eq!(p.limit, Some(50));
+    }
+
+    #[test]
+    fn test_array_query_param_encoding() {
+        let url = build_url("/connected_accounts", &[("user_ids[]", "alice"), ("toolkit_slugs[]", "gmail")]);
+        assert!(url.contains("user_ids%5B%5D=alice"));
+        assert!(url.contains("toolkit_slugs%5B%5D=gmail"));
+    }
+
+    #[test]
+    fn test_extract_toolkit_slug_from_direct_response() {
+        let tool: serde_json::Value = serde_json::from_str(
+            r#"{"slug": "GMAIL_SEND_EMAIL", "toolkit": {"slug": "gmail"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            extract_toolkit_slug_from_tool(&tool, "GMAIL_SEND_EMAIL").unwrap(),
+            "gmail"
+        );
+    }
+
+    #[test]
+    fn test_extract_toolkit_slug_from_direct_response_legacy() {
+        let tool: serde_json::Value = serde_json::from_str(
+            r#"{"slug": "SLACK_POST", "toolkit_slug": "slack"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            extract_toolkit_slug_from_tool(&tool, "SLACK_POST").unwrap(),
+            "slack"
+        );
+    }
+
+    #[test]
+    fn test_extract_toolkit_slug_from_direct_response_missing() {
+        let tool: serde_json::Value = serde_json::from_str(
+            r#"{"slug": "UNKNOWN"}"#,
+        )
+        .unwrap();
+        assert!(extract_toolkit_slug_from_tool(&tool, "UNKNOWN").is_err());
     }
 
     #[test]
