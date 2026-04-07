@@ -2021,7 +2021,7 @@ async fn await_thread_outcome(
                     _ => {}
                 }
             }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
                 if !state.thread_manager.is_running(thread_id).await {
                     break;
                 }
