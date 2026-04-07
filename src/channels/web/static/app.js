@@ -4422,9 +4422,9 @@ function renderWasmChannelStepper(ext) {
   var requiresPairing = !!(ext.onboarding && ext.onboarding.requires_pairing);
 
   var steps = [
-    { label: 'Configure Credentials', key: 'setup_required' },
-    { label: requiresPairing ? 'Claim Ownership' : 'Activate Channel', key: 'pairing_required' },
-    { label: 'Ready', key: 'ready' },
+    { label: I18n.t('missions.stepConfigured'), key: 'setup_required' },
+    { label: requiresPairing ? I18n.t('missions.stepAwaitingPairing') : I18n.t('extensions.activate'), key: 'pairing_required' },
+    { label: I18n.t('missions.stepActive'), key: 'ready' },
   ];
 
   var reachedIdx;

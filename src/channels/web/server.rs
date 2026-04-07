@@ -1901,7 +1901,10 @@ async fn chat_auth_token_handler(
                         &user.user_id,
                         AppEvent::PairingRequired {
                             channel: req.extension_name.clone(),
-                            instructions: Some(pairing_instructions(&req.extension_name)),
+                            instructions: result
+                                .onboarding
+                                .as_ref()
+                                .and_then(|o| o.pairing_instructions.clone()),
                             onboarding: result
                                 .onboarding
                                 .clone()
@@ -3079,7 +3082,10 @@ async fn extensions_setup_submit_handler(
                         &user.user_id,
                         AppEvent::PairingRequired {
                             channel: name.clone(),
-                            instructions: Some(pairing_instructions(&name)),
+                            instructions: result
+                                .onboarding
+                                .as_ref()
+                                .and_then(|o| o.pairing_instructions.clone()),
                             onboarding: result
                                 .onboarding
                                 .clone()
@@ -3092,16 +3098,6 @@ async fn extensions_setup_submit_handler(
             Ok(Json(resp))
         }
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
-    }
-}
-
-fn pairing_instructions(channel: &str) -> String {
-    if channel == "telegram" {
-        "Open your Telegram bot, send it any message such as hi or /start, wait for the pairing code reply, then paste that code here. Telegram bots cannot message you first.".to_string()
-    } else {
-        format!(
-            "Open {channel}, send it any message to receive a pairing code, then paste that code here, or run `ironclaw pairing approve {channel} <CODE>`."
-        )
     }
 }
 
