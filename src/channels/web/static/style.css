@@ -40,8 +40,6 @@
   --focus-ring: rgba(52, 211, 153, 0.1);
   --accent-subtle: rgba(52, 211, 153, 0.15);
   --accent-border-subtle: rgba(52, 211, 153, 0.3);
-  --info-subtle: rgba(96, 165, 250, 0.12);
-  --info-border-subtle: rgba(96, 165, 250, 0.3);
   --danger-subtle: rgba(230, 76, 76, 0.15);
   --danger-border-subtle: rgba(230, 76, 76, 0.3);
   --warning-subtle: rgba(245, 166, 35, 0.15);
@@ -1646,8 +1644,7 @@ body {
 
 /* Tool calls summary (persisted between user/assistant messages) */
 .tool-calls-summary {
-  background: linear-gradient(90deg, var(--info-subtle) 0, var(--bg-secondary) 28%);
-  border: 1px solid var(--info-border-subtle);
+  background: var(--bg-secondary);
   border-left: 3px solid var(--info);
   padding: 6px 12px;
   margin: 4px 0;
@@ -1666,7 +1663,6 @@ body {
   display: inline-block;
   margin-right: 6px;
   font-size: 0.7em;
-  color: var(--info);
   transition: transform 0.15s;
 }
 
