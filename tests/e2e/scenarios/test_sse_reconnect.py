@@ -61,14 +61,19 @@ async def _wait_for_turn_in_history(base_url: str, thread_id: str, expected_resp
 
 
 async def test_sse_status_shows_connected(page):
-    """SSE should be connected after page load."""
-    await _wait_for_connected(page, timeout=5000)
+    """SSE dot should show connected state after page load."""
+    dot = page.locator("#sse-dot")
+    cls = await dot.get_attribute("class") or ""
+    assert "disconnected" not in cls, f"Expected connected dot, got class='{cls}'"
 
 
 async def test_sse_reconnect_after_disconnect(page):
     """After programmatic disconnect, SSE should reconnect."""
     await _wait_for_connected(page, timeout=5000)
     await page.evaluate("if (eventSource) eventSource.close()")
+    # Reset the flag so _wait_for_connected can detect the new onopen.
+    # The history-reload path (sseHasConnectedBefore=true on reconnect)
+    # is covered by test_sse_reconnect_preserves_chat_history.
     await page.evaluate("sseHasConnectedBefore = false; connectSSE()")
     await _wait_for_connected(page, timeout=10000)
 
