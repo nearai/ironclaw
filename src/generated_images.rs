@@ -1,5 +1,7 @@
 //! Shared helpers for image-generation sentinel payloads.
 
+use std::borrow::Cow;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GeneratedImageSentinel {
     pub(crate) value: serde_json::Value,
@@ -16,7 +18,9 @@ impl GeneratedImageSentinel {
         if value.get("type").and_then(|v| v.as_str()) != Some("image_generated") {
             return None;
         }
-        Some(Self { value })
+        Some(Self {
+            value: value.into_owned(),
+        })
     }
 
     pub(crate) fn data_url(&self) -> Option<&str> {
@@ -45,21 +49,25 @@ impl GeneratedImageSentinel {
     }
 }
 
-fn normalize_embedded_json(value: &serde_json::Value) -> Option<serde_json::Value> {
-    let mut current = value.clone();
+fn normalize_embedded_json(value: &serde_json::Value) -> Option<Cow<'_, serde_json::Value>> {
+    let serde_json::Value::String(s) = value else {
+        return Some(Cow::Borrowed(value));
+    };
+
+    let mut current = serde_json::from_str::<serde_json::Value>(s).ok()?;
     // Generated-image sentinels may be serialized more than once as they flow
     // through tool output, DB persistence, and history reconstruction. Unwrap a
     // few layers to tolerate that pipeline, but stop after a small fixed number
     // of rounds so malformed input cannot trigger unbounded reparsing.
-    for _ in 0..3 {
+    for _ in 0..2 {
         match current {
             serde_json::Value::String(ref s) => {
                 current = serde_json::from_str::<serde_json::Value>(s).ok()?;
             }
-            _ => return Some(current),
+            _ => return Some(Cow::Owned(current)),
         }
     }
-    Some(current)
+    Some(Cow::Owned(current))
 }
 
 #[cfg(test)]

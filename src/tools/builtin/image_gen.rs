@@ -64,7 +64,11 @@ impl ImageGenerateTool {
 
 pub(super) fn infer_generated_image_media_type(image_b64: &str) -> &'static str {
     let prefix_len = image_b64.len().min(64);
-    let prefix = &image_b64[..prefix_len];
+    let decodable_len = prefix_len - (prefix_len % 4);
+    if decodable_len == 0 {
+        return "image/png";
+    }
+    let prefix = &image_b64[..decodable_len];
     let decoded = STANDARD.decode(prefix);
     let Ok(bytes) = decoded else {
         return "image/png";
@@ -281,6 +285,45 @@ mod tests {
     fn infer_generated_image_media_type_detects_png() {
         let png_b64 = STANDARD.encode([0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
         assert_eq!(infer_generated_image_media_type(&png_b64), "image/png");
+    }
+
+    #[test]
+    fn infer_generated_image_media_type_detects_gif() {
+        let gif_b64 = STANDARD.encode(b"GIF89a");
+        assert_eq!(infer_generated_image_media_type(&gif_b64), "image/gif");
+    }
+
+    #[test]
+    fn infer_generated_image_media_type_detects_webp() {
+        let mut riff = b"RIFF".to_vec();
+        riff.extend_from_slice(&[0x00; 4]);
+        riff.extend_from_slice(b"WEBP");
+        let webp_b64 = STANDARD.encode(&riff);
+        assert_eq!(infer_generated_image_media_type(&webp_b64), "image/webp");
+    }
+
+    #[test]
+    fn infer_generated_image_media_type_detects_short_unaligned_jpeg_prefix() {
+        let jpeg_b64 = STANDARD.encode([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]);
+        let short_unaligned = &jpeg_b64[..jpeg_b64.len() - 1];
+        assert_eq!(short_unaligned.len() % 4, 3);
+        assert_eq!(
+            infer_generated_image_media_type(short_unaligned),
+            "image/jpeg"
+        );
+    }
+
+    #[test]
+    fn infer_generated_image_media_type_defaults_for_invalid_base64() {
+        assert_eq!(
+            infer_generated_image_media_type("!!!not-base64"),
+            "image/png"
+        );
+    }
+
+    #[test]
+    fn infer_generated_image_media_type_defaults_for_empty_input() {
+        assert_eq!(infer_generated_image_media_type(""), "image/png");
     }
 
     #[test]

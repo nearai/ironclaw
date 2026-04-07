@@ -30,13 +30,13 @@ fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
 
 fn generated_image_event_id(
     turn_number: usize,
-    image_index: usize,
+    result_index: usize,
     preferred_id: Option<&str>,
 ) -> String {
     preferred_id
         .filter(|id| !id.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| format!("turn-{turn_number}-image-{image_index}"))
+        .unwrap_or_else(|| format!("turn-{turn_number}-image-{result_index}"))
 }
 
 fn parse_image_generated_sentinel_from_value(
@@ -63,10 +63,10 @@ pub fn collect_generated_images_from_tool_results<'a>(
     tool_results
         .into_iter()
         .enumerate()
-        .filter_map(|(image_index, (event_id, result))| {
+        .filter_map(|(result_index, (event_id, result))| {
             parse_image_generated_sentinel_from_value(
                 result?,
-                generated_image_event_id(turn_number, image_index, event_id),
+                generated_image_event_id(turn_number, result_index, event_id),
             )
         })
         .collect()

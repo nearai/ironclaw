@@ -9,18 +9,12 @@ use std::sync::Arc;
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
-use crate::channels::web::util::{
-    build_turns_from_db_messages, collect_generated_images_from_tool_results,
-    enforce_generated_image_history_budget, tool_error_for_display, tool_result_preview,
-};
 use axum::{
     Json,
-    extract::{Query, State, WebSocketUpgrade},
+    extract::{State, WebSocketUpgrade},
     http::StatusCode,
     response::IntoResponse,
 };
-use serde::Deserialize;
-use uuid::Uuid;
 
 // ── Shared helpers used by server.rs handlers ──────────────────────────
 
@@ -81,183 +75,6 @@ pub async fn chat_ws_handler(
     }
     Ok(ws.on_upgrade(move |socket| {
         crate::channels::web::ws::handle_ws_connection(socket, state, identity)
-    }))
-}
-
-// ── Thread management and history handlers ────────────────────────────
-
-#[derive(Deserialize)]
-pub struct HistoryQuery {
-    pub thread_id: Option<String>,
-    pub limit: Option<usize>,
-    pub before: Option<String>,
-}
-
-pub async fn chat_history_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(identity): AuthenticatedUser,
-    Query(query): Query<HistoryQuery>,
-) -> Result<Json<HistoryResponse>, (StatusCode, String)> {
-    let session_manager = state.session_manager.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Session manager not available".to_string(),
-    ))?;
-
-    let session = session_manager
-        .get_or_create_session(&identity.user_id)
-        .await;
-
-    let limit = query.limit.unwrap_or(50);
-    let before_cursor = query
-        .before
-        .as_deref()
-        .map(|s| {
-            chrono::DateTime::parse_from_rfc3339(s)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|_| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        "Invalid 'before' timestamp".to_string(),
-                    )
-                })
-        })
-        .transpose()?;
-
-    // Find the thread (lock only briefly to get active_thread if needed)
-    let thread_id = if let Some(ref tid) = query.thread_id {
-        Uuid::parse_str(tid)
-            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid thread_id".to_string()))?
-    } else {
-        let sess = session.lock().await;
-        sess.active_thread
-            .ok_or((StatusCode::NOT_FOUND, "No active thread".to_string()))?
-    };
-
-    // Verify the thread belongs to the authenticated user before returning any data.
-    if query.thread_id.is_some()
-        && let Some(ref store) = state.store
-    {
-        let owned = store
-            .conversation_belongs_to_user(thread_id, &identity.user_id)
-            .await
-            .unwrap_or(false);
-        if !owned {
-            let sess = session.lock().await;
-            if !sess.threads.contains_key(&thread_id) {
-                return Err((StatusCode::NOT_FOUND, "Thread not found".to_string()));
-            }
-        }
-    }
-
-    // For paginated requests (before cursor set), always go to DB
-    if before_cursor.is_some()
-        && let Some(ref store) = state.store
-    {
-        let (messages, has_more) = store
-            .list_conversation_messages_paginated(thread_id, before_cursor, limit as i64)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
-        let mut turns = build_turns_from_db_messages(&messages);
-        enforce_generated_image_history_budget(&mut turns);
-        return Ok(Json(HistoryResponse {
-            thread_id,
-            turns,
-            has_more,
-            oldest_timestamp,
-            pending_gate: None,
-        }));
-    }
-
-    // Try in-memory first (freshest data for active threads)
-    // Lock only when checking in-memory state
-    {
-        let sess = session.lock().await;
-        if let Some(thread) = sess.threads.get(&thread_id)
-            && (!thread.turns.is_empty() || thread.pending_approval.is_some())
-        {
-            let mut turns: Vec<TurnInfo> = thread
-                .turns
-                .iter()
-                .map(|t| TurnInfo {
-                    turn_number: t.turn_number,
-                    user_input: t.user_input.clone(),
-                    response: t.response.clone(),
-                    state: format!("{:?}", t.state),
-                    started_at: t.started_at.to_rfc3339(),
-                    completed_at: t.completed_at.map(|dt| dt.to_rfc3339()),
-                    tool_calls: t
-                        .tool_calls
-                        .iter()
-                        .map(|tc| ToolCallInfo {
-                            name: tc.name.clone(),
-                            has_result: tc.result.is_some(),
-                            has_error: tc.error.is_some(),
-                            result_preview: tool_result_preview(tc.result.as_ref()),
-                            error: tc.error.as_deref().map(tool_error_for_display),
-                            rationale: tc.rationale.clone(),
-                        })
-                        .collect(),
-                    generated_images: collect_generated_images_from_tool_results(
-                        t.turn_number,
-                        t.tool_calls
-                            .iter()
-                            .map(|tc| (tc.tool_call_id.as_deref(), tc.result.as_ref())),
-                    ),
-                    narrative: t.narrative.clone(),
-                })
-                .collect();
-            enforce_generated_image_history_budget(&mut turns);
-
-            let pending_gate = thread.pending_approval.as_ref().map(|pa| PendingGateInfo {
-                request_id: pa.request_id.to_string(),
-                thread_id: thread_id.to_string(),
-                gate_name: "approval".into(),
-                tool_name: pa.tool_name.clone(),
-                description: pa.description.clone(),
-                parameters: serde_json::to_string_pretty(&pa.parameters).unwrap_or_default(),
-                resume_kind: serde_json::json!({"Approval":{"allow_always":true}}),
-            });
-
-            return Ok(Json(HistoryResponse {
-                thread_id,
-                turns,
-                has_more: false,
-                oldest_timestamp: None,
-                pending_gate,
-            }));
-        }
-    }
-
-    // Fall back to DB for historical threads not in memory (paginated)
-    if let Some(ref store) = state.store {
-        let (messages, has_more) = store
-            .list_conversation_messages_paginated(thread_id, None, limit as i64)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        if !messages.is_empty() {
-            let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
-            let mut turns = build_turns_from_db_messages(&messages);
-            enforce_generated_image_history_budget(&mut turns);
-            return Ok(Json(HistoryResponse {
-                thread_id,
-                turns,
-                has_more,
-                oldest_timestamp,
-                pending_gate: None,
-            }));
-        }
-    }
-
-    // Empty thread (just created, no messages yet)
-    Ok(Json(HistoryResponse {
-        thread_id,
-        turns: Vec::new(),
-        has_more: false,
-        oldest_timestamp: None,
-        pending_gate: None,
     }))
 }
 
@@ -428,8 +245,8 @@ pub async fn chat_new_thread_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::channels::web::util::build_turns_from_db_messages;
+    use uuid::Uuid;
 
     #[test]
     fn test_build_turns_from_db_messages_complete() {

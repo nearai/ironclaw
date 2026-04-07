@@ -28,6 +28,16 @@ use ironclaw_common::truncate_preview;
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
 const MAX_PERSISTED_IMAGE_SENTINEL_BYTES: usize = 512 * 1024;
 
+fn persisted_image_sentinel_cap_label() -> String {
+    if MAX_PERSISTED_IMAGE_SENTINEL_BYTES.is_multiple_of(1024 * 1024) {
+        return format!("{} MiB", MAX_PERSISTED_IMAGE_SENTINEL_BYTES / (1024 * 1024));
+    }
+    if MAX_PERSISTED_IMAGE_SENTINEL_BYTES.is_multiple_of(1024) {
+        return format!("{} KiB", MAX_PERSISTED_IMAGE_SENTINEL_BYTES / 1024);
+    }
+    format!("{} bytes", MAX_PERSISTED_IMAGE_SENTINEL_BYTES)
+}
+
 fn tool_result_preview_for_persistence(result: &serde_json::Value) -> String {
     if GeneratedImageSentinel::from_value(result).is_some() {
         return "Generated image".to_string();
@@ -48,8 +58,8 @@ fn tool_result_content_for_persistence(result: &serde_json::Value) -> String {
             return serialized;
         }
         return format!(
-            "Generated image omitted from persistence because it exceeded the {} MiB cap",
-            MAX_PERSISTED_IMAGE_SENTINEL_BYTES / (1024 * 1024)
+            "Generated image omitted from persistence because it exceeded the {} cap",
+            persisted_image_sentinel_cap_label()
         );
     }
     match result {
@@ -2381,6 +2391,7 @@ mod tests {
         let persisted = tool_result_content_for_persistence(&result);
 
         assert!(persisted.contains("Generated image omitted from persistence"));
+        assert!(persisted.contains("512 KiB cap"));
         assert!(!persisted.contains("data:image/jpeg;base64"));
     }
 
