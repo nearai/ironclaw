@@ -2529,6 +2529,11 @@ impl WasmChannel {
     /// multiple times (e.g., from `refresh_active_channel` after re-running
     /// `on_start`).
     pub async fn ensure_polling(&self, config: &ChannelConfig) {
+        // Always stop any existing polling task first — if the channel switched
+        // from polling to webhook (or polling was disabled), the old task must
+        // not keep running.
+        let _ = self.poll_shutdown_tx.write().await.take();
+
         if let Some(poll_config) = &config.poll
             && poll_config.enabled
         {
@@ -2542,9 +2547,6 @@ impl WasmChannel {
                     return;
                 }
             };
-
-            // Drop old sender (stops a dead/stale polling task if any)
-            let _ = self.poll_shutdown_tx.write().await.take();
 
             let (poll_shutdown_tx, poll_shutdown_rx) = oneshot::channel();
             *self.poll_shutdown_tx.write().await = Some(poll_shutdown_tx);

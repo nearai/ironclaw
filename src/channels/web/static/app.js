@@ -4370,7 +4370,7 @@ function approvePairing(channel, code, options) {
     return Promise.resolve();
   }
 
-  apiFetch('/api/pairing/' + encodeURIComponent(channel) + '/approve', {
+  return apiFetch('/api/pairing/' + encodeURIComponent(channel) + '/approve', {
     method: 'POST',
     body: { code: normalizedCode },
   }).then(res => {
