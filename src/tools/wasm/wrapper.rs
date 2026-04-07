@@ -84,7 +84,6 @@ impl OAuthRefreshConfig {
 /// Built before each WASM execution by decrypting secrets from the store.
 /// Applied per-request by matching the URL host against `host_patterns`.
 /// WASM tools never see the raw secret values.
-#[derive(Debug)]
 struct ResolvedHostCredential {
     /// Host patterns this credential applies to (e.g., "www.googleapis.com").
     host_patterns: Vec<String>,
@@ -94,6 +93,22 @@ struct ResolvedHostCredential {
     query_params: HashMap<String, String>,
     /// Raw secret value for redaction in error messages.
     secret_value: String,
+}
+
+// Custom Debug impl to prevent accidental secret leakage in logs or panics.
+// Headers contain auth tokens and secret_value is the raw decrypted secret.
+impl std::fmt::Debug for ResolvedHostCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedHostCredential")
+            .field("host_patterns", &self.host_patterns)
+            .field("headers", &format_args!("[{} entries]", self.headers.len()))
+            .field(
+                "query_params",
+                &format_args!("[{} entries]", self.query_params.len()),
+            )
+            .field("secret_value", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Store data for WASM tool execution.
@@ -1534,6 +1549,10 @@ async fn resolve_host_credentials(
 
     let mut resolved = Vec::new();
 
+    // All declared non-UrlPath credentials are required. If any credential
+    // is missing, expired, or inaccessible, the entire tool execution fails
+    // rather than running with partial auth. This prevents silent 401s from
+    // confusing users. See #2099 discussion for rationale.
     for mapping in http_cap.credentials.values() {
         // Skip UrlPath credentials, they're handled by placeholder substitution
         if matches!(
