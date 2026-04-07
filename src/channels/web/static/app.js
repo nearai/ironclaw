@@ -990,10 +990,10 @@ function sendMessage() {
   if (!content && stagedImages.length === 0) return;
 
   // Intercept approval keywords when an unresolved approval card is pending.
-  // Pick the last card (most recent) if multiple are visible; skip already-resolved cards.
-  const approvalCards = document.querySelectorAll('.approval-card');
-  const approvalCard = approvalCards.length ? approvalCards[approvalCards.length - 1] : null;
-  if (approvalCard && !approvalCard.querySelector('.approval-resolved') && content) {
+  // Find the most recent unresolved card (resolved cards linger 1.5s before removal).
+  const approvalCards = Array.from(document.querySelectorAll('.approval-card'));
+  const approvalCard = approvalCards.reverse().find(card => !card.querySelector('.approval-resolved'));
+  if (approvalCard && content) {
     const lower = content.toLowerCase();
     let action = null;
     if (['yes', 'y', 'approve', 'ok', '/approve', '/yes', '/y'].includes(lower)) {
