@@ -14,7 +14,13 @@ const I18n = {
     } else {
       // Detect browser language
       const browserLang = navigator.language || navigator.userLanguage;
-      this.currentLang = browserLang.startsWith('zh') ? 'zh-CN' : 'en';
+      if (browserLang.startsWith('zh')) {
+        this.currentLang = 'zh-CN';
+      } else if (browserLang.startsWith('ko')) {
+        this.currentLang = 'ko';
+      } else {
+        this.currentLang = 'en';
+      }
     }
     this.updateHtmlLang();
   },

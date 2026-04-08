@@ -56,8 +56,13 @@ function switchLanguage(lang) {
       menu.style.display = 'none';
     }
 
-    // Show toast notification
-    showToast(I18n.t('language.switch') + ': ' + (lang === 'zh-CN' ? '简体中文' : 'English'));
+    // Show toast notification. Both halves of the message read from the
+    // current language pack — which has just been switched to `lang` — so
+    // the toast appears entirely in the language the user just selected.
+    // Each language file owns its own native name under `language.name`,
+    // so adding a new language here is a single key addition with no
+    // changes to this file.
+    showToast(I18n.t('language.switch') + ': ' + I18n.t('language.name'));
   }
 }
 
