@@ -62,6 +62,9 @@ use crate::tools::wasm::{
 };
 use ironclaw_safety::LeakDetector;
 
+#[cfg(any(test, debug_assertions))]
+const TEST_HTTP_REWRITE_MAP_ENV: &str = "IRONCLAW_TEST_HTTP_REWRITE_MAP";
+
 const WEBSOCKET_EVENT_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue";
 const WEBSOCKET_EVENT_PROCESSING_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue_processing";
 const WEBSOCKET_EVENT_QUEUE_MAX_ITEMS: usize = 100;
@@ -383,13 +386,14 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             self.inject_host_credentials(&host, &mut headers, &mut logical_url);
         }
 
-        let transport_url = rewrite_telegram_api_url_for_testing(&logical_url)
+        let transport_url = rewrite_http_url_for_testing(&logical_url)
+            .or_else(|| rewrite_telegram_api_url_for_testing(&logical_url))
             .unwrap_or_else(|| logical_url.clone());
         if transport_url != logical_url {
             tracing::info!(
                 logical_url = %logical_url,
                 transport_url = %transport_url,
-                "Rewriting Telegram API request to test base URL"
+                "Rewriting outbound HTTP request to test base URL"
             );
         }
 
@@ -404,7 +408,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             .unwrap_or(10 * 1024 * 1024);
 
         // Resolve hostname and reject private/internal IPs to prevent DNS rebinding.
-        reject_private_ip(&url)?;
+        reject_private_ip(&transport_url)?;
 
         // Make the HTTP request using a dedicated single-threaded runtime.
         // We're inside spawn_blocking, so we can't rely on the main runtime's
@@ -4023,6 +4027,70 @@ fn extract_host_from_url(url: &str) -> Option<String> {
     })
 }
 
+/// Rewrite outbound HTTP URLs for testing.
+///
+/// `IRONCLAW_TEST_HTTP_REWRITE_MAP` is a JSON object mapping exact hostnames to
+/// replacement base URLs. For example:
+/// `{"slack.com":"http://127.0.0.1:8080","files.slack.com":"http://127.0.0.1:8080"}`
+///
+/// The replacement preserves the original path and query string so tests can
+/// point production hosts at local fakes without adding channel-specific code.
+#[cfg(any(test, debug_assertions))]
+fn rewrite_http_url_for_testing(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+
+    let host = parsed.host_str()?.to_lowercase();
+    let override_base = std::env::var(TEST_HTTP_REWRITE_MAP_ENV)
+        .ok()
+        .and_then(|value| parse_test_http_rewrite_map(&value).get(&host).cloned())?;
+
+    let path = parsed.path().trim_start_matches('/');
+    let mut rewritten = format!("{override_base}/{path}");
+    if let Some(query) = parsed.query() {
+        rewritten.push('?');
+        rewritten.push_str(query);
+    }
+    Some(rewritten)
+}
+
+#[cfg(not(any(test, debug_assertions)))]
+fn rewrite_http_url_for_testing(_url: &str) -> Option<String> {
+    None
+}
+
+#[cfg(any(test, debug_assertions))]
+fn parse_test_http_rewrite_map(raw: &str) -> HashMap<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return HashMap::new();
+    }
+
+    match serde_json::from_str::<HashMap<String, String>>(trimmed) {
+        Ok(map) => map
+            .into_iter()
+            .filter_map(|(host, base)| {
+                let host = host.trim().to_lowercase();
+                let base = base.trim().trim_end_matches('/').to_string();
+                if host.is_empty() || base.is_empty() {
+                    return None;
+                }
+                Some((host, base))
+            })
+            .collect(),
+        Err(error) => {
+            tracing::warn!(
+                env_var = TEST_HTTP_REWRITE_MAP_ENV,
+                %error,
+                "Ignoring invalid test HTTP rewrite map"
+            );
+            HashMap::new()
+        }
+    }
+}
+
 fn rewrite_telegram_api_url_for_testing(url: &str) -> Option<String> {
     let override_base = std::env::var(TELEGRAM_TEST_API_BASE_ENV)
         .ok()
@@ -4047,7 +4115,6 @@ fn rewrite_telegram_api_url_for_testing(url: &str) -> Option<String> {
     }
     Some(rewritten)
 }
-
 fn should_skip_response_leak_scan(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|parsed| {
         matches!(parsed.scheme(), "http" | "https")
@@ -4228,13 +4295,14 @@ mod tests {
         PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
     use crate::channels::wasm::wrapper::{
-        EmitDispatchContext, HttpResponse, TELEGRAM_TEST_API_BASE_ENV, WasmChannel,
-        WebsocketRuntimeConfig, build_discord_gateway_presence_update,
+        EmitDispatchContext, HttpResponse, TELEGRAM_TEST_API_BASE_ENV, TEST_HTTP_REWRITE_MAP_ENV,
+        WasmChannel, WebsocketRuntimeConfig, build_discord_gateway_presence_update,
         build_websocket_identify_message, build_websocket_resume_message,
         discord_gateway_presence_status, drain_guest_logs, parse_websocket_invalid_session,
         parse_websocket_ready_session, resolve_websocket_identify_message,
-        should_warn_on_heartbeat_interval, uses_owner_broadcast_target,
-        websocket_heartbeat_sleep_duration, websocket_reconnect_backoff,
+        rewrite_http_url_for_testing, should_warn_on_heartbeat_interval,
+        uses_owner_broadcast_target, websocket_heartbeat_sleep_duration,
+        websocket_reconnect_backoff,
     };
     use crate::pairing::PairingStore;
     use crate::secrets::{CreateSecretParams, InMemorySecretsStore, SecretsCrypto, SecretsStore};
@@ -4387,18 +4455,21 @@ mod tests {
             identify_secret_name: Some("discord_bot_token".to_string()),
         };
 
-        let payload = resolve_websocket_identify_message(&config, Some(store.as_ref()), "owner_42")
-            .await;
+        let payload =
+            resolve_websocket_identify_message(&config, Some(store.as_ref()), "owner_42").await;
         assert!(payload.is_some());
         let json: serde_json::Value = serde_json::from_str(payload.as_ref().unwrap()).unwrap();
         assert_eq!(json["d"]["token"], serde_json::json!("real_bot_token"));
 
-        let no_payload = resolve_websocket_identify_message(&config, Some(store.as_ref()), "default")
-            .await;
+        let no_payload =
+            resolve_websocket_identify_message(&config, Some(store.as_ref()), "default").await;
         assert!(no_payload.is_some());
         let no_payload_json: serde_json::Value =
             serde_json::from_str(no_payload.as_ref().unwrap()).unwrap();
-        assert_eq!(no_payload_json["d"]["token"], serde_json::json!("default-bot-token"));
+        assert_eq!(
+            no_payload_json["d"]["token"],
+            serde_json::json!("default-bot-token")
+        );
     }
 
     #[test]
@@ -6148,5 +6219,53 @@ mod tests {
             mime_from_extension("/home/user/.ironclaw/screenshot.png"),
             "image/png"
         );
+    }
+
+    #[test]
+    fn test_rewrite_http_url_for_testing_uses_host_map() {
+        use std::sync::{Mutex, OnceLock};
+
+        static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+        let _lock = ENV_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env mutex poisoned");
+
+        let original = std::env::var(TEST_HTTP_REWRITE_MAP_ENV).ok();
+
+        // SAFETY: guarded by ENV_MUTEX — no concurrent env access.
+        unsafe {
+            std::env::set_var(
+                TEST_HTTP_REWRITE_MAP_ENV,
+                r#"{"slack.com":"http://localhost:9999","files.slack.com":"http://localhost:9999"}"#,
+            );
+        }
+
+        // slack.com API call
+        let result = rewrite_http_url_for_testing("https://slack.com/api/chat.postMessage");
+        assert_eq!(
+            result.as_deref(),
+            Some("http://localhost:9999/api/chat.postMessage")
+        );
+        // files.slack.com file download
+        let result = rewrite_http_url_for_testing(
+            "https://files.slack.com/files-pri/T123/download/test.txt",
+        );
+        assert_eq!(
+            result.as_deref(),
+            Some("http://localhost:9999/files-pri/T123/download/test.txt")
+        );
+        // Non-Slack URL should not be rewritten
+        let result = rewrite_http_url_for_testing("https://api.telegram.org/bot123/getMe");
+        assert!(result.is_none());
+
+        // SAFETY: guarded by ENV_MUTEX — restore original state.
+        unsafe {
+            if let Some(ref val) = original {
+                std::env::set_var(TEST_HTTP_REWRITE_MAP_ENV, val);
+            } else {
+                std::env::remove_var(TEST_HTTP_REWRITE_MAP_ENV);
+            }
+        }
     }
 }

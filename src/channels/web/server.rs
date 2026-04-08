@@ -3102,7 +3102,7 @@ async fn extensions_setup_submit_handler(
             resp.auth_url = result.auth_url.clone();
             resp.verification = result.verification.clone();
             resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
-            resp.onboarding_state = result.onboarding_state.clone();
+            resp.onboarding_state = result.onboarding_state;
             resp.onboarding = result.onboarding.clone();
             if result.verification.is_none() {
                 // Broadcast auth_completed so the chat UI can dismiss any in-progress

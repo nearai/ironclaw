@@ -268,8 +268,7 @@ impl ConversationManager {
                     .to_string();
 
                 // Spawn new foreground thread with conversation history.
-                let thread_id = self
-                    .thread_manager
+                self.thread_manager
                     .spawn_thread_with_history(
                         content, // use message as goal
                         ThreadType::Foreground,
@@ -280,9 +279,7 @@ impl ConversationManager {
                         history,
                         Some(base_channel),
                     )
-                    .await?;
-
-                thread_id
+                    .await?
             }
         };
 
@@ -540,9 +537,9 @@ mod tests {
     use crate::traits::store::Store;
     use crate::types::capability::{ActionDef, CapabilityLease};
     use crate::types::conversation::{ConversationId, ConversationSurface, EntrySender};
-    use crate::types::message::MessageRole;
     use crate::types::event::ThreadEvent;
     use crate::types::memory::{DocId, MemoryDoc};
+    use crate::types::message::MessageRole;
     use crate::types::project::Project;
     use crate::types::step::{ActionResult, LlmResponse, Step, TokenUsage};
     use crate::types::thread::ThreadState;

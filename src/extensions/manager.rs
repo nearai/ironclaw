@@ -6967,28 +6967,28 @@ impl ExtensionManager {
 
             stored_fields.insert(field_name.clone(), trimmed.to_string());
 
-            if let Some(field_def) = field_def {
-                if let Some(setting_path) = &field_def.setting_path {
-                    Self::validate_setup_setting_path(&name, setting_path)?;
-                    let store = self.store.as_ref().ok_or_else(|| {
-                        ExtensionError::Other(
-                            "Settings store unavailable for setup field persistence".to_string(),
-                        )
+            if let Some(field_def) = field_def
+                && let Some(setting_path) = &field_def.setting_path
+            {
+                Self::validate_setup_setting_path(&name, setting_path)?;
+                let store = self.store.as_ref().ok_or_else(|| {
+                    ExtensionError::Other(
+                        "Settings store unavailable for setup field persistence".to_string(),
+                    )
+                })?;
+                store
+                    .set_setting(
+                        &self.user_id,
+                        setting_path,
+                        &serde_json::Value::String(trimmed.to_string()),
+                    )
+                    .await
+                    .map_err(|e| {
+                        ExtensionError::Other(format!(
+                            "Failed to set '{}' for extension '{}': {}",
+                            setting_path, name, e
+                        ))
                     })?;
-                    store
-                        .set_setting(
-                            &self.user_id,
-                            setting_path,
-                            &serde_json::Value::String(trimmed.to_string()),
-                        )
-                        .await
-                        .map_err(|e| {
-                            ExtensionError::Other(format!(
-                                "Failed to set '{}' for extension '{}': {}",
-                                setting_path, name, e
-                            ))
-                        })?;
-                }
             }
         }
 
@@ -8631,7 +8631,6 @@ mod tests {
             optional: false,
             input_type: crate::tools::wasm::ToolSetupFieldInputType::Text,
             setting_path: Some("nearai.session_token".to_string()),
-            restart_required: false,
         };
 
         let provided = mgr
@@ -8656,8 +8655,7 @@ mod tests {
                         {
                             "name": "llm_backend",
                             "prompt": "Provider",
-                            "setting_path": "llm_backend",
-                            "restart_required": true
+                            "setting_path": "llm_backend"
                         }
                     ]
                 }
@@ -8684,10 +8682,10 @@ mod tests {
             !result.activated,
             "tool should not auto-activate without runtime"
         );
-        assert!(
-            result.restart_required,
-            "backend switch should require restart"
-        );
+        // NOTE: `restart_required` was removed as dead code in PR #2103 —
+        // no extension actually used it; channels hot-activate. Keeping
+        // the rest of the assertion: the configure call must persist the
+        // allowlisted setting through to the store.
         assert_eq!(
             store
                 .get_setting("test", "llm_backend")
