@@ -2060,154 +2060,9 @@ function buildSetupFields(form, extensionName, secrets, submitFn) {
 }
 
 function showSetupCardForExtension(data) {
-  apiFetch('/api/extensions/' + encodeURIComponent(data.extension_name) + '/setup')
-    .then((setup) => {
-      const secrets = Array.isArray(setup.secrets) ? setup.secrets : [];
-      const fields = Array.isArray(setup.fields) ? setup.fields : [];
-      if (secrets.length === 0 && fields.length === 0) {
-        showAuthCard(data);
-        return;
-      }
-      showSetupCard({
-        extension_name: data.extension_name,
-        onboarding: setup.onboarding || null,
-        secrets,
-      });
-    })
-    .catch(() => {
-      showAuthCard(data);
-    });
-}
-
-function showSetupCard(data) {
-  const existing = getAuthOverlay();
-  if (existing) existing.remove();
-
-  const overlay = document.createElement('div');
-  overlay.className = 'auth-overlay';
-  overlay.setAttribute('data-extension-name', data.extension_name);
-  overlay.addEventListener('click', (e) => {
-    if (e.target === overlay) cancelAuth(data.extension_name);
-  });
-
-  const card = document.createElement('div');
-  card.className = 'auth-card auth-modal setup-card';
-  card.setAttribute('data-extension-name', data.extension_name);
-
-  const onboarding = data.onboarding || {};
-
-  const header = document.createElement('div');
-  header.className = 'auth-header';
-  header.textContent = onboarding.credential_title || ('Configure credentials for ' + data.extension_name);
-  card.appendChild(header);
-
-  if (onboarding.credential_instructions) {
-    const instr = document.createElement('div');
-    instr.className = 'auth-instructions';
-    instr.textContent = onboarding.credential_instructions;
-    card.appendChild(instr);
-  }
-
-  if (onboarding.setup_url && /^https?:\/\//i.test(onboarding.setup_url)) {
-    const links = document.createElement('div');
-    links.className = 'auth-links';
-    const setupLink = document.createElement('a');
-    setupLink.href = onboarding.setup_url;
-    setupLink.target = '_blank';
-    setupLink.rel = 'noopener noreferrer';
-    setupLink.textContent = I18n.t('authRequired.getToken');
-    links.appendChild(setupLink);
-    card.appendChild(links);
-  }
-
-  const form = document.createElement('div');
-  form.className = 'setup-form';
-  card.appendChild(form);
-
-  let fields = [];
-  const submit = () => submitSetupCard(data.extension_name, fields, card);
-  fields = buildSetupFields(form, data.extension_name, data.secrets || [], submit);
-
-  if (onboarding.credential_next_step) {
-    const nextStep = document.createElement('div');
-    nextStep.className = 'setup-next-step';
-    nextStep.textContent = onboarding.credential_next_step;
-    card.appendChild(nextStep);
-  }
-
-  const errorEl = document.createElement('div');
-  errorEl.className = 'auth-error';
-  errorEl.style.display = 'none';
-  card.appendChild(errorEl);
-
-  const actions = document.createElement('div');
-  actions.className = 'auth-actions';
-
-  const submitBtn = document.createElement('button');
-  submitBtn.className = 'auth-submit';
-  submitBtn.textContent = I18n.t('config.save');
-  submitBtn.addEventListener('click', submit);
-  actions.appendChild(submitBtn);
-
-  const cancelBtn = document.createElement('button');
-  cancelBtn.className = 'auth-cancel';
-  cancelBtn.textContent = I18n.t('btn.cancel');
-  cancelBtn.addEventListener('click', () => cancelAuth(data.extension_name));
-  actions.appendChild(cancelBtn);
-
-  card.appendChild(actions);
-  overlay.appendChild(card);
-  document.body.appendChild(overlay);
-  if (fields.length > 0) fields[0].input.focus();
-}
-
-function showSetupCardError(extensionName, message) {
-  const card = getAuthCard(extensionName);
-  if (!card) return;
-  card.querySelectorAll('button').forEach((btn) => {
-    btn.disabled = false;
-  });
-  const errorEl = card.querySelector('.auth-error');
-  if (errorEl) {
-    errorEl.textContent = message;
-    errorEl.style.display = 'block';
-  }
-}
-
-function submitSetupCard(extensionName, fields, cardEl) {
-  const secrets = {};
-  (fields || []).forEach((field) => {
-    const value = (field.input.value || '').trim();
-    if (value) secrets[field.name] = value;
-  });
-
-  const card = cardEl || getAuthCard(extensionName);
-  if (card) {
-    card.querySelectorAll('button').forEach((btn) => {
-      btn.disabled = true;
-    });
-  }
-
-  apiFetch('/api/extensions/' + encodeURIComponent(extensionName) + '/setup', {
-    method: 'POST',
-    body: { secrets, fields: {} },
-  }).then((result) => {
-    if (!result.success) {
-      showSetupCardError(extensionName, result.message || 'Configuration failed.');
-      return;
-    }
-    removeSetupCard(extensionName);
-    if (result.onboarding_state === 'pairing_required') {
-      showPairingCard({
-        channel: extensionName,
-        instructions: result.onboarding && result.onboarding.pairing_instructions,
-        onboarding: result.onboarding || null,
-      });
-    }
-    refreshCurrentSettingsTab();
-  }).catch((err) => {
-    showSetupCardError(extensionName, 'Configuration failed: ' + err.message);
-  });
+  // Dedup: don't open if a configure modal is already showing for this extension
+  if (getConfigureOverlay(data.extension_name)) return;
+  showConfigureModal(data.extension_name, { authData: data });
 }
 
 function showAuthCard(data) {
@@ -4019,28 +3874,42 @@ function removeExtension(name) {
   }, I18n.t('common.remove'), 'btn-danger');
 }
 
-function showConfigureModal(name) {
+function showConfigureModal(name, options) {
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup')
     .then((setup) => {
       const secrets = Array.isArray(setup.secrets) ? setup.secrets : [];
       const setupFields = Array.isArray(setup.fields) ? setup.fields : [];
       if (secrets.length === 0 && setupFields.length === 0) {
-        showToast(I18n.t('extensions.noConfigNeeded', { name: name }), 'info');
+        if (options && options.authData) {
+          showAuthCard(options.authData);
+        } else {
+          showToast(I18n.t('extensions.noConfigNeeded', { name: name }), 'info');
+        }
         return;
       }
-      renderConfigureModal(name, secrets, setupFields, setup.onboarding || null);
+      renderConfigureModal(name, secrets, setupFields, setup.onboarding || null, options);
     })
     .catch((err) => showToast(I18n.t('extensions.setupLoadFailed', { message: err.message }), 'error'));
 }
 
-function renderConfigureModal(name, secrets, setupFields, onboarding) {
+function renderConfigureModal(name, secrets, setupFields, onboarding, options) {
   closeConfigureModal();
   const overlay = document.createElement('div');
   overlay.className = 'configure-overlay';
   overlay.setAttribute('data-extension-name', name);
+  if (options && options.authData) {
+    overlay.setAttribute('data-auth-flow', 'true');
+    overlay.setAttribute('data-auth-extension', options.authData.extension_name || name);
+    if (options.authData.request_id) overlay.setAttribute('data-request-id', options.authData.request_id);
+    if (options.authData.thread_id) overlay.setAttribute('data-thread-id', options.authData.thread_id);
+  }
   overlay.addEventListener('click', (e) => {
     if (e.target !== overlay) return;
-    closeConfigureModal();
+    if (overlay.getAttribute('data-auth-flow')) {
+      cancelAuthFromConfigureModal(overlay);
+    } else {
+      closeConfigureModal();
+    }
   });
 
   const modal = document.createElement('div');
@@ -4165,7 +4034,13 @@ function renderConfigureModal(name, secrets, setupFields, onboarding) {
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn-ext remove';
   cancelBtn.textContent = I18n.t('config.cancel');
-  cancelBtn.addEventListener('click', closeConfigureModal);
+  cancelBtn.addEventListener('click', function() {
+    if (overlay.getAttribute('data-auth-flow')) {
+      cancelAuthFromConfigureModal(overlay);
+    } else {
+      closeConfigureModal();
+    }
+  });
   actions.appendChild(cancelBtn);
 
   modal.appendChild(actions);
@@ -4215,6 +4090,9 @@ function submitConfigureModal(name, fields, options) {
   })
     .then((res) => {
       if (res.success) {
+        // Strip auth-flow flag before closing so closeConfigureModal
+        // does not trigger a spurious auth-cancel API call.
+        if (overlay) overlay.removeAttribute('data-auth-flow');
         closeConfigureModal();
         if (res.auth_url) {
           showAuthCard({
@@ -4223,6 +4101,15 @@ function submitConfigureModal(name, fields, options) {
           });
           showToast(I18n.t('extensions.openingOAuth', { name: name }), 'info');
           openOAuthUrl(res.auth_url);
+          refreshCurrentSettingsTab();
+        }
+        // Transition to pairing if the channel requires it.
+        if (res.onboarding_state === 'pairing_required') {
+          showPairingCard({
+            channel: name,
+            instructions: res.onboarding && res.onboarding.pairing_instructions,
+            onboarding: res.onboarding || null,
+          });
           refreshCurrentSettingsTab();
         }
         // For non-OAuth success: the server always broadcasts auth_completed SSE,
@@ -4249,6 +4136,19 @@ function closeConfigureModal(extensionName) {
     setAuthFlowPending(false);
     enableChatInput();
   }
+}
+
+function cancelAuthFromConfigureModal(overlay) {
+  var extName = overlay.getAttribute('data-auth-extension') || overlay.getAttribute('data-extension-name');
+  var requestId = overlay.getAttribute('data-request-id');
+  var threadId = overlay.getAttribute('data-thread-id');
+  var request = requestId
+    ? apiFetch('/api/chat/gate/resolve', { method: 'POST', body: { request_id: requestId, thread_id: threadId || currentThreadId || undefined, resolution: 'cancelled' } })
+    : apiFetch('/api/chat/auth-cancel', { method: 'POST', body: { extension_name: extName, thread_id: threadId || currentThreadId || undefined } });
+  request.catch(function() {});
+  overlay.remove();
+  setAuthFlowPending(false);
+  enableChatInput();
 }
 
 function currentUserIsAdmin() {

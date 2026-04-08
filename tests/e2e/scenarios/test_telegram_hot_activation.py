@@ -259,7 +259,7 @@ async def test_telegram_hot_activation_transitions_installed_to_pairing(page):
     ]
 
 
-async def test_telegram_auth_required_shows_setup_card_and_can_restart(page):
+async def test_telegram_auth_required_shows_configure_modal_and_can_cancel(page):
     setup_hits = {"count": 0}
     cancel_hits = {"count": 0}
 
@@ -305,15 +305,15 @@ async def test_telegram_auth_required_shows_setup_card_and_can_restart(page):
         """
     )
 
-    setup_card = page.locator(SEL["setup_card"])
-    await setup_card.wait_for(state="visible", timeout=5000)
-    assert "Telegram Bot API token" in await setup_card.text_content()
-    assert "pairing code" in await setup_card.text_content()
-    assert await setup_card.locator(SEL["setup_input"]).count() == 1
-    assert await setup_card.locator(SEL["setup_next_step"]).count() == 1
+    # Auth-required now opens the unified configure modal, not the old setup card
+    modal = page.locator(SEL["configure_overlay"])
+    await modal.wait_for(state="visible", timeout=5000)
+    assert "Telegram Bot API token" in await modal.text_content()
+    assert await modal.locator(SEL["configure_input"]).count() == 1
+    assert await page.locator(SEL["setup_card"]).count() == 0
 
-    await setup_card.locator(SEL["auth_cancel_btn"]).click()
-    await setup_card.wait_for(state="hidden", timeout=5000)
+    await modal.locator(".btn-ext.remove").click()
+    await modal.wait_for(state="hidden", timeout=5000)
     assert cancel_hits["count"] == 1
 
     await page.evaluate(
@@ -325,11 +325,11 @@ async def test_telegram_auth_required_shows_setup_card_and_can_restart(page):
         });
         """
     )
-    await page.locator(SEL["setup_card"]).wait_for(state="visible", timeout=5000)
+    await page.locator(SEL["configure_overlay"]).wait_for(state="visible", timeout=5000)
     assert setup_hits["count"] == 2
 
 
-async def test_telegram_setup_card_submit_then_cancel_pairing_and_restart(page):
+async def test_telegram_configure_modal_submit_then_cancel_pairing_and_restart(page):
     setup_payloads = []
 
     async def handle_setup(route):
@@ -385,11 +385,12 @@ async def test_telegram_setup_card_submit_then_cancel_pairing_and_restart(page):
         """
     )
 
-    setup_card = page.locator(SEL["setup_card"])
-    await setup_card.wait_for(state="visible", timeout=5000)
-    await setup_card.locator(SEL["setup_input"]).fill("123456789:ABCdefGhI")
-    await setup_card.locator(SEL["auth_submit_btn"]).click()
-    await setup_card.wait_for(state="hidden", timeout=5000)
+    # Auth-required now opens the unified configure modal
+    modal = page.locator(SEL["configure_overlay"])
+    await modal.wait_for(state="visible", timeout=5000)
+    await modal.locator(SEL["configure_input"]).fill("123456789:ABCdefGhI")
+    await modal.locator(".btn-ext.activate").click()
+    await modal.wait_for(state="hidden", timeout=5000)
 
     pairing_card = page.locator(SEL["pairing_card"])
     await pairing_card.wait_for(state="visible", timeout=5000)

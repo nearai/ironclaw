@@ -44,6 +44,8 @@ pub enum LoopOutcome {
     Failure(String),
     /// A tool requires user approval before continuing (chat delegate only).
     NeedApproval(Box<PendingApproval>),
+    /// Auth flow initiated — config card already sent, suppress text response.
+    AuthPending,
 }
 
 /// Configuration for the agentic loop.

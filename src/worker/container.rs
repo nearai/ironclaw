@@ -251,7 +251,7 @@ Work independently to complete this job. When finished, your final message MUST 
                     })
                     .await?;
             }
-            Ok(Ok(LoopOutcome::Stopped | LoopOutcome::NeedApproval(_))) => {
+            Ok(Ok(LoopOutcome::Stopped | LoopOutcome::NeedApproval(_) | LoopOutcome::AuthPending)) => {
                 tracing::info!("Worker for job {} stopped", self.config.job_id);
                 self.client
                     .report_complete(&CompletionReport {

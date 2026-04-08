@@ -418,7 +418,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             LoopOutcome::Stopped => {
                 // Stop signal handled — nothing more to do
             }
-            LoopOutcome::NeedApproval(_) => {}
+            LoopOutcome::NeedApproval(_) | LoopOutcome::AuthPending => {}
         }
 
         Ok(())
