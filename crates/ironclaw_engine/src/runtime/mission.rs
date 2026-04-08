@@ -844,6 +844,18 @@ impl MissionManager {
         );
         mission.metadata = serde_json::json!({"self_improvement": true});
         mission.max_threads_per_day = 5;
+        // Future-proof: today this helper only ever uses OnSystemEvent, but if
+        // a future caller passes a Cron cadence the same `next_fire_at = None`
+        // bug that #1944 fixed in `create_mission` would silently re-emerge
+        // here. Compute next_fire_at on construction so this helper can never
+        // produce a stuck cron mission.
+        if let MissionCadence::Cron {
+            ref expression,
+            ref timezone,
+        } = mission.cadence
+        {
+            mission.next_fire_at = next_cron_fire(expression, timezone.as_ref())?;
+        }
 
         let id = mission.id;
         self.store.save_mission(&mission).await?;
@@ -1020,6 +1032,17 @@ impl MissionManager {
         mission.success_criteria = Some(success_criteria.into());
         mission.metadata = serde_json::json!({metadata_key: true});
         mission.max_threads_per_day = max_per_day;
+        // Future-proof: today every caller passes OnSystemEvent, but a future
+        // caller passing Cron would silently re-introduce the `next_fire_at =
+        // None` bug that #1944 fixed in `create_mission`. Compute it here so
+        // this helper can never produce a stuck cron mission.
+        if let MissionCadence::Cron {
+            ref expression,
+            ref timezone,
+        } = mission.cadence
+        {
+            mission.next_fire_at = next_cron_fire(expression, timezone.as_ref())?;
+        }
 
         let id = mission.id;
         self.store.save_mission(&mission).await?;
@@ -3363,6 +3386,46 @@ mod tests {
         assert!(
             mission.next_fire_at.is_some(),
             "resume should still recompute next_fire_at for cron"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_mission_by_metadata_with_cron_cadence_computes_next_fire_at() {
+        // Regression: ensure_mission_by_metadata used to construct
+        // Mission::new + save_mission directly, bypassing the next_fire_at
+        // computation that create_mission performs. Today every caller passes
+        // OnSystemEvent so the bug is latent, but a future caller passing
+        // Cron would silently re-introduce the original `next_fire_at = None`
+        // bug that #1944 fixes.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .ensure_mission_by_metadata(
+                project_id,
+                "test-user",
+                "synthetic_cron",
+                "synthetic-cron",
+                "synthetic goal",
+                MissionCadence::Cron {
+                    expression: "0 9 * * *".into(),
+                    timezone: None,
+                },
+                "synthetic criteria",
+                3,
+            )
+            .await
+            .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            mission.next_fire_at.is_some(),
+            "ensure_mission_by_metadata must compute next_fire_at for Cron cadence"
+        );
+        assert!(
+            mission.next_fire_at.unwrap() > chrono::Utc::now(),
+            "next_fire_at must be in the future"
         );
     }
 }
