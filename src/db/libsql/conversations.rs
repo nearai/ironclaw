@@ -444,20 +444,18 @@ impl ConversationStore for LibSqlBackend {
         {
             let id_str: String = row.get(0).unwrap_or_default();
             let source_channel: Option<String> = row.get(1).unwrap_or_default();
+            let id: Uuid = id_str
+                .parse()
+                .map_err(|_| DatabaseError::Serialization("Invalid UUID".to_string()))?;
             if source_channel.is_none() {
-                // safety: idempotent backfill — COALESCE collapses concurrent
-                // writers to the same value, so a race between two callers
-                // cannot diverge the row.
                 conn.execute(
-                    "UPDATE conversations SET source_channel = COALESCE(source_channel, ?2) WHERE id = ?1",
-                    params![id_str.clone(), channel],
+                    "UPDATE conversations SET source_channel = ?2 WHERE id = ?1 AND source_channel IS NULL",
+                    params![id.to_string(), channel],
                 )
                 .await
                 .map_err(|e| DatabaseError::Query(e.to_string()))?;
             }
-            return id_str
-                .parse()
-                .map_err(|_| DatabaseError::Serialization("Invalid UUID".to_string()));
+            return Ok(id);
         }
 
         // Create new
@@ -925,6 +923,29 @@ mod tests {
             source.as_deref(),
             Some("gateway"),
             "upsert should backfill source_channel when the existing row is legacy NULL"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_assistant_conversation_sets_source_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_assistant_source_channel.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conv_id = backend
+            .get_or_create_assistant_conversation("assistant-user", "gateway")
+            .await
+            .unwrap();
+
+        let source = backend
+            .get_conversation_source_channel(conv_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            source.as_deref(),
+            Some("gateway"),
+            "assistant conversation should persist its source_channel"
         );
     }
 

@@ -469,9 +469,11 @@ impl AuthManager {
         Ok(ConfigureResult {
             message: format!("Credential '{}' stored.", spec.name),
             activated: true,
-            restart_required: false,
+            pairing_required: false,
             auth_url: None,
             verification: None,
+            onboarding_state: None,
+            onboarding: None,
         })
     }
 

@@ -36,6 +36,7 @@ use crate::history::{
     AgentJobRecord, AgentJobSummary, ConversationMessage, ConversationSummary, LlmCallRecord,
     SandboxJobRecord, SandboxJobSummary, SettingRow,
 };
+use crate::ownership::Owned;
 use crate::workspace::Workspace;
 
 // ---------------------------------------------------------------------------
@@ -98,7 +99,7 @@ impl TenantScope {
     /// Fetch a job by ID, returning `None` if it doesn't belong to this user.
     pub async fn get_job(&self, id: Uuid) -> Result<Option<JobContext>, DatabaseError> {
         match self.inner.get_job(id).await? {
-            Some(ctx) if ctx.user_id == self.identity.owner_id.as_str() => Ok(Some(ctx)),
+            Some(ctx) if ctx.is_owned_by(self.identity.owner_id.as_str()) => Ok(Some(ctx)),
             _ => Ok(None),
         }
     }
@@ -152,7 +153,7 @@ impl TenantScope {
         id: Uuid,
     ) -> Result<Option<SandboxJobRecord>, DatabaseError> {
         match self.inner.get_sandbox_job(id).await? {
-            Some(job) if job.user_id == self.identity.owner_id.as_str() => Ok(Some(job)),
+            Some(job) if job.is_owned_by(self.identity.owner_id.as_str()) => Ok(Some(job)),
             _ => Ok(None),
         }
     }
@@ -180,7 +181,7 @@ impl TenantScope {
     /// Fetch a routine by ID, returning `None` if it doesn't belong to this user.
     pub async fn get_routine(&self, id: Uuid) -> Result<Option<Routine>, DatabaseError> {
         match self.inner.get_routine(id).await? {
-            Some(r) if r.user_id == self.identity.owner_id.as_str() => Ok(Some(r)),
+            Some(r) if r.is_owned_by(self.identity.owner_id.as_str()) => Ok(Some(r)),
             _ => Ok(None),
         }
     }

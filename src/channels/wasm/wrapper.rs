@@ -1032,6 +1032,14 @@ impl WasmChannel {
     }
 
     /// Load broadcast metadata from settings store on startup.
+    ///
+    /// # Legacy migration (remove after ownership model rollout — tracked in #2100)
+    ///
+    /// If no metadata is found under `self.owner_scope_id`, a second lookup
+    /// under `"default"` is attempted for backward compatibility with instances
+    /// that stored broadcast metadata before the ownership model migration.
+    /// Remove this fallback once all deployments have run the
+    /// `migrate_default_owner` bootstrap step and restarted at least once.
     async fn load_broadcast_metadata(&self) {
         if let Some(ref store) = self.settings_store {
             match store
@@ -1046,6 +1054,7 @@ impl WasmChannel {
                     );
                 }
                 Ok(_) => {
+                    // LEGACY MIGRATION: remove after ownership model rollout — tracked in #2100
                     if self.owner_scope_id != "default" {
                         match store
                             .get_setting("default", &self.broadcast_metadata_key())
@@ -1165,8 +1174,8 @@ impl WasmChannel {
             let processing_queue_path = websocket_processing_queue_path(&channel_name);
             let identify_payload = resolve_websocket_identify_message(
                 &config,
-                &owner_scope_id,
                 websocket_secrets_store.as_deref(),
+                &owner_scope_id,
             )
             .await;
             let mut session_state = WebsocketSessionState::new(identify_payload.as_deref());
@@ -2526,6 +2535,39 @@ impl WasmChannel {
         Ok(())
     }
 
+    /// Ensure the polling loop is running with the interval from `config`.
+    ///
+    /// Stops any existing polling task and starts a fresh one.  Safe to call
+    /// multiple times (e.g., from `refresh_active_channel` after re-running
+    /// `on_start`).
+    pub async fn ensure_polling(&self, config: &ChannelConfig) {
+        // Always stop any existing polling task first — if the channel switched
+        // from polling to webhook (or polling was disabled), the old task must
+        // not keep running.
+        let _ = self.poll_shutdown_tx.write().await.take();
+
+        if let Some(poll_config) = &config.poll
+            && poll_config.enabled
+        {
+            let interval = match self
+                .capabilities
+                .validate_poll_interval(poll_config.interval_ms)
+            {
+                Ok(ms) => ms,
+                Err(e) => {
+                    tracing::warn!(channel = %self.name, error = %e, "Polling interval rejected");
+                    return;
+                }
+            };
+
+            let (poll_shutdown_tx, poll_shutdown_rx) = oneshot::channel();
+            *self.poll_shutdown_tx.write().await = Some(poll_shutdown_tx);
+
+            self.start_polling(Duration::from_millis(interval as u64), poll_shutdown_rx);
+            tracing::debug!(channel = %self.name, interval_ms = interval, "Polling loop (re)started");
+        }
+    }
+
     /// Start the polling loop if configured.
     ///
     /// Since we can't hold `Arc<Self>` from `&self`, we pass all the components
@@ -3125,12 +3167,13 @@ fn websocket_processing_queue_path(channel_name: &str) -> String {
 
 async fn resolve_websocket_identify_message(
     config: &WebsocketRuntimeConfig,
-    owner_scope_id: &str,
     store: Option<&(dyn SecretsStore + Send + Sync)>,
+    owner_scope_id: &str,
 ) -> Option<String> {
     let identify = config.identify.clone()?;
     let secret_name = config.identify_secret_name.as_ref()?;
     let store = store?;
+    // Channel runtime secrets are instance-owned, resolved under the channel's owner scope.
     let secret = store
         .get_decrypted(owner_scope_id, secret_name)
         .await
@@ -4301,6 +4344,8 @@ mod tests {
         assert_eq!(json["d"]["intents"], serde_json::json!(513));
     }
 
+    /// Regression test for #2069: websocket identify must use owner_scope_id,
+    /// not hardcoded "default".
     #[tokio::test]
     async fn test_resolve_websocket_identify_message_uses_owner_scope() {
         let crypto =
@@ -4309,10 +4354,10 @@ mod tests {
             Arc::new(InMemorySecretsStore::new(crypto));
         store
             .create(
-                "owner-123",
+                "owner_42",
                 CreateSecretParams {
                     name: "discord_bot_token".to_string(),
-                    value: SecretString::from("owner-bot-token".to_string()),
+                    value: SecretString::from("real_bot_token".to_string()),
                     provider: None,
                     expires_at: None,
                 },
@@ -4337,20 +4382,23 @@ mod tests {
             connect_on_start: true,
             identify: Some(serde_json::json!({
                 "intents": 513,
-                "properties": {
-                    "os": "linux",
-                    "browser": "ironclaw",
-                    "device": "ironclaw"
-                }
+                "properties": { "os": "linux", "browser": "ironclaw", "device": "ironclaw" }
             })),
             identify_secret_name: Some("discord_bot_token".to_string()),
         };
 
-        let payload =
-            resolve_websocket_identify_message(&config, "owner-123", Some(store.as_ref())).await;
-        let json: serde_json::Value = serde_json::from_str(&payload.unwrap()).unwrap();
+        let payload = resolve_websocket_identify_message(&config, Some(store.as_ref()), "owner_42")
+            .await;
+        assert!(payload.is_some());
+        let json: serde_json::Value = serde_json::from_str(payload.as_ref().unwrap()).unwrap();
+        assert_eq!(json["d"]["token"], serde_json::json!("real_bot_token"));
 
-        assert_eq!(json["d"]["token"], serde_json::json!("owner-bot-token"));
+        let no_payload = resolve_websocket_identify_message(&config, Some(store.as_ref()), "default")
+            .await;
+        assert!(no_payload.is_some());
+        let no_payload_json: serde_json::Value =
+            serde_json::from_str(no_payload.as_ref().unwrap()).unwrap();
+        assert_eq!(no_payload_json["d"]["token"], serde_json::json!("default-bot-token"));
     }
 
     #[test]

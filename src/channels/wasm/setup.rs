@@ -2,6 +2,15 @@
 //!
 //! Encapsulates the logic for loading WASM channels, registering their
 //! webhook routes, and injecting credentials from the secrets store.
+//!
+//! # Ownership model
+//!
+//! Boot-time secret lookups use `config.owner_id` because channels are
+//! **instance-level resources** — they run as the instance operator, not as
+//! individual users. This is intentional and distinct from tool-level
+//! credential resolution, which is scoped to the calling user's `user_id`.
+//!
+//! See `docs/superpowers/specs/2026-04-01-ownership-model-design.md`.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -186,6 +195,7 @@ async fn register_channel(
     let sig_key_secret_name = loaded.signature_key_secret_name();
     let hmac_secret_name = loaded.hmac_secret_name();
 
+    // Channel-level secrets: owner_id is correct — channels are instance resources.
     let webhook_secret = if let Some(secrets) = secrets_store {
         secrets
             .get_decrypted(&config.owner_id, &secret_name)

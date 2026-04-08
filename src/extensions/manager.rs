@@ -6849,7 +6849,6 @@ impl ExtensionManager {
                     optional: true,
                     setting_path: Some(format!("extensions.{name}.relay_url")),
                     input_type: crate::tools::wasm::ToolSetupFieldInputType::Text,
-                    restart_required: false,
                 }];
                 (std::collections::HashSet::new(), relay_fields)
             }
@@ -6937,7 +6936,6 @@ impl ExtensionManager {
                 .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
         }
 
-        let mut restart_required = false;
         let mut stored_fields = self.load_tool_setup_fields(&name).await.unwrap_or_default();
 
         for (field_name, field_value) in fields {
@@ -6970,9 +6968,6 @@ impl ExtensionManager {
             stored_fields.insert(field_name.clone(), trimmed.to_string());
 
             if let Some(field_def) = field_def {
-                if field_def.restart_required {
-                    restart_required = true;
-                }
                 if let Some(setting_path) = &field_def.setting_path {
                     Self::validate_setup_setting_path(&name, setting_path)?;
                     let store = self.store.as_ref().ok_or_else(|| {
@@ -7063,9 +7058,11 @@ impl ExtensionManager {
                             name, verification.instructions
                         ),
                         activated: false,
-                        restart_required,
+                        pairing_required: false,
                         auth_url: None,
                         verification: Some(verification),
+                        onboarding_state: None,
+                        onboarding: None,
                     });
                 }
             }
@@ -7115,9 +7112,11 @@ impl ExtensionManager {
                     return Ok(ConfigureResult {
                         message,
                         activated: true,
-                        restart_required,
+                        pairing_required: false,
                         auth_url,
                         verification: None,
+                        onboarding_state: None,
+                        onboarding: None,
                     });
                 }
                 Err(e) => {
@@ -7129,9 +7128,11 @@ impl ExtensionManager {
                     return Ok(ConfigureResult {
                         message: format!("Configuration saved for '{}'.", name),
                         activated: false,
-                        restart_required,
+                        pairing_required: false,
                         auth_url: None,
                         verification: None,
+                        onboarding_state: None,
+                        onboarding: None,
                     });
                 }
             }
@@ -7147,9 +7148,11 @@ impl ExtensionManager {
                     name
                 ),
                 activated: false,
-                restart_required,
+                pairing_required: false,
                 auth_url: auth_result.auth_url().map(String::from),
                 verification: None,
+                onboarding_state: None,
+                onboarding: None,
             });
         }
 
@@ -7163,9 +7166,11 @@ impl ExtensionManager {
                 return Ok(ConfigureResult {
                     message: format!("Configuration saved for '{}'.", name),
                     activated: false,
-                    restart_required,
+                    pairing_required: false,
                     auth_url: None,
                     verification: None,
+                    onboarding_state: None,
+                    onboarding: None,
                 });
             }
         };
@@ -7192,9 +7197,11 @@ impl ExtensionManager {
                 Ok(ConfigureResult {
                     message,
                     activated: true,
-                    restart_required,
+                    pairing_required: false,
                     auth_url: None,
                     verification: None,
+                    onboarding_state: None,
+                    onboarding: None,
                 })
             }
             Err(e) => {
@@ -7216,9 +7223,11 @@ impl ExtensionManager {
                         name, e
                     ),
                     activated: false,
-                    restart_required,
+                    pairing_required: false,
                     auth_url: None,
                     verification: None,
+                    onboarding_state: None,
+                    onboarding: None,
                 })
             }
         }

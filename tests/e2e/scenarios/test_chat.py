@@ -1,79 +1,38 @@
 """Scenario 2: Chat message round-trip via SSE streaming."""
 
 import pytest
-from helpers import SEL
+from helpers import SEL, send_chat_and_wait_for_terminal_message
 
 
 async def test_send_message_and_receive_response(page):
     """Type a message, receive a streamed response from mock LLM."""
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.wait_for(state="visible", timeout=5000)
-    initial_assistant_count = await page.locator(SEL["message_assistant"]).count()
+    result = await send_chat_and_wait_for_terminal_message(page, "What is 2+2?")
 
-    # Send message
-    await chat_input.fill("What is 2+2?")
-    await chat_input.press("Enter")
-
-    # Wait for a new assistant response after any seeded greeting.
-    await page.wait_for_function(
-        """({ selector, initialCount }) => {
-            return document.querySelectorAll(selector).length > initialCount;
-        }""",
-        arg={
-            "selector": SEL["message_assistant"],
-            "initialCount": initial_assistant_count,
-        },
-        timeout=15000,
-    )
-    assistant_msg = page.locator(SEL["message_assistant"]).last
-
-    # Verify user message
-    user_msgs = page.locator(SEL["message_user"])
-    assert await user_msgs.count() >= 1
-    last_user = user_msgs.last
-    user_text = await last_user.text_content()
-    assert "2+2" in user_text or "2 + 2" in user_text
-
-    # Verify assistant response contains "4" (from mock LLM canned response)
-    assistant_text = await assistant_msg.text_content()
-    assert "4" in assistant_text, f"Expected '4' in response, got: '{assistant_text}'"
+    assert result["role"] == "assistant"
+    assert "4" in result["text"], f"Expected '4' in response, got: '{result['text']}'"
 
 
 async def test_multiple_messages(page):
     """Send two messages, verify both get responses."""
     chat_input = page.locator(SEL["chat_input"])
     await chat_input.wait_for(state="visible", timeout=5000)
-    initial_assistant_count = await page.locator(SEL["message_assistant"]).count()
 
     # First message
     await chat_input.fill("Hello")
     await chat_input.press("Enter")
 
-    # Wait for first new response after any seeded greeting.
-    await page.wait_for_function(
-        """({ selector, expectedCount }) => {
-            return document.querySelectorAll(selector).length >= expectedCount;
-        }""",
-        arg={
-            "selector": SEL["message_assistant"],
-            "expectedCount": initial_assistant_count + 1,
-        },
-        timeout=15000,
+    # Wait for first response
+    await page.locator(SEL["message_assistant"]).first.wait_for(
+        state="visible", timeout=15000
     )
 
     # Second message
     await chat_input.fill("What is 2+2?")
     await chat_input.press("Enter")
 
-    # Wait for second new response (beyond any initial greeting).
+    # Wait for second response (at least 2 assistant messages)
     await page.wait_for_function(
-        """({ selector, expectedCount }) => {
-            return document.querySelectorAll(selector).length >= expectedCount;
-        }""",
-        arg={
-            "selector": SEL["message_assistant"],
-            "expectedCount": initial_assistant_count + 2,
-        },
+        """() => document.querySelectorAll('#chat-messages .message.assistant').length >= 2""",
         timeout=15000,
     )
 
@@ -81,28 +40,23 @@ async def test_multiple_messages(page):
     user_count = await page.locator(SEL["message_user"]).count()
     assistant_count = await page.locator(SEL["message_assistant"]).count()
     assert user_count >= 2, f"Expected >= 2 user messages, got {user_count}"
-    assert assistant_count >= initial_assistant_count + 2, (
-        f"Expected >= {initial_assistant_count + 2} assistant messages, got {assistant_count}"
-    )
+    assert assistant_count >= 2, f"Expected >= 2 assistant messages, got {assistant_count}"
 
 
 async def test_empty_message_not_sent(page):
     """Pressing Enter with empty input should not create a message."""
     chat_input = page.locator(SEL["chat_input"])
     await chat_input.wait_for(state="visible", timeout=5000)
-    await page.locator(".message-skeleton").first.wait_for(state="hidden", timeout=15000)
 
-    initial_user_count = await page.locator(SEL["message_user"]).count()
+    initial_count = await page.locator(f"{SEL['message_user']}, {SEL['message_assistant']}").count()
 
     # Press Enter with empty input
     await chat_input.press("Enter")
 
-    # Wait a moment and verify no new user messages
+    # Wait a moment and verify no new messages
     await page.wait_for_timeout(2000)
-    final_user_count = await page.locator(SEL["message_user"]).count()
-    assert final_user_count == initial_user_count, (
-        "Empty message should not create a new user message"
-    )
+    final_count = await page.locator(f"{SEL['message_user']}, {SEL['message_assistant']}").count()
+    assert final_count == initial_count, "Empty message should not create new messages"
 
 
 async def test_copy_from_chat_forces_plain_text(page):

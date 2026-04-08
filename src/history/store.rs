@@ -570,6 +570,12 @@ impl SandboxRestartParams {
     }
 }
 
+impl crate::ownership::Owned for SandboxJobRecord {
+    fn owner_user_id(&self) -> &str {
+        &self.user_id
+    }
+}
+
 /// Summary of sandbox job counts grouped by status.
 #[derive(Debug, Clone, Default)]
 pub struct SandboxJobSummary {
@@ -592,6 +598,12 @@ pub struct AgentJobRecord {
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub failure_reason: Option<String>,
+}
+
+impl crate::ownership::Owned for AgentJobRecord {
+    fn owner_user_id(&self) -> &str {
+        &self.user_id
+    }
 }
 
 /// Summary counts for agent (non-sandbox) jobs.
@@ -1960,7 +1972,7 @@ impl Store {
         let row = conn
             .query_opt(
                 r#"
-                SELECT id FROM conversations
+                SELECT id, source_channel FROM conversations
                 WHERE user_id = $1 AND channel = $2 AND metadata->>'thread_type' = 'assistant'
                 LIMIT 1
                 "#,
@@ -1975,8 +1987,8 @@ impl Store {
                 conn.execute(
                     r#"
                     UPDATE conversations
-                    SET source_channel = COALESCE(source_channel, $2)
-                    WHERE id = $1
+                    SET source_channel = $2
+                    WHERE id = $1 AND source_channel IS NULL
                     "#,
                     &[&id, &channel],
                 )
@@ -1991,9 +2003,9 @@ impl Store {
         conn.execute(
             r#"
             INSERT INTO conversations (id, channel, user_id, metadata, source_channel)
-            VALUES ($1, $2, $3, $4, $2)
+            VALUES ($1, $2, $3, $4, $5)
             "#,
-            &[&id, &channel, &user_id, &metadata],
+            &[&id, &channel, &user_id, &metadata, &channel],
         )
         .await?;
 

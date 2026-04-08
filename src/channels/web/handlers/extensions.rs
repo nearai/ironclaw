@@ -90,6 +90,8 @@ pub async fn extensions_list_handler(
                 activation_status,
                 activation_error: ext.activation_error,
                 version: ext.version,
+                onboarding_state: None,
+                onboarding: None,
             }
         })
         .collect();

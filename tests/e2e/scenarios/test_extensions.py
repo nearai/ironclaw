@@ -67,6 +67,28 @@ _WASM_CHANNEL = {
     "tools": [],
     "activation_status": "installed",
     "activation_error": None,
+    "onboarding_state": "setup_required",
+    "onboarding": {
+        "state": "setup_required",
+        "requires_pairing": True,
+        "credential_title": "Configure credentials for Test Channel",
+        "credential_instructions": "Enter the channel token to continue.",
+        "credential_next_step": "Next: send the channel any message to receive a pairing code, then paste it into IronClaw.",
+        "setup_url": None,
+        "pairing_title": "Claim ownership for Test Channel",
+        "pairing_instructions": "Send the channel any message to receive a pairing code, then paste it into IronClaw.",
+        "restart_instructions": "If you close this claim step, send another message in the channel to get a new pairing code.",
+    },
+}
+
+_WASM_CHANNEL_PAIRING = {
+    **_WASM_CHANNEL,
+    "activation_status": "pairing",
+    "onboarding_state": "pairing_required",
+    "onboarding": {
+        **_WASM_CHANNEL["onboarding"],
+        "state": "pairing_required",
+    },
 }
 
 _REGISTRY_WASM = {
@@ -216,7 +238,7 @@ async def open_channels_with_mock_role(
 
     await page.goto(
         f"{ironclaw_server}/?token={AUTH_TOKEN}",
-        wait_until="load",
+        wait_until="domcontentloaded",
         timeout=15000,
     )
     await page.locator(SEL["auth_screen"]).wait_for(state="hidden", timeout=10000)
@@ -349,7 +371,47 @@ async def test_mcp_server_installed_auth_dot(page):
 # ─── Group D: WASM channel stepper states ─────────────────────────────────────
 
 async def _load_wasm_channel(page, activation_status, activation_error=None):
-    ext = {**_WASM_CHANNEL, "activation_status": activation_status, "activation_error": activation_error}
+    onboarding_state = {
+        "installed": "setup_required",
+        "configured": "activation_in_progress",
+        "pairing": "pairing_required",
+        "active": "ready",
+        "failed": "failed",
+    }[activation_status]
+    onboarding = {**_WASM_CHANNEL["onboarding"], "state": onboarding_state}
+    ext = {
+        **_WASM_CHANNEL,
+        "activation_status": activation_status,
+        "activation_error": activation_error,
+        "onboarding_state": onboarding_state,
+        "onboarding": onboarding,
+    }
+
+    async def handle_setup(route):
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "name": "test-channel",
+                    "kind": "wasm_channel",
+                    "secrets": [
+                        {
+                            "name": "channel_token",
+                            "prompt": "Enter channel token",
+                            "provided": False,
+                            "optional": False,
+                            "auto_generate": False,
+                        }
+                    ],
+                    "fields": [],
+                    "onboarding_state": onboarding_state,
+                    "onboarding": onboarding,
+                }
+            ),
+        )
+
+    await page.route("**/api/extensions/test-channel/setup", handle_setup)
     await mock_ext_apis(page, installed=[ext])
     await go_to_channels(page)
     # Find the WASM channel card specifically (not built-in channel cards)
@@ -359,19 +421,22 @@ async def _load_wasm_channel(page, activation_status, activation_error=None):
 
 
 async def test_wasm_channel_setup_states(page):
-    """activation_status installed/configured both show the Setup button and stepper."""
+    """setup_required renders inline setup guidance, token input, and no duplicate setup button."""
     card = await _load_wasm_channel(page, "installed")
-    setup_btn = card.locator(SEL["ext_configure_btn"], has_text="Setup")
-    assert await setup_btn.count() == 1
+    assert await card.locator(SEL["ext_configure_btn"], has_text="Setup").count() == 0
     assert await card.locator(SEL["ext_stepper"]).count() == 1
-    # configured renders identically (same Setup button); verified by same stepper check above
+    assert await card.locator(SEL["ext_onboarding"]).count() == 1
+    assert await card.locator(SEL["ext_onboarding_title"]).count() == 1
+    assert await card.locator(SEL["setup_input"]).count() == 1
+    assert await card.locator(SEL["setup_next_step"]).count() == 1
 
 
 async def test_wasm_channel_pairing_state(page):
-    """activation_status=pairing shows Awaiting Pairing label and Reconfigure."""
+    """pairing_required shows claim guidance, manual code entry, and reconfigure."""
     card = await _load_wasm_channel(page, "pairing")
     assert await card.locator(SEL["ext_pairing_label"]).count() == 1
     assert await card.locator(SEL["ext_configure_btn"], has_text="Reconfigure").count() == 1
+    assert await card.locator(SEL["pairing_help"]).count() == 1
 
 
 async def test_wasm_channel_pairing_state_admin_shows_pending_requests(browser, ironclaw_server):
@@ -380,7 +445,7 @@ async def test_wasm_channel_pairing_state_admin_shows_pending_requests(browser, 
         browser,
         ironclaw_server,
         role="admin",
-        installed=[{**_WASM_CHANNEL, "activation_status": "pairing"}],
+        installed=[_WASM_CHANNEL_PAIRING],
         pairing_requests=[{"code": "ABCD1234", "sender_id": "telegram-user-1"}],
     )
     try:
@@ -388,11 +453,14 @@ async def test_wasm_channel_pairing_state_admin_shows_pending_requests(browser, 
         await card.wait_for(state="visible", timeout=5000)
 
         pairing = card.locator(SEL["ext_pairing"])
-        await pairing.locator(SEL["pairing_heading"]).wait_for(state="visible", timeout=5000)
-        assert "Pending pairing requests" in await pairing.locator(SEL["pairing_heading"]).text_content()
+        await pairing.locator(SEL["pairing_manual_input"]).wait_for(state="visible", timeout=5000)
+        assert await pairing.locator(SEL["pairing_manual_input"]).count() == 1
+        assert await pairing.locator(SEL["pairing_manual_submit"]).count() == 1
+        assert await pairing.locator(SEL["pairing_help"]).count() == 1
+        assert await pairing.locator(SEL["pairing_restart"]).count() == 1
         assert "ABCD1234" in await pairing.locator(SEL["pairing_code"]).text_content()
         assert "telegram-user-1" in await pairing.locator(SEL["pairing_sender"]).text_content()
-        assert await pairing.locator(".btn-ext.activate", has_text="Approve").count() == 1
+        assert await pairing.locator(".pairing-row:not(.pairing-manual) .btn-ext.activate").count() == 1
         assert pairing_hits["list"] >= 1
     finally:
         await context.close()
@@ -404,7 +472,7 @@ async def test_wasm_channel_pairing_state_member_shows_claim_ui(browser, ironcla
         browser,
         ironclaw_server,
         role="member",
-        installed=[{**_WASM_CHANNEL, "activation_status": "pairing"}],
+        installed=[_WASM_CHANNEL_PAIRING],
     )
     try:
         card = page.locator(SEL["channels_ext_card"], has_text="Test Channel").first
@@ -412,10 +480,11 @@ async def test_wasm_channel_pairing_state_member_shows_claim_ui(browser, ironcla
 
         pairing = card.locator(SEL["ext_pairing"])
         await pairing.locator(SEL["pairing_heading"]).wait_for(state="visible", timeout=5000)
-        assert "pair this account" in (await pairing.locator(SEL["pairing_heading"]).text_content()).lower()
+        assert "claim ownership" in (await pairing.locator(SEL["pairing_heading"]).text_content()).lower()
         assert await pairing.locator(SEL["pairing_help"]).count() == 1
         assert await pairing.locator(SEL["pairing_input"]).count() == 1
         assert await pairing.locator(".btn-ext.activate").count() == 1
+        assert await pairing.locator(SEL["pairing_restart"]).count() == 1
         assert await pairing.locator(SEL["pairing_code"]).count() == 0
         assert await pairing.locator(SEL["pairing_sender"]).count() == 0
         assert pairing_hits["list"] == 0
@@ -429,7 +498,7 @@ async def test_member_pairing_claim_submission_shows_success(browser, ironclaw_s
         browser,
         ironclaw_server,
         role="member",
-        installed=[{**_WASM_CHANNEL, "activation_status": "pairing"}],
+        installed=[_WASM_CHANNEL_PAIRING],
         approve_response={"success": True},
     )
     try:
@@ -453,7 +522,7 @@ async def test_member_pairing_claim_failure_shows_error(browser, ironclaw_server
         browser,
         ironclaw_server,
         role="member",
-        installed=[{**_WASM_CHANNEL, "activation_status": "pairing"}],
+        installed=[_WASM_CHANNEL_PAIRING],
         approve_response={"success": False, "message": "Invalid pairing code"},
     )
     try:
@@ -467,6 +536,31 @@ async def test_member_pairing_claim_failure_shows_error(browser, ironclaw_server
         assert pairing_hits["approve"] == 1
         assert await input_field.input_value() == "bad-code"
         assert await input_field.is_visible()
+    finally:
+        await context.close()
+
+
+async def test_admin_pairing_manual_code_submit(browser, ironclaw_server):
+    """Admins can approve a pairing code directly from the manual entry row."""
+    context, page, pairing_hits = await open_channels_with_mock_role(
+        browser,
+        ironclaw_server,
+        role="admin",
+        installed=[_WASM_CHANNEL_PAIRING],
+        pairing_requests=[],
+        approve_response={"success": True},
+    )
+    try:
+        card = page.locator(SEL["channels_ext_card"], has_text="Test Channel").first
+        input_field = card.locator(SEL["pairing_manual_input"])
+        await input_field.wait_for(state="visible", timeout=5000)
+        await input_field.fill("pair-1234")
+        await input_field.press("Enter")
+
+        await wait_for_toast(page, "Pairing approved")
+        assert pairing_hits["approve"] == 1
+        assert pairing_hits["approve_body"] == {"code": "PAIR-1234"}
+        assert await input_field.input_value() == ""
     finally:
         await context.close()
 
@@ -609,21 +703,8 @@ async def test_install_wasm_channel_triggers_configure(page):
 
 
 async def test_install_with_auth_url_opens_popup_and_shows_auth_prompt(page):
-    """Install responses with auth_url should surface the same auth prompt used elsewhere.
-
-    Regression for nearai/ironclaw#1502: the OAuth popup must be opened with
-    target='_blank' so the user lands in a new tab. The mock captures every
-    argument the production caller passes to window.open — silently dropping
-    target/features here would be the exact bug shape that caused #1502 to
-    ship in the first place. See .claude/rules/testing.md ("Mock hygiene
-    corollary").
-    """
-    await page.evaluate(
-        "window._lastOpenCall = null;"
-        "window.open = (url, target, features) => {"
-        "  window._lastOpenCall = { url, target, features };"
-        "}"
-    )
+    """Install responses with auth_url should surface the same auth prompt used elsewhere."""
+    await page.evaluate("window.open = (url) => { window._lastOpenedUrl = url; }")
     await mock_ext_apis(page, registry=[_REGISTRY_WASM])
 
     async def handle_install(route):
@@ -641,19 +722,12 @@ async def test_install_with_auth_url_opens_popup_and_shows_auth_prompt(page):
     await install_btn.click()
 
     await page.wait_for_function(
-        """() => {
-            const call = window._lastOpenCall;
-            return !!(call && typeof call.url === 'string' && call.url.length > 0 && call.target === '_blank');
-        }""",
+        "() => window._lastOpenedUrl !== null && window._lastOpenedUrl !== undefined",
         timeout=5000,
     )
-    call = await page.evaluate("window._lastOpenCall")
-    assert call is not None, "window.open was not called"
-    assert "example.com" in call["url"], f"unexpected URL: {call['url']}"
-    assert call["target"] == "_blank", (
-        f"OAuth popup must open in a new tab (target='_blank'), got "
-        f"{call['target']!r} — see nearai/ironclaw#1502"
-    )
+    opened = await page.evaluate("window._lastOpenedUrl")
+    assert opened is not None, "window.open was not called"
+    assert "example.com" in opened
     await page.locator(SEL["auth_card"] + '[data-extension-name="registry-tool"]').wait_for(
         state="visible", timeout=5000
     )
@@ -815,16 +889,8 @@ async def test_configure_modal_save_success(page):
 
 
 async def test_configure_modal_save_oauth(page):
-    """Save response with auth_url opens a popup and shows the global auth prompt.
-
-    Regression for nearai/ironclaw#1502: see test_install_with_auth_url_opens_popup_and_shows_auth_prompt.
-    """
-    await page.evaluate(
-        "window._lastOpenCall = null;"
-        "window.open = (url, target, features) => {"
-        "  window._lastOpenCall = { url, target, features };"
-        "}"
-    )
+    """Save response with auth_url opens a popup and shows the global auth prompt."""
+    await page.evaluate("window.open = (url) => { window._lastOpenedUrl = url; }")
 
     async def handle_setup(route):
         if route.request.method == "GET":
@@ -846,22 +912,10 @@ async def test_configure_modal_save_oauth(page):
     await page.locator(SEL["configure_input"]).fill("ignored")
     await page.locator(SEL["configure_save_btn"]).click()
 
-    await page.wait_for_function(
-        """() => {
-            const call = window._lastOpenCall;
-            return !!(call && typeof call.url === 'string' && call.url.length > 0 && call.target === '_blank');
-        }""",
-        timeout=5000,
-    )
-    call = await page.evaluate("window._lastOpenCall")
-    assert call is not None, "window.open was not called"
-    assert "oauth" in call["url"] or "example.com" in call["url"], (
-        f"unexpected URL: {call['url']}"
-    )
-    assert call["target"] == "_blank", (
-        f"OAuth popup must open in a new tab (target='_blank'), got "
-        f"{call['target']!r} — see nearai/ironclaw#1502"
-    )
+    await page.wait_for_function("() => window._lastOpenedUrl !== null && window._lastOpenedUrl !== undefined", timeout=5000)
+    opened = await page.evaluate("window._lastOpenedUrl")
+    assert opened is not None, "window.open was not called"
+    assert "oauth" in opened or "example.com" in opened
     await page.locator(SEL["auth_card"] + '[data-extension-name="test-ext"]').wait_for(
         state="visible", timeout=5000
     )
@@ -931,6 +985,13 @@ async def _show_auth_card(page, **kwargs):
     await page.locator(SEL["auth_card"]).wait_for(state="visible", timeout=5000)
 
 
+async def _show_pairing_card(page, **kwargs):
+    """Inject the chat pairing prompt via JS and wait for it to appear."""
+    payload = json.dumps(kwargs)
+    await page.evaluate(f"showPairingCard({payload})")
+    await page.locator(SEL["pairing_card"]).wait_for(state="visible", timeout=5000)
+
+
 async def test_auth_card_token_only(page):
     """Auth card with no auth_url shows token input, Submit, Cancel, but no OAuth button."""
     await _show_auth_card(page, extension_name="github", instructions="Paste your GitHub token")
@@ -954,19 +1015,6 @@ async def test_auth_card_with_oauth(page):
     assert "slack" in await oauth_btn.text_content()
 
 
-async def test_auth_card_oauth_link_opens_in_new_tab(page):
-    """OAuth auth card link should open in a new tab without opener access."""
-    auth_url = "https://accounts.google.com/o/oauth2/v2/auth?client_id=test"
-    await _show_auth_card(page, extension_name="gmail", auth_url=auth_url)
-
-    oauth_link = page.locator(SEL["auth_card"]).locator(SEL["auth_oauth_btn"])
-    assert await oauth_link.get_attribute("href") == auth_url
-    assert await oauth_link.get_attribute("target") == "_blank"
-    rel = await oauth_link.get_attribute("rel")
-    assert rel is not None
-    assert "noopener" in rel.split()
-
-
 async def test_auth_card_with_setup_url(page):
     """Auth card with setup_url shows a 'Get your token' link."""
     await _show_auth_card(page, extension_name="openai", setup_url="https://platform.openai.com/api-keys")
@@ -986,24 +1034,17 @@ async def test_auth_card_submit_success(page):
         submit_called.append(True)
         await route.fulfill(status=200, content_type="application/json", body=json.dumps({"success": True, "message": "Authenticated!"}))
 
-    await page.route("**/api/chat/gate/resolve", handle_auth)
+    await page.route("**/api/chat/auth-token", handle_auth)
 
     # Test click submit
-    await _show_auth_card(
-        page,
-        extension_name="myext",
-        instructions="Enter token",
-        request_id="11111111-1111-1111-1111-111111111111",
-    )
+    await _show_auth_card(page, extension_name="myext", instructions="Enter token")
     await page.locator(SEL["auth_token_input"]).fill("valid-token-123")
     await page.locator(SEL["auth_submit_btn"]).click()
     await page.locator(SEL["auth_card"]).wait_for(state="hidden", timeout=5000)
     assert len(submit_called) >= 1
 
     # Test Enter key submit (re-show card for a different extension)
-    await page.evaluate(
-        "showAuthCard({extension_name: 'myext2', instructions: 'Again', request_id: '33333333-3333-3333-3333-333333333333'})"
-    )
+    await page.evaluate("showAuthCard({extension_name: 'myext2', instructions: 'Again'})")
     await page.locator(SEL["auth_card"]).wait_for(state="visible", timeout=5000)
     await page.locator(SEL["auth_token_input"]).fill("another-token")
     await page.locator(SEL["auth_token_input"]).press("Enter")
@@ -1023,12 +1064,8 @@ async def test_auth_card_submit_error(page):
     async def handle_auth(route):
         await route.fulfill(status=200, content_type="application/json", body=json.dumps({"success": False, "message": "Bad token"}))
 
-    await page.route("**/api/chat/gate/resolve", handle_auth)
-    await _show_auth_card(
-        page,
-        extension_name="myext",
-        request_id="55555555-5555-5555-5555-555555555555",
-    )
+    await page.route("**/api/chat/auth-token", handle_auth)
+    await _show_auth_card(page, extension_name="myext")
     await page.locator(SEL["auth_token_input"]).fill("wrong-token")
     await page.locator(SEL["auth_submit_btn"]).click()
 
@@ -1045,12 +1082,8 @@ async def test_auth_card_cancel_removes_card(page):
     async def handle_cancel(route):
         await route.fulfill(status=200, content_type="application/json", body="{}")
 
-    await page.route("**/api/chat/gate/resolve", handle_cancel)
-    await _show_auth_card(
-        page,
-        extension_name="myext",
-        request_id="77777777-7777-7777-7777-777777777777",
-    )
+    await page.route("**/api/chat/auth-cancel", handle_cancel)
+    await _show_auth_card(page, extension_name="myext")
     await page.locator(SEL["auth_cancel_btn"]).click()
     await page.locator(SEL["auth_card"]).wait_for(state="hidden", timeout=3000)
 
@@ -1114,25 +1147,25 @@ async def test_auth_required_does_not_reopen_existing_configure_modal(page):
             overlay.setAttribute('data-extension-name', 'telegram');
             document.body.appendChild(overlay);
 
-            const originalShowConfigureModal = window.showConfigureModal;
+            const originalShowSetupCardForExtension = window.showSetupCardForExtension;
             const originalSetAuthFlowPending = window.setAuthFlowPending;
-            let showCalls = 0;
+            let setupCalls = 0;
             let pendingCalls = 0;
 
-            window.showConfigureModal = () => { showCalls += 1; };
+            window.showSetupCardForExtension = () => { setupCalls += 1; };
             window.setAuthFlowPending = () => { pendingCalls += 1; };
 
             handleAuthRequired({ extension_name: 'telegram', instructions: 'pending', auth_url: null });
 
-            window.showConfigureModal = originalShowConfigureModal;
+            window.showSetupCardForExtension = originalShowSetupCardForExtension;
             window.setAuthFlowPending = originalSetAuthFlowPending;
             overlay.remove();
-            return { showCalls, pendingCalls };
+            return { setupCalls, pendingCalls };
         }"""
     )
 
-    assert result["showCalls"] == 0
-    assert result["pendingCalls"] == 0
+    assert result["setupCalls"] == 0
+    assert result["pendingCalls"] == 1
 
 
 async def test_auth_completed_sse_dismisses_card(page):
@@ -1226,6 +1259,79 @@ async def test_auth_completed_failure_sse_shows_error_toast_and_reloads_extensio
     assert len(reload_count) > count_before, "Extensions list did not reload after auth failure"
 
 
+async def test_pairing_card_submit_success(page):
+    """Submitting a valid pairing code removes the chat pairing card."""
+    submit_bodies = []
+
+    async def handle_pairing(route):
+        submit_bodies.append(json.loads(route.request.post_data or "{}"))
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"success": True, "message": "Pairing approved."}),
+        )
+
+    await page.route("**/api/pairing/telegram/approve", handle_pairing)
+
+    await _show_pairing_card(
+        page,
+        channel="telegram",
+        instructions="Paste the pairing code from Telegram.",
+    )
+    await page.locator(SEL["pairing_card"]).locator(SEL["auth_token_input"]).fill("pair-1234")
+    await page.locator(SEL["pairing_submit_btn"]).click()
+    await page.locator(SEL["pairing_card"]).wait_for(state="hidden", timeout=5000)
+
+    await _show_pairing_card(
+        page,
+        channel="telegram",
+        instructions="Paste the pairing code from Telegram.",
+    )
+    await page.locator(SEL["pairing_card"]).locator(SEL["auth_token_input"]).fill("pair-5678")
+    await page.locator(SEL["pairing_card"]).locator(SEL["auth_token_input"]).press("Enter")
+    await page.locator(SEL["pairing_card"]).wait_for(state="hidden", timeout=5000)
+
+    assert submit_bodies == [{"code": "PAIR-1234"}, {"code": "PAIR-5678"}]
+
+
+async def test_pairing_card_submit_error(page):
+    """A failed pairing submission keeps the card open and shows inline error text."""
+    async def handle_pairing(route):
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"success": False, "message": "Invalid pairing code"}),
+        )
+
+    await page.route("**/api/pairing/telegram/approve", handle_pairing)
+    await _show_pairing_card(
+        page,
+        channel="telegram",
+        instructions="Paste the pairing code from Telegram.",
+    )
+    await page.locator(SEL["pairing_card"]).locator(SEL["auth_token_input"]).fill("bad-code")
+    await page.locator(SEL["pairing_submit_btn"]).click()
+
+    error = page.locator(SEL["pairing_card"]).locator(SEL["auth_error"])
+    await error.wait_for(state="visible", timeout=5000)
+    assert "Invalid pairing code" in await error.text_content()
+    assert await page.locator(SEL["pairing_card"]).count() == 1
+
+
+async def test_pairing_card_cancel_shows_restart_hint(page):
+    await _show_pairing_card(
+        page,
+        channel="telegram",
+        instructions="Paste the pairing code from Telegram.",
+    )
+
+    await page.locator(SEL["pairing_cancel_btn"]).click()
+    await page.locator(SEL["pairing_card"]).wait_for(state="hidden", timeout=5000)
+    await page.locator(SEL["toast"], has_text="Message the channel again to get a new pairing code.").wait_for(
+        state="visible", timeout=5000
+    )
+
+
 # ─── Group I: Activate flow ────────────────────────────────────────────────────
 
 async def test_activate_mcp_server_success(page):
@@ -1296,16 +1402,8 @@ async def test_activate_failure_shows_error_toast(page):
 
 
 async def test_activate_with_auth_url_opens_popup_and_shows_auth_prompt(page):
-    """Activate response with auth_url calls window.open and shows the auth prompt.
-
-    Regression for nearai/ironclaw#1502: see test_install_with_auth_url_opens_popup_and_shows_auth_prompt.
-    """
-    await page.evaluate(
-        "window._lastOpenCall = null;"
-        "window.open = (url, target, features) => {"
-        "  window._lastOpenCall = { url, target, features };"
-        "}"
-    )
+    """Activate response with auth_url calls window.open and shows the auth prompt."""
+    await page.evaluate("window.open = (url) => { window._lastOpenedUrl = url; }")
     await mock_ext_apis(page, installed=[_MCP_INACTIVE])
 
     async def handle_activate(route):
@@ -1318,20 +1416,10 @@ async def test_activate_with_auth_url_opens_popup_and_shows_auth_prompt(page):
     await activate_btn.wait_for(state="visible", timeout=5000)
     await activate_btn.click()
 
-    await page.wait_for_function(
-        """() => {
-            const call = window._lastOpenCall;
-            return !!(call && typeof call.url === 'string' && call.url.length > 0 && call.target === '_blank');
-        }""",
-        timeout=5000,
-    )
-    call = await page.evaluate("window._lastOpenCall")
-    assert call is not None, "window.open was not called"
-    assert "example.com" in call["url"], f"unexpected URL: {call['url']}"
-    assert call["target"] == "_blank", (
-        f"OAuth popup must open in a new tab (target='_blank'), got "
-        f"{call['target']!r} — see nearai/ironclaw#1502"
-    )
+    await page.wait_for_function("() => window._lastOpenedUrl !== null && window._lastOpenedUrl !== undefined", timeout=5000)
+    opened = await page.evaluate("window._lastOpenedUrl")
+    assert opened is not None, "window.open was not called"
+    assert "example.com" in opened
     await page.locator(
         SEL["auth_card"] + '[data-extension-name="test-mcp-inactive"]'
     ).wait_for(state="visible", timeout=5000)

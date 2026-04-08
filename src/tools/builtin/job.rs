@@ -22,8 +22,11 @@ use crate::db::Database;
 use crate::history::SandboxJobRecord;
 use crate::orchestrator::auth::CredentialGrant;
 use crate::orchestrator::job_manager::{ContainerJobManager, JobCreationParams, JobMode};
+use crate::ownership::Owned;
 use crate::secrets::SecretsStore;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{
+    ApprovalRequirement, EngineCompatibility, Tool, ToolError, ToolOutput, require_str,
+};
 use ironclaw_common::AppEvent;
 
 /// Lazy scheduler reference, filled after Agent::new creates the Scheduler.
@@ -1095,6 +1098,10 @@ impl Tool for CreateJobTool {
     fn requires_sanitization(&self) -> bool {
         false
     }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
+    }
 }
 
 /// Tool for listing jobs.
@@ -1237,7 +1244,7 @@ impl Tool for JobStatusTool {
 
         match self.context_manager.get_context(job_id).await {
             Ok(job_ctx) => {
-                if job_ctx.user_id != requester_id {
+                if !job_ctx.is_owned_by(&requester_id) {
                     let result = serde_json::json!({
                         "error": "Job not found".to_string()
                     });
@@ -1340,7 +1347,7 @@ impl Tool for CancelJobTool {
         match self
             .context_manager
             .update_context(job_id, |ctx| {
-                if ctx.user_id != requester_id {
+                if !ctx.is_owned_by(&requester_id) {
                     return Err("Job not found".to_string());
                 }
                 ctx.transition_to(JobState::Cancelled, Some("Cancelled by user".to_string()))
@@ -1411,6 +1418,10 @@ impl Tool for CancelJobTool {
 
     fn requires_sanitization(&self) -> bool {
         false
+    }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
     }
 }
 
@@ -1493,7 +1504,7 @@ impl Tool for JobEventsTool {
                 ))
             })?;
 
-        if job_ctx.user_id != ctx.user_id {
+        if !job_ctx.is_owned_by(&ctx.user_id) {
             return Err(ToolError::ExecutionFailed(format!(
                 "job {} does not belong to current user",
                 job_id
@@ -1631,7 +1642,7 @@ impl Tool for JobPromptTool {
                 ))
             })?;
 
-        if job_ctx.user_id != ctx.user_id {
+        if !job_ctx.is_owned_by(&ctx.user_id) {
             return Err(ToolError::ExecutionFailed(format!(
                 "job {} does not belong to current user",
                 job_id

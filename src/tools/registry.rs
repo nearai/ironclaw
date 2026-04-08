@@ -24,7 +24,9 @@ use crate::tools::builtin::{
     ToolRemoveTool, ToolSearchTool, ToolUpgradeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolDiscoverySummary, ToolDomain};
+use crate::tools::tool::{
+    ApprovalRequirement, EngineVersion, Tool, ToolDiscoverySummary, ToolDomain,
+};
 use crate::tools::wasm::{
     Capabilities, OAuthRefreshConfig, ResourceLimits, SharedCredentialRegistry, WasmError,
     WasmStorageError, WasmToolRuntime, WasmToolStore, WasmToolWrapper,
@@ -134,6 +136,9 @@ pub struct ToolRegistry {
     http_interceptor: Option<Arc<dyn HttpInterceptor>>,
     /// Reference to the message tool for setting context per-turn.
     message_tool: RwLock<Option<Arc<crate::tools::builtin::MessageTool>>>,
+    /// Active engine version. Controls which tools are visible via
+    /// `tool_definitions()`, `all()`, etc. Defaults to V1.
+    engine_version: EngineVersion,
 }
 
 impl ToolRegistry {
@@ -146,7 +151,11 @@ impl ToolRegistry {
         }
     }
 
-    /// Create a new empty registry.
+    fn is_engine_visible(tool: &dyn Tool, version: EngineVersion) -> bool {
+        tool.engine_compatibility().is_visible_in(version)
+    }
+
+    /// Create a new empty registry. Defaults to engine V1.
     pub fn new() -> Self {
         Self {
             tools: RwLock::new(HashMap::new()),
@@ -158,6 +167,7 @@ impl ToolRegistry {
             rate_limiter: RateLimiter::new(),
             http_interceptor: None,
             message_tool: RwLock::new(None),
+            engine_version: EngineVersion::V1,
         }
     }
 
@@ -188,6 +198,17 @@ impl ToolRegistry {
     pub fn with_http_interceptor(mut self, interceptor: Arc<dyn HttpInterceptor>) -> Self {
         self.http_interceptor = Some(interceptor);
         self
+    }
+
+    /// Set the engine version. Must be called before wrapping in `Arc`.
+    pub fn with_engine_version(mut self, version: EngineVersion) -> Self {
+        self.engine_version = version;
+        self
+    }
+
+    /// Get the active engine version.
+    pub fn engine_version(&self) -> EngineVersion {
+        self.engine_version
     }
 
     /// Get a reference to the shared credential registry.
@@ -302,9 +323,16 @@ impl ToolRegistry {
         self.tools.read().await.contains_key(name)
     }
 
-    /// List all tool names.
+    /// List tool names visible in the current engine version.
     pub async fn list(&self) -> Vec<String> {
-        self.tools.read().await.keys().cloned().collect()
+        let version = self.engine_version;
+        self.tools
+            .read()
+            .await
+            .values()
+            .filter(|tool| Self::is_engine_visible(tool.as_ref(), version))
+            .map(|tool| tool.name().to_string())
+            .collect()
     }
 
     /// Retain only tools whose names are in the given allowlist.
@@ -324,9 +352,16 @@ impl ToolRegistry {
         self.tools.try_read().map(|t| t.len()).unwrap_or(0)
     }
 
-    /// Get all tools.
+    /// Get all tools visible in the current engine version.
     pub async fn all(&self) -> Vec<Arc<dyn Tool>> {
-        self.tools.read().await.values().cloned().collect()
+        let version = self.engine_version;
+        self.tools
+            .read()
+            .await
+            .values()
+            .filter(|tool| Self::is_engine_visible(tool.as_ref(), version))
+            .cloned()
+            .collect()
     }
 
     /// Get the set of built-in tool names currently registered.
@@ -335,12 +370,25 @@ impl ToolRegistry {
     }
 
     /// Get tool definitions for LLM function calling.
+    ///
+    /// Automatically filters by the registry's engine version, so callers
+    /// don't need to know which engine is active.
     pub async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        self.tool_definitions_for_engine(self.engine_version).await
+    }
+
+    /// Get tool definitions filtered by engine version.
+    ///
+    /// Returns tools whose `engine_compatibility()` is `Both` or matches the
+    /// requested version. Use this instead of `tool_definitions()` when building
+    /// the tool list for a specific engine version.
+    pub async fn tool_definitions_for_engine(&self, version: EngineVersion) -> Vec<ToolDefinition> {
         let mut defs: Vec<ToolDefinition> = self
             .tools
             .read()
             .await
             .values()
+            .filter(|tool| Self::is_engine_visible(tool.as_ref(), version))
             .map(Self::tool_definition)
             .collect();
         defs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
@@ -406,11 +454,14 @@ impl ToolRegistry {
 
     /// Get tool definitions filtered by domain.
     pub async fn tool_definitions_for_domain(&self, domain: ToolDomain) -> Vec<ToolDefinition> {
+        let version = self.engine_version;
         self.tools
             .read()
             .await
             .values()
-            .filter(|tool| tool.domain() == domain)
+            .filter(|tool| {
+                tool.domain() == domain && Self::is_engine_visible(tool.as_ref(), version)
+            })
             .map(Self::tool_definition)
             .collect()
     }
@@ -421,12 +472,16 @@ impl ToolRegistry {
     /// so the LLM only sees tools it is actually allowed to call.
     pub async fn tool_definitions_excluding(&self, deny: &[&str]) -> Vec<ToolDefinition> {
         let empty_params = serde_json::Value::Object(serde_json::Map::new());
+        let version = self.engine_version;
         let mut defs: Vec<ToolDefinition> = self
             .tools
             .read()
             .await
             .values()
             .filter(|tool| {
+                if !Self::is_engine_visible(tool.as_ref(), version) {
+                    return false;
+                }
                 // Exclude denylisted tools
                 if deny.contains(&tool.name()) {
                     return false;
@@ -1004,7 +1059,7 @@ impl std::fmt::Debug for ToolRegistry {
 mod tests {
     use super::*;
     use crate::tools::registry::EchoTool;
-    use crate::tools::tool::ToolDiscoverySummary;
+    use crate::tools::tool::{EngineCompatibility, ToolDiscoverySummary};
 
     #[tokio::test]
     async fn test_register_and_get() {
@@ -1362,5 +1417,125 @@ mod tests {
         registry.retain_only(&[]).await;
         let after = registry.list().await.len();
         assert_eq!(before, after);
+    }
+
+    // ── engine compatibility tests ───────────────────────────────────────
+
+    /// Stub tool that returns V1Only engine compatibility.
+    struct V1OnlyTool;
+
+    #[async_trait::async_trait]
+    impl crate::tools::Tool for V1OnlyTool {
+        fn name(&self) -> &str {
+            "v1_only_stub"
+        }
+        fn description(&self) -> &str {
+            "test stub"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &crate::context::JobContext,
+        ) -> Result<crate::tools::ToolOutput, crate::tools::ToolError> {
+            unreachable!()
+        }
+        fn engine_compatibility(&self) -> EngineCompatibility {
+            EngineCompatibility::V1Only
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_definitions_for_engine_excludes_v1_only_from_v2() {
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool)).await;
+        registry.register(Arc::new(V1OnlyTool)).await;
+
+        let v2_defs = registry
+            .tool_definitions_for_engine(EngineVersion::V2)
+            .await;
+        let names: Vec<&str> = v2_defs.iter().map(|d| d.name.as_str()).collect();
+
+        assert!(
+            names.contains(&"echo"),
+            "Both-compatible tool should appear in v2"
+        );
+        assert!(
+            !names.contains(&"v1_only_stub"),
+            "V1Only tool must not appear in v2"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_definitions_for_engine_includes_v1_only_in_v1() {
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool)).await;
+        registry.register(Arc::new(V1OnlyTool)).await;
+
+        let v1_defs = registry
+            .tool_definitions_for_engine(EngineVersion::V1)
+            .await;
+        let names: Vec<&str> = v1_defs.iter().map(|d| d.name.as_str()).collect();
+
+        assert!(
+            names.contains(&"echo"),
+            "Both-compatible tool should appear in v1"
+        );
+        assert!(
+            names.contains(&"v1_only_stub"),
+            "V1Only tool should appear in v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn builtin_echo_tool_is_both_compatible() {
+        let registry = Arc::new(ToolRegistry::new());
+        registry.register_builtin_tools();
+
+        let echo = registry.get("echo").await.unwrap();
+        assert_eq!(echo.engine_compatibility(), EngineCompatibility::Both);
+    }
+
+    #[tokio::test]
+    async fn tool_definitions_auto_filters_by_stored_engine_version() {
+        let registry = ToolRegistry::new().with_engine_version(EngineVersion::V2);
+        registry.register(Arc::new(EchoTool)).await;
+        registry.register(Arc::new(V1OnlyTool)).await;
+
+        // tool_definitions() should auto-filter using the stored V2 version
+        let defs = registry.tool_definitions().await;
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+
+        assert!(names.contains(&"echo"));
+        assert!(!names.contains(&"v1_only_stub"));
+    }
+
+    #[tokio::test]
+    async fn default_v1_registry_includes_v1_only_tools() {
+        // Default ToolRegistry::new() is V1 — V1Only tools should be visible
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool)).await;
+        registry.register(Arc::new(V1OnlyTool)).await;
+
+        let defs = registry.tool_definitions().await;
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+
+        assert!(names.contains(&"echo"));
+        assert!(names.contains(&"v1_only_stub"));
+    }
+
+    #[tokio::test]
+    async fn all_filters_by_engine_version() {
+        let registry = ToolRegistry::new().with_engine_version(EngineVersion::V2);
+        registry.register(Arc::new(EchoTool)).await;
+        registry.register(Arc::new(V1OnlyTool)).await;
+
+        let tools = registry.all().await;
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+
+        assert!(names.contains(&"echo"));
+        assert!(!names.contains(&"v1_only_stub"));
     }
 }

@@ -329,13 +329,17 @@ impl AppBuilder {
 
         // Initialize tool registry with credential injection support
         let credential_registry = Arc::new(SharedCredentialRegistry::new());
-        let mut tools_builder = ToolRegistry::new();
+        let engine_version = if crate::bridge::is_engine_v2_enabled() {
+            crate::tools::EngineVersion::V2
+        } else {
+            crate::tools::EngineVersion::V1
+        };
+        let mut registry = ToolRegistry::new().with_engine_version(engine_version);
         if let Some(ref db) = self.db {
-            tools_builder = tools_builder.with_database(Arc::clone(db));
+            registry = registry.with_database(Arc::clone(db));
         }
         if let Some(ref ss) = self.secrets_store {
-            tools_builder =
-                tools_builder.with_credentials(Arc::clone(&credential_registry), Arc::clone(ss));
+            registry = registry.with_credentials(Arc::clone(&credential_registry), Arc::clone(ss));
         }
         // Test-only HTTP host remapping. Gated to debug/test builds so a stray
         // `IRONCLAW_TEST_HTTP_REMAP` env var on a release deployment cannot
@@ -346,9 +350,9 @@ impl AppBuilder {
             None
         };
         if let Some(ref interceptor) = http_interceptor {
-            tools_builder = tools_builder.with_http_interceptor(Arc::clone(interceptor));
+            registry = registry.with_http_interceptor(Arc::clone(interceptor));
         }
-        let tools = Arc::new(tools_builder);
+        let tools = Arc::new(registry);
         tools.register_builtin_tools();
         tools.register_tool_info();
 

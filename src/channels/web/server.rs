@@ -2628,6 +2628,8 @@ async fn extensions_list_handler(
                 activation_status,
                 activation_error: ext.activation_error,
                 version: ext.version,
+                onboarding_state: None,
+                onboarding: None,
             }
         })
         .collect();
@@ -3066,6 +3068,8 @@ async fn extensions_setup_handler(
         kind,
         secrets: setup.secrets,
         fields: setup.fields,
+        onboarding_state: None,
+        onboarding: None,
     }))
 }
 
@@ -3095,12 +3099,11 @@ async fn extensions_setup_submit_handler(
                 ActionResponse::fail(result.message)
             };
             resp.activated = Some(result.activated);
-            if result.restart_required || !result.activated {
-                resp.needs_restart = Some(true);
-            }
             resp.auth_url = result.auth_url.clone();
             resp.verification = result.verification.clone();
             resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
+            resp.onboarding_state = result.onboarding_state.clone();
+            resp.onboarding = result.onboarding.clone();
             if result.verification.is_none() {
                 // Broadcast auth_completed so the chat UI can dismiss any in-progress
                 // auth card or setup modal that was triggered by tool_auth/tool_activate.

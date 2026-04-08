@@ -1180,33 +1180,15 @@ impl ChannelPairingStore for PgBackend {
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-        // Return existing valid pending request if present
-        let existing = tx
-            .query_opt(
-                "SELECT id, channel, external_id, code, created_at, expires_at
-                 FROM pairing_requests
-                 WHERE channel = $1 AND external_id = $2
-                   AND approved_at IS NULL AND expires_at > NOW()
-                 ORDER BY created_at DESC LIMIT 1",
-                &[&channel, &external_id],
-            )
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-
-        if let Some(row) = existing {
-            tx.commit()
-                .await
-                .map_err(|e| DatabaseError::Query(e.to_string()))?;
-            return Ok(PairingRequestRecord {
-                id: row.get(0),
-                channel: row.get(1),
-                external_id: row.get(2),
-                code: row.get(3),
-                created: false,
-                created_at: row.get(4),
-                expires_at: row.get(5),
-            });
-        }
+        tx.execute(
+            "UPDATE pairing_requests
+             SET expires_at = NOW()
+             WHERE channel = $1 AND external_id = $2
+               AND approved_at IS NULL AND expires_at > NOW()",
+            &[&channel, &external_id],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let expires_at = chrono::Utc::now() + chrono::Duration::minutes(15);
         let meta_json: Option<serde_json::Value> = meta;

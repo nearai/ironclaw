@@ -22,11 +22,6 @@ import pytest
 
 from helpers import SEL, api_get, api_post
 
-MCP_ROUTE_NAME = "mock-mcp"
-MCP_LIST_NAME = "mock_mcp"
-MCP_400_ROUTE_NAME = "mock-mcp-400"
-MCP_400_LIST_NAME = "mock_mcp_400"
-
 
 def _extract_state(auth_url: str) -> str:
     """Extract the CSRF state parameter from an OAuth authorization URL."""
@@ -36,16 +31,11 @@ def _extract_state(auth_url: str) -> str:
     return qs["state"][0]
 
 
-def _canonical_extension_name(name: str) -> str:
-    return name.replace("-", "_")
-
-
 async def _get_extension(base_url, name):
     """Get a specific extension from the extensions list, or None."""
     r = await api_get(base_url, "/api/extensions")
-    canonical_name = _canonical_extension_name(name)
     for ext in r.json().get("extensions", []):
-        if ext["name"] in {name, canonical_name}:
+        if ext["name"] == name:
             return ext
     return None
 
@@ -62,20 +52,20 @@ async def _ensure_removed(base_url, name):
 
 async def test_mcp_install(ironclaw_server, mock_llm_server):
     """Install a mock MCP server pointing at mock_llm.py's /mcp endpoint."""
-    await _ensure_removed(ironclaw_server, MCP_ROUTE_NAME)
+    await _ensure_removed(ironclaw_server, "mock_mcp")
 
     mcp_url = f"{mock_llm_server}/mcp"
     r = await api_post(
         ironclaw_server,
         "/api/extensions/install",
-        json={"name": MCP_ROUTE_NAME, "url": mcp_url, "kind": "mcp_server"},
+        json={"name": "mock_mcp", "url": mcp_url, "kind": "mcp_server"},
         timeout=30,
     )
     assert r.status_code == 200
     data = r.json()
     assert data.get("success") is True, f"Install failed: {data}"
 
-    ext = await _get_extension(ironclaw_server, MCP_LIST_NAME)
+    ext = await _get_extension(ironclaw_server, "mock_mcp")
     assert ext is not None, "mock_mcp should appear in extensions list"
     assert ext["kind"] == "mcp_server"
 
@@ -90,13 +80,13 @@ async def test_mcp_activate_triggers_auth(ironclaw_server):
     is present. The activate handler should detect this as auth-required
     and return an auth_url.
     """
-    ext = await _get_extension(ironclaw_server, MCP_LIST_NAME)
+    ext = await _get_extension(ironclaw_server, "mock_mcp")
     if ext is None:
         pytest.skip("mock_mcp not installed")
 
     r = await api_post(
         ironclaw_server,
-        f"/api/extensions/{MCP_ROUTE_NAME}/activate",
+        "/api/extensions/mock_mcp/activate",
         timeout=30,
     )
     assert r.status_code == 200
@@ -120,14 +110,14 @@ async def test_mcp_activate_triggers_auth(ironclaw_server):
 
 async def test_mcp_oauth_callback(ironclaw_server):
     """Complete the OAuth flow via setup + callback for the MCP server."""
-    ext = await _get_extension(ironclaw_server, MCP_LIST_NAME)
+    ext = await _get_extension(ironclaw_server, "mock_mcp")
     if ext is None:
         pytest.skip("mock_mcp not installed")
 
     # Configure with empty secrets to trigger OAuth
     r = await api_post(
         ironclaw_server,
-        f"/api/extensions/{MCP_ROUTE_NAME}/setup",
+        "/api/extensions/mock_mcp/setup",
         json={"secrets": {}},
         timeout=30,
     )
@@ -139,7 +129,7 @@ async def test_mcp_oauth_callback(ironclaw_server):
     if auth_url is None:
         r = await api_post(
             ironclaw_server,
-            f"/api/extensions/{MCP_ROUTE_NAME}/activate",
+            "/api/extensions/mock_mcp/activate",
             timeout=30,
         )
         data = r.json()
@@ -147,7 +137,7 @@ async def test_mcp_oauth_callback(ironclaw_server):
 
     if auth_url is None:
         # Server might have been auto-authenticated via DCR; check if active
-        ext = await _get_extension(ironclaw_server, MCP_LIST_NAME)
+        ext = await _get_extension(ironclaw_server, "mock_mcp")
         if ext and ext.get("authenticated"):
             return  # Already authenticated, skip callback test
         pytest.skip("Could not obtain auth_url for mock_mcp")
@@ -171,7 +161,7 @@ async def test_mcp_oauth_callback(ironclaw_server):
 
 async def test_mcp_authenticated_after_oauth(ironclaw_server):
     """After OAuth callback, MCP server shows authenticated=True."""
-    ext = await _get_extension(ironclaw_server, MCP_LIST_NAME)
+    ext = await _get_extension(ironclaw_server, "mock_mcp")
     if ext is None:
         pytest.skip("mock_mcp not installed")
     assert ext["authenticated"] is True, (
@@ -181,7 +171,7 @@ async def test_mcp_authenticated_after_oauth(ironclaw_server):
 
 async def test_mcp_tools_registered(ironclaw_server):
     """After authentication, MCP tools appear in the extension."""
-    ext = await _get_extension(ironclaw_server, MCP_LIST_NAME)
+    ext = await _get_extension(ironclaw_server, "mock_mcp")
     if ext is None:
         pytest.skip("mock_mcp not installed")
     tools = ext.get("tools", [])
@@ -236,13 +226,13 @@ async def test_mcp_400_activate_triggers_auth(ironclaw_server, mock_llm_server):
     Previously, only 401 triggered the auth flow. GitHub's MCP returns 400
     with "Authorization header is badly formatted" instead.
     """
-    await _ensure_removed(ironclaw_server, MCP_400_ROUTE_NAME)
+    await _ensure_removed(ironclaw_server, "mock_mcp_400")
 
     mcp_url = f"{mock_llm_server}/mcp-400"
     r = await api_post(
         ironclaw_server,
         "/api/extensions/install",
-        json={"name": MCP_400_ROUTE_NAME, "url": mcp_url, "kind": "mcp_server"},
+        json={"name": "mock_mcp_400", "url": mcp_url, "kind": "mcp_server"},
         timeout=30,
     )
     assert r.status_code == 200
@@ -251,7 +241,7 @@ async def test_mcp_400_activate_triggers_auth(ironclaw_server, mock_llm_server):
     # Activate should detect 400 + "authorization" as auth-required
     r = await api_post(
         ironclaw_server,
-        f"/api/extensions/{MCP_400_ROUTE_NAME}/activate",
+        "/api/extensions/mock_mcp_400/activate",
         timeout=30,
     )
     assert r.status_code == 200, f"Activate returned {r.status_code}: {r.text[:300]}"
@@ -278,14 +268,14 @@ async def test_mcp_400_oauth_discovery_returns_auth_url(ironclaw_server):
     This test would have failed before the wildcard .well-known routes were
     added to mock_llm.py.
     """
-    ext = await _get_extension(ironclaw_server, MCP_400_LIST_NAME)
+    ext = await _get_extension(ironclaw_server, "mock_mcp_400")
     if ext is None:
         pytest.skip("mock_mcp_400 not installed")
 
     # Re-activate to get a fresh auth response
     r = await api_post(
         ironclaw_server,
-        f"/api/extensions/{MCP_400_ROUTE_NAME}/activate",
+        "/api/extensions/mock_mcp_400/activate",
         timeout=30,
     )
     assert r.status_code == 200, f"Activate returned {r.status_code}: {r.text[:300]}"
@@ -311,14 +301,14 @@ async def test_mcp_400_full_oauth_roundtrip(ironclaw_server):
     no auth_url is produced, so this test would fail at the csrf_state
     extraction step.
     """
-    ext = await _get_extension(ironclaw_server, MCP_400_LIST_NAME)
+    ext = await _get_extension(ironclaw_server, "mock_mcp_400")
     if ext is None:
         pytest.skip("mock_mcp_400 not installed")
 
     # Get a fresh auth_url via activate
     r = await api_post(
         ironclaw_server,
-        f"/api/extensions/{MCP_400_ROUTE_NAME}/activate",
+        "/api/extensions/mock_mcp_400/activate",
         timeout=30,
     )
     data = r.json()
@@ -343,7 +333,7 @@ async def test_mcp_400_full_oauth_roundtrip(ironclaw_server):
     )
 
     # Verify authenticated + tools loaded
-    ext = await _get_extension(ironclaw_server, MCP_400_LIST_NAME)
+    ext = await _get_extension(ironclaw_server, "mock_mcp_400")
     assert ext is not None, "mock_mcp_400 should still be installed"
     assert ext["authenticated"] is True, (
         f"mock_mcp_400 should be authenticated after OAuth: {ext}"
@@ -354,8 +344,8 @@ async def test_mcp_400_full_oauth_roundtrip(ironclaw_server):
 
 async def test_mcp_400_cleanup(ironclaw_server):
     """Clean up the 400-variant MCP server."""
-    await _ensure_removed(ironclaw_server, MCP_400_ROUTE_NAME)
-    ext = await _get_extension(ironclaw_server, MCP_400_LIST_NAME)
+    await _ensure_removed(ironclaw_server, "mock_mcp_400")
+    ext = await _get_extension(ironclaw_server, "mock_mcp_400")
     assert ext is None, "mock_mcp_400 should be removed"
 
 
@@ -363,7 +353,7 @@ async def test_mcp_400_cleanup(ironclaw_server):
 
 
 async def test_mcp_cleanup(ironclaw_server):
-    """Remove mock-mcp (cleanup for other test files)."""
-    await _ensure_removed(ironclaw_server, MCP_ROUTE_NAME)
-    ext = await _get_extension(ironclaw_server, MCP_LIST_NAME)
+    """Remove mock_mcp (cleanup for other test files)."""
+    await _ensure_removed(ironclaw_server, "mock_mcp")
+    ext = await _get_extension(ironclaw_server, "mock_mcp")
     assert ext is None, "mock_mcp should be removed"

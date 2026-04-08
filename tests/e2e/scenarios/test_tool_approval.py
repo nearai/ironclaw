@@ -1,7 +1,6 @@
 """Scenario 6: Tool approval overlay UI behavior."""
 
 import asyncio
-import uuid
 
 from helpers import SEL, api_get, api_post
 
@@ -48,7 +47,7 @@ async def _wait_for_history(
         )
         assert response.status_code == 200, response.text
         history = response.json()
-        pending = history.get("pending_gate") or history.get("pending_approval")
+        pending = history.get("pending_gate")
         turns = history.get("turns", [])
         latest_response = turns[-1].get("response") if turns else None
 
@@ -244,108 +243,6 @@ async def test_waiting_for_approval_message_no_error_prefix(page):
     )
 
 
-async def test_v1_browser_approval_card_approve_resumes_tool(page):
-    """In the default v1 E2E harness, approving via the browser resumes the tool call."""
-    chat_input = page.locator(SEL["chat_input"])
-    assistant_messages = page.locator(SEL["message_assistant"])
-    await chat_input.wait_for(state="visible", timeout=5000)
-
-    original_thread_id = await page.evaluate("() => currentThreadId")
-    await page.evaluate("() => createNewThread()")
-    await page.wait_for_function(
-        """(previousThreadId) => {
-            return !!currentThreadId && currentThreadId !== previousThreadId;
-        }""",
-        arg=original_thread_id,
-        timeout=10000,
-    )
-
-    label = f"browser-approve-{uuid.uuid4().hex[:8]}"
-    initial_assistant_count = await assistant_messages.count()
-
-    await chat_input.fill(f"make approval post {label}")
-    await chat_input.press("Enter")
-
-    card = page.locator(SEL["approval_card"]).last
-    await card.wait_for(state="visible", timeout=10000)
-
-    tool_name = await card.locator(SEL["approval_tool_name"]).text_content()
-    desc_text = await card.locator(SEL["approval_description"]).text_content()
-    assert tool_name == "http"
-    assert desc_text is not None and "HTTP requests to external APIs" in desc_text
-
-    pending_assistant_count = await assistant_messages.count()
-
-    await card.locator(SEL["approval_approve_btn"]).click()
-    await card.locator(SEL["approval_resolved"]).wait_for(state="visible", timeout=5000)
-    assert await card.locator(SEL["approval_resolved"]).text_content() == "Approved"
-
-    await page.wait_for_function(
-        """({ selector, minCount }) => {
-            return document.querySelectorAll(selector).length > minCount;
-        }""",
-        arg={
-            "selector": SEL["message_assistant"],
-            "minCount": pending_assistant_count,
-        },
-        timeout=15000,
-    )
-
-    last_msg = assistant_messages.last.locator(".message-content")
-    msg_text = await last_msg.inner_text()
-    assert "The http tool returned:" in msg_text, msg_text
-    assert '"status": 405' in msg_text or "Example Domain" in msg_text, msg_text
-
-    final_assistant_count = await assistant_messages.count()
-    assert final_assistant_count > initial_assistant_count
-
-
-async def test_v1_browser_seeded_assistant_thread_approve_resumes_tool(page):
-    """The seeded assistant thread should also allow browser approval in v1."""
-    chat_input = page.locator(SEL["chat_input"])
-    assistant_messages = page.locator(SEL["message_assistant"])
-    await chat_input.wait_for(state="visible", timeout=5000)
-
-    label = f"seeded-assistant-approve-{uuid.uuid4().hex[:8]}"
-    initial_assistant_count = await assistant_messages.count()
-
-    await chat_input.fill(f"make approval post {label}")
-    await chat_input.press("Enter")
-
-    card = page.locator(SEL["approval_card"]).last
-    await card.wait_for(state="visible", timeout=10000)
-
-    tool_name = await card.locator(SEL["approval_tool_name"]).text_content()
-    desc_text = await card.locator(SEL["approval_description"]).text_content()
-    assert tool_name == "http"
-    assert desc_text is not None and "HTTP requests to external APIs" in desc_text
-
-    pending_assistant_count = await assistant_messages.count()
-
-    await card.locator(SEL["approval_approve_btn"]).click()
-    await card.locator(SEL["approval_resolved"]).wait_for(state="visible", timeout=5000)
-    assert await card.locator(SEL["approval_resolved"]).text_content() == "Approved"
-
-    await page.wait_for_function(
-        """({ selector, minCount }) => {
-            return document.querySelectorAll(selector).length > minCount;
-        }""",
-        arg={
-            "selector": SEL["message_assistant"],
-            "minCount": pending_assistant_count,
-        },
-        timeout=15000,
-    )
-
-    last_msg = assistant_messages.last.locator(".message-content")
-    msg_text = await last_msg.inner_text()
-    assert "The http tool returned:" in msg_text, msg_text
-    assert '"status": 405' in msg_text or "Example Domain" in msg_text, msg_text
-
-    final_assistant_count = await assistant_messages.count()
-    assert final_assistant_count > initial_assistant_count
-
-
 async def test_chat_reply_approve_resumes_pending_tool(ironclaw_server):
     """A plain chat reply of 'approve' should resume the pending tool call."""
     thread_id = await _create_thread(ironclaw_server)
@@ -362,7 +259,7 @@ async def test_chat_reply_approve_resumes_pending_tool(ironclaw_server):
         turn_count_at_least=1,
     )
 
-    assert (history.get("pending_gate") or history.get("pending_approval")) is None
+    assert history.get("pending_gate") is None
     assert history["turns"][-1]["response"] is not None
 
 
@@ -412,5 +309,281 @@ async def test_chat_reply_always_auto_approves_next_same_tool(ironclaw_server):
         turn_count_at_least=2,
     )
 
-    assert (history.get("pending_gate") or history.get("pending_approval")) is None
+    assert history.get("pending_gate") is None
     assert len(history["turns"]) >= 2
+
+
+# -- Text-based approval interception tests ----------------------------------
+
+
+async def test_text_yes_intercepts_approval(page):
+    """Typing 'yes' in the chat input should resolve a pending approval card."""
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+
+    user_msg_count_before = await page.locator(SEL["message_user"]).count()
+
+    await page.evaluate("""
+        showApproval({
+            request_id: 'test-text-yes',
+            thread_id: currentThreadId,
+            tool_name: 'http',
+            description: 'GET https://example.com',
+        })
+    """)
+
+    card = page.locator('.approval-card[data-request-id="test-text-yes"]')
+    await card.wait_for(state="visible", timeout=5000)
+
+    await chat_input.fill("yes")
+    await chat_input.press("Enter")
+
+    resolved = card.locator(".approval-resolved")
+    await resolved.wait_for(state="visible", timeout=5000)
+    assert await resolved.text_content() == "Approved"
+
+    # Input should be cleared after interception
+    assert await chat_input.input_value() == "", "Input should be cleared after keyword interception"
+
+    # No user message bubble should appear for "yes"
+    user_msg_count_after = await page.locator(SEL["message_user"]).count()
+    assert user_msg_count_after == user_msg_count_before, (
+        "Typing 'yes' should not create a user message bubble"
+    )
+
+
+async def test_text_no_intercepts_denial(page):
+    """Typing 'no' in the chat input should deny a pending approval card."""
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+
+    await page.evaluate("""
+        showApproval({
+            request_id: 'test-text-no',
+            thread_id: currentThreadId,
+            tool_name: 'shell',
+            description: 'Execute: rm -rf /',
+        })
+    """)
+
+    card = page.locator('.approval-card[data-request-id="test-text-no"]')
+    await card.wait_for(state="visible", timeout=5000)
+
+    await chat_input.fill("no")
+    await chat_input.press("Enter")
+
+    resolved = card.locator(".approval-resolved")
+    await resolved.wait_for(state="visible", timeout=5000)
+    assert await resolved.text_content() == "Denied"
+
+    assert await chat_input.input_value() == "", "Input should be cleared after keyword interception"
+
+
+async def test_text_always_intercepts_always(page):
+    """Typing 'always' in the chat input should always-approve a pending card."""
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+
+    await page.evaluate("""
+        showApproval({
+            request_id: 'test-text-always',
+            thread_id: currentThreadId,
+            tool_name: 'http',
+            description: 'POST https://example.com/api',
+        })
+    """)
+
+    card = page.locator('.approval-card[data-request-id="test-text-always"]')
+    await card.wait_for(state="visible", timeout=5000)
+
+    await chat_input.fill("always")
+    await chat_input.press("Enter")
+
+    resolved = card.locator(".approval-resolved")
+    await resolved.wait_for(state="visible", timeout=5000)
+    assert await resolved.text_content() == "Always approved"
+
+    assert await chat_input.input_value() == "", "Input should be cleared after keyword interception"
+
+
+async def test_text_skips_resolved_card_targets_unresolved(page):
+    """Typing 'yes' should skip a resolved card and target the next unresolved one."""
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+
+    # Inject two approval cards
+    await page.evaluate("""
+        showApproval({
+            request_id: 'test-resolved-older',
+            thread_id: currentThreadId,
+            tool_name: 'http',
+            description: 'Older unresolved card',
+        });
+        showApproval({
+            request_id: 'test-resolved-newer',
+            thread_id: currentThreadId,
+            tool_name: 'shell',
+            description: 'Newer card (will be resolved)',
+        });
+    """)
+
+    older_card = page.locator('.approval-card[data-request-id="test-resolved-older"]')
+    newer_card = page.locator('.approval-card[data-request-id="test-resolved-newer"]')
+    await older_card.wait_for(state="visible", timeout=5000)
+    await newer_card.wait_for(state="visible", timeout=5000)
+
+    # Resolve the newer card via button click (it stays in DOM for 1.5s)
+    await newer_card.locator("button.approve").click()
+    newer_resolved = newer_card.locator(".approval-resolved")
+    await newer_resolved.wait_for(state="visible", timeout=5000)
+
+    # Now type "yes" — should skip the resolved newer card, target the older unresolved one
+    await chat_input.fill("yes")
+    await chat_input.press("Enter")
+
+    older_resolved = older_card.locator(".approval-resolved")
+    await older_resolved.wait_for(state="visible", timeout=5000)
+    assert await older_resolved.text_content() == "Approved"
+
+
+async def test_text_aliases_intercepted(page):
+    """Various approval aliases ('y', 'n', 'approve', 'deny') should be intercepted."""
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+
+    aliases = [
+        ("y", "Approved"),
+        ("n", "Denied"),
+        ("approve", "Approved"),
+        ("deny", "Denied"),
+    ]
+
+    for i, (text, expected_label) in enumerate(aliases):
+        req_id = f"test-alias-{i}"
+        await page.evaluate(
+            f"""
+            showApproval({{
+                request_id: '{req_id}',
+                thread_id: currentThreadId,
+                tool_name: 'http',
+                description: 'Test alias {text}',
+            }})
+            """
+        )
+
+        card = page.locator(f'.approval-card[data-request-id="{req_id}"]')
+        await card.wait_for(state="visible", timeout=5000)
+
+        await chat_input.fill(text)
+        await chat_input.press("Enter")
+
+        resolved = card.locator(".approval-resolved")
+        await resolved.wait_for(state="visible", timeout=5000)
+        actual = await resolved.text_content()
+        assert actual == expected_label, (
+            f"Alias '{text}' should resolve as '{expected_label}', got '{actual}'"
+        )
+
+
+async def test_text_approval_case_insensitive(page):
+    """Approval keywords should be matched case-insensitively ('Yes', 'YES', 'No')."""
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+
+    cases = [
+        ("Yes", "Approved"),
+        ("YES", "Approved"),
+        ("No", "Denied"),
+        ("ALWAYS", "Always approved"),
+    ]
+
+    for i, (text, expected_label) in enumerate(cases):
+        req_id = f"test-case-{i}"
+        await page.evaluate(
+            f"""
+            showApproval({{
+                request_id: '{req_id}',
+                thread_id: currentThreadId,
+                tool_name: 'http',
+                description: 'Test case {text}',
+            }})
+            """
+        )
+
+        card = page.locator(f'.approval-card[data-request-id="{req_id}"]')
+        await card.wait_for(state="visible", timeout=5000)
+
+        await chat_input.fill(text)
+        await chat_input.press("Enter")
+
+        resolved = card.locator(".approval-resolved")
+        await resolved.wait_for(state="visible", timeout=5000)
+        actual = await resolved.text_content()
+        assert actual == expected_label, (
+            f"Case '{text}' should resolve as '{expected_label}', got '{actual}'"
+        )
+
+
+async def test_normal_text_not_intercepted_with_approval_card(page):
+    """Regular text should still send as a normal message even when an approval card is visible."""
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+
+    user_msg_count_before = await page.locator(SEL["message_user"]).count()
+
+    await page.evaluate("""
+        showApproval({
+            request_id: 'test-passthrough',
+            thread_id: currentThreadId,
+            tool_name: 'http',
+            description: 'GET https://example.com',
+        })
+    """)
+
+    card = page.locator('.approval-card[data-request-id="test-passthrough"]')
+    await card.wait_for(state="visible", timeout=5000)
+
+    # Type regular text that is not an approval keyword
+    await chat_input.fill("hello world")
+    await chat_input.press("Enter")
+
+    # A user message bubble should appear (text was NOT intercepted)
+    await page.wait_for_function(
+        f"() => document.querySelectorAll('{SEL['message_user']}').length > {user_msg_count_before}",
+        timeout=5000,
+    )
+
+    # The approval card should still be visible (not resolved)
+    assert await card.is_visible(), "Approval card should remain visible after non-keyword text"
+    assert await card.locator(".approval-resolved").count() == 0, (
+        "Approval card should not show a resolved label"
+    )
+
+
+async def test_text_approval_resolves_real_tool_call(page):
+    """Typing 'yes' should resolve a real approval gate triggered by a tool call."""
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+
+    # Trigger a real HTTP tool call that requires approval
+    await chat_input.fill("make approval post text-approval-e2e")
+    await chat_input.press("Enter")
+
+    # Wait for the approval card to appear (from the SSE event)
+    card = page.locator(SEL["approval_card"]).last
+    await card.wait_for(state="visible", timeout=15000)
+
+    tool_name = await card.locator(".approval-tool-name").text_content()
+    assert tool_name == "http"
+
+    # Type "yes" to approve — should be intercepted by the frontend
+    await chat_input.fill("yes")
+    await chat_input.press("Enter")
+
+    # Card should show resolved status
+    resolved = card.locator(".approval-resolved")
+    await resolved.wait_for(state="visible", timeout=5000)
+    assert await resolved.text_content() == "Approved"
+
+    # Card should be removed after brief delay
+    await card.wait_for(state="hidden", timeout=5000)

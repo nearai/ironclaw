@@ -2,7 +2,7 @@
 
 Tests the full tool approval flow through the v2 engine (CodeAct):
 1. Mock LLM generates an http POST tool call (requires approval)
-2. Engine pauses the thread and exposes a pending gate in chat history
+2. Engine pauses the thread and exposes pending_approval in chat history
 3. User submits approval decision via POST /api/chat/approval
 4. Engine resumes (or denies) the tool call and completes the thread
 
@@ -11,7 +11,6 @@ submitting approval for a non-existent request_id.
 """
 
 import asyncio
-import json
 import os
 import signal
 import socket
@@ -33,8 +32,8 @@ from helpers import api_get, api_post, AUTH_TOKEN, wait_for_ready
 # ---------------------------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parent.parent.parent.parent
-_V2_APPROVAL_USER_ID = "e2e-v2-approval-tester"
-_CURRENT_PENDING_GATES_PATH: Path | None = None
+_V2_APPROVAL_DB_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-v2-approval-e2e-")
+_V2_APPROVAL_HOME_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-v2-approval-e2e-home-")
 
 
 def _forward_coverage_env(env: dict):
@@ -62,7 +61,7 @@ async def _stop_process(proc, sig=signal.SIGINT, timeout=5):
 # Fixtures
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 async def v2_approval_server(ironclaw_binary, mock_llm_server):
     """Start ironclaw with ENGINE_V2=true for tool approval flow tests.
 
@@ -70,12 +69,8 @@ async def v2_approval_server(ironclaw_binary, mock_llm_server):
     POST requests, which is what the mock LLM generates for the
     "make approval post <label>" pattern.
     """
-    db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-v2-approval-e2e-")
-    home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-v2-approval-e2e-home-")
-    home_dir = home_tmpdir.name
+    home_dir = _V2_APPROVAL_HOME_TMPDIR.name
     os.makedirs(os.path.join(home_dir, ".ironclaw"), exist_ok=True)
-    global _CURRENT_PENDING_GATES_PATH
-    _CURRENT_PENDING_GATES_PATH = Path(home_dir) / ".ironclaw" / "pending-gates.json"
 
     # Find two free ports
     socks = []
@@ -100,7 +95,7 @@ async def v2_approval_server(ironclaw_binary, mock_llm_server):
         "GATEWAY_HOST": "127.0.0.1",
         "GATEWAY_PORT": str(gateway_port),
         "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
-        "GATEWAY_USER_ID": _V2_APPROVAL_USER_ID,
+        "GATEWAY_USER_ID": "e2e-v2-approval-tester",
         "HTTP_HOST": "127.0.0.1",
         "HTTP_PORT": str(http_port),
         "CLI_ENABLED": "false",
@@ -108,7 +103,7 @@ async def v2_approval_server(ironclaw_binary, mock_llm_server):
         "LLM_BASE_URL": mock_llm_server,
         "LLM_MODEL": "mock-model",
         "DATABASE_BACKEND": "libsql",
-        "LIBSQL_PATH": os.path.join(db_tmpdir.name, "v2-approval-e2e.db"),
+        "LIBSQL_PATH": os.path.join(_V2_APPROVAL_DB_TMPDIR.name, "v2-approval-e2e.db"),
         "SANDBOX_ENABLED": "false",
         "SKILLS_ENABLED": "false",
         "ROUTINES_ENABLED": "false",
@@ -149,9 +144,6 @@ async def v2_approval_server(ironclaw_binary, mock_llm_server):
             await _stop_process(proc, sig=signal.SIGINT, timeout=10)
             if proc.returncode is None:
                 await _stop_process(proc, sig=signal.SIGTERM, timeout=5)
-        _CURRENT_PENDING_GATES_PATH = None
-        home_tmpdir.cleanup()
-        db_tmpdir.cleanup()
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +156,10 @@ async def _wait_for_approval(
     *,
     timeout: float = 45.0,
 ) -> dict:
-    """Poll /api/chat/history until a pending approval gate appears."""
+    """Poll /api/chat/history until pending_gate appears.
+
+    Returns the pending_gate dict containing request_id, tool_name, etc.
+    """
     for _ in range(int(timeout * 2)):
         r = await api_get(
             base_url,
@@ -173,7 +168,7 @@ async def _wait_for_approval(
         )
         r.raise_for_status()
         history = r.json()
-        pending = history.get("pending_gate") or history.get("pending_approval")
+        pending = history.get("pending_gate")
         if pending and pending.get("request_id"):
             return pending
         await asyncio.sleep(0.5)
@@ -184,7 +179,7 @@ async def _wait_for_approval(
         r = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
         data = r.json()
         turns = data.get("turns", [])
-        pending = data.get("pending_gate") or data.get("pending_approval")
+        pending = data.get("pending_gate")
         debug_info = f"turns={len(turns)}, pending={pending}"
         if turns:
             last_turn = turns[-1]
@@ -196,7 +191,7 @@ async def _wait_for_approval(
     except Exception as e:
         debug_info = f"error: {e}"
     raise AssertionError(
-        f"Timed out waiting for pending approval in thread {thread_id}. "
+        f"Timed out waiting for pending_gate in thread {thread_id}. "
         f"Debug: {debug_info}"
     )
 
@@ -235,63 +230,15 @@ async def _wait_for_response(
     )
 
 
-async def _wait_for_no_pending_approval(base_url: str, thread_id: str, *, timeout: float = 45.0):
+async def _wait_for_no_pending_gate(base_url: str, thread_id: str, *, timeout: float = 45.0):
     for _ in range(int(timeout * 2)):
         r = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
         r.raise_for_status()
         history = r.json()
-        if not (history.get("pending_gate") or history.get("pending_approval")):
+        if not history.get("pending_gate"):
             return history
         await asyncio.sleep(0.5)
-    raise AssertionError(f"Timed out waiting for pending approval to clear in thread {thread_id}")
-
-
-def _load_persisted_gates() -> list[dict]:
-    if _CURRENT_PENDING_GATES_PATH is None or not _CURRENT_PENDING_GATES_PATH.exists():
-        return []
-    content = _CURRENT_PENDING_GATES_PATH.read_text(encoding="utf-8").strip()
-    if not content:
-        return []
-    try:
-        data = json.loads(content)
-    except json.JSONDecodeError:
-        # File-backed persistence rewrites in place; tolerate a transient read
-        # during truncate/write windows and let the caller poll again.
-        return []
-    return data.get("gates", [])
-
-
-async def _wait_for_persisted_gate(
-    label: str,
-    *,
-    timeout: float = 45.0,
-) -> dict:
-    """Poll persisted pending gates until a matching gate appears."""
-    for _ in range(int(timeout * 2)):
-        for gate in _load_persisted_gates():
-            params = json.dumps(gate.get("parameters", {}), sort_keys=True)
-            if label in params:
-                return gate
-        await asyncio.sleep(0.5)
-    raise AssertionError(
-        f"Timed out waiting for persisted pending gate matching {label!r}. "
-        f"Current gates: {_load_persisted_gates()}"
-    )
-
-
-async def _wait_for_persisted_gate_absent(
-    request_id: str,
-    *,
-    timeout: float = 45.0,
-) -> None:
-    for _ in range(int(timeout * 2)):
-        if all(gate.get("request_id") != request_id for gate in _load_persisted_gates()):
-            return
-        await asyncio.sleep(0.5)
-    raise AssertionError(
-        f"Timed out waiting for persisted gate {request_id} to clear. "
-        f"Current gates: {_load_persisted_gates()}"
-    )
+    raise AssertionError(f"Timed out waiting for pending_gate to clear in thread {thread_id}")
 
 
 async def _approve(
@@ -341,29 +288,23 @@ class TestV2EngineApprovalFlow:
             timeout=30,
         )
 
-        await _wait_for_response(base_url, thread_a, timeout=60, expect_substring="requires approval")
-        await _wait_for_response(base_url, thread_b, timeout=60, expect_substring="requires approval")
-
-        pending_a = await _wait_for_persisted_gate("alpha", timeout=60)
-        pending_b = await _wait_for_persisted_gate("beta", timeout=60)
+        pending_a = await _wait_for_approval(base_url, thread_a, timeout=60)
+        pending_b = await _wait_for_approval(base_url, thread_b, timeout=60)
         assert pending_a["request_id"] != pending_b["request_id"]
 
         approve_a = await _approve(base_url, thread_a, pending_a["request_id"], "approve")
         assert approve_a.status_code == 202, approve_a.text
-        await _wait_for_persisted_gate_absent(pending_a["request_id"], timeout=60)
+        await _wait_for_no_pending_gate(base_url, thread_a, timeout=60)
 
         history_b = await api_get(base_url, f"/api/chat/history?thread_id={thread_b}", timeout=15)
         history_b.raise_for_status()
-        turns_b = history_b.json().get("turns", [])
-        assert turns_b, history_b.json()
-        assert "requires approval" in (turns_b[-1].get("response") or "").lower()
-        remaining_request_ids = {gate["request_id"] for gate in _load_persisted_gates()}
-        assert pending_a["request_id"] not in remaining_request_ids
-        assert pending_b["request_id"] in remaining_request_ids
+        still_pending_b = history_b.json().get("pending_gate")
+        assert still_pending_b is not None, history_b.json()
+        assert still_pending_b["request_id"] == pending_b["request_id"]
 
         approve_b = await _approve(base_url, thread_b, pending_b["request_id"], "approve")
         assert approve_b.status_code == 202, approve_b.text
-        await _wait_for_persisted_gate_absent(pending_b["request_id"], timeout=60)
+        await _wait_for_no_pending_gate(base_url, thread_b, timeout=60)
 
     """Test the v2 engine tool approval lifecycle.
 
@@ -411,14 +352,14 @@ class TestV2EngineApprovalFlow:
                 last = (turns[-1].get("response") or "").lower()
                 if last and "requires approval" not in last:
                     break
-            # Also check if the pending gate is cleared (approval processed)
-            if not (history.get("pending_gate") or history.get("pending_approval")):
+            # Also check if pending_gate is cleared (approval processed)
+            if not history.get("pending_gate"):
                 break
 
-        # After approval, the pending gate should be cleared
-        assert (history.get("pending_gate") or history.get("pending_approval")) is None, (
-            f"After approval, pending gate should be cleared. "
-            f"Got: {history.get('pending_gate') or history.get('pending_approval')}"
+        # After approval, pending_gate should be cleared
+        assert history.get("pending_gate") is None, (
+            f"After approval, pending_gate should be cleared. "
+            f"Got: {history.get('pending_gate')}"
         )
 
     async def test_approval_no(self, v2_approval_server):
@@ -468,9 +409,9 @@ class TestV2EngineApprovalFlow:
         ).lower()
 
         # After denial, approval prompt should no longer be pending
-        assert (history.get("pending_gate") or history.get("pending_approval")) is None, (
-            f"After denial, pending gate should be cleared. "
-            f"Got: {history.get('pending_gate') or history.get('pending_approval')}"
+        assert history.get("pending_gate") is None, (
+            f"After denial, pending_gate should be cleared. "
+            f"Got: {history.get('pending_gate')}"
         )
 
     async def test_approval_always(self, v2_approval_server):

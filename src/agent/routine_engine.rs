@@ -34,6 +34,7 @@ use crate::extensions::ExtensionManager;
 use crate::llm::{
     ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
 };
+use crate::ownership::Owned;
 use crate::tenant::SystemScope;
 use crate::tools::{
     ToolError, ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_message,
@@ -81,7 +82,7 @@ pub(crate) fn routine_matches_message(routine: &Routine, message: &IncomingMessa
     }
 
     // User ownership filter — only fire routines scoped to this user.
-    if routine.user_id != message.user_id {
+    if !routine.is_owned_by(&message.user_id) {
         return false;
     }
 
@@ -291,7 +292,7 @@ impl RoutineEngine {
             if !routine_matches_message(routine, message) {
                 // User mismatch is expected for multi-user setups — keep at
                 // trace to avoid one log per routine per inbound message.
-                if routine.user_id != message.user_id {
+                if !routine.is_owned_by(&message.user_id) {
                     tracing::trace!(
                         routine = %routine.name,
                         routine_user = %routine.user_id,
@@ -405,7 +406,7 @@ impl RoutineEngine {
             }
 
             if let Some(uid) = user_id
-                && routine.user_id != uid
+                && !routine.is_owned_by(uid)
             {
                 continue;
             }
@@ -770,7 +771,7 @@ impl RoutineEngine {
 
         // Enforce ownership when a user_id is provided (gateway calls).
         if let Some(uid) = user_id
-            && routine.user_id != uid
+            && !routine.is_owned_by(uid)
         {
             return Err(RoutineError::NotAuthorized { id: routine_id });
         }

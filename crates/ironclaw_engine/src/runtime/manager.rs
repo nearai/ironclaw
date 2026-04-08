@@ -309,11 +309,9 @@ impl ThreadManager {
                 tracing::debug!(thread_id = %thread_id, "failed to transition to Done: {e}");
             }
 
-            // Write trace file if enabled
-            if crate::executor::trace::is_trace_enabled() {
-                crate::executor::trace::log_trace_summary(&trace);
-                crate::executor::trace::write_trace(&trace);
-            }
+            // Trace recording is handled centrally by `RecordingLlm` in the
+            // host crate (gated by `IRONCLAW_RECORD_TRACE`). The engine no
+            // longer writes its own JSON trace file.
 
             if let Err(e) = store_for_task.append_events(&exec.thread.events).await {
                 tracing::debug!(

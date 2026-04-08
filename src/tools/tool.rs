@@ -161,6 +161,46 @@ pub enum ToolDomain {
     Container,
 }
 
+/// Which engine versions a tool is available in.
+///
+/// Declared by each tool via `Tool::engine_compatibility()`. Tools default to
+/// `Both`; override for version-specific tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EngineCompatibility {
+    /// Available in both v1 (legacy agent loop) and v2 (engine threads).
+    Both,
+    /// Only available in v1 (legacy agent loop). Replaced by engine-native
+    /// capabilities in v2 (e.g. `routine_create` → `mission_create`).
+    V1Only,
+    /// Only available in v2 (engine threads/capabilities).
+    V2Only,
+}
+
+impl EngineCompatibility {
+    /// Whether a tool with this compatibility is visible in the given engine version.
+    pub fn is_visible_in(self, version: EngineVersion) -> bool {
+        match self {
+            Self::Both => true,
+            Self::V1Only => version == EngineVersion::V1,
+            Self::V2Only => version == EngineVersion::V2,
+        }
+    }
+}
+
+/// Engine version selector for filtering tools.
+///
+/// Used by `ToolRegistry::tool_definitions_for_engine()` as the filter
+/// parameter. Separate from `EngineCompatibility` to avoid the footgun of
+/// passing `Both` as a filter (which would confusingly exclude version-specific
+/// tools).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EngineVersion {
+    /// V1 legacy agent loop.
+    V1,
+    /// V2 engine threads/capabilities.
+    V2,
+}
+
 /// Error type for tool execution.
 #[derive(Debug, Error)]
 pub enum ToolError {
@@ -350,6 +390,16 @@ pub trait Tool: Send + Sync {
     /// Default: `Orchestrator` (safe for the main process).
     fn domain(&self) -> ToolDomain {
         ToolDomain::Orchestrator
+    }
+
+    /// Which engine versions this tool is available in.
+    ///
+    /// Default: `Both`. Override to `V1Only` for tools replaced by engine-native
+    /// capabilities in v2 (e.g. `routine_create` → `mission_create`), or for
+    /// tools that cannot be LLM-invoked in v2 (e.g. `ApprovalRequirement::Always`
+    /// tools with no interactive approval path).
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::Both
     }
 
     /// Parameter names whose values must be redacted before logging, hooks, and approvals.
