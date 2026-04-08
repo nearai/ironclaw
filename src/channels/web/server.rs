@@ -4066,7 +4066,7 @@ mod tests {
         let secrets = test_secrets_store();
         let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
 
-        let channel_name = "test-failing-channel";
+        let channel_name = "test_failing_channel";
         std::fs::write(
             wasm_channels_dir
                 .path()
