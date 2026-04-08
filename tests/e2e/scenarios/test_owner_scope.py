@@ -136,12 +136,12 @@ async def _wait_for_http_thread(base_url: str, title_fragment: str, timeout: flo
     )
 
 
-async def _wait_for_pending_approval(
+async def _wait_for_pending_gate(
     base_url: str,
     thread_id: str,
     timeout: float = 20.0,
 ) -> dict:
-    """Poll chat history until the thread exposes a pending approval payload."""
+    """Poll chat history until the thread exposes a pending gate payload."""
     for _ in range(int(timeout * 2)):
         response = await api_get(
             base_url,
@@ -149,11 +149,11 @@ async def _wait_for_pending_approval(
             timeout=10,
         )
         response.raise_for_status()
-        pending = response.json().get("pending_approval")
+        pending = response.json().get("pending_gate")
         if pending:
             return pending
         await _poll_sleep()
-    raise AssertionError(f"Thread '{thread_id}' did not expose a pending approval")
+    raise AssertionError(f"Thread '{thread_id}' did not expose a pending gate")
 
 
 async def _approve_pending_request(base_url: str, thread_id: str, request_id: str) -> None:
@@ -256,7 +256,7 @@ async def test_http_created_full_job_routine_is_visible_in_web_after_approval(
     )
 
     thread_id = await _wait_for_http_thread(ironclaw_server, routine_name)
-    pending = await _wait_for_pending_approval(ironclaw_server, thread_id)
+    pending = await _wait_for_pending_gate(ironclaw_server, thread_id)
     assert pending["tool_name"] == "routine_create"
     await _approve_pending_request(
         ironclaw_server,
