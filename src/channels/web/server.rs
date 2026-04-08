@@ -720,11 +720,13 @@ pub async fn start_server(
             put(super::handlers::secrets::secrets_put_handler)
                 .delete(super::handlers::secrets::secrets_delete_handler),
         )
-        // Admin system prompt
+        // Admin system prompt — tighter body cap than the global 10 MB so an
+        // oversized payload is rejected before being parsed into memory.
         .route(
             "/api/admin/system-prompt",
             get(super::handlers::system_prompt::get_handler)
-                .put(super::handlers::system_prompt::put_handler),
+                .put(super::handlers::system_prompt::put_handler)
+                .layer(DefaultBodyLimit::max(128 * 1024)),
         )
         // Usage reporting (admin)
         .route(

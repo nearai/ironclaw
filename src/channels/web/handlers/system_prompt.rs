@@ -57,7 +57,9 @@ pub async fn put_handler(
     Json(req): Json<SystemPromptRequest>,
 ) -> Result<Json<SystemPromptResponse>, (StatusCode, String)> {
     // Enforce size limit — this content is injected into every user's system
-    // prompt, so an unbounded size could exhaust token budgets.
+    // prompt, so an unbounded size could exhaust token budgets. The route also
+    // applies a `DefaultBodyLimit` layer that rejects oversized payloads
+    // before they are parsed; this in-handler check is a clearer-error fallback.
     if req.content.len() > MAX_SYSTEM_PROMPT_SIZE {
         return Err((
             StatusCode::PAYLOAD_TOO_LARGE,

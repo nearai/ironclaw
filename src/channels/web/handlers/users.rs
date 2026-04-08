@@ -68,16 +68,6 @@ pub async fn users_create_handler(
 
     let user_id = Uuid::new_v4().to_string();
 
-    // Defense-in-depth: UUIDs cannot collide with reserved scopes, but
-    // validate anyway in case this code path is later changed to accept
-    // custom user IDs.
-    if crate::workspace::is_reserved_scope(&user_id) {
-        return Err((
-            StatusCode::CONFLICT,
-            "Generated user ID collides with a reserved scope".to_string(),
-        ));
-    }
-
     let now = chrono::Utc::now();
     let user_record = UserRecord {
         id: user_id.clone(),
