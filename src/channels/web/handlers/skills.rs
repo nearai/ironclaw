@@ -203,13 +203,9 @@ pub async fn skills_install_handler(
                 Err(e) => return Err((StatusCode::BAD_REQUEST, e.to_string())),
             }
         };
+        let url =
+            ironclaw_skills::catalog::skill_download_url(catalog.registry_url(), &download_key);
         resolved_download_key = Some(download_key);
-        let url = ironclaw_skills::catalog::skill_download_url(
-            catalog.registry_url(),
-            resolved_download_key
-                .as_deref()
-                .expect("download key guaranteed Some above"),
-        );
         crate::tools::builtin::skill_tools::fetch_skill_content(&url)
             .await
             .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?

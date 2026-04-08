@@ -57,8 +57,7 @@ fn render_skill_md(
         reason: format!("Failed to rewrite normalized SKILL.md: {}", e),
     })?;
 
-    let yaml = yaml.strip_prefix("---\n").unwrap_or(&yaml);
-    let yaml = yaml.strip_suffix("...\n").unwrap_or(yaml);
+    let yaml = yaml.strip_suffix("...\n").unwrap_or(&yaml);
     let yaml = yaml.strip_suffix("...").unwrap_or(yaml);
 
     let mut rendered = String::from("---\n");
