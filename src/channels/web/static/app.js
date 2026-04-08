@@ -2844,6 +2844,18 @@ function loadThreads() {
         item.appendChild(dot);
       }
 
+      // Delete button
+      const delBtn = document.createElement('button');
+      delBtn.className = 'thread-delete-btn';
+      delBtn.title = (typeof I18n !== 'undefined') ? I18n.t('chat.deleteThread') : 'Delete';
+      delBtn.setAttribute('aria-label', (typeof I18n !== 'undefined') ? I18n.t('chat.deleteThread') : 'Delete');
+      delBtn.textContent = '\u00D7';
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteThread(thread.id, threadTitle(thread));
+      });
+      item.appendChild(delBtn);
+
       item.addEventListener('click', () => switchThread(thread.id));
       list.appendChild(item);
     }
@@ -2925,6 +2937,32 @@ function createNewThread() {
     loadThreads();
   }).catch((err) => {
     showToast(I18n.t('chat.threadCreateFailed', { message: err.message }), 'error');
+  });
+}
+
+function deleteThread(threadId, title) {
+  const displayTitle = title || threadId;
+  const confirmMessage = (typeof I18n !== 'undefined')
+    ? I18n.t('chat.confirmDeleteThread', { title: displayTitle })
+    : ('Delete "' + displayTitle + '"?');
+  if (!confirm(confirmMessage)) return;
+
+  apiFetch('/api/chat/thread/' + threadId, { method: 'DELETE' }).then(() => {
+    showToast((typeof I18n !== 'undefined') ? I18n.t('chat.threadDeleted') : 'Thread deleted', 'success');
+    if (currentThreadId === threadId) {
+      currentThreadId = assistantThreadId || null;
+      if (currentThreadId) {
+        loadHistory();
+      } else {
+        document.getElementById('chat-messages').innerHTML = '';
+      }
+    }
+    loadThreads();
+  }).catch((err) => {
+    const message = (typeof I18n !== 'undefined')
+      ? I18n.t('chat.deleteThreadFailed', { message: err.message })
+      : ('Delete failed: ' + err.message);
+    showToast(message, 'error');
   });
 }
 

@@ -473,6 +473,14 @@ pub trait ConversationStore: Send + Sync {
         &self,
         conversation_id: Uuid,
     ) -> Result<Option<String>, DatabaseError>;
+
+    /// Delete a conversation and all its messages. Returns true if the
+    /// conversation existed and was deleted.
+    async fn delete_conversation(
+        &self,
+        conversation_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError>;
 }
 
 #[async_trait]
