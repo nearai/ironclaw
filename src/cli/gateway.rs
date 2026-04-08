@@ -12,6 +12,7 @@
 //! agent loop (chat send/ws, routine trigger, job restart/cancel/prompt)
 //! return 503. For full agent mode, use `ironclaw run`.
 
+use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -122,6 +123,11 @@ async fn cmd_serve(config_path: Option<&Path>) -> anyhow::Result<()> {
     // Wire the GatewayChannel via shared factory — no more manual duplication
     // with main.rs. Agent-loop-only features (scheduler, job_manager, etc.)
     // are intentionally omitted; those APIs return 503 in standalone mode.
+    //
+    // Note: `enable_db_auth: true` causes `from_components()` to bootstrap an
+    // admin user if none exist. This is intentional — standalone mode needs a
+    // DB user so the Web UI auth works. The pairing store is intentionally NOT
+    // wired; pairing endpoints return 503 (handlers check the Option).
     let session_manager =
         Arc::new(crate::agent::SessionManager::new().with_hooks(components.hooks.clone()));
     let gateway_base_url = tunnel_public_url
@@ -184,8 +190,16 @@ async fn cmd_serve(config_path: Option<&Path>) -> anyhow::Result<()> {
     }
 
     println!("Gateway running at http://{bound_addr}/");
-    println!("Auth token: {auth_token}");
-    println!("Web UI: http://{bound_addr}/?token={auth_token}");
+    // Only print the auth token when stdout is a real terminal. When
+    // `gateway start` redirects stdout to gateway.log, suppress the token
+    // to avoid writing credentials to the log file in plaintext. The token
+    // is always available via the dedicated token file (gateway.token).
+    if std::io::stdout().is_terminal() {
+        println!("Auth token: {auth_token}");
+        println!("Web UI: http://{bound_addr}/?token={auth_token}");
+    } else {
+        println!("Auth token written to {}", token_path.display());
+    }
     println!();
     println!("Standalone mode: chat endpoints return 503 (no agent loop).");
     println!("Press Ctrl-C to stop.");
@@ -451,19 +465,29 @@ async fn cmd_stop() -> anyhow::Result<()> {
             )
         })?;
 
-        // Note: is_process_alive uses kill(pid, 0) which can return false
-        // positives if the PID has been reused by an unrelated process.
-        // This is inherent to PID-file-based lifecycle management; the
-        // flock held by PidLock is the authoritative ownership signal.
+        // Verify the gateway still holds the flock on the PID file. This is
+        // the authoritative ownership signal — `is_process_alive` alone can
+        // return false positives if the OS has recycled the PID to an
+        // unrelated process.
+        if !is_pid_lock_held(&pid_path) {
+            // No flock held — the gateway has exited and the PID may have
+            // been reused. Clean up the stale PID file instead of signalling.
+            let _ = std::fs::remove_file(&pid_path);
+            cleanup_gateway_token_file(&gateway_token_path());
+            anyhow::bail!("Gateway process (PID {pid}) is not running (stale PID file removed)");
+        }
+
         if !is_process_alive(pid) {
-            // Process already gone — clean up stale PID file.
+            // Flock held but process not found — theoretically impossible,
+            // but handle gracefully (kernel should release flock on exit).
             let _ = std::fs::remove_file(&pid_path);
             cleanup_gateway_token_file(&gateway_token_path());
             anyhow::bail!("Gateway process (PID {pid}) is not running (stale PID file removed)");
         }
 
         let pid_t = to_pid_t(pid).ok_or_else(|| anyhow::anyhow!("PID {pid} overflows i32"))?;
-        // SAFETY: We are sending a signal to a process identified by our PID file.
+        // SAFETY: We are sending a signal to a process identified by our PID
+        // file whose flock we verified above.
         let ret = unsafe { libc::kill(pid_t, libc::SIGTERM) };
         if ret != 0 {
             let err = std::io::Error::last_os_error();
@@ -564,6 +588,35 @@ async fn cmd_status(config_path: Option<&Path>) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Check whether the PID file's exclusive flock is currently held by another
+/// process.
+///
+/// Returns `true` if the lock IS held (meaning the gateway is still running),
+/// `false` if we can acquire it (meaning the gateway has exited and the PID
+/// may be stale/reused).
+#[cfg(unix)]
+fn is_pid_lock_held(path: &Path) -> bool {
+    use fs4::FileExt;
+    let Ok(file) = std::fs::OpenOptions::new().read(true).open(path) else {
+        return false;
+    };
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            // We acquired the lock — nobody else holds it. Release immediately.
+            let _ = file.unlock();
+            false
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            // Lock held by the gateway process.
+            true
+        }
+        Err(_) => {
+            // Other I/O error (permissions, etc.) — assume not held.
+            false
+        }
+    }
 }
 
 /// Check if a process is alive by sending signal 0.
@@ -672,6 +725,37 @@ mod tests {
         assert!(
             err.contains("already running"),
             "expected 'already running' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn is_pid_lock_held_returns_true_when_locked() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let pid_path = dir.path().join("gateway.pid");
+
+        // Acquire a PidLock — this holds the flock.
+        let _lock = PidLock::acquire_at(pid_path.clone()).expect("acquire lock");
+
+        // is_pid_lock_held should see the lock as held.
+        assert!(
+            is_pid_lock_held(&pid_path),
+            "expected lock to be reported as held"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn is_pid_lock_held_returns_false_when_unlocked() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let pid_path = dir.path().join("gateway.pid");
+
+        // Write a file but do NOT hold a flock.
+        std::fs::write(&pid_path, "12345").expect("write pid file");
+
+        assert!(
+            !is_pid_lock_held(&pid_path),
+            "expected lock to be reported as not held"
         );
     }
 
