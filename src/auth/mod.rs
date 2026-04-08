@@ -11,9 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::db::{SettingsStore, UserStore};
 use crate::secrets::{CreateSecretParams, DecryptedSecret, SecretError, SecretsStore};
 use crate::tools::wasm::OAuthRefreshConfig;
-use crate::tools::wasm::{
-    ssrf_safe_client_builder_for_target, validate_and_resolve_http_target,
-};
+use crate::tools::wasm::{ssrf_safe_client_builder_for_target, validate_and_resolve_http_target};
 
 const AUTH_DESCRIPTORS_SETTING_KEY: &str = "auth.descriptors_v1";
 

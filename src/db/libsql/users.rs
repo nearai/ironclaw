@@ -140,31 +140,52 @@ impl UserStore for LibSqlBackend {
         let metadata_json = serde_json::to_string(&user.metadata)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
 
-        let rows = conn
-            .execute(
-            r#"
-            INSERT OR IGNORE INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-            "#,
-            params![
-                user.id.as_str(),
-                opt_text(user.email.as_deref()),
-                user.display_name.as_str(),
-                user.status.as_str(),
-                user.role.as_str(),
-                fmt_ts(&user.created_at),
-                fmt_ts(&user.updated_at),
-                fmt_opt_ts(&user.last_login_at),
-                opt_text(user.created_by.as_deref()),
-                metadata_json,
-            ],
-        )
-        .await
-        .map_err(|e| DatabaseError::Query(format!("get_or_create_user: {e}")))?;
+        // Wrap the (insert + seed assistant thread) cycle in a transaction
+        // so a seed failure rolls back the user row, preserving the
+        // invariant that every provisioned user has a seeded assistant
+        // thread (matches the pattern in `create_user`).
+        conn.execute("BEGIN", ())
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-        if rows > 0 {
-            seed_initial_assistant_thread(&conn, &user.id, &user.created_at).await?;
+        let result = async {
+            let rows = conn
+                .execute(
+                    r#"
+                INSERT OR IGNORE INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                "#,
+                    params![
+                        user.id.as_str(),
+                        opt_text(user.email.as_deref()),
+                        user.display_name.as_str(),
+                        user.status.as_str(),
+                        user.role.as_str(),
+                        fmt_ts(&user.created_at),
+                        fmt_ts(&user.updated_at),
+                        fmt_opt_ts(&user.last_login_at),
+                        opt_text(user.created_by.as_deref()),
+                        metadata_json,
+                    ],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(format!("get_or_create_user: {e}")))?;
+
+            if rows > 0 {
+                seed_initial_assistant_thread(&conn, &user.id, &user.created_at).await?;
+            }
+            Ok::<_, DatabaseError>(())
         }
+        .await;
+
+        if let Err(err) = result {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(err);
+        }
+
+        conn.execute("COMMIT", ())
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
     }
 

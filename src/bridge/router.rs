@@ -3105,9 +3105,11 @@ fn cadence_type_label(cadence: &ironclaw_engine::types::mission::MissionCadence)
 fn cadence_description(cadence: &ironclaw_engine::types::mission::MissionCadence) -> String {
     use ironclaw_engine::types::mission::MissionCadence;
     match cadence {
-        MissionCadence::Cron { expression, timezone } => {
-            let base = describe_cron(expression)
-                .unwrap_or_else(|| format!("cron: {expression}"));
+        MissionCadence::Cron {
+            expression,
+            timezone,
+        } => {
+            let base = describe_cron(expression).unwrap_or_else(|| format!("cron: {expression}"));
             match timezone {
                 Some(tz) => format!("{base} ({tz})"),
                 None => base,
@@ -3176,8 +3178,7 @@ fn describe_cron(expression: &str) -> Option<String> {
     // Weekly on a single day at H:M
     if is_any(dom)
         && is_any(month)
-        && let (Some(m), Some(h), Some(d)) =
-            (parse_num(minute), parse_num(hour), parse_num(dow))
+        && let (Some(m), Some(h), Some(d)) = (parse_num(minute), parse_num(hour), parse_num(dow))
     {
         let name = day_name(d);
         if !name.is_empty() {
@@ -3187,8 +3188,7 @@ fn describe_cron(expression: &str) -> Option<String> {
     // Monthly on day-of-month at H:M
     if is_any(month)
         && is_any(dow)
-        && let (Some(m), Some(h), Some(d)) =
-            (parse_num(minute), parse_num(hour), parse_num(dom))
+        && let (Some(m), Some(h), Some(d)) = (parse_num(minute), parse_num(hour), parse_num(dom))
     {
         return Some(format!("monthly on day {d} at {h:02}:{m:02}"));
     }
@@ -4577,10 +4577,7 @@ mod tests {
             Arc::new(PolicyEngine::new()),
         ));
 
-        let cm = Arc::new(ConversationManager::new(
-            Arc::clone(&tm),
-            store_dyn.clone(),
-        ));
+        let cm = Arc::new(ConversationManager::new(Arc::clone(&tm), store_dyn.clone()));
 
         EngineState {
             thread_manager: tm,

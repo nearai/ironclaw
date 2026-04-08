@@ -48,9 +48,7 @@ mod live_mission_tests {
         deadline: Instant,
     ) -> Option<String> {
         loop {
-            let responses = rig
-                .wait_for_responses(0, Duration::from_millis(0))
-                .await;
+            let responses = rig.wait_for_responses(0, Duration::from_millis(0)).await;
             if let Some(r) = responses.iter().find(|r| r.content.contains(marker)) {
                 return Some(r.content.clone());
             }
@@ -120,9 +118,7 @@ mod live_mission_tests {
         rig.send_message(&setup_prompt).await;
 
         // Wait for the agent to finish the setup turn (one assistant response).
-        let setup_responses = rig
-            .wait_for_responses(1, Duration::from_secs(300))
-            .await;
+        let setup_responses = rig.wait_for_responses(1, Duration::from_secs(300)).await;
         assert!(
             !setup_responses.is_empty(),
             "expected the setup turn to produce at least one response"
@@ -171,27 +167,22 @@ mod live_mission_tests {
         // against a slower model with a multi-step CodeAct loop.
         let mission_marker = format!("**[{MISSION_NAME}]**");
         let mission_deadline = Instant::now() + Duration::from_secs(900);
-        let mission_text = match wait_for_response_containing(
-            rig,
-            &mission_marker,
-            mission_deadline,
-        )
-        .await
-        {
-            Some(text) => text,
-            None => {
-                let captured: Vec<String> = rig
-                    .wait_for_responses(0, Duration::from_millis(0))
-                    .await
-                    .iter()
-                    .map(|r| r.content.clone())
-                    .collect();
-                panic!(
-                    "mission notification with marker '{mission_marker}' did not arrive within \
+        let mission_text =
+            match wait_for_response_containing(rig, &mission_marker, mission_deadline).await {
+                Some(text) => text,
+                None => {
+                    let captured: Vec<String> = rig
+                        .wait_for_responses(0, Duration::from_millis(0))
+                        .await
+                        .iter()
+                        .map(|r| r.content.clone())
+                        .collect();
+                    panic!(
+                        "mission notification with marker '{mission_marker}' did not arrive within \
                      15 minutes. Captured responses so far: {captured:#?}"
-                );
-            }
-        };
+                    );
+                }
+            };
         eprintln!(
             "[MissionTest] Mission notification: {}",
             mission_text.chars().take(400).collect::<String>()

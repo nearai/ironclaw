@@ -19,19 +19,16 @@ impl CompositeHttpInterceptor {
 #[async_trait]
 impl HttpInterceptor for CompositeHttpInterceptor {
     async fn before_request(&self, request: &HttpExchangeRequest) -> Option<HttpExchangeResponse> {
-        for (producer_idx, interceptor) in self.interceptors.iter().enumerate() {
+        // When one interceptor short-circuits with a synthesized response,
+        // we DO NOT call `after_response` on any of the other interceptors
+        // — the trait contract says `after_response` is "called after a
+        // real HTTP request completes (recording mode only)", and the
+        // synthesized response is by definition not real. Calling it would
+        // double-record on the recorder side or otherwise corrupt
+        // interceptor state. The producer's own `before_request` is the
+        // single hook for replay/short-circuit paths.
+        for interceptor in &self.interceptors {
             if let Some(response) = interceptor.before_request(request).await {
-                // Notify the *other* interceptors of the synthesized response.
-                // The producing interceptor must not receive `after_response`
-                // for its own fabricated response (it already knows it served
-                // the request); interceptors before it returned `None` from
-                // `before_request`, so they get the response notification only
-                // — never their own short-circuit echoed back.
-                for (j, recorder) in self.interceptors.iter().enumerate() {
-                    if j != producer_idx {
-                        recorder.after_response(request, &response).await;
-                    }
-                }
                 return Some(response);
             }
         }
@@ -238,8 +235,13 @@ mod tests {
     /// Regression: when one interceptor short-circuits via `before_request`,
     /// the producing interceptor must NOT receive `after_response` for its own
     /// fabricated response.
+    /// Regression: when one interceptor short-circuits via `before_request`,
+    /// `after_response` MUST NOT be called on any of the interceptors. The
+    /// trait contract says `after_response` is "called after a real HTTP
+    /// request completes (recording mode only)", and a synthesized
+    /// short-circuit response is by definition not real.
     #[tokio::test]
-    async fn composite_skips_producer_in_after_response() {
+    async fn composite_skips_after_response_on_short_circuit() {
         let log: Arc<Mutex<Vec<(&'static str, &'static str)>>> = Arc::new(Mutex::new(Vec::new()));
         let response = HttpExchangeResponse {
             status: 200,
@@ -273,19 +275,18 @@ mod tests {
         assert!(result.is_some(), "producer should short-circuit");
 
         let events = log.lock().unwrap().clone();
-        // 'a' and 'b' run before_request (a returns None, b produces).
-        // After short-circuit: a and c get after_response (NOT b).
+        // a (returns None) and b (produces) ran before_request; c never did
+        // because b short-circuited.
         assert!(events.contains(&("a", "before")));
         assert!(events.contains(&("b", "before")));
         assert!(
             !events.contains(&("c", "before")),
             "interceptors after the producer should not see before_request",
         );
-        assert!(events.contains(&("a", "after")));
-        assert!(events.contains(&("c", "after")));
+        // The key invariant: NO after_response calls fire on a short-circuit.
         assert!(
-            !events.contains(&("b", "after")),
-            "producer must NOT receive after_response for its own response",
+            events.iter().all(|(_, kind)| *kind == "before"),
+            "after_response must not be called on any interceptor when one short-circuits; got {events:?}"
         );
     }
 }

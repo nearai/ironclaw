@@ -4324,7 +4324,24 @@ function parseHttpsOAuthUrl(url) {
 function openOAuthUrl(url) {
   const parsed = parseHttpsOAuthUrl(url);
   if (!parsed) return;
-  window.open(parsed.href, '_blank', 'width=600,height=700');
+  // `noopener,noreferrer` defends against tabnabbing — without these the
+  // OAuth provider page can read `window.opener` and reach back into the
+  // app tab. `noreferrer` also strips the Referer header.
+  const opened = window.open(
+    parsed.href,
+    '_blank',
+    'width=600,height=700,noopener,noreferrer',
+  );
+  // Some browsers ignore the noopener feature flag in window.open's third
+  // argument when the window is non-null; explicitly null the opener as a
+  // belt-and-suspenders defense.
+  if (opened) {
+    try {
+      opened.opener = null;
+    } catch (_) {
+      /* opener may already be null in cross-origin contexts */
+    }
+  }
 }
 
 // --- Pairing ---

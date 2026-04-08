@@ -52,10 +52,12 @@ pub(crate) async fn validate_and_resolve_http_target(
         })
         .ok_or_else(|| "Failed to parse host from URL".to_string())?
         .to_string();
-    let port = parsed.port_or_known_default().unwrap_or(match parsed.scheme() {
-        "http" => 80,
-        _ => 443,
-    });
+    let port = parsed
+        .port_or_known_default()
+        .unwrap_or(match parsed.scheme() {
+            "http" => 80,
+            _ => 443,
+        });
 
     if let Ok(ip) = host.parse::<IpAddr>() {
         return if is_private_ip(ip) {
@@ -234,7 +236,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(target.resolved_addrs.len(), 1);
-        assert_eq!(target.resolved_addrs[0], SocketAddr::from(([8, 8, 8, 8], 443)));
+        assert_eq!(
+            target.resolved_addrs[0],
+            SocketAddr::from(([8, 8, 8, 8], 443))
+        );
         assert!(!target.pin_host_resolution);
     }
 
