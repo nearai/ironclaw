@@ -309,7 +309,7 @@ pub async fn users_update_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
-    tracing::warn!(admin = %admin.user_id, action = "user_updated", target_user = %id, "Admin updated user");
+    tracing::info!(admin = %admin.user_id, action = "user_updated", target_user = %id, "Admin updated user");
 
     Ok(Json(AdminUserProfileResponse {
         id: updated.id,
@@ -368,7 +368,7 @@ pub async fn users_suspend_handler(
         ps.evict_user(&id);
     }
 
-    tracing::warn!(admin = %admin.user_id, action = "user_suspended", target_user = %id, "Admin suspended user");
+    tracing::info!(admin = %admin.user_id, action = "user_suspended", target_user = %id, "Admin suspended user");
 
     Ok(Json(AdminUserStatusResponse {
         id,
@@ -404,7 +404,7 @@ pub async fn users_activate_handler(
         db_auth.invalidate_user(&id).await;
     }
 
-    tracing::warn!(admin = %admin.user_id, action = "user_activated", target_user = %id, "Admin activated user");
+    tracing::info!(admin = %admin.user_id, action = "user_activated", target_user = %id, "Admin activated user");
 
     Ok(Json(AdminUserStatusResponse {
         id,
@@ -452,7 +452,7 @@ pub async fn users_delete_handler(
         ps.evict_user(&id);
     }
 
-    tracing::warn!(admin = %admin.user_id, action = "user_deleted", target_user = %id, "Admin deleted user");
+    tracing::info!(admin = %admin.user_id, action = "user_deleted", target_user = %id, "Admin deleted user");
 
     Ok(Json(AdminUserDeleteResponse { id, deleted: true }))
 }

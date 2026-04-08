@@ -736,11 +736,7 @@ impl UserStore for LibSqlBackend {
                     (SELECT COUNT(*) FROM users WHERE status = 'active') AS active_users,
                     (SELECT COUNT(*) FROM users WHERE status = 'suspended') AS suspended_users,
                     (SELECT COUNT(*) FROM users WHERE role = 'admin') AS admin_users,
-                    (
-                        SELECT COUNT(DISTINCT j.id)
-                        FROM llm_calls l
-                        LEFT JOIN agent_jobs j ON l.job_id = j.id
-                    ) AS total_jobs,
+                    (SELECT COUNT(*) FROM agent_jobs) AS total_jobs,
                     (SELECT CAST(COALESCE(SUM(l.cost), 0) AS TEXT) FROM llm_calls l) AS total_cost,
                     (SELECT COUNT(*) FROM llm_calls WHERE created_at >= ?1) AS llm_calls,
                     (
@@ -1167,7 +1163,7 @@ mod tests {
         assert_eq!(summary.active_users, 1);
         assert_eq!(summary.suspended_users, 1);
         assert_eq!(summary.admin_users, 1);
-        assert_eq!(summary.total_jobs, 2);
+        assert_eq!(summary.total_jobs, 3);
         assert_eq!(
             summary.total_cost,
             rust_decimal::Decimal::from_str_exact("0.16").unwrap()

@@ -2842,12 +2842,8 @@ impl Store {
                     (SELECT COUNT(*) FROM users WHERE status = 'active') AS active_users,
                     (SELECT COUNT(*) FROM users WHERE status = 'suspended') AS suspended_users,
                     (SELECT COUNT(*) FROM users WHERE role = 'admin') AS admin_users,
-                    (
-                        SELECT COUNT(DISTINCT j.id)
-                        FROM llm_calls l
-                        LEFT JOIN agent_jobs j ON l.job_id = j.id
-                    ) AS total_jobs,
-                    (SELECT COALESCE(SUM(l.cost), 0) FROM llm_calls l) AS total_cost,
+                    (SELECT COUNT(*) FROM agent_jobs) AS total_jobs,
+                    (SELECT COALESCE(SUM(l.cost), 0::numeric) FROM llm_calls l) AS total_cost,
                     (SELECT COUNT(*) FROM llm_calls WHERE created_at >= $1) AS llm_calls,
                     (
                         SELECT COALESCE(SUM(input_tokens), 0)
@@ -2860,7 +2856,7 @@ impl Store {
                         WHERE created_at >= $1
                     ) AS output_tokens,
                     (
-                        SELECT COALESCE(SUM(cost), 0)
+                        SELECT COALESCE(SUM(cost), 0::numeric)
                         FROM llm_calls
                         WHERE created_at >= $1
                     ) AS usage_cost

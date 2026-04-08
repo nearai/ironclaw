@@ -745,7 +745,7 @@
         var name = target.getAttribute('data-name') || id;
         showConfirmModal(
           'Delete User',
-          'Are you sure you want to delete <strong>' + escapeHtml(name) + '</strong>? This action cannot be undone.',
+          'Are you sure you want to delete "' + name + '"? This action cannot be undone.',
           'Delete',
           function () {
             apiFetch('/api/admin/users/' + encodeURIComponent(id), { method: 'DELETE' })
@@ -838,7 +838,7 @@
     if (!overlay || !content) return;
 
     content.innerHTML = '<h2>' + escapeHtml(title) + '</h2>' +
-      '<p style="color:var(--text-secondary);margin-top:var(--space-3)">' + message + '</p>' +
+      '<p style="color:var(--text-secondary);margin-top:var(--space-3)">' + escapeHtml(message) + '</p>' +
       '<div class="modal-actions">' +
       '<button class="btn-secondary" data-action="modal-close">Cancel</button>' +
       '<button class="btn-primary btn-danger" id="modal-confirm">' + escapeHtml(confirmText) + '</button>' +

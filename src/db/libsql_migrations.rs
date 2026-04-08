@@ -957,6 +957,13 @@ CREATE TABLE IF NOT EXISTS pairing_requests (
 CREATE INDEX IF NOT EXISTS idx_pairing_requests_channel ON pairing_requests (channel, external_id);
 "#,
     ),
+    (
+        21,
+        "llm_calls_created_at_index",
+        r#"
+CREATE INDEX IF NOT EXISTS idx_llm_calls_created_at ON llm_calls(created_at);
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already
