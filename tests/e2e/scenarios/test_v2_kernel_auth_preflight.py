@@ -24,12 +24,9 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from helpers import api_get, api_post, AUTH_TOKEN, wait_for_ready
 
-pytestmark = pytest.mark.skip(
-    reason=(
-        "Dedicated v2 preflight-auth fixture is stale against the current approval/auth "
-        "ordering; auth coverage remains in the broader E2E suites."
-    )
-)
+# Re-enabled after PR #2050 — the v2 preflight gate is the path that
+# reactive missions and routine_create now flow through, so this fixture's
+# coverage is back on the critical path.
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +194,10 @@ async def v2_server(ironclaw_binary, mock_llm_server, mock_api):
         "RUST_LOG": "ironclaw=debug",
         "RUST_BACKTRACE": "1",
         "ENGINE_V2": "true",
+        # Auto-approve tools so the preflight test doesn't get stuck on a
+        # second approval gate after submitting the token. The point of this
+        # file is the *credential* gate, not the *approval* gate.
+        "AGENT_AUTO_APPROVE_TOOLS": "true",
         "HTTP_ALLOW_LOCALHOST": "true",
         "SECRETS_MASTER_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "GATEWAY_ENABLED": "true",
@@ -204,6 +205,7 @@ async def v2_server(ironclaw_binary, mock_llm_server, mock_api):
         "GATEWAY_PORT": str(gateway_port),
         "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
         "GATEWAY_USER_ID": "e2e-preflight-tester",
+        "IRONCLAW_OWNER_ID": "e2e-preflight-tester",
         "HTTP_HOST": "127.0.0.1",
         "HTTP_PORT": str(http_port),
         "CLI_ENABLED": "false",
@@ -310,7 +312,9 @@ class TestPreflightAuthGate:
 
         This is the core assertion for the kernel auth rework: when credentials
         are missing, the pre-flight gate returns NeedAuthentication without
-        executing the tool. The mock API must receive ZERO requests.
+        executing the tool. The mock API must receive ZERO requests until the
+        user submits a valid token, after which the retry succeeds and the
+        credential is persisted (which the next test relies on).
         """
         base_url = v2_server["url"]
         stderr_log = v2_server["stderr_log"]
@@ -360,6 +364,33 @@ class TestPreflightAuthGate:
             f"Pre-flight gate must block BEFORE HTTP request is sent. "
             f"Mock API received {api_state['request_count']} request(s). "
             f"Relevant server logs:\n{diag_lines}"
+        )
+
+        # Now submit a valid token to complete the auth flow. This persists
+        # the credential in the secrets store; subsequent tests in this
+        # module rely on the credential being already-stored to assert that
+        # the retry path works without re-prompting.
+        test_token = "ghp_v2_preflight_test_token_abc123"
+        await api_post(
+            base_url,
+            "/api/chat/send",
+            json={"content": test_token, "thread_id": thread_id},
+            timeout=30,
+        )
+
+        # Wait for the retry to actually fire against the mock API.
+        for _ in range(120):
+            async with httpx.AsyncClient() as client:
+                state_r = await client.get(f"{mock_api_url}/__mock/state")
+                api_state = state_r.json()
+            if test_token in api_state.get("tokens", []):
+                break
+            await asyncio.sleep(0.5)
+
+        assert test_token in api_state.get("tokens", []), (
+            f"After submitting the token, the retry must inject it into "
+            f"the outbound request and the mock API must record it. "
+            f"Mock state: {api_state}"
         )
 
     async def test_auth_then_retry_succeeds(self, v2_server, mock_api):

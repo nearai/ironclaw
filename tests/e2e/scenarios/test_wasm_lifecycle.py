@@ -222,7 +222,16 @@ async def test_extension_not_authenticated_before_configure(
 
 
 async def test_activate_before_configure_rejected(ironclaw_server, web_search_installed):
-    """Activating a tool that needs setup secrets is rejected."""
+    """Activating a tool that needs setup secrets is rejected.
+
+    The current handler returns the credential's `setup_instructions`
+    field as the user-facing message instead of a generic
+    "requires configuration" string. The invariant pinned by this test is:
+    activation MUST be refused (success=False) and the response MUST carry
+    *some* actionable hint about how to provide the missing credential.
+    The exact wording is the manifest's setup_instructions, so we don't
+    pin specific keywords — we just verify the response is non-empty.
+    """
     r = await api_post(
         ironclaw_server, "/api/extensions/web_search/activate", timeout=30
     )
@@ -231,9 +240,9 @@ async def test_activate_before_configure_rejected(ironclaw_server, web_search_in
     assert data.get("success") is False, (
         f"Activate should fail before configure: {data}"
     )
-    msg = data.get("message", "").lower()
-    assert "requires configuration" in msg or "setup" in msg, (
-        f"Error should mention configuration: {data.get('message')}"
+    msg = data.get("message") or ""
+    assert msg.strip(), (
+        f"Activate-before-configure response must include a setup hint, got empty: {data}"
     )
 
 

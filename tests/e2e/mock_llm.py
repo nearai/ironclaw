@@ -38,8 +38,13 @@ CANNED_RESPONSES = [
     # For tool intent nudge test: first response expresses intent without tool call
     (re.compile(r"search intent", re.IGNORECASE),
      "Let me search for that information now."),
-    # After nudge message, summarize the tool result
-    (re.compile(r"You expressed intent", re.IGNORECASE),
+    # After the orchestrator sends its nudge, recover with a final completion.
+    # The exact nudge prefix is "You said you would perform an action..." —
+    # see `signals_tool_intent` + the nudge append in
+    # `crates/ironclaw_engine/orchestrator/default.py`. Match either the new
+    # phrasing or the legacy "You expressed intent" so older deployments
+    # still work.
+    (re.compile(r"You said you would perform an action|You expressed intent", re.IGNORECASE),
      "I found the information you requested."),
 ]
 DEFAULT_RESPONSE = "I understand your request."
