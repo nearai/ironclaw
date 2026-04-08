@@ -109,6 +109,14 @@ pub struct PendingGateInfo {
     pub resume_kind: serde_json::Value,
 }
 
+// --- Thread management ---
+
+/// Request body for `POST /api/chat/thread/{id}/rename`.
+#[derive(Debug, Deserialize)]
+pub struct RenameThreadRequest {
+    pub title: String,
+}
+
 // --- Approval ---
 
 #[derive(Debug, Deserialize)]

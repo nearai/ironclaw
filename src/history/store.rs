@@ -1630,6 +1630,7 @@ impl Store {
                     ) AS title
                 FROM conversations c
                 WHERE c.user_id = $1 AND c.channel = $2
+                  AND (c.metadata->>'archived') IS DISTINCT FROM 'true'
                 ORDER BY c.last_activity DESC
                 LIMIT $3
                 "#,
@@ -1645,8 +1646,12 @@ impl Store {
                     .get("thread_type")
                     .and_then(|v| v.as_str())
                     .map(String::from);
+                let custom_title = metadata
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 let sql_title: Option<String> = r.get("title");
-                let title = sql_title.or_else(|| {
+                let title = custom_title.or(sql_title).or_else(|| {
                     metadata
                         .get("routine_name")
                         .and_then(|v| v.as_str())
@@ -1666,6 +1671,10 @@ impl Store {
     }
 
     /// List conversations across all channels with a title derived from the first user message.
+    ///
+    /// Filters out conversations where `metadata->>'archived' = 'true'` (soft-delete via UI).
+    /// Conversations are never physically deleted (see `.claude/rules/database.md`); the archive
+    /// flag only hides them from the gateway thread list.
     pub async fn list_conversations_all_channels(
         &self,
         user_id: &str,
@@ -1690,6 +1699,7 @@ impl Store {
                     ) AS title
                 FROM conversations c
                 WHERE c.user_id = $1
+                  AND (c.metadata->>'archived') IS DISTINCT FROM 'true'
                 ORDER BY c.last_activity DESC
                 LIMIT $2
                 "#,
@@ -1705,10 +1715,15 @@ impl Store {
                     .get("thread_type")
                     .and_then(|v| v.as_str())
                     .map(String::from);
-                // For routine/heartbeat threads, derive title from metadata
-                // since they may have no user messages.
+                // Custom user-supplied title (from rename) wins over derived title.
+                // Falls back to first user message, then to routine_name for routine/heartbeat
+                // threads that have no user messages.
+                let custom_title = metadata
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 let sql_title: Option<String> = r.get("title");
-                let title = sql_title.or_else(|| {
+                let title = custom_title.or(sql_title).or_else(|| {
                     metadata
                         .get("routine_name")
                         .and_then(|v| v.as_str())
@@ -2893,6 +2908,101 @@ mod tests {
                 channel: ch.to_string(),
             };
             assert_eq!(summary.channel, ch);
+        }
+    }
+
+    /// Regression test: archived conversations must be filtered out of
+    /// `list_conversations_all_channels`, and `metadata.title` must override the
+    /// SQL-derived first-message title. Both behaviors back the gateway's
+    /// soft-delete and rename UX.
+    ///
+    /// Requires a running PostgreSQL instance (integration tier).
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    #[ignore]
+    async fn test_archive_and_custom_title_in_list_conversations() {
+        use crate::config::Config;
+
+        let _ = dotenvy::dotenv();
+        let config = Config::from_env().await.expect("Failed to load config");
+        let store = Store::new(&config.database)
+            .await
+            .expect("Failed to connect to database");
+        store
+            .run_migrations()
+            .await
+            .expect("Failed to run migrations");
+
+        let user_id = format!("test-archive-{}", Uuid::new_v4());
+        let kept = Uuid::new_v4();
+        let renamed = Uuid::new_v4();
+        let archived = Uuid::new_v4();
+
+        for id in [kept, renamed, archived] {
+            store
+                .ensure_conversation(id, "gateway", &user_id, None, Some("gateway"))
+                .await
+                .unwrap();
+            store
+                .add_conversation_message(id, "user", "first user message")
+                .await
+                .unwrap();
+        }
+
+        store
+            .update_conversation_metadata_field(
+                renamed,
+                "title",
+                &serde_json::Value::String("My Custom Title".into()),
+            )
+            .await
+            .unwrap();
+        store
+            .update_conversation_metadata_field(
+                archived,
+                "archived",
+                &serde_json::Value::Bool(true),
+            )
+            .await
+            .unwrap();
+
+        let summaries = store
+            .list_conversations_all_channels(&user_id, 50)
+            .await
+            .unwrap();
+
+        let ids: Vec<Uuid> = summaries.iter().map(|s| s.id).collect();
+        assert!(ids.contains(&kept), "kept conversation should be visible");
+        assert!(ids.contains(&renamed), "renamed conversation should be visible");
+        assert!(
+            !ids.contains(&archived),
+            "archived conversation must be filtered out (soft-delete)"
+        );
+
+        let renamed_summary = summaries.iter().find(|s| s.id == renamed).unwrap();
+        assert_eq!(
+            renamed_summary.title.as_deref(),
+            Some("My Custom Title"),
+            "metadata.title must override the SQL-derived first-message title"
+        );
+
+        // Verify the archived conversation's messages still exist in the DB —
+        // soft-delete must NEVER physically delete LLM data.
+        let messages = store.list_conversation_messages(archived).await.unwrap();
+        assert!(
+            !messages.is_empty(),
+            "archived conversation messages must remain in the database"
+        );
+
+        // Cleanup test rows.
+        let conn = store.conn().await.unwrap();
+        for id in [kept, renamed, archived] {
+            conn.execute("DELETE FROM conversation_messages WHERE conversation_id = $1", &[&id])
+                .await
+                .unwrap();
+            conn.execute("DELETE FROM conversations WHERE id = $1", &[&id])
+                .await
+                .unwrap();
         }
     }
 

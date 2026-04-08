@@ -544,6 +544,14 @@ pub async fn start_server(
         .route("/api/chat/history", get(chat_history_handler))
         .route("/api/chat/threads", get(chat_threads_handler))
         .route("/api/chat/thread/new", post(chat_new_thread_handler))
+        .route(
+            "/api/chat/thread/{id}/rename",
+            post(chat_rename_thread_handler),
+        )
+        .route(
+            "/api/chat/thread/{id}/archive",
+            post(chat_archive_thread_handler),
+        )
         // Memory
         .route("/api/memory/tree", get(memory_tree_handler))
         .route("/api/memory/list", get(memory_list_handler))
@@ -2471,6 +2479,120 @@ async fn chat_new_thread_handler(
     }
 
     Ok(Json(info))
+}
+
+/// Maximum length (in characters) for a user-supplied thread title.
+const MAX_THREAD_TITLE_CHARS: usize = 200;
+
+/// `POST /api/chat/thread/{id}/rename`
+///
+/// Updates a conversation's user-visible title via `metadata.title`.
+/// The original first-user-message-derived title is preserved as a fallback for any
+/// consumer that does not read the metadata override.
+async fn chat_rename_thread_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Path(thread_id): Path<Uuid>,
+    Json(body): Json<RenameThreadRequest>,
+) -> Result<Json<ThreadInfo>, (StatusCode, String)> {
+    let title = body.title.trim().to_string();
+    if title.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Title must not be empty".into()));
+    }
+    if title.chars().count() > MAX_THREAD_TITLE_CHARS {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Title exceeds {MAX_THREAD_TITLE_CHARS} characters"),
+        ));
+    }
+
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Persistence not available".to_string(),
+    ))?;
+
+    // Ownership check first — return 404 (not 403) so we don't leak existence.
+    let owned = store
+        .conversation_belongs_to_user(thread_id, &user.user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !owned {
+        return Err((StatusCode::NOT_FOUND, "Thread not found".into()));
+    }
+
+    let title_value = serde_json::Value::String(title.clone());
+    store
+        .update_conversation_metadata_field(thread_id, "title", &title_value)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Re-read metadata for thread_type so the response shape stays consistent with list_threads.
+    let metadata = store
+        .get_conversation_metadata(thread_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .unwrap_or_else(|| serde_json::json!({}));
+    let thread_type = metadata
+        .get("thread_type")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let now = chrono::Utc::now().to_rfc3339();
+    Ok(Json(ThreadInfo {
+        id: thread_id,
+        state: "Idle".to_string(),
+        turn_count: 0,
+        created_at: now.clone(),
+        updated_at: now,
+        title: Some(title),
+        thread_type,
+        channel: Some("gateway".to_string()),
+    }))
+}
+
+/// `POST /api/chat/thread/{id}/archive`
+///
+/// Soft-deletes a conversation by setting `metadata.archived = true`.
+/// IronClaw never physically deletes LLM data (see `.claude/rules/database.md`).
+/// `list_conversations_all_channels` filters out archived rows so the gateway
+/// frontend treats archive as user-facing "delete".
+///
+/// If the archived thread is the in-memory active thread, the active pointer is cleared
+/// so a fresh thread will be picked up on the next interaction. The in-memory thread
+/// HashMap entry is intentionally left intact in case an SSE turn is still in flight.
+async fn chat_archive_thread_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Path(thread_id): Path<Uuid>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Persistence not available".to_string(),
+    ))?;
+
+    let owned = store
+        .conversation_belongs_to_user(thread_id, &user.user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !owned {
+        return Err((StatusCode::NOT_FOUND, "Thread not found".into()));
+    }
+
+    store
+        .update_conversation_metadata_field(thread_id, "archived", &serde_json::Value::Bool(true))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Clear the in-memory active pointer if it matches the archived thread.
+    if let Some(ref sm) = state.session_manager {
+        let session = sm.get_or_create_session(&user.user_id).await;
+        let mut sess = session.lock().await;
+        if sess.active_thread == Some(thread_id) {
+            sess.active_thread = None;
+        }
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // Job handlers moved to handlers/jobs.rs
