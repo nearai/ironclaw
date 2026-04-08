@@ -597,53 +597,56 @@ impl MissionManager {
                         }
 
                         // ── Trigger 4: Conversation insights ────────────
-                        // Use the thread's project_id as a proxy for conversation scope.
-                        let conv_key = thread.project_id.0.to_string();
-                        let count = conv_thread_counts.entry(conv_key.clone()).or_insert(0);
-                        *count += 1;
+                        // Keep insights tied to successful completions only.
+                        if should_count_for_conversation_insights(terminal_state) {
+                            // Use the thread's project_id as a proxy for conversation scope.
+                            let conv_key = thread.project_id.0.to_string();
+                            let count = conv_thread_counts.entry(conv_key.clone()).or_insert(0);
+                            *count += 1;
 
-                        if (*count).is_multiple_of(CONVERSATION_INSIGHTS_INTERVAL) {
-                            // Collect recent thread goals for context
-                            let thread_goals: Vec<String> = match mgr
-                                .store
-                                .list_threads(thread.project_id, &thread.user_id)
-                                .await
-                            {
-                                Ok(threads) => threads
+                            if (*count).is_multiple_of(CONVERSATION_INSIGHTS_INTERVAL) {
+                                // Collect recent thread goals for context
+                                let thread_goals: Vec<String> = match mgr
+                                    .store
+                                    .list_threads(thread.project_id, &thread.user_id)
+                                    .await
+                                {
+                                    Ok(threads) => threads
+                                        .iter()
+                                        .rev()
+                                        .take(CONVERSATION_INSIGHTS_INTERVAL as usize)
+                                        .map(|t| t.goal.clone())
+                                        .collect(),
+                                    Err(_) => vec![thread.goal.clone()],
+                                };
+
+                                // Collect sample user messages from recent threads
+                                let sample_messages: Vec<String> = thread
+                                    .messages
                                     .iter()
-                                    .rev()
-                                    .take(CONVERSATION_INSIGHTS_INTERVAL as usize)
-                                    .map(|t| t.goal.clone())
-                                    .collect(),
-                                Err(_) => vec![thread.goal.clone()],
-                            };
+                                    .filter(|m| m.role == crate::types::message::MessageRole::User)
+                                    .map(|m| m.content.chars().take(200).collect::<String>())
+                                    .take(10)
+                                    .collect();
 
-                            // Collect sample user messages from recent threads
-                            let sample_messages: Vec<String> = thread
-                                .messages
-                                .iter()
-                                .filter(|m| m.role == crate::types::message::MessageRole::User)
-                                .map(|m| m.content.chars().take(200).collect::<String>())
-                                .take(10)
-                                .collect();
+                                let payload = serde_json::json!({
+                                    "project_id": thread.project_id.0.to_string(),
+                                    "completed_thread_count": *count,
+                                    "thread_goals": thread_goals,
+                                    "sample_user_messages": sample_messages,
+                                });
 
-                            let payload = serde_json::json!({
-                                "project_id": thread.project_id.0.to_string(),
-                                "completed_thread_count": *count,
-                                "thread_goals": thread_goals,
-                                "sample_user_messages": sample_messages,
-                            });
-
-                            if let Err(e) = mgr
-                                .fire_on_system_event(
-                                    "engine",
-                                    "conversation_insights_due",
-                                    &thread.user_id,
-                                    Some(payload),
-                                )
-                                .await
-                            {
-                                debug!("event listener: failed to fire conversation insights: {e}");
+                                if let Err(e) = mgr
+                                    .fire_on_system_event(
+                                        "engine",
+                                        "conversation_insights_due",
+                                        &thread.user_id,
+                                        Some(payload),
+                                    )
+                                    .await
+                                {
+                                    debug!("event listener: failed to fire conversation insights: {e}");
+                                }
                             }
                         }
                     }
@@ -1542,6 +1545,12 @@ fn learning_terminal_state(
         } => Some(crate::types::thread::ThreadState::Failed),
         _ => None,
     }
+}
+
+fn should_count_for_conversation_insights(
+    terminal_state: crate::types::thread::ThreadState,
+) -> bool {
+    terminal_state == crate::types::thread::ThreadState::Done
 }
 
 fn has_action_failures(thread: &Thread) -> bool {
@@ -3240,6 +3249,12 @@ mod tests {
             self_imp_count, 1,
             "should not duplicate self-improvement mission"
         );
+    }
+
+    #[test]
+    fn conversation_insights_count_only_done_threads() {
+        assert!(should_count_for_conversation_insights(ThreadState::Done));
+        assert!(!should_count_for_conversation_insights(ThreadState::Failed));
     }
 
     #[test]
