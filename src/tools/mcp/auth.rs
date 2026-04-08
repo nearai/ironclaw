@@ -1930,6 +1930,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_url_safe_https() {
+        // DNS resolution must work for hostname-based validation.
+        if tokio::net::lookup_host("example.com:443").await.is_err() {
+            eprintln!("skipping test_validate_url_safe_https: DNS unavailable");
+            return;
+        }
         assert!(validate_url_safe("https://example.com/path").await.is_ok());
     }
 

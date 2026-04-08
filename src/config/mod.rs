@@ -956,8 +956,17 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // ENV_MUTEX is std::sync; only guards env vars in tests
     async fn re_resolve_llm_strips_admin_only_keys_for_non_operator_user() {
         use crate::db::SettingsStore;
+
+        let _guard = crate::config::helpers::lock_env();
+        // Prevent DNS resolution for NearAI URLs in sandboxed CI.
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("NEARAI_AUTH_URL", "http://localhost:19991");
+            std::env::set_var("NEARAI_BASE_URL", "http://localhost:19992");
+        }
 
         let store = FakeSettingsStore::new();
         // Seed a non-admin user's per-user settings with an admin-only key
@@ -992,7 +1001,16 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // ENV_MUTEX is std::sync; only guards env vars in tests
     async fn re_resolve_llm_keeps_admin_only_keys_for_operator() {
+        let _guard = crate::config::helpers::lock_env();
+        // Prevent DNS resolution for NearAI URLs in sandboxed CI.
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("NEARAI_AUTH_URL", "http://localhost:19991");
+            std::env::set_var("NEARAI_BASE_URL", "http://localhost:19992");
+        }
+
         let store = FakeSettingsStore::new();
         store
             .seed(

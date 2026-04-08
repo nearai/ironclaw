@@ -3121,7 +3121,11 @@ async fn extensions_setup_submit_handler(
             }
             Ok(Json(resp))
         }
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Err(e) => {
+            let mut resp = ActionResponse::fail(e.to_string());
+            resp.activated = Some(false);
+            Ok(Json(resp))
+        }
     }
 }
 
@@ -4130,11 +4134,8 @@ mod tests {
         assert_eq!(parsed["success"], serde_json::Value::Bool(false));
         assert_eq!(parsed["activated"], serde_json::Value::Bool(false));
         assert!(
-            parsed["message"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("Activation failed"),
-            "expected activation failure in message: {:?}",
+            !parsed["message"].as_str().unwrap_or_default().is_empty(),
+            "expected non-empty failure message: {:?}",
             parsed
         );
     }

@@ -351,6 +351,14 @@ mod tests {
             .merged_router_clone()
             .expect("Router should exist after start()");
         let result = tokio::net::TcpListener::bind(invalid_addr).await;
+        if result.is_ok() {
+            // Running as root — privileged port bind succeeds; skip the rest.
+            eprintln!(
+                "skipping test_restart_with_addr_rollback_on_bind_failure: \
+                 running as root, privileged port bind succeeds"
+            );
+            return;
+        }
         assert!(result.is_err(), "Bind to privileged port should fail");
         // `app` is dropped — server state unchanged (rollback by construction)
         drop(app);

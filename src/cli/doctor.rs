@@ -757,6 +757,9 @@ mod tests {
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::set_var("LLM_BACKEND", "anthropic");
+            // Prevent DNS resolution for NearAI URLs in sandboxed CI.
+            std::env::set_var("NEARAI_AUTH_URL", "http://localhost:19991");
+            std::env::set_var("NEARAI_BASE_URL", "http://localhost:19992");
         }
         let _env_guard = EnvGuard("LLM_BACKEND", prev);
 
@@ -877,6 +880,9 @@ mod tests {
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
+            // Prevent DNS resolution for NearAI URLs in sandboxed CI.
+            std::env::set_var("NEARAI_AUTH_URL", "http://localhost:19991");
+            std::env::set_var("NEARAI_BASE_URL", "http://localhost:19992");
         }
         let settings = Settings::default();
         match check_llm_config(&settings) {
