@@ -54,7 +54,7 @@ mod tests {
         let starts: Vec<&str> = tool_events
             .iter()
             .filter_map(|e| match e {
-                StatusUpdate::ToolStarted { name } => Some(name.as_str()),
+                StatusUpdate::ToolStarted { name, .. } => Some(name.as_str()),
                 _ => None,
             })
             .collect();
@@ -85,7 +85,7 @@ mod tests {
         let mut pending_starts: Vec<String> = Vec::new();
         for event in &tool_events {
             match event {
-                StatusUpdate::ToolStarted { name } => {
+                StatusUpdate::ToolStarted { name, .. } => {
                     pending_starts.push(name.clone());
                 }
                 StatusUpdate::ToolCompleted { name, .. } => {

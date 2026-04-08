@@ -140,12 +140,7 @@ pub struct ExtensionSetupSchema {
 
 /// Only these global (non-namespaced) setting paths may be written by extension
 /// setup fields. Everything else must be under `extensions.<name>.*`.
-const ALLOWED_GLOBAL_SETUP_SETTING_PATHS: &[&str] = &[
-    "llm_backend",
-    "selected_model",
-    "ollama_base_url",
-    "openai_compatible_base_url",
-];
+const ALLOWED_GLOBAL_SETUP_SETTING_PATHS: &[&str] = &["llm_backend", "selected_model"];
 
 #[cfg(test)]
 type TestWasmChannelLoader =
@@ -8817,6 +8812,61 @@ mod tests {
                 .get_setting("test", "nearai.session_token")
                 .await
                 .expect("get disallowed setting"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn test_configure_rejects_admin_only_global_base_url_setting_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "base-url-tool",
+            r#"{
+                "setup": {
+                    "required_fields": [
+                        {
+                            "name": "base_url",
+                            "prompt": "Base URL",
+                            "setting_path": "ollama_base_url"
+                        }
+                    ]
+                }
+            }"#,
+        );
+        let channels_dir = dir.path().join("channels");
+
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+        let mut fields = std::collections::HashMap::new();
+        fields.insert(
+            "base_url".to_string(),
+            "http://192.168.1.50:11434".to_string(),
+        );
+
+        let err = match mgr
+            .configure(
+                "base-url-tool",
+                &std::collections::HashMap::new(),
+                &fields,
+                "test-user",
+            )
+            .await
+        {
+            Ok(_) => panic!("admin-only global setting_path should fail"),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Invalid setting_path"),
+            "unexpected error message: {msg}"
+        );
+        assert_eq!(
+            store
+                .get_setting("test", "ollama_base_url")
+                .await
+                .expect("get admin-only setting"),
             None
         );
     }

@@ -165,7 +165,10 @@ impl SubmissionParser {
             }
         }
 
-        // /resume <uuid> - resume from checkpoint
+        // /resume - show thread picker; /resume <uuid> - resume from checkpoint
+        if lower == "/resume" {
+            return Submission::ListThreads;
+        }
         if let Some(rest) = lower.strip_prefix("/resume ")
             && let Ok(id) = Uuid::parse_str(rest.trim())
         {
@@ -336,6 +339,9 @@ pub enum Submission {
 
     /// Create a new thread.
     NewThread,
+
+    /// List threads for the interactive resume picker.
+    ListThreads,
 
     /// Trigger a manual heartbeat check.
     Heartbeat,

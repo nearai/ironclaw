@@ -628,9 +628,13 @@ impl Channel for ReplChannel {
                 eprintln!("  {}\u{25CB} {display}{}", fmt::dim(), fmt::reset());
                 self.transient_lines.store(1, Ordering::Relaxed);
             }
-            StatusUpdate::ToolStarted { name } => {
+            StatusUpdate::ToolStarted { name, detail, .. } => {
                 self.clear_transient();
-                eprintln!("  {}\u{25CB} {name}{}", fmt::dim(), fmt::reset());
+                if let Some(d) = detail {
+                    eprintln!("  {}\u{25CB} {name}: {d}{}", fmt::dim(), fmt::reset());
+                } else {
+                    eprintln!("  {}\u{25CB} {name}{}", fmt::dim(), fmt::reset());
+                }
                 self.transient_lines.store(1, Ordering::Relaxed);
             }
             StatusUpdate::ToolCompleted { name, success, .. } => {
@@ -641,7 +645,9 @@ impl Channel for ReplChannel {
                     eprintln!("  {}\u{2717} {name} (failed){}", fmt::error(), fmt::reset());
                 }
             }
-            StatusUpdate::ToolResult { name: _, preview } => {
+            StatusUpdate::ToolResult {
+                name: _, preview, ..
+            } => {
                 let display = truncate_for_preview(&preview, CLI_TOOL_RESULT_MAX);
                 eprintln!("    {}{display}{}", fmt::dim(), fmt::reset());
             }
@@ -789,6 +795,18 @@ impl Channel for ReplChannel {
             }
             StatusUpdate::TurnCost { .. } => {
                 // Cost display is handled by the TUI channel
+            }
+            StatusUpdate::JobStatus { .. }
+            | StatusUpdate::JobResult { .. }
+            | StatusUpdate::RoutineUpdate { .. }
+            | StatusUpdate::ContextPressure { .. }
+            | StatusUpdate::SandboxStatus { .. }
+            | StatusUpdate::SecretsStatus { .. }
+            | StatusUpdate::CostGuard { .. }
+            | StatusUpdate::ThreadList { .. }
+            | StatusUpdate::EngineThreadList { .. }
+            | StatusUpdate::ConversationHistory { .. } => {
+                // Infrastructure status events are only rendered by the TUI.
             }
             StatusUpdate::SkillActivated { skill_names } => {
                 if !skill_names.is_empty() {

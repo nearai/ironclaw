@@ -588,6 +588,62 @@ impl Agent {
         (selected, rewritten)
     }
 
+    /// Send initial engine thread list and routines to the TUI channel so
+    /// the sidebar is populated before the first user message.
+    async fn hydrate_tui_sidebar(&self) {
+        let empty_meta = serde_json::Value::Object(serde_json::Map::new());
+
+        // Engine threads
+        if self.config.engine_v2
+            && let Ok(threads) = crate::bridge::list_engine_threads(None, self.owner_id()).await
+        {
+            let summaries: Vec<crate::channels::EngineThreadSummary> = threads
+                .into_iter()
+                .map(|t| crate::channels::EngineThreadSummary {
+                    id: t.id,
+                    goal: t.goal,
+                    thread_type: t.thread_type,
+                    state: t.state,
+                    step_count: t.step_count,
+                    total_tokens: t.total_tokens,
+                    created_at: t.created_at,
+                    updated_at: t.updated_at,
+                })
+                .collect();
+            let _ = self
+                .channels
+                .send_status(
+                    "tui",
+                    StatusUpdate::EngineThreadList { threads: summaries },
+                    &empty_meta,
+                )
+                .await;
+        }
+
+        // Routines
+        if let Some(system) = self.system_store()
+            && let Ok(routines) = system.list_all_routines().await
+        {
+            for routine in routines {
+                let _ = self
+                    .channels
+                    .send_status(
+                        "tui",
+                        StatusUpdate::RoutineUpdate {
+                            id: routine.id.to_string(),
+                            name: routine.name.clone(),
+                            trigger_type: format!("{:?}", routine.trigger),
+                            enabled: routine.enabled,
+                            last_run: routine.last_run_at.map(|t| t.to_rfc3339()),
+                            next_fire: routine.next_fire_at.map(|t| t.to_rfc3339()),
+                        },
+                        &empty_meta,
+                    )
+                    .await;
+            }
+        }
+    }
+
     /// Run the agent main loop.
     pub async fn run(self) -> Result<(), Error> {
         // Eagerly initialize engine v2 so gateway API endpoints can serve
@@ -985,6 +1041,10 @@ impl Agent {
             None
         };
 
+        // Hydrate TUI sidebar with existing engine threads and routines so the
+        // activity panel is populated before the first user message.
+        self.hydrate_tui_sidebar().await;
+
         // Main message loop
         tracing::debug!("Agent {} ready and listening", self.config.name);
 
@@ -1106,6 +1166,34 @@ impl Agent {
                         );
                     }
                 }
+            }
+
+            // Refresh engine v2 thread list in the TUI sidebar after each turn.
+            if self.config.engine_v2
+                && let Ok(threads) =
+                    crate::bridge::list_engine_threads(None, &message.user_id).await
+            {
+                let summaries: Vec<crate::channels::EngineThreadSummary> = threads
+                    .into_iter()
+                    .map(|t| crate::channels::EngineThreadSummary {
+                        id: t.id,
+                        goal: t.goal,
+                        thread_type: t.thread_type,
+                        state: t.state,
+                        step_count: t.step_count,
+                        total_tokens: t.total_tokens,
+                        created_at: t.created_at,
+                        updated_at: t.updated_at,
+                    })
+                    .collect();
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::EngineThreadList { threads: summaries },
+                        &message.metadata,
+                    )
+                    .await;
             }
         }
 
@@ -1692,6 +1780,7 @@ impl Agent {
             Submission::Resume { checkpoint_id } => {
                 self.process_resume(session, thread_id, checkpoint_id).await
             }
+            Submission::ListThreads => self.process_list_threads(session, message).await,
             Submission::ExecApproval {
                 request_id,
                 approved,

@@ -43,7 +43,7 @@ use crate::types::message::ThreadMessage;
 use crate::types::project::ProjectId;
 use crate::types::shared_owner_id;
 use crate::types::step::{StepId, TokenUsage};
-use crate::types::thread::{Thread, ThreadState};
+use crate::types::thread::{ActiveSkillProvenance, Thread, ThreadState};
 
 use super::scripting::{execute_code, json_to_monty, monty_to_json, monty_to_string};
 
@@ -476,6 +476,9 @@ pub async fn execute_orchestrator(
 
                     // __record_skill_usage__(doc_id, success)
                     "__record_skill_usage__" => handle_record_skill_usage(args, store).await,
+
+                    // __set_active_skills__(skills)
+                    "__set_active_skills__" => handle_set_active_skills(args, thread),
 
                     // Unknown — let Monty resolve it (user-defined functions, builtins)
                     other => ExtFunctionResult::NotFound(other.to_string()),
@@ -1808,6 +1811,31 @@ async fn handle_record_skill_usage(
         .await
     {
         debug!("__record_skill_usage__: failed: {e}");
+    }
+
+    ExtFunctionResult::Return(MontyObject::None)
+}
+
+/// Handle `__set_active_skills__(skills)`.
+///
+/// Persists the selected skill provenance onto the thread so post-run learning
+/// flows can reason about the exact skill versions and snippets that were active.
+fn handle_set_active_skills(args: &[MontyObject], thread: &mut Thread) -> ExtFunctionResult {
+    let skills_json = args
+        .first()
+        .map(monty_to_json)
+        .unwrap_or_else(|| serde_json::json!([]));
+
+    let skills = match serde_json::from_value::<Vec<ActiveSkillProvenance>>(skills_json) {
+        Ok(skills) => skills,
+        Err(e) => {
+            debug!("__set_active_skills__: invalid payload: {e}");
+            return ExtFunctionResult::Return(MontyObject::None);
+        }
+    };
+
+    if let Err(e) = thread.set_active_skills(&skills) {
+        debug!("__set_active_skills__: failed to persist active skills: {e}");
     }
 
     ExtFunctionResult::Return(MontyObject::None)
