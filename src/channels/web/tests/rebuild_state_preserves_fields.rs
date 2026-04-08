@@ -26,6 +26,7 @@ fn test_gateway() -> GatewayChannel {
             workspace_read_scopes: vec![],
             memory_layers: vec![],
             oidc: None,
+            max_connections: 100,
         },
         "test-user".to_string(),
     )

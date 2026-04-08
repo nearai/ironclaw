@@ -110,7 +110,7 @@ impl GatewayChannel {
 
         let state = Arc::new(GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
-            sse: Arc::new(SseManager::new()),
+            sse: Arc::new(SseManager::with_max_connections(config.max_connections)),
             workspace: None,
             workspace_pool: None,
             session_manager: None,
@@ -162,7 +162,10 @@ impl GatewayChannel {
         let mut new_state = GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
             // Preserve the existing broadcast channel so sender handles remain valid.
-            sse: Arc::new(SseManager::from_sender(self.state.sse.sender())),
+            sse: Arc::new(SseManager::from_sender(
+                self.state.sse.sender(),
+                self.state.sse.max_connections(),
+            )),
             workspace: self.state.workspace.clone(),
             workspace_pool: self.state.workspace_pool.clone(),
             session_manager: self.state.session_manager.clone(),

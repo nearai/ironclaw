@@ -117,7 +117,7 @@ impl AuthManager {
         let host = match extract_host_from_params(parameters) {
             Some(h) => h,
             None => {
-                tracing::debug!("Pre-flight auth: no host in params — skipping");
+                tracing::debug!("Pre-flight auth: no host in params — skipping"); // safety: no actual param values logged
                 return AuthCheckResult::NoAuthRequired;
             }
         };

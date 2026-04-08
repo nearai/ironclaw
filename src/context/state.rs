@@ -209,6 +209,12 @@ pub struct JobContext {
     pub approval_context: Option<ApprovalContext>,
 }
 
+impl crate::ownership::Owned for JobContext {
+    fn owner_user_id(&self) -> &str {
+        &self.user_id
+    }
+}
+
 impl JobContext {
     /// Create a new job context.
     pub fn new(title: impl Into<String>, description: impl Into<String>) -> Self {

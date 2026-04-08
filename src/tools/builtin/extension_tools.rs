@@ -11,7 +11,9 @@ use crate::context::JobContext;
 use crate::extensions::{ExtensionKind, ExtensionManager};
 use crate::tools::permissions::{TOOL_RISK_DEFAULTS, effective_permission};
 use crate::tools::registry::ToolRegistry;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{
+    ApprovalRequirement, EngineCompatibility, Tool, ToolError, ToolOutput, require_str,
+};
 
 fn activation_error_requires_auth(err: &str) -> bool {
     let err_lower = err.to_ascii_lowercase();
@@ -277,6 +279,10 @@ impl Tool for ToolAuthTool {
         } else {
             ApprovalRequirement::UnlessAutoApproved
         }
+    }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
     }
 }
 
@@ -591,6 +597,10 @@ impl Tool for ToolRemoveTool {
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
         ApprovalRequirement::Always
     }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
+    }
 }
 
 // ── tool_upgrade ─────────────────────────────────────────────────────
@@ -871,6 +881,10 @@ impl Tool for ToolPermissionSetTool {
             "new_state": new_state,
         });
         Ok(ToolOutput::success(output, start.elapsed()))
+    }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
     }
 }
 
@@ -1158,7 +1172,7 @@ mod tests {
         let tool = ToolPermissionSetTool::new(Arc::clone(&registry), None);
         let ctx = JobContext::default();
         let result = tool
-            .execute(serde_json::json!({"tool_name": "unknown_xyz"}), &ctx)
+            .execute(serde_json::json!({"tool_name": "unknown_xyz"}), &ctx) // safety: Tool::execute, not DB
             .await;
         assert!(result.is_err(), "expected error for unknown tool");
         let err = result.unwrap_err();
@@ -1224,7 +1238,7 @@ mod tests {
 
         let ctx = JobContext::default();
         let result = list_tool
-            .execute(serde_json::json!({"kind": "builtin"}), &ctx)
+            .execute(serde_json::json!({"kind": "builtin"}), &ctx) // safety: Tool::execute, not DB
             .await
             .expect("tool_list kind=builtin should succeed");
 

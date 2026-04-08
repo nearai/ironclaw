@@ -54,16 +54,18 @@ use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse,
 use crate::error::ChannelError;
 use crate::pairing::PairingStore;
 use crate::secrets::SecretsStore;
-use crate::tools::wasm::LogLevel;
-use crate::tools::wasm::WasmResourceLimiter;
 use crate::tools::wasm::credential_injector::{
     InjectedCredentials, host_matches_pattern, inject_credential,
+};
+use crate::tools::wasm::{
+    LogLevel, WasmResourceLimiter, reject_private_ip, ssrf_safe_client_builder,
 };
 use ironclaw_safety::LeakDetector;
 
 const WEBSOCKET_EVENT_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue";
 const WEBSOCKET_EVENT_PROCESSING_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue_processing";
 const WEBSOCKET_EVENT_QUEUE_MAX_ITEMS: usize = 100;
+const TELEGRAM_TEST_API_BASE_ENV: &str = "IRONCLAW_TEST_TELEGRAM_API_BASE_URL";
 
 // Generate component model bindings from the WIT file
 wasmtime::component::bindgen!({
@@ -359,7 +361,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             "Parsed and injected request headers"
         );
 
-        let mut url = injected_url;
+        let mut logical_url = injected_url;
 
         // Leak scan runs on WASM-provided values BEFORE host credential injection.
         // This prevents false positives where the host-injected Bearer token
@@ -372,13 +374,23 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             .collect();
 
         leak_detector
-            .scan_http_request(&url, &header_vec, body.as_deref())
+            .scan_http_request(&logical_url, &header_vec, body.as_deref())
             .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
 
         // Inject pre-resolved host credentials (Bearer tokens, API keys, etc.)
         // after the leak scan so host-injected secrets don't trigger false positives.
-        if let Some(host) = extract_host_from_url(&url) {
-            self.inject_host_credentials(&host, &mut headers, &mut url);
+        if let Some(host) = extract_host_from_url(&logical_url) {
+            self.inject_host_credentials(&host, &mut headers, &mut logical_url);
+        }
+
+        let transport_url = rewrite_telegram_api_url_for_testing(&logical_url)
+            .unwrap_or_else(|| logical_url.clone());
+        if transport_url != logical_url {
+            tracing::info!(
+                logical_url = %logical_url,
+                transport_url = %transport_url,
+                "Rewriting Telegram API request to test base URL"
+            );
         }
 
         // Get the max response size from capabilities (default 10MB).
@@ -390,6 +402,9 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             .as_ref()
             .map(|h| h.max_response_bytes)
             .unwrap_or(10 * 1024 * 1024);
+
+        // Resolve hostname and reject private/internal IPs to prevent DNS rebinding.
+        reject_private_ip(&url)?;
 
         // Make the HTTP request using a dedicated single-threaded runtime.
         // We're inside spawn_blocking, so we can't rely on the main runtime's
@@ -406,18 +421,18 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         }
         let rt = self.http_runtime.as_ref().expect("just initialized");
         let result = rt.block_on(async {
-            let client = reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(10))
+            let client = ssrf_safe_client_builder()
+                .connect_timeout(Duration::from_secs(10))
                 .build()
                 .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
             let mut request = match method.to_uppercase().as_str() {
-                "GET" => client.get(&url),
-                "POST" => client.post(&url),
-                "PUT" => client.put(&url),
-                "DELETE" => client.delete(&url),
-                "PATCH" => client.patch(&url),
-                "HEAD" => client.head(&url),
+                "GET" => client.get(&transport_url),
+                "POST" => client.post(&transport_url),
+                "PUT" => client.put(&transport_url),
+                "DELETE" => client.delete(&transport_url),
+                "PATCH" => client.patch(&transport_url),
+                "HEAD" => client.head(&transport_url),
                 _ => return Err(format!("Unsupported HTTP method: {}", method)),
             };
 
@@ -506,7 +521,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             // safety layer before they reach the LLM, so we allow the polling
             // response to continue here to avoid poisoning the offset state.
             if let Ok(body_str) = std::str::from_utf8(&body)
-                && !should_skip_response_leak_scan(&url)
+                && !should_skip_response_leak_scan(&logical_url)
             {
                 leak_detector
                     .scan_and_clean(body_str)
@@ -1017,6 +1032,14 @@ impl WasmChannel {
     }
 
     /// Load broadcast metadata from settings store on startup.
+    ///
+    /// # Legacy migration (remove after ownership model rollout — tracked in #2100)
+    ///
+    /// If no metadata is found under `self.owner_scope_id`, a second lookup
+    /// under `"default"` is attempted for backward compatibility with instances
+    /// that stored broadcast metadata before the ownership model migration.
+    /// Remove this fallback once all deployments have run the
+    /// `migrate_default_owner` bootstrap step and restarted at least once.
     async fn load_broadcast_metadata(&self) {
         if let Some(ref store) = self.settings_store {
             match store
@@ -1031,6 +1054,7 @@ impl WasmChannel {
                     );
                 }
                 Ok(_) => {
+                    // LEGACY MIGRATION: remove after ownership model rollout — tracked in #2100
                     if self.owner_scope_id != "default" {
                         match store
                             .get_setting("default", &self.broadcast_metadata_key())
@@ -1148,9 +1172,12 @@ impl WasmChannel {
             );
             let queue_path = websocket_queue_path(&channel_name);
             let processing_queue_path = websocket_processing_queue_path(&channel_name);
-            let identify_payload =
-                resolve_websocket_identify_message(&config, websocket_secrets_store.as_deref())
-                    .await;
+            let identify_payload = resolve_websocket_identify_message(
+                &config,
+                websocket_secrets_store.as_deref(),
+                &owner_scope_id,
+            )
+            .await;
             let mut session_state = WebsocketSessionState::new(identify_payload.as_deref());
 
             'reconnect: loop {
@@ -2508,6 +2535,39 @@ impl WasmChannel {
         Ok(())
     }
 
+    /// Ensure the polling loop is running with the interval from `config`.
+    ///
+    /// Stops any existing polling task and starts a fresh one.  Safe to call
+    /// multiple times (e.g., from `refresh_active_channel` after re-running
+    /// `on_start`).
+    pub async fn ensure_polling(&self, config: &ChannelConfig) {
+        // Always stop any existing polling task first — if the channel switched
+        // from polling to webhook (or polling was disabled), the old task must
+        // not keep running.
+        let _ = self.poll_shutdown_tx.write().await.take();
+
+        if let Some(poll_config) = &config.poll
+            && poll_config.enabled
+        {
+            let interval = match self
+                .capabilities
+                .validate_poll_interval(poll_config.interval_ms)
+            {
+                Ok(ms) => ms,
+                Err(e) => {
+                    tracing::warn!(channel = %self.name, error = %e, "Polling interval rejected");
+                    return;
+                }
+            };
+
+            let (poll_shutdown_tx, poll_shutdown_rx) = oneshot::channel();
+            *self.poll_shutdown_tx.write().await = Some(poll_shutdown_tx);
+
+            self.start_polling(Duration::from_millis(interval as u64), poll_shutdown_rx);
+            tracing::debug!(channel = %self.name, interval_ms = interval, "Polling loop (re)started");
+        }
+    }
+
     /// Start the polling loop if configured.
     ///
     /// Since we can't hold `Arc<Self>` from `&self`, we pass all the components
@@ -3108,11 +3168,16 @@ fn websocket_processing_queue_path(channel_name: &str) -> String {
 async fn resolve_websocket_identify_message(
     config: &WebsocketRuntimeConfig,
     store: Option<&(dyn SecretsStore + Send + Sync)>,
+    owner_scope_id: &str,
 ) -> Option<String> {
     let identify = config.identify.clone()?;
     let secret_name = config.identify_secret_name.as_ref()?;
     let store = store?;
-    let secret = store.get_decrypted("default", secret_name).await.ok()?;
+    // Channel runtime secrets are instance-owned, resolved under the channel's owner scope.
+    let secret = store
+        .get_decrypted(owner_scope_id, secret_name)
+        .await
+        .ok()?;
     build_websocket_identify_message(&identify, secret.expose())
 }
 
@@ -3958,6 +4023,31 @@ fn extract_host_from_url(url: &str) -> Option<String> {
     })
 }
 
+fn rewrite_telegram_api_url_for_testing(url: &str) -> Option<String> {
+    let override_base = std::env::var(TELEGRAM_TEST_API_BASE_ENV)
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())?;
+
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+
+    let host = parsed.host_str()?;
+    if !host.eq_ignore_ascii_case("api.telegram.org") {
+        return None;
+    }
+
+    let path = parsed.path().trim_start_matches('/');
+    let mut rewritten = format!("{override_base}/{path}");
+    if let Some(query) = parsed.query() {
+        rewritten.push('?');
+        rewritten.push_str(query);
+    }
+    Some(rewritten)
+}
+
 fn should_skip_response_leak_scan(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|parsed| {
         matches!(parsed.scheme(), "http" | "https")
@@ -4136,12 +4226,13 @@ mod tests {
         PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
     use crate::channels::wasm::wrapper::{
-        EmitDispatchContext, HttpResponse, WasmChannel, WebsocketRuntimeConfig,
-        build_discord_gateway_presence_update, build_websocket_identify_message,
-        build_websocket_resume_message, discord_gateway_presence_status, drain_guest_logs,
-        parse_websocket_invalid_session, parse_websocket_ready_session,
-        should_warn_on_heartbeat_interval, uses_owner_broadcast_target,
-        websocket_heartbeat_sleep_duration, websocket_reconnect_backoff,
+        EmitDispatchContext, HttpResponse, TELEGRAM_TEST_API_BASE_ENV, WasmChannel,
+        WebsocketRuntimeConfig, build_discord_gateway_presence_update,
+        build_websocket_identify_message, build_websocket_resume_message,
+        discord_gateway_presence_status, drain_guest_logs, parse_websocket_invalid_session,
+        parse_websocket_ready_session, should_warn_on_heartbeat_interval,
+        uses_owner_broadcast_target, websocket_heartbeat_sleep_duration,
+        websocket_reconnect_backoff,
     };
     use crate::pairing::PairingStore;
     use crate::testing::credentials::TEST_TELEGRAM_BOT_TOKEN;
@@ -4248,6 +4339,49 @@ mod tests {
         assert_eq!(json["op"], serde_json::json!(2));
         assert_eq!(json["d"]["token"], serde_json::json!("bot-token"));
         assert_eq!(json["d"]["intents"], serde_json::json!(513));
+    }
+
+    /// Regression test for #2069: websocket identify must use owner_scope_id,
+    /// not hardcoded "default".
+    #[tokio::test]
+    async fn test_resolve_websocket_identify_message_uses_owner_scope() {
+        use super::resolve_websocket_identify_message;
+        use crate::secrets::SecretsStore;
+        use crate::testing::credentials::test_secrets_store;
+
+        let store = test_secrets_store();
+
+        // Store secret under a specific owner, NOT under "default"
+        store
+            .create(
+                "owner_42",
+                crate::secrets::CreateSecretParams::new("discord_bot_token", "real_bot_token"),
+            )
+            .await
+            .expect("store token"); // safety: test code only
+
+        let config = WebsocketRuntimeConfig {
+            url: "wss://gateway.discord.gg/?v=10&encoding=json".to_string(),
+            connect_on_start: true,
+            identify: Some(serde_json::json!({
+                "intents": 513,
+                "properties": { "os": "linux", "browser": "ironclaw", "device": "ironclaw" }
+            })),
+            identify_secret_name: Some("discord_bot_token".to_string()),
+        };
+
+        // Should find the secret under "owner_42"
+        let payload = resolve_websocket_identify_message(&config, Some(&store), "owner_42").await;
+        assert!(payload.is_some(), "should resolve from owner scope"); // safety: test code only
+        let json: serde_json::Value = serde_json::from_str(payload.as_ref().unwrap()).unwrap(); // safety: test code only
+        assert_eq!(json["d"]["token"], serde_json::json!("real_bot_token"));
+
+        // Must NOT find the secret under "default"
+        let no_payload = resolve_websocket_identify_message(&config, Some(&store), "default").await;
+        assert!(
+            no_payload.is_none(),
+            "default scope must not find owner_42's secret"
+        );
     }
 
     #[test]
@@ -5537,6 +5671,40 @@ mod tests {
     }
 
     #[test]
+    fn test_http_request_rejects_private_ip_targets() {
+        let capabilities =
+            ChannelCapabilities::for_channel("test").with_tool_capabilities(ToolCapabilities {
+                http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                    "127.0.0.1",
+                )])),
+                ..Default::default()
+            });
+        let mut store = super::ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            capabilities,
+            std::collections::HashMap::new(),
+            Vec::new(),
+            Arc::new(PairingStore::new_noop()),
+        );
+
+        let result = super::near::agent::channel_host::Host::http_request(
+            &mut store,
+            "GET".to_string(),
+            "https://127.0.0.1:1/health".to_string(),
+            "{}".to_string(),
+            None,
+            Some(1_000),
+        );
+
+        assert!(result.is_err(), "loopback targets must be rejected");
+        assert!(
+            result.unwrap_err().contains("private/internal IP"),
+            "expected SSRF guard error"
+        );
+    }
+
+    #[test]
     fn test_should_skip_response_leak_scan_only_for_telegram_getupdates() {
         use super::should_skip_response_leak_scan;
 
@@ -5550,6 +5718,32 @@ mod tests {
             "https://api.example.com/getUpdates"
         ));
         assert!(!should_skip_response_leak_scan("not a url"));
+    }
+
+    #[test]
+    fn test_rewrite_telegram_api_url_for_testing_uses_test_override() {
+        use super::rewrite_telegram_api_url_for_testing;
+
+        let _guard = crate::config::helpers::lock_env();
+        let original = std::env::var(TELEGRAM_TEST_API_BASE_ENV).ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var(TELEGRAM_TEST_API_BASE_ENV, "http://127.0.0.1:19001/");
+        }
+
+        let rewritten =
+            rewrite_telegram_api_url_for_testing("https://api.telegram.org/bot123/sendMessage")
+                .expect("Telegram URL should rewrite");
+        assert_eq!(rewritten, "http://127.0.0.1:19001/bot123/sendMessage");
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            if let Some(value) = original {
+                std::env::set_var(TELEGRAM_TEST_API_BASE_ENV, value);
+            } else {
+                std::env::remove_var(TELEGRAM_TEST_API_BASE_ENV);
+            }
+        }
     }
 
     /// Verify that WASM HTTP host functions work using a dedicated

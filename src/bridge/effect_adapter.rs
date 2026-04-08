@@ -34,6 +34,8 @@ pub struct EffectBridgeAdapter {
     tools: Arc<ToolRegistry>,
     safety: Arc<SafetyLayer>,
     hooks: Arc<HookRegistry>,
+    /// Global auto-approve mode from agent config/env.
+    auto_approve_tools: bool,
     /// Tools the user has approved with "always" (persists within session).
     auto_approved: RwLock<HashSet<String>>,
     /// Per-step tool call counter (reset externally between steps).
@@ -56,12 +58,19 @@ impl EffectBridgeAdapter {
             tools,
             safety,
             hooks,
+            auto_approve_tools: false,
             auto_approved: RwLock::new(HashSet::new()),
             call_count: std::sync::atomic::AtomicU32::new(0),
             rate_limiter: RateLimiter::new(),
             mission_manager: RwLock::new(None),
             auth_manager: RwLock::new(None),
         }
+    }
+
+    /// Mirror the v1 dispatcher behavior for globally auto-approved tools.
+    pub fn with_global_auto_approve(mut self, enabled: bool) -> Self {
+        self.auto_approve_tools = enabled;
+        self
     }
 
     /// Mark a tool as auto-approved (user said "always").
@@ -427,27 +436,20 @@ impl EffectBridgeAdapter {
             });
         }
 
-        if is_v1_only_tool(lookup_name) {
-            return Err(EngineError::Effect {
-                reason: format!(
-                    "Tool '{}' is not available in engine v2. \
-                     Tell the user to use the slash command instead (e.g. /routine, /job).",
-                    action_name
-                ),
-            });
-        }
-
-        if is_v1_auth_tool(lookup_name) {
-            return Err(EngineError::Effect {
-                reason: format!(
-                    "Tool '{}' is not available in engine v2. \
-                     Authentication is handled automatically by the kernel.",
-                    action_name
-                ),
-            });
-        }
-
         if let Some((_, tool)) = self.tools.get_resolved(action_name).await {
+            // Defense-in-depth: reject V1Only tools even if they somehow got
+            // a lease (e.g. via a stale capability registry or hallucination).
+            if tool.engine_compatibility() == crate::tools::EngineCompatibility::V1Only {
+                return Err(EngineError::Effect {
+                    reason: format!(
+                        "Tool '{}' is v1-only and not available in engine v2. \
+                         Use the equivalent v2 workflow (e.g. mission_create instead of \
+                         routine_create) or the appropriate slash command.",
+                        action_name
+                    ),
+                });
+            }
+
             let requirement = tool.requires_approval(&parameters);
             match requirement {
                 ApprovalRequirement::Always => {
@@ -460,7 +462,8 @@ impl EffectBridgeAdapter {
                     });
                 }
                 ApprovalRequirement::UnlessAutoApproved => {
-                    let is_approved = self.auto_approved.read().await.contains(lookup_name);
+                    let is_approved = self.auto_approve_tools
+                        || self.auto_approved.read().await.contains(lookup_name);
                     if !is_approved && !approval_already_granted {
                         // Credential presence alone does NOT bypass approval.
                         // Credentials indicate the call *can* be authenticated,
@@ -745,34 +748,24 @@ impl EffectExecutor for EffectBridgeAdapter {
     ) -> Result<Vec<ActionDef>, EngineError> {
         let tool_defs = self.tools.tool_definitions().await;
 
-        // Build action defs, excluding v1-only tools and v1 auth tools
-        let mut actions = Vec::with_capacity(tool_defs.len());
-        for td in tool_defs {
-            // Skip tools that can't work in engine v2
-            if is_v1_only_tool(&td.name) {
-                continue;
-            }
-
-            // Skip v1 auth management tools — auth is kernel-level in v2
-            if is_v1_auth_tool(&td.name) {
-                continue;
-            }
-
-            let python_name = td.name.replace('-', "_");
-
-            actions.push(ActionDef {
-                name: python_name,
-                description: td.description,
-                parameters_schema: td.parameters,
-                effects: vec![],
-                // Approval is enforced at execute-time inside this adapter so
-                // thread-scoped one-shot approvals and auth-aware bypasses can
-                // participate. Advertising approval here would cause the engine
-                // policy preflight to interrupt before the adapter can apply
-                // those runtime checks.
-                requires_approval: false,
-            });
-        }
+        let actions = tool_defs
+            .into_iter()
+            .map(|td| {
+                let python_name = td.name.replace('-', "_");
+                ActionDef {
+                    name: python_name,
+                    description: td.description,
+                    parameters_schema: td.parameters,
+                    effects: vec![],
+                    // Approval is enforced at execute-time inside this adapter so
+                    // thread-scoped one-shot approvals and auth-aware bypasses can
+                    // participate. Advertising approval here would cause the engine
+                    // policy preflight to interrupt before the adapter can apply
+                    // those runtime checks.
+                    requires_approval: false,
+                }
+            })
+            .collect();
 
         Ok(actions)
     }
@@ -829,31 +822,6 @@ fn extract_credential_name(error_msg: &str) -> Option<String> {
             .map(String::from);
     }
     None
-}
-
-fn is_v1_only_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "create_job"
-            | "create-job"
-            | "cancel_job"
-            | "cancel-job"
-            | "build_software"
-            | "build-software"
-            | "routine_create"
-            | "routine_list"
-            | "routine_fire"
-            | "routine_pause"
-            | "routine_resume"
-            | "routine_update"
-            | "routine_delete"
-    )
-}
-
-/// Auth management tools from v1 that are now kernel-internal in v2.
-/// The LLM should not see or call these — auth is handled automatically.
-fn is_v1_auth_tool(name: &str) -> bool {
-    matches!(name, "tool_auth" | "tool-auth")
 }
 
 #[cfg(test)]
@@ -915,7 +883,74 @@ mod tests {
         assert!(adapter.auto_approved.read().await.contains("shell"));
     }
 
+    #[tokio::test]
+    async fn global_auto_approve_skips_unless_auto_approved_gates() {
+        use ironclaw_safety::SafetyConfig;
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(ApprovalTestTool)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+        .with_global_auto_approve(true);
+
+        let result = adapter
+            .execute_action(
+                "approval_test",
+                serde_json::json!({"value": "x"}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_global_auto_approve"),
+                ),
+            )
+            .await
+            .expect("global auto-approve should bypass approval gate");
+
+        assert!(!result.is_error);
+    }
+
+    #[tokio::test]
+    async fn global_auto_approve_does_not_bypass_always_gates() {
+        use ironclaw_safety::SafetyConfig;
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(AlwaysApprovalTestTool)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+        .with_global_auto_approve(true);
+
+        let result = adapter
+            .execute_action(
+                "always_approval_test",
+                serde_json::json!({"value": "x"}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_global_auto_approve_always"),
+                ),
+            )
+            .await;
+
+        assert!(matches!(result, Err(EngineError::LeaseDenied { .. })));
+    }
+
     struct ApprovalTestTool;
+
+    struct AlwaysApprovalTestTool;
 
     #[async_trait]
     impl Tool for ApprovalTestTool {
@@ -949,6 +984,41 @@ mod tests {
 
         fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
             ApprovalRequirement::UnlessAutoApproved
+        }
+    }
+
+    #[async_trait]
+    impl Tool for AlwaysApprovalTestTool {
+        fn name(&self) -> &str {
+            "always_approval_test"
+        }
+
+        fn description(&self) -> &str {
+            "Test tool that always requires explicit approval"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "value": { "type": "string" }
+                }
+            })
+        }
+
+        async fn execute(
+            &self,
+            params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({ "echo": params }),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+
+        fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+            ApprovalRequirement::Always
         }
     }
 
@@ -1099,47 +1169,6 @@ mod tests {
     fn extract_credential_returns_none_for_json_without_credential() {
         let msg = r#"Tool 'http' failed: {"error":"not_found","message":"404"}"#;
         assert_eq!(extract_credential_name(msg), None);
-    }
-
-    // ── is_v1_only_tool tests ──────────────────────────────────
-
-    #[test]
-    fn routine_tools_are_v1_only() {
-        assert!(is_v1_only_tool("routine_create"));
-        assert!(is_v1_only_tool("routine_list"));
-        assert!(is_v1_only_tool("routine_fire"));
-        assert!(is_v1_only_tool("routine_delete"));
-        assert!(is_v1_only_tool("routine_pause"));
-        assert!(is_v1_only_tool("routine_resume"));
-        assert!(is_v1_only_tool("routine_update"));
-    }
-
-    #[test]
-    fn mission_tools_are_not_v1_only() {
-        assert!(!is_v1_only_tool("mission_create"));
-        assert!(!is_v1_only_tool("mission_list"));
-        assert!(!is_v1_only_tool("mission_fire"));
-        assert!(!is_v1_only_tool("http"));
-        assert!(!is_v1_only_tool("web_search"));
-    }
-
-    // ── is_v1_auth_tool tests ─────────────────────────────────
-
-    #[test]
-    fn auth_tools_are_v1_auth() {
-        assert!(is_v1_auth_tool("tool_auth"));
-        assert!(is_v1_auth_tool("tool-auth"));
-        assert!(!is_v1_auth_tool("tool_activate"));
-        assert!(!is_v1_auth_tool("tool-activate"));
-    }
-
-    #[test]
-    fn non_auth_tools_are_not_v1_auth() {
-        assert!(!is_v1_auth_tool("tool_install"));
-        assert!(!is_v1_auth_tool("tool-install"));
-        assert!(!is_v1_auth_tool("http"));
-        assert!(!is_v1_auth_tool("tool_search"));
-        assert!(!is_v1_auth_tool("tool_list"));
     }
 
     // ── Pre-flight auth gate integration test ─────────────────

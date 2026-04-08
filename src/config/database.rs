@@ -130,7 +130,7 @@ impl DatabaseConfig {
                 hint: "Run 'ironclaw onboard' or set DATABASE_URL environment variable".to_string(),
             })?;
 
-        let pool_size = parse_optional_env("DATABASE_POOL_SIZE", 10)?;
+        let pool_size = parse_optional_env("DATABASE_POOL_SIZE", 30)?;
 
         let ssl_mode: SslMode = if let Some(s) = optional_env("DATABASE_SSLMODE")? {
             s.parse().map_err(|e| ConfigError::InvalidValue {

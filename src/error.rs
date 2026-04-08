@@ -346,6 +346,9 @@ pub enum OrchestratorError {
 
     #[error("Docker error: {reason}")]
     Docker { reason: String },
+
+    #[error("{mode} mode is not enabled")]
+    ModeDisabled { mode: String },
 }
 
 /// Worker errors (container-side execution).

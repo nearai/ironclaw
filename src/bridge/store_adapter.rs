@@ -645,7 +645,7 @@ impl HybridStore {
             .get(&project_id)
             .map(|p| slugify(&p.name, &p.id.0.to_string()))
             .unwrap_or_else(|| {
-                let short = &project_id.0.to_string()[..8];
+                let short = &project_id.0.to_string()[..8]; // safety: UUID.to_string() is always 36 ASCII hex chars
                 format!("unknown--{short}")
             })
     }
@@ -676,7 +676,8 @@ impl HybridStore {
         let content = if is_orchestrator_code_path(&new_path) {
             // Orchestrator Python: store raw content (the Python source code)
             doc.content.clone()
-        } else if new_path.ends_with(".md") {
+        } else if new_path.to_ascii_lowercase().ends_with(".md") {
+            // safety: case-insensitive for macOS/Windows
             // Knowledge docs and prompt overlays: frontmatter + content
             serialize_knowledge_doc(doc)
         } else {
@@ -827,19 +828,23 @@ fn slugify(title: &str, id: &str) -> String {
     }
     let collapsed = collapsed.trim_end_matches('-');
 
-    // Truncate slug to 60 chars, append 8-char ID suffix
+    // Truncate slug to 60 chars, append 8-char ID suffix. `collapsed` is
+    // ASCII-only because slugify() already replaced non-ASCII chars, so
+    // byte-index slicing into it is safe.
     let max_slug = 60;
     let truncated = if collapsed.len() > max_slug {
-        // Don't cut in the middle of a word — find last dash before limit
-        match collapsed[..max_slug].rfind('-') {
-            Some(pos) if pos > 20 => &collapsed[..pos],
-            _ => &collapsed[..max_slug],
+        // Don't cut in the middle of a word — find last dash before limit.
+        let window = &collapsed.as_bytes()[..max_slug]; // safety: ASCII-only input
+        let dash_pos = window.iter().rposition(|&b| b == b'-');
+        match dash_pos {
+            Some(pos) if pos > 20 => &collapsed[..pos], // safety: ASCII-only input
+            _ => &collapsed[..max_slug],                // safety: ASCII-only input
         }
     } else {
         collapsed
     };
 
-    let short_id = if id.len() >= 8 { &id[..8] } else { id };
+    let short_id = if id.len() >= 8 { &id[..8] } else { id }; // safety: UUID string is always ASCII
     format!("{truncated}--{short_id}")
 }
 
