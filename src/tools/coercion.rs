@@ -1069,24 +1069,47 @@ mod tests {
     }
 
     #[test]
-    fn coerces_literal_null_string_to_json_null_for_nullable_field() {
+    fn coerces_literal_null_string_to_json_null_for_nullable_non_string_field() {
+        // When a field only allows null (not string), the literal "null"
+        // should be coerced to JSON null.
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
-                "layer": { "type": ["string", "null"] },
+                "ref_id": { "type": ["integer", "null"] },
                 "content": { "type": "string" }
             },
             "required": ["content"]
         });
         let params = serde_json::json!({
-            "layer": "null",
+            "ref_id": "null",
             "content": "hello"
         });
 
         let result = prepare_params_for_schema(&params, &schema);
 
-        assert_eq!(result["layer"], serde_json::Value::Null);
+        assert_eq!(result["ref_id"], serde_json::Value::Null);
         assert_eq!(result["content"], serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn keeps_literal_null_string_for_nullable_string_field() {
+        // When a field allows both string and null, "null" is a valid
+        // string value and should NOT be coerced.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "layer": { "type": ["string", "null"] }
+            }
+        });
+        let params = serde_json::json!({
+            "layer": "null"
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        // "null" is kept as a string — the memory_write tool handles
+        // this case with its own filter.
+        assert_eq!(result["layer"], serde_json::json!("null"));
     }
 
     #[test]
