@@ -15,12 +15,14 @@ use crate::tools::builder::{
     BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder, SoftwareBuilder,
 };
 use crate::tools::builtin::{
-    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
-    JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
-    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PlanUpdateTool, PromptQueue,
-    ReadFileTool, ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool,
-    TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolPermissionSetTool,
-    ToolRemoveTool, ToolSearchTool, ToolUpgradeTool, WriteFileTool,
+    AboundAccountInfoTool, AboundCreateNotificationTool, AboundExchangeRateTool,
+    AboundSendWireTool, AnalyzeTransferTool, ApplyPatchTool, CancelJobTool, CreateJobTool,
+    EchoTool, ExtensionInfoTool, ForexHistoricalDataTool, HttpTool, JobEventsTool, JobPromptTool,
+    JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool,
+    MemoryTreeTool, MemoryWriteTool, PlanUpdateTool, PromptQueue, ReadFileTool, ShellTool,
+    SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool,
+    ToolAuthTool, ToolInstallTool, ToolListTool, ToolPermissionSetTool, ToolRemoveTool,
+    ToolSearchTool, ToolUpgradeTool, ValidateTransferTargetTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{
@@ -104,6 +106,15 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "plan_update",
     // Permission tools
     "tool_permission_set",
+    // Abound tools
+    "abound_account_info",
+    "abound_exchange_rate",
+    "abound_send_wire",
+    "abound_create_notification",
+    // Forex tools
+    "forex_historical_data",
+    "analyze_transfer",
+    "validate_transfer_target",
     // Aliases (web_fetch is an alias for http in some contexts)
     "web_fetch",
 ];
@@ -370,6 +381,25 @@ impl ToolRegistry {
             http = http.with_credentials(Arc::clone(cr), Arc::clone(ss));
         }
         self.register_sync(Arc::new(http));
+
+        // Abound & forex tools (require secrets store for credential access)
+        if let Some(ss) = &self.secrets_store {
+            macro_rules! register_or_warn {
+                ($tool:expr) => {
+                    match $tool {
+                        Ok(t) => self.register_sync(Arc::new(t)),
+                        Err(e) => tracing::warn!("Failed to register tool: {e}"),
+                    }
+                };
+            }
+            register_or_warn!(AboundAccountInfoTool::new(Arc::clone(ss)));
+            register_or_warn!(AboundExchangeRateTool::new(Arc::clone(ss)));
+            register_or_warn!(AboundSendWireTool::new(Arc::clone(ss)));
+            register_or_warn!(AboundCreateNotificationTool::new(Arc::clone(ss)));
+            register_or_warn!(ForexHistoricalDataTool::new(Arc::clone(ss)));
+            register_or_warn!(AnalyzeTransferTool::new(Arc::clone(ss)));
+            register_or_warn!(ValidateTransferTargetTool::new(Arc::clone(ss)));
+        }
 
         tracing::debug!("Registered {} built-in tools", self.count());
     }

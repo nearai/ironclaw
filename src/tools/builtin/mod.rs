@@ -1,8 +1,10 @@
 //! Built-in tools that come with the agent.
 
+mod abound;
 mod echo;
 pub mod extension_tools;
 mod file;
+mod forex;
 mod http;
 mod job;
 mod json;
@@ -18,12 +20,16 @@ pub mod skill_tools;
 mod time;
 mod tool_info;
 
+pub use abound::{
+    AboundAccountInfoTool, AboundCreateNotificationTool, AboundExchangeRateTool, AboundSendWireTool,
+};
 pub use echo::EchoTool;
 pub use extension_tools::{
     ExtensionInfoTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool,
     ToolPermissionSetTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
 };
 pub use file::{ApplyPatchTool, ListDirTool, ReadFileTool, WriteFileTool};
+pub use forex::{AnalyzeTransferTool, ForexHistoricalDataTool, ValidateTransferTargetTool};
 pub use http::{HttpTool, extract_host_from_params};
 pub use job::{
     CancelJobTool, CreateJobTool, JobEventsTool, JobPromptTool, JobStatusTool, ListJobsTool,
