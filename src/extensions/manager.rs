@@ -5430,12 +5430,29 @@ impl ExtensionManager {
                 let cap_path = self
                     .wasm_channels_dir
                     .join(format!("{}.capabilities.json", name));
-                if !cap_path.exists() {
-                    return Err(ExtensionError::Other(format!(
-                        "Capabilities file not found for '{}'",
-                        name
-                    )));
-                }
+                let cap_path = if !cap_path.exists() {
+                    // Fall back to legacy hyphenated name for pre-canonicalization installs
+                    if let Some(legacy) = legacy_extension_alias(name) {
+                        let legacy_path = self
+                            .wasm_channels_dir
+                            .join(format!("{}.capabilities.json", legacy));
+                        if legacy_path.exists() {
+                            legacy_path
+                        } else {
+                            return Err(ExtensionError::Other(format!(
+                                "Capabilities file not found for '{}'",
+                                name
+                            )));
+                        }
+                    } else {
+                        return Err(ExtensionError::Other(format!(
+                            "Capabilities file not found for '{}'",
+                            name
+                        )));
+                    }
+                } else {
+                    cap_path
+                };
                 let cap_bytes = tokio::fs::read(&cap_path)
                     .await
                     .map_err(|e| ExtensionError::Other(e.to_string()))?;

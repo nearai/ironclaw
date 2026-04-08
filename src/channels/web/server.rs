@@ -3100,7 +3100,11 @@ async fn extensions_setup_submit_handler(
             }
             Ok(Json(resp))
         }
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Err(e) => {
+            let mut resp = ActionResponse::fail(e.to_string());
+            resp.activated = Some(false);
+            Ok(Json(resp))
+        }
     }
 }
 
@@ -4045,7 +4049,7 @@ mod tests {
         let secrets = test_secrets_store();
         let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
 
-        let channel_name = "test-failing-channel";
+        let channel_name = "test_failing_channel";
         std::fs::write(
             wasm_channels_dir
                 .path()
