@@ -141,16 +141,23 @@ pub(crate) async fn realign_diverged_checksums_with(
         // Defensive: the canonical checksum must never appear in the bad
         // list, otherwise we'd be rewriting already-correct rows. This is
         // a programming error in `KNOWN_DIVERGENCES`, not a runtime
-        // condition. Use `assert!` rather than `debug_assert!` so the
-        // guard remains in release builds — `KNOWN_DIVERGENCES` has at
-        // most a handful of entries, so the cost is one constant-time
-        // slice lookup per startup.
-        assert!(
-            !divergence
-                .known_bad_checksums
-                .contains(&migration.checksum()),
-            "{migration_label}: canonical checksum is listed as known-bad",
-        );
+        // condition, but it must still be detected in release builds (a
+        // `debug_assert!` would be stripped). Return a hard error so the
+        // process refuses to start with a misconfigured fix-up table —
+        // see PR #2101 review by @serrrfirat. Cost is one constant-time
+        // slice lookup per startup; the `KNOWN_DIVERGENCES` list has at
+        // most a handful of entries.
+        if divergence
+            .known_bad_checksums
+            .contains(&migration.checksum())
+        {
+            return Err(DatabaseError::Migration(format!(
+                "{migration_label}: canonical checksum is listed in \
+                 known_bad_checksums — this is a programming error in \
+                 KNOWN_DIVERGENCES that would silently rewrite \
+                 already-correct rows",
+            )));
+        }
 
         // Only rewrite rows whose stored checksum is one of the known
         // historical bad values for this migration. Any other divergence
