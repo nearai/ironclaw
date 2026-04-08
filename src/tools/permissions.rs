@@ -91,6 +91,55 @@ pub static TOOL_RISK_DEFAULTS: LazyLock<HashMap<&'static str, PermissionState>> 
         m
     });
 
+// ---------------------------------------------------------------------------
+// Admin tool policy
+// ---------------------------------------------------------------------------
+
+/// Well-known `user_id` for admin-scoped settings in the settings table.
+pub const ADMIN_SETTINGS_USER_ID: &str = "__admin__";
+
+/// Settings key where the admin tool policy is stored.
+pub const ADMIN_TOOL_POLICY_KEY: &str = "admin_tool_policy";
+
+/// Admin-defined tool restrictions that override per-user permissions.
+///
+/// Stored as a single JSON value in the `settings` table under
+/// `(ADMIN_SETTINGS_USER_ID, ADMIN_TOOL_POLICY_KEY)`. Tools listed here are
+/// stripped from the LLM context before per-user permissions are evaluated,
+/// so users cannot re-enable admin-disabled tools.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminToolPolicy {
+    /// Tool names disabled for ALL non-admin users.
+    #[serde(default)]
+    pub disabled_tools: Vec<String>,
+
+    /// Additional tool names disabled for specific users, keyed by `user_id`.
+    #[serde(default)]
+    pub user_disabled_tools: HashMap<String, Vec<String>>,
+}
+
+impl AdminToolPolicy {
+    /// Returns `true` if `tool_name` is admin-disabled for the given `user_id`.
+    pub fn is_tool_disabled(&self, tool_name: &str, user_id: &str) -> bool {
+        if self.disabled_tools.iter().any(|t| t == tool_name) {
+            return true;
+        }
+        if let Some(user_tools) = self.user_disabled_tools.get(user_id) {
+            return user_tools.iter().any(|t| t == tool_name);
+        }
+        false
+    }
+
+    /// Returns `true` if the policy has no restrictions at all.
+    pub fn is_empty(&self) -> bool {
+        self.disabled_tools.is_empty() && self.user_disabled_tools.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-user effective permission
+// ---------------------------------------------------------------------------
+
 /// Return the effective `PermissionState` for `tool_name`.
 ///
 /// Lookup order:
@@ -156,6 +205,72 @@ mod tests {
             PermissionState::AskEachTime,
             "unknown tool should default to AskEachTime"
         );
+    }
+
+    #[test]
+    fn test_admin_tool_policy_global_disabled() {
+        let policy = AdminToolPolicy {
+            disabled_tools: vec!["build_software".to_string(), "tool_install".to_string()],
+            ..Default::default()
+        };
+        assert!(policy.is_tool_disabled("build_software", "any_user"));
+        assert!(policy.is_tool_disabled("tool_install", "any_user"));
+        assert!(!policy.is_tool_disabled("shell", "any_user"));
+    }
+
+    #[test]
+    fn test_admin_tool_policy_per_user_disabled() {
+        let mut user_tools = HashMap::new();
+        user_tools.insert("alice".to_string(), vec!["tool_install".to_string()]);
+        let policy = AdminToolPolicy {
+            user_disabled_tools: user_tools,
+            ..Default::default()
+        };
+        assert!(policy.is_tool_disabled("tool_install", "alice"));
+        assert!(!policy.is_tool_disabled("tool_install", "bob"));
+        assert!(!policy.is_tool_disabled("shell", "alice"));
+    }
+
+    #[test]
+    fn test_admin_tool_policy_combined() {
+        let mut user_tools = HashMap::new();
+        user_tools.insert("alice".to_string(), vec!["shell".to_string()]);
+        let policy = AdminToolPolicy {
+            disabled_tools: vec!["build_software".to_string()],
+            user_disabled_tools: user_tools,
+        };
+        assert!(policy.is_tool_disabled("build_software", "alice"));
+        assert!(policy.is_tool_disabled("build_software", "bob"));
+        assert!(policy.is_tool_disabled("shell", "alice"));
+        assert!(!policy.is_tool_disabled("shell", "bob"));
+    }
+
+    #[test]
+    fn test_admin_tool_policy_empty() {
+        let policy = AdminToolPolicy::default();
+        assert!(policy.is_empty());
+        assert!(!policy.is_tool_disabled("anything", "anyone"));
+    }
+
+    #[test]
+    fn test_admin_tool_policy_serde_roundtrip() {
+        let mut user_tools = HashMap::new();
+        user_tools.insert("alice".to_string(), vec!["shell".to_string()]);
+        let policy = AdminToolPolicy {
+            disabled_tools: vec!["build_software".to_string()],
+            user_disabled_tools: user_tools,
+        };
+        let json = serde_json::to_value(&policy).expect("serialize");
+        let restored: AdminToolPolicy = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(policy, restored);
+    }
+
+    #[test]
+    fn test_admin_tool_policy_deserialize_partial() {
+        let json = serde_json::json!({"disabled_tools": ["build_software"]});
+        let policy: AdminToolPolicy = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(policy.disabled_tools, vec!["build_software"]);
+        assert!(policy.user_disabled_tools.is_empty());
     }
 
     #[test]

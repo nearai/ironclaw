@@ -11,6 +11,7 @@ pub mod routines;
 pub mod secrets;
 pub mod skills;
 pub mod tokens;
+pub mod tool_policy;
 pub mod users;
 
 // Modules not yet wired into server.rs router -- suppress dead_code until
