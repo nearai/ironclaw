@@ -158,13 +158,36 @@ impl EffectBridgeAdapter {
         }
     }
 
-    /// Handle mission_* function calls. Returns None if not a mission call.
+    /// Handle mission_* and routine_* function calls. routine_* are aliases:
+    /// the routine schema is translated into mission_* parameters and
+    /// dispatched through the same mission manager. Returns None if the
+    /// action name is neither a mission nor routine call.
     async fn handle_mission_call(
         &self,
         action_name: &str,
         params: &serde_json::Value,
         context: &ThreadExecutionContext,
     ) -> Option<Result<ActionResult, EngineError>> {
+        // Translate routine_* aliases to mission_* before dispatching. The
+        // routine schema is richer (kind/schedule/pattern/source/event_type/
+        // filters/execution/delivery/advanced) than mission_*; the translator
+        // collapses it into mission fields plus a follow-up update for the
+        // non-execution guardrails (cooldown, max_concurrent, dedup_window,
+        // notify_user, context_paths, description).
+        let routine_alias = routine_to_mission_alias(action_name, params);
+        let (effective_action, effective_params, post_create_update) =
+            if let Some(alias) = routine_alias.as_ref() {
+                (
+                    alias.mission_action,
+                    std::borrow::Cow::Borrowed(&alias.mission_params),
+                    alias.post_create_update.clone(),
+                )
+            } else {
+                (action_name, std::borrow::Cow::Borrowed(params), None)
+            };
+        let action_name = effective_action;
+        let params = effective_params.as_ref();
+
         let mgr = self.mission_manager.read().await;
         let mgr = mgr.as_ref()?;
 
@@ -208,6 +231,20 @@ impl EffectBridgeAdapter {
                     .await
                 {
                     Ok(id) => {
+                        // Routine alias post-create update: apply the
+                        // non-execution routine fields (description,
+                        // context_paths, notify_user, cooldown, max_concurrent,
+                        // dedup_window) via update_mission. Mission_create's
+                        // signature doesn't take these directly.
+                        if let Some(updates) = post_create_update.clone()
+                            && let Err(e) = mgr.update_mission(id, &context.user_id, updates).await
+                        {
+                            tracing::warn!(
+                                mission_id = %id,
+                                error = %e,
+                                "routine alias: failed to apply post-create updates"
+                            );
+                        }
                         Ok(serde_json::json!({"mission_id": id.to_string(), "status": "created"}))
                     }
                     Err(e) => Err(e),
@@ -973,6 +1010,7 @@ fn parse_cadence(s: &str) -> ironclaw_engine::types::mission::MissionCadence {
                 .unwrap_or("")
                 .trim()
                 .to_string(),
+            channel: None,
         }
     } else if trimmed.starts_with("webhook:") {
         MissionCadence::Webhook {
@@ -986,6 +1024,361 @@ fn parse_cadence(s: &str) -> ironclaw_engine::types::mission::MissionCadence {
     } else {
         // Default to manual if unrecognized
         MissionCadence::Manual
+    }
+}
+
+/// Translation result from a `routine_*` call into mission_* dispatch.
+///
+/// `mission_action` is the canonical mission_* name to dispatch.
+/// `mission_params` is the rewritten parameter object that mission_* expects.
+/// `post_create_update`, when present and the action is `mission_create`, is
+/// applied via `MissionManager::update_mission` immediately after creation
+/// to set fields that mission_create's signature does not accept directly
+/// (description, context_paths, notify_user, cooldown_secs, max_concurrent,
+/// dedup_window_secs).
+#[derive(Debug, Clone)]
+struct RoutineMissionAlias {
+    mission_action: &'static str,
+    mission_params: serde_json::Value,
+    post_create_update: Option<ironclaw_engine::MissionUpdate>,
+}
+
+/// Translate a `routine_*` action call into mission_* parameters. Returns
+/// `None` if `action_name` is not a routine alias.
+fn routine_to_mission_alias(
+    action_name: &str,
+    params: &serde_json::Value,
+) -> Option<RoutineMissionAlias> {
+    match action_name {
+        "routine_create" => {
+            let name = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unnamed routine")
+                .to_string();
+            // Routines call the body field "prompt"; missions call it "goal".
+            let goal = params
+                .get("prompt")
+                .or_else(|| params.get("goal"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let description = params
+                .get("description")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+
+            // Translate the routine `request` block into a MissionCadence
+            // serialized as the cadence string parse_cadence understands. We
+            // serialize as a structured string when possible, otherwise we
+            // hand the cadence variant directly through metadata that
+            // mission_create can't read — so we instead build the cadence
+            // here and store it via the post_create_update path.
+            let cadence = parse_routine_request(params);
+            // We carry cadence + the new fields via the update path so we
+            // don't need to change mission_create's flat-args contract.
+            let mut updates = ironclaw_engine::MissionUpdate {
+                description: description.clone(),
+                ..Default::default()
+            };
+            updates.cadence = Some(cadence);
+
+            // execution.context_paths
+            if let Some(arr) = params
+                .get("execution")
+                .and_then(|e| e.get("context_paths"))
+                .and_then(|v| v.as_array())
+            {
+                updates.context_paths = Some(
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect(),
+                );
+            }
+
+            // delivery.user
+            if let Some(user) = params
+                .get("delivery")
+                .and_then(|d| d.get("user"))
+                .and_then(|v| v.as_str())
+            {
+                updates.notify_user = Some(user.to_string());
+            }
+
+            // delivery.channel — feeds notify_channels
+            let mut notify_channels: Vec<String> = Vec::new();
+            if let Some(ch) = params
+                .get("delivery")
+                .and_then(|d| d.get("channel"))
+                .and_then(|v| v.as_str())
+            {
+                notify_channels.push(ch.to_string());
+            }
+
+            // advanced.cooldown_secs (also accepts top-level cooldown_secs)
+            if let Some(secs) = params
+                .get("advanced")
+                .and_then(|a| a.get("cooldown_secs"))
+                .or_else(|| params.get("cooldown_secs"))
+                .and_then(|v| v.as_u64())
+            {
+                updates.cooldown_secs = Some(secs);
+            }
+            // guardrails.max_concurrent
+            if let Some(max) = params
+                .get("guardrails")
+                .and_then(|g| g.get("max_concurrent"))
+                .or_else(|| params.get("max_concurrent"))
+                .and_then(|v| v.as_u64())
+            {
+                updates.max_concurrent = Some(max as u32);
+            }
+            // guardrails.dedup_window_secs
+            if let Some(secs) = params
+                .get("guardrails")
+                .and_then(|g| g.get("dedup_window_secs"))
+                .or_else(|| params.get("dedup_window_secs"))
+                .and_then(|v| v.as_u64())
+            {
+                updates.dedup_window_secs = Some(secs);
+            }
+
+            // mission_create takes a `cadence` string as a flat param. We
+            // pass "manual" here as a placeholder — the real cadence is
+            // applied immediately afterward via update_mission. This keeps
+            // the mission_create signature unchanged.
+            let mut mission_params = serde_json::json!({
+                "name": name,
+                "goal": goal,
+                "cadence": "manual",
+            });
+            if !notify_channels.is_empty()
+                && let Some(obj) = mission_params.as_object_mut()
+            {
+                obj.insert(
+                    "notify_channels".to_string(),
+                    serde_json::json!(notify_channels),
+                );
+            }
+
+            Some(RoutineMissionAlias {
+                mission_action: "mission_create",
+                mission_params,
+                post_create_update: Some(updates),
+            })
+        }
+
+        "routine_list" => Some(RoutineMissionAlias {
+            mission_action: "mission_list",
+            mission_params: params.clone(),
+            post_create_update: None,
+        }),
+
+        "routine_fire" => Some(RoutineMissionAlias {
+            mission_action: "mission_fire",
+            mission_params: params.clone(),
+            post_create_update: None,
+        }),
+
+        "routine_pause" => Some(RoutineMissionAlias {
+            mission_action: "mission_pause",
+            mission_params: params.clone(),
+            post_create_update: None,
+        }),
+
+        "routine_resume" => Some(RoutineMissionAlias {
+            mission_action: "mission_resume",
+            mission_params: params.clone(),
+            post_create_update: None,
+        }),
+
+        "routine_delete" => Some(RoutineMissionAlias {
+            mission_action: "mission_delete",
+            mission_params: params.clone(),
+            post_create_update: None,
+        }),
+
+        "routine_update" => {
+            // Mission_update accepts the same flat fields the routine API
+            // already exposes (id, name, goal, cadence, notify_channels,
+            // success_criteria) plus the new ones. Translate routine
+            // execution/delivery/advanced/guardrails sub-objects into the
+            // flat mission_update keys the existing arm reads.
+            let mut translated = match params {
+                serde_json::Value::Object(map) => map.clone(),
+                _ => serde_json::Map::new(),
+            };
+            if let Some(prompt) = params.get("prompt").and_then(|v| v.as_str()) {
+                translated.insert(
+                    "goal".to_string(),
+                    serde_json::Value::String(prompt.to_string()),
+                );
+            }
+            if let Some(arr) = params
+                .get("execution")
+                .and_then(|e| e.get("context_paths"))
+                .cloned()
+            {
+                translated.insert("context_paths".to_string(), arr);
+            }
+            if let Some(user) = params.get("delivery").and_then(|d| d.get("user")).cloned() {
+                translated.insert("notify_user".to_string(), user);
+            }
+            if let Some(ch) = params
+                .get("delivery")
+                .and_then(|d| d.get("channel"))
+                .and_then(|v| v.as_str())
+            {
+                translated.insert(
+                    "notify_channels".to_string(),
+                    serde_json::json!([ch.to_string()]),
+                );
+            }
+            if let Some(secs) = params
+                .get("advanced")
+                .and_then(|a| a.get("cooldown_secs"))
+                .cloned()
+            {
+                translated.insert("cooldown_secs".to_string(), secs);
+            }
+            if let Some(secs) = params
+                .get("guardrails")
+                .and_then(|g| g.get("dedup_window_secs"))
+                .cloned()
+            {
+                translated.insert("dedup_window_secs".to_string(), secs);
+            }
+            if let Some(max) = params
+                .get("guardrails")
+                .and_then(|g| g.get("max_concurrent"))
+                .cloned()
+            {
+                translated.insert("max_concurrent".to_string(), max);
+            }
+            // Cadence: derive from the request block if present.
+            if params.get("request").is_some() {
+                let cadence = parse_routine_request(params);
+                // We can't pass a structured cadence through the
+                // mission_update arm, which only reads a "cadence" string.
+                // Encode it back into the cadence string the parser
+                // recognizes (cron expr / "event:..." / "webhook:..." /
+                // "manual"). Structured filters and channel filters that
+                // can't round-trip into a string fall back through the
+                // post-create update path on `routine_create`, but for
+                // `routine_update` we can't fully express them today —
+                // log a debug and drop the structured pieces.
+                let cadence_str = cadence_to_round_trip_string(&cadence);
+                translated.insert(
+                    "cadence".to_string(),
+                    serde_json::Value::String(cadence_str),
+                );
+            }
+
+            Some(RoutineMissionAlias {
+                mission_action: "mission_update",
+                mission_params: serde_json::Value::Object(translated),
+                post_create_update: None,
+            })
+        }
+
+        _ => None,
+    }
+}
+
+/// Parse the routine `request` sub-object into a `MissionCadence`.
+/// Falls back to `Manual` when the kind is missing or unrecognized.
+fn parse_routine_request(
+    params: &serde_json::Value,
+) -> ironclaw_engine::types::mission::MissionCadence {
+    use ironclaw_engine::types::mission::MissionCadence;
+
+    let request = params.get("request");
+    let kind = request
+        .and_then(|r| r.get("kind"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("manual");
+
+    match kind {
+        "cron" => MissionCadence::Cron {
+            expression: request
+                .and_then(|r| r.get("schedule"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("0 0 * * * *")
+                .to_string(),
+            timezone: request
+                .and_then(|r| r.get("timezone"))
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        },
+        "message_event" => MissionCadence::OnEvent {
+            event_pattern: request
+                .and_then(|r| r.get("pattern"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            channel: request
+                .and_then(|r| r.get("channel"))
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        },
+        "system_event" => {
+            let mut filters = std::collections::HashMap::new();
+            if let Some(map) = request
+                .and_then(|r| r.get("filters"))
+                .and_then(|v| v.as_object())
+            {
+                for (k, v) in map {
+                    filters.insert(k.clone(), v.clone());
+                }
+            }
+            MissionCadence::OnSystemEvent {
+                source: request
+                    .and_then(|r| r.get("source"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                event_type: request
+                    .and_then(|r| r.get("event_type"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                filters,
+            }
+        }
+        "webhook" => MissionCadence::Webhook {
+            path: request
+                .and_then(|r| r.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            secret: request
+                .and_then(|r| r.get("secret"))
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        },
+        _ => MissionCadence::Manual,
+    }
+}
+
+/// Encode a `MissionCadence` into a string that `parse_cadence` can round-trip.
+/// Structured features (channel filter, system event filters, webhook secret)
+/// are lossy through this path; callers that need full fidelity should use
+/// `update_mission` with a typed `MissionUpdate` instead.
+fn cadence_to_round_trip_string(
+    cadence: &ironclaw_engine::types::mission::MissionCadence,
+) -> String {
+    use ironclaw_engine::types::mission::MissionCadence;
+    match cadence {
+        MissionCadence::Cron { expression, .. } => expression.clone(),
+        MissionCadence::OnEvent { event_pattern, .. } => format!("event:{event_pattern}"),
+        MissionCadence::OnSystemEvent {
+            source, event_type, ..
+        } => {
+            format!("system_event:{source}/{event_type}")
+        }
+        MissionCadence::Webhook { path, .. } => format!("webhook:{path}"),
+        MissionCadence::Manual => "manual".to_string(),
     }
 }
 
@@ -1008,6 +1401,13 @@ fn extract_credential_name(error_msg: &str) -> Option<String> {
 }
 
 fn is_v1_only_tool(name: &str) -> bool {
+    // routine_* tools are surfaced in v2 too, but are intercepted by
+    // `handle_mission_call`'s routine alias path *before* this check fires —
+    // they get translated into mission_* dispatches via the existing
+    // mission manager rather than the v1 routine engine. The original v1
+    // routine tools remain registered for the v1 engine, but in v2 the
+    // alias path means the LLM-facing routine_create/list/update/etc.
+    // calls always go through missions.
     matches!(
         name,
         "create_job"
@@ -1016,13 +1416,6 @@ fn is_v1_only_tool(name: &str) -> bool {
             | "cancel-job"
             | "build_software"
             | "build-software"
-            | "routine_create"
-            | "routine_list"
-            | "routine_fire"
-            | "routine_pause"
-            | "routine_resume"
-            | "routine_update"
-            | "routine_delete"
     )
 }
 
@@ -1347,6 +1740,267 @@ mod tests {
         assert!(matches!(third, Err(EngineError::GatePaused { .. })));
     }
 
+    // ── routine→mission alias tests ────────────────────────────
+
+    #[test]
+    fn routine_create_alias_translates_cron_with_full_field_set() {
+        let params = serde_json::json!({
+            "name": "Daily PR digest",
+            "prompt": "Summarize open PRs needing review",
+            "description": "Morning developer briefing",
+            "request": {
+                "kind": "cron",
+                "schedule": "0 9 * * *",
+                "timezone": "America/New_York",
+            },
+            "execution": {
+                "context_paths": ["context/profile.json", "MEMORY.md"],
+            },
+            "delivery": {
+                "channel": "gateway",
+                "user": "alice",
+            },
+            "advanced": {
+                "cooldown_secs": 300,
+            },
+            "guardrails": {
+                "max_concurrent": 1,
+                "dedup_window_secs": 60,
+            },
+        });
+
+        let alias = routine_to_mission_alias("routine_create", &params)
+            .expect("routine_create should produce an alias");
+        assert_eq!(alias.mission_action, "mission_create");
+        assert_eq!(
+            alias.mission_params.get("name").and_then(|v| v.as_str()),
+            Some("Daily PR digest")
+        );
+        assert_eq!(
+            alias.mission_params.get("goal").and_then(|v| v.as_str()),
+            Some("Summarize open PRs needing review")
+        );
+        // mission_create receives a placeholder cadence; the real cadence is
+        // applied via the post_create_update.
+        assert_eq!(
+            alias.mission_params.get("cadence").and_then(|v| v.as_str()),
+            Some("manual")
+        );
+        assert_eq!(
+            alias
+                .mission_params
+                .get("notify_channels")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+            Some(vec!["gateway"])
+        );
+
+        let updates = alias
+            .post_create_update
+            .expect("routine_create should populate updates");
+        assert_eq!(
+            updates.description.as_deref(),
+            Some("Morning developer briefing")
+        );
+        assert_eq!(
+            updates.context_paths.as_deref(),
+            Some(&["context/profile.json".to_string(), "MEMORY.md".to_string()][..])
+        );
+        assert_eq!(updates.notify_user.as_deref(), Some("alice"));
+        assert_eq!(updates.cooldown_secs, Some(300));
+        assert_eq!(updates.max_concurrent, Some(1));
+        assert_eq!(updates.dedup_window_secs, Some(60));
+        match updates.cadence.as_ref().expect("cadence in updates") {
+            ironclaw_engine::types::mission::MissionCadence::Cron {
+                expression,
+                timezone,
+            } => {
+                assert_eq!(expression, "0 9 * * *");
+                assert_eq!(timezone.as_deref(), Some("America/New_York"));
+            }
+            other => panic!("expected Cron cadence, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn routine_create_alias_translates_message_event_with_channel_filter() {
+        let params = serde_json::json!({
+            "name": "GitHub PR watcher",
+            "prompt": "React to PR review requests",
+            "request": {
+                "kind": "message_event",
+                "pattern": "review requested",
+                "channel": "github",
+            },
+        });
+        let alias =
+            routine_to_mission_alias("routine_create", &params).expect("alias for message_event");
+        let updates = alias.post_create_update.expect("updates");
+        match updates.cadence.as_ref().expect("cadence") {
+            ironclaw_engine::types::mission::MissionCadence::OnEvent {
+                event_pattern,
+                channel,
+            } => {
+                assert_eq!(event_pattern, "review requested");
+                assert_eq!(channel.as_deref(), Some("github"));
+            }
+            other => panic!("expected OnEvent cadence, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn routine_create_alias_translates_system_event_with_filters() {
+        let params = serde_json::json!({
+            "name": "Issue triage",
+            "prompt": "Triage opened issues",
+            "request": {
+                "kind": "system_event",
+                "source": "github",
+                "event_type": "issue.opened",
+                "filters": {
+                    "repository_name": "nearai/ironclaw",
+                    "sender_login": "ilblackdragon",
+                },
+            },
+        });
+        let alias = routine_to_mission_alias("routine_create", &params).expect("alias");
+        let updates = alias.post_create_update.expect("updates");
+        match updates.cadence.as_ref().expect("cadence") {
+            ironclaw_engine::types::mission::MissionCadence::OnSystemEvent {
+                source,
+                event_type,
+                filters,
+            } => {
+                assert_eq!(source, "github");
+                assert_eq!(event_type, "issue.opened");
+                assert_eq!(filters.len(), 2);
+                assert_eq!(
+                    filters.get("repository_name").and_then(|v| v.as_str()),
+                    Some("nearai/ironclaw")
+                );
+                assert_eq!(
+                    filters.get("sender_login").and_then(|v| v.as_str()),
+                    Some("ilblackdragon")
+                );
+            }
+            other => panic!("expected OnSystemEvent cadence, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn routine_create_alias_translates_webhook() {
+        let params = serde_json::json!({
+            "name": "GitHub webhook",
+            "prompt": "Handle inbound GitHub events",
+            "request": {
+                "kind": "webhook",
+                "path": "github",
+                "secret": "shh",
+            },
+        });
+        let alias = routine_to_mission_alias("routine_create", &params).expect("alias");
+        let updates = alias.post_create_update.expect("updates");
+        match updates.cadence.as_ref().expect("cadence") {
+            ironclaw_engine::types::mission::MissionCadence::Webhook { path, secret } => {
+                assert_eq!(path, "github");
+                assert_eq!(secret.as_deref(), Some("shh"));
+            }
+            other => panic!("expected Webhook cadence, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn routine_create_alias_defaults_to_manual_when_request_missing() {
+        let params = serde_json::json!({
+            "name": "Manual mission",
+            "prompt": "Run on demand",
+        });
+        let alias = routine_to_mission_alias("routine_create", &params).expect("alias");
+        let updates = alias.post_create_update.expect("updates");
+        match updates.cadence.as_ref().expect("cadence") {
+            ironclaw_engine::types::mission::MissionCadence::Manual => {}
+            other => panic!("expected Manual cadence, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn routine_simple_actions_alias_to_mission_counterparts() {
+        let params = serde_json::json!({"id": "00000000-0000-0000-0000-000000000000"});
+        for (routine, mission) in &[
+            ("routine_list", "mission_list"),
+            ("routine_fire", "mission_fire"),
+            ("routine_pause", "mission_pause"),
+            ("routine_resume", "mission_resume"),
+            ("routine_delete", "mission_delete"),
+        ] {
+            let alias = routine_to_mission_alias(routine, &params)
+                .unwrap_or_else(|| panic!("expected alias for {routine}"));
+            assert_eq!(alias.mission_action, *mission, "wrong target for {routine}");
+            assert!(alias.post_create_update.is_none());
+        }
+    }
+
+    #[test]
+    fn routine_update_alias_translates_nested_to_flat() {
+        let params = serde_json::json!({
+            "id": "11111111-1111-1111-1111-111111111111",
+            "prompt": "Updated goal",
+            "execution": {
+                "context_paths": ["NOTES.md"],
+            },
+            "delivery": {
+                "channel": "repl",
+                "user": "bob",
+            },
+            "advanced": {"cooldown_secs": 600},
+            "guardrails": {"dedup_window_secs": 120, "max_concurrent": 2},
+            "request": {
+                "kind": "cron",
+                "schedule": "0 12 * * *",
+            },
+        });
+        let alias = routine_to_mission_alias("routine_update", &params).expect("alias");
+        assert_eq!(alias.mission_action, "mission_update");
+        let mp = &alias.mission_params;
+        assert_eq!(
+            mp.get("goal").and_then(|v| v.as_str()),
+            Some("Updated goal")
+        );
+        assert_eq!(mp.get("notify_user").and_then(|v| v.as_str()), Some("bob"));
+        assert_eq!(
+            mp.get("notify_channels")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str()),
+            Some("repl")
+        );
+        assert_eq!(mp.get("cooldown_secs").and_then(|v| v.as_u64()), Some(600));
+        assert_eq!(
+            mp.get("dedup_window_secs").and_then(|v| v.as_u64()),
+            Some(120)
+        );
+        assert_eq!(mp.get("max_concurrent").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(
+            mp.get("context_paths")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str()),
+            Some("NOTES.md")
+        );
+        assert_eq!(
+            mp.get("cadence").and_then(|v| v.as_str()),
+            Some("0 12 * * *")
+        );
+    }
+
+    #[test]
+    fn routine_alias_returns_none_for_unrelated_action() {
+        let params = serde_json::json!({});
+        assert!(routine_to_mission_alias("http", &params).is_none());
+        assert!(routine_to_mission_alias("mission_create", &params).is_none());
+        assert!(routine_to_mission_alias("web_search", &params).is_none());
+    }
+
     // ── extract_credential_name tests ──────────────────────────
 
     #[test]
@@ -1381,15 +2035,26 @@ mod tests {
 
     // ── is_v1_only_tool tests ──────────────────────────────────
 
+    /// Routines are no longer classified as v1-only: in v2 they are
+    /// surfaced to the LLM and intercepted by the routine→mission alias
+    /// path in `handle_mission_call` *before* the v1-only check fires.
+    /// The original v1 routine tools remain registered for the v1 engine.
     #[test]
-    fn routine_tools_are_v1_only() {
-        assert!(is_v1_only_tool("routine_create"));
-        assert!(is_v1_only_tool("routine_list"));
-        assert!(is_v1_only_tool("routine_fire"));
-        assert!(is_v1_only_tool("routine_delete"));
-        assert!(is_v1_only_tool("routine_pause"));
-        assert!(is_v1_only_tool("routine_resume"));
-        assert!(is_v1_only_tool("routine_update"));
+    fn routine_tools_are_not_v1_only() {
+        assert!(!is_v1_only_tool("routine_create"));
+        assert!(!is_v1_only_tool("routine_list"));
+        assert!(!is_v1_only_tool("routine_fire"));
+        assert!(!is_v1_only_tool("routine_delete"));
+        assert!(!is_v1_only_tool("routine_pause"));
+        assert!(!is_v1_only_tool("routine_resume"));
+        assert!(!is_v1_only_tool("routine_update"));
+    }
+
+    #[test]
+    fn job_and_build_tools_remain_v1_only() {
+        assert!(is_v1_only_tool("create_job"));
+        assert!(is_v1_only_tool("cancel_job"));
+        assert!(is_v1_only_tool("build_software"));
     }
 
     #[test]

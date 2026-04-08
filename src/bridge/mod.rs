@@ -10,6 +10,9 @@ mod llm_adapter;
 mod router;
 pub mod skill_migration;
 mod store_adapter;
+mod workspace_reader;
+
+pub use workspace_reader::WorkspaceReaderAdapter;
 
 pub use effect_adapter::EffectBridgeAdapter;
 pub use router::{

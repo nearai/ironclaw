@@ -4,6 +4,7 @@
 //! progress. The manager handles lifecycle (create, pause, resume, complete)
 //! and delegates thread spawning to [`ThreadManager`].
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
@@ -13,12 +14,13 @@ use crate::memory::RetrievalEngine;
 use crate::runtime::manager::ThreadManager;
 use crate::runtime::messaging::ThreadOutcome;
 use crate::traits::store::Store;
+use crate::traits::workspace::WorkspaceReader;
 use crate::types::error::EngineError;
 use crate::types::memory::MemoryDoc;
 use crate::types::mission::{Mission, MissionCadence, MissionId, MissionStatus};
 use crate::types::project::ProjectId;
 use crate::types::shared_owner_id;
-use crate::types::thread::{ThreadConfig, ThreadId, ThreadType};
+use crate::types::thread::{ThreadConfig, ThreadId, ThreadState, ThreadType};
 
 /// Notification emitted when a mission thread completes.
 ///
@@ -32,6 +34,9 @@ pub struct MissionNotification {
     pub user_id: String,
     /// Channels to notify (from `Mission.notify_channels`).
     pub notify_channels: Vec<String>,
+    /// Optional per-channel recipient (from `Mission.notify_user`). When
+    /// `None`, the channel's default recipient is used.
+    pub notify_user: Option<String>,
     /// The thread's response text (None if failed/no output).
     pub response: Option<String>,
     /// True if the thread failed.
@@ -39,15 +44,25 @@ pub struct MissionNotification {
 }
 
 /// Optional updates to apply to a mission via [`MissionManager::update_mission`].
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct MissionUpdate {
     pub name: Option<String>,
+    pub description: Option<String>,
     pub goal: Option<String>,
     pub cadence: Option<MissionCadence>,
     pub notify_channels: Option<Vec<String>>,
+    pub notify_user: Option<String>,
+    pub context_paths: Option<Vec<String>>,
     pub max_threads_per_day: Option<u32>,
     pub success_criteria: Option<String>,
+    pub cooldown_secs: Option<u64>,
+    pub max_concurrent: Option<u32>,
+    pub dedup_window_secs: Option<u64>,
 }
+
+/// In-memory dedup state for event-triggered missions. Keyed by
+/// (mission_id, dedup-key) → last fire timestamp.
+type DedupKey = (MissionId, String);
 
 /// Manages mission lifecycle and thread spawning.
 pub struct MissionManager {
@@ -57,6 +72,12 @@ pub struct MissionManager {
     active: RwLock<Vec<MissionId>>,
     /// Broadcast channel for mission outcome notifications.
     notification_tx: tokio::sync::broadcast::Sender<MissionNotification>,
+    /// Optional workspace reader used to load `Mission.context_paths` at
+    /// fire time. When `None`, context preloading is silently skipped.
+    workspace: Option<Arc<dyn WorkspaceReader>>,
+    /// Per-mission dedup table for event-triggered firings. Cleared
+    /// opportunistically when entries fall outside the dedup window.
+    dedup_table: RwLock<HashMap<DedupKey, chrono::DateTime<chrono::Utc>>>,
 }
 
 impl MissionManager {
@@ -67,7 +88,17 @@ impl MissionManager {
             thread_manager,
             active: RwLock::new(Vec::new()),
             notification_tx,
+            workspace: None,
+            dedup_table: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Attach a workspace reader so `context_paths` are loaded at fire time.
+    /// Builder-style for back-compat with existing call sites that don't yet
+    /// supply a reader.
+    pub fn with_workspace_reader(mut self, reader: Arc<dyn WorkspaceReader>) -> Self {
+        self.workspace = Some(reader);
+        self
     }
 
     /// Subscribe to mission outcome notifications.
@@ -137,6 +168,9 @@ impl MissionManager {
         if let Some(name) = updates.name {
             mission.name = name;
         }
+        if let Some(description) = updates.description {
+            mission.description = Some(description);
+        }
         if let Some(goal) = updates.goal {
             mission.goal = goal;
         }
@@ -146,11 +180,26 @@ impl MissionManager {
         if let Some(channels) = updates.notify_channels {
             mission.notify_channels = channels;
         }
+        if let Some(notify_user) = updates.notify_user {
+            mission.notify_user = Some(notify_user);
+        }
+        if let Some(context_paths) = updates.context_paths {
+            mission.context_paths = context_paths;
+        }
         if let Some(max) = updates.max_threads_per_day {
             mission.max_threads_per_day = max;
         }
         if let Some(criteria) = updates.success_criteria {
             mission.success_criteria = Some(criteria);
+        }
+        if let Some(secs) = updates.cooldown_secs {
+            mission.cooldown_secs = secs;
+        }
+        if let Some(max) = updates.max_concurrent {
+            mission.max_concurrent = max;
+        }
+        if let Some(secs) = updates.dedup_window_secs {
+            mission.dedup_window_secs = secs;
         }
 
         mission.updated_at = chrono::Utc::now();
@@ -259,13 +308,70 @@ impl MissionManager {
             return Ok(None);
         }
 
+        // Cooldown: refuse to fire if the last successful fire was within
+        // `cooldown_secs` of now. 0 = disabled.
+        if mission.cooldown_secs > 0
+            && let Some(last) = mission.last_fire_at
+        {
+            let elapsed = chrono::Utc::now().signed_duration_since(last).num_seconds();
+            if elapsed >= 0 && (elapsed as u64) < mission.cooldown_secs {
+                debug!(
+                    mission_id = %id,
+                    elapsed_secs = elapsed,
+                    cooldown_secs = mission.cooldown_secs,
+                    "mission cooldown not yet elapsed"
+                );
+                return Ok(None);
+            }
+        }
+
+        // max_concurrent: count threads from this mission that are still in
+        // a non-terminal state. 0 = unlimited.
+        if mission.max_concurrent > 0 {
+            let running = self.count_running_threads(&mission).await;
+            if running >= mission.max_concurrent as usize {
+                debug!(
+                    mission_id = %id,
+                    running,
+                    max_concurrent = mission.max_concurrent,
+                    "mission max_concurrent reached"
+                );
+                return Ok(None);
+            }
+        }
+
+        // Load context_paths from the workspace if a reader is attached.
+        // Failures are logged but never block the fire — context loading is
+        // a best-effort enrichment, not a precondition.
+        let mut context_blocks: Vec<(String, String)> = Vec::new();
+        if let Some(reader) = self.workspace.as_ref() {
+            for path in &mission.context_paths {
+                match reader.read_doc(path).await {
+                    Ok(content) => context_blocks.push((path.clone(), content)),
+                    Err(error) => debug!(
+                        mission_id = %id,
+                        path = %path,
+                        error = %error,
+                        "failed to load mission context_path; skipping"
+                    ),
+                }
+            }
+        } else if !mission.context_paths.is_empty() {
+            debug!(
+                mission_id = %id,
+                paths = mission.context_paths.len(),
+                "mission has context_paths but no WorkspaceReader is attached"
+            );
+        }
+
         // Build meta-prompt from mission state + project docs
         let retrieval = RetrievalEngine::new(Arc::clone(&self.store));
         let project_docs = retrieval
             .retrieve_context(mission.project_id, &mission.user_id, &mission.goal, 10)
             .await
             .unwrap_or_default();
-        let meta_prompt = build_meta_prompt(&mission, &project_docs, &trigger_payload);
+        let meta_prompt =
+            build_meta_prompt(&mission, &project_docs, &trigger_payload, &context_blocks);
 
         // Spawn thread with meta-prompt as initial user message
         let thread_id = self
@@ -285,6 +391,7 @@ impl MissionManager {
         updated.record_thread(thread_id);
         updated.threads_today += 1;
         updated.last_trigger_payload = trigger_payload;
+        updated.last_fire_at = Some(chrono::Utc::now());
         self.store.save_mission(&updated).await?;
 
         debug!(mission_id = %id, thread_id = %thread_id, "mission fired");
@@ -396,11 +503,144 @@ impl MissionManager {
                 MissionCadence::OnSystemEvent {
                     source: s,
                     event_type: et,
-                } => s == source && et == event_type,
+                    filters,
+                } => {
+                    s == source
+                        && et == event_type
+                        && payload_matches_filters(filters, payload.as_ref())
+                }
                 _ => false,
             };
 
-            if matches && let Some(tid) = self.fire_mission(mid, user_id, payload.clone()).await? {
+            if !matches {
+                continue;
+            }
+
+            // Dedup: skip if an identical event key fired this mission within
+            // its dedup window. The default key is the SHA-256 of the payload
+            // serialization (compact and stable for typical webhook bodies).
+            if mission.dedup_window_secs > 0 {
+                let key = payload_dedup_key(payload.as_ref());
+                if self.dedup_event(mid, &key, mission.dedup_window_secs).await {
+                    debug!(
+                        mission_id = %mid,
+                        dedup_window_secs = mission.dedup_window_secs,
+                        "skipping system_event fire — dedup window not yet elapsed"
+                    );
+                    continue;
+                }
+            }
+
+            if let Some(tid) = self.fire_mission(mid, user_id, payload.clone()).await? {
+                spawned.push(tid);
+            }
+        }
+
+        Ok(spawned)
+    }
+
+    /// Fire all active `OnEvent` missions whose `event_pattern` matches
+    /// `text` and (if a channel filter is set) whose `channel` matches the
+    /// incoming message channel case-insensitively.
+    ///
+    /// `payload` is forwarded as `trigger_payload` to each mission's thread.
+    /// Pattern matching uses simple substring matching to keep this dependency-
+    /// free; callers needing regex semantics should normalize first or
+    /// extend the matcher.
+    pub async fn fire_on_message_event(
+        &self,
+        channel: &str,
+        text: &str,
+        user_id: &str,
+        payload: Option<serde_json::Value>,
+    ) -> Result<Vec<ThreadId>, EngineError> {
+        let active_ids = self.active.read().await.clone();
+        let mut spawned = Vec::new();
+
+        for mid in active_ids {
+            let mission = match self.store.load_mission(mid).await? {
+                Some(m) if m.status == MissionStatus::Active => m,
+                _ => continue,
+            };
+
+            if !mission.is_owned_by(user_id) && !mission.owner_id().is_shared() {
+                continue;
+            }
+
+            let matches = match &mission.cadence {
+                MissionCadence::OnEvent {
+                    event_pattern,
+                    channel: cadence_channel,
+                } => {
+                    let channel_ok = cadence_channel
+                        .as_ref()
+                        .is_none_or(|c| c.eq_ignore_ascii_case(channel));
+                    channel_ok && text.contains(event_pattern.as_str())
+                }
+                _ => false,
+            };
+
+            if !matches {
+                continue;
+            }
+
+            if mission.dedup_window_secs > 0 {
+                let key = payload_dedup_key(payload.as_ref());
+                if self.dedup_event(mid, &key, mission.dedup_window_secs).await {
+                    continue;
+                }
+            }
+
+            if let Some(tid) = self.fire_mission(mid, user_id, payload.clone()).await? {
+                spawned.push(tid);
+            }
+        }
+
+        Ok(spawned)
+    }
+
+    /// Fire the active `Webhook` mission whose registered `path` matches the
+    /// incoming webhook path. The bridge layer is responsible for HMAC
+    /// validation against `Webhook.secret` *before* calling this; the engine
+    /// just routes payloads to mission threads.
+    ///
+    /// Returns the IDs of any threads spawned.
+    pub async fn fire_on_webhook(
+        &self,
+        webhook_path: &str,
+        user_id: &str,
+        payload: Option<serde_json::Value>,
+    ) -> Result<Vec<ThreadId>, EngineError> {
+        let active_ids = self.active.read().await.clone();
+        let mut spawned = Vec::new();
+
+        for mid in active_ids {
+            let mission = match self.store.load_mission(mid).await? {
+                Some(m) if m.status == MissionStatus::Active => m,
+                _ => continue,
+            };
+
+            if !mission.is_owned_by(user_id) && !mission.owner_id().is_shared() {
+                continue;
+            }
+
+            let matches = matches!(
+                &mission.cadence,
+                MissionCadence::Webhook { path, .. } if path == webhook_path
+            );
+
+            if !matches {
+                continue;
+            }
+
+            if mission.dedup_window_secs > 0 {
+                let key = payload_dedup_key(payload.as_ref());
+                if self.dedup_event(mid, &key, mission.dedup_window_secs).await {
+                    continue;
+                }
+            }
+
+            if let Some(tid) = self.fire_mission(mid, user_id, payload.clone()).await? {
                 spawned.push(tid);
             }
         }
@@ -666,6 +906,7 @@ impl MissionManager {
             MissionCadence::OnSystemEvent {
                 source: "engine".into(),
                 event_type: "thread_completed_with_issues".into(),
+                filters: std::collections::HashMap::new(),
             },
         );
         mission.success_criteria = Some(
@@ -728,6 +969,7 @@ impl MissionManager {
             MissionCadence::OnSystemEvent {
                 source: "engine".into(),
                 event_type: "thread_completed_with_learnings".into(),
+                filters: std::collections::HashMap::new(),
             },
             "Extract reusable skills from successful multi-step threads",
             3, // max 3/day
@@ -744,6 +986,7 @@ impl MissionManager {
             MissionCadence::OnSystemEvent {
                 source: "engine".into(),
                 event_type: "conversation_insights_due".into(),
+                filters: std::collections::HashMap::new(),
             },
             "Extract user preferences, domain knowledge, and workflow patterns from conversations",
             2, // max 2/day
@@ -760,6 +1003,7 @@ impl MissionManager {
             MissionCadence::OnSystemEvent {
                 source: "user_feedback".into(),
                 event_type: "expected_behavior".into(),
+                filters: std::collections::HashMap::new(),
             },
             "Investigate user-reported expectation gaps and apply fixes",
             5, // max 5/day
@@ -885,15 +1129,64 @@ impl MissionManager {
                 | MissionCadence::Webhook { .. } => false,
             };
 
-            // Fire cron missions with the mission's own user_id so artifacts
-            // are scoped to the correct tenant.
-            if should_fire && let Some(tid) = self.fire_mission(mid, &mission.user_id, None).await?
-            {
+            if !should_fire {
+                continue;
+            }
+
+            // `fire_mission` enforces cooldown_secs and max_concurrent
+            // independently of the cron next_fire_at, so a cron mission whose
+            // schedule fires faster than its cooldown will simply skip the
+            // intervening firings rather than backlog them.
+            if let Some(tid) = self.fire_mission(mid, &mission.user_id, None).await? {
                 spawned.push(tid);
             }
         }
 
         Ok(spawned)
+    }
+
+    /// Count threads spawned by `mission` that are still in a non-terminal
+    /// state (anything other than `Done`/`Failed`). Used by `max_concurrent`
+    /// enforcement. Walks the in-memory thread cache; threads that the store
+    /// no longer knows about are treated as terminal.
+    async fn count_running_threads(&self, mission: &Mission) -> usize {
+        let mut running = 0;
+        for tid in mission.thread_history.iter().rev() {
+            match self.store.load_thread(*tid).await {
+                Ok(Some(thread)) => {
+                    if !matches!(thread.state, ThreadState::Done | ThreadState::Failed) {
+                        running += 1;
+                    }
+                }
+                _ => continue,
+            }
+        }
+        running
+    }
+
+    /// Returns `true` if `(mission_id, dedup_key)` was last seen within
+    /// `window_secs`. Updates the table to record `now` for the next call.
+    /// Drops entries older than `window_secs` opportunistically to bound the
+    /// table size.
+    async fn dedup_event(&self, mission_id: MissionId, dedup_key: &str, window_secs: u64) -> bool {
+        if window_secs == 0 {
+            return false;
+        }
+        let now = chrono::Utc::now();
+        let window = chrono::Duration::seconds(window_secs as i64);
+        let mut table = self.dedup_table.write().await;
+        // Opportunistic cleanup: drop entries older than the window so the
+        // table doesn't grow without bound.
+        table.retain(|_, ts| now.signed_duration_since(*ts) < window);
+
+        let key = (mission_id, dedup_key.to_string());
+        if let Some(last) = table.get(&key)
+            && now.signed_duration_since(*last) < window
+        {
+            return true;
+        }
+        table.insert(key, now);
+        false
     }
 
     fn spawn_mission_outcome_watcher(&self, mission_id: MissionId, thread_id: ThreadId) {
@@ -929,10 +1222,49 @@ impl MissionManager {
 ///
 /// Assembles the mission's goal, current focus, approach history, and
 /// relevant project docs into a structured prompt that guides the thread.
+/// Returns `true` if every `(key, value)` pair in `filters` matches the
+/// payload's top-level field exactly. An empty filter map always matches.
+/// `None` payload only matches an empty filter map.
+fn payload_matches_filters(
+    filters: &HashMap<String, serde_json::Value>,
+    payload: Option<&serde_json::Value>,
+) -> bool {
+    if filters.is_empty() {
+        return true;
+    }
+    let Some(payload) = payload else {
+        return false;
+    };
+    let Some(obj) = payload.as_object() else {
+        return false;
+    };
+    filters
+        .iter()
+        .all(|(key, expected)| obj.get(key).is_some_and(|actual| actual == expected))
+}
+
+/// Compute a stable dedup key for an event payload. Hashes the canonicalized
+/// JSON serialization with the standard library hasher (non-cryptographic but
+/// sufficient for in-memory dedup of trusted host-sourced events). Empty/None
+/// payloads collapse to a single fixed key so a flood of identical empty
+/// events is suppressed.
+fn payload_dedup_key(payload: Option<&serde_json::Value>) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let serialized = match payload {
+        Some(value) => serde_json::to_string(value).unwrap_or_default(),
+        None => String::new(),
+    };
+    let mut hasher = DefaultHasher::new();
+    serialized.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 fn build_meta_prompt(
     mission: &Mission,
     project_docs: &[MemoryDoc],
     trigger_payload: &Option<serde_json::Value>,
+    context_blocks: &[(String, String)],
 ) -> String {
     let mut parts = Vec::new();
 
@@ -941,8 +1273,20 @@ fn build_meta_prompt(
         mission.name, mission.goal
     ));
 
+    if let Some(description) = &mission.description {
+        parts.push(format!("\n{description}"));
+    }
+
     if let Some(criteria) = &mission.success_criteria {
         parts.push(format!("Success criteria: {criteria}"));
+    }
+
+    // Preloaded workspace context (`Mission.context_paths`).
+    if !context_blocks.is_empty() {
+        parts.push("\n## Loaded Context".into());
+        for (path, content) in context_blocks {
+            parts.push(format!("### {path}\n\n{content}"));
+        }
     }
 
     // Current focus
@@ -1098,6 +1442,7 @@ async fn process_mission_outcome_and_notify(
             thread_id,
             user_id: mission.user_id.clone(),
             notify_channels: mission.notify_channels.clone(),
+            notify_user: mission.notify_user.clone(),
             response: notify_response,
             is_error,
         };
@@ -2041,6 +2386,7 @@ mod tests {
             MissionCadence::OnSystemEvent {
                 source: "engine".into(),
                 event_type: "thread_completed_with_issues".into(),
+                filters: std::collections::HashMap::new(),
             },
             Vec::new(),
         )
@@ -2074,6 +2420,7 @@ mod tests {
             MissionCadence::OnSystemEvent {
                 source: "github".into(),
                 event_type: "push".into(),
+                filters: std::collections::HashMap::new(),
             },
             Vec::new(),
         )
@@ -2137,6 +2484,7 @@ mod tests {
             MissionCadence::OnSystemEvent {
                 source: "engine".into(),
                 event_type: "thread_completed_with_issues".into(),
+                filters: std::collections::HashMap::new(),
             },
         );
         mission.metadata = serde_json::json!({"self_improvement": true});

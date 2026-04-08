@@ -46,6 +46,7 @@ pub use types::thread::{Thread, ThreadConfig, ThreadId, ThreadState, ThreadType}
 pub use traits::effect::{EffectExecutor, ThreadExecutionContext};
 pub use traits::llm::{LlmBackend, LlmCallConfig, LlmOutput};
 pub use traits::store::Store;
+pub use traits::workspace::WorkspaceReader;
 
 // ── Re-exports: capability ────────────────────────────────────
 

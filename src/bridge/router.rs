@@ -746,11 +746,17 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         debug!("engine v2: bootstrap_user failed: {e}");
     }
 
-    // Create mission manager and start cron ticker
-    let mission_manager = Arc::new(MissionManager::new(
-        store_dyn.clone(),
-        Arc::clone(&thread_manager),
-    ));
+    // Create mission manager and start cron ticker. Attach a
+    // WorkspaceReader so missions with `context_paths` can preload workspace
+    // documents into their meta-prompt at fire time.
+    let mut mission_manager_inner =
+        MissionManager::new(store_dyn.clone(), Arc::clone(&thread_manager));
+    if let Some(workspace) = agent.workspace().cloned() {
+        let reader: Arc<dyn ironclaw_engine::WorkspaceReader> =
+            Arc::new(crate::bridge::WorkspaceReaderAdapter::new(workspace));
+        mission_manager_inner = mission_manager_inner.with_workspace_reader(reader);
+    }
+    let mission_manager = Arc::new(mission_manager_inner);
     if let Err(e) = thread_manager.recover_project_threads(project_id).await {
         debug!("engine v2: recover_project_threads failed: {e}");
     }
@@ -2552,12 +2558,17 @@ async fn handle_mission_notification(
 
     let full_text = format!("**[{}]** {text}", notif.mission_name);
 
+    // `notify_user` takes precedence over the mission owner's user_id when
+    // set — it lets a routine/mission deliver to a specific recipient
+    // (channel target) different from the mission's owning user.
+    let broadcast_user = notif.notify_user.as_deref().unwrap_or(&notif.user_id);
+
     for channel_name in &notif.notify_channels {
         // Send via channel broadcast (proactive, no incoming message required)
         if let Err(e) = channels
             .broadcast(
                 channel_name,
-                &notif.user_id,
+                broadcast_user,
                 OutgoingResponse::text(&full_text),
             )
             .await
