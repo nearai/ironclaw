@@ -374,6 +374,133 @@ impl ToolRegistry {
         tracing::debug!("Registered {} built-in tools", self.count());
     }
 
+    /// Load integration credential mappings from a JSON file.
+    ///
+    /// The file format is:
+    /// ```json
+    /// { "mappings": [{ "secret_name": "...", "location": {...}, "host_patterns": [...], "path_patterns": [...] }] }
+    /// ```
+    pub fn load_credential_mappings(&self, path: &std::path::Path) {
+        use crate::secrets::{CredentialLocation, CredentialMapping};
+
+        let cr = match &self.credential_registry {
+            Some(cr) => cr,
+            None => {
+                tracing::warn!("Cannot load credential mappings: no credential registry");
+                return;
+            }
+        };
+
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to read credential mappings from {}: {}",
+                    path.display(),
+                    e
+                );
+                return;
+            }
+        };
+
+        let json: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to parse credential mappings from {}: {}",
+                    path.display(),
+                    e
+                );
+                return;
+            }
+        };
+
+        let entries = match json.get("mappings").and_then(|v| v.as_array()) {
+            Some(arr) => arr,
+            None => {
+                tracing::warn!("No 'mappings' array in {}", path.display());
+                return;
+            }
+        };
+
+        let mut mappings = Vec::new();
+        for entry in entries {
+            let secret_name = match entry.get("secret_name").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let host_patterns: Vec<String> = entry
+                .get("host_patterns")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let location = match entry
+                .get("location")
+                .and_then(|v| v.get("type"))
+                .and_then(|v| v.as_str())
+            {
+                Some("bearer") => CredentialLocation::AuthorizationBearer,
+                Some("header") => {
+                    let name = match entry["location"]["name"].as_str() {
+                        Some(n) => n.to_string(),
+                        None => {
+                            tracing::warn!(
+                                "Skipping credential mapping '{}': header location missing 'name'",
+                                secret_name
+                            );
+                            continue;
+                        }
+                    };
+                    CredentialLocation::Header { name, prefix: None }
+                }
+                Some("query") => {
+                    let name = match entry["location"]["name"].as_str() {
+                        Some(n) => n.to_string(),
+                        None => {
+                            tracing::warn!(
+                                "Skipping credential mapping '{}': query location missing 'name'",
+                                secret_name
+                            );
+                            continue;
+                        }
+                    };
+                    CredentialLocation::QueryParam { name }
+                }
+                _ => continue,
+            };
+
+            let path_patterns: Vec<String> = entry
+                .get("path_patterns")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            mappings.push(CredentialMapping {
+                secret_name,
+                location,
+                host_patterns,
+                path_patterns,
+            });
+        }
+
+        let count = mappings.len();
+        cr.add_mappings(mappings);
+        tracing::info!(
+            "Loaded {} credential mappings from {}",
+            count,
+            path.display()
+        );
+    }
+
     /// Register the `tool_info` discovery tool.
     ///
     /// Requires `Arc<Self>` so the tool can query the registry for other tools'
