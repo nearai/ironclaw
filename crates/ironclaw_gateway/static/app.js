@@ -8954,10 +8954,11 @@ if (window.__IRONCLAW_LAYOUT__) {
       }
     }
 
-    // Apply default tab — switch to it if no hash navigation overrides
-    if (layout.tabs && layout.tabs.default_tab && !window.location.hash) {
-      switchTab(layout.tabs.default_tab);
-    }
+    // NOTE: `default_tab` is intentionally applied *after* the widget
+    // queue drains below — see the post-drain block. Applying it here
+    // would silently no-op for any widget-provided tab id, because
+    // `switchTab()` looks up `#tab-{id}` and the widget panel hasn't
+    // been mounted yet.
 
     // Apply chat config
     if (layout.chat) {
@@ -8980,4 +8981,22 @@ if (IronClaw._widgetInitQueue && IronClaw._widgetInitQueue.length > 0) {
     _addWidgetTab(def);
   });
   IronClaw._widgetInitQueue = [];
+}
+
+// Apply `default_tab` after the widget queue has drained.
+//
+// If a layout sets `tabs.default_tab` to a widget-provided id (say
+// "dashboard"), the corresponding `#tab-dashboard` panel does not exist
+// until `_addWidgetTab` runs. Calling `switchTab("dashboard")` from
+// inside the layout IIFE above (which runs first) used to silently
+// no-op — the user landed on the default built-in tab instead and the
+// `default_tab` setting appeared broken.
+//
+// Hash navigation still wins (so `#chat` deep-links survive a
+// customized default_tab) and we only switch if a layout was injected.
+if (window.__IRONCLAW_LAYOUT__
+    && window.__IRONCLAW_LAYOUT__.tabs
+    && window.__IRONCLAW_LAYOUT__.tabs.default_tab
+    && !window.location.hash) {
+  switchTab(window.__IRONCLAW_LAYOUT__.tabs.default_tab);
 }

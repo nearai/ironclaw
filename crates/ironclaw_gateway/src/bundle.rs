@@ -141,11 +141,28 @@ pub fn assemble_index(base_html: &str, bundle: &FrontendBundle) -> String {
     // gateway swaps it for a fresh per-response nonce that matches the
     // response's `Content-Security-Policy` header. Without the nonce the
     // browser blocks this inline script under the gateway's CSP.
-    if let Ok(layout_json) = serde_json::to_string(&bundle.layout) {
-        let safe_layout = escape_tag_close(&layout_json, "</script");
-        body_injections.push(format!(
-            "<script nonce=\"{NONCE_PLACEHOLDER}\">window.__IRONCLAW_LAYOUT__ = {safe_layout};</script>"
-        ));
+    match serde_json::to_string(&bundle.layout) {
+        Ok(layout_json) => {
+            let safe_layout = escape_tag_close(&layout_json, "</script");
+            body_injections.push(format!(
+                "<script nonce=\"{NONCE_PLACEHOLDER}\">window.__IRONCLAW_LAYOUT__ = {safe_layout};</script>"
+            ));
+        }
+        Err(e) => {
+            // `LayoutConfig` and every nested type derive `Serialize` cleanly,
+            // so this branch is unreachable on well-typed input. Surface it
+            // anyway — a silent drop here would mean the customized HTML
+            // ships without `window.__IRONCLAW_LAYOUT__`, and the IIFE in
+            // `app.js` would no-op all branding/tab/chat customizations
+            // without leaving a trace. A loud warn at the failure site is
+            // cheap insurance against a future refactor that introduces a
+            // serialization-fallible field.
+            tracing::warn!(
+                error = %e,
+                "failed to serialize LayoutConfig for window.__IRONCLAW_LAYOUT__ injection — \
+                 customizations will not apply"
+            );
+        }
     }
 
     // Widget CSS (scoped) and JS
