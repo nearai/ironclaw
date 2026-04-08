@@ -159,6 +159,9 @@ pub struct LlmConfig {
     /// Used by the NearAI provider for OAuth/session-token auth.
     pub session: SessionConfig,
     /// NEAR AI config (always populated, also used for embeddings).
+    /// Legacy chain-wide retry/circuit-breaker/cache fields remain here for
+    /// backward compatibility, but `build_provider_chain()` reads the
+    /// canonical top-level copies on `LlmConfig`.
     pub nearai: NearAiConfig,
     /// Resolved provider config for registry-based providers.
     /// `None` when backend is "nearai" or "bedrock".
@@ -173,6 +176,29 @@ pub struct LlmConfig {
     /// Default: 120. Increase for local LLMs (Ollama, vLLM, LM Studio) that
     /// need more time for prompt evaluation on consumer hardware.
     pub request_timeout_secs: u64,
+    /// Maximum retry count for chain-wide retry wrappers.
+    /// Primary env: `LLM_MAX_RETRIES`; legacy fallback: `NEARAI_MAX_RETRIES`.
+    pub max_retries: u32,
+    /// Circuit breaker threshold for chain-wide fast-fail protection.
+    /// Primary env: `LLM_CIRCUIT_BREAKER_THRESHOLD`; legacy fallback:
+    /// `CIRCUIT_BREAKER_THRESHOLD`.
+    pub circuit_breaker_threshold: Option<u32>,
+    /// Circuit breaker recovery timeout in seconds.
+    /// Primary env: `LLM_CIRCUIT_BREAKER_RECOVERY_SECS`; legacy fallback:
+    /// `CIRCUIT_BREAKER_RECOVERY_SECS`.
+    pub circuit_breaker_recovery_secs: u64,
+    /// Enable in-memory response caching for the chain.
+    /// Primary env: `LLM_RESPONSE_CACHE_ENABLED`; legacy fallback:
+    /// `RESPONSE_CACHE_ENABLED`.
+    pub response_cache_enabled: bool,
+    /// TTL in seconds for cached LLM responses.
+    /// Primary env: `LLM_RESPONSE_CACHE_TTL_SECS`; legacy fallback:
+    /// `RESPONSE_CACHE_TTL_SECS`.
+    pub response_cache_ttl_secs: u64,
+    /// Maximum number of cached LLM responses.
+    /// Primary env: `LLM_RESPONSE_CACHE_MAX_ENTRIES`; legacy fallback:
+    /// `RESPONSE_CACHE_MAX_ENTRIES`.
+    pub response_cache_max_entries: usize,
     /// Generic cheap/fast model for lightweight tasks (heartbeat, routing, evaluation).
     /// Works with any backend. Set via `LLM_CHEAP_MODEL` env var.
     /// When set, takes priority over the NearAI-specific `NEARAI_CHEAP_MODEL`.
@@ -200,6 +226,10 @@ impl LlmConfig {
 }
 
 /// NEAR AI configuration.
+///
+/// The chain-wide retry / circuit-breaker / response-cache settings remain
+/// here for backward compatibility, but the canonical copies used by
+/// `build_provider_chain()` live on `LlmConfig`.
 #[derive(Debug, Clone)]
 pub struct NearAiConfig {
     /// Model to use (e.g., "claude-3-5-sonnet-20241022", "gpt-4o")
