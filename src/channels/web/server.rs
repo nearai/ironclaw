@@ -469,6 +469,7 @@ pub async fn start_server(
     addr: SocketAddr,
     state: Arc<GatewayState>,
     auth: CombinedAuthState,
+    additional_routes: Vec<Router>,
 ) -> Result<SocketAddr, crate::error::ChannelError> {
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
         crate::error::ChannelError::StartupFailed {
@@ -856,6 +857,16 @@ pub async fn start_server(
             ),
         ))
         .with_state(state.clone());
+
+    // Merge webhook routes (WASM channels, HTTP channel, etc.) so they are
+    // reachable on the gateway port.  These routes already have their own
+    // state applied and use channel-specific auth (HMAC, Ed25519, secret
+    // headers), bypassing gateway bearer-token auth.  The separate
+    // WebhookServer still runs for tunnel-based setups.
+    let mut app = app;
+    for route in additional_routes {
+        app = app.merge(route);
+    }
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     *state.shutdown_tx.write().await = Some(shutdown_tx);
@@ -4131,7 +4142,7 @@ mod tests {
             "test-token".to_string(),
             "test".to_string(),
         ));
-        let bound = start_server(addr, state.clone(), auth)
+        let bound = start_server(addr, state.clone(), auth, Vec::new())
             .await
             .expect("server should start");
 

@@ -100,7 +100,7 @@ mod tests {
         });
 
         let addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
-        start_server(addr, state, auth.into())
+        start_server(addr, state, auth.into(), Vec::new())
             .await
             .expect("start server")
     }

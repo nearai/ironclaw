@@ -83,7 +83,7 @@ async fn start_test_server() -> (
         "test-user".to_string(),
     );
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let bound_addr = start_server(addr, state.clone(), auth.into())
+    let bound_addr = start_server(addr, state.clone(), auth.into(), Vec::new())
         .await
         .expect("Failed to start test server");
 

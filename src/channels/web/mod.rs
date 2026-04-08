@@ -68,6 +68,9 @@ pub struct GatewayChannel {
     state: Arc<GatewayState>,
     /// Combined auth state: env-var tokens + optional DB-backed tokens.
     auth: CombinedAuthState,
+    /// Extra axum routes (e.g. webhook routes) merged into the gateway server
+    /// so they are reachable on the same port as the web UI.
+    webhook_routes: Vec<axum::Router>,
 }
 
 impl GatewayChannel {
@@ -153,7 +156,17 @@ impl GatewayChannel {
             config,
             state,
             auth,
+            webhook_routes: Vec::new(),
         }
+    }
+
+    /// Add webhook routes that will be merged into the gateway server.
+    ///
+    /// These routes use their own channel-specific auth (HMAC, Ed25519,
+    /// secret headers) and bypass the gateway's bearer-token auth.
+    pub fn with_webhook_routes(mut self, routes: Vec<axum::Router>) -> Self {
+        self.webhook_routes = routes;
+        self
     }
 
     /// Helper to rebuild state, copying existing fields and applying a mutation.
@@ -512,7 +525,13 @@ impl Channel for GatewayChannel {
                 ),
             })?;
 
-        server::start_server(addr, self.state.clone(), self.auth.clone()).await?;
+        server::start_server(
+            addr,
+            self.state.clone(),
+            self.auth.clone(),
+            self.webhook_routes.clone(),
+        )
+        .await?;
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }

@@ -311,6 +311,7 @@ impl GatewayWorkflowHarness {
             "127.0.0.1:0".parse().expect("valid localhost addr"),
             Arc::clone(&gateway_state),
             auth.into(),
+            Vec::new(),
         )
         .await
         .expect("failed to start gateway server");

@@ -552,8 +552,8 @@ async fn async_main() -> anyhow::Result<()> {
             );
         }
         let mut server = WebhookServer::new(WebhookServerConfig { addr });
-        for routes in webhook_routes {
-            server.add_routes(routes);
+        for routes in &webhook_routes {
+            server.add_routes(routes.clone());
         }
         server.start().await?;
         Some(Arc::new(tokio::sync::Mutex::new(server)))
@@ -795,6 +795,10 @@ async fn async_main() -> anyhow::Result<()> {
         ));
 
         tracing::debug!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
+
+        // Merge webhook routes into the gateway so they are reachable on the
+        // same port (needed for single-port deployments like Railway).
+        gw = gw.with_webhook_routes(webhook_routes.clone());
 
         // Capture SSE sender and routine engine slot before moving gw into channels.
         // IMPORTANT: This must come after all `with_*` calls since `rebuild_state`

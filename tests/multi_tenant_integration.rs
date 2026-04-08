@@ -660,7 +660,7 @@ async fn start_owner_scoped_sender_server() -> (
 
     let auth = MultiAuthState::multi(tokens).into();
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let bound = start_server(addr, state.clone(), auth)
+    let bound = start_server(addr, state.clone(), auth, Vec::new())
         .await
         .expect("Failed to start owner-scoped sender test server");
 
@@ -1054,9 +1054,10 @@ async fn start_multi_user_server_with_db() -> (
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let bound = ironclaw::channels::web::server::start_server(addr, state.clone(), auth.into())
-        .await
-        .expect("Failed to start server with DB");
+    let bound =
+        ironclaw::channels::web::server::start_server(addr, state.clone(), auth.into(), Vec::new())
+            .await
+            .expect("Failed to start server with DB");
 
     (bound, state, db, temp_dir)
 }
