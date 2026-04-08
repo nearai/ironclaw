@@ -324,13 +324,9 @@ pub async fn settings_import_handler(
 }
 
 fn is_admin_only_setting_key(key: &str) -> bool {
-    matches!(
-        key,
-        "llm_builtin_overrides"
-            | "llm_custom_providers"
-            | "ollama_base_url"
-            | "openai_compatible_base_url"
-    )
+    // Single source of truth lives in `crate::config::helpers` so the
+    // write-side gate here cannot drift from the read-side strip filter.
+    crate::config::helpers::ADMIN_ONLY_LLM_SETTING_KEYS.contains(&key)
 }
 
 fn ensure_setting_write_allowed(
