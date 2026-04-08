@@ -3860,6 +3860,7 @@ mod tests {
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
+                drift: crate::agent::drift_monitor::DriftConfig::default(),
                 engine_v2: true,
             },
             deps,
