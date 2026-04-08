@@ -91,26 +91,46 @@ impl MissionManager {
             if mission.status != MissionStatus::Active {
                 continue;
             }
-            // Backfill next_fire_at for cron missions that predate the scheduling fix.
+            // Backfill next_fire_at for cron missions that predate the
+            // scheduling fix. Match all three branches of next_cron_fire so a
+            // mission with an unschedulable cron (Ok(None) — e.g. a year-locked
+            // expression in the past) or an invalid expression (Err) is at
+            // least observable in the logs instead of silently staying stuck.
             if let MissionCadence::Cron {
                 ref expression,
                 ref timezone,
             } = mission.cadence
                 && mission.next_fire_at.is_none()
-                && let Ok(Some(next)) = next_cron_fire(expression, timezone.as_ref())
             {
-                let mut patched = mission.clone();
-                patched.next_fire_at = Some(next);
-                match self.store.save_mission(&patched).await {
-                    Ok(()) => debug!(
+                match next_cron_fire(expression, timezone.as_ref()) {
+                    Ok(Some(next)) => {
+                        let mut patched = mission.clone();
+                        patched.next_fire_at = Some(next);
+                        match self.store.save_mission(&patched).await {
+                            Ok(()) => debug!(
+                                mission_id = %mission.id,
+                                next = %next,
+                                "backfilled next_fire_at for legacy cron mission"
+                            ),
+                            Err(e) => debug!(
+                                mission_id = %mission.id,
+                                error = %e,
+                                "failed to persist next_fire_at backfill; mission will retry on next bootstrap"
+                            ),
+                        }
+                    }
+                    Ok(None) => debug!(
                         mission_id = %mission.id,
-                        next = %next,
-                        "backfilled next_fire_at for legacy cron mission"
+                        expression = %expression,
+                        timezone = ?timezone,
+                        "legacy cron mission has no upcoming fire time; leaving next_fire_at unset"
                     ),
                     Err(e) => debug!(
                         mission_id = %mission.id,
+                        expression = %expression,
+                        timezone = ?timezone,
                         error = %e,
-                        "failed to persist next_fire_at backfill; mission will retry on next bootstrap"
+                        "failed to compute next_fire_at for legacy cron mission; leaving next_fire_at unset"
                     ),
                 }
             }
