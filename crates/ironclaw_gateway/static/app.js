@@ -8925,10 +8925,21 @@ if (window.__IRONCLAW_LAYOUT__) {
       if (titleEl) titleEl.textContent = layout.branding.title;
     }
 
-    // Apply tab visibility — hide specified tabs
+    // Apply tab visibility — hide specified tabs.
+    //
+    // The selector must match BOTH built-in tab buttons (rendered in
+    // `index.html` as plain `<button data-tab="…">`, no class) and
+    // widget-injected tab buttons (created by `_addWidgetTab` with
+    // `class="tab-btn"`). The earlier `.tab-btn[data-tab=…]` form only
+    // matched widget tabs, so `tabs.hidden: ["routines"]` (a built-in)
+    // silently no-opped. Scope the selector to `.tab-bar` so a stray
+    // `<button data-tab>` elsewhere on the page can't be hidden by
+    // accident, then accept any descendant button.
     if (layout.tabs && layout.tabs.hidden) {
       layout.tabs.hidden.forEach(function(tabId) {
-        var btn = document.querySelector('.tab-btn[data-tab="' + tabId + '"]');
+        var btn = document.querySelector(
+          '.tab-bar button[data-tab="' + tabId + '"]'
+        );
         if (btn) btn.style.display = 'none';
       });
     }
@@ -8967,8 +8978,16 @@ if (window.__IRONCLAW_LAYOUT__) {
         if (chips) chips.style.display = 'none';
       }
       if (layout.chat.image_upload === false) {
-        var imgBtn = document.getElementById('image-upload-btn');
-        if (imgBtn) imgBtn.style.display = 'none';
+        // The visible affordance is `#attach-btn` (the paperclip in the
+        // composer); the file input it triggers is `#image-file-input`.
+        // Hide the button AND disable the input — hiding the button alone
+        // wouldn't stop a programmatic `document.getElementById('image-file-input').click()`,
+        // and operators that flip this flag almost always want the
+        // capability gone, not just the chrome.
+        var attachBtn = document.getElementById('attach-btn');
+        if (attachBtn) attachBtn.style.display = 'none';
+        var imgInput = document.getElementById('image-file-input');
+        if (imgInput) imgInput.disabled = true;
       }
     }
   })();
