@@ -11,13 +11,11 @@ use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use axum::{
     Json,
-    extract::{State, WebSocketUpgrade},
-    http::StatusCode,
     extract::{Query, State, WebSocketUpgrade},
     http::{HeaderMap, HeaderName, StatusCode},
     response::IntoResponse,
 };
-
+use serde::Deserialize;
 // ── Shared helpers used by server.rs handlers ──────────────────────────
 
 /// Clear pending auth mode on the active thread.
