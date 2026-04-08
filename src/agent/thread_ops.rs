@@ -203,6 +203,19 @@ impl Agent {
                 };
 
                 if requires_preexisting_uuid_thread(&message.channel) {
+                    // Allow new threads from the Responses API — it generates
+                    // fresh UUIDs that don't exist in the DB yet.
+                    if !exists
+                        && message.metadata.get("source").and_then(|v| v.as_str())
+                            == Some("responses_api")
+                    {
+                        tracing::debug!(
+                            user = %message.user_id,
+                            thread_id = %thread_uuid,
+                            "Allowing new thread from Responses API"
+                        );
+                        return None;
+                    }
                     tracing::warn!(
                         user = %message.user_id,
                         channel = %message.channel,

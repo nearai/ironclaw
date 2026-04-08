@@ -64,6 +64,14 @@ pub struct ResponsesRequest {
     pub tools: Option<Vec<ResponsesTool>>,
     #[serde(default)]
     pub tool_choice: Option<serde_json::Value>,
+    /// IronClaw extension: structured context injected into the agent's conversation.
+    ///
+    /// NOT part of the OpenAI Responses API spec. Used by integrations
+    /// (e.g. Abound) to pass notification responses, approval/rejection
+    /// status, or other structured data. Must be a flat `{key: {flat_object}}`
+    /// structure — nested objects are serialized as raw JSON.
+    #[serde(default, alias = "context")]
+    pub x_context: Option<serde_json::Value>,
 }
 
 fn default_model() -> String {
@@ -297,6 +305,35 @@ fn unix_timestamp() -> i64 {
 
 fn make_item_id() -> String {
     format!("item_{}", Uuid::new_v4().simple())
+}
+
+/// Format structured context as a human-readable prefix for the agent.
+fn format_context(ctx: &serde_json::Value) -> String {
+    let obj = match ctx.as_object() {
+        Some(o) => o,
+        None => return format!("[Context: {}]", ctx),
+    };
+    let mut parts = Vec::new();
+    for (key, value) in obj {
+        let detail = match value.as_object() {
+            Some(inner) => {
+                let fields: Vec<String> = inner
+                    .iter()
+                    .map(|(k, v)| {
+                        let s = match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        format!("{k}: {s}")
+                    })
+                    .collect();
+                format!("[Context: {key} \u{2014} {}]", fields.join(", "))
+            }
+            None => format!("[Context: {key}: {value}]"),
+        };
+        parts.push(detail);
+    }
+    parts.join("\n")
 }
 
 /// Extract the user message text from the input.
@@ -622,8 +659,14 @@ pub async fn create_response_handler(
         ));
     }
 
-    let content = extract_user_content(&req.input)
+    let mut content = extract_user_content(&req.input)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
+
+    // Prepend structured context (e.g. notification approval/rejection)
+    if let Some(ref ctx) = req.x_context {
+        let prefix = format_context(ctx);
+        content = format!("{prefix}\n\n{content}");
+    }
 
     // Resolve or create thread.
     let thread_uuid = match &req.previous_response_id {
@@ -640,13 +683,17 @@ pub async fn create_response_handler(
     let response_uuid = Uuid::new_v4();
 
     // Build the message for the agent loop.
+    let mut metadata = serde_json::json!({
+        "thread_id": &thread_id_str,
+        "user_id": &user.user_id,
+        "source": "responses_api",
+    });
+    if let Some(ref ctx) = req.x_context {
+        metadata["context"] = ctx.clone();
+    }
     let msg = IncomingMessage::new("gateway", &user.user_id, &content)
         .with_thread(&thread_id_str)
-        .with_metadata(serde_json::json!({
-            "thread_id": &thread_id_str,
-            "user_id": &user.user_id,
-            "source": "responses_api",
-        }));
+        .with_metadata(metadata);
 
     let resp_id = encode_response_id(&response_uuid, &thread_uuid);
     let model = req.model.clone();
@@ -974,50 +1021,61 @@ async fn streaming_worker(
                     content.clone()
                 };
                 if !text.is_empty() {
-                    match message_output_index {
-                        Some(idx) => {
-                            acc.output[idx] = ResponseOutputItem::Message {
-                                id: make_item_id(),
-                                role: "assistant".to_string(),
-                                content: vec![MessageContent::OutputText { text }],
-                            };
-                            if let Some(item) = acc.output.get(idx) {
-                                emit(
-                                    &tx,
-                                    "response.output_item.done",
-                                    &ResponseStreamEvent::OutputItemDone {
-                                        output_index: idx,
-                                        item: item.clone(),
-                                    },
-                                );
-                            }
-                        }
+                    let idx = match message_output_index {
+                        Some(i) => i,
                         None => {
-                            let idx = acc.output.len();
-                            let item = ResponseOutputItem::Message {
+                            // Create the output item first.
+                            let i = acc.output.len();
+                            let placeholder = ResponseOutputItem::Message {
                                 id: make_item_id(),
                                 role: "assistant".to_string(),
-                                content: vec![MessageContent::OutputText { text }],
+                                content: vec![MessageContent::OutputText {
+                                    text: String::new(),
+                                }],
                             };
                             emit(
                                 &tx,
                                 "response.output_item.added",
                                 &ResponseStreamEvent::OutputItemAdded {
-                                    output_index: idx,
-                                    item: item.clone(),
+                                    output_index: i,
+                                    item: placeholder.clone(),
                                 },
                             );
-                            emit(
-                                &tx,
-                                "response.output_item.done",
-                                &ResponseStreamEvent::OutputItemDone {
-                                    output_index: idx,
-                                    item: item.clone(),
-                                },
-                            );
-                            acc.output.push(item);
+                            acc.output.push(placeholder);
+                            i
                         }
+                    };
+
+                    // Emit the full text as a delta so streaming clients
+                    // receive it via response.output_text.delta, but only
+                    // when StreamChunks haven't already delivered the content.
+                    if acc.text_chunks.is_empty() {
+                        emit(
+                            &tx,
+                            "response.output_text.delta",
+                            &ResponseStreamEvent::OutputTextDelta {
+                                output_index: idx,
+                                content_index: 0,
+                                delta: text.clone(),
+                            },
+                        );
                     }
+
+                    // Finalize the output item with the complete text.
+                    let item = ResponseOutputItem::Message {
+                        id: make_item_id(),
+                        role: "assistant".to_string(),
+                        content: vec![MessageContent::OutputText { text }],
+                    };
+                    acc.output[idx] = item.clone();
+                    emit(
+                        &tx,
+                        "response.output_item.done",
+                        &ResponseStreamEvent::OutputItemDone {
+                            output_index: idx,
+                            item,
+                        },
+                    );
                 }
             }
 
@@ -1471,5 +1529,29 @@ mod tests {
         assert_eq!(json, "\"in_progress\"");
         let json = serde_json::to_string(&ResponseStatus::Completed).expect("serialize");
         assert_eq!(json, "\"completed\"");
+    }
+
+    #[test]
+    fn format_context_notification_response() {
+        let ctx = serde_json::json!({
+            "notification_response": {
+                "notification_id": "msg_123",
+                "action": "approved",
+                "score": 72
+            }
+        });
+        let result = format_context(&ctx);
+        assert!(result.contains("[Context: notification_response"));
+        assert!(result.contains("notification_id: msg_123"));
+        assert!(result.contains("action: approved"));
+        assert!(result.contains("score: 72"));
+    }
+
+    #[test]
+    fn format_context_simple_value() {
+        let ctx = serde_json::json!({"status": "ok"});
+        let result = format_context(&ctx);
+        assert!(result.contains("status"));
+        assert!(result.contains("ok"));
     }
 }
