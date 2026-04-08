@@ -67,7 +67,8 @@ pub use embeddings::{
 #[cfg(feature = "postgres")]
 pub use repository::Repository;
 pub use search::{
-    FusionStrategy, RankedResult, SearchConfig, SearchResult, fuse_results, reciprocal_rank_fusion,
+    FusionStrategy, RankedResult, SearchConfig, SearchDetailLevel, SearchResult, fuse_results,
+    reciprocal_rank_fusion,
 };
 
 /// Result of a layer-aware write operation.
@@ -89,7 +90,12 @@ use deadpool_postgres::Pool;
 use uuid::Uuid;
 
 use crate::error::WorkspaceError;
+use crate::llm::error::LlmError;
+use crate::llm::retry::{is_retryable, retry_backoff_delay};
+use crate::llm::{ChatMessage, CompletionRequest, LlmProvider};
+use crate::util::floor_char_boundary;
 use ironclaw_safety::{Sanitizer, Severity};
+use tokio::time::sleep;
 
 /// Files injected into the system prompt. Writes to these are scanned for
 /// prompt injection patterns and rejected if high-severity matches are found.
@@ -148,6 +154,11 @@ fn is_engine_runtime_path(path: &str) -> bool {
 
 /// Shared sanitizer instance — avoids rebuilding Aho-Corasick + regexes on every write.
 static SANITIZER: std::sync::LazyLock<Sanitizer> = std::sync::LazyLock::new(Sanitizer::new);
+
+/// Default number of documents to backfill summaries for on startup.
+const DEFAULT_SUMMARY_BACKFILL_LIMIT: usize = 50;
+/// Upper bound on document content passed to the summarizer.
+const SUMMARY_INPUT_MAX_BYTES: usize = 32 * 1024;
 
 /// Scan content for prompt injection. Returns `Err` if high-severity patterns
 /// are detected, otherwise logs warnings and returns `Ok(())`.
@@ -241,6 +252,25 @@ impl WorkspaceStorage {
             #[cfg(feature = "postgres")]
             Self::Repo(repo) => repo.update_document(id, content).await,
             Self::Db(db) => db.update_document(id, content).await,
+        }
+    }
+
+    async fn update_document_summaries(
+        &self,
+        id: Uuid,
+        summary_l0: Option<&str>,
+        summary_l1: Option<&str>,
+    ) -> Result<(), WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => {
+                repo.update_document_summaries(id, summary_l0, summary_l1)
+                    .await
+            }
+            Self::Db(db) => {
+                db.update_document_summaries(id, summary_l0, summary_l1)
+                    .await
+            }
         }
     }
 
@@ -404,6 +434,19 @@ impl WorkspaceStorage {
         }
     }
 
+    async fn list_documents(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        limit: Option<usize>,
+    ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => repo.list_documents(user_id, agent_id, limit).await,
+            Self::Db(db) => db.list_documents(user_id, agent_id, limit).await,
+        }
+    }
+
     // ==================== Metadata ====================
 
     async fn update_document_metadata(
@@ -539,6 +582,8 @@ pub struct Workspace {
     storage: WorkspaceStorage,
     /// Embedding provider for semantic search.
     embeddings: Option<Arc<dyn EmbeddingProvider>>,
+    /// Optional LLM provider for summary generation/backfill.
+    summary_llm: Option<Arc<dyn LlmProvider>>,
     /// Set by `seed_if_empty()` when BOOTSTRAP.md is freshly seeded.
     /// The agent loop checks and clears this to send a proactive greeting.
     bootstrap_pending: std::sync::atomic::AtomicBool,
@@ -573,6 +618,7 @@ impl Workspace {
             agent_id: None,
             storage: WorkspaceStorage::Repo(Repository::new(pool)),
             embeddings: None,
+            summary_llm: None,
             bootstrap_pending: std::sync::atomic::AtomicBool::new(false),
             bootstrap_completed: std::sync::atomic::AtomicBool::new(false),
             search_defaults: SearchConfig::default(),
@@ -595,6 +641,7 @@ impl Workspace {
             agent_id: None,
             storage: WorkspaceStorage::Db(db),
             embeddings: None,
+            summary_llm: None,
             bootstrap_pending: std::sync::atomic::AtomicBool::new(false),
             bootstrap_completed: std::sync::atomic::AtomicBool::new(false),
             search_defaults: SearchConfig::default(),
@@ -663,6 +710,12 @@ impl Workspace {
         self
     }
 
+    /// Set the optional LLM provider used for summary generation.
+    pub fn with_llm(mut self, provider: Arc<dyn LlmProvider>) -> Self {
+        self.summary_llm = Some(provider);
+        self
+    }
+
     /// Set the default search configuration from workspace search config.
     pub fn with_search_config(mut self, config: &crate::config::WorkspaceSearchConfig) -> Self {
         self.search_defaults = SearchConfig::default()
@@ -671,6 +724,11 @@ impl Workspace {
             .with_fts_weight(config.fts_weight)
             .with_vector_weight(config.vector_weight);
         self
+    }
+
+    /// Get the default search configuration applied to workspace queries.
+    pub fn search_defaults(&self) -> &SearchConfig {
+        &self.search_defaults
     }
 
     /// Configure memory layers for this workspace.
@@ -776,6 +834,7 @@ impl Workspace {
             agent_id: self.agent_id,
             storage: self.storage.clone(),
             embeddings: self.embeddings.clone(),
+            summary_llm: self.summary_llm.clone(),
             bootstrap_pending: std::sync::atomic::AtomicBool::new(if preserve_flags {
                 self.bootstrap_pending
                     .load(std::sync::atomic::Ordering::Acquire)
@@ -1132,6 +1191,8 @@ impl Workspace {
         self.storage.update_document(doc.id, content).await?;
         self.reindex_document_with_metadata(doc.id, Some(&metadata))
             .await?;
+        self.refresh_summaries_after_write(doc.id, path.clone(), content.to_string())
+            .await;
 
         // Return updated doc
         self.storage.get_document_by_id(doc.id).await
@@ -1181,6 +1242,8 @@ impl Workspace {
         self.storage.update_document(doc.id, &new_content).await?;
         self.reindex_document_with_metadata(doc.id, Some(&metadata))
             .await?;
+        self.refresh_summaries_after_write(doc.id, path.clone(), new_content)
+            .await;
         Ok(())
     }
 
@@ -1275,6 +1338,8 @@ impl Workspace {
         self.storage.update_document(doc.id, content).await?;
         self.reindex_document_with_metadata(doc.id, Some(&metadata))
             .await?;
+        self.refresh_summaries_after_write(doc.id, path.clone(), content.to_string())
+            .await;
         let document = self.storage.get_document_by_id(doc.id).await?;
         Ok(WriteResult {
             document,
@@ -1327,6 +1392,8 @@ impl Workspace {
         self.storage.update_document(doc.id, &new_content).await?;
         self.reindex_document_with_metadata(doc.id, Some(&metadata))
             .await?;
+        self.refresh_summaries_after_write(doc.id, path.clone(), new_content)
+            .await;
         let document = self.storage.get_document_by_id(doc.id).await?;
         Ok(WriteResult {
             document,
@@ -1541,6 +1608,8 @@ impl Workspace {
         self.storage.update_document(doc.id, &new_content).await?;
         self.reindex_document_with_metadata(doc.id, Some(&metadata))
             .await?;
+        self.refresh_summaries_after_write(doc.id, paths::MEMORY.to_string(), new_content)
+            .await;
         Ok(())
     }
 
@@ -2010,8 +2079,14 @@ impl Workspace {
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchResult>, WorkspaceError> {
-        self.search_with_config(query, self.search_defaults.clone().with_limit(limit))
-            .await
+        self.search_with_config(
+            query,
+            self.search_defaults
+                .clone()
+                .with_limit(limit)
+                .with_detail(SearchDetailLevel::L1),
+        )
+        .await
     }
 
     /// Search with custom configuration.
@@ -2134,6 +2209,37 @@ impl Workspace {
         }
 
         Ok(())
+    }
+
+    /// Refresh summary tiers for a document after a content write.
+    async fn refresh_summaries_after_write(
+        &self,
+        document_id: Uuid,
+        path: String,
+        content: String,
+    ) {
+        let Some(llm) = self.summary_llm.as_ref() else {
+            return;
+        };
+        if content.split_whitespace().count() < SUMMARY_MIN_WORDS {
+            return;
+        }
+
+        if let Err(e) = refresh_document_summaries(
+            self.storage.clone(),
+            Arc::clone(llm),
+            document_id,
+            path,
+            content,
+        )
+        .await
+        {
+            tracing::warn!(
+                document_id = %document_id,
+                "Failed to refresh workspace summaries: {}",
+                e
+            );
+        }
     }
 
     // ==================== Seeding ====================
@@ -2386,6 +2492,185 @@ impl Workspace {
 
         Ok(count)
     }
+
+    /// Backfill missing summary tiers for existing documents.
+    pub async fn backfill_summaries(&self) -> Result<usize, WorkspaceError> {
+        let Some(ref llm) = self.summary_llm else {
+            return Ok(0);
+        };
+
+        let backfill_limit = summary_backfill_limit();
+        if backfill_limit == 0 {
+            tracing::info!("Summary backfill disabled via SUMMARY_BACKFILL_LIMIT=0");
+            return Ok(0);
+        }
+
+        let docs = self
+            .storage
+            .list_documents(&self.user_id, self.agent_id, Some(backfill_limit))
+            .await?;
+        let docs_len = docs.len();
+
+        let mut count = 0;
+        for doc in docs {
+            if doc.word_count() < SUMMARY_MIN_WORDS {
+                continue;
+            }
+            if doc.summary_l0.is_some() && doc.summary_l1.is_some() {
+                continue;
+            }
+
+            match refresh_document_summaries(
+                self.storage.clone(),
+                Arc::clone(llm),
+                doc.id,
+                doc.path.clone(),
+                doc.content.clone(),
+            )
+            .await
+            {
+                Ok(()) => {
+                    count += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        document_id = %doc.id,
+                        path = %doc.path,
+                        "Failed to backfill workspace summaries: {}",
+                        e
+                    );
+                }
+            }
+        }
+
+        if docs_len == backfill_limit {
+            tracing::info!(
+                limit = backfill_limit,
+                "Summary backfill reached configured startup limit"
+            );
+        }
+
+        Ok(count)
+    }
+}
+
+const SUMMARY_MIN_WORDS: usize = 200;
+
+const SUMMARY_PROMPT: &str = r#"You are summarizing a document from a personal knowledge base.
+
+Produce two summaries in JSON only. Be specific and concise.
+
+- l0: exactly one sentence, at most 30 words
+- l1: structured overview, at most 500 words, with the most important facts, decisions, entities, dates, and action items
+
+Return exactly:
+{"l0":"...","l1":"..."}"#;
+
+fn extract_json_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    if end < start {
+        return None;
+    }
+    Some(text[start..=end].trim())
+}
+
+async fn generate_document_summaries(
+    llm: &Arc<dyn LlmProvider>,
+    path: &str,
+    content: &str,
+) -> Result<(String, String), WorkspaceError> {
+    let (content_for_prompt, truncated) = truncate_summary_input(content);
+    let truncation_note = if truncated {
+        format!(
+            "\nNOTE: Document content was truncated to the first {} bytes before summarization.\n",
+            SUMMARY_INPUT_MAX_BYTES
+        )
+    } else {
+        String::new()
+    };
+    let prompt = format!(
+        "{SUMMARY_PROMPT}\n\nDOCUMENT PATH: {path}\n{truncation_note}DOCUMENT CONTENT:\n---\n{content_for_prompt}\n---\n"
+    );
+    let request = CompletionRequest::new(vec![
+        ChatMessage::system("You produce compact JSON summaries for workspace documents."),
+        ChatMessage::user(prompt),
+    ])
+    .with_temperature(0.2)
+    .with_max_tokens(1024);
+
+    let response = complete_summary_request(llm, request).await?;
+
+    let json_text = extract_json_object(&response.content).ok_or_else(|| {
+        WorkspaceError::SummaryGenerationFailed {
+            reason: "Summary generation returned no JSON object".to_string(),
+        }
+    })?;
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(json_text).map_err(|e| WorkspaceError::SummaryGenerationFailed {
+            reason: format!("Summary generation returned invalid JSON: {e}"),
+        })?;
+
+    let l0 = parsed.get("l0").and_then(|v| v.as_str()).ok_or_else(|| {
+        WorkspaceError::SummaryGenerationFailed {
+            reason: "Summary generation missing l0".to_string(),
+        }
+    })?;
+    let l1 = parsed.get("l1").and_then(|v| v.as_str()).ok_or_else(|| {
+        WorkspaceError::SummaryGenerationFailed {
+            reason: "Summary generation missing l1".to_string(),
+        }
+    })?;
+
+    Ok((l0.trim().to_string(), l1.trim().to_string()))
+}
+
+async fn refresh_document_summaries(
+    storage: WorkspaceStorage,
+    llm: Arc<dyn LlmProvider>,
+    document_id: Uuid,
+    path: String,
+    content: String,
+) -> Result<(), WorkspaceError> {
+    if content.split_whitespace().count() < SUMMARY_MIN_WORDS {
+        return Ok(());
+    }
+
+    let (summary_l0, summary_l1) = generate_document_summaries(&llm, &path, &content).await?;
+
+    let current_content = storage
+        .get_document_by_id(document_id)
+        .await
+        .map_err(|e| WorkspaceError::SummaryGenerationFailed {
+            reason: format!("Failed to re-read document before storing summaries: {}", e),
+        })?
+        .content;
+    if current_content != content {
+        return Err(WorkspaceError::SummaryGenerationFailed {
+            reason: "Document changed during summary generation; skipping stale summaries"
+                .to_string(),
+        });
+    }
+
+    reject_if_injected(&format!("{path}#summary_l0"), &summary_l0).map_err(|e| {
+        WorkspaceError::SummaryGenerationFailed {
+            reason: format!("Summary L0 rejected by prompt-injection guard: {}", e),
+        }
+    })?;
+    reject_if_injected(&format!("{path}#summary_l1"), &summary_l1).map_err(|e| {
+        WorkspaceError::SummaryGenerationFailed {
+            reason: format!("Summary L1 rejected by prompt-injection guard: {}", e),
+        }
+    })?;
+
+    storage
+        .update_document_summaries(document_id, Some(&summary_l0), Some(&summary_l1))
+        .await
+        .map_err(|e| WorkspaceError::SummaryGenerationFailed {
+            reason: format!("Summary persistence failed: {}", e),
+        })?;
+    Ok(())
 }
 
 /// Find the nearest ancestor `.config` document for a given path.
@@ -2413,6 +2698,70 @@ fn find_nearest_config(path: &str, configs: &[MemoryDocument]) -> Option<serde_j
 
     // Check root-level .config
     config_map.get(CONFIG_FILE_NAME).map(|m| (*m).clone())
+}
+
+async fn complete_summary_request(
+    llm: &Arc<dyn LlmProvider>,
+    request: CompletionRequest,
+) -> Result<crate::llm::CompletionResponse, WorkspaceError> {
+    let mut last_error: Option<LlmError> = None;
+
+    for attempt in 0..3u32 {
+        match llm.complete(request.clone()).await {
+            Ok(response) => return Ok(response),
+            Err(err) if is_retryable(&err) && attempt < 2 => {
+                let delay = retry_backoff_delay(attempt);
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    delay_ms = delay.as_millis(),
+                    error = %err,
+                    "Summary generation failed transiently; retrying"
+                );
+                last_error = Some(err);
+                sleep(delay).await;
+            }
+            Err(err) => {
+                return Err(WorkspaceError::SummaryGenerationFailed {
+                    reason: format!("LLM request failed: {}", err),
+                });
+            }
+        }
+    }
+
+    Err(WorkspaceError::SummaryGenerationFailed {
+        reason: format!(
+            "LLM request failed after retries: {}",
+            last_error
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown error".to_string())
+        ),
+    })
+}
+
+fn truncate_summary_input(content: &str) -> (&str, bool) {
+    if content.len() <= SUMMARY_INPUT_MAX_BYTES {
+        (content, false)
+    } else {
+        let end = floor_char_boundary(content, SUMMARY_INPUT_MAX_BYTES);
+        (&content[..end], true)
+    }
+}
+
+fn summary_backfill_limit() -> usize {
+    match std::env::var("SUMMARY_BACKFILL_LIMIT") {
+        Ok(value) => match value.trim().parse::<usize>() {
+            Ok(limit) => limit,
+            Err(e) => {
+                tracing::warn!(
+                    value = %value,
+                    error = %e,
+                    "Invalid SUMMARY_BACKFILL_LIMIT; using default"
+                );
+                DEFAULT_SUMMARY_BACKFILL_LIMIT
+            }
+        },
+        Err(_) => DEFAULT_SUMMARY_BACKFILL_LIMIT,
+    }
 }
 
 /// Normalize a file path (remove leading/trailing slashes, collapse //).
@@ -2443,7 +2792,10 @@ fn normalize_directory(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::testing::StubLlm;
 
     #[test]
     fn test_normalize_path() {
@@ -2460,6 +2812,31 @@ mod tests {
         assert_eq!(normalize_directory("foo/bar"), "foo/bar");
         assert_eq!(normalize_directory("/"), "");
         assert_eq!(normalize_directory(""), "");
+    }
+
+    #[tokio::test]
+    async fn test_generate_document_summaries_parses_json_response() {
+        let llm: Arc<dyn LlmProvider> = Arc::new(StubLlm::new(
+            "ignored preface {\"l0\":\"one line\",\"l1\":\"structured overview\"} trailing noise",
+        ));
+
+        let (l0, l1) = generate_document_summaries(&llm, "docs/test.md", "alpha beta gamma")
+            .await
+            .expect("summary generation");
+
+        assert_eq!(l0, "one line");
+        assert_eq!(l1, "structured overview");
+    }
+
+    #[test]
+    fn test_truncate_summary_input_respects_char_boundaries() {
+        let prefix = "a".repeat(SUMMARY_INPUT_MAX_BYTES - 1);
+        let content = format!("{prefix}é");
+
+        let (truncated, was_truncated) = truncate_summary_input(&content);
+
+        assert!(was_truncated);
+        assert_eq!(truncated, prefix);
     }
 
     // ── Fix 1: merge_profile_section tests ─────────────────────────

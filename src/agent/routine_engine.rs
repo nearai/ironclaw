@@ -607,10 +607,12 @@ impl RoutineEngine {
     /// Finalize a dispatched routine run: update DB, update routine runtime,
     /// persist to conversation thread, and send notification.
     async fn complete_dispatched_run(&self, run: &RoutineRun, status: RunStatus, summary: &str) {
+        let summary = sanitize_summary(summary);
+
         // Complete the run record in DB
         if let Err(e) = self
             .store
-            .complete_routine_run(run.id, status, Some(summary), None)
+            .complete_routine_run(run.id, status, Some(summary.as_str()), None)
             .await
         {
             tracing::error!(
@@ -740,7 +742,7 @@ impl RoutineEngine {
             &routine.user_id,
             &routine.name,
             status,
-            Some(summary),
+            Some(summary.as_str()),
             thread_id.as_deref(),
         )
         .await;
@@ -2171,7 +2173,6 @@ fn truncate(s: &str, max: usize) -> String {
 /// 2. Strip HTML tags to prevent injection in web-rendered notifications
 /// 3. Collapse multiple whitespace/newlines to single spaces for cleaner output
 /// 4. Truncate to 500 chars to prevent oversized notifications
-#[cfg(test)]
 fn sanitize_summary(s: &str) -> String {
     // Strip control characters (keep newline for now, collapse later)
     let no_control: String = s
@@ -2199,7 +2200,6 @@ fn sanitize_summary(s: &str) -> String {
 }
 
 /// Remove HTML/XML tags from a string.
-#[cfg(test)]
 fn strip_html_tags(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut in_tag = false;

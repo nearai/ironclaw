@@ -6,7 +6,13 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use ironclaw::llm::{
+    CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
+    ToolCompletionRequest, ToolCompletionResponse,
+};
 use ironclaw::workspace::{MockEmbeddings, SearchConfig, Workspace, paths};
+use rust_decimal::Decimal;
 
 fn get_pool() -> deadpool_postgres::Pool {
     let database_url = std::env::var("DATABASE_URL")
@@ -41,6 +47,50 @@ async fn cleanup_user(pool: &deadpool_postgres::Pool, user_id: &str) {
     )
     .await
     .ok();
+}
+
+struct StubLlm {
+    response: String,
+}
+
+impl StubLlm {
+    fn new(response: impl Into<String>) -> Self {
+        Self {
+            response: response.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for StubLlm {
+    fn model_name(&self) -> &str {
+        "stub-model"
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        Ok(CompletionResponse {
+            content: self.response.clone(),
+            input_tokens: 0,
+            output_tokens: 0,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        })
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        Err(LlmError::RequestFailed {
+            provider: "stub-model".to_string(),
+            reason: "tool calls not supported in integration stub".to_string(),
+        })
+    }
 }
 
 #[tokio::test]
@@ -335,6 +385,91 @@ async fn test_workspace_hybrid_search_with_mock_embeddings() {
     assert!(!results.is_empty(), "Should find results");
     // At least one result should be a hybrid match (found by both FTS and vector)
     // or we should have results from either method
+
+    cleanup_user(&pool, user_id).await;
+}
+
+#[tokio::test]
+async fn test_workspace_tiered_summaries_default_search_returns_l1() {
+    let pool = get_pool();
+    if try_connect(&pool).await.is_none() {
+        return;
+    }
+    let user_id = "test_tiered_summaries";
+    cleanup_user(&pool, user_id).await;
+
+    let llm = Arc::new(StubLlm::new(
+        r#"{"l0":"Project Alpha overview.","l1":"Topic: Project Alpha\n\nKey facts:\n- The roadmap is stable.\n- The owner prefers concise updates.\n\nEntities: Project Alpha, Alice\nDates: 2026-03-22\nAction items: Review next milestone."}"#,
+    ));
+    let workspace = Workspace::new(user_id, pool.clone()).with_llm(llm);
+
+    let mut body = String::new();
+    for _ in 0..80 {
+        body.push_str("Project Alpha status remains stable and the roadmap stays on track. ");
+    }
+
+    workspace
+        .write("projects/alpha/status.md", &body)
+        .await
+        .expect("write failed");
+
+    let default_result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let results = workspace
+                .search("Project Alpha", 5)
+                .await
+                .expect("search failed");
+            if let Some(first) = results.first()
+                && first.content.contains("Topic: Project Alpha")
+            {
+                break first.clone();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for summary generation");
+
+    assert!(
+        default_result.content.contains("Topic: Project Alpha"),
+        "default search should return L1 summary"
+    );
+
+    let l0_result = workspace
+        .search_with_config(
+            "Project Alpha",
+            SearchConfig::default()
+                .fts_only()
+                .with_detail(ironclaw::workspace::SearchDetailLevel::L0),
+        )
+        .await
+        .expect("search l0 failed");
+    assert!(
+        l0_result
+            .first()
+            .expect("expected l0 result")
+            .content
+            .contains("Project Alpha overview"),
+        "L0 search should return the abstract"
+    );
+
+    let l2_result = workspace
+        .search_with_config(
+            "Project Alpha",
+            SearchConfig::default()
+                .fts_only()
+                .with_detail(ironclaw::workspace::SearchDetailLevel::L2),
+        )
+        .await
+        .expect("search l2 failed");
+    assert!(
+        l2_result
+            .first()
+            .expect("expected l2 result")
+            .content
+            .contains("roadmap stays on track"),
+        "L2 search should return the raw chunk content"
+    );
 
     cleanup_user(&pool, user_id).await;
 }

@@ -172,6 +172,8 @@ CREATE TABLE memory_documents (
     -- File path within workspace (e.g., "context/vision.md")
     path TEXT NOT NULL,
     content TEXT NOT NULL,
+    summary_l0 TEXT,
+    summary_l1 TEXT,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -266,7 +268,7 @@ BEGIN
         SELECT
             d.path,
             d.updated_at,
-            LEFT(d.content, 200) as content_preview,
+            COALESCE(d.summary_l0, LEFT(d.content, 120)) as content_preview,
             -- Extract the immediate child name
             CASE
                 WHEN p_directory = '' THEN

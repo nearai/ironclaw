@@ -289,6 +289,9 @@ pub enum WorkspaceError {
     #[error("Search failed: {reason}")]
     SearchFailed { reason: String },
 
+    #[error("Summary generation failed: {reason}")]
+    SummaryGenerationFailed { reason: String },
+
     #[error("Embedding generation failed: {reason}")]
     EmbeddingFailed { reason: String },
 

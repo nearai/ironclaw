@@ -13,7 +13,22 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+use tracing::warn;
 use uuid::Uuid;
+
+/// Detail level requested from memory search results.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchDetailLevel {
+    /// Return a short one-line abstract.
+    L0,
+    /// Return a structured overview.
+    #[default]
+    L1,
+    /// Return the raw chunk content.
+    L2,
+}
 
 /// Strategy used to fuse FTS and vector search results.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -50,6 +65,8 @@ pub struct SearchConfig {
     /// Ignored by `Rrf` fusion. For env-based config via
     /// `WorkspaceSearchConfig::resolve`, defaults are per-strategy.
     pub vector_weight: f32,
+    /// Detail level for returned content.
+    pub detail: SearchDetailLevel,
 }
 
 impl Default for SearchConfig {
@@ -64,6 +81,7 @@ impl Default for SearchConfig {
             fusion_strategy: FusionStrategy::default(),
             fts_weight: 0.5,
             vector_weight: 0.5,
+            detail: SearchDetailLevel::default(),
         }
     }
 }
@@ -126,6 +144,12 @@ impl SearchConfig {
         }
         self
     }
+
+    /// Set the detail level returned by search results.
+    pub fn with_detail(mut self, detail: SearchDetailLevel) -> Self {
+        self.detail = detail;
+        self
+    }
 }
 
 /// A search result with hybrid scoring.
@@ -139,6 +163,10 @@ pub struct SearchResult {
     pub chunk_id: Uuid,
     /// Chunk content.
     pub content: String,
+    /// Optional one-line summary of the document.
+    pub summary_l0: Option<String>,
+    /// Optional structured summary of the document.
+    pub summary_l1: Option<String>,
     /// Combined fusion score (0.0-1.0 normalized). Strategy-dependent (RRF or WeightedScore).
     pub score: f32,
     /// Rank in FTS results (1-based, None if not in FTS results).
@@ -172,6 +200,8 @@ pub struct RankedResult {
     /// File path of the source document.
     pub document_path: String,
     pub content: String,
+    pub summary_l0: Option<String>,
+    pub summary_l1: Option<String>,
     pub rank: u32, // 1-based rank
 }
 
@@ -189,6 +219,31 @@ pub fn fuse_results(
         FusionStrategy::Rrf => reciprocal_rank_fusion(fts_results, vector_results, config),
         FusionStrategy::WeightedScore => weighted_score_fusion(fts_results, vector_results, config),
     }
+}
+
+fn choose_search_content(
+    document_path: &str,
+    summary_l0: &Option<String>,
+    summary_l1: &Option<String>,
+    raw_content: &str,
+    detail: SearchDetailLevel,
+) -> String {
+    let missing_summaries = summary_l0.is_none() && summary_l1.is_none();
+    match detail {
+        SearchDetailLevel::L0 => summary_l0.clone().or_else(|| summary_l1.clone()),
+        SearchDetailLevel::L1 => summary_l1.clone(),
+        SearchDetailLevel::L2 => None,
+    }
+    .unwrap_or_else(|| {
+        if missing_summaries && detail != SearchDetailLevel::L2 {
+            warn!(
+                path = %document_path,
+                detail = ?detail,
+                "Search result missing summaries; falling back to raw content"
+            );
+        }
+        raw_content.to_string()
+    })
 }
 
 /// Reciprocal Rank Fusion algorithm.
@@ -217,6 +272,8 @@ pub fn reciprocal_rank_fusion(
         document_id: Uuid,
         document_path: String,
         content: String,
+        summary_l0: Option<String>,
+        summary_l1: Option<String>,
         score: f32,
         fts_rank: Option<u32>,
         vector_rank: Option<u32>,
@@ -232,11 +289,19 @@ pub fn reciprocal_rank_fusion(
             .and_modify(|info| {
                 info.score += rrf_score;
                 info.fts_rank = Some(result.rank);
+                if info.summary_l0.is_none() {
+                    info.summary_l0 = result.summary_l0.clone();
+                }
+                if info.summary_l1.is_none() {
+                    info.summary_l1 = result.summary_l1.clone();
+                }
             })
             .or_insert(ChunkInfo {
                 document_id: result.document_id,
                 document_path: result.document_path,
                 content: result.content,
+                summary_l0: result.summary_l0,
+                summary_l1: result.summary_l1,
                 score: rrf_score,
                 fts_rank: Some(result.rank),
                 vector_rank: None,
@@ -251,11 +316,19 @@ pub fn reciprocal_rank_fusion(
             .and_modify(|info| {
                 info.score += rrf_score;
                 info.vector_rank = Some(result.rank);
+                if info.summary_l0.is_none() {
+                    info.summary_l0 = result.summary_l0.clone();
+                }
+                if info.summary_l1.is_none() {
+                    info.summary_l1 = result.summary_l1.clone();
+                }
             })
             .or_insert(ChunkInfo {
                 document_id: result.document_id,
                 document_path: result.document_path,
                 content: result.content,
+                summary_l0: result.summary_l0,
+                summary_l1: result.summary_l1,
                 score: rrf_score,
                 fts_rank: None,
                 vector_rank: Some(result.rank),
@@ -265,14 +338,26 @@ pub fn reciprocal_rank_fusion(
     // Convert to SearchResult and sort by score
     let mut results: Vec<SearchResult> = chunk_scores
         .into_iter()
-        .map(|(chunk_id, info)| SearchResult {
-            document_id: info.document_id,
-            document_path: info.document_path,
-            chunk_id,
-            content: info.content,
-            score: info.score,
-            fts_rank: info.fts_rank,
-            vector_rank: info.vector_rank,
+        .map(|(chunk_id, info)| {
+            let document_path = info.document_path;
+            let content = choose_search_content(
+                &document_path,
+                &info.summary_l0,
+                &info.summary_l1,
+                &info.content,
+                config.detail,
+            );
+            SearchResult {
+                document_id: info.document_id,
+                document_path,
+                chunk_id,
+                content,
+                summary_l0: info.summary_l0,
+                summary_l1: info.summary_l1,
+                score: info.score,
+                fts_rank: info.fts_rank,
+                vector_rank: info.vector_rank,
+            }
         })
         .collect();
 
@@ -321,6 +406,8 @@ pub fn weighted_score_fusion(
         document_id: Uuid,
         document_path: String,
         content: String,
+        summary_l0: Option<String>,
+        summary_l1: Option<String>,
         score: f32,
         fts_rank: Option<u32>,
         vector_rank: Option<u32>,
@@ -336,11 +423,19 @@ pub fn weighted_score_fusion(
             .and_modify(|info| {
                 info.score += score;
                 info.fts_rank = Some(result.rank);
+                if info.summary_l0.is_none() {
+                    info.summary_l0 = result.summary_l0.clone();
+                }
+                if info.summary_l1.is_none() {
+                    info.summary_l1 = result.summary_l1.clone();
+                }
             })
             .or_insert(ChunkInfo {
                 document_id: result.document_id,
                 document_path: result.document_path,
                 content: result.content,
+                summary_l0: result.summary_l0,
+                summary_l1: result.summary_l1,
                 score,
                 fts_rank: Some(result.rank),
                 vector_rank: None,
@@ -355,11 +450,19 @@ pub fn weighted_score_fusion(
             .and_modify(|info| {
                 info.score += score;
                 info.vector_rank = Some(result.rank);
+                if info.summary_l0.is_none() {
+                    info.summary_l0 = result.summary_l0.clone();
+                }
+                if info.summary_l1.is_none() {
+                    info.summary_l1 = result.summary_l1.clone();
+                }
             })
             .or_insert(ChunkInfo {
                 document_id: result.document_id,
                 document_path: result.document_path,
                 content: result.content,
+                summary_l0: result.summary_l0,
+                summary_l1: result.summary_l1,
                 score,
                 fts_rank: None,
                 vector_rank: Some(result.rank),
@@ -368,14 +471,26 @@ pub fn weighted_score_fusion(
 
     let mut results: Vec<SearchResult> = chunk_scores
         .into_iter()
-        .map(|(chunk_id, info)| SearchResult {
-            document_id: info.document_id,
-            document_path: info.document_path,
-            chunk_id,
-            content: info.content,
-            score: info.score,
-            fts_rank: info.fts_rank,
-            vector_rank: info.vector_rank,
+        .map(|(chunk_id, info)| {
+            let document_path = info.document_path;
+            let content = choose_search_content(
+                &document_path,
+                &info.summary_l0,
+                &info.summary_l1,
+                &info.content,
+                config.detail,
+            );
+            SearchResult {
+                document_id: info.document_id,
+                document_path,
+                chunk_id,
+                content,
+                summary_l0: info.summary_l0,
+                summary_l1: info.summary_l1,
+                score: info.score,
+                fts_rank: info.fts_rank,
+                vector_rank: info.vector_rank,
+            }
         })
         .collect();
 
@@ -416,6 +531,8 @@ mod tests {
             document_id: doc_id,
             document_path: format!("docs/{}.md", doc_id),
             content: format!("content for chunk {}", chunk_id),
+            summary_l0: None,
+            summary_l1: None,
             rank,
         }
     }
@@ -426,8 +543,39 @@ mod tests {
             document_id: doc_id,
             document_path: path.to_string(),
             content: format!("content for chunk {}", chunk_id),
+            summary_l0: None,
+            summary_l1: None,
             rank,
         }
+    }
+
+    #[test]
+    fn test_search_detail_levels_choose_content() {
+        let doc = Uuid::new_v4();
+        let chunk = Uuid::new_v4();
+        let mut config = SearchConfig::default().with_limit(10);
+
+        let result = RankedResult {
+            chunk_id: chunk,
+            document_id: doc,
+            document_path: "docs/test.md".to_string(),
+            content: "raw content".to_string(),
+            summary_l0: Some("one line".to_string()),
+            summary_l1: Some("structured overview".to_string()),
+            rank: 1,
+        };
+
+        config.detail = SearchDetailLevel::L0;
+        let l0 = reciprocal_rank_fusion(vec![result.clone()], Vec::new(), &config);
+        assert_eq!(l0[0].content, "one line");
+
+        config.detail = SearchDetailLevel::L1;
+        let l1 = reciprocal_rank_fusion(vec![result.clone()], Vec::new(), &config);
+        assert_eq!(l1[0].content, "structured overview");
+
+        config.detail = SearchDetailLevel::L2;
+        let l2 = reciprocal_rank_fusion(vec![result], Vec::new(), &config);
+        assert_eq!(l2[0].content, "raw content");
     }
 
     #[test]

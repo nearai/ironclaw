@@ -157,7 +157,7 @@ mod import_integration_tests {
 
         // Verify DB starts empty
         let before_docs = db
-            .list_documents("test_user", None)
+            .list_documents("test_user", None, None)
             .await
             .expect("list docs failed");
         assert_eq!(before_docs.len(), 0);
@@ -239,7 +239,7 @@ mod import_integration_tests {
 
         // Count documents before import
         let before_import = db
-            .list_documents(user_id, None)
+            .list_documents(user_id, None, None)
             .await
             .expect("list docs before failed");
         let before_count = before_import.len();
@@ -257,7 +257,7 @@ mod import_integration_tests {
 
         // Count documents after (in dry-run mode, no writes should occur)
         let after_import = db
-            .list_documents(user_id, None)
+            .list_documents(user_id, None, None)
             .await
             .expect("list docs after failed");
         let after_count = after_import.len();
