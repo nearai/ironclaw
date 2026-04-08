@@ -20,7 +20,7 @@ use ironclaw::tools::Tool;
 
 use crate::support::instrumented_llm::InstrumentedLlm;
 use crate::support::metrics::{ToolInvocation, TraceMetrics};
-use crate::support::test_channel::{TestChannel, TestChannelHandle};
+use crate::support::test_channel::{CapturedEvent, TestChannel, TestChannelHandle};
 use crate::support::trace_llm::{LlmTrace, TraceLlm};
 
 use ironclaw::llm::recording::{HttpExchange, HttpInterceptor, ReplayingHttpInterceptor};
@@ -166,9 +166,19 @@ impl TestRig {
         self.channel.tool_timings()
     }
 
+    /// Wait until a `Status("Done")` event has been captured, or `timeout` elapses.
+    pub async fn wait_for_done(&self, timeout: Duration) -> bool {
+        self.channel.wait_for_done(timeout).await
+    }
+
     /// Return a snapshot of all captured status events.
     pub fn captured_status_events(&self) -> Vec<StatusUpdate> {
         self.channel.captured_status_events()
+    }
+
+    /// Return the ordered log of captured outbound events.
+    pub fn captured_events(&self) -> Vec<CapturedEvent> {
+        self.channel.captured_events()
     }
 
     /// Clear all captured responses and status events.

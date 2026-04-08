@@ -521,7 +521,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     // Generate the engine workspace README
     store.generate_engine_readme().await;
 
-    // Build capability registry from available tools
+    // Build capability registry from available tools (auto-filtered by engine version)
     let mut capabilities = CapabilityRegistry::new();
     let tool_defs = agent.tools().tool_definitions().await;
     if !tool_defs.is_empty() {
@@ -2771,7 +2771,7 @@ pub async fn list_engine_threads(
             let uuid = uuid::Uuid::parse_str(id).map_err(|e| engine_err("parse project_id", e))?;
             ironclaw_engine::ProjectId(uuid)
         }
-        None => state.default_project_id,
+        None => resolve_user_project(&state.store, user_id, state.default_project_id).await?,
     };
 
     let threads = state
@@ -3001,7 +3001,7 @@ pub async fn list_engine_missions(
             let uuid = uuid::Uuid::parse_str(id).map_err(|e| engine_err("parse project_id", e))?;
             ironclaw_engine::ProjectId(uuid)
         }
-        None => state.default_project_id,
+        None => resolve_user_project(&state.store, user_id, state.default_project_id).await?,
     };
 
     let missions = state

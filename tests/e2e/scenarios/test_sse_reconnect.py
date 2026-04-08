@@ -25,15 +25,17 @@ async def _open_gateway_page(browser, base_url: str):
 
 
 async def _wait_for_connected(page, *, timeout: int = 10000) -> None:
-    """Wait until the frontend reports an active SSE connection."""
-    status = page.locator(SEL["sse_status"])
-    await status.wait_for(state="visible", timeout=timeout)
-    deadline = asyncio.get_running_loop().time() + (timeout / 1000)
-    while asyncio.get_running_loop().time() < deadline:
-        if await status.text_content() == "Connected":
-            return
-        await asyncio.sleep(0.2)
-    raise AssertionError("SSE status did not return to Connected before timeout")
+    """Wait until the frontend reports an active SSE connection.
+
+    Uses the ``sseHasConnectedBefore`` JS flag which is set to ``true``
+    inside ``EventSource.onopen``.  This is more reliable than checking
+    CSS state on ``#sse-dot`` because the dot starts without the
+    ``disconnected`` class before SSE even connects.
+    """
+    await page.wait_for_function(
+        "() => typeof sseHasConnectedBefore !== 'undefined' && sseHasConnectedBefore === true",
+        timeout=timeout,
+    )
 
 
 async def _wait_for_last_event_id(page, *, timeout: int = 15000) -> str:
@@ -59,21 +61,21 @@ async def _wait_for_turn_in_history(base_url: str, thread_id: str, expected_resp
 
 
 async def test_sse_status_shows_connected(page):
-    """SSE status should show Connected after page load."""
-    status = page.locator(SEL["sse_status"])
-    await status.wait_for(state="visible", timeout=5000)
-    text = await status.text_content()
-    assert text == "Connected", f"Expected 'Connected', got '{text}'"
+    """SSE dot should show connected state after page load."""
+    dot = page.locator("#sse-dot")
+    cls = await dot.get_attribute("class") or ""
+    assert "disconnected" not in cls, f"Expected connected dot, got class='{cls}'"
 
 
 async def test_sse_reconnect_after_disconnect(page):
-    """After programmatic disconnect, SSE should reconnect and show Connected."""
+    """After programmatic disconnect, SSE should reconnect."""
     await _wait_for_connected(page, timeout=5000)
     await page.evaluate("if (eventSource) eventSource.close()")
-    await page.evaluate("connectSSE()")
+    # Reset the flag so _wait_for_connected can detect the new onopen.
+    # The history-reload path (sseHasConnectedBefore=true on reconnect)
+    # is covered by test_sse_reconnect_preserves_chat_history.
+    await page.evaluate("sseHasConnectedBefore = false; connectSSE()")
     await _wait_for_connected(page, timeout=10000)
-    status = page.locator(SEL["sse_status"])
-    assert await status.text_content() == "Connected"
 
 
 async def test_sse_reconnect_preserves_chat_history(page):

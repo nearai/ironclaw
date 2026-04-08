@@ -425,7 +425,7 @@ impl ConversationStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id FROM conversations
+                SELECT id, source_channel FROM conversations
                 WHERE user_id = ?1 AND channel = ?2
                   AND json_extract(metadata, '$.thread_type') = 'assistant'
                 LIMIT 1
@@ -441,9 +441,19 @@ impl ConversationStore for LibSqlBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
             let id_str: String = row.get(0).unwrap_or_default();
-            return id_str
+            let source_channel: Option<String> = row.get(1).unwrap_or_default();
+            let id: Uuid = id_str
                 .parse()
-                .map_err(|_| DatabaseError::Serialization("Invalid UUID".to_string()));
+                .map_err(|_| DatabaseError::Serialization("Invalid UUID".to_string()))?;
+            if source_channel.is_none() {
+                conn.execute(
+                    "UPDATE conversations SET source_channel = ?2 WHERE id = ?1 AND source_channel IS NULL",
+                    params![id.to_string(), channel],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            }
+            return Ok(id);
         }
 
         // Create new
@@ -451,8 +461,8 @@ impl ConversationStore for LibSqlBackend {
         let now = fmt_ts(&Utc::now());
         let metadata = serde_json::json!({"thread_type": "assistant", "title": "Assistant"});
         conn.execute(
-            "INSERT INTO conversations (id, channel, user_id, metadata, started_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-            params![id.to_string(), channel, user_id, metadata.to_string(), now],
+            "INSERT INTO conversations (id, channel, user_id, metadata, source_channel, started_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![id.to_string(), channel, user_id, metadata.to_string(), channel, now],
         )
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -880,6 +890,67 @@ mod tests {
             source.as_deref(),
             Some("telegram"),
             "upsert should not overwrite original source_channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_assistant_conversation_sets_source_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_assistant_source_channel.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conv_id = backend
+            .get_or_create_assistant_conversation("assistant-user", "gateway")
+            .await
+            .unwrap();
+
+        let source = backend
+            .get_conversation_source_channel(conv_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            source.as_deref(),
+            Some("gateway"),
+            "assistant conversation should persist its source_channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_assistant_conversation_backfills_missing_source_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_assistant_backfill_source_channel.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conv_id = Uuid::new_v4();
+        let now = fmt_ts(&Utc::now());
+        let metadata = serde_json::json!({"thread_type": "assistant", "title": "Assistant"});
+        let conn = backend.connect().await.unwrap();
+        conn.execute(
+            "INSERT INTO conversations (id, channel, user_id, metadata, started_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![conv_id.to_string(), "gateway", "assistant-user", metadata.to_string(), now],
+        )
+        .await
+        .unwrap();
+
+        let loaded_id = backend
+            .get_or_create_assistant_conversation("assistant-user", "gateway")
+            .await
+            .unwrap();
+        assert_eq!(
+            loaded_id, conv_id,
+            "existing assistant thread should be reused"
+        );
+
+        let source = backend
+            .get_conversation_source_channel(conv_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            source.as_deref(),
+            Some("gateway"),
+            "existing assistant conversation should be backfilled with source_channel"
         );
     }
 }
