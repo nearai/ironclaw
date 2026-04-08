@@ -1057,7 +1057,32 @@ async fn compute_frontend_cache_key(workspace: &crate::workspace::Workspace) -> 
 /// mtimes (computed with a single `list()` call). A cache hit skips reading
 /// every widget manifest / JS / CSS file, which would otherwise fire on every
 /// page load.
+///
+/// **Multi-tenant safety.** In multi-user mode (`workspace_pool` set) this
+/// function ALWAYS returns `None`, regardless of whether `state.workspace` is
+/// also populated. The customization assembly path is fundamentally
+/// single-tenant: `index_handler` (`GET /`) is the unauthenticated bootstrap
+/// route — no user identity is available at request time, so there is no way
+/// to resolve the *correct* per-user workspace inside this function. Reading
+/// `state.workspace` instead would expose one global workspace's
+/// customizations to every user, and the process-wide
+/// `frontend_html_cache` would pin the leak across requests. We refuse the
+/// path entirely and serve the embedded default to all users; per-user
+/// customization can ride a future JS-side fetch against
+/// `/api/frontend/layout`, which is authenticated and routes through
+/// `resolve_workspace(&state, &user)` so it returns the right workspace.
+/// See `crates/ironclaw_gateway/static/app.js` — the layout-config IIFE
+/// already reads `window.__IRONCLAW_LAYOUT__`, which a future change can
+/// populate from a `fetch('/api/frontend/layout')` after auth.
 async fn build_frontend_html(state: &GatewayState) -> Option<String> {
+    if state.workspace_pool.is_some() {
+        // Multi-tenant: refuse the assembly path entirely. See the function
+        // doc comment above for the full rationale. The cache write below
+        // is unreachable on this branch, so the cache stays empty and
+        // cannot leak one user's customizations to another.
+        return None;
+    }
+
     let ws = state.workspace.as_ref()?;
 
     // Fast path — cache hit. One workspace `list()` call, no file reads.
@@ -4706,6 +4731,85 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Multi-tenant cache safety: when `workspace_pool` is set,
+    /// `build_frontend_html` must refuse the assembly path entirely and
+    /// return `None` regardless of what `state.workspace` contains.
+    ///
+    /// Background: `index_handler` (`GET /`) is the unauthenticated
+    /// bootstrap route, so it has no user identity at request time.
+    /// Reading `state.workspace` in multi-tenant mode would expose one
+    /// global workspace's customizations to every user, and the
+    /// process-wide `frontend_html_cache` would pin the leak across
+    /// requests. The bait here is a global workspace seeded with a
+    /// hostile-looking layout — if the function ever stops short-
+    /// circuiting on `workspace_pool.is_some()`, that layout would land
+    /// in the assembled HTML and this test would fail loudly.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_build_frontend_html_returns_none_in_multi_tenant_mode() {
+        use crate::config::{WorkspaceConfig, WorkspaceSearchConfig};
+        use crate::db::Database as _;
+        use crate::db::libsql::LibSqlBackend;
+        use crate::workspace::EmbeddingCacheConfig;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LibSqlBackend::new_local(&dir.path().join("multi_tenant_index.db"))
+            .await
+            .expect("backend");
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+
+        // Bait: a *global* workspace with customizations. If
+        // build_frontend_html ever read state.workspace in multi-tenant
+        // mode, the title "TENANT-LEAK-BAIT" would appear in the
+        // assembled HTML for every user. The assertions below pin the
+        // refusal contract — both the return value AND the cache slot.
+        let global_ws = Arc::new(Workspace::new_with_db("tenant-leak-bait", Arc::clone(&db)));
+        global_ws
+            .write(
+                ".system/gateway/layout.json",
+                r#"{"branding":{"title":"TENANT-LEAK-BAIT"}}"#,
+            )
+            .await
+            .expect("seed bait layout");
+
+        let pool = Arc::new(WorkspacePool::new(
+            Arc::clone(&db),
+            None,
+            EmbeddingCacheConfig::default(),
+            WorkspaceSearchConfig::default(),
+            WorkspaceConfig::default(),
+        ));
+
+        // Build state via the standard test helper, then mutate the
+        // workspace + workspace_pool fields. `Arc::get_mut` succeeds here
+        // because no other strong reference exists yet — the helper just
+        // returned the freshly-constructed Arc.
+        let mut state = test_gateway_state(None);
+        let state_mut = Arc::get_mut(&mut state).expect("test state must be uniquely owned");
+        state_mut.workspace = Some(global_ws);
+        state_mut.workspace_pool = Some(pool);
+
+        // Contract 1: build_frontend_html refuses to assemble.
+        let html = build_frontend_html(&state).await;
+        assert!(
+            html.is_none(),
+            "build_frontend_html must return None in multi-tenant mode \
+             (got Some HTML — bait layout may have leaked across tenants)"
+        );
+
+        // Contract 2: the cache slot is still empty. The early return
+        // above MUST short-circuit before the cache write at the bottom
+        // of the function — otherwise a poisoned cache entry would serve
+        // the leaked HTML to subsequent requests even after the bug is
+        // fixed.
+        let cache = state.frontend_html_cache.read().await;
+        assert!(
+            cache.is_none(),
+            "frontend_html_cache must remain empty in multi-tenant mode"
+        );
     }
 
     #[tokio::test]
