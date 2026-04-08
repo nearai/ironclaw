@@ -744,8 +744,8 @@ mod tests {
             status: ThreadStatus::Active,
             step_count: 4,
             total_tokens: 1_024,
-            started_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            started_at: Some(chrono::Utc::now()),
+            updated_at: Some(chrono::Utc::now()),
         }];
 
         let area = Rect::new(0, 0, 40, 12);
@@ -762,8 +762,8 @@ mod tests {
             status: ThreadStatus::Active,
             step_count: 4,
             total_tokens: 1_024,
-            started_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            started_at: Some(chrono::Utc::now()),
+            updated_at: Some(chrono::Utc::now()),
         }];
 
         let area = Rect::new(0, 0, 40, 5);

@@ -502,9 +502,7 @@ impl Agent {
 
         // Engine threads
         if self.config.engine_v2 {
-            if let Ok(threads) =
-                crate::bridge::list_engine_threads(None, self.owner_id()).await
-            {
+            if let Ok(threads) = crate::bridge::list_engine_threads(None, self.owner_id()).await {
                 let summaries: Vec<crate::channels::EngineThreadSummary> = threads
                     .into_iter()
                     .map(|t| crate::channels::EngineThreadSummary {

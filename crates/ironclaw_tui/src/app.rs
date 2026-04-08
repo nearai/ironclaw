@@ -2317,14 +2317,9 @@ fn render_tool_detail_modal(
     let inner = block.inner(area);
     block.render(area, frame.buffer_mut());
 
-    let lines = crate::render::render_markdown(
-        &modal.content,
-        inner.width as usize,
-        &theme,
-    );
+    let lines = crate::render::render_markdown(&modal.content, inner.width as usize, &theme);
 
-    let paragraph = Paragraph::new(lines)
-        .scroll((modal.scroll, 0));
+    let paragraph = Paragraph::new(lines).scroll((modal.scroll, 0));
     paragraph.render(inner, frame.buffer_mut());
 }
 
@@ -2796,8 +2791,8 @@ mod tests {
                 status: ThreadStatus::Active,
                 step_count: 5,
                 total_tokens: 4_096,
-                started_at: now - chrono::Duration::minutes(9),
-                updated_at: now,
+                started_at: Some(now - chrono::Duration::minutes(9)),
+                updated_at: Some(now),
             }],
             ..Default::default()
         };
