@@ -59,6 +59,8 @@ pub struct WorkerDeps {
     pub approval_context: Option<ApprovalContext>,
     /// HTTP interceptor for trace recording/replay (propagated to JobContext).
     pub http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
+    /// Whether the deployment is multi-tenant (used for admin tool policy filtering).
+    pub multi_tenant: bool,
 }
 
 /// Worker that executes a single job.
@@ -394,6 +396,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
             recovery_state: tokio::sync::Mutex::new(AutonomousRecoveryState::default()),
             has_text_response: std::sync::atomic::AtomicBool::new(false),
+            cached_user_info: tokio::sync::OnceCell::new(),
         };
 
         let config = AgenticLoopConfig {
@@ -1172,10 +1175,54 @@ struct JobDelegate<'a> {
     /// When true, an empty follow-up response is treated as job completion
     /// rather than a retry signal (prevents spurious failures in routines).
     has_text_response: std::sync::atomic::AtomicBool,
+    /// Cached (user_id, role) for admin tool policy filtering. Populated once
+    /// on first access to avoid repeated DB lookups.
+    cached_user_info:
+        tokio::sync::OnceCell<(String, crate::ownership::UserRole)>,
 }
 
 impl<'a> JobDelegate<'a> {
     const MAX_CONSECUTIVE_RATE_LIMITS: usize = 10;
+
+    /// Resolve and cache (user_id, role) for admin tool policy filtering.
+    ///
+    /// Reads the job's `user_id` from the context manager and looks up the
+    /// user's role from the database. Falls back to `Member` when the DB
+    /// lookup fails or no store is configured (safe default: non-admin users
+    /// still see the filtered tool list).
+    async fn resolve_user_info(&self) -> &(String, crate::ownership::UserRole) {
+        self.cached_user_info
+            .get_or_init(|| async {
+                let user_id = self
+                    .worker
+                    .context_manager()
+                    .get_context(self.worker.job_id)
+                    .await
+                    .map(|ctx| ctx.user_id.clone())
+                    .unwrap_or_default();
+
+                let role = if let Some(store) = self.worker.store() {
+                    match store.db().get_user(&user_id).await {
+                        Ok(Some(user)) if user.role == "admin" => {
+                            crate::ownership::UserRole::Admin
+                        }
+                        Ok(_) => crate::ownership::UserRole::Member,
+                        Err(e) => {
+                            tracing::debug!(
+                                job_id = %self.worker.job_id,
+                                "Failed to look up user role, defaulting to Member: {e}"
+                            );
+                            crate::ownership::UserRole::Member
+                        }
+                    }
+                } else {
+                    crate::ownership::UserRole::Member
+                };
+
+                (user_id, role)
+            })
+            .await
+    }
 
     /// Handle a rate-limit error: back off, increment counter, and fail fast
     /// if the provider remains rate-limited for too many consecutive attempts.
@@ -1375,7 +1422,20 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             reason_ctx.available_tools.clear();
         } else {
             // Refresh tool definitions so newly built tools become visible
-            reason_ctx.available_tools = self.worker.tools().tool_definitions().await;
+            let tool_defs = self.worker.tools().tool_definitions().await;
+
+            // Apply admin tool policy filtering (multi-tenant only).
+            let (user_id, role) = self.resolve_user_info().await;
+            let tool_defs = crate::tools::permissions::filter_admin_disabled_tools(
+                tool_defs,
+                self.worker.deps.multi_tenant,
+                role,
+                user_id,
+                self.worker.store().map(|s| s.db()),
+            )
+            .await;
+
+            reason_ctx.available_tools = tool_defs;
         }
 
         // Claude 4.6 rejects assistant prefill; NEAR AI rejects any non-user-ending
@@ -1828,6 +1888,7 @@ mod tests {
             sse_tx: None,
             approval_context: None,
             http_interceptor: None,
+            multi_tenant: false,
         };
 
         Worker::new(job_id, deps)
@@ -2047,6 +2108,7 @@ mod tests {
             sse_tx: None,
             approval_context,
             http_interceptor: None,
+            multi_tenant: false,
         };
 
         Worker::new(job_id, deps)
@@ -2406,6 +2468,7 @@ mod tests {
             consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
             recovery_state: tokio::sync::Mutex::new(AutonomousRecoveryState::default()),
             has_text_response: std::sync::atomic::AtomicBool::new(false),
+            cached_user_info: tokio::sync::OnceCell::new(),
         };
 
         let mut reason_ctx = ReasoningContext::new();

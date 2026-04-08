@@ -521,6 +521,12 @@ impl SystemScope {
         Self { inner: db }
     }
 
+    /// Expose the underlying database handle for system-level operations that
+    /// need raw access (e.g. loading admin tool policy with a fixed user_id).
+    pub fn db(&self) -> &Arc<dyn Database> {
+        &self.inner
+    }
+
     /// Construct a per-user workspace for system-process operations.
     ///
     /// Used by the heartbeat and routine engine to get a workspace scoped to

@@ -513,51 +513,14 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         // Apply admin tool policy: remove tools the admin has globally or
         // per-user disabled. Only active in multi-tenant mode. Admin users are
         // exempt — they always see every tool so they cannot lock themselves out.
-        let tool_defs = if self.agent.config.multi_tenant
-            && self.tenant.identity().role != crate::ownership::UserRole::Admin
-        {
-            let admin_policy: crate::tools::permissions::AdminToolPolicy =
-                if let Some(db) = self.agent.store() {
-                    match db
-                        .get_setting(
-                            crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
-                            crate::tools::permissions::ADMIN_TOOL_POLICY_KEY,
-                        )
-                        .await
-                    {
-                        Ok(Some(value)) => serde_json::from_value(value).unwrap_or_default(),
-                        Ok(None) => crate::tools::permissions::AdminToolPolicy::default(),
-                        Err(e) => {
-                            tracing::warn!("Failed to load admin tool policy: {}", e);
-                            crate::tools::permissions::AdminToolPolicy::default()
-                        }
-                    }
-                } else {
-                    crate::tools::permissions::AdminToolPolicy::default()
-                };
-
-            if !admin_policy.is_empty() {
-                let user_id = self.tenant.user_id();
-                tool_defs
-                    .into_iter()
-                    .filter(|def| {
-                        if admin_policy.is_tool_disabled(&def.name, user_id) {
-                            tracing::debug!(
-                                tool = %def.name,
-                                "Excluding tool disabled by admin policy"
-                            );
-                            false
-                        } else {
-                            true
-                        }
-                    })
-                    .collect()
-            } else {
-                tool_defs
-            }
-        } else {
-            tool_defs
-        };
+        let tool_defs = crate::tools::permissions::filter_admin_disabled_tools(
+            tool_defs,
+            self.agent.config.multi_tenant,
+            &self.tenant.identity().role,
+            self.tenant.user_id(),
+            self.agent.store(),
+        )
+        .await;
 
         // Update context for this iteration
         reason_ctx.available_tools = tool_defs;
