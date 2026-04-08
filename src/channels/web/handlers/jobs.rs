@@ -475,8 +475,15 @@ pub async fn jobs_restart_handler(
                 resolve_sandbox_restart_mode(store.as_ref(), &stored_mode, &old_job.user_id)
                     .await
                     .map_err(|e| (StatusCode::CONFLICT, format!("Cannot restart job: {}", e)))?;
-
             check_mode_enabled(mode, jm.as_ref())?;
+
+            // Carry the original mcp_servers filter and max_iterations cap
+            // through the restart. Without this the restarted job would mount
+            // the *full* MCP master config (the opposite of the original
+            // filter) and run with the default worker iteration cap, silently
+            // diverging from the original job's constraints.
+            let restart_mcp_servers = old_job.mcp_servers.clone();
+            let restart_max_iterations = old_job.max_iterations;
 
             let record = crate::history::SandboxJobRecord {
                 id: new_job_id,
@@ -490,6 +497,8 @@ pub async fn jobs_restart_handler(
                 started_at: None,
                 completed_at: None,
                 credential_grants_json: old_job.credential_grants_json.clone(),
+                mcp_servers: restart_mcp_servers.clone(),
+                max_iterations: restart_max_iterations,
             };
             store
                 .save_sandbox_job(&record)
@@ -525,6 +534,18 @@ pub async fn jobs_restart_handler(
                     vec![]
                 });
 
+            // Load the master MCP config for the original job's user so the
+            // restart re-creates the same MCP environment as the initial run.
+            // Without this the orchestrator would fall back to no mount even
+            // when the user has servers configured (staging-regressions
+            // issue 3 — the orchestrator used to read from a hardcoded host
+            // file path that bootstrap moves into the DB on first run).
+            let master_mcp_config = crate::tools::mcp::config::load_master_mcp_config_value(
+                store.as_ref(),
+                &old_job.user_id,
+            )
+            .await;
+
             let project_dir = std::path::PathBuf::from(&old_job.project_dir);
             let create_result = jm
                 .create_job(
@@ -534,8 +555,10 @@ pub async fn jobs_restart_handler(
                     mode,
                     JobCreationParams {
                         credential_grants,
+                        mcp_servers: restart_mcp_servers,
+                        max_iterations: restart_max_iterations,
                         acp_agent,
-                        ..Default::default()
+                        master_mcp_config,
                     },
                 )
                 .await;

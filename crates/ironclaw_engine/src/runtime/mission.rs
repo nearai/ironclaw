@@ -1681,7 +1681,7 @@ fn truncate_notification_text(text: &str) -> String {
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}…", &text[..end])
+    format!("{}…", &text[..end]) // safety: end walked back to a valid char boundary above
 }
 
 /// Check if a mission is the self-improvement mission.

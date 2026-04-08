@@ -249,6 +249,21 @@ impl CreateJobTool {
         Ok(grants)
     }
 
+    /// Load the user's master MCP server config from the DB so the
+    /// orchestrator can mount it into worker containers. Returns `None` when
+    /// no DB is available, when the user has no servers configured, or when
+    /// loading fails — the orchestrator gracefully degrades to "no MCP mount"
+    /// in that case.
+    ///
+    /// This is the source-of-truth fix for staging-regressions issue 3: the
+    /// orchestrator used to read from a hardcoded host file path that
+    /// bootstrap migrates into the DB and renames on first run, so per-job
+    /// MCP filtering silently no-op'd on every typical install.
+    async fn load_master_mcp_config(&self, user_id: &str) -> Option<serde_json::Value> {
+        let store = self.store.as_ref()?;
+        crate::tools::mcp::config::load_master_mcp_config_value(store.as_ref(), user_id).await
+    }
+
     /// Persist a sandbox job record (fire-and-forget).
     fn persist_job(&self, record: SandboxJobRecord) {
         if let Some(store) = self.store.clone() {
@@ -435,7 +450,11 @@ impl CreateJobTool {
                 ToolError::ExecutionFailed(format!("failed to register sandbox job: {}", e))
             })?;
 
-        // Persist the job to DB before creating the container.
+        // Persist the job to DB before creating the container. The mcp_servers
+        // filter and max_iterations cap are persisted alongside credential
+        // grants so a restart re-applies the original constraints instead of
+        // silently falling back to the master MCP config and the default
+        // worker iteration cap.
         self.persist_job(SandboxJobRecord {
             id: job_id,
             task: task.to_string(),
@@ -448,6 +467,8 @@ impl CreateJobTool {
             started_at: None,
             completed_at: None,
             credential_grants_json,
+            mcp_servers: params.mcp_servers.clone(),
+            max_iterations: params.max_iterations,
         });
 
         // Persist the job mode to DB (for non-default modes).
@@ -1040,6 +1061,15 @@ impl Tool for CreateJobTool {
                 None => None,
             };
 
+            // Load the master MCP config from the per-user DB-backed setting
+            // so the orchestrator can mount it into the worker container. We
+            // load eagerly here regardless of MCP_PER_JOB_ENABLED — the
+            // orchestrator gates the actual mount on the feature flag, and
+            // loading is cheap. Pre-fix the orchestrator read from a
+            // hardcoded host file path that bootstrap moves into the DB on
+            // first run, so per-job MCP filtering silently no-op'd.
+            let master_mcp_config = self.load_master_mcp_config(&ctx.user_id).await;
+
             // Combine title and description into the task prompt for the sub-agent.
             let task = format!("{}\n\n{}", title, description);
             self.execute_sandbox(
@@ -1052,6 +1082,7 @@ impl Tool for CreateJobTool {
                     mcp_servers,
                     max_iterations,
                     acp_agent,
+                    master_mcp_config,
                 },
                 ctx,
             )

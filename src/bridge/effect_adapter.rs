@@ -1804,6 +1804,7 @@ mod tests {
         );
         assert_eq!(
             updates.context_paths.as_deref(),
+            // safety: array-to-slice coercion, not a string byte slice
             Some(&["context/profile.json".to_string(), "MEMORY.md".to_string()][..])
         );
         assert_eq!(updates.notify_user.as_deref(), Some("alice"));

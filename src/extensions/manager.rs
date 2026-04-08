@@ -8000,7 +8000,13 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn ensure_extension_ready_reports_needs_auth_for_wasm_channel() {
+        // Serialize against tests that mutate IRONCLAW_OAUTH_CALLBACK_URL
+        // (e.g. `auth_wasm_channel_status_uses_persisted_secret_oauth_descriptor`):
+        // without the env lock the auth path nondeterministically returns
+        // "awaiting_authorization" instead of "awaiting_token".
+        let _env_guard = crate::config::helpers::lock_env();
         let dir = tempfile::tempdir().expect("temp dir");
         let (store, _db_dir) = make_test_store().await;
         let channels_dir = write_test_channel(
@@ -8103,6 +8109,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn auth_wasm_channel_status_uses_persisted_secret_oauth_descriptor() {
         let _env_guard = crate::config::helpers::lock_env();
         unsafe {
@@ -11522,6 +11529,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_google_oauth_returns_blocked_app_guidance_with_builtin_client()
     -> Result<(), String> {
         let _env_guard = crate::config::helpers::lock_env();

@@ -445,6 +445,9 @@ impl ConversationStore for LibSqlBackend {
             let id_str: String = row.get(0).unwrap_or_default();
             let source_channel: Option<String> = row.get(1).unwrap_or_default();
             if source_channel.is_none() {
+                // safety: idempotent backfill — COALESCE collapses concurrent
+                // writers to the same value, so a race between two callers
+                // cannot diverge the row.
                 conn.execute(
                     "UPDATE conversations SET source_channel = COALESCE(source_channel, ?2) WHERE id = ?1",
                     params![id_str.clone(), channel],
