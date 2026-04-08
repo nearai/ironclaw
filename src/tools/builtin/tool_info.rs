@@ -14,18 +14,7 @@ use async_trait::async_trait;
 
 use crate::context::JobContext;
 use crate::tools::registry::ToolRegistry;
-use crate::tools::tool::{
-    EngineCompatibility, EngineVersion, Tool, ToolDiscoverySummary, ToolError, ToolOutput,
-    require_str,
-};
-
-fn is_compatible(compat: EngineCompatibility, version: EngineVersion) -> bool {
-    match compat {
-        EngineCompatibility::Both => true,
-        EngineCompatibility::V1Only => version == EngineVersion::V1,
-        EngineCompatibility::V2Only => version == EngineVersion::V2,
-    }
-}
+use crate::tools::tool::{Tool, ToolDiscoverySummary, ToolError, ToolOutput, require_str};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolInfoDetail {
@@ -155,7 +144,10 @@ impl Tool for ToolInfoTool {
         })?;
 
         // Reject tools that are not available in the current engine version.
-        if !is_compatible(tool.engine_compatibility(), registry.engine_version()) {
+        if !tool
+            .engine_compatibility()
+            .is_visible_in(registry.engine_version())
+        {
             return Err(ToolError::InvalidParameters(format!(
                 "Tool '{name}' is not available in the current engine version"
             )));
@@ -311,5 +303,48 @@ mod tests {
             .execute(serde_json::json!({"name": "echo"}), &ctx)
             .await;
         assert!(matches!(result, Err(ToolError::ExecutionFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn test_tool_info_rejects_v1_only_in_v2_registry() {
+        use crate::tools::tool::{EngineCompatibility, EngineVersion};
+
+        struct V1OnlyStub;
+
+        #[async_trait]
+        impl Tool for V1OnlyStub {
+            fn name(&self) -> &str {
+                "v1_stub"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                unreachable!()
+            }
+            fn engine_compatibility(&self) -> EngineCompatibility {
+                EngineCompatibility::V1Only
+            }
+        }
+
+        let registry = Arc::new(ToolRegistry::new().with_engine_version(EngineVersion::V2));
+        registry.register(Arc::new(V1OnlyStub)).await;
+
+        let tool = ToolInfoTool::new(Arc::downgrade(&registry));
+        let ctx = JobContext::default();
+        let result = tool
+            .execute(serde_json::json!({"name": "v1_stub"}), &ctx)
+            .await;
+        assert!(
+            matches!(result, Err(ToolError::InvalidParameters(ref msg)) if msg.contains("not available")),
+            "tool_info should reject V1Only tools in V2 registry"
+        );
     }
 }

@@ -331,15 +331,11 @@ impl AppBuilder {
         } else {
             crate::tools::EngineVersion::V1
         };
-        let tools = if let Some(ref ss) = self.secrets_store {
-            Arc::new(
-                ToolRegistry::new()
-                    .with_engine_version(engine_version)
-                    .with_credentials(Arc::clone(&credential_registry), Arc::clone(ss)),
-            )
-        } else {
-            Arc::new(ToolRegistry::new().with_engine_version(engine_version))
-        };
+        let mut registry = ToolRegistry::new().with_engine_version(engine_version);
+        if let Some(ref ss) = self.secrets_store {
+            registry = registry.with_credentials(Arc::clone(&credential_registry), Arc::clone(ss));
+        }
+        let tools = Arc::new(registry);
         tools.register_builtin_tools();
         tools.register_tool_info();
 

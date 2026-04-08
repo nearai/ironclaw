@@ -24,7 +24,7 @@ use crate::tools::builtin::{
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{
-    ApprovalRequirement, EngineCompatibility, EngineVersion, Tool, ToolDiscoverySummary, ToolDomain,
+    ApprovalRequirement, EngineVersion, Tool, ToolDiscoverySummary, ToolDomain,
 };
 use crate::tools::wasm::{
     Capabilities, OAuthRefreshConfig, ResourceLimits, SharedCredentialRegistry, WasmError,
@@ -144,17 +144,8 @@ impl ToolRegistry {
         }
     }
 
-    /// Check if a tool is visible in the given engine version.
     fn is_engine_visible(tool: &dyn Tool, version: EngineVersion) -> bool {
-        let compat = tool.engine_compatibility();
-        match version {
-            EngineVersion::V1 => {
-                compat == EngineCompatibility::Both || compat == EngineCompatibility::V1Only
-            }
-            EngineVersion::V2 => {
-                compat == EngineCompatibility::Both || compat == EngineCompatibility::V2Only
-            }
-        }
+        tool.engine_compatibility().is_visible_in(version)
     }
 
     /// Create a new empty registry. Defaults to engine V1.
@@ -286,9 +277,16 @@ impl ToolRegistry {
         self.tools.read().await.contains_key(name)
     }
 
-    /// List all tool names.
+    /// List tool names visible in the current engine version.
     pub async fn list(&self) -> Vec<String> {
-        self.tools.read().await.keys().cloned().collect()
+        let version = self.engine_version;
+        self.tools
+            .read()
+            .await
+            .values()
+            .filter(|tool| Self::is_engine_visible(tool.as_ref(), version))
+            .map(|tool| tool.name().to_string())
+            .collect()
     }
 
     /// Retain only tools whose names are in the given allowlist.
@@ -999,7 +997,7 @@ impl std::fmt::Debug for ToolRegistry {
 mod tests {
     use super::*;
     use crate::tools::registry::EchoTool;
-    use crate::tools::tool::ToolDiscoverySummary;
+    use crate::tools::tool::{EngineCompatibility, ToolDiscoverySummary};
 
     #[tokio::test]
     async fn test_register_and_get() {

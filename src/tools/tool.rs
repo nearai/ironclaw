@@ -176,6 +176,17 @@ pub enum EngineCompatibility {
     V2Only,
 }
 
+impl EngineCompatibility {
+    /// Whether a tool with this compatibility is visible in the given engine version.
+    pub fn is_visible_in(self, version: EngineVersion) -> bool {
+        match self {
+            Self::Both => true,
+            Self::V1Only => version == EngineVersion::V1,
+            Self::V2Only => version == EngineVersion::V2,
+        }
+    }
+}
+
 /// Engine version selector for filtering tools.
 ///
 /// Used by `ToolRegistry::tool_definitions_for_engine()` as the filter
