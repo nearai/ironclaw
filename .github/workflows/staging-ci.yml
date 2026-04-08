@@ -28,6 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read
     outputs:
       promotion_base: ${{ steps.resolve.outputs.promotion_base }}
     steps:
@@ -261,6 +262,7 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
+      checks: read
     outputs:
       gate_passed: ${{ steps.evaluate.outputs.passed }}
     steps:
