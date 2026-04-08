@@ -322,7 +322,7 @@ impl LiveTestHarness {
                 StatusUpdate::SkillActivated { skill_names } => {
                     log.push_str(&format!("  ◆ skills: {}\n", skill_names.join(", ")));
                 }
-                StatusUpdate::ToolStarted { name } => {
+                StatusUpdate::ToolStarted { name, .. } => {
                     log.push_str(&format!("  ● {name}\n"));
                 }
                 StatusUpdate::ToolCompleted {
@@ -338,7 +338,7 @@ impl LiveTestHarness {
                         log.push_str(&format!("  ✗ {name}: {err}\n"));
                     }
                 }
-                StatusUpdate::ToolResult { name, preview } => {
+                StatusUpdate::ToolResult { name, preview, .. } => {
                     let short = if preview.len() > 200 {
                         // Find a safe char boundary to avoid panicking on multi-byte UTF-8.
                         let end = preview

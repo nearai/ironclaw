@@ -501,6 +501,20 @@ def run_loop(context, goal, actions, state, config):
             all_skills = __list_skills__()
             active_skills = select_skills(all_skills, goal, max_candidates=3, max_tokens=4000)
             if active_skills:
+                __set_active_skills__([
+                    {
+                        "doc_id": s.get("doc_id", ""),
+                        "name": s.get("metadata", {}).get("name", "?"),
+                        "version": s.get("metadata", {}).get("version", 1),
+                        "snippet_names": [
+                            sn.get("name", "")
+                            for sn in s.get("metadata", {}).get("code_snippets", [])
+                            if sn.get("name")
+                        ],
+                        "force_activated": False,
+                    }
+                    for s in active_skills
+                ])
                 skill_text = format_skills(active_skills)
                 append_system_append(working_messages, skill_text)
                 # Emit skill activation event for CLI/gateway display
