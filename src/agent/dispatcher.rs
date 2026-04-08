@@ -46,6 +46,11 @@ pub(super) enum AgenticLoopResult {
         error: Error,
         turn_usage: TurnUsageSummary,
     },
+    /// Auth flow initiated — config card already sent, suppress text response.
+    AuthPending {
+        instructions: String,
+        turn_usage: TurnUsageSummary,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -312,6 +317,10 @@ impl Agent {
             }),
             Ok(LoopOutcome::NeedApproval(pending)) => Ok(AgenticLoopResult::NeedApproval {
                 pending,
+                turn_usage,
+            }),
+            Ok(LoopOutcome::AuthPending(instructions)) => Ok(AgenticLoopResult::AuthPending {
+                instructions,
                 turn_usage,
             }),
             Err(error) => Ok(AgenticLoopResult::Failed { error, turn_usage }),
@@ -1247,7 +1256,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     auth_data.setup_url,
                 )
                 .await;
-                return Ok(Some(LoopOutcome::Response(instructions)));
+                return Ok(Some(LoopOutcome::AuthPending(instructions)));
             }
 
             emit_auth_required_status(
@@ -2314,6 +2323,9 @@ mod tests {
             }
             super::AgenticLoopResult::Failed { .. } => {
                 panic!("expected NeedApproval, got Failed")
+            }
+            super::AgenticLoopResult::AuthPending { .. } => {
+                panic!("expected NeedApproval, got AuthPending")
             }
         };
 
@@ -3568,6 +3580,9 @@ mod tests {
             super::AgenticLoopResult::Failed { error, .. } => {
                 panic!("Expected text response, got Failed: {error}");
             }
+            super::AgenticLoopResult::AuthPending { .. } => {
+                panic!("Expected text response, got AuthPending");
+            }
         }
     }
 
@@ -3612,6 +3627,9 @@ mod tests {
                 }
                 super::AgenticLoopResult::Failed { error, .. } => {
                     panic!("expected a text response, got Failed: {error}");
+                }
+                super::AgenticLoopResult::AuthPending { .. } => {
+                    panic!("expected a text response, got AuthPending");
                 }
             }
         }

@@ -1878,6 +1878,11 @@ impl Agent {
                 Ok(HandleOutcome::Respond(format!("Error: {}", message)))
             }
             SubmissionResult::Interrupted => Ok(HandleOutcome::Respond("Interrupted.".into())),
+            SubmissionResult::AuthPending => {
+                // Auth-required status already sent by handle_auth_intercept.
+                // Thread is in auth mode — suppress text response and Done.
+                Ok(HandleOutcome::Pending)
+            }
             SubmissionResult::NeedApproval { .. } => {
                 // ApprovalNeeded status was already sent by thread_ops.rs before
                 // returning this result. The thread is now in AwaitingApproval —
