@@ -125,7 +125,13 @@ impl UserStore for LibSqlBackend {
         }
         .await
         {
-            let _ = conn.execute("ROLLBACK", ()).await;
+            if let Err(rollback_err) = conn.execute("ROLLBACK", ()).await {
+                tracing::warn!(
+                    error = %rollback_err,
+                    "ROLLBACK failed after libSQL transaction error; \
+                     connection will be dropped (not pooled), so no dirty state leaks"
+                );
+            }
             return Err(err);
         }
 
@@ -179,7 +185,13 @@ impl UserStore for LibSqlBackend {
         .await;
 
         if let Err(err) = result {
-            let _ = conn.execute("ROLLBACK", ()).await;
+            if let Err(rollback_err) = conn.execute("ROLLBACK", ()).await {
+                tracing::warn!(
+                    error = %rollback_err,
+                    "ROLLBACK failed after libSQL transaction error; \
+                     connection will be dropped (not pooled), so no dirty state leaks"
+                );
+            }
             return Err(err);
         }
 
@@ -579,7 +591,13 @@ impl UserStore for LibSqlBackend {
                 Ok(deleted)
             }
             Err(e) => {
-                let _ = conn.execute("ROLLBACK", ()).await;
+                if let Err(rollback_err) = conn.execute("ROLLBACK", ()).await {
+                    tracing::warn!(
+                        error = %rollback_err,
+                        "ROLLBACK failed after libSQL transaction error; \
+                         connection will be dropped (not pooled), so no dirty state leaks"
+                    );
+                }
                 Err(e)
             }
         }
@@ -698,7 +716,13 @@ impl UserStore for LibSqlBackend {
             )
             .await
         {
-            let _ = conn.execute("ROLLBACK", ()).await;
+            if let Err(rollback_err) = conn.execute("ROLLBACK", ()).await {
+                tracing::warn!(
+                    error = %rollback_err,
+                    "ROLLBACK failed after libSQL transaction error; \
+                     connection will be dropped (not pooled), so no dirty state leaks"
+                );
+            }
             return Err(DatabaseError::Query(e.to_string()));
         }
 
@@ -723,12 +747,24 @@ impl UserStore for LibSqlBackend {
             )
             .await
         {
-            let _ = conn.execute("ROLLBACK", ()).await;
+            if let Err(rollback_err) = conn.execute("ROLLBACK", ()).await {
+                tracing::warn!(
+                    error = %rollback_err,
+                    "ROLLBACK failed after libSQL transaction error; \
+                     connection will be dropped (not pooled), so no dirty state leaks"
+                );
+            }
             return Err(DatabaseError::Query(e.to_string()));
         }
 
         if let Err(e) = seed_initial_assistant_thread(&conn, &user.id, &user.created_at).await {
-            let _ = conn.execute("ROLLBACK", ()).await;
+            if let Err(rollback_err) = conn.execute("ROLLBACK", ()).await {
+                tracing::warn!(
+                    error = %rollback_err,
+                    "ROLLBACK failed after libSQL transaction error; \
+                     connection will be dropped (not pooled), so no dirty state leaks"
+                );
+            }
             return Err(e);
         }
 

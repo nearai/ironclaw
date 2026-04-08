@@ -60,14 +60,21 @@ fn resumed_action_result_message(
     ironclaw_engine::ThreadMessage::action_result(call_id, action_name, rendered)
 }
 
+/// Resolve the assistant action `call_id` that a pending gate corresponds to.
+///
+/// Returns `None` when neither the persisted `call_id` nor a history scan can
+/// produce a match. Callers must treat `None` as a real miss and synthesize a
+/// fresh id rather than collapsing it into an empty string — an empty
+/// `action_call_id` on a `ThreadMessage::action_result` corrupts the engine's
+/// call/result pairing and causes the assistant to drop the resumed reply.
 fn resolved_call_id_for_pending_action(
     thread: &ironclaw_engine::Thread,
     pending: &PendingGate,
-) -> String {
+) -> Option<String> {
     // New pending gates persist the exact call_id at insertion time.
     // Only infer from history for legacy rows created before call_id was stored.
     if !pending.call_id.is_empty() {
-        return pending.call_id.clone();
+        return Some(pending.call_id.clone());
     }
 
     let resolved_ids: HashSet<&str> = thread
@@ -80,23 +87,26 @@ fn resolved_call_id_for_pending_action(
         })
         .collect();
 
-    thread
-        .messages
-        .iter()
-        .rev()
-        .find_map(|message| {
-            if message.role != ironclaw_engine::types::message::MessageRole::Assistant {
-                return None;
-            }
-            message.action_calls.as_ref().and_then(|calls| {
-                calls.iter().find_map(|call| {
-                    (call.action_name == pending.action_name
-                        && !resolved_ids.contains(call.id.as_str()))
-                    .then(|| call.id.clone())
-                })
+    thread.messages.iter().rev().find_map(|message| {
+        if message.role != ironclaw_engine::types::message::MessageRole::Assistant {
+            return None;
+        }
+        message.action_calls.as_ref().and_then(|calls| {
+            calls.iter().find_map(|call| {
+                (call.action_name == pending.action_name
+                    && !resolved_ids.contains(call.id.as_str()))
+                .then(|| call.id.clone())
             })
         })
-        .unwrap_or_default()
+    })
+}
+
+/// Synthesize a fresh action call id when no historical id can be recovered.
+///
+/// Used as a last-resort so the resumed `ActionResult` message still carries a
+/// non-empty correlator and the engine does not silently drop the reply.
+fn synthetic_action_call_id(action_name: &str) -> String {
+    format!("synthetic-{}-{}", action_name, uuid::Uuid::new_v4())
 }
 
 async fn notify_pending_gate(
@@ -215,7 +225,16 @@ async fn execute_pending_gate_action(
         .await
         .map_err(|e| engine_err("load thread", e))?
         .ok_or_else(|| engine_err("load thread", "thread not found"))?;
-    let resolved_call_id = resolved_call_id_for_pending_action(&thread, pending);
+    let resolved_call_id =
+        resolved_call_id_for_pending_action(&thread, pending).unwrap_or_else(|| {
+            tracing::warn!(
+                action = %pending.action_name,
+                thread_id = %pending.thread_id,
+                "no historical call_id for pending gate; synthesizing one to keep \
+                 ActionResult correlator non-empty"
+            );
+            synthetic_action_call_id(&pending.action_name)
+        });
 
     let lease = state
         .thread_manager
@@ -4370,7 +4389,7 @@ mod tests {
 
         assert_eq!(
             resolved_call_id_for_pending_action(&thread, &pending),
-            "call-1"
+            Some("call-1".to_string())
         );
     }
 
@@ -4415,8 +4434,29 @@ mod tests {
 
         assert_eq!(
             resolved_call_id_for_pending_action(&thread, &pending),
-            "call-2"
+            Some("call-2".to_string())
         );
+    }
+
+    #[test]
+    fn resolved_call_id_returns_none_when_no_history_match() {
+        let thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        let pending = PendingGate {
+            call_id: String::new(),
+            ..sample_pending_gate(
+                "alice",
+                thread.id,
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            )
+        };
+
+        assert!(resolved_call_id_for_pending_action(&thread, &pending).is_none());
     }
 
     #[tokio::test]

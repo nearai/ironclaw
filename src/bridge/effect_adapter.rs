@@ -936,13 +936,17 @@ impl EffectBridgeAdapter {
     /// `authentication_required` error containing an attacker-chosen
     /// `credential_name` to phish the user. We only honor the gate request
     /// when the name corresponds to a credential the host has actually
-    /// registered. If the registry isn't wired (e.g., test harnesses without
-    /// credential injection), fall back to the existing behavior so we don't
-    /// regress unrelated callers.
+    /// registered.
+    ///
+    /// **Fail-closed:** when no credential registry is wired, we reject the
+    /// gate request rather than honoring it. A test/embed harness without a
+    /// registry has no source of truth for credential names, and trusting
+    /// the tool's claim in that mode would let any tool prompt the user for
+    /// any credential name.
     fn is_known_credential(&self, credential_name: &str) -> bool {
         match self.tools.credential_registry() {
             Some(registry) => registry.has_secret(credential_name),
-            None => true,
+            None => false,
         }
     }
 }

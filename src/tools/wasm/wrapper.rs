@@ -1163,7 +1163,7 @@ impl Tool for WasmToolWrapper {
         // This decrypts the secrets once so the sync http_request() host function
         // can inject them without needing async access.
         let credential_user_id = &ctx.user_id;
-        let host_credentials = resolve_host_credentials(
+        let resolution = resolve_host_credentials(
             &self.capabilities,
             self.secrets_store.as_deref(),
             credential_user_id,
@@ -1171,6 +1171,23 @@ impl Tool for WasmToolWrapper {
             self.oauth_refresh.as_ref(),
         )
         .await;
+
+        // Fail closed: if any *required* credential is missing, refuse to
+        // execute the tool. The previous behavior of silently dropping
+        // unresolved credentials let a malicious or misconfigured tool
+        // issue requests without the credentials it declared, which can
+        // exfiltrate user context to an unauthenticated endpoint.
+        // Tools that genuinely want graceful degradation must mark the
+        // mapping `optional = true` in their capabilities manifest.
+        if !resolution.missing_required.is_empty() {
+            return Err(ToolError::ExecutionFailed(format!(
+                "WASM tool '{}' requires credentials that are not configured: {}. \
+                 Configure the missing credentials before re-running the tool.",
+                self.name(),
+                resolution.missing_required.join(", ")
+            )));
+        }
+        let host_credentials = resolution.resolved;
 
         // Serialize context for WASM
         let context_json = serde_json::to_string(ctx).ok();
@@ -1268,36 +1285,88 @@ impl std::fmt::Debug for WasmToolWrapper {
 /// Silently skips credentials that can't be resolved (e.g., missing secrets).
 /// The tool will get a 401/403 from the API, which is the expected UX when
 /// auth hasn't been configured yet.
+/// Outcome of pre-resolving WASM tool host credentials. Carries both the
+/// successfully-resolved set and any *required* credentials that could not
+/// be resolved. The caller is responsible for refusing to execute the tool
+/// when `missing_required` is non-empty — proceeding would let the tool
+/// issue requests without the credentials it declared, which a malicious
+/// or misconfigured tool can use to exfiltrate user context to an
+/// unauthenticated endpoint.
+struct HostCredentialsResolution {
+    resolved: Vec<ResolvedHostCredential>,
+    missing_required: Vec<String>,
+}
+
+#[cfg(test)]
+impl HostCredentialsResolution {
+    fn is_empty(&self) -> bool {
+        self.resolved.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.resolved.len()
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Index<usize> for HostCredentialsResolution {
+    type Output = ResolvedHostCredential;
+    fn index(&self, idx: usize) -> &Self::Output {
+        &self.resolved[idx]
+    }
+}
+
 async fn resolve_host_credentials(
     capabilities: &Capabilities,
     store: Option<&(dyn SecretsStore + Send + Sync)>,
     user_id: &str,
     role_lookup: Option<&dyn UserStore>,
     oauth_refresh: Option<&OAuthRefreshConfig>,
-) -> Vec<ResolvedHostCredential> {
+) -> HostCredentialsResolution {
+    let mut missing_required: Vec<String> = Vec::new();
+
     let store = match store {
         Some(s) => s,
         None => {
-            // If tool requires credentials but has no secrets store, this is a configuration error
+            // If tool requires credentials but has no secrets store, every
+            // declared *required* credential is unresolvable. Return them
+            // as missing so the caller can refuse the execution rather
+            // than silently dropping into unauthenticated mode.
             if let Some(http_cap) = &capabilities.http
                 && !http_cap.credentials.is_empty()
             {
                 tracing::warn!(
                     user_id = %user_id,
-                    "WASM tool requires credentials but secrets_store is not configured - authentication will fail"
+                    "WASM tool requires credentials but secrets_store is not configured"
                 );
+                for mapping in http_cap.credentials.values() {
+                    if !mapping.optional {
+                        missing_required.push(mapping.secret_name.clone());
+                    }
+                }
             }
-            return Vec::new();
+            return HostCredentialsResolution {
+                resolved: Vec::new(),
+                missing_required,
+            };
         }
     };
 
     let http_cap = match &capabilities.http {
         Some(cap) => cap,
-        None => return Vec::new(),
+        None => {
+            return HostCredentialsResolution {
+                resolved: Vec::new(),
+                missing_required,
+            };
+        }
     };
 
     if http_cap.credentials.is_empty() {
-        return Vec::new();
+        return HostCredentialsResolution {
+            resolved: Vec::new(),
+            missing_required,
+        };
     }
 
     let mut resolved = Vec::new();
@@ -1327,8 +1396,12 @@ async fn resolve_host_credentials(
                     secret_name = %mapping.secret_name,
                     user_id = %user_id,
                     error = ?error,
+                    optional = mapping.optional,
                     "Could not resolve credential for WASM tool"
                 );
+                if !mapping.optional {
+                    missing_required.push(mapping.secret_name.clone());
+                }
                 continue;
             }
         };
@@ -1355,7 +1428,10 @@ async fn resolve_host_credentials(
         );
     }
 
-    resolved
+    HostCredentialsResolution {
+        resolved,
+        missing_required,
+    }
 }
 
 /// Extract the hostname from a URL string.
@@ -2135,6 +2211,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                optional: false,
             },
         );
 
@@ -2181,6 +2258,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                optional: false,
             },
         );
 
@@ -2228,6 +2306,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                optional: false,
             },
         );
 
@@ -2265,6 +2344,7 @@ mod tests {
                 secret_name: "missing_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.example.com".to_string()],
+                optional: false,
             },
         );
 
@@ -2308,6 +2388,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                optional: false,
             },
         );
 
@@ -2367,6 +2448,7 @@ mod tests {
                 secret_name: "my_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.example.com".to_string()],
+                optional: false,
             },
         );
 
@@ -2409,6 +2491,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                optional: false,
             },
         );
 
@@ -2450,6 +2533,22 @@ mod tests {
         use crate::tools::wasm::capabilities::HttpCapability;
         use crate::tools::wasm::wrapper::{OAuthRefreshConfig, resolve_host_credentials};
 
+        // The OAuth proxy URL is now SSRF-validated. The mock proxy below
+        // binds to a loopback address, which is normally rejected; opt into
+        // the loopback escape hatch so the test can exercise the proxy
+        // refresh path end-to-end. The escape hatch only affects this
+        // process and is not exposed to operators.
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                // safety: env mutation in tests; var is test-only.
+                unsafe { std::env::remove_var("IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK") };
+            }
+        }
+        // safety: env mutation in tests; var is test-only.
+        unsafe { std::env::set_var("IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK", "1") };
+        let _proxy_loopback_guard = EnvGuard;
+
         let proxy = MockProxyServer::start().await;
         let store = test_secrets_store();
 
@@ -2476,6 +2575,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                optional: false,
             },
         );
 
@@ -2586,6 +2686,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                optional: false,
             },
         );
 
@@ -2654,6 +2755,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                optional: false,
             },
         );
 
@@ -2908,6 +3010,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["sheets.googleapis.com".to_string()],
+                optional: false,
             },
         );
         let caps = Capabilities {
@@ -2935,6 +3038,40 @@ mod tests {
 
         assert!(!result.is_empty(), "fallback to default"); // safety: test code only
         assert_eq!(result[0].secret_value, "global_token_value"); // safety: test code only
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_resolve_host_credentials_denies_default_fallback_when_caller_is_default() {
+        // Regression: a caller whose `user_id` is literally "default" must NOT
+        // be granted the AdminOnly default-fallback path. The fallback exists
+        // so that admin-initiated background jobs can borrow a global secret
+        // from the "default" scope; if the caller IS already "default", there
+        // is nothing to fall back to and treating it as an admin loops the
+        // resolution back into the same scope it just failed in.
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+        // Even though the user has admin role, the literal id "default" must
+        // short-circuit the fallback decision.
+        let db = test_user_db("default", "admin").await;
+
+        // No secret stored anywhere — neither under "default" nor any other
+        // scope. The resolver should report an empty result, not panic and
+        // not silently bypass the AdminOnly gate.
+        let caps = test_capabilities_with_google_oauth();
+        let result =
+            resolve_host_credentials(&caps, Some(&store), "default", Some(db.as_ref()), None).await;
+
+        assert!(
+            result.is_empty(),
+            "caller user_id == 'default' must not enter the fallback branch"
+        );
+        assert_eq!(
+            result.missing_required,
+            vec!["google_oauth_token".to_string()],
+            "missing required credential should still be reported"
+        );
     }
 
     #[cfg(feature = "libsql")]
@@ -2981,6 +3118,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["sheets.googleapis.com".to_string()],
+                optional: false,
             },
         );
         Capabilities {

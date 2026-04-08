@@ -1569,11 +1569,15 @@ impl ExtensionManager {
             Err(ExtensionError::NotInstalled(_))
                 if matches!(
                     intent,
-                    EnsureReadyIntent::UseCapability
-                        | EnsureReadyIntent::PostInstall
-                        | EnsureReadyIntent::ExplicitActivate
+                    EnsureReadyIntent::PostInstall | EnsureReadyIntent::ExplicitActivate
                 ) =>
             {
+                // Auto-install only on explicit user actions (PostInstall after a
+                // user-initiated install, or ExplicitActivate). For
+                // `UseCapability` (LLM-driven latent action invocation) we
+                // intentionally do NOT silently install registry extensions —
+                // that path must surface as `NotInstalled` so the bridge can
+                // route it through the approval/install gate.
                 let entry = self
                     .registry
                     .get(&name)
@@ -1582,7 +1586,7 @@ impl ExtensionManager {
                 tracing::debug!(
                     extension = %name,
                     kind = %entry.kind,
-                    "Auto-installing registry extension on first use"
+                    "Auto-installing registry extension on explicit user action"
                 );
                 self.install_from_entry(&entry, user_id).await?;
                 self.determine_installed_kind(&name, user_id).await?
@@ -5193,6 +5197,11 @@ impl ExtensionManager {
             tool_names.len()
         );
 
+        // Invalidate latent provider actions so the newly-activated MCP server
+        // stops appearing in the latent set on the next ensure_extension_ready
+        // cycle.
+        self.invalidate_latent_wasm_provider_actions_cache().await;
+
         Ok(ActivateResult {
             name: name.to_string(),
             kind: ExtensionKind::McpServer,
@@ -5328,6 +5337,10 @@ impl ExtensionManager {
         }
 
         tracing::info!("Activated WASM tool '{}'", name);
+
+        // Invalidate latent provider actions so the newly-activated tool stops
+        // appearing in the latent set on the next ensure_extension_ready cycle.
+        self.invalidate_latent_wasm_provider_actions_cache().await;
 
         Ok(ActivateResult {
             name: name.to_string(),
@@ -8485,7 +8498,7 @@ mod tests {
     /// `WasmBuildable.build_dir` points at the tempdir, so no network and
     /// no real `cargo` invocation are needed.
     #[tokio::test]
-    async fn ensure_extension_ready_auto_installs_registry_wasm_tool_on_first_use() {
+    async fn ensure_extension_ready_auto_installs_registry_wasm_tool_on_explicit_activate() {
         let dir = tempfile::tempdir().expect("temp dir");
         let tools_dir = dir.path().join("tools");
         let channels_dir = dir.path().join("channels");
@@ -8547,7 +8560,7 @@ mod tests {
             .ensure_extension_ready(
                 "web_search",
                 "test",
-                crate::extensions::EnsureReadyIntent::UseCapability,
+                crate::extensions::EnsureReadyIntent::ExplicitActivate,
             )
             .await
             .expect("ensure ready");
@@ -8579,6 +8592,67 @@ mod tests {
         assert!(
             tools_dir.join("web_search.capabilities.json").exists(),
             "auto-install should have copied the capabilities sidecar into wasm_tools_dir"
+        );
+    }
+
+    /// Regression: latent provider actions called by the LLM
+    /// (`UseCapability` intent) must NOT silently install a registry
+    /// extension. The bridge needs to surface this as `NotInstalled` so the
+    /// caller can route through the install/approval gate instead of
+    /// downloading and activating arbitrary code on the LLM's behalf.
+    #[tokio::test]
+    async fn ensure_extension_ready_use_capability_does_not_auto_install() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+
+        let build_dir = dir.path().join("build");
+        let artifact_dir = build_dir.join("target/wasm32-wasip2/release");
+        std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
+        let wasm_path = artifact_dir.join("web_search.wasm");
+        std::fs::write(&wasm_path, b"\x00asm\x01\x00\x00\x00").expect("write wasm");
+        let caps_path = build_dir.join("web_search.capabilities.json");
+        std::fs::write(&caps_path, "{}").expect("write capabilities");
+
+        let entry = RegistryEntry {
+            name: "web_search".to_string(),
+            display_name: "Web Search".to_string(),
+            kind: ExtensionKind::WasmTool,
+            description: "Search the web via Brave Search".to_string(),
+            keywords: vec!["search".into(), "web".into()],
+            source: ExtensionSource::WasmBuildable {
+                source_dir: build_dir.to_string_lossy().into_owned(),
+                build_dir: Some(build_dir.to_string_lossy().into_owned()),
+                crate_name: Some("web_search".to_string()),
+            },
+            fallback_source: None,
+            auth_hint: AuthHint::CapabilitiesAuth,
+            version: None,
+        };
+
+        let manager = make_test_manager_with_catalog(
+            None,
+            tools_dir.clone(),
+            channels_dir,
+            None,
+            vec![entry],
+        );
+
+        let result = manager
+            .ensure_extension_ready(
+                "web_search",
+                "test",
+                crate::extensions::EnsureReadyIntent::UseCapability,
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(ExtensionError::NotInstalled(_))),
+            "UseCapability must surface NotInstalled, not auto-install; got {result:?}"
+        );
+        assert!(
+            !tools_dir.join("web_search.wasm").exists(),
+            "UseCapability path must NOT have copied the wasm artifact into wasm_tools_dir"
         );
     }
 

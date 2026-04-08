@@ -66,6 +66,9 @@ pub fn credential_spec_to_mapping(spec: &SkillCredentialSpec) -> CredentialMappi
         secret_name: spec.name.clone(),
         location: convert_credential_location(&spec.location),
         host_patterns: spec.hosts.clone(),
+        // Skill credentials are required by default; the spec doesn't yet
+        // expose an `optional` field, so we conservatively mark required.
+        optional: false,
     }
 }
 

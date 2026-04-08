@@ -367,6 +367,13 @@ pub struct CredentialMappingSchema {
     /// Host patterns this credential applies to.
     #[serde(default)]
     pub host_patterns: Vec<String>,
+
+    /// When `true`, the host may run the tool without resolving this
+    /// credential (graceful degradation). Defaults to `false` (required) so
+    /// a tool that simply declares a credential cannot be silently
+    /// downgraded to an unauthenticated request.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 impl CredentialMappingSchema {
@@ -375,6 +382,7 @@ impl CredentialMappingSchema {
             secret_name: self.secret_name.clone(),
             location: self.location.to_credential_location(),
             host_patterns: self.host_patterns.clone(),
+            optional: self.optional,
         }
     }
 }

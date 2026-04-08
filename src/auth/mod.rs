@@ -15,12 +15,38 @@ use crate::tools::wasm::{ssrf_safe_client_builder_for_target, validate_and_resol
 
 const AUTH_DESCRIPTORS_SETTING_KEY: &str = "auth.descriptors_v1";
 
-fn auth_descriptor_cache()
--> &'static tokio::sync::Mutex<HashMap<String, HashMap<String, AuthDescriptor>>> {
-    static CACHE: std::sync::OnceLock<
-        tokio::sync::Mutex<HashMap<String, HashMap<String, AuthDescriptor>>>,
-    > = std::sync::OnceLock::new();
+/// TTL for cached auth-descriptor maps. Bounded so that:
+/// - a deleted/suspended user's descriptors fall out of cache within the
+///   window even if no explicit invalidation hook fires;
+/// - the cache cannot grow unboundedly across long-lived processes — every
+///   `load_auth_descriptors` call also evicts entries past TTL on its way
+///   through.
+const AUTH_DESCRIPTOR_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[derive(Clone)]
+struct CachedDescriptors {
+    descriptors: HashMap<String, AuthDescriptor>,
+    inserted_at: std::time::Instant,
+}
+
+fn auth_descriptor_cache() -> &'static tokio::sync::Mutex<HashMap<String, CachedDescriptors>> {
+    static CACHE: std::sync::OnceLock<tokio::sync::Mutex<HashMap<String, CachedDescriptors>>> =
+        std::sync::OnceLock::new();
     CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
+}
+
+/// Drop the cached auth descriptors for `user_id`. Call this when a user is
+/// deleted/suspended/has their descriptors mutated by an out-of-band path so
+/// the in-process cache doesn't hand back stale entries until TTL expires.
+pub async fn invalidate_auth_descriptor_cache(user_id: &str) {
+    auth_descriptor_cache().lock().await.remove(user_id);
+}
+
+/// Drop ALL cached auth descriptors. Used in tests and on settings-store
+/// reconfiguration.
+#[cfg(test)]
+pub async fn clear_auth_descriptor_cache() {
+    auth_descriptor_cache().lock().await.clear();
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -159,8 +185,15 @@ async fn load_auth_descriptors(
     // `DefaultFallback::AdminOnly` policy in `resolve_secret_for_runtime` is
     // what enforces the actual cross-tenant boundary.
     let cache = auth_descriptor_cache();
-    if let Some(descriptors) = cache.lock().await.get(user_id).cloned() {
-        return Ok(descriptors);
+    let now = std::time::Instant::now();
+    {
+        let mut guard = cache.lock().await;
+        // Evict expired entries opportunistically so the cache cannot grow
+        // unboundedly across long-lived processes.
+        guard.retain(|_, entry| now.duration_since(entry.inserted_at) < AUTH_DESCRIPTOR_CACHE_TTL);
+        if let Some(entry) = guard.get(user_id) {
+            return Ok(entry.descriptors.clone());
+        }
     }
 
     let descriptors = match store
@@ -172,10 +205,13 @@ async fn load_auth_descriptors(
         None => Ok(HashMap::new()),
     }?;
 
-    cache
-        .lock()
-        .await
-        .insert(user_id.to_string(), descriptors.clone());
+    cache.lock().await.insert(
+        user_id.to_string(),
+        CachedDescriptors {
+            descriptors: descriptors.clone(),
+            inserted_at: std::time::Instant::now(),
+        },
+    );
     Ok(descriptors)
 }
 
@@ -272,10 +308,13 @@ pub async fn upsert_auth_descriptor(
         return;
     }
 
-    auth_descriptor_cache()
-        .lock()
-        .await
-        .insert(user_id.to_string(), descriptors);
+    auth_descriptor_cache().lock().await.insert(
+        user_id.to_string(),
+        CachedDescriptors {
+            descriptors,
+            inserted_at: std::time::Instant::now(),
+        },
+    );
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -441,6 +480,39 @@ pub enum DefaultFallback {
     AdminOnly,
 }
 
+/// Validate an OAuth refresh-proxy URL against SSRF.
+///
+/// Wraps [`validate_and_resolve_http_target`] but optionally allows loopback
+/// targets when `IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK=1` is set in the
+/// environment. This escape hatch exists so unit tests that stand up a mock
+/// proxy on `127.0.0.1` can still exercise the refresh path. Production
+/// deployments must NEVER set this flag; the variable is intentionally
+/// undocumented in `.env.example` to keep it test-only.
+async fn validate_oauth_proxy_url(proxy_url: &str) -> Result<(), String> {
+    let allow_loopback = std::env::var("IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE"))
+        .unwrap_or(false);
+
+    match validate_and_resolve_http_target(proxy_url).await {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            if allow_loopback
+                && let Ok(parsed) = url::Url::parse(proxy_url)
+                && let Some(host) = parsed.host_str()
+                && let Ok(ip) = host.parse::<std::net::IpAddr>()
+                && ip.is_loopback()
+            {
+                tracing::debug!(
+                    proxy_url = %proxy_url,
+                    "Loopback OAuth proxy permitted via IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK"
+                );
+                return Ok(());
+            }
+            Err(error)
+        }
+    }
+}
+
 pub async fn refresh_oauth_access_token(
     store: &(dyn SecretsStore + Send + Sync),
     user_id: &str,
@@ -458,6 +530,28 @@ pub async fn refresh_oauth_access_token(
             );
             return false;
         };
+
+        // SSRF guard for the proxy path. The direct refresh path validates
+        // `token_url` below; the proxy path was previously trusting whatever
+        // the operator put in `IRONCLAW_OAUTH_EXCHANGE_URL`. Without this,
+        // a misconfigured/compromised proxy URL could be pointed at internal
+        // infrastructure and the refresh request (carrying the user's
+        // refresh token) would happily POST there.
+        //
+        // Loopback (`127.0.0.0/8`, `::1`) is conditionally exempt: in normal
+        // production this is still blocked, but tests that spin up a local
+        // mock proxy can set `IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK=1` to
+        // exercise the refresh path end-to-end. Loopback exemption is gated
+        // explicitly so an operator does not silently widen the SSRF surface
+        // by setting `IRONCLAW_OAUTH_EXCHANGE_URL=http://localhost/...`.
+        if let Err(error) = validate_oauth_proxy_url(proxy_url).await {
+            tracing::warn!(
+                proxy_url = %proxy_url,
+                error = %error,
+                "OAuth refresh proxy URL failed SSRF validation; refusing token refresh"
+            );
+            return false;
+        }
 
         let refresh_secret = match load_oauth_refresh_secret(store, user_id, &refresh_name).await {
             Some(secret) => secret,

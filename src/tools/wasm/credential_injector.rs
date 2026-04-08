@@ -500,6 +500,7 @@ mod tests {
                 secret_name: "openai_key".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.openai.com".to_string()],
+                optional: false,
             },
         );
 
@@ -533,6 +534,7 @@ mod tests {
                     prefix: None,
                 },
                 host_patterns: vec!["*.example.com".to_string()],
+                optional: false,
             },
         );
 
@@ -565,6 +567,7 @@ mod tests {
                     username: "myuser".to_string(),
                 },
                 host_patterns: vec!["api.service.com".to_string()],
+                optional: false,
             },
         );
 
@@ -607,6 +610,7 @@ mod tests {
                 secret_name: "secret_key".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.test.com".to_string()],
+                optional: false,
             },
         );
 
