@@ -1412,6 +1412,12 @@ async fn process_skill_repair_output(
             ),
         });
     }
+    if !existing.is_owned_by(&mission.user_id) {
+        return Err(EngineError::AccessDenied {
+            user_id: mission.user_id.clone(),
+            entity: format!("skill {}", repair.doc_id.0),
+        });
+    }
     if existing.doc_type != DocType::Skill {
         return Err(EngineError::Skill {
             reason: format!(
@@ -1556,6 +1562,16 @@ fn is_recoverable_action_failure(error: &str) -> bool {
     is_recoverable_auth_failure_text(error)
 }
 
+fn action_params_summary<'a>(event: &'a crate::types::event::ThreadEvent) -> Option<&'a str> {
+    match &event.kind {
+        crate::types::event::EventKind::ActionExecuted { params_summary, .. }
+        | crate::types::event::EventKind::ActionFailed { params_summary, .. } => {
+            params_summary.as_deref()
+        }
+        _ => None,
+    }
+}
+
 fn contains_word(haystack: &str, word: &str) -> bool {
     for (start, _) in haystack.match_indices(word) {
         let before_ok = start == 0 || haystack.as_bytes()[start - 1].is_ascii_whitespace();
@@ -1591,25 +1607,82 @@ fn has_shell_verification_action(thread: &Thread) -> bool {
     const WORD_PATTERNS: &[&str] = &["ls", "diff", "status", "view", "show"];
 
     thread.events.iter().any(|event| match &event.kind {
-        crate::types::event::EventKind::ActionExecuted {
-            action_name,
-            params_summary,
-            ..
+        crate::types::event::EventKind::ActionExecuted { action_name, .. }
+            if action_name == "shell" =>
+        {
+            action_params_summary(event)
+                .map(|summary| {
+                    let lower = summary.to_lowercase();
+                    PHRASE_PATTERNS
+                        .iter()
+                        .any(|pattern| lower.contains(pattern))
+                        || WORD_PATTERNS.iter().any(|word| contains_word(&lower, word))
+                })
+                .unwrap_or(false)
         }
-        | crate::types::event::EventKind::ActionFailed {
-            action_name,
-            params_summary,
-            ..
-        } if action_name == "shell" => params_summary
-            .as_deref()
-            .map(|summary| {
-                let lower = summary.to_lowercase();
-                PHRASE_PATTERNS
-                    .iter()
-                    .any(|pattern| lower.contains(pattern))
-                    || WORD_PATTERNS.iter().any(|word| contains_word(&lower, word))
-            })
-            .unwrap_or(false),
+        crate::types::event::EventKind::ActionFailed { action_name, .. }
+            if action_name == "shell" =>
+        {
+            action_params_summary(event)
+                .map(|summary| {
+                    let lower = summary.to_lowercase();
+                    PHRASE_PATTERNS
+                        .iter()
+                        .any(|pattern| lower.contains(pattern))
+                        || WORD_PATTERNS.iter().any(|word| contains_word(&lower, word))
+                })
+                .unwrap_or(false)
+        }
+        _ => false,
+    })
+}
+
+fn has_mutating_shell_or_git_action(thread: &Thread) -> bool {
+    const PHRASE_PATTERNS: &[&str] = &[
+        "apply_patch",
+        "git commit",
+        "git push",
+        "git pull",
+        "git merge",
+        "git rebase",
+        "git cherry-pick",
+        "git revert",
+        "git reset",
+        "git checkout",
+        "git switch",
+        "cargo fmt",
+        "rustfmt",
+        "npm install",
+        "pnpm install",
+        "yarn install",
+        "mkdir ",
+        "rm ",
+        "mv ",
+        "cp ",
+        "touch ",
+        "tee ",
+        "sed -i",
+        "perl -pi",
+    ];
+    const WORD_PATTERNS: &[&str] = &[
+        "write", "create", "delete", "remove", "rename", "patch", "install", "format",
+    ];
+
+    thread.events.iter().any(|event| match &event.kind {
+        crate::types::event::EventKind::ActionExecuted { action_name, .. }
+        | crate::types::event::EventKind::ActionFailed { action_name, .. }
+            if action_name == "shell" || action_name == "git" =>
+        {
+            action_params_summary(event)
+                .map(|summary| {
+                    let lower = summary.to_lowercase();
+                    PHRASE_PATTERNS
+                        .iter()
+                        .any(|pattern| lower.contains(pattern))
+                        || WORD_PATTERNS.iter().any(|word| contains_word(&lower, word))
+                })
+                .unwrap_or(false)
+        }
         _ => false,
     })
 }
@@ -1686,15 +1759,9 @@ fn infer_skill_repair_hints(
     let mutating_actions = observed_actions.iter().any(|action| {
         matches!(
             action.as_str(),
-            "write_file"
-                | "apply_patch"
-                | "memory_write"
-                | "shell"
-                | "git"
-                | "skill_install"
-                | "skill_remove"
+            "write_file" | "apply_patch" | "memory_write" | "skill_install" | "skill_remove"
         )
-    });
+    }) || has_mutating_shell_or_git_action(thread);
     let verification_actions = observed_actions.iter().any(|action| {
         matches!(
             action.as_str(),
@@ -3493,5 +3560,94 @@ mod tests {
         assert_eq!(updated.content, "Original skill content");
         assert_eq!(updated_meta.version, 1);
         assert!(updated_meta.repairs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_skill_repair_output_rejects_shared_skill_updates() {
+        let store = Arc::new(TestStore::new());
+        let project_id = ProjectId::new();
+        let skill_doc = make_skill_doc(project_id, shared_owner_id(), "github-pr-workflow");
+        let skill_doc_id = skill_doc.id;
+        store.save_memory_doc(&skill_doc).await.unwrap();
+
+        let mut mission = Mission::new(
+            project_id,
+            "alice",
+            "skill-repair",
+            SKILL_REPAIR_GOAL,
+            MissionCadence::Manual,
+        );
+        mission.metadata = serde_json::json!({"skill_repair": true});
+        mission.last_trigger_payload = Some(serde_json::json!({
+            "source_thread_id": "thread-123",
+            "active_skills": [{
+                "doc_id": skill_doc_id,
+                "name": "github-pr-workflow",
+                "version": 1,
+                "snippet_names": [],
+                "force_activated": false
+            }]
+        }));
+
+        let response = serde_json::json!({
+            "doc_id": skill_doc_id,
+            "repair_type": "missing_verification",
+            "summary": "Attempted shared skill update.",
+            "updated_content": "1. Verify auth\n2. Run the command"
+        })
+        .to_string();
+
+        let err =
+            process_skill_repair_output(&(store.clone() as Arc<dyn Store>), &mission, &response)
+                .await
+                .unwrap_err();
+        match err {
+            EngineError::AccessDenied { user_id, entity } => {
+                assert_eq!(user_id, "alice");
+                assert!(entity.contains(&skill_doc_id.0.to_string()));
+            }
+            other => panic!("expected access denied, got: {other:?}"),
+        }
+
+        let unchanged = store.load_memory_doc(skill_doc_id).await.unwrap().unwrap();
+        let meta: V2SkillMetadata = serde_json::from_value(unchanged.metadata).unwrap();
+        assert_eq!(unchanged.content, "Original skill content");
+        assert_eq!(meta.version, 1);
+        assert!(meta.repairs.is_empty());
+    }
+
+    #[test]
+    fn build_skill_gap_payload_skips_read_only_shell_workflows() {
+        let project_id = ProjectId::new();
+        let mut thread = Thread::new(
+            "inspect github pull requests",
+            ThreadType::Foreground,
+            project_id,
+            "alice",
+            ThreadConfig::default(),
+        );
+        thread.state = ThreadState::Done;
+        thread
+            .set_active_skills(&[ActiveSkillProvenance {
+                doc_id: DocId::new(),
+                name: "github-pr-workflow".to_string(),
+                version: 1,
+                snippet_names: vec![],
+                force_activated: false,
+            }])
+            .unwrap();
+        thread.add_event(crate::types::event::EventKind::ActionExecuted {
+            step_id: StepId::new(),
+            action_name: "shell".to_string(),
+            call_id: "call_1".to_string(),
+            params_summary: Some("gh pr list --repo nearai/ironclaw".to_string()),
+            duration_ms: 15,
+        });
+
+        let trace = crate::executor::trace::build_trace(&thread);
+        assert!(
+            build_skill_gap_payload(&thread, &trace, &thread.active_skills()).is_none(),
+            "read-only shell workflows should not trigger skill repair"
+        );
     }
 }
