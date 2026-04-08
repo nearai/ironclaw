@@ -160,6 +160,88 @@ impl BrandingConfig {
             format!(":root {{ {} }}", vars.join(" "))
         }
     }
+
+    /// Return [`Self::logo_url`] if it passes [`is_safe_url`], otherwise
+    /// `None`.
+    ///
+    /// `logo_url` is currently a passthrough field — no consumer in the
+    /// browser runtime reads it yet — but it is exposed via
+    /// `GET /api/frontend/layout` and lands inside the
+    /// `window.__IRONCLAW_LAYOUT__` JSON island. The first consumer that
+    /// renders it (most likely as `<img src="…">` or
+    /// `<link rel="icon" href="…">`) would inherit a footgun if a
+    /// `layout.json` could ship `javascript:`/`data:` URIs unfiltered.
+    /// Routing every consumer through this getter — mirroring the
+    /// `to_css_vars` precedent for branding colors — keeps the validation
+    /// at the type layer so a future caller can't accidentally bypass it
+    /// by reading the field directly.
+    pub fn safe_logo_url(&self) -> Option<&str> {
+        self.logo_url.as_deref().filter(|v| is_safe_url(v))
+    }
+
+    /// Return [`Self::favicon_url`] if it passes [`is_safe_url`], otherwise
+    /// `None`. Same rationale as [`Self::safe_logo_url`].
+    pub fn safe_favicon_url(&self) -> Option<&str> {
+        self.favicon_url.as_deref().filter(|v| is_safe_url(v))
+    }
+}
+
+/// Return `true` if `value` is a syntactically-safe URL for use in `<img
+/// src>` / `<link href>` / similar HTML attribute contexts.
+///
+/// Accepts a conservative subset:
+///
+/// * **HTTPS / HTTP absolute URLs**: `https://example.com/logo.png`,
+///   `http://intranet.local/icon.svg`. HTTP is allowed (not just HTTPS) so
+///   intranet and dev deployments aren't gratuitously broken; the gateway
+///   itself enforces TLS at the network layer where appropriate.
+/// * **Site-relative paths**: `/static/logo.png`, `/foo/bar.svg`. Must
+///   start with a single `/`, NOT `//` (protocol-relative — those can be
+///   hijacked into a different scheme by the browser's URL parser).
+///
+/// Rejects:
+///
+/// * `javascript:`, `data:`, `vbscript:`, `file:`, `blob:`, and any other
+///   non-HTTP(S) absolute scheme. These are the classic
+///   `<img src="javascript:…">` / data-URI tracking-pixel vectors.
+/// * Strings containing characters that could break out of an HTML
+///   attribute (`<`, `>`, `"`, `'`, backtick, backslash) or terminate it
+///   prematurely (NUL, newline, carriage return, tab).
+/// * Empty / whitespace-only values, and anything > 2048 bytes (matches
+///   the de-facto Chrome / Apache URL length cap; longer values are
+///   either pathological or an exfil vector).
+///
+/// Strict URL parsing is **not** the goal — this validator favors
+/// rejecting suspicious shapes over preserving every legal RFC 3986 form.
+/// A user who needs an exotic URL can pre-encode it; the gateway's job is
+/// to refuse anything an attacker could weaponize against an unsuspecting
+/// future consumer.
+pub(crate) fn is_safe_url(value: &str) -> bool {
+    let v = value.trim();
+    if v.is_empty() || v.len() > 2048 {
+        return false;
+    }
+    // Reject HTML-attribute breakout vectors and any control character
+    // that could be smuggled through copy-paste from a hostile source.
+    if v.bytes().any(|b| {
+        matches!(
+            b,
+            b'<' | b'>' | b'"' | b'\'' | b'`' | b'\\' | b'\0' | b'\n' | b'\r' | b'\t'
+        )
+    }) {
+        return false;
+    }
+    // Site-relative path. Must start with a single `/`, NOT `//`
+    // (protocol-relative URLs are scheme-flippable in the browser URL
+    // parser and historically have been a source of CSP-bypass tricks).
+    if let Some(rest) = v.strip_prefix('/') {
+        return !rest.starts_with('/');
+    }
+    // Otherwise must be an absolute http(s) URL. Lowercase the scheme
+    // prefix for the comparison only — the rest of the URL is left as-is
+    // because path/query case can be semantically meaningful.
+    let lower = v.to_ascii_lowercase();
+    lower.starts_with("https://") || lower.starts_with("http://")
 }
 
 /// Return `true` if `value` is a syntactically-safe CSS color literal.
@@ -359,6 +441,126 @@ mod tests {
         assert!(!is_safe_css_color(""));
         assert!(!is_safe_css_color("   "));
         assert!(!is_safe_css_color(&"#".repeat(200)));
+    }
+
+    #[test]
+    fn test_is_safe_url_accepts_common_forms() {
+        // Absolute HTTPS — the default operator path.
+        assert!(is_safe_url("https://example.com/logo.png"));
+        assert!(is_safe_url("https://cdn.example.com/path/to/icon.svg?v=2"));
+        // Absolute HTTP — intranet/dev usability. The gateway enforces
+        // TLS at the network layer where appropriate, so blocking plain
+        // HTTP here would be punishing for development setups.
+        assert!(is_safe_url("http://intranet.local/x.png"));
+        // Site-relative — for assets served by the gateway itself.
+        assert!(is_safe_url("/static/logo.png"));
+        assert!(is_safe_url("/foo/bar/baz.svg"));
+        // Tolerated whitespace from sloppy hand-edits.
+        assert!(is_safe_url("  https://example.com/logo.png  "));
+    }
+
+    #[test]
+    fn test_is_safe_url_rejects_injection_vectors() {
+        // The classic `<img src=javascript:>` vector. Case-insensitive
+        // check covers `JavaScript:`, `JAVASCRIPT:`, etc.
+        assert!(!is_safe_url("javascript:alert(1)"));
+        assert!(!is_safe_url("JavaScript:alert(1)"));
+        assert!(!is_safe_url("JAVASCRIPT:alert(1)"));
+        // `data:` is the tracking-pixel / payload-stash vector.
+        assert!(!is_safe_url("data:text/html,<script>alert(1)</script>"));
+        assert!(!is_safe_url("data:image/svg+xml;base64,PHN2Zy8+"));
+        // Other historically-abused schemes.
+        assert!(!is_safe_url("vbscript:msgbox(1)"));
+        assert!(!is_safe_url("file:///etc/passwd"));
+        assert!(!is_safe_url("blob:https://attacker.example/x"));
+        // Protocol-relative URLs are scheme-flippable in the browser
+        // URL parser and have historically been a CSP-bypass source.
+        assert!(!is_safe_url("//attacker.example/logo.png"));
+        // HTML-attribute breakout vectors.
+        assert!(!is_safe_url(
+            "https://x.example/\"><script>alert(1)</script>"
+        ));
+        assert!(!is_safe_url("https://x.example/<img>"));
+        assert!(!is_safe_url("https://x.example/'onerror='alert(1)"));
+        assert!(!is_safe_url("https://x.example/`backtick`"));
+        // Control characters that could be smuggled through copy-paste.
+        assert!(!is_safe_url("https://x.example/\nhost"));
+        assert!(!is_safe_url("https://x.example/\rhost"));
+        assert!(!is_safe_url("https://x.example/\tpath"));
+        assert!(!is_safe_url("https://x.example/\0null"));
+        // Empty / whitespace-only.
+        assert!(!is_safe_url(""));
+        assert!(!is_safe_url("   "));
+        // Length cap. 2049 is one byte over the 2048-byte limit.
+        // `"https://example.com/"` is 20 chars, so 2029 trailing chars
+        // brings the total to 2049 — one over.
+        let too_long = format!("https://example.com/{}", "a".repeat(2029));
+        assert_eq!(too_long.len(), 2049);
+        assert!(!is_safe_url(&too_long));
+        // And exactly 2048 must still pass.
+        let at_limit = format!("https://example.com/{}", "a".repeat(2028));
+        assert_eq!(at_limit.len(), 2048);
+        assert!(is_safe_url(&at_limit));
+        // No scheme at all (not relative either).
+        assert!(!is_safe_url("example.com/logo.png"));
+        // Single `/` is technically a valid root path, but the
+        // contract is "site-relative path"; bare `/` is fine.
+        assert!(is_safe_url("/"));
+    }
+
+    #[test]
+    fn test_branding_safe_logo_url_filters_invalid() {
+        // safe_logo_url is the contract any future consumer must use.
+        // It must return None when the underlying field is missing,
+        // empty, whitespace-only, or a hostile scheme — and the original
+        // string when it's a legal HTTPS / HTTP / site-relative URL.
+        let safe = BrandingConfig {
+            logo_url: Some("https://example.com/logo.png".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(safe.safe_logo_url(), Some("https://example.com/logo.png"));
+
+        let hostile = BrandingConfig {
+            logo_url: Some("javascript:alert(1)".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            hostile.safe_logo_url().is_none(),
+            "javascript: scheme must be dropped by safe_logo_url"
+        );
+
+        let relative = BrandingConfig {
+            logo_url: Some("/static/logo.png".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(relative.safe_logo_url(), Some("/static/logo.png"));
+
+        let absent = BrandingConfig {
+            logo_url: None,
+            ..Default::default()
+        };
+        assert!(absent.safe_logo_url().is_none());
+    }
+
+    #[test]
+    fn test_branding_safe_favicon_url_filters_invalid() {
+        // Same contract as safe_logo_url; covers the parallel field so a
+        // future consumer can never accidentally route favicon through a
+        // bypass while logo is correctly validated.
+        let safe = BrandingConfig {
+            favicon_url: Some("/favicon.ico".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(safe.safe_favicon_url(), Some("/favicon.ico"));
+
+        let hostile = BrandingConfig {
+            favicon_url: Some("data:image/x-icon;base64,AA==".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            hostile.safe_favicon_url().is_none(),
+            "data: scheme must be dropped by safe_favicon_url"
+        );
     }
 
     #[test]

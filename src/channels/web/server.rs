@@ -1149,10 +1149,16 @@ fn layout_has_customizations(layout: &LayoutConfig) -> bool {
         let nonempty = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
         nonempty(&colors.primary) || nonempty(&colors.accent)
     });
+    // Same precedent for URL fields: route through the `safe_logo_url`
+    // / `safe_favicon_url` getters that apply `is_safe_url`. A
+    // `layout.json` with `logo_url: "javascript:alert(1)"` would
+    // otherwise force the customized HTML path even though the value
+    // gets dropped at consumer time. Symmetric with how branding colors
+    // are gated above.
     b.title.is_some()
         || b.subtitle.is_some()
-        || b.logo_url.is_some()
-        || b.favicon_url.is_some()
+        || b.safe_logo_url().is_some()
+        || b.safe_favicon_url().is_some()
         || has_branding_colors
         || t.order.is_some()
         || t.hidden.is_some()
@@ -1260,16 +1266,32 @@ async fn css_handler(State(state): State<Arc<GatewayState>>, headers: HeaderMap)
     // via `Cow::Borrowed` so we don't allocate / copy the entire embedded
     // stylesheet on every request. We only fall through to an owned
     // `format!` when there's actually content to append.
-    let css: std::borrow::Cow<'static, str> = match &state.workspace {
-        Some(ws) => match ws.read(".system/gateway/custom.css").await {
-            Ok(doc) if !doc.content.trim().is_empty() => std::borrow::Cow::Owned(format!(
-                "{}\n/* --- custom overrides --- */\n{}",
-                assets::STYLE_CSS,
-                doc.content
-            )),
-            _ => std::borrow::Cow::Borrowed(assets::STYLE_CSS),
-        },
-        None => std::borrow::Cow::Borrowed(assets::STYLE_CSS),
+    //
+    // **Multi-tenant safety.** This must mirror the same guard
+    // `build_frontend_html` already enforces (see its doc comment): in
+    // multi-user mode (`workspace_pool.is_some()`) we cannot resolve a
+    // per-user workspace because `/style.css` is the unauthenticated
+    // bootstrap stylesheet — there is no user identity at request time.
+    // Reading from `state.workspace` here would expose one global
+    // workspace's `custom.css` to every user, defeating the
+    // `index_handler` guard at the sibling endpoint. Refuse the overlay
+    // path entirely in multi-tenant mode and serve the embedded base
+    // stylesheet to all users; per-user CSS overrides can ride a future
+    // authenticated `/api/frontend/custom-css` endpoint.
+    let css: std::borrow::Cow<'static, str> = if state.workspace_pool.is_some() {
+        std::borrow::Cow::Borrowed(assets::STYLE_CSS)
+    } else {
+        match &state.workspace {
+            Some(ws) => match ws.read(".system/gateway/custom.css").await {
+                Ok(doc) if !doc.content.trim().is_empty() => std::borrow::Cow::Owned(format!(
+                    "{}\n/* --- custom overrides --- */\n{}",
+                    assets::STYLE_CSS,
+                    doc.content
+                )),
+                _ => std::borrow::Cow::Borrowed(assets::STYLE_CSS),
+            },
+            None => std::borrow::Cow::Borrowed(assets::STYLE_CSS),
+        }
     };
 
     // Strong validator over the assembled body. The cache key naturally
@@ -4769,6 +4791,102 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Multi-tenant safety symmetry: in multi-user mode the CSS handler
+    /// must mirror `build_frontend_html` and refuse to layer
+    /// `.system/gateway/custom.css` from `state.workspace`. The
+    /// `/style.css` route is unauthenticated bootstrap, so there is no
+    /// user identity at request time — reading the global workspace
+    /// would leak one operator's `custom.css` to every other tenant.
+    ///
+    /// The bait here is a global workspace seeded with hostile-looking
+    /// custom CSS. If `css_handler` ever stops short-circuiting on
+    /// `workspace_pool.is_some()`, the bait would land in the response
+    /// body and this test would fail loudly with the leaked content.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_css_handler_returns_base_in_multi_tenant_mode() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        use crate::config::{WorkspaceConfig, WorkspaceSearchConfig};
+        use crate::db::Database as _;
+        use crate::db::libsql::LibSqlBackend;
+        use crate::workspace::EmbeddingCacheConfig;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LibSqlBackend::new_local(&dir.path().join("multi_tenant_css.db"))
+            .await
+            .expect("backend");
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+
+        // Bait: a global workspace with a hostile-looking custom.css.
+        // If css_handler ever reads state.workspace in multi-tenant
+        // mode, the marker would leak into the response body and this
+        // test would fail with an actionable diagnostic.
+        let global_ws = Arc::new(Workspace::new_with_db("tenant-leak-bait", Arc::clone(&db)));
+        global_ws
+            .write(
+                ".system/gateway/custom.css",
+                "body { background: #ff0000; } /* TENANT-LEAK-BAIT */",
+            )
+            .await
+            .expect("seed bait custom.css");
+
+        let pool = Arc::new(WorkspacePool::new(
+            Arc::clone(&db),
+            None,
+            EmbeddingCacheConfig::default(),
+            WorkspaceSearchConfig::default(),
+            WorkspaceConfig::default(),
+        ));
+
+        let mut state = test_gateway_state(None);
+        let state_mut = Arc::get_mut(&mut state).expect("test state must be uniquely owned");
+        state_mut.workspace = Some(global_ws);
+        state_mut.workspace_pool = Some(pool);
+
+        let app = Router::new()
+            .route("/style.css", get(css_handler))
+            .with_state(state);
+
+        let req = axum::http::Request::builder()
+            .uri("/style.css")
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let body_str = String::from_utf8_lossy(&body);
+
+        // Contract 1: the bait marker is absent. If a future regression
+        // re-reads state.workspace in multi-tenant mode, the marker
+        // would land here and this assertion fails with the leaked
+        // content visible in the diagnostic.
+        assert!(
+            !body_str.contains("TENANT-LEAK-BAIT"),
+            "custom.css from global workspace leaked into multi-tenant /style.css \
+             response — css_handler is missing its workspace_pool guard"
+        );
+
+        // Contract 2: the response is exactly the embedded base
+        // stylesheet, byte-for-byte. This catches a subtler regression
+        // where the leak content is dropped but the multi-tenant path
+        // still does the owned `format!` (turning what should be a
+        // borrowed hot-path response into an allocation).
+        assert_eq!(
+            body_str.as_ref(),
+            assets::STYLE_CSS,
+            "multi-tenant /style.css must serve the embedded base stylesheet \
+             unchanged — no overlay, no allocation"
+        );
     }
 
     #[test]
