@@ -492,12 +492,9 @@ impl Channel for ReplChannel {
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = mpsc::channel(32);
-        // Store tx so send_status can inject approval responses directly.
-        // Skip for single-message mode — no interactive approval is needed
-        // and the extra sender would keep the stream open after /quit.
-        if self.single_message.is_none()
-            && let Ok(mut guard) = self.msg_tx.lock()
-        {
+        // Store tx so send_status can inject approval responses directly and
+        // single-message mode can send `/quit` after the first response.
+        if let Ok(mut guard) = self.msg_tx.lock() {
             *guard = Some(tx.clone());
         }
         let single_message = self.single_message.clone();
@@ -942,8 +939,10 @@ mod tests {
 
     use super::*;
 
-    /// Regression: single-message mode must close the stream after the one
-    /// message so callers (and tests) don't hang forever.
+    /// Regression: single-message mode sends the user line, then after the agent
+    /// completes the turn `finish_single_message_turn()` injects `/quit` so the
+    /// main loop can exit; only then should the stream close (msg_tx clone kept
+    /// the channel open after the input thread exited).
     #[tokio::test]
     async fn single_message_mode_sends_message_and_closes_stream() {
         let repl = ReplChannel::with_message("hi".to_string());
@@ -956,15 +955,21 @@ mod tests {
         assert_eq!(first.channel, "repl");
         assert_eq!(first.content, "hi");
 
-        // The spawned thread sent the message and returned, dropping its
-        // sender. Because we skip storing a clone in msg_tx for single-
-        // message mode, the stream should close immediately.
+        repl.finish_single_message_turn().await;
+
+        let quit = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("timed out waiting for /quit injection")
+            .expect("/quit message missing");
+        assert_eq!(quit.channel, "repl");
+        assert_eq!(quit.content, "/quit");
+
         assert!(
             timeout(Duration::from_secs(1), stream.next())
                 .await
                 .expect("timed out waiting for stream to close")
                 .is_none(),
-            "stream should end after the single message"
+            "stream should end after /quit sender is dropped"
         );
     }
 }
