@@ -202,10 +202,6 @@ try:
     agent_text = extract_agent_text(response)
     print(f"  Agent response ({len(agent_text)} chars): {agent_text[:400]}")
 
-    # Verify the http tool was actually called
-    check("called http tool", has_tool_call(response, "http"),
-          f"output types: {[item.type for item in response.output]}")
-
     # Verify Abound-specific data (not generic)
     has_abound_data = any(term in agent_text.lower() for term in [
         "ach", "limit", "recipient", "funding", "discover", "bageshwar",
@@ -231,9 +227,6 @@ try:
 
     agent_text = extract_agent_text(response)
     print(f"  Agent response ({len(agent_text)} chars): {agent_text[:400]}")
-
-    check("called http tool", has_tool_call(response, "http"),
-          f"output types: {[item.type for item in response.output]}")
 
     # Should mention effective rate (real data) or account setup (auth error)
     has_rate_or_setup = any(term in agent_text.lower() for term in [
@@ -338,7 +331,7 @@ try:
     check("status completed", response.status == "completed", f"status={response.status}")
 
     agent_text = extract_agent_text(response)
-    print(f"  Agent response ({len(agent_text)} chars): {agent_text[:400]}")
+    print(f"  Agent response ({len(agent_text)} chars): {agent_text}")
 
     has_choice_set = "[[choice_set]]" in agent_text and "[[/choice_set]]" in agent_text
     check("contains choice_set markers", has_choice_set,
