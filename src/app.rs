@@ -13,7 +13,7 @@ use crate::agent::SessionManager as AgentSessionManager;
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::config::Config;
 use crate::context::ContextManager;
-use crate::db::Database;
+use crate::db::{Database, UserStore};
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::recording::HttpInterceptor;
@@ -531,8 +531,8 @@ impl AppBuilder {
                         loader = loader.with_secrets_store(Arc::clone(secrets));
                     }
                     if let Some(ref db) = db {
-                        loader = loader
-                            .with_role_lookup(Arc::clone(db) as Arc<dyn crate::db::UserStore>);
+                        let role_lookup: Arc<dyn UserStore> = db.clone();
+                        loader = loader.with_role_lookup(role_lookup);
                     }
 
                     match loader.load_from_dir(&wasm_config.tools_dir).await {

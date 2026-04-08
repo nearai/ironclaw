@@ -2051,11 +2051,15 @@ function showAuthCard(data) {
   }
 
   if (data.setup_url) {
-    const setupLink = document.createElement('a');
-    setupLink.href = data.setup_url;
-    setupLink.target = '_blank';
-    setupLink.textContent = I18n.t('authRequired.getToken');
-    links.appendChild(setupLink);
+    const parsedSetupUrl = parseHttpsExternalUrl(data.setup_url, 'setup');
+    if (parsedSetupUrl) {
+      const setupLink = document.createElement('a');
+      setupLink.href = parsedSetupUrl.href;
+      setupLink.target = '_blank';
+      setupLink.rel = 'noopener';
+      setupLink.textContent = I18n.t('authRequired.getToken');
+      links.appendChild(setupLink);
+    }
   }
 
   if (links.children.length > 0) {
@@ -3965,7 +3969,7 @@ function currentUserIsAdmin() {
 // Rejects javascript:, data:, and other non-HTTPS schemes to prevent URL-injection.
 // Uses the URL constructor to safely parse and validate the scheme, which also
 // handles non-string values (objects, null, etc.) that would throw on .startsWith().
-function parseHttpsOAuthUrl(url) {
+function parseHttpsExternalUrl(url, label) {
   let parsed;
   try {
     parsed = new URL(url);
@@ -3973,11 +3977,15 @@ function parseHttpsOAuthUrl(url) {
       throw new Error('non-HTTPS protocol: ' + parsed.protocol);
     }
   } catch (e) {
-    console.warn('Blocked invalid/non-HTTPS OAuth URL:', url, e.message);
+    console.warn(`Blocked invalid/non-HTTPS ${label} URL:`, url, e.message);
     showToast(I18n.t('extensions.invalidOAuthUrl'), 'error');
     return null;
   }
   return parsed;
+}
+
+function parseHttpsOAuthUrl(url) {
+  return parseHttpsExternalUrl(url, 'OAuth');
 }
 
 function openOAuthUrl(url) {

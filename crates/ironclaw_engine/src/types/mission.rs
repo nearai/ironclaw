@@ -198,7 +198,7 @@ impl Mission {
         );
         let (default_max_threads_per_day, default_cooldown_secs, default_max_concurrent) =
             if is_reactive {
-                // 5-minute cooldown, ~24 fires/day, single-instance — same
+                // 5-minute cooldown + 24/day cap + single-instance — same
                 // floor v1 routine_create used for event-driven routines.
                 (24, 300, 1)
             } else {

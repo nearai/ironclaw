@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use crate::db::{SettingsStore, UserStore};
 use crate::secrets::{CreateSecretParams, DecryptedSecret, SecretError, SecretsStore};
 use crate::tools::wasm::OAuthRefreshConfig;
+use crate::tools::wasm::{
+    ssrf_safe_client_builder_for_target, validate_and_resolve_http_target,
+};
 
 const AUTH_DESCRIPTORS_SETTING_KEY: &str = "auth.descriptors_v1";
 
@@ -434,10 +437,6 @@ async fn persist_refreshed_oauth_tokens(
     true
 }
 
-fn reject_private_ip(url: &str) -> Result<(), &'static str> {
-    crate::tools::wasm::reject_private_ip(url).map_err(|_| "host resolves to private/internal IP")
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefaultFallback {
     Denied,
@@ -502,18 +501,20 @@ pub async fn refresh_oauth_access_token(
         );
         return false;
     }
-    if let Err(reason) = reject_private_ip(&config.token_url) {
-        tracing::warn!(
-            token_url = %config.token_url,
-            reason = %reason,
-            "OAuth token_url points to a private/internal IP, refusing token refresh"
-        );
-        return false;
-    }
+    let resolved_target = match validate_and_resolve_http_target(&config.token_url).await {
+        Ok(target) => target,
+        Err(reason) => {
+            tracing::warn!(
+                token_url = %config.token_url,
+                reason = %reason,
+                "OAuth token_url points to a private/internal IP, refusing token refresh"
+            );
+            return false;
+        }
+    };
 
-    let client = match reqwest::Client::builder()
+    let client = match ssrf_safe_client_builder_for_target(&resolved_target)
         .timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(c) => c,
@@ -561,6 +562,7 @@ pub async fn refresh_oauth_access_token(
         && content_length > MAX_TOKEN_BODY_BYTES as u64
     {
         tracing::warn!(
+            token_url = %config.token_url,
             content_length,
             limit = MAX_TOKEN_BODY_BYTES,
             "OAuth token refresh Content-Length exceeds size limit; refusing to read body"

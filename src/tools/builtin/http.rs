@@ -600,6 +600,7 @@ impl Tool for HttpTool {
             RefreshFailed,
         }
         let mut missing_credential: Option<(String, MissingReason)> = None;
+        let mut injected_any_credential = false;
         if let (Some(registry), Some(store)) = (
             self.credential_registry.as_ref(),
             self.secrets_store.as_ref(),
@@ -626,6 +627,8 @@ impl Tool for HttpTool {
                 .await
                 {
                     Ok(secret) => {
+                        injected_any_credential = true;
+                        missing_credential = None;
                         tracing::debug!(
                             user_id = %ctx.user_id,
                             secret_name = %mapping.secret_name,
@@ -643,7 +646,7 @@ impl Tool for HttpTool {
                             request = request.query(&[(name.as_str(), value.as_str())]);
                         }
                     }
-                    Err(error) if error.requires_authentication() => {
+                    Err(error) if error.requires_authentication() && !injected_any_credential => {
                         tracing::debug!(
                             secret = %mapping.secret_name,
                             host = %cred_host,

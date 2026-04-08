@@ -427,7 +427,7 @@ impl ConversationStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id FROM conversations
+                SELECT id, source_channel FROM conversations
                 WHERE user_id = ?1 AND channel = ?2
                   AND json_extract(metadata, '$.thread_type') = 'assistant'
                 LIMIT 1

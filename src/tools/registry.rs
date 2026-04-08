@@ -174,7 +174,8 @@ impl ToolRegistry {
 
     /// Attach a database handle for user-role aware tool behavior.
     pub fn with_database(mut self, db: Arc<dyn Database>) -> Self {
-        self.role_lookup = Some(Arc::clone(&db) as Arc<dyn UserStore>);
+        let role_lookup: Arc<dyn UserStore> = db.clone();
+        self.role_lookup = Some(role_lookup);
         self.db = Some(db);
         self
     }

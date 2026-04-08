@@ -30,7 +30,7 @@ use crate::tools::wasm::error::WasmError;
 use crate::tools::wasm::host::{HostState, LogLevel};
 use crate::tools::wasm::limits::{ResourceLimits, WasmResourceLimiter};
 use crate::tools::wasm::runtime::{EPOCH_TICK_INTERVAL, PreparedModule, WasmToolRuntime};
-use crate::tools::wasm::ssrf_safe_client_builder;
+use crate::tools::wasm::{ssrf_safe_client_builder_for_target, validate_and_resolve_http_target};
 use ironclaw_safety::LeakDetector;
 
 // Generate component model bindings from the WIT file.
@@ -348,9 +348,6 @@ impl near::agent::host::Host for StoreData {
             .map(|h| h.max_response_bytes)
             .unwrap_or(10 * 1024 * 1024);
 
-        // Resolve hostname and reject private/internal IPs to prevent DNS rebinding.
-        reject_private_ip(&url)?;
-
         // Make HTTP request using a dedicated single-threaded runtime.
         // We're inside spawn_blocking, so we can't rely on the main runtime's
         // I/O driver (it may be busy with WASM compilation or other startup work).
@@ -365,6 +362,11 @@ impl near::agent::host::Host for StoreData {
             );
         }
         let rt = self.http_runtime.as_ref().expect("just initialized"); // safety: is_none branch above guarantees Some
+
+        // Resolve the destination once, reject private/internal addresses, and
+        // reuse the validated addresses in reqwest so there is no second DNS
+        // lookup window for rebinding between validation and connect.
+        let resolved_target = rt.block_on(validate_and_resolve_http_target(&url))?;
 
         // If an HTTP interceptor is set (testing), short-circuit with a canned response.
         if let Some(interceptor) = &self.http_interceptor {
@@ -419,7 +421,7 @@ impl near::agent::host::Host for StoreData {
         });
 
         let result = rt.block_on(async {
-            let client = ssrf_safe_client_builder()
+            let client = ssrf_safe_client_builder_for_target(&resolved_target)
                 .connect_timeout(Duration::from_secs(10))
                 .build()
                 .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
@@ -1374,6 +1376,7 @@ fn extract_host_from_url(url: &str) -> Option<String> {
     })
 }
 
+#[cfg(test)]
 fn reject_private_ip(url: &str) -> Result<(), String> {
     crate::tools::wasm::reject_private_ip(url)
 }
