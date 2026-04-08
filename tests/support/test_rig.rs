@@ -869,9 +869,28 @@ impl TestRigBuilder {
                 let registry_dir = skills_dir_override
                     .clone()
                     .unwrap_or_else(|| temp_dir.path().join("skills"));
+                if skills_dir_override.is_some() {
+                    let meta = std::fs::metadata(&registry_dir).unwrap_or_else(|e| {
+                        panic!(
+                            "test rig skills_dir_override '{}' is not readable: {e}",
+                            registry_dir.display()
+                        )
+                    });
+                    assert!(
+                        meta.is_dir(),
+                        "test rig skills_dir_override '{}' is not a directory",
+                        registry_dir.display()
+                    );
+                }
                 let mut registry = ironclaw_skills::SkillRegistry::new(registry_dir)
                     .with_installed_dir(installed_skills_dir.clone());
-                let _ = registry.discover_all().await;
+                let loaded = registry.discover_all().await;
+                if skills_dir_override.is_some() {
+                    assert!(
+                        !loaded.is_empty(),
+                        "test rig skills_dir_override did not load any skills; check SKILL.md frontmatter and directory contents"
+                    );
+                }
                 let registry = Arc::new(std::sync::RwLock::new(registry));
                 let catalog = ironclaw_skills::catalog::shared_catalog();
                 components

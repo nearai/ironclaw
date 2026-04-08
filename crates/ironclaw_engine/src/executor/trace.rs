@@ -1,12 +1,15 @@
-//! Execution trace recording and analysis.
+//! Execution trace analysis.
 //!
-//! Records full execution traces to JSON files for debugging. Optionally
-//! runs a post-execution analysis to detect common issues.
+//! Builds an in-memory `ExecutionTrace` from a completed `Thread` and runs a
+//! retrospective analyzer that flags common failure patterns. Used by the
+//! self-improvement mission and surfaced in debug logs.
 //!
-//! Enable with `ENGINE_V2_TRACE=1` env var. Traces are written to
-//! `engine_trace_{timestamp}.json` in the current directory.
-
-use std::path::PathBuf;
+//! **There is no separate engine trace file.** Live trace recording for the
+//! whole system is handled by `RecordingLlm` in the host crate
+//! (`src/llm/recording.rs`), gated by `IRONCLAW_RECORD_TRACE`. Because the
+//! engine's `LlmBackend` is wired to the same provider chain, engine LLM
+//! interactions are captured by that single recorder — no engine-side env var
+//! and no second JSON file.
 
 use chrono::Utc;
 use serde::Serialize;
@@ -14,13 +17,6 @@ use tracing::debug;
 
 use crate::types::event::ThreadEvent;
 use crate::types::thread::{Thread, ThreadId, ThreadState};
-
-/// Check if trace recording is enabled.
-pub fn is_trace_enabled() -> bool {
-    std::env::var("ENGINE_V2_TRACE")
-        .map(|v| v == "1" || v == "true")
-        .unwrap_or(false)
-}
 
 /// A complete execution trace for a single thread.
 #[derive(Debug, Serialize)]
@@ -105,29 +101,6 @@ pub fn build_trace(thread: &Thread) -> ExecutionTrace {
         events: thread.events.clone(),
         issues,
         timestamp: Utc::now(),
-    }
-}
-
-/// Write a trace to a JSON file.
-pub fn write_trace(trace: &ExecutionTrace) -> Option<PathBuf> {
-    let filename = format!("engine_trace_{}.json", Utc::now().format("%Y%m%dT%H%M%S"));
-    let path = PathBuf::from(&filename);
-
-    match serde_json::to_string_pretty(trace) {
-        Ok(json) => match std::fs::write(&path, json) {
-            Ok(()) => {
-                debug!(path = %path.display(), "Execution trace written");
-                Some(path)
-            }
-            Err(e) => {
-                debug!("Failed to write trace: {e}");
-                None
-            }
-        },
-        Err(e) => {
-            debug!("Failed to serialize trace: {e}");
-            None
-        }
     }
 }
 

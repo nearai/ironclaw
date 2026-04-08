@@ -839,7 +839,7 @@ mod tests {
             matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "got result")
         );
         // Should have at least 1 action result recorded
-        assert!(!exec.thread.messages.is_empty());
+        assert!(!exec.thread.internal_messages.is_empty());
     }
 
     #[tokio::test]
@@ -911,7 +911,7 @@ mod tests {
         // First step should have error in output metadata
         assert!(
             exec.thread
-                .messages
+                .internal_messages
                 .iter()
                 .any(|m| { m.content.contains("NameError") || m.content.contains("Error") })
         );

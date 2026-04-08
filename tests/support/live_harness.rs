@@ -876,11 +876,7 @@ async fn hydrate_llm_secrets_into_env() {
         }
         match store.get_decrypted(owner_id, secret_name).await {
             Ok(decrypted) => {
-                // SAFETY: this runs at test startup before any tokio tasks
-                // read the env. Single-threaded prologue is fine.
-                unsafe {
-                    std::env::set_var(env_var, decrypted.expose());
-                }
+                ironclaw::config::set_runtime_env(env_var, decrypted.expose());
                 eprintln!(
                     "[LiveTest] hydrate_llm_secrets: set {env_var} from secret '{secret_name}'"
                 );
