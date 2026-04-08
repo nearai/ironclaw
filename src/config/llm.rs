@@ -1129,7 +1129,6 @@ mod tests {
     fn nearai_aliases_all_resolve_to_nearai() {
         let _guard = lock_env();
         stub_nearai_urls();
-        stub_nearai_urls();
 
         for alias in &["nearai", "near_ai", "near"] {
             // SAFETY: Under ENV_MUTEX.
