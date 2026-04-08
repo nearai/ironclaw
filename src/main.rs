@@ -369,6 +369,8 @@ async fn async_main() -> anyhow::Result<()> {
     .build_all()
     .await?;
 
+    // Pre-compute workspace pool before moving config out of components.
+    let workspace_pool = components.create_workspace_pool();
     let config = components.config;
 
     // ── Tunnel setup ───────────────────────────────────────────────────
@@ -628,20 +630,6 @@ async fn async_main() -> anyhow::Result<()> {
 
         // Build gateway from shared components (same factory as cli/gateway.rs).
         let mut gw = GatewayChannel::from_components(gw_config.clone(), config.owner_id.clone(), {
-            // Build workspace pool for multi-user isolation if DB is available.
-            let workspace_pool = components.db.as_ref().map(|db| {
-                let emb_cache_config = ironclaw::workspace::EmbeddingCacheConfig {
-                    max_entries: config.embeddings.cache_size,
-                };
-                Arc::new(ironclaw::channels::web::server::WorkspacePool::new(
-                    Arc::clone(db),
-                    components.embeddings.clone(),
-                    emb_cache_config,
-                    config.search.clone(),
-                    config.workspace.clone(),
-                ))
-            });
-
             ironclaw::channels::web::GatewayComponents {
                 llm: Arc::clone(&components.llm),
                 workspace: components.workspace.clone(),

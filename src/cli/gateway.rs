@@ -133,18 +133,7 @@ async fn cmd_serve(config_path: Option<&Path>) -> anyhow::Result<()> {
     let gateway_base_url = tunnel_public_url
         .unwrap_or_else(|| format!("http://{}:{}", gw_config.host, gw_config.port));
     // Build workspace pool for multi-user isolation if DB is available.
-    let workspace_pool = components.db.as_ref().map(|db| {
-        let emb_cache_config = crate::workspace::EmbeddingCacheConfig {
-            max_entries: components.config.embeddings.cache_size,
-        };
-        Arc::new(crate::channels::web::server::WorkspacePool::new(
-            Arc::clone(db),
-            components.embeddings.clone(),
-            emb_cache_config,
-            components.config.search.clone(),
-            components.config.workspace.clone(),
-        ))
-    });
+    let workspace_pool = components.create_workspace_pool();
 
     let gw = GatewayChannel::from_components(
         gw_config.clone(),
@@ -263,12 +252,74 @@ fn write_gateway_token_file(path: &Path, auth_token: &str) -> std::io::Result<()
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+
+        // Write the file first.
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
+        file.write_all(auth_token.as_bytes())?;
+        drop(file);
+
+        // Restrict to owner-only via Windows ACLs: remove inherited ACEs and
+        // grant only the current user full control.
+        restrict_windows_file_permissions(path);
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
         std::fs::write(path, auth_token)?;
     }
 
     Ok(())
+}
+
+/// Best-effort restriction of file permissions on Windows using `icacls`.
+///
+/// Removes inherited ACEs and grants only the current user full control,
+/// mirroring the Unix `chmod 0600` behaviour. Failures are logged as
+/// warnings but do not prevent gateway startup.
+#[cfg(windows)]
+fn restrict_windows_file_permissions(path: &Path) {
+    // `icacls <path> /inheritance:r /grant:r "%USERNAME%:F"` removes inherited
+    // permissions and grants only the current user full control.
+    let username = std::env::var("USERNAME").unwrap_or_default();
+    if username.is_empty() {
+        tracing::warn!(
+            "Cannot restrict token file permissions: %USERNAME% not set"
+        );
+        return;
+    }
+
+    let path_str = path.to_string_lossy();
+    let grant_arg = format!("{username}:F");
+    let result = std::process::Command::new("icacls")
+        .args([path_str.as_ref(), "/inheritance:r", "/grant:r", &grant_arg])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    match result {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            tracing::warn!(
+                "icacls returned non-zero ({}) for {}; token file may be world-readable",
+                status,
+                path.display()
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to run icacls for {}: {e}; token file may be world-readable",
+                path.display()
+            );
+        }
+    }
 }
 
 /// Open the gateway log file in append mode. On Unix, restrict to owner-only
@@ -284,7 +335,16 @@ fn open_log_file(path: &Path) -> std::io::Result<std::fs::File> {
             .mode(0o600)
             .open(path)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        restrict_windows_file_permissions(path);
+        Ok(file)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         std::fs::OpenOptions::new()
             .create(true)

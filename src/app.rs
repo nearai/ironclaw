@@ -63,6 +63,27 @@ pub struct AppComponents {
     pub ownership_cache: Arc<crate::ownership::OwnershipCache>,
 }
 
+impl AppComponents {
+    /// Create a [`WorkspacePool`](crate::channels::web::server::WorkspacePool)
+    /// from the current components. Returns `None` if no database is configured.
+    pub fn create_workspace_pool(
+        &self,
+    ) -> Option<Arc<crate::channels::web::server::WorkspacePool>> {
+        self.db.as_ref().map(|db| {
+            let emb_cache_config = EmbeddingCacheConfig {
+                max_entries: self.config.embeddings.cache_size,
+            };
+            Arc::new(crate::channels::web::server::WorkspacePool::new(
+                Arc::clone(db),
+                self.embeddings.clone(),
+                emb_cache_config,
+                self.config.search.clone(),
+                self.config.workspace.clone(),
+            ))
+        })
+    }
+}
+
 /// Options that control optional init phases.
 #[derive(Default)]
 pub struct AppBuilderFlags {
