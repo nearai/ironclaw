@@ -184,6 +184,16 @@ impl MissionManager {
         self.notification_tx.subscribe()
     }
 
+    /// Test-only handle to the broadcast sender so unit tests can drive
+    /// `process_mission_outcome_and_notify` without going through the full
+    /// thread lifecycle. Not part of the public API.
+    #[cfg(test)]
+    pub(crate) fn notification_tx_for_test(
+        &self,
+    ) -> &tokio::sync::broadcast::Sender<MissionNotification> {
+        &self.notification_tx
+    }
+
     /// Populate the active mission index from persisted mission state.
     pub async fn bootstrap_project(&self, project_id: ProjectId) -> Result<usize, EngineError> {
         // System operation: load all missions for the project regardless of user.
@@ -1627,6 +1637,12 @@ async fn process_mission_outcome_and_notify(
 
     // Emit notification if there are channels to notify.
     if !mission.notify_channels.is_empty() && notify_response.is_some() {
+        // Truncate before broadcasting. Mission threads can produce
+        // arbitrarily long output (especially full-job missions); a multi-MB
+        // notification is unusable in any chat surface and can OOM Slack/
+        // Discord adapters that buffer outbound bodies. The full text is
+        // already preserved untruncated in `mission.approach_history`.
+        let response = notify_response.map(|text| truncate_notification_text(&text));
         let notification = MissionNotification {
             mission_id,
             mission_name: mission.name.clone(),
@@ -1634,7 +1650,7 @@ async fn process_mission_outcome_and_notify(
             user_id: mission.user_id.clone(),
             notify_channels: mission.notify_channels.clone(),
             notify_user: mission.notify_user.clone(),
-            response: notify_response,
+            response,
             is_error,
         };
         // Best-effort: ignore send errors (no subscribers = no problem).
@@ -1643,6 +1659,29 @@ async fn process_mission_outcome_and_notify(
 
     mission.updated_at = chrono::Utc::now();
     store.save_mission(&mission).await
+}
+
+/// UTF-8-safe ellipsis truncation for mission notification responses.
+///
+/// Mirrors the v1 routine engine's `truncate` helper (which uses
+/// `floor_char_boundary` from the host `util` module). The engine crate
+/// has no `util` so we inline a small helper. The full response text is
+/// always preserved untruncated in `Mission.approach_history`; truncation
+/// here only affects what is broadcast to notify_channels.
+const MAX_NOTIFICATION_RESPONSE_BYTES: usize = 4000;
+
+fn truncate_notification_text(text: &str) -> String {
+    if text.len() <= MAX_NOTIFICATION_RESPONSE_BYTES {
+        return text.to_string();
+    }
+    // Walk back from the byte cap to the nearest char boundary so we
+    // never split a multi-byte UTF-8 sequence. `is_char_boundary(0)`
+    // is always true so the loop is bounded.
+    let mut end = MAX_NOTIFICATION_RESPONSE_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
 }
 
 /// Check if a mission is the self-improvement mission.
@@ -3627,6 +3666,243 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(spawned.len(), 1, "new pattern must take effect");
+    }
+
+    // ── routine-fix-history regression tests ─────────────────────────
+    //
+    // Tests in this section pin invariants whose v1 routine analogs were
+    // historically broken (or whose fix went into a v1 routine code path
+    // that has no v2 equivalent — we add them here to make sure missions
+    // never regress the same bug).
+
+    /// Mirrors v1 routine fix #1372 / #1374: a fired mission with
+    /// `max_concurrent = N` and N already-running threads must refuse to
+    /// fire again. The check is in `fire_mission` after the cooldown gate.
+    /// This test pins it through the public surface so a future refactor
+    /// can't drop the check without failing here.
+    #[tokio::test]
+    async fn fire_mission_blocks_when_max_concurrent_reached() {
+        use crate::types::thread::{Thread, ThreadConfig, ThreadType};
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "single instance",
+                "do exactly one thing at a time",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        // Set max_concurrent=1 explicitly (Manual missions default to 0).
+        mgr.update_mission(
+            id,
+            "alice",
+            MissionUpdate {
+                max_concurrent: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // Pre-seed a Running thread for this mission so the next fire
+        // sees max_concurrent already saturated. ThreadType::Mission with
+        // the default `Created` state is non-terminal in
+        // count_running_threads (which only treats Done/Failed as
+        // terminal).
+        let thread = Thread::new(
+            "preseeded",
+            ThreadType::Mission,
+            project_id,
+            "alice",
+            ThreadConfig::default(),
+        );
+        let preseeded_id = thread.id;
+        store.save_thread(&thread).await.unwrap();
+        let mut mission = mgr.get_mission(id).await.unwrap().unwrap();
+        mission.thread_history.push(preseeded_id);
+        store.save_mission(&mission).await.unwrap();
+
+        // Fire — should be refused with Ok(None), not an error.
+        let outcome = mgr.fire_mission(id, "alice", None).await.unwrap();
+        assert!(
+            outcome.is_none(),
+            "max_concurrent=1 with one running thread must block the next fire"
+        );
+
+        // The mission's thread_history must NOT have grown.
+        let after = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(
+            after.thread_history.len(),
+            1,
+            "blocked fire must not record a new thread"
+        );
+    }
+
+    /// Mirrors v1 routine fix #1321: notification summaries must be
+    /// truncated before broadcasting so a runaway response can't OOM
+    /// chat-channel adapters or saturate SSE buffers. The full text stays
+    /// in `mission.approach_history` untruncated.
+    #[test]
+    fn truncate_notification_text_caps_long_strings() {
+        let huge = "x".repeat(MAX_NOTIFICATION_RESPONSE_BYTES * 3);
+        let truncated = truncate_notification_text(&huge);
+        assert!(
+            truncated.len() <= MAX_NOTIFICATION_RESPONSE_BYTES + 4,
+            "truncated text must fit within the cap (plus the ellipsis byte): got {}",
+            truncated.len()
+        );
+        assert!(
+            truncated.ends_with('…'),
+            "truncation must end with an ellipsis"
+        );
+
+        let small = "fits within the cap";
+        assert_eq!(
+            truncate_notification_text(small),
+            small,
+            "strings under the cap must pass through unchanged"
+        );
+    }
+
+    /// Mirrors v1 routine fix's `floor_char_boundary` change: truncation
+    /// MUST NOT split a multi-byte UTF-8 sequence. The naive approach
+    /// (`&s[..MAX]`) would panic on a multi-byte character that straddles
+    /// the byte index.
+    #[test]
+    fn truncate_notification_text_is_utf8_safe() {
+        // Construct a string where a multi-byte char straddles the byte cap.
+        // "ñ" is 2 bytes (0xC3 0xB1). We want byte position MAX_BYTES to
+        // land in the middle of one.
+        let prefix = "a".repeat(MAX_NOTIFICATION_RESPONSE_BYTES - 1);
+        let mut input = prefix;
+        input.push('ñ'); // 2 bytes — second byte is at MAX_BYTES
+        input.push_str(&"b".repeat(100));
+        assert!(input.len() > MAX_NOTIFICATION_RESPONSE_BYTES);
+
+        // Must not panic — the bug would slice a multi-byte char in half.
+        let truncated = truncate_notification_text(&input);
+        // And the result must be valid UTF-8 (it's a String, so by
+        // construction it is — but the assertion makes the invariant
+        // explicit).
+        assert!(truncated.is_char_boundary(truncated.len()));
+        // The 'ñ' must NOT have been split: either it's in the result
+        // wholly, or it was dropped wholly.
+        assert!(
+            !truncated.ends_with('a'),
+            "truncation should have stopped at the multi-byte char boundary, not after it"
+        );
+    }
+
+    /// Mirrors v1 routine fix #1255: when a mission is deleted (the v2
+    /// analog of `routine_delete`), its compiled regex cache entry MUST
+    /// be evicted so a future mission with the same id can't accidentally
+    /// pick up a stale pattern. This pins the eviction call already in
+    /// `complete_mission`.
+    #[tokio::test]
+    async fn complete_mission_evicts_event_regex_cache() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = create_unguarded_event_mission(
+            &mgr,
+            project_id,
+            "alice",
+            "to be deleted",
+            r"hello",
+            None,
+        )
+        .await;
+
+        // Force regex compile + cache populate.
+        let _ = mgr
+            .fire_on_message_event("gateway", "hello", "alice", None)
+            .await
+            .unwrap();
+        assert!(
+            mgr.event_regex_cache.read().await.contains_key(&id),
+            "regex cache should hold the compiled pattern after first match"
+        );
+
+        mgr.complete_mission(id).await.unwrap();
+        assert!(
+            !mgr.event_regex_cache.read().await.contains_key(&id),
+            "complete_mission must evict the cached compiled regex"
+        );
+    }
+
+    /// Mirrors v1 routine fix #1374: failure-path outcomes must produce a
+    /// notification, not silently swallow the error. Without this, a
+    /// failed mission run leaves the user with no signal that anything
+    /// went wrong.
+    #[tokio::test]
+    async fn failed_outcome_emits_error_notification() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "may fail",
+                "do the risky thing",
+                MissionCadence::Manual,
+                vec!["gateway".to_string()],
+            )
+            .await
+            .unwrap();
+
+        let mut rx = mgr.subscribe_notifications();
+
+        let synthetic_thread_id = crate::types::thread::ThreadId::new();
+        process_mission_outcome_and_notify(
+            &(Arc::clone(&store) as Arc<dyn Store>),
+            id,
+            synthetic_thread_id,
+            &ThreadOutcome::Failed {
+                error: "container exited 137".into(),
+            },
+            mgr.notification_tx_for_test(),
+        )
+        .await
+        .unwrap();
+
+        let notification = rx
+            .try_recv()
+            .expect("Failed outcome must emit a notification");
+        assert!(notification.is_error, "is_error flag must be set");
+        assert_eq!(notification.notify_channels, vec!["gateway".to_string()]);
+        assert!(
+            notification
+                .response
+                .as_deref()
+                .is_some_and(|r| r.contains("container exited 137")),
+            "notification response must surface the underlying error message; got {:?}",
+            notification.response
+        );
+
+        // Same for MaxIterations — historically the silent-fail case.
+        process_mission_outcome_and_notify(
+            &(Arc::clone(&store) as Arc<dyn Store>),
+            id,
+            synthetic_thread_id,
+            &ThreadOutcome::MaxIterations,
+            mgr.notification_tx_for_test(),
+        )
+        .await
+        .unwrap();
+
+        let notification = rx
+            .try_recv()
+            .expect("MaxIterations must emit a notification");
+        assert!(notification.is_error, "MaxIterations must set is_error");
     }
 
     /// A pattern that fails to compile (or exceeds the size cap) must be
