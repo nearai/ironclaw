@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use secrecy::SecretString;
 
 use crate::bootstrap::ironclaw_base_dir;
-use crate::config::helpers::{optional_env, parse_optional_env, validate_base_url};
+use crate::config::helpers::{
+    optional_env, parse_csv_env, parse_optional_env, validate_base_url,
+    validate_base_url_with_allowlists,
+};
 use crate::error::ConfigError;
 use crate::llm::config::*;
 use crate::llm::registry::{ProviderProtocol, ProviderRegistry};
@@ -530,7 +533,18 @@ impl LlmConfig {
         // Validate base URL to prevent SSRF (#1103).
         if !base_url.is_empty() {
             let field = base_url_env.unwrap_or("LLM_BASE_URL");
-            validate_base_url(&base_url, field)?;
+            if field == "LLM_BASE_URL" {
+                let allow_private_hosts = parse_csv_env("LLM_BASE_URL_ALLOW_PRIVATE_HOSTS")?;
+                let allow_private_cidrs = parse_csv_env("LLM_BASE_URL_ALLOW_PRIVATE_CIDRS")?;
+                validate_base_url_with_allowlists(
+                    &base_url,
+                    field,
+                    &allow_private_hosts,
+                    &allow_private_cidrs,
+                )?;
+            } else {
+                validate_base_url(&base_url, field)?;
+            }
         }
 
         // Resolve model: selected_model (DB) > per-provider override (DB) > env var > registry default
@@ -693,7 +707,11 @@ mod tests {
         unsafe {
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("LLM_BASE_URL");
+            std::env::remove_var("LLM_BASE_URL_ALLOW_PRIVATE_HOSTS");
+            std::env::remove_var("LLM_BASE_URL_ALLOW_PRIVATE_CIDRS");
             std::env::remove_var("LLM_MODEL");
+            std::env::remove_var("NEARAI_AUTH_URL");
+            std::env::remove_var("NEARAI_BASE_URL");
         }
     }
 
@@ -1169,6 +1187,73 @@ mod tests {
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("LLM_BASE_URL");
         }
+    }
+
+    #[test]
+    fn openai_compatible_private_https_base_url_rejected_by_default() {
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "openai_compatible");
+            std::env::set_var("LLM_BASE_URL", "https://10.1.1.20/v1");
+            std::env::set_var("NEARAI_AUTH_URL", "http://localhost:11434");
+            std::env::set_var("NEARAI_BASE_URL", "http://localhost:11434");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            ..Default::default()
+        };
+        let err = LlmConfig::resolve(&settings).unwrap_err().to_string();
+        assert!(err.contains("private/internal IP"));
+
+        clear_openai_compatible_env();
+    }
+
+    #[test]
+    fn openai_compatible_private_https_base_url_allowed_with_cidr_override() {
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "openai_compatible");
+            std::env::set_var("LLM_BASE_URL", "https://10.1.1.20/v1");
+            std::env::set_var("LLM_BASE_URL_ALLOW_PRIVATE_CIDRS", "10.0.0.0/8");
+            std::env::set_var("NEARAI_AUTH_URL", "http://localhost:11434");
+            std::env::set_var("NEARAI_BASE_URL", "http://localhost:11434");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("should have provider config");
+        assert_eq!(provider.base_url, "https://10.1.1.20/v1");
+
+        clear_openai_compatible_env();
+    }
+
+    #[test]
+    fn openai_compatible_private_hostname_allowed_with_host_override() {
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "openai_compatible");
+            std::env::set_var("LLM_BASE_URL", "https://localhost:8443/v1");
+            std::env::set_var("LLM_BASE_URL_ALLOW_PRIVATE_HOSTS", "localhost");
+            std::env::set_var("NEARAI_AUTH_URL", "http://localhost:11434");
+            std::env::set_var("NEARAI_BASE_URL", "http://localhost:11434");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("should have provider config");
+        assert_eq!(provider.base_url, "https://localhost:8443/v1");
+
+        clear_openai_compatible_env();
     }
 
     // ── OAuth resolution tests ──────────────────────────────────────

@@ -295,6 +295,22 @@ LLM_API_KEY=sk-...
 LLM_MODEL=gpt-4o                 # as configured in litellm config.yaml
 ```
 
+For private-network deployments, IronClaw still blocks private/internal
+`LLM_BASE_URL` values by default. If your LiteLLM or vLLM endpoint is intentionally
+inside a trusted VPN/VPC, you can allow it explicitly:
+
+```env
+LLM_BACKEND=openai_compatible
+LLM_BASE_URL=https://corp-llm.internal.example/v1
+LLM_BASE_URL_ALLOW_PRIVATE_HOSTS=corp-llm.internal.example
+LLM_BASE_URL_ALLOW_PRIVATE_CIDRS=10.0.0.0/8
+LLM_API_KEY=sk-...
+LLM_MODEL=gpt-4o
+```
+
+Use the smallest allowlist you can. Metadata endpoints and other blocked address
+classes remain rejected.
+
 ### LM Studio (local GUI)
 
 Start LM Studio's local server, then:

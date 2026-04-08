@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Mutex, OnceLock};
 
 use crate::error::ConfigError;
@@ -186,6 +187,102 @@ pub(crate) fn parse_string_env(
     Ok(optional_env(key)?.unwrap_or_else(|| default.into()))
 }
 
+fn parse_csv_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+pub(crate) fn parse_csv_env(key: &str) -> Result<Vec<String>, ConfigError> {
+    Ok(optional_env(key)?
+        .map(|v| parse_csv_list(&v))
+        .unwrap_or_default())
+}
+
+fn is_metadata_ip(ip: &IpAddr) -> bool {
+    matches!(ip, IpAddr::V4(v4) if *v4 == Ipv4Addr::new(169, 254, 169, 254))
+}
+
+fn is_allowlist_eligible_private_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_private(),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                v4.is_private()
+            } else {
+                (v6.octets()[0] & 0xfe) == 0xfc
+            }
+        }
+    }
+}
+
+fn ipv4_in_cidr(ip: Ipv4Addr, base: Ipv4Addr, prefix: u8) -> bool {
+    let ip_u = u32::from(ip);
+    let base_u = u32::from(base);
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    (ip_u & mask) == (base_u & mask)
+}
+
+fn ipv6_in_cidr(ip: Ipv6Addr, base: Ipv6Addr, prefix: u8) -> bool {
+    let ip_u = u128::from_be_bytes(ip.octets());
+    let base_u = u128::from_be_bytes(base.octets());
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u128::MAX << (128 - prefix)
+    };
+    (ip_u & mask) == (base_u & mask)
+}
+
+fn ip_in_cidr(ip: &IpAddr, cidr: &str) -> Result<bool, String> {
+    let (base_str, prefix_str) = cidr
+        .split_once('/')
+        .ok_or_else(|| format!("CIDR '{cidr}' is missing '/'"))?;
+    let base_ip: IpAddr = base_str
+        .parse()
+        .map_err(|e| format!("invalid CIDR base '{base_str}': {e}"))?;
+    match (ip, base_ip) {
+        (IpAddr::V4(ipv4), IpAddr::V4(base_v4)) => {
+            let prefix: u8 = prefix_str
+                .parse()
+                .map_err(|e| format!("invalid IPv4 CIDR prefix '{prefix_str}': {e}"))?;
+            if prefix > 32 {
+                return Err(format!("IPv4 CIDR prefix out of range in '{cidr}'"));
+            }
+            Ok(ipv4_in_cidr(*ipv4, base_v4, prefix))
+        }
+        (IpAddr::V6(ipv6), IpAddr::V6(base_v6)) => {
+            let prefix: u8 = prefix_str
+                .parse()
+                .map_err(|e| format!("invalid IPv6 CIDR prefix '{prefix_str}': {e}"))?;
+            if prefix > 128 {
+                return Err(format!("IPv6 CIDR prefix out of range in '{cidr}'"));
+            }
+            Ok(ipv6_in_cidr(*ipv6, base_v6, prefix))
+        }
+        _ => Ok(false),
+    }
+}
+
+fn is_private_ip_allowed(ip: &IpAddr, allow_private_cidrs: &[String]) -> Result<bool, String> {
+    if !is_allowlist_eligible_private_ip(ip) {
+        return Ok(false);
+    }
+    for cidr in allow_private_cidrs {
+        if ip_in_cidr(ip, cidr)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Validate a user-configurable base URL to prevent SSRF attacks (#1103).
 ///
 /// Rejects:
@@ -196,7 +293,16 @@ pub(crate) fn parse_string_env(
 /// This is intended for config-time validation of base URLs like
 /// `OLLAMA_BASE_URL`, `EMBEDDING_BASE_URL`, `NEARAI_BASE_URL`, etc.
 pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), ConfigError> {
-    use std::net::{IpAddr, Ipv4Addr};
+    validate_base_url_with_allowlists(url, field_name, &[], &[])
+}
+
+pub(crate) fn validate_base_url_with_allowlists(
+    url: &str,
+    field_name: &str,
+    allow_private_hosts: &[String],
+    allow_private_cidrs: &[String],
+) -> Result<(), ConfigError> {
+    use std::net::ToSocketAddrs;
 
     let parsed = reqwest::Url::parse(url).map_err(|e| ConfigError::InvalidValue {
         key: field_name.to_string(),
@@ -276,6 +382,16 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
     // Check both IP literals and resolved hostnames to prevent DNS-based SSRF.
     if let Ok(ip) = host.parse::<IpAddr>() {
         if is_dangerous_ip(&ip) {
+            if !is_metadata_ip(&ip)
+                && is_private_ip_allowed(&ip, allow_private_cidrs).map_err(|e| {
+                    ConfigError::InvalidValue {
+                        key: field_name.to_string(),
+                        message: e,
+                    }
+                })?
+            {
+                return Ok(());
+            }
             return Err(ConfigError::InvalidValue {
                 key: field_name.to_string(),
                 message: format!(
@@ -297,12 +413,25 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
         // before the async runtime is fully driving I/O. If this ever moves to
         // a hot path, wrap in `tokio::task::spawn_blocking` or use
         // `tokio::net::lookup_host`.
-        use std::net::ToSocketAddrs;
         let port = parsed.port().unwrap_or(443);
         match (host, port).to_socket_addrs() {
             Ok(addrs) => {
+                let host_allowed = allow_private_hosts
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(host));
                 for addr in addrs {
                     if is_dangerous_ip(&addr.ip()) {
+                        if !is_metadata_ip(&addr.ip())
+                            && (host_allowed
+                                || is_private_ip_allowed(&addr.ip(), allow_private_cidrs).map_err(
+                                    |e| ConfigError::InvalidValue {
+                                        key: field_name.to_string(),
+                                        message: e,
+                                    },
+                                )?)
+                        {
+                            continue;
+                        }
                         return Err(ConfigError::InvalidValue {
                             key: field_name.to_string(),
                             message: format!(
@@ -518,5 +647,55 @@ mod tests {
             err.contains("failed to resolve"),
             "Expected DNS resolution failure, got: {err}"
         );
+    }
+
+    #[test]
+    fn validate_base_url_with_allowlists_allows_private_ip_cidr() {
+        let allow_cidrs = vec!["10.0.0.0/8".to_string()];
+        assert!(
+            validate_base_url_with_allowlists("https://10.1.2.3/v1", "TEST", &[], &allow_cidrs)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_base_url_with_allowlists_allows_private_hostname() {
+        let allow_hosts = vec!["localhost".to_string()];
+        assert!(
+            validate_base_url_with_allowlists(
+                "https://localhost:8443/v1",
+                "TEST",
+                &allow_hosts,
+                &[]
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_base_url_with_allowlists_still_rejects_metadata_ip() {
+        let allow_cidrs = vec!["169.254.169.254/32".to_string()];
+        let result =
+            validate_base_url_with_allowlists("https://169.254.169.254", "TEST", &[], &allow_cidrs);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_csv_env_splits_and_trims() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_CSV_ENV";
+        set_runtime_env(key, " a.example.com , b.example.com ,, 10.0.0.0/8 ");
+        assert_eq!(
+            parse_csv_env(key).unwrap(),
+            vec![
+                "a.example.com".to_string(),
+                "b.example.com".to_string(),
+                "10.0.0.0/8".to_string()
+            ]
+        );
+        runtime_overrides()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(key);
     }
 }
