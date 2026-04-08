@@ -147,8 +147,10 @@ pub fn catalog_entry_is_installed(slug: &str, name: &str, installed_names: &[Str
     installed_names.iter().any(|installed| {
         slug.eq_ignore_ascii_case(installed)
             || slug_suffix.eq_ignore_ascii_case(installed)
-            || name == installed
-            || normalized_slug_name.as_deref() == Some(installed.as_str())
+            || name.eq_ignore_ascii_case(installed)
+            || normalized_slug_name
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(installed))
     })
 }
 

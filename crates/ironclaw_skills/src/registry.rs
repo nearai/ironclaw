@@ -19,9 +19,12 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::gating;
-use crate::parser::{SkillParseError, parse_skill_md, parse_skill_md_for_install_recovery};
+use crate::parser::{
+    SkillParseError, parse_skill_md, parse_skill_md_for_install_recovery,
+    split_skill_md_frontmatter,
+};
 use crate::types::{
-    GatingRequirements, LoadedSkill, MAX_PROMPT_FILE_SIZE, SkillManifest, SkillSource, SkillTrust,
+    GatingRequirements, LoadedSkill, MAX_PROMPT_FILE_SIZE, SkillSource, SkillTrust,
 };
 use crate::validation::{normalize_line_endings, normalize_skill_identifier};
 
@@ -48,18 +51,48 @@ fn parse_error_for_install(error_label: &str, error: SkillParseError) -> SkillRe
     }
 }
 
-fn render_skill_md(
-    manifest: &SkillManifest,
-    prompt_content: &str,
+/// Rewrite the `name` field in raw YAML frontmatter while preserving every
+/// other key and value in the original mapping.
+///
+/// We deliberately operate on `serde_yml::Value` instead of the typed
+/// `SkillManifest`: re-serializing through the typed struct silently drops
+/// any unknown frontmatter fields published upstream (custom metadata, future
+/// fields, vendor extensions). The recovery path must be lossless except for
+/// the single field we are rewriting.
+fn rewrite_frontmatter_name(
+    frontmatter: &str,
+    new_name: &str,
+    error_label: &str,
 ) -> Result<String, SkillRegistryError> {
-    let yaml = serde_yml::to_string(manifest).map_err(|e| SkillRegistryError::ParseError {
-        name: manifest.name.clone(),
+    let mut value: serde_yml::Value =
+        serde_yml::from_str(frontmatter).map_err(|e| SkillRegistryError::ParseError {
+            name: error_label.to_string(),
+            reason: format!("Failed to parse SKILL.md frontmatter for rewrite: {}", e),
+        })?;
+
+    let mapping = value
+        .as_mapping_mut()
+        .ok_or_else(|| SkillRegistryError::ParseError {
+            name: error_label.to_string(),
+            reason: "SKILL.md frontmatter is not a YAML mapping".to_string(),
+        })?;
+
+    mapping.insert(
+        serde_yml::Value::String("name".to_string()),
+        serde_yml::Value::String(new_name.to_string()),
+    );
+
+    let yaml = serde_yml::to_string(&value).map_err(|e| SkillRegistryError::ParseError {
+        name: error_label.to_string(),
         reason: format!("Failed to rewrite normalized SKILL.md: {}", e),
     })?;
 
     let yaml = yaml.strip_suffix("...\n").unwrap_or(&yaml);
     let yaml = yaml.strip_suffix("...").unwrap_or(yaml);
+    Ok(yaml.to_string())
+}
 
+fn assemble_skill_md(yaml: &str, prompt_content: &str) -> String {
     let mut rendered = String::from("---\n");
     rendered.push_str(yaml);
     if !rendered.ends_with('\n') {
@@ -67,7 +100,7 @@ fn render_skill_md(
     }
     rendered.push_str("---\n\n");
     rendered.push_str(prompt_content);
-    Ok(rendered)
+    rendered
 }
 
 fn normalize_install_content(
@@ -77,7 +110,10 @@ fn normalize_install_content(
     match parse_skill_md(normalized_content) {
         Ok(parsed) => Ok((parsed.manifest.name, normalized_content.to_string())),
         Err(SkillParseError::InvalidName { .. }) => {
-            let mut parsed = parse_skill_md_for_install_recovery(normalized_content)
+            // Re-parse the typed manifest only to recover the original name and
+            // confirm structural validity; the actual rewrite operates on raw
+            // YAML below to preserve any unknown frontmatter fields.
+            let parsed = parse_skill_md_for_install_recovery(normalized_content)
                 .map_err(|e| parse_error_for_install("(install)", e))?;
             let original_name = parsed.manifest.name.clone();
             let normalized_name = requested_identifier
@@ -91,15 +127,18 @@ fn normalize_install_content(
                     ),
                 })?;
 
-            tracing::warn!(
+            tracing::debug!(
                 original_name = %original_name,
                 normalized_name = %normalized_name,
                 requested_identifier = requested_identifier.unwrap_or(""),
                 "Normalizing invalid skill name during install"
             );
 
-            parsed.manifest.name = normalized_name.clone();
-            let rendered = render_skill_md(&parsed.manifest, &parsed.prompt_content)?;
+            let (frontmatter, prompt_content) = split_skill_md_frontmatter(normalized_content)
+                .map_err(|e| parse_error_for_install("(install)", e))?;
+            let rewritten_yaml =
+                rewrite_frontmatter_name(&frontmatter, &normalized_name, &original_name)?;
+            let rendered = assemble_skill_md(&rewritten_yaml, &prompt_content);
             Ok((normalized_name, rendered))
         }
         Err(e) => Err(parse_error_for_install("(install)", e)),
@@ -1090,6 +1129,36 @@ mod tests {
 
         let written = fs::read_to_string(skill_path).unwrap();
         assert!(written.contains("name: mortgage-calculator"));
+    }
+
+    #[test]
+    fn test_resolve_install_content_preserves_unknown_frontmatter_fields() {
+        // Published manifests may carry custom keys (vendor extensions, future
+        // fields) that the typed `SkillManifest` does not know about. Recovery
+        // must rewrite only `name` without dropping unknown keys.
+        let content = "---\nname: Mortgage Calculator\ndescription: Computes payments\nx-publisher: acme\ncustom_meta:\n  rating: 5\n  tags:\n    - finance\n    - calculator\n---\n\nInstalled prompt.\n";
+
+        let (name, rewritten) = SkillRegistry::resolve_install_content(content, None).unwrap();
+
+        assert_eq!(name, "mortgage-calculator");
+        assert!(rewritten.contains("name: mortgage-calculator"));
+        assert!(
+            rewritten.contains("x-publisher: acme"),
+            "unknown top-level key was dropped: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("custom_meta:"),
+            "unknown nested mapping was dropped: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("rating: 5"),
+            "nested scalar was dropped: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("- finance") && rewritten.contains("- calculator"),
+            "nested sequence was dropped: {rewritten}"
+        );
+        assert!(rewritten.contains("Installed prompt."));
     }
 
     #[test]

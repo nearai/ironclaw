@@ -62,6 +62,44 @@ pub(crate) fn parse_skill_md_for_install_recovery(
     parse_skill_md_impl(content, false)
 }
 
+/// Split a SKILL.md file into its raw YAML frontmatter and prompt body without
+/// deserializing into a typed [`SkillManifest`].
+///
+/// Used by install recovery to mutate a single field (`name`) while preserving
+/// any unknown YAML keys that the typed `SkillManifest` would otherwise drop.
+pub(crate) fn split_skill_md_frontmatter(
+    content: &str,
+) -> Result<(String, String), SkillParseError> {
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    let stripped = normalized.strip_prefix('\u{feff}').unwrap_or(&normalized);
+
+    let trimmed = stripped.trim_start_matches(['\n', '\r']);
+    if !trimmed.starts_with("---") {
+        return Err(SkillParseError::MissingFrontmatter);
+    }
+
+    let after_first = &trimmed[3..];
+    let after_first_line = match after_first.find('\n') {
+        Some(pos) => &after_first[pos + 1..],
+        None => return Err(SkillParseError::MissingFrontmatter),
+    };
+
+    let yaml_end =
+        find_closing_delimiter(after_first_line).ok_or(SkillParseError::MissingFrontmatter)?;
+    let yaml_str = after_first_line[..yaml_end].to_string();
+
+    let after_yaml = &after_first_line[yaml_end..];
+    let prompt_start = after_yaml
+        .find('\n')
+        .map(|p| p + 1)
+        .unwrap_or(after_yaml.len());
+    let prompt_content = after_yaml[prompt_start..]
+        .trim_start_matches('\n')
+        .to_string();
+
+    Ok((yaml_str, prompt_content))
+}
+
 fn parse_skill_md_impl(content: &str, validate_name: bool) -> Result<ParsedSkill, SkillParseError> {
     // Normalize line endings before parsing to handle CRLF (callers may not
     // have pre-normalized). This also makes `find_closing_delimiter`'s byte

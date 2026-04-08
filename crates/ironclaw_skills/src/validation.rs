@@ -20,6 +20,11 @@ pub fn validate_skill_name(name: &str) -> bool {
 /// preserved; invalid identifiers are lowercased and non-alphanumeric runs are
 /// collapsed into `-`, `_`, or `.` separators as allowed by the skill-name
 /// grammar.
+///
+/// Non-ASCII characters (accented letters, CJK, emoji) are treated as separators
+/// and effectively dropped: e.g. `"café"` becomes `"caf"`, `"中文-skill"` becomes
+/// `"skill"`. Identifiers that normalize to an empty or otherwise invalid name
+/// return `None`.
 pub fn normalize_skill_identifier(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if validate_skill_name(trimmed) {
