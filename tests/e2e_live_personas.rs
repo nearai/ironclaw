@@ -226,7 +226,7 @@ mod persona_tests {
         let tools: Vec<String> = new_events
             .iter()
             .filter_map(|event| match event {
-                ironclaw::channels::StatusUpdate::ToolStarted { name } => Some(name.clone()),
+                ironclaw::channels::StatusUpdate::ToolStarted { name, .. } => Some(name.clone()),
                 _ => None,
             })
             .collect();

@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use crate::validation::normalize_skill_identifier;
+
 /// Default ClawHub registry URL.
 ///
 /// Points directly at the Convex backend, bypassing Vercel's edge which
@@ -68,6 +70,88 @@ pub struct CatalogEntry {
     /// Owner handle (populated via detail enrichment).
     #[serde(default)]
     pub owner: Option<String>,
+}
+
+/// Error when a human-readable catalog name cannot be resolved safely.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CatalogResolveError {
+    #[error("Skill name '{name}' matches multiple catalog entries; use a slug instead ({matches})")]
+    AmbiguousName { name: String, matches: String },
+}
+
+fn normalize_catalog_identity(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+fn slug_suffix(slug: &str) -> &str {
+    slug.rsplit('/').next().unwrap_or(slug)
+}
+
+/// Resolve a display name or suffix-like query to a unique catalog slug.
+pub fn resolve_catalog_slug_for_name(
+    name: &str,
+    entries: &[CatalogEntry],
+) -> Result<Option<String>, CatalogResolveError> {
+    let normalized_name = normalize_catalog_identity(name);
+    if normalized_name.is_empty() {
+        return Ok(None);
+    }
+
+    let collect_matches = |predicate: &dyn Fn(&CatalogEntry) -> bool| -> Vec<String> {
+        let mut matches: Vec<String> = entries
+            .iter()
+            .filter(|entry| predicate(entry))
+            .map(|entry| entry.slug.clone())
+            .collect();
+
+        matches.sort();
+        matches.dedup();
+        matches
+    };
+
+    let exact_name = name.to_ascii_lowercase();
+    let matches = collect_matches(&|entry| entry.name.to_ascii_lowercase() == exact_name);
+    if matches.len() == 1 {
+        return Ok(matches.into_iter().next());
+    }
+    if matches.len() > 1 {
+        return Err(CatalogResolveError::AmbiguousName {
+            name: name.to_string(),
+            matches: matches.join(", "),
+        });
+    }
+
+    let matches = collect_matches(&|entry| {
+        normalize_catalog_identity(&entry.name) == normalized_name
+            || normalize_catalog_identity(slug_suffix(&entry.slug)) == normalized_name
+    });
+
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.into_iter().next()),
+        _ => Err(CatalogResolveError::AmbiguousName {
+            name: name.to_string(),
+            matches: matches.join(", "),
+        }),
+    }
+}
+
+/// Whether a catalog entry should be marked as installed for a set of local names.
+pub fn catalog_entry_is_installed(slug: &str, name: &str, installed_names: &[String]) -> bool {
+    let normalized_slug_name = normalize_skill_identifier(slug);
+    let slug_suffix = slug_suffix(slug);
+    installed_names.iter().any(|installed| {
+        slug.eq_ignore_ascii_case(installed)
+            || slug_suffix.eq_ignore_ascii_case(installed)
+            || name.eq_ignore_ascii_case(installed)
+            || normalized_slug_name
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(installed))
+    })
 }
 
 /// Top-level wrapper from the ClawHub `/api/v1/skills/{slug}` response.
@@ -519,6 +603,122 @@ mod tests {
     fn test_skill_download_url_encodes_special_chars() {
         let url = skill_download_url("https://clawhub.ai", "foo&bar=baz#frag");
         assert!(url.contains("slug=foo%26bar%3Dbaz%23frag"));
+    }
+
+    #[test]
+    fn test_resolve_catalog_slug_for_name_unique_match() {
+        let entries = vec![CatalogEntry {
+            slug: "finance/mortgage-calculator".to_string(),
+            name: "Mortgage Calculator".to_string(),
+            description: String::new(),
+            version: String::new(),
+            score: 1.0,
+            updated_at: None,
+            stars: None,
+            downloads: None,
+            installs_current: None,
+            owner: None,
+        }];
+
+        assert_eq!(
+            resolve_catalog_slug_for_name("Mortgage Calculator", &entries).unwrap(),
+            Some("finance/mortgage-calculator".to_string())
+        );
+        assert_eq!(
+            resolve_catalog_slug_for_name("mortgage-calculator", &entries).unwrap(),
+            Some("finance/mortgage-calculator".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_catalog_slug_for_name_ambiguous() {
+        let entries = vec![
+            CatalogEntry {
+                slug: "alice/mortgage-calculator".to_string(),
+                name: "Mortgage Calculator".to_string(),
+                description: String::new(),
+                version: String::new(),
+                score: 1.0,
+                updated_at: None,
+                stars: None,
+                downloads: None,
+                installs_current: None,
+                owner: None,
+            },
+            CatalogEntry {
+                slug: "bob/mortgage-calculator".to_string(),
+                name: "Mortgage Calculator".to_string(),
+                description: String::new(),
+                version: String::new(),
+                score: 0.9,
+                updated_at: None,
+                stars: None,
+                downloads: None,
+                installs_current: None,
+                owner: None,
+            },
+        ];
+
+        let err = resolve_catalog_slug_for_name("Mortgage Calculator", &entries).unwrap_err();
+        assert!(matches!(err, CatalogResolveError::AmbiguousName { .. }));
+        assert!(err.to_string().contains("use a slug instead"));
+    }
+
+    #[test]
+    fn test_resolve_catalog_slug_for_name_prefers_exact_display_name() {
+        let entries = vec![
+            CatalogEntry {
+                slug: "alice/ab".to_string(),
+                name: "AB".to_string(),
+                description: String::new(),
+                version: String::new(),
+                score: 1.0,
+                updated_at: None,
+                stars: None,
+                downloads: None,
+                installs_current: None,
+                owner: None,
+            },
+            CatalogEntry {
+                slug: "bob/a-b".to_string(),
+                name: "A-B".to_string(),
+                description: String::new(),
+                version: String::new(),
+                score: 0.9,
+                updated_at: None,
+                stars: None,
+                downloads: None,
+                installs_current: None,
+                owner: None,
+            },
+        ];
+
+        assert_eq!(
+            resolve_catalog_slug_for_name("AB", &entries).unwrap(),
+            Some("alice/ab".to_string())
+        );
+    }
+
+    #[test]
+    fn test_catalog_entry_is_installed_matches_normalized_slug_name() {
+        let installed = vec!["finance-mortgage-calculator".to_string()];
+
+        assert!(catalog_entry_is_installed(
+            "finance/mortgage-calculator",
+            "Mortgage Calculator",
+            &installed,
+        ));
+    }
+
+    #[test]
+    fn test_catalog_entry_is_installed_does_not_match_partial_suffix() {
+        let installed = vec!["calculator".to_string()];
+
+        assert!(!catalog_entry_is_installed(
+            "alice/mortgage-calculator",
+            "Mortgage Calculator",
+            &installed,
+        ));
     }
 
     #[test]

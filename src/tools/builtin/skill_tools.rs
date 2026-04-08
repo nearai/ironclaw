@@ -14,7 +14,9 @@ use crate::context::JobContext;
 use crate::tools::tool::{
     ApprovalRequirement, EngineCompatibility, Tool, ToolError, ToolOutput, require_str,
 };
-use ironclaw_skills::catalog::SkillCatalog;
+use ironclaw_skills::catalog::{
+    SkillCatalog, catalog_entry_is_installed, resolve_catalog_slug_for_name,
+};
 use ironclaw_skills::registry::SkillRegistry;
 
 const MAX_CHAIN_DEPS: usize = 10;
@@ -398,10 +400,8 @@ impl Tool for SkillSearchTool {
         let catalog_json: Vec<serde_json::Value> = catalog_entries
             .iter()
             .map(|entry| {
-                let is_installed = installed_names.iter().any(|n| {
-                    // Match by slug suffix or exact name
-                    entry.slug.ends_with(n.as_str()) || entry.name == *n
-                });
+                let is_installed =
+                    catalog_entry_is_installed(&entry.slug, &entry.name, &installed_names);
                 serde_json::json!({
                     "slug": entry.slug,
                     "name": entry.name,
@@ -476,6 +476,35 @@ impl SkillInstallTool {
     }
 }
 
+async fn resolve_catalog_download_key(
+    catalog: &SkillCatalog,
+    name: &str,
+    slug: Option<&str>,
+) -> Result<String, ToolError> {
+    if let Some(slug) = slug.filter(|s| !s.is_empty()) {
+        return Ok(slug.to_string());
+    }
+
+    if name.contains('/') {
+        return Ok(name.to_string());
+    }
+
+    let outcome = catalog.search(name).await;
+    match resolve_catalog_slug_for_name(name, &outcome.results) {
+        Ok(Some(resolved)) => Ok(resolved),
+        Ok(None) => {
+            let reason = outcome
+                .error
+                .unwrap_or_else(|| "no unique catalog match was found".to_string());
+            Err(ToolError::ExecutionFailed(format!(
+                "Could not resolve skill name '{}' to a catalog slug: {}",
+                name, reason
+            )))
+        }
+        Err(e) => Err(ToolError::ExecutionFailed(e.to_string())),
+    }
+}
+
 #[async_trait]
 impl Tool for SkillInstallTool {
     fn name(&self) -> &str {
@@ -493,6 +522,10 @@ impl Tool for SkillInstallTool {
                 "name": {
                     "type": "string",
                     "description": "Skill name or slug (from search results)"
+                },
+                "slug": {
+                    "type": "string",
+                    "description": "Registry slug from catalog search results; preferred when installing from ClawHub"
                 },
                 "url": {
                     "type": "string",
@@ -523,6 +556,11 @@ impl Tool for SkillInstallTool {
             .get("install_dependencies")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let mut requested_identifier = params
+            .get("slug")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
 
         // Idempotent: if a skill with this name is already loaded (from any
         // source — local SKILL.md, bundled, previously installed), return
@@ -562,25 +600,37 @@ impl Tool for SkillInstallTool {
             fetch_skill_content(url).await.map_err(ToolError::from)?
         } else {
             // Look up in catalog and fetch
-            let download_url =
-                ironclaw_skills::catalog::skill_download_url(self.catalog.registry_url(), name);
+            let download_key = resolve_catalog_download_key(
+                self.catalog.as_ref(),
+                name,
+                requested_identifier.as_deref(),
+            )
+            .await?;
+            requested_identifier = Some(download_key.clone());
+            let download_url = ironclaw_skills::catalog::skill_download_url(
+                self.catalog.registry_url(),
+                &download_key,
+            );
             fetch_skill_content(&download_url)
                 .await
                 .map_err(ToolError::from)?
         };
 
+        let normalized = ironclaw_skills::normalize_line_endings(&content);
+
         // Check for duplicates and get install_dir under a brief read lock.
-        let (user_dir, skill_name_from_parse) = {
+        let (user_dir, skill_name_from_parse, install_content) = {
             let guard = self
                 .registry
                 .read()
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
 
-            // Parse to extract the name (cheap, in-memory)
-            let normalized = ironclaw_skills::normalize_line_endings(&content);
-            let parsed = ironclaw_skills::parser::parse_skill_md(&normalized)
+            let (skill_name, install_content) =
+                ironclaw_skills::registry::SkillRegistry::resolve_install_content(
+                    &normalized,
+                    requested_identifier.as_deref(),
+                )
                 .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
-            let skill_name = parsed.manifest.name.clone();
 
             if guard.has(&skill_name) {
                 return Err(ToolError::ExecutionFailed(format!(
@@ -589,7 +639,11 @@ impl Tool for SkillInstallTool {
                 )));
             }
 
-            (guard.install_target_dir().to_path_buf(), skill_name)
+            (
+                guard.install_target_dir().to_path_buf(),
+                skill_name,
+                install_content,
+            )
         };
 
         // Perform async I/O (write to disk, validate round-trip) with no lock held.
@@ -597,7 +651,7 @@ impl Tool for SkillInstallTool {
             ironclaw_skills::registry::SkillRegistry::prepare_install_to_disk(
                 &user_dir,
                 &skill_name_from_parse,
-                &ironclaw_skills::normalize_line_endings(&content),
+                &install_content,
             )
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
@@ -1129,8 +1183,70 @@ mod tests {
         );
         let schema = tool.parameters_schema();
         assert!(schema["properties"].get("name").is_some());
+        assert!(schema["properties"].get("slug").is_some());
         assert!(schema["properties"].get("url").is_some());
         assert!(schema["properties"].get("content").is_some());
+    }
+
+    #[test]
+    fn test_find_catalog_slug_for_display_name() {
+        let entries = vec![ironclaw_skills::catalog::CatalogEntry {
+            slug: "finance/mortgage-calculator".to_string(),
+            name: "Mortgage Calculator".to_string(),
+            description: String::new(),
+            version: String::new(),
+            score: 1.0,
+            updated_at: None,
+            stars: None,
+            downloads: None,
+            installs_current: None,
+            owner: None,
+        }];
+
+        assert_eq!(
+            resolve_catalog_slug_for_name("Mortgage Calculator", &entries)
+                .unwrap()
+                .as_deref(),
+            Some("finance/mortgage-calculator")
+        );
+        assert_eq!(
+            resolve_catalog_slug_for_name("mortgage-calculator", &entries)
+                .unwrap()
+                .as_deref(),
+            Some("finance/mortgage-calculator")
+        );
+    }
+
+    #[test]
+    fn test_resolve_catalog_slug_for_display_name_is_ambiguous() {
+        let entries = vec![
+            ironclaw_skills::catalog::CatalogEntry {
+                slug: "alice/mortgage-calculator".to_string(),
+                name: "Mortgage Calculator".to_string(),
+                description: String::new(),
+                version: String::new(),
+                score: 1.0,
+                updated_at: None,
+                stars: None,
+                downloads: None,
+                installs_current: None,
+                owner: None,
+            },
+            ironclaw_skills::catalog::CatalogEntry {
+                slug: "bob/mortgage-calculator".to_string(),
+                name: "Mortgage Calculator".to_string(),
+                description: String::new(),
+                version: String::new(),
+                score: 0.9,
+                updated_at: None,
+                stars: None,
+                downloads: None,
+                installs_current: None,
+                owner: None,
+            },
+        ];
+
+        assert!(resolve_catalog_slug_for_name("Mortgage Calculator", &entries).is_err());
     }
 
     #[test]

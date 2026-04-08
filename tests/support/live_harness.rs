@@ -165,7 +165,7 @@ impl LiveTestHarness {
                     }
                     errors.push(format!("tool '{name}' failed: {err}"));
                 }
-                StatusUpdate::ToolResult { name, preview } => {
+                StatusUpdate::ToolResult { name, preview, .. } => {
                     if let Some(reason) = scan_preview_for_errors(&preview) {
                         errors.push(format!("tool '{name}' result contains error: {reason}"));
                     }

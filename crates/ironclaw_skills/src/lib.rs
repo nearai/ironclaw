@@ -64,6 +64,9 @@ pub use validation::{
 };
 
 #[cfg(feature = "catalog")]
-pub use catalog::{CatalogEntry, CatalogSearchOutcome, SkillCatalog, shared_catalog};
+pub use catalog::{
+    CatalogEntry, CatalogResolveError, CatalogSearchOutcome, SkillCatalog,
+    catalog_entry_is_installed, resolve_catalog_slug_for_name, shared_catalog,
+};
 #[cfg(feature = "registry")]
 pub use registry::{SkillRegistry, SkillRegistryError, compute_hash};
