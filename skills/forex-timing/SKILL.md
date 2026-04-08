@@ -91,6 +91,28 @@ def today_unix_day(iso_date_str):
 def ms_to_date_str(ms):
     return format_unix_day(ms // 86400000)
 
+# ── Massive URL builder (validates date format before the request is sent) ─────
+
+def build_massive_url(pair, start_str, end_str, multiplier=1, timespan="day"):
+    """Build a Massive API OHLCV URL.
+    Raises ValueError immediately if either date is malformed so the bug is
+    caught before any HTTP call goes out.
+    Dates MUST be YYYY-MM-DD (exactly 10 chars, dashes at positions 4 and 7).
+    ALWAYS call this instead of constructing the URL manually."""
+    for label, s in [("start", start_str), ("end", end_str)]:
+        if (len(s) != 10 or s[4] != '-' or s[7] != '-'
+                or not s[:4].isdigit() or not s[5:7].isdigit() or not s[8:].isdigit()):
+            raise ValueError(
+                f"Malformed {label} date passed to build_massive_url: {s!r}. "
+                f"Expected YYYY-MM-DD (10 chars). "
+                f"Always use format_unix_day() to produce date strings."
+            )
+    return (
+        f"https://api.massive.com/v2/aggs/ticker/C:{pair.upper()}"
+        f"/range/{multiplier}/{timespan}/{start_str}/{end_str}"
+        f"?sort=asc&limit=5000"
+    )
+
 # ── Massive API response parsing ───────────────────────────────────────────────
 
 def parse_massive_bars(resp):
@@ -322,7 +344,7 @@ today_day = today_unix_day(_now["iso"][:10])
 end = format_unix_day(today_day)
 
 pair = (from_ccy + to_ccy).upper()
-url  = f"https://api.massive.com/v2/aggs/ticker/C:{pair}/range/1/day/{start}/{end}?sort=asc&limit=5000"
+url  = build_massive_url(pair, start, end)
 resp = await http(method="GET", url=url)
 bars, err = parse_massive_bars(resp)
 if err:
@@ -351,7 +373,7 @@ start_str  = format_unix_day(start_day)
 end_str    = format_unix_day(today_day)
 
 pair        = "USDINR"
-massive_url = f"https://api.massive.com/v2/aggs/ticker/C:{pair}/range/1/day/{start_str}/{end_str}?sort=asc&limit=5000"
+massive_url = build_massive_url(pair, start_str, end_str)
 now_unix    = _now["unix"]
 dxy_url     = f"https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB?interval=1d&period1={now_unix - 35*86400}&period2={now_unix}"
 
@@ -430,7 +452,7 @@ today_day = today_unix_day(_now["iso"][:10])
 start_str = format_unix_day(today_day - 5)
 end_str   = format_unix_day(today_day)
 
-url  = f"https://api.massive.com/v2/aggs/ticker/C:USDINR/range/1/day/{start_str}/{end_str}?sort=asc&limit=10"
+url  = build_massive_url("USDINR", start_str, end_str)
 resp = await http(method="GET", url=url)
 bars, err = parse_massive_bars(resp)
 if err:
@@ -478,5 +500,6 @@ FINAL({
 - Yahoo Finance DXY failure is always non-fatal: `parse_dxy_direction` returns `"unknown"` on any error.
 - `analyze_transfer` and `validate_transfer_target` are USD/INR only; their static tables are not valid for other pairs.
 - `get_forex_historical_data` is generic (any Massive-supported pair).
-- Always uppercase currency codes before building Massive URLs (`C:USDINR`, not `C:usdinr`).
+- **Always use `build_massive_url(pair, start_str, end_str)` — never construct Massive API URLs manually.** The helper validates that dates are exactly `YYYY-MM-DD` and raises `ValueError` immediately if they are malformed, preventing bad requests from ever being sent.
+- Always produce date strings with `format_unix_day()` — never format dates by hand.
 - Massive uses `?limit=5000` — covers 220 calendar days (~160 trading days) in a single request.
