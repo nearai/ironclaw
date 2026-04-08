@@ -1071,8 +1071,9 @@ pub trait ChannelPairingStore: Send + Sync {
     /// allow-list-based WASM channel admission.
     async fn read_allow_from(&self, channel: &str) -> Result<Vec<String>, DatabaseError>;
 
-    /// Create or refresh a pending pairing request for `(channel, external_id)`.
-    /// Returns existing non-expired pending request if one exists; creates new one otherwise.
+    /// Create or replace the pending pairing request for `(channel, external_id)`.
+    /// Any existing non-expired pending request for the same sender is retired and a new code
+    /// is issued so retrying the claim flow always rotates to a fresh code.
     async fn upsert_pairing_request(
         &self,
         channel: &str,

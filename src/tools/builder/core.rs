@@ -44,7 +44,8 @@ use crate::llm::{
     ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolDefinition,
 };
 use crate::tools::tool::{
-    ApprovalContext, ApprovalRequirement, Tool, ToolError, ToolOutput, check_approval_in_context,
+    ApprovalContext, ApprovalRequirement, EngineCompatibility, Tool, ToolError, ToolOutput,
+    check_approval_in_context,
 };
 use crate::tools::{ToolRegistry, prepare_tool_params};
 
@@ -1113,6 +1114,10 @@ impl Tool for BuildSoftwareTool {
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
         ApprovalRequirement::UnlessAutoApproved
+    }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
     }
 }
 

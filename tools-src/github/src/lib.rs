@@ -955,7 +955,7 @@ fn fork_repo(
     if let Some(org) = organization {
         validate_input_length(org, "organization")?;
         if !validate_path_segment(org) {
-            return Err("Invalid organization name".into());
+            return Err("Invalid org name".into());
         }
     }
     if let Some(n) = name {
