@@ -728,18 +728,28 @@ fn slugify(title: &str, id: &str) -> String {
 
 // ── Frontmatter serialization ───────────────────────────────
 
+/// Escape a string for use as a YAML double-quoted scalar.
+fn yaml_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
 /// Serialize a MemoryDoc as YAML frontmatter + markdown content.
 fn serialize_knowledge_doc(doc: &MemoryDoc) -> String {
     let mut frontmatter = String::from("---\n");
     frontmatter.push_str(&format!("id: \"{}\"\n", doc.id.0));
+    frontmatter.push_str(&format!("project_id: \"{}\"\n", doc.project_id.0));
+    frontmatter.push_str(&format!("user_id: \"{}\"\n", yaml_escape(&doc.user_id)));
     frontmatter.push_str(&format!("doc_type: \"{:?}\"\n", doc.doc_type));
-    frontmatter.push_str(&format!("title: \"{}\"\n", doc.title.replace('"', "\\\"")));
+    frontmatter.push_str(&format!("title: \"{}\"\n", yaml_escape(&doc.title)));
     if !doc.tags.is_empty() {
         frontmatter.push_str(&format!(
             "tags: [{}]\n",
             doc.tags
                 .iter()
-                .map(|t| format!("\"{t}\""))
+                .map(|t| format!("\"{}\"", yaml_escape(t)))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
@@ -832,11 +842,28 @@ fn deserialize_knowledge_doc(content: &str) -> Option<MemoryDoc> {
         .cloned()
         .unwrap_or(serde_json::json!({}));
 
-    // project_id is not in frontmatter — use nil UUID (assigned at load time)
+    // project_id: present in new docs; older docs default to system_project_id()
+    // (Uuid::nil()) which is where shared/admin skills were stored before this
+    // field was added to the frontmatter.
+    let project_id = yaml
+        .get("project_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        .map(ProjectId)
+        .unwrap_or_else(ironclaw_engine::system_project_id);
+
+    // user_id: present in new docs; older docs default to "legacy" so that
+    // migrate_legacy_user_ids() can stamp them with the correct owner.
+    let user_id = yaml
+        .get("user_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("legacy")
+        .to_string();
+
     Some(MemoryDoc {
         id: DocId(id),
-        project_id: ProjectId(uuid::Uuid::nil()),
-        user_id: "legacy".to_string(),
+        project_id,
+        user_id,
         doc_type,
         title,
         content: body.to_string(),

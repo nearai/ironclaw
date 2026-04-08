@@ -783,6 +783,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
             match crate::bridge::skill_migration::migrate_v1_skill_list(
                 &skills_snapshot,
                 &store_dyn,
+                owner_id,
                 project_id,
             )
             .await
@@ -3291,6 +3292,24 @@ async fn migrate_legacy_user_ids(store: &Arc<dyn ironclaw_engine::Store>, owner_
                 doc.updated_at = chrono::Utc::now();
                 let _ = store.save_memory_doc(&doc).await;
             }
+        }
+    }
+
+    // Upgrade path: docs in the system project that were serialized before
+    // project_id/user_id were written to frontmatter will be loaded with
+    // user_id = "legacy". Skill docs there belong to the shared/admin space,
+    // not to any individual owner, so stamp them with shared_owner_id().
+    let sys = ironclaw_engine::system_project_id();
+    if let Ok(legacy) = store.list_memory_docs(sys, "legacy").await {
+        for mut doc in legacy {
+            let correct_owner = if doc.doc_type == ironclaw_engine::DocType::Skill {
+                ironclaw_engine::types::shared_owner_id().to_string()
+            } else {
+                owner_id.to_string()
+            };
+            doc.user_id = correct_owner;
+            doc.updated_at = chrono::Utc::now();
+            let _ = store.save_memory_doc(&doc).await;
         }
     }
 

@@ -34,7 +34,7 @@ pub use types::event::{EventId, EventKind, ThreadEvent};
 pub use types::memory::{DocId, DocType, MemoryDoc};
 pub use types::message::{MessageRole, ThreadMessage};
 pub use types::mission::{Mission, MissionCadence, MissionId, MissionStatus};
-pub use types::project::{Project, ProjectId};
+pub use types::project::{Project, ProjectId, system_project_id};
 pub use types::provenance::Provenance;
 pub use types::step::{
     ActionCall, ActionResult, ExecutionTier, LlmResponse, Step, StepId, StepStatus, TokenUsage,
@@ -104,7 +104,7 @@ pub(crate) mod tests {
     use crate::types::event::ThreadEvent;
     use crate::types::memory::{DocId, MemoryDoc};
     use crate::types::mission::{Mission, MissionId, MissionStatus};
-    use crate::types::project::{Project, ProjectId};
+    use crate::types::project::{Project, ProjectId, system_project_id};
     use crate::types::step::Step;
     use crate::types::thread::{Thread, ThreadId, ThreadState};
 
@@ -528,5 +528,78 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(docs.len(), 2);
+    }
+
+    /// Regression test for issue #2084.
+    ///
+    /// Admin skills live in `system_project_id()`. A tenant whose thread runs
+    /// in a different per-user project must still see those skills via
+    /// `list_shared_memory_docs` / `list_memory_docs_with_shared`.
+    #[tokio::test]
+    async fn admin_skills_in_system_project_visible_to_all_tenants() {
+        use crate::types::memory::DocType;
+        use crate::types::shared_owner_id;
+
+        // Admin installs a skill into the system project.
+        let admin_skill = MemoryDoc::new(
+            system_project_id(),
+            shared_owner_id(),
+            DocType::Skill,
+            "skill:admin-tool",
+            "# Admin Tool\nDo admin things.",
+        );
+
+        // Alice has her own skill in her own project.
+        let alice_project = ProjectId::new();
+        let alice_skill = MemoryDoc::new(
+            alice_project,
+            "alice",
+            DocType::Skill,
+            "skill:alice-tool",
+            "# Alice Tool\nAlice's personal skill.",
+        );
+
+        // Bob's thread runs in yet another project.
+        let bob_project = ProjectId::new();
+
+        let store = InMemoryStore::with_docs(vec![admin_skill.clone(), alice_skill.clone()]);
+
+        // Bob sees admin skill via list_shared_memory_docs from his project.
+        let shared = store
+            .list_shared_memory_docs(bob_project)
+            .await
+            .unwrap();
+        assert!(
+            shared.iter().any(|d| d.id == admin_skill.id),
+            "Bob should see admin skill from system project"
+        );
+
+        // Bob does NOT see Alice's personal skill.
+        assert!(
+            !shared.iter().any(|d| d.id == alice_skill.id),
+            "Bob should not see Alice's personal skill"
+        );
+
+        // Alice sees both her own skill and the admin skill.
+        let alice_docs = store
+            .list_memory_docs_with_shared(alice_project, "alice")
+            .await
+            .unwrap();
+        assert!(
+            alice_docs.iter().any(|d| d.id == admin_skill.id),
+            "Alice should see admin skill"
+        );
+        assert!(
+            alice_docs.iter().any(|d| d.id == alice_skill.id),
+            "Alice should see her own skill"
+        );
+
+        // Bob's full doc list (own + shared) includes admin skill, not Alice's.
+        let bob_docs = store
+            .list_memory_docs_with_shared(bob_project, "bob")
+            .await
+            .unwrap();
+        assert!(bob_docs.iter().any(|d| d.id == admin_skill.id));
+        assert!(!bob_docs.iter().any(|d| d.id == alice_skill.id));
     }
 }

@@ -25,6 +25,17 @@ impl Default for ProjectId {
     }
 }
 
+/// The global system project — a stable, well-known project where
+/// admin-installed shared skills live. Using `Uuid::nil()` means it requires
+/// no database row: every `Store` implementation can query it via the normal
+/// `list_memory_docs(system_project_id(), user_id)` path.
+///
+/// Skills in this project are visible to all users regardless of which
+/// per-user project their thread runs in.
+pub fn system_project_id() -> ProjectId {
+    ProjectId(Uuid::nil())
+}
+
 /// A project — the unit of context scoping.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {

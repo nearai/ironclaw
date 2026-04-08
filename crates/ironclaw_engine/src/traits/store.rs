@@ -9,7 +9,7 @@ use crate::types::error::EngineError;
 use crate::types::event::ThreadEvent;
 use crate::types::memory::{DocId, MemoryDoc};
 use crate::types::mission::{Mission, MissionId, MissionStatus};
-use crate::types::project::{Project, ProjectId};
+use crate::types::project::{Project, ProjectId, system_project_id};
 use crate::types::step::Step;
 use crate::types::thread::{Thread, ThreadId, ThreadState};
 use crate::types::{is_shared_owner, shared_owner_candidates};
@@ -120,9 +120,16 @@ pub trait Store: Send + Sync {
         &self,
         project_id: ProjectId,
     ) -> Result<Vec<MemoryDoc>, EngineError> {
+        let sys = system_project_id();
         let mut docs = Vec::new();
         for owner_id in shared_owner_candidates() {
             docs.extend(self.list_memory_docs(project_id, owner_id).await?);
+            // Always include the system project — admin-installed skills live
+            // here and must be visible to all tenants regardless of which
+            // per-user project their thread runs in.
+            if project_id != sys {
+                docs.extend(self.list_memory_docs(sys, owner_id).await?);
+            }
         }
         docs.sort_by_key(|doc| doc.id.0);
         docs.dedup_by_key(|doc| doc.id);
