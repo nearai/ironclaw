@@ -373,7 +373,7 @@ async fn resolve_user_project(
 /// Persistent engine state that lives across messages.
 struct EngineState {
     thread_manager: Arc<ThreadManager>,
-    conversation_manager: ConversationManager,
+    conversation_manager: Arc<ConversationManager>,
     effect_adapter: Arc<EffectBridgeAdapter>,
     store: Arc<dyn Store>,
     default_project_id: ironclaw_engine::ProjectId,
@@ -738,7 +738,10 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         }
     };
 
-    let conversation_manager = ConversationManager::new(Arc::clone(&thread_manager), store.clone());
+    let conversation_manager = Arc::new(ConversationManager::new(
+        Arc::clone(&thread_manager),
+        store.clone(),
+    ));
     if let Err(e) = conversation_manager
         .bootstrap_user(&agent.deps.owner_id)
         .await
@@ -787,6 +790,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         let channels = Arc::clone(&agent.channels);
         let sse_ref = agent.deps.sse_tx.clone();
         let db_ref = agent.deps.store.clone();
+        let conv_mgr_ref = Arc::clone(&conversation_manager);
         tokio::spawn(async move {
             loop {
                 match notification_rx.recv().await {
@@ -796,6 +800,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                             &channels,
                             sse_ref.as_ref(),
                             db_ref.as_ref(),
+                            Some(conv_mgr_ref.as_ref()),
                         )
                         .await;
                     }
@@ -2639,11 +2644,29 @@ fn interpret_message_event(role: &str, content_preview: &str) -> Option<&'static
 }
 
 /// Deliver a mission thread outcome to the mission's notify_channels.
+///
+/// Three sinks need the mission output so the assistant conversation stays
+/// coherent across follow-ups:
+///
+/// 1. **Channel broadcast** — pushes the message to the live channel (REPL,
+///    web SSE, etc.) so the user sees it in real time.
+/// 2. **SSE app events** — pushes a `Response` event for the web gateway.
+/// 3. **v1 conversation_messages table** — the gateway history API reads from
+///    here, so a missing write would leave the message out of `/api/chat/history`.
+/// 4. **v2 ConversationManager entries** — the engine v2 follow-up code path
+///    builds new-thread context from `ConversationSurface.entries` (see
+///    `build_history_from_entries`). Without an entry here, when the user
+///    replies after a mission notification the new thread spawns with no
+///    knowledge of the mission's output and the agent will (correctly, given
+///    its empty context) say "I haven't sent you a digest". Recording an
+///    `Agent` entry tagged with the mission's thread id keeps the v2 history
+///    consistent with what the user actually saw.
 async fn handle_mission_notification(
     notif: &ironclaw_engine::MissionNotification,
     channels: &std::sync::Arc<crate::channels::ChannelManager>,
     sse: Option<&Arc<SseManager>>,
     db: Option<&Arc<dyn Database>>,
+    conv_mgr: Option<&ironclaw_engine::ConversationManager>,
 ) {
     let Some(ref text) = notif.response else {
         return;
@@ -2696,6 +2719,45 @@ async fn handle_mission_notification(
         let _ = db
             .add_conversation_message(conv_id, "assistant", &full_text)
             .await;
+    }
+
+    // Inject the mission output into each notify channel's v2 conversation
+    // so follow-up user messages spawn threads whose history includes the
+    // mission output. Without this step, the engine v2 conversation history
+    // (`build_history_from_entries`) is unaware of the mission and the user
+    // can't ask follow-ups about its content.
+    if let Some(conv_mgr) = conv_mgr {
+        for channel_name in &notif.notify_channels {
+            match conv_mgr
+                .get_or_create_conversation(channel_name, &notif.user_id)
+                .await
+            {
+                Ok(conv_id) => {
+                    if let Err(e) = conv_mgr
+                        .record_external_agent_message(
+                            conv_id,
+                            notif.thread_id,
+                            &notif.user_id,
+                            full_text.clone(),
+                        )
+                        .await
+                    {
+                        debug!(
+                            channel = %channel_name,
+                            mission = %notif.mission_name,
+                            "failed to record mission output in v2 conversation: {e}"
+                        );
+                    }
+                }
+                Err(e) => {
+                    debug!(
+                        channel = %channel_name,
+                        mission = %notif.mission_name,
+                        "failed to resolve v2 conversation for mission notification: {e}"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -2994,6 +3056,9 @@ pub struct EngineMissionInfo {
     pub goal: String,
     pub status: String,
     pub cadence_type: String,
+    /// Human-readable description of the cadence (e.g. "every Monday at 09:00",
+    /// "webhook: /github", "manual"). Renders nicer than `cadence_type` alone.
+    pub cadence_description: String,
     pub thread_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_focus: Option<String>,
@@ -3029,6 +3094,105 @@ fn cadence_type_label(cadence: &ironclaw_engine::types::mission::MissionCadence)
         MissionCadence::Webhook { .. } => "webhook",
         MissionCadence::Manual => "manual",
     }
+}
+
+/// Human-readable description of a mission cadence for the UI.
+///
+/// For cron expressions, recognizes common patterns ("every hour",
+/// "every Monday at 09:00", etc.) and falls back to `"cron: <expression>"`
+/// for unrecognized patterns. Other cadence types include their pattern/path
+/// so the user can see what triggers the mission.
+fn cadence_description(cadence: &ironclaw_engine::types::mission::MissionCadence) -> String {
+    use ironclaw_engine::types::mission::MissionCadence;
+    match cadence {
+        MissionCadence::Cron { expression, timezone } => {
+            let base = describe_cron(expression)
+                .unwrap_or_else(|| format!("cron: {expression}"));
+            match timezone {
+                Some(tz) => format!("{base} ({tz})"),
+                None => base,
+            }
+        }
+        MissionCadence::OnEvent { event_pattern, .. } => format!("on event: {event_pattern}"),
+        MissionCadence::OnSystemEvent {
+            source, event_type, ..
+        } => {
+            format!("on system event: {source}/{event_type}")
+        }
+        MissionCadence::Webhook { path, .. } => format!("webhook: {path}"),
+        MissionCadence::Manual => "manual".to_string(),
+    }
+}
+
+/// Translate a 5-field cron expression into an English description for common
+/// patterns. Returns `None` if the expression doesn't match a known shape; the
+/// caller should fall back to showing the raw expression.
+fn describe_cron(expression: &str) -> Option<String> {
+    let parts: Vec<&str> = expression.split_whitespace().collect();
+    // Accept standard 5-field cron; ignore 6/7-field variants for now.
+    if parts.len() != 5 {
+        return None;
+    }
+    let (minute, hour, dom, month, dow) = (parts[0], parts[1], parts[2], parts[3], parts[4]);
+
+    // Helpers
+    let is_any = |s: &str| s == "*";
+    let parse_num = |s: &str| s.parse::<u32>().ok();
+    let day_name = |n: u32| match n % 7 {
+        0 | 7 => "Sunday",
+        1 => "Monday",
+        2 => "Tuesday",
+        3 => "Wednesday",
+        4 => "Thursday",
+        5 => "Friday",
+        6 => "Saturday",
+        _ => "",
+    };
+
+    // Every minute
+    if is_any(minute) && is_any(hour) && is_any(dom) && is_any(month) && is_any(dow) {
+        return Some("every minute".to_string());
+    }
+    // Every hour at minute M
+    if is_any(hour)
+        && is_any(dom)
+        && is_any(month)
+        && is_any(dow)
+        && let Some(m) = parse_num(minute)
+    {
+        if m == 0 {
+            return Some("every hour".to_string());
+        }
+        return Some(format!("every hour at :{m:02}"));
+    }
+    // Daily at H:M (no day-of-week, no day-of-month restriction)
+    if is_any(dom)
+        && is_any(month)
+        && is_any(dow)
+        && let (Some(m), Some(h)) = (parse_num(minute), parse_num(hour))
+    {
+        return Some(format!("every day at {h:02}:{m:02}"));
+    }
+    // Weekly on a single day at H:M
+    if is_any(dom)
+        && is_any(month)
+        && let (Some(m), Some(h), Some(d)) =
+            (parse_num(minute), parse_num(hour), parse_num(dow))
+    {
+        let name = day_name(d);
+        if !name.is_empty() {
+            return Some(format!("every {name} at {h:02}:{m:02}"));
+        }
+    }
+    // Monthly on day-of-month at H:M
+    if is_any(month)
+        && is_any(dow)
+        && let (Some(m), Some(h), Some(d)) =
+            (parse_num(minute), parse_num(hour), parse_num(dom))
+    {
+        return Some(format!("monthly on day {d} at {h:02}:{m:02}"));
+    }
+    None
 }
 
 fn thread_to_info(t: &ironclaw_engine::Thread) -> EngineThreadInfo {
@@ -3311,6 +3475,7 @@ pub async fn list_engine_missions(
             goal: m.goal.clone(),
             status: format!("{:?}", m.status),
             cadence_type: cadence_type_label(&m.cadence).to_string(),
+            cadence_description: cadence_description(&m.cadence),
             thread_count: m.thread_history.len(),
             current_focus: m.current_focus.clone(),
             created_at: m.created_at.to_rfc3339(),
@@ -3365,6 +3530,7 @@ pub async fn get_engine_mission(
             goal: m.goal.clone(),
             status: format!("{:?}", m.status),
             cadence_type: cadence_type_label(&m.cadence).to_string(),
+            cadence_description: cadence_description(&m.cadence),
             thread_count: m.thread_history.len(),
             current_focus: m.current_focus.clone(),
             created_at: m.created_at.to_rfc3339(),
@@ -4411,7 +4577,10 @@ mod tests {
             Arc::new(PolicyEngine::new()),
         ));
 
-        let cm = ConversationManager::new(Arc::clone(&tm), store_dyn.clone());
+        let cm = Arc::new(ConversationManager::new(
+            Arc::clone(&tm),
+            store_dyn.clone(),
+        ));
 
         EngineState {
             thread_manager: tm,

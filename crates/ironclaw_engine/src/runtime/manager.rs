@@ -102,11 +102,20 @@ impl ThreadManager {
             parent_id,
             user_id,
             Vec::new(),
+            None,
         )
         .await
     }
 
     /// Spawn a thread with initial conversation history.
+    ///
+    /// `source_channel` records the channel name (e.g. "gateway") that
+    /// originated this thread. It is stored in `thread.metadata.source_channel`
+    /// **before** the execution task is spawned, so the orchestrator's
+    /// `ThreadExecutionContext` sees it on the very first step. Setting it
+    /// post-spawn via `set_thread_metadata` is a race — the spawned task owns
+    /// its own in-memory copy of the `Thread`, and the late metadata update
+    /// only lands on the persisted copy that the running task never re-reads.
     #[allow(clippy::too_many_arguments)]
     pub async fn spawn_thread_with_history(
         &self,
@@ -117,11 +126,25 @@ impl ThreadManager {
         parent_id: Option<ThreadId>,
         user_id: impl Into<String>,
         initial_messages: Vec<crate::types::message::ThreadMessage>,
+        source_channel: Option<String>,
     ) -> Result<ThreadId, EngineError> {
         let user_id = user_id.into();
         let mut thread = Thread::new(goal, thread_type, project_id, &user_id, config);
         if let Some(pid) = parent_id {
             thread = thread.with_parent(pid);
+        }
+        // Stamp source_channel into metadata BEFORE the execution task takes
+        // ownership of the Thread struct. The orchestrator reads this via
+        // `thread_source_channel(thread)` and uses it to populate
+        // `ThreadExecutionContext.source_channel`, which downstream tools
+        // (notably `mission_create`) consult to default `notify_channels`.
+        if let Some(channel) = source_channel
+            && let Some(obj) = thread.metadata.as_object_mut()
+        {
+            obj.insert(
+                "source_channel".to_string(),
+                serde_json::Value::String(channel),
+            );
         }
         let thread_id = thread.id;
 

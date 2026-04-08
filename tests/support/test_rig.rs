@@ -433,6 +433,7 @@ pub struct TestRigBuilder {
     wasm_tools: Vec<WasmToolSpec>,
     keep_bootstrap: bool,
     engine_v2: bool,
+    channel_name_override: Option<String>,
 }
 
 impl TestRigBuilder {
@@ -453,7 +454,18 @@ impl TestRigBuilder {
             wasm_tools: Vec::new(),
             keep_bootstrap: false,
             engine_v2: false,
+            channel_name_override: None,
         }
+    }
+
+    /// Override the test channel name (default: "test", or "gateway" when
+    /// `.with_bootstrap()` is set). Use this when you need the channel name to
+    /// match a real-world channel (e.g. "gateway") so that downstream features
+    /// keyed on the channel name (assistant conversations, mission notify
+    /// channels) behave the same as in production.
+    pub fn with_channel_name(mut self, name: impl Into<String>) -> Self {
+        self.channel_name_override = Some(name.into());
+        self
     }
 
     /// Load a real WASM tool binary into the test rig.
@@ -605,6 +617,7 @@ impl TestRigBuilder {
             wasm_tools,
             keep_bootstrap,
             engine_v2,
+            channel_name_override,
         } = self;
 
         // 1. Create temp dir + libSQL database + run migrations.
@@ -908,8 +921,13 @@ impl TestRigBuilder {
 
         // 7. Create TestChannel and ChannelManager.
         // When testing bootstrap, the channel must be named "gateway" because
-        // the bootstrap greeting targets only the gateway channel.
-        let test_channel = if self.keep_bootstrap {
+        // the bootstrap greeting targets only the gateway channel. An explicit
+        // override (via `with_channel_name`) takes precedence so tests can
+        // mirror real-world channel naming for features keyed on the channel
+        // name (e.g. mission notifications routed back to the source channel).
+        let test_channel = if let Some(ref name) = channel_name_override {
+            Arc::new(TestChannel::new().with_name(name.clone()))
+        } else if self.keep_bootstrap {
             Arc::new(TestChannel::new().with_name("gateway"))
         } else {
             Arc::new(TestChannel::new())

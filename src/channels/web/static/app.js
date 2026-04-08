@@ -5431,7 +5431,7 @@ function renderMissionsList(missions) {
     return '<tr class="mission-row" data-action="open-mission" data-id="' + escapeHtml(m.id) + '">'
       + '<td>' + escapeHtml(m.name) + '</td>'
       + '<td class="truncate">' + escapeHtml(m.goal) + '</td>'
-      + '<td>' + escapeHtml(m.cadence_type) + '</td>'
+      + '<td>' + escapeHtml(m.cadence_description || m.cadence_type) + '</td>'
       + '<td>' + m.thread_count + '</td>'
       + '<td><span class="badge ' + statusClass + '">' + escapeHtml(m.status) + '</span></td>'
       + '<td>'
@@ -5481,7 +5481,7 @@ function renderMissionDetail(m) {
     + '<div class="job-description-body">' + renderMarkdown(m.goal) + '</div></div>';
 
   html += '<div class="job-meta-grid">'
-    + metaItem(I18n.t('missions.cadence'), m.cadence_type)
+    + metaItem(I18n.t('missions.cadence'), m.cadence_description || m.cadence_type)
     + metaItem(I18n.t('missions.status'), m.status)
     + metaItem(I18n.t('missions.threadsToday'), m.threads_today + ' / ' + (m.max_threads_per_day || '∞'))
     + metaItem(I18n.t('missions.totalThreads'), m.thread_count)

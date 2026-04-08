@@ -245,7 +245,11 @@ impl EffectBridgeAdapter {
                                 "routine alias: failed to apply post-create updates"
                             );
                         }
-                        Ok(serde_json::json!({"mission_id": id.to_string(), "status": "created"}))
+                        Ok(serde_json::json!({
+                            "mission_id": id.to_string(),
+                            "name": name,
+                            "status": "created"
+                        }))
                     }
                     Err(e) => Err(e),
                 }

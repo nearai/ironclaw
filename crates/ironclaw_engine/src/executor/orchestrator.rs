@@ -1269,7 +1269,12 @@ async fn handle_execute_actions_parallel(
             user_id: thread.user_id.clone(),
             step_id,
             current_call_id: Some(pc.call_id.clone()),
-            source_channel: None,
+            // Read source_channel from thread metadata so downstream tools
+            // (e.g. mission_create) can default notify_channels to the
+            // originating channel. Hardcoding `None` here was a bug — it
+            // silently dropped the gateway routing for any tool dispatched
+            // through the parallel batch path.
+            source_channel: thread_source_channel(thread),
         };
         let ps = summarize_params(&pc.name, &pc.params);
         let (result_json, event, output) = execute_single_action(
@@ -1292,6 +1297,9 @@ async fn handle_execute_actions_parallel(
         // Multiple calls: execute in parallel via JoinSet
         let mut join_set = tokio::task::JoinSet::new();
         let effects = effects.clone();
+        // Capture once outside the loop — the thread's metadata is stable
+        // for the duration of the parallel batch.
+        let parallel_source_channel = thread_source_channel(thread);
 
         for (idx, lease) in runnable {
             let pc_name = parsed[idx].name.clone();
@@ -1306,7 +1314,8 @@ async fn handle_execute_actions_parallel(
                 user_id: thread.user_id.clone(),
                 step_id,
                 current_call_id: Some(pc_call_id.clone()),
-                source_channel: None,
+                // See comment above — read from thread metadata, not None.
+                source_channel: parallel_source_channel.clone(),
             };
             let ps = summarize_params(&pc_name, &pc_params);
 

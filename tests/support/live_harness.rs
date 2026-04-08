@@ -220,6 +220,7 @@ pub struct LiveTestHarnessBuilder {
     max_tool_iterations: usize,
     engine_v2: Option<bool>,
     auto_approve_tools: Option<bool>,
+    channel_name: Option<String>,
 }
 
 impl LiveTestHarnessBuilder {
@@ -233,7 +234,16 @@ impl LiveTestHarnessBuilder {
             max_tool_iterations: 30,
             engine_v2: None,
             auto_approve_tools: None,
+            channel_name: None,
         }
+    }
+
+    /// Override the test channel name. Useful when testing features that key
+    /// on the channel name (e.g. mission notifications, assistant
+    /// conversations) and you want to mirror the real "gateway" channel.
+    pub fn with_channel_name(mut self, name: impl Into<String>) -> Self {
+        self.channel_name = Some(name.into());
+        self
     }
 
     /// Set the maximum number of tool iterations per agentic loop invocation.
@@ -318,13 +328,15 @@ impl LiveTestHarnessBuilder {
         // - engine_v2 controls which agentic loop path is used
         // - auto_approve_tools comes from the env/config (tests can override
         //   via LiveTestHarnessBuilder if needed)
-        let rig = TestRigBuilder::new()
+        let mut rig_builder = TestRigBuilder::new()
             .with_config(config)
             .with_llm(llm)
             .with_http_interceptor(http_interceptor)
-            .with_max_tool_iterations(self.max_tool_iterations)
-            .build()
-            .await;
+            .with_max_tool_iterations(self.max_tool_iterations);
+        if let Some(ref name) = self.channel_name {
+            rig_builder = rig_builder.with_channel_name(name.clone());
+        }
+        let rig = rig_builder.build().await;
 
         // Use cheap LLM for judge if available.
         let judge_llm = cheap_llm;
@@ -353,12 +365,14 @@ impl LiveTestHarnessBuilder {
             )
         });
 
-        let rig = TestRigBuilder::new()
+        let mut rig_builder = TestRigBuilder::new()
             .with_trace(trace)
             .with_max_tool_iterations(self.max_tool_iterations)
-            .with_auto_approve_tools(true)
-            .build()
-            .await;
+            .with_auto_approve_tools(true);
+        if let Some(ref name) = self.channel_name {
+            rig_builder = rig_builder.with_channel_name(name.clone());
+        }
+        let rig = rig_builder.build().await;
 
         LiveTestHarness {
             rig,
