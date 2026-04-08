@@ -2146,16 +2146,21 @@ function showSetupCard(data) {
     card.appendChild(instr);
   }
 
-  if (onboarding.setup_url && /^https?:\/\//i.test(onboarding.setup_url)) {
-    const links = document.createElement('div');
-    links.className = 'auth-links';
-    const setupLink = document.createElement('a');
-    setupLink.href = onboarding.setup_url;
-    setupLink.target = '_blank';
-    setupLink.rel = 'noopener noreferrer';
-    setupLink.textContent = I18n.t('authRequired.getToken');
-    links.appendChild(setupLink);
-    card.appendChild(links);
+  if (onboarding.setup_url) {
+    // Strict HTTPS validation via shared helper — defends against
+    // `javascript:`/`data:` URLs in extension/registry metadata.
+    const parsedSetupUrl = parseHttpsExternalUrl(onboarding.setup_url, 'setup');
+    if (parsedSetupUrl) {
+      const links = document.createElement('div');
+      links.className = 'auth-links';
+      const setupLink = document.createElement('a');
+      setupLink.href = parsedSetupUrl.href;
+      setupLink.target = '_blank';
+      setupLink.rel = 'noopener noreferrer';
+      setupLink.textContent = I18n.t('authRequired.getToken');
+      links.appendChild(setupLink);
+      card.appendChild(links);
+    }
   }
 
   const form = document.createElement('div');
@@ -3936,16 +3941,20 @@ function loadInlineChannelSetup(ext, container) {
         container.appendChild(text);
       }
 
-      if (onboarding.setup_url && /^https?:\/\//i.test(onboarding.setup_url)) {
-        const links = document.createElement('div');
-        links.className = 'auth-links';
-        const link = document.createElement('a');
-        link.href = onboarding.setup_url;
-        link.target = '_blank';
-        link.rel = 'noopener noreferrer';
-        link.textContent = I18n.t('authRequired.getToken');
-        links.appendChild(link);
-        container.appendChild(links);
+      if (onboarding.setup_url) {
+        // Strict HTTPS validation via shared helper.
+        const parsedSetupUrl2 = parseHttpsExternalUrl(onboarding.setup_url, 'setup');
+        if (parsedSetupUrl2) {
+          const links = document.createElement('div');
+          links.className = 'auth-links';
+          const link = document.createElement('a');
+          link.href = parsedSetupUrl2.href;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          link.textContent = I18n.t('authRequired.getToken');
+          links.appendChild(link);
+          container.appendChild(links);
+        }
       }
 
       const form = document.createElement('div');
