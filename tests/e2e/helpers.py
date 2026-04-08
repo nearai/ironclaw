@@ -19,8 +19,6 @@ SEL = {
     # Auth
     "auth_screen": "#auth-screen",
     "token_input": "#token-input",
-    # Connection
-    "sse_status": "#sse-status",
     # Tabs
     "tab_button": '.tab-bar button[data-tab="{tab}"]',
     "tab_panel": "#tab-{tab}",
@@ -71,8 +69,10 @@ SEL = {
     "ext_error":                ".ext-error",
     "ext_tools":                ".ext-tools",
     "pairing_heading":          ".pairing-heading",
-    "pairing_help":             ".pairing-help",
+    "pairing_help":             ".pairing-help:not(.pairing-restart)",
     "pairing_input":            ".pairing-input",
+    "pairing_manual_input":     ".pairing-manual-input",
+    "pairing_manual_submit":    ".pairing-manual-submit",
     "pairing_row":              ".pairing-row",
     "pairing_code":             ".pairing-code",
     "pairing_sender":           ".pairing-sender",
@@ -100,6 +100,14 @@ SEL = {
     "auth_submit_btn":          ".auth-submit",
     "auth_cancel_btn":          ".auth-cancel",
     "auth_error":               ".auth-error",
+    "setup_card":               ".setup-card",
+    "setup_form":               ".setup-form",
+    "setup_input":              ".setup-input",
+    "setup_next_step":          ".setup-next-step",
+    "pairing_card":             ".pairing-card",
+    "pairing_submit_btn":       ".pairing-submit",
+    "pairing_cancel_btn":       ".pairing-cancel",
+    "pairing_restart":          ".pairing-restart",
     # WASM channel progress stepper
     "ext_stepper":              ".ext-stepper",
     "stepper_step":             ".stepper-step",
@@ -110,6 +118,9 @@ SEL = {
     "confirm_modal_cancel":     "#confirm-modal-cancel-btn",
     # Channels subtab – cards
     "channels_ext_card":        "#settings-channels-content .ext-card",
+    "ext_onboarding":           ".ext-onboarding",
+    "ext_onboarding_title":     ".ext-onboarding-title",
+    "ext_onboarding_text":      ".ext-onboarding-text",
     # Toast notifications
     "toast":                    ".toast",
     "toast_success":            ".toast.toast-success",

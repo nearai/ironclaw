@@ -112,6 +112,38 @@ fn is_system_prompt_file(path: &str) -> bool {
         .any(|p| path.eq_ignore_ascii_case(p))
 }
 
+/// Returns `true` for engine runtime state paths that should never be chunked
+/// or indexed for FTS/vector search.
+///
+/// Covered prefixes / paths (all machine-generated blobs, not semantic docs):
+/// - `engine/.runtime/` — execution-state blobs (threads, steps, events, leases,
+///   conversations, compacted summaries) written by the bridge on every turn.
+/// - `engine/projects/` — project and mission JSON files serialised on every
+///   state mutation (e.g. `engine/projects/{slug}/project.json`,
+///   `engine/projects/{slug}/missions/{slug}/mission.json`).
+/// - `engine/orchestrator/failures.json` — orchestrator failure-tracker blob,
+///   updated at engine-turn frequency.
+///
+/// Semantic content that is intentionally KEPT indexed:
+/// - `engine/knowledge/` — summaries, lessons, plans, specs, notes.
+/// - `engine/orchestrator/v{N}.py` — versioned orchestrator code.
+/// - `engine/orchestrator/*.md` — prompt overlays.
+///
+/// Indexing the excluded paths floods the DB connection pool under
+/// multi-tenant load.
+fn is_engine_runtime_path(path: &str) -> bool {
+    // normalize_path() does not resolve '..' segments — this guard is
+    // load-bearing. Without it, `engine/.runtime/../knowledge/foo.md`
+    // would pass the starts_with check but refer to a semantic document.
+    !path.contains("..")
+        && (path.starts_with("engine/.runtime/")
+            || path.starts_with("engine/projects/")
+            || path == "engine/orchestrator/failures.json"
+            // Auto-generated per-workspace README — regenerated at engine-turn
+            // frequency; should not accumulate version rows.
+            || path == "engine/README.md")
+}
+
 /// Shared sanitizer instance — avoids rebuilding Aho-Corasick + regexes on every write.
 static SANITIZER: std::sync::LazyLock<Sanitizer> = std::sync::LazyLock::new(Sanitizer::new);
 
@@ -1018,6 +1050,33 @@ impl Workspace {
             .storage
             .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)
             .await?;
+
+        // Engine runtime state files are execution-state blobs, not semantic
+        // documents.  Skip the resolve_metadata DB query and all
+        // chunking/embedding work for them entirely.
+        if is_engine_runtime_path(&path) {
+            // One-time cleanup: delete any chunks that were created before this
+            // guard existed. This is a no-op once the document has no chunks,
+            // and prevents stale chunks from polluting search results or
+            // consuming storage indefinitely.
+            // Fail-open: chunk deletion failure must not block state writes.
+            let _ = self.storage.delete_chunks(doc.id).await;
+
+            if doc.content == content {
+                return Ok(doc);
+            }
+            let skip_meta = DocumentMetadata {
+                skip_indexing: Some(true),
+                skip_versioning: Some(true),
+                ..Default::default()
+            };
+            // Fail-open: versioning failures must not block state writes.
+            let _ = self
+                .maybe_save_version(doc.id, &doc.content, &skip_meta, Some(&self.user_id))
+                .await;
+            self.storage.update_document(doc.id, content).await?;
+            return self.storage.get_document_by_id(doc.id).await;
+        }
 
         // Short-circuit when content is unchanged: skip versioning and update,
         // but still reindex so metadata-driven flags (e.g. skip_indexing toggled
@@ -2869,5 +2928,66 @@ mod versioning_tests {
         let result = ws.patch("test.md", " cruel", "", false).await.unwrap();
 
         assert_eq!(result.document.content, "hello world");
+    }
+
+    // T2: engine/projects/ paths skip FTS/vector indexing; engine/knowledge/ paths do not.
+    #[tokio::test]
+    async fn engine_projects_path_skips_indexing_but_knowledge_does_not() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Write to an engine/projects/ path — should skip chunking entirely.
+        ws.write(
+            "engine/projects/test-proj--abc12345/project.json",
+            r#"{"id":"abc12345","name":"test-proj"}"#,
+        )
+        .await
+        .unwrap();
+
+        // No chunks should exist for this document.
+        let chunks = ws
+            .storage
+            .get_chunks_without_embeddings("test_version", None, 100)
+            .await
+            .unwrap();
+        assert!(
+            chunks.is_empty(),
+            "engine/projects/ write must not produce any chunks, got: {chunks:?}"
+        );
+
+        // Write to an engine/knowledge/ path — should be indexed normally.
+        ws.write(
+            "engine/knowledge/lessons/lesson-one--abc12345.md",
+            "This is a lesson learned from the last run.",
+        )
+        .await
+        .unwrap();
+
+        // At least one chunk should now exist for the knowledge document.
+        let chunks = ws
+            .storage
+            .get_chunks_without_embeddings("test_version", None, 100)
+            .await
+            .unwrap();
+        assert!(
+            !chunks.is_empty(),
+            "engine/knowledge/ write must produce chunks for FTS/vector indexing"
+        );
+    }
+
+    // T3: writes to engine/.runtime/ paths produce zero version rows.
+    #[tokio::test]
+    async fn runtime_path_writes_produce_no_versions() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        let path = "engine/.runtime/threads/test-thread.json";
+        let doc = ws.write(path, "v1").await.unwrap();
+        ws.write(path, "v2").await.unwrap();
+
+        let versions = ws.list_versions(doc.id, 50).await.unwrap();
+        assert_eq!(
+            versions.len(),
+            0,
+            "runtime path writes must not accumulate version rows, got: {versions:?}"
+        );
     }
 }

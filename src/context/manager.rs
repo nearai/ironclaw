@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::context::{JobContext, JobState, Memory};
 use crate::error::JobError;
+use crate::ownership::Owned;
 
 /// Manages contexts for multiple concurrent jobs.
 pub struct ContextManager {
@@ -194,7 +195,7 @@ impl ContextManager {
             .read()
             .await
             .iter()
-            .filter(|(_, c)| c.user_id == user_id && c.state.is_active())
+            .filter(|(_, c)| c.is_owned_by(user_id) && c.state.is_active())
             .map(|(id, _)| *id)
             .collect()
     }
@@ -209,7 +210,7 @@ impl ContextManager {
             .read()
             .await
             .iter()
-            .filter(|(_, c)| c.user_id == user_id && c.state.is_parallel_blocking())
+            .filter(|(_, c)| c.is_owned_by(user_id) && c.state.is_parallel_blocking())
             .count()
     }
 
@@ -219,7 +220,7 @@ impl ContextManager {
             .read()
             .await
             .iter()
-            .filter(|(_, c)| c.user_id == user_id)
+            .filter(|(_, c)| c.is_owned_by(user_id))
             .map(|(id, _)| *id)
             .collect()
     }
@@ -325,7 +326,7 @@ impl ContextManager {
         let contexts = self.contexts.read().await;
 
         let mut summary = ContextSummary::default();
-        for ctx in contexts.values().filter(|c| c.user_id == user_id) {
+        for ctx in contexts.values().filter(|c| c.is_owned_by(user_id)) {
             match ctx.state {
                 crate::context::JobState::Pending => summary.pending += 1,
                 crate::context::JobState::InProgress => summary.in_progress += 1,

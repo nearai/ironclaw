@@ -14,20 +14,15 @@ use crate::channels::web::types::*;
 
 /// Derive the activation status for an installed extension.
 ///
-/// Previously relied on the file-based pairing store to determine whether any
-/// senders had been approved. With the DB-backed pairing model, we derive the
-/// status from the extension's known fields and the owner-binding flag instead.
+/// `ready_for_active` means the channel either has an owner binding or at
+/// least one approved pairing identity, so an active runtime should surface as
+/// fully active instead of awaiting pairing.
 pub(crate) fn derive_activation_status(
     ext: &crate::extensions::InstalledExtension,
-    has_owner_binding: bool,
+    ready_for_active: bool,
 ) -> Option<ExtensionActivationStatus> {
     if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-        // In the DB-backed model, "paired" no longer comes from a local allowFrom
-        // file. Until this handler can query channel_identities directly, be
-        // conservative: only explicit owner binding upgrades an active channel to
-        // Active. Otherwise it remains in Pairing.
-        // TODO(ownership): derive has_paired from the DB-backed pairing tables.
-        classify_wasm_channel_activation(ext, false, has_owner_binding)
+        classify_wasm_channel_activation(ext, ready_for_active, ready_for_active)
     } else if ext.kind == crate::extensions::ExtensionKind::ChannelRelay {
         Some(if ext.active {
             ExtensionActivationStatus::Active
@@ -82,6 +77,8 @@ pub async fn extensions_list_handler(
                 activation_status,
                 activation_error: ext.activation_error,
                 version: ext.version,
+                onboarding_state: None,
+                onboarding: None,
             }
         })
         .collect();
@@ -179,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn active_authenticated_wasm_channel_without_owner_binding_stays_pairing() {
+    fn active_authenticated_wasm_channel_without_pairing_stays_pairing() {
         let ext = active_authenticated_wasm_channel("discord");
         assert_eq!(
             derive_activation_status(&ext, false),
@@ -188,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn active_authenticated_wasm_channel_with_owner_binding_is_active() {
+    fn active_authenticated_wasm_channel_with_pairing_is_active() {
         let ext = active_authenticated_wasm_channel("discord");
         assert_eq!(
             derive_activation_status(&ext, true),
