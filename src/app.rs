@@ -157,7 +157,8 @@ impl AppBuilder {
         }
 
         let toml_path = self.toml_path.as_deref();
-        match Config::from_db_with_toml(db.as_ref(), &self.config.owner_id, toml_path).await {
+        // is_operator=true: owner_id is the operator/admin scope.
+        match Config::from_db_with_toml(db.as_ref(), &self.config.owner_id, toml_path, true).await {
             Ok(db_config) => {
                 self.config = db_config;
                 tracing::debug!("Configuration reloaded from database");
@@ -264,6 +265,7 @@ impl AppBuilder {
                 self.db.as_ref().map(|db| db.as_ref() as _);
             let toml_path = self.toml_path.as_deref();
             let owner_id = self.config.owner_id.clone();
+            // is_operator=true: owner_id is the operator/admin scope.
             if let Err(e) = self
                 .config
                 .re_resolve_llm_with_secrets(
@@ -271,6 +273,7 @@ impl AppBuilder {
                     &owner_id,
                     toml_path,
                     Some(secrets.as_ref()),
+                    true,
                 )
                 .await
             {
