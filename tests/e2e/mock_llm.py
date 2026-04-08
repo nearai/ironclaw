@@ -21,6 +21,8 @@ CANNED_RESPONSES = [
     (re.compile(r"html.?test|injection.?test", re.IGNORECASE),
      'Here is some content: <script>alert("xss")</script> and <img src=x onerror="alert(1)">'
      ' and <iframe src="javascript:alert(2)"></iframe> end of content.'),
+    (re.compile(r"long response", re.IGNORECASE),
+     ("First paragraph. " * 200 + "\n\n" + "Second paragraph. " * 200)),
     # For tool intent nudge test: first response expresses intent without tool call
     (re.compile(r"search intent", re.IGNORECASE),
      "Let me search for that information now."),

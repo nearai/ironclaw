@@ -112,6 +112,12 @@ When a workspace has additional read scopes (via `with_additional_read_scopes`),
 
 **Design rule:** If you want shared identity across users, seed the same content into each user's scope at setup time. Don't rely on multi-scope fallback for identity files.
 
+**Embeddings providers:**
+- **NEAR AI** - reuses the session auth path
+- **OpenAI** - uses `OPENAI_API_KEY`
+- **Ollama** - local embedding server
+- **AWS Bedrock** - Titan Text Embeddings V2 with Bedrock region/profile auth
+
 ## Heartbeat System
 
 Proactive periodic execution (default: 30 minutes):

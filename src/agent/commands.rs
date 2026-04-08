@@ -15,6 +15,7 @@ use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobState;
 use crate::error::Error;
 use crate::llm::{ChatMessage, Reasoning};
+use crate::ownership::Owned;
 
 /// Format a count with a suffix, using K/M abbreviations for large numbers.
 fn format_count(n: u64, suffix: &str) -> String {
@@ -146,7 +147,7 @@ impl Agent {
                 }
 
                 let ctx = self.context_manager.get_context(uuid).await?;
-                if ctx.user_id != tenant.user_id() {
+                if !ctx.is_owned_by(tenant.user_id()) {
                     return Err(crate::error::JobError::NotFound { id: uuid }.into());
                 }
 
@@ -214,7 +215,7 @@ impl Agent {
             .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
 
         let ctx = self.context_manager.get_context(uuid).await?;
-        if ctx.user_id != tenant.user_id() {
+        if !ctx.is_owned_by(tenant.user_id()) {
             return Err(crate::error::JobError::NotFound { id: uuid }.into());
         }
 
@@ -294,7 +295,7 @@ impl Agent {
             .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
 
         let ctx = self.context_manager.get_context(uuid).await?;
-        if ctx.user_id != tenant.user_id() {
+        if !ctx.is_owned_by(tenant.user_id()) {
             return Err(crate::error::JobError::NotFound { id: uuid }.into());
         }
 

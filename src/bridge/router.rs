@@ -490,11 +490,14 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         Some(agent.cheap_llm().clone()),
     ));
 
-    let effect_adapter = Arc::new(EffectBridgeAdapter::new(
-        agent.tools().clone(),
-        agent.safety().clone(),
-        agent.hooks().clone(),
-    ));
+    let effect_adapter = Arc::new(
+        EffectBridgeAdapter::new(
+            agent.tools().clone(),
+            agent.safety().clone(),
+            agent.hooks().clone(),
+        )
+        .with_global_auto_approve(agent.config().auto_approve_tools),
+    );
 
     // Build centralized auth manager for pre-flight credential checks.
     let has_secrets = agent.tools().secrets_store().is_some();
@@ -532,7 +535,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     // Generate the engine workspace README
     store.generate_engine_readme().await;
 
-    // Build capability registry from available tools
+    // Build capability registry from available tools (auto-filtered by engine version)
     let mut capabilities = CapabilityRegistry::new();
     let tool_defs = agent.tools().tool_definitions().await;
     if !tool_defs.is_empty() {
@@ -2120,7 +2123,7 @@ async fn await_thread_outcome(
                     .nth(1)
                     .and_then(|s| {
                         // Handle both JSON ("credential_name":"foo") and prose
-                        s.split(&['"', '\'', '`'][..])
+                        s.split(&['"', '\'', '`'][..]) // safety: slice of char array, not string byte slicing
                             .find(|seg| !seg.is_empty() && !seg.contains(':') && !seg.contains(' '))
                     })
                     .filter(|name| {
@@ -2799,7 +2802,7 @@ pub async fn list_engine_threads(
             let uuid = uuid::Uuid::parse_str(id).map_err(|e| engine_err("parse project_id", e))?;
             ironclaw_engine::ProjectId(uuid)
         }
-        None => state.default_project_id,
+        None => resolve_user_project(&state.store, user_id, state.default_project_id).await?,
     };
 
     let threads = state
@@ -3029,7 +3032,7 @@ pub async fn list_engine_missions(
             let uuid = uuid::Uuid::parse_str(id).map_err(|e| engine_err("parse project_id", e))?;
             ironclaw_engine::ProjectId(uuid)
         }
-        None => state.default_project_id,
+        None => resolve_user_project(&state.store, user_id, state.default_project_id).await?,
     };
 
     let missions = state

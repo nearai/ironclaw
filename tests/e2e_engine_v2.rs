@@ -12,13 +12,16 @@ mod support;
 
 #[cfg(feature = "libsql")]
 mod engine_v2_tests {
+    use async_trait::async_trait;
     use std::sync::OnceLock;
     use std::time::Duration;
 
     use tokio::sync::Mutex;
 
     use crate::support::test_rig::TestRigBuilder;
-    use crate::support::trace_llm::LlmTrace;
+    use crate::support::trace_llm::{LlmTrace, TraceResponse, TraceStep, TraceToolCall};
+    use ironclaw::context::JobContext;
+    use ironclaw::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput};
 
     fn engine_v2_test_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -42,6 +45,47 @@ mod engine_v2_tests {
         "/tests/fixtures/llm_traces/engine_v2"
     );
     const TIMEOUT: Duration = Duration::from_secs(15);
+
+    struct ApprovalProbeTool;
+
+    #[async_trait]
+    impl Tool for ApprovalProbeTool {
+        fn name(&self) -> &str {
+            "approval_probe"
+        }
+
+        fn description(&self) -> &str {
+            "Test tool that should be auto-approved in engine v2"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "value": { "type": "string" }
+                },
+                "required": ["value"]
+            })
+        }
+
+        async fn execute(
+            &self,
+            params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({
+                    "ok": true,
+                    "echo": params.get("value").cloned().unwrap_or(serde_json::Value::Null),
+                }),
+                Duration::from_millis(1),
+            ))
+        }
+
+        fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+            ApprovalRequirement::UnlessAutoApproved
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Phase 1: Core scenarios — prove the v2 path works
@@ -174,6 +218,73 @@ mod engine_v2_tests {
         assert!(
             !completed.is_empty(),
             "should have ToolCompleted status events"
+        );
+        rig.shutdown();
+    }
+
+    /// Regression: engine v2 must honor the global auto-approve setting for
+    /// `UnlessAutoApproved` tools, matching the legacy dispatcher.
+    #[tokio::test]
+    async fn v2_honors_global_auto_approve_for_unless_auto_approved_tools() {
+        let _guard = engine_v2_test_lock().lock().await;
+        let trace = LlmTrace::single_turn(
+            "test-v2-auto-approve",
+            "Run the approval probe tool",
+            vec![
+                TraceStep {
+                    request_hint: None,
+                    response: TraceResponse::ToolCalls {
+                        tool_calls: vec![TraceToolCall {
+                            id: "call_approval_probe_1".into(),
+                            name: "approval_probe".into(),
+                            arguments: serde_json::json!({ "value": "engine-v2" }),
+                        }],
+                        input_tokens: 10,
+                        output_tokens: 5,
+                    },
+                    expected_tool_results: Vec::new(),
+                },
+                TraceStep {
+                    request_hint: None,
+                    response: TraceResponse::Text {
+                        content: "approval probe completed".into(),
+                        input_tokens: 10,
+                        output_tokens: 5,
+                    },
+                    expected_tool_results: Vec::new(),
+                },
+            ],
+        );
+        let rig = TestRigBuilder::new()
+            .with_engine_v2()
+            .with_auto_approve_tools(true)
+            .with_trace(trace)
+            .with_extra_tools(vec![std::sync::Arc::new(ApprovalProbeTool)])
+            .build()
+            .await;
+
+        rig.send_message("Run the approval probe tool").await;
+        let responses = rig.wait_for_responses(1, Duration::from_secs(5)).await;
+
+        assert_eq!(
+            responses.len(),
+            1,
+            "expected a final response, got {responses:?}"
+        );
+        assert!(
+            responses[0].content.contains("approval probe completed"),
+            "unexpected response: {:?}",
+            responses[0]
+        );
+        assert_v2_tool_used(&rig.tool_calls_started(), "approval_probe");
+        assert!(
+            !rig.captured_status_events().iter().any(|status| {
+                matches!(
+                    status,
+                    ironclaw::channels::StatusUpdate::ApprovalNeeded { .. }
+                )
+            }),
+            "engine v2 should not emit ApprovalNeeded when global auto-approve is enabled"
         );
         rig.shutdown();
     }

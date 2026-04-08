@@ -59,8 +59,9 @@ impl JobState {
 
         matches!(
             (self, target),
-            // From Pending
-            (Pending, InProgress) | (Pending, Cancelled) |
+            // From Pending (Failed added for self-repair: stuck Pending jobs
+            // that exhaust repair attempts must be terminable)
+            (Pending, InProgress) | (Pending, Failed) | (Pending, Cancelled) |
             // From InProgress
             (InProgress, Completed) | (InProgress, Failed) |
             (InProgress, Stuck) | (InProgress, Cancelled) |
@@ -206,6 +207,12 @@ pub struct JobContext {
     /// if they're allowed to run in autonomous/non-interactive contexts.
     #[serde(skip)]
     pub approval_context: Option<ApprovalContext>,
+}
+
+impl crate::ownership::Owned for JobContext {
+    fn owner_user_id(&self) -> &str {
+        &self.user_id
+    }
 }
 
 impl JobContext {

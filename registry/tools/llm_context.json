@@ -1,5 +1,5 @@
 {
-  "name": "llm-context",
+  "name": "llm_context",
   "display_name": "LLM Context",
   "kind": "tool",
   "version": "0.1.1",

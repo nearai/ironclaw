@@ -106,7 +106,7 @@ async def _wait_for_gmail_tool_call(base_url: str, thread_id: str, timeout: floa
         response.raise_for_status()
         history = response.json()
 
-        pending = history.get("pending_approval")
+        pending = history.get("pending_gate")
         if pending and pending["request_id"] not in approved_request_ids:
             await _approve_pending_request(base_url, thread_id, pending["request_id"])
             approved_request_ids.add(pending["request_id"])
@@ -137,7 +137,7 @@ async def _wait_for_tool_call(
         response.raise_for_status()
         history = response.json()
 
-        pending = history.get("pending_approval")
+        pending = history.get("pending_gate")
         if pending and pending["request_id"] not in approved_request_ids:
             await _approve_pending_request(base_url, thread_id, pending["request_id"])
             approved_request_ids.add(pending["request_id"])

@@ -326,14 +326,16 @@ impl AppBuilder {
 
         // Initialize tool registry with credential injection support
         let credential_registry = Arc::new(SharedCredentialRegistry::new());
-        let tools = if let Some(ref ss) = self.secrets_store {
-            Arc::new(
-                ToolRegistry::new()
-                    .with_credentials(Arc::clone(&credential_registry), Arc::clone(ss)),
-            )
+        let engine_version = if crate::bridge::is_engine_v2_enabled() {
+            crate::tools::EngineVersion::V2
         } else {
-            Arc::new(ToolRegistry::new())
+            crate::tools::EngineVersion::V1
         };
+        let mut registry = ToolRegistry::new().with_engine_version(engine_version);
+        if let Some(ref ss) = self.secrets_store {
+            registry = registry.with_credentials(Arc::clone(&credential_registry), Arc::clone(ss));
+        }
+        let tools = Arc::new(registry);
         tools.register_builtin_tools();
         tools.register_tool_info();
 
@@ -345,7 +347,12 @@ impl AppBuilder {
         let embeddings = self
             .config
             .embeddings
-            .create_provider(&self.config.llm.nearai.base_url, self.session.clone());
+            .create_provider(
+                &self.config.llm.nearai.base_url,
+                self.session.clone(),
+                self.config.llm.bedrock.as_ref(),
+            )
+            .await;
 
         // Register memory tools if database is available
         let workspace_user_id = self.config.owner_id.as_str();
@@ -477,7 +484,6 @@ impl AppBuilder {
         ),
         anyhow::Error,
     > {
-        use crate::tools::mcp::config::load_mcp_servers_from_db;
         use crate::tools::wasm::{WasmToolLoader, load_dev_tools};
 
         let mcp_session_manager = Arc::new(McpSessionManager::new());
@@ -560,11 +566,9 @@ impl AppBuilder {
             let pm = Arc::clone(&mcp_process_manager);
             let owner_id = self.config.owner_id.clone();
             async move {
-                let servers_result = if let Some(ref d) = db {
-                    load_mcp_servers_from_db(d.as_ref(), &owner_id).await
-                } else {
-                    crate::tools::mcp::config::load_mcp_servers().await
-                };
+                let servers_result =
+                    crate::tools::mcp::config::load_mcp_servers_ready(db.as_deref(), &owner_id)
+                        .await;
                 match servers_result {
                     Ok(servers) => {
                         let enabled: Vec<_> = servers.enabled_servers().cloned().collect();
@@ -585,6 +589,7 @@ impl AppBuilder {
 
                             join_set.spawn(async move {
                                 let server_name = server.name.clone();
+                                let has_custom_auth_header = server.has_custom_auth_header();
 
                                 let client = match crate::tools::mcp::create_client_from_config(
                                     server,
@@ -635,15 +640,21 @@ impl AppBuilder {
                                     }
                                     Err(e) => {
                                         let err_str = e.to_string();
-                                        if err_str.contains("401")
-                                            || err_str.contains("authentication")
+                                        if crate::tools::mcp::is_auth_error_message(&err_str)
                                         {
-                                            tracing::warn!(
-                                                "MCP server '{}' requires authentication. \
-                                                 Run: ironclaw mcp auth {}",
-                                                server_name,
-                                                server_name
-                                            );
+                                            if has_custom_auth_header {
+                                                tracing::warn!(
+                                                    "MCP server '{}' rejected its configured Authorization header. Update the configured credential and try again.",
+                                                    server_name
+                                                );
+                                            } else {
+                                                tracing::warn!(
+                                                    "MCP server '{}' requires authentication. \
+                                                     Run: ironclaw mcp auth {}",
+                                                    server_name,
+                                                    server_name
+                                                );
+                                            }
                                         } else {
                                             tracing::warn!(
                                                 "Failed to connect to MCP server '{}': {}",

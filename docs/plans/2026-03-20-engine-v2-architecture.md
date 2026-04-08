@@ -346,7 +346,7 @@ Engine broadcasts `ThreadEvent`s via `tokio::broadcast`. Router subscribes and f
 `EngineState` persists across messages (OnceLock singleton). ConversationManager builds the visible conversation transcript for continuity. The orchestrator persists its mutable working transcript and intermediate execution state in `persisted_state` / internal thread transcript rather than mixing tool traces into the user-visible transcript.
 
 ### 6.5 Trace recording + retrospective — DONE
-`ENGINE_V2_TRACE=1` writes full JSON traces. Automatic trace analysis detects 8 issue categories. Reflection pipeline produces Summary/Lesson/Issue/Spec/Playbook docs. All run inside ThreadManager after thread completion.
+Live trace recording is handled by the host crate's `RecordingLlm` (`IRONCLAW_RECORD_TRACE=1`) — engine v2 piggybacks on it via the shared LLM provider chain, so there is no separate engine trace file. Inside ThreadManager, retrospective trace analysis runs unconditionally after each thread completes: the analyzer detects 8 issue categories and the reflection pipeline produces Summary/Lesson/Issue/Spec/Playbook docs.
 
 ### 6.6 Bugs found and fixed via traces
 - Tool name hyphens vs underscores (web-search vs web_search)

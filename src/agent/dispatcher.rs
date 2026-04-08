@@ -23,6 +23,10 @@ use crate::llm::{ChatMessage, Reasoning, ReasoningContext, TokenUsage};
 use crate::tools::permissions::{PermissionState, effective_permission};
 use crate::tools::redact_params;
 
+fn selected_model_override(value: &serde_json::Value) -> Option<String> {
+    crate::llm::normalized_model_override(value.as_str()).map(str::to_string)
+}
+
 /// Result of the agentic loop execution.
 pub(super) enum AgenticLoopResult {
     /// Completed with a response.
@@ -559,12 +563,9 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         if iteration == 0
             && let Some(store) = self.tenant.store()
             && let Ok(Some(value)) = store.get_setting("selected_model").await
-            && let Some(model) = value.as_str()
+            && let Some(model) = selected_model_override(&value)
         {
-            let model = model.trim();
-            if !model.is_empty() {
-                reason_ctx.model_override = Some(model.to_string());
-            }
+            reason_ctx.model_override = Some(model);
         }
 
         let output = match reasoning.respond_with_tools(reason_ctx).await {
@@ -1512,7 +1513,7 @@ mod tests {
     use crate::tools::ToolRegistry;
     use ironclaw_safety::SafetyLayer;
 
-    use super::check_auth_required;
+    use super::{check_auth_required, selected_model_override};
 
     /// Minimal LLM provider for unit tests that always returns a static response.
     struct StaticLlmProvider;
@@ -2417,6 +2418,20 @@ mod tests {
                 "ceiling logic inconsistent for max_iter={max_iter}"
             );
         }
+    }
+
+    #[test]
+    fn selected_model_override_ignores_default_sentinel() {
+        assert_eq!(selected_model_override(&serde_json::json!("default")), None);
+        assert_eq!(
+            selected_model_override(&serde_json::json!("  DEFAULT  ")),
+            None
+        );
+        assert_eq!(selected_model_override(&serde_json::json!("  ")), None);
+        assert_eq!(
+            selected_model_override(&serde_json::json!("claude-opus-4-6")).as_deref(),
+            Some("claude-opus-4-6")
+        );
     }
 
     /// LLM provider that always returns calls to a nonexistent tool, regardless

@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use ironclaw_safety::sensitive_paths::is_sensitive_path;
 use tokio::fs;
 
 use crate::context::JobContext;
@@ -116,6 +117,15 @@ impl Tool for ReadFileTool {
         let start = std::time::Instant::now();
 
         let path = validate_path(path_str, self.base_dir.as_deref())?;
+
+        // Check sensitive path blocklist (after canonicalization in validate_path)
+        if is_sensitive_path(&path) {
+            return Err(ToolError::ExecutionFailed(
+                "Access denied: this file may contain credentials. \
+                 Use `secret_list` and `secret_create` to manage credentials securely."
+                    .to_string(),
+            ));
+        }
 
         // Check file size
         let metadata = fs::metadata(&path)
@@ -256,6 +266,15 @@ impl Tool for WriteFileTool {
 
         let path = validate_path(path_str, self.base_dir.as_deref())?;
 
+        // Block writes to sensitive credential files
+        if is_sensitive_path(&path) {
+            return Err(ToolError::ExecutionFailed(
+                "Access denied: cannot write to credential files. \
+                 Use `secret_list` and `secret_create` to manage credentials securely."
+                    .to_string(),
+            ));
+        }
+
         // Create parent directories
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await.map_err(|e| {
@@ -364,6 +383,15 @@ impl Tool for ListDirTool {
 
         let path = validate_path(path_str, self.base_dir.as_deref())?;
 
+        // Block listing sensitive credential directories
+        if is_sensitive_path(&path) {
+            return Err(ToolError::ExecutionFailed(
+                "Access denied: this directory may contain credentials. \
+                 Use `secret_list` and `secret_create` to manage credentials securely."
+                    .to_string(),
+            ));
+        }
+
         let mut entries = Vec::new();
         list_dir_inner(&path, &path, recursive, max_depth, 0, &mut entries).await?;
 
@@ -447,6 +475,16 @@ async fn list_dir_inner(
         entries.push(display);
 
         if recursive && is_dir && current_depth < max_depth {
+            // Skip sensitive credential directories during recursive traversal
+            if is_sensitive_path(&entry_path) {
+                // Replace the last entry with an annotated version so the user
+                // knows the directory was intentionally skipped.
+                if let Some(last) = entries.last_mut() {
+                    *last = format!("{} [sensitive - access blocked]", relative);
+                }
+                continue;
+            }
+
             // Skip common non-essential directories
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
@@ -560,6 +598,15 @@ impl Tool for ApplyPatchTool {
         let start = std::time::Instant::now();
 
         let path = validate_path(path_str, self.base_dir.as_deref())?;
+
+        // Block patches to sensitive credential files
+        if is_sensitive_path(&path) {
+            return Err(ToolError::ExecutionFailed(
+                "Access denied: cannot modify credential files. \
+                 Use `secret_list` and `secret_create` to manage credentials securely."
+                    .to_string(),
+            ));
+        }
 
         // Read current content
         let content = fs::read_to_string(&path)
@@ -863,6 +910,34 @@ mod tests {
             result.is_ok(),
             "Should allow .. that stays within sandbox: {:?}",
             result
+        );
+    }
+
+    // Unit tests for is_sensitive_path live in crates/ironclaw_safety/src/sensitive_paths.rs.
+    // Only integration-level tests that exercise the tool's execute() method belong here.
+
+    #[tokio::test]
+    async fn test_list_dir_blocks_sensitive_directory() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let ssh_dir = tmp.path().join(".ssh");
+        std::fs::create_dir(&ssh_dir).expect("create .ssh dir");
+        std::fs::write(ssh_dir.join("id_rsa"), "fake-key").expect("write fake key");
+
+        let tool = ListDirTool::new();
+        let ctx = JobContext::default();
+
+        let err = tool
+            .execute(
+                serde_json::json!({"path": ssh_dir.to_string_lossy().as_ref()}),
+                &ctx,
+            )
+            .await;
+
+        assert!(err.is_err(), "listing a .ssh directory should be blocked");
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("Access denied") || msg.contains("credentials"),
+            "expected sensitive path error, got: {msg}"
         );
     }
 }
