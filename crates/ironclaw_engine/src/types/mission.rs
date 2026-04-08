@@ -194,9 +194,16 @@ impl Mission {
 
 /// Normalize a cron expression to the 7-field format expected by the `cron` crate.
 ///
-/// - 5-field (standard) -> prepend `0` (seconds) and append `*` (year)
-/// - 6-field -> append `*` (year)
-/// - 7-field -> pass through unchanged
+/// Field formats accepted:
+/// - **5-field** (standard Vixie cron): `min hr dom mon dow` — prepend `0`
+///   (seconds) and append `*` (year).
+/// - **6-field**: assumed to be `sec min hr dom mon dow` (the `cron` crate's
+///   native format minus year) and append `*` (year). **Note:** this is *not*
+///   the Quartz `min hr dom mon dow year` interpretation. A user passing
+///   `"0 9 * * * 2027"` intending "at 09:00 every day in 2027" will instead
+///   get "at second 0 of minute 9 of every hour, every day, every year". Use
+///   the explicit 7-field form `0 0 9 * * * 2027` to disambiguate.
+/// - **7-field**: `sec min hr dom mon dow year` — passed through unchanged.
 ///
 /// Returns an error for any other field count rather than passing the input
 /// through to `cron::Schedule::from_str`, which would surface a confusing
@@ -299,6 +306,26 @@ mod tests {
         // 6-field (with seconds) should be accepted.
         let next = next_cron_fire("0 0 9 * * *", None).unwrap();
         assert!(next.is_some());
+    }
+
+    #[test]
+    fn six_field_cron_is_sec_min_hr_dom_mon_dow_not_quartz_with_year() {
+        // Pin the 6-field interpretation: `sec min hr dom mon dow`, NOT the
+        // Quartz-style `min hr dom mon dow year`. A 6-field input gets `*`
+        // appended for the year position. This test exists so a future change
+        // doesn't silently flip the interpretation and break existing
+        // missions.
+        let normalized = normalize_cron_expression("0 0 9 * * *").unwrap();
+        assert_eq!(
+            normalized, "0 0 9 * * * *",
+            "6-field input must be treated as `sec min hr dom mon dow` and appended with `*` (year)"
+        );
+
+        // Sanity: the resulting schedule fires at 09:00:00 wall-clock daily.
+        let next = next_cron_fire("0 0 9 * * *", None).unwrap().unwrap();
+        assert_eq!(next.hour(), 9);
+        assert_eq!(next.minute(), 0);
+        assert_eq!(next.second(), 0);
     }
 
     #[test]

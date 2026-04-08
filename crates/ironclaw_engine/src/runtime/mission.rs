@@ -104,18 +104,42 @@ impl MissionManager {
             {
                 match next_cron_fire(expression, timezone.as_ref()) {
                     Ok(Some(next)) => {
-                        let mut patched = mission.clone();
-                        patched.next_fire_at = Some(next);
-                        match self.store.save_mission(&patched).await {
-                            Ok(()) => debug!(
+                        // Re-load the mission immediately before save to narrow
+                        // the TOCTOU window between the initial list_all_missions
+                        // snapshot and our save. If a concurrent fire/update has
+                        // already populated next_fire_at, skip — that writer's
+                        // copy is fresher than ours. The remaining race window
+                        // (between this re-load and save_mission) is much smaller
+                        // than the original list-then-save window, and a strict
+                        // CAS would require a new Store trait method.
+                        match self.store.load_mission(mission.id).await {
+                            Ok(Some(mut fresh)) if fresh.next_fire_at.is_none() => {
+                                fresh.next_fire_at = Some(next);
+                                match self.store.save_mission(&fresh).await {
+                                    Ok(()) => debug!(
+                                        mission_id = %mission.id,
+                                        next = %next,
+                                        "backfilled next_fire_at for legacy cron mission"
+                                    ),
+                                    Err(e) => debug!(
+                                        mission_id = %mission.id,
+                                        error = %e,
+                                        "failed to persist next_fire_at backfill; mission will retry on next bootstrap"
+                                    ),
+                                }
+                            }
+                            Ok(Some(_)) => debug!(
                                 mission_id = %mission.id,
-                                next = %next,
-                                "backfilled next_fire_at for legacy cron mission"
+                                "next_fire_at already set by concurrent writer; skipping backfill"
+                            ),
+                            Ok(None) => debug!(
+                                mission_id = %mission.id,
+                                "mission deleted between bootstrap list and backfill; skipping"
                             ),
                             Err(e) => debug!(
                                 mission_id = %mission.id,
                                 error = %e,
-                                "failed to persist next_fire_at backfill; mission will retry on next bootstrap"
+                                "failed to re-load mission for backfill"
                             ),
                         }
                     }
@@ -420,7 +444,20 @@ impl MissionManager {
                 ),
             }
         }
-        self.store.save_mission(&updated).await?;
+        // Persistence is best-effort: if save_mission fails on a transient store
+        // error, the thread is already running and the outcome watcher is already
+        // installed (above), so failing here would orphan the work AND — for cron
+        // cadences — leave next_fire_at un-advanced, causing the next tick to
+        // re-fire the same mission in a runaway loop. Log and continue. The
+        // caller still gets Ok(Some(thread_id)) so the spawned thread is visible.
+        if let Err(e) = self.store.save_mission(&updated).await {
+            debug!(
+                mission_id = %id,
+                thread_id = %thread_id,
+                error = %e,
+                "failed to persist mission update after fire; thread is running and watched, schedule may re-fire on next tick"
+            );
+        }
 
         debug!(mission_id = %id, thread_id = %thread_id, "mission fired");
 
@@ -1003,9 +1040,16 @@ impl MissionManager {
         let now = chrono::Utc::now();
 
         for mid in active_ids {
-            let mission = match self.store.load_mission(mid).await? {
-                Some(m) if m.status == MissionStatus::Active => m,
-                _ => continue,
+            // Per-mission error isolation: a transient store/load error or a
+            // single fire failure must not abort the entire tick — the other
+            // active missions still need their chance to fire on this cycle.
+            let mission = match self.store.load_mission(mid).await {
+                Ok(Some(m)) if m.status == MissionStatus::Active => m,
+                Ok(_) => continue,
+                Err(e) => {
+                    debug!(mission_id = %mid, error = %e, "tick: failed to load mission; skipping");
+                    continue;
+                }
             };
 
             let should_fire = match &mission.cadence {
@@ -1019,11 +1063,18 @@ impl MissionManager {
                 | MissionCadence::Webhook { .. } => false,
             };
 
-            // Fire cron missions with the mission's own user_id so artifacts
-            // are scoped to the correct tenant.
-            if should_fire && let Some(tid) = self.fire_mission(mid, &mission.user_id, None).await?
-            {
-                spawned.push(tid);
+            if should_fire {
+                // Fire cron missions with the mission's own user_id so artifacts
+                // are scoped to the correct tenant.
+                match self.fire_mission(mid, &mission.user_id, None).await {
+                    Ok(Some(tid)) => spawned.push(tid),
+                    Ok(None) => {}
+                    Err(e) => debug!(
+                        mission_id = %mid,
+                        error = %e,
+                        "tick: fire_mission failed; continuing with remaining missions"
+                    ),
+                }
             }
         }
 

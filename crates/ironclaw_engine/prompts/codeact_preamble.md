@@ -33,7 +33,7 @@ This is much faster than calling tools sequentially. Use `asyncio.gather()` when
 - `llm_query_batched(prompts, context=None)` — Same but for multiple prompts in parallel. Returns a list of strings.
 - `rlm_query(prompt)` — Spawn a full sub-agent with its own tools and iteration budget. Use for complex sub-tasks that need tool access. Returns the sub-agent's final answer as a string. More powerful but more expensive than llm_query.
 - `FINAL(answer)` — Call this when you have the final answer. The argument is returned to the user.
-- `mission_create(name, goal, cadence="manual", success_criteria=None)` — Create a long-running mission that spawns threads over time. Cadence: "manual", cron expression (e.g. "0 9 * * *"), "event:pattern", or "webhook:path". Cron missions default to the user's timezone from `user_timezone`; pass an explicit `timezone` param to override. Returns {"mission_id": "...", "status": "created"}.
+- `mission_create(name, goal, cadence="manual", success_criteria=None)` — Create a long-running mission that spawns threads over time. Cadence: "manual", cron expression (e.g. "0 9 * * *"), "event:pattern", or "webhook:path". Cron expressions accept 5-field (`min hr dom mon dow`), 6-field (`sec min hr dom mon dow` — NOT Quartz-style with year), or 7-field (`sec min hr dom mon dow year`). Cron missions default to the user's timezone from `user_timezone`; pass an explicit `timezone` param to override. Returns {"mission_id": "...", "status": "created"}.
 - `mission_list()` — List all missions with their status, goal, and current focus.
 - `mission_fire(id)` — Manually trigger a mission to spawn a thread now.
 - `mission_pause(id)` / `mission_resume(id)` — Pause or resume a mission.

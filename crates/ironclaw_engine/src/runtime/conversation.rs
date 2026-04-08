@@ -226,6 +226,12 @@ impl ConversationManager {
                     thread_id = %thread_id,
                     "injecting message into active thread"
                 );
+                // Known limitation: a tz change mid-turn (user travels between
+                // messages of the same active thread) is not propagated. The
+                // running ExecutionLoop holds an in-memory copy of the Thread
+                // and cannot be updated externally without a new signal type.
+                // Updating the persisted record here would not affect the live
+                // step. Rare in practice; defer to a follow-up if needed.
                 self.thread_manager
                     .inject_message(thread_id, user_id, ThreadMessage::user(content))
                     .await?;
@@ -237,6 +243,15 @@ impl ConversationManager {
                     thread_id = %thread_id,
                     "resuming suspended foreground thread"
                 );
+                // Resume reloads the thread from the store, so writing fresh
+                // user_timezone to the persisted record before resume_thread
+                // means the resumed execution sees the up-to-date value. This
+                // is the only metadata refresh path for an existing thread.
+                if let Some(tz) = user_timezone {
+                    self.thread_manager
+                        .set_thread_metadata(thread_id, "user_timezone", tz)
+                        .await;
+                }
                 self.thread_manager
                     .resume_thread(
                         thread_id,
