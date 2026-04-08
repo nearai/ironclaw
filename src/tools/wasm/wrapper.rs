@@ -688,23 +688,73 @@ impl WasmToolSchemas {
 
     /// Derive a compact advertised schema from the full discovery schema.
     ///
-    /// Collects properties from top-level `properties` and from
-    /// `oneOf`/`anyOf`/`allOf` variants. Keeps only properties that are in
-    /// the top-level `required` array or carry an `enum`/`const` constraint.
-    /// For properties defined via `const` across multiple variants (e.g.
-    /// `"action": {"const": "get_repo"}` in each `oneOf` branch), the `const`
-    /// values are merged into a single `enum` array.
+    /// Two distinct shapes are handled:
     ///
-    /// Variant-level `required` fields (e.g. `owner`, `repo` required within
-    /// each `oneOf` variant but not top-level) are intentionally omitted from
-    /// the compact schema — the LLM can discover them via
-    /// `tool_info(detail: "schema")`.
+    /// 1. **Tagged enum / `oneOf` shape** (e.g. WASM tools whose action
+    ///    enum is exposed via `schemars::JsonSchema`, or hand-written
+    ///    `oneOf` schemas like `github`'s). The `oneOf` structure is
+    ///    *preserved* — including each variant's `properties` and
+    ///    `required` array — so the LLM can see "field X is required
+    ///    when action == Y" before constructing a call. This is
+    ///    critical: previously these arrays were stripped out and the
+    ///    LLM would happily call `{"action":"get_file"}` without
+    ///    `file_id`, getting a runtime serde error. We strip
+    ///    `description`, `default`, `title`, `format`, `examples`, and
+    ///    `$schema` from each variant to save tokens — the contract
+    ///    (types + required) survives, the prose doesn't.
     ///
-    /// At most `MAX_COMPACT_PROPERTIES` properties are collected to bound
+    /// 2. **Flat shape** (no `oneOf`/`anyOf`/`allOf`). Keeps top-level
+    ///    properties that are either in `required` or carry an
+    ///    `enum`/`const` constraint, with descriptions stripped. If
+    ///    nothing survives the filter, falls back to all typed properties
+    ///    or to a permissive `{}` schema.
+    ///
+    /// At most `MAX_COMPACT_VARIANTS` variants and
+    /// `MAX_COMPACT_PROPERTIES` flat properties are kept to bound
     /// allocations from adversarial schemas.
     fn compact_schema(discovery: &serde_json::Value) -> serde_json::Value {
         const MAX_COMPACT_PROPERTIES: usize = 100;
+        const MAX_COMPACT_VARIANTS: usize = 50;
 
+        // Shape 1: tagged enum / oneOf schema. Preserve the structure so
+        // the LLM sees per-variant required arrays.
+        for combinator in ["oneOf", "anyOf", "allOf"] {
+            if let Some(variants) = discovery.get(combinator).and_then(|v| v.as_array())
+                && !variants.is_empty()
+            {
+                let compact_variants: Vec<serde_json::Value> = variants
+                    .iter()
+                    .take(MAX_COMPACT_VARIANTS)
+                    .map(strip_schema_metadata)
+                    .collect();
+                let mut result = serde_json::Map::new();
+                result.insert(
+                    "type".to_string(),
+                    serde_json::Value::String("object".to_string()),
+                );
+                if let Some(top_required) = discovery.get("required") {
+                    result.insert("required".to_string(), top_required.clone());
+                }
+                // Carry through any top-level properties (rare with
+                // schemars-derived schemas, but possible with hybrid
+                // hand-written ones).
+                if let Some(top_props) = discovery.get("properties") {
+                    result.insert("properties".to_string(), strip_props_metadata(top_props));
+                }
+                result.insert(
+                    combinator.to_string(),
+                    serde_json::Value::Array(compact_variants),
+                );
+                result.insert(
+                    "additionalProperties".to_string(),
+                    serde_json::Value::Bool(true),
+                );
+                return serde_json::Value::Object(result);
+            }
+        }
+
+        // Shape 2: flat schema. Keep required + enum/const-bearing
+        // properties, drop the rest.
         let required: std::collections::HashSet<String> = discovery
             .get("required")
             .and_then(|r| r.as_array())
@@ -715,53 +765,13 @@ impl WasmToolSchemas {
             })
             .unwrap_or_default();
 
-        // Collect properties from top-level and oneOf/anyOf/allOf variants.
-        // For properties with `const` across variants, merge into an `enum`.
         let mut all_properties = serde_json::Map::new();
-        // Track const values per property to merge into enum.
-        let mut const_values: std::collections::HashMap<String, Vec<serde_json::Value>> =
-            std::collections::HashMap::new();
-
         if let Some(props) = discovery.get("properties").and_then(|p| p.as_object()) {
             for (k, v) in props {
                 if all_properties.len() >= MAX_COMPACT_PROPERTIES {
                     break;
                 }
-                all_properties.insert(k.clone(), v.clone());
-            }
-        }
-        for key in ["oneOf", "anyOf", "allOf"] {
-            if let Some(variants) = discovery.get(key).and_then(|v| v.as_array()) {
-                for variant in variants {
-                    if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
-                        for (k, v) in props {
-                            if all_properties.len() >= MAX_COMPACT_PROPERTIES
-                                && !all_properties.contains_key(k)
-                            {
-                                continue;
-                            }
-                            // Track const values for merging into enum.
-                            if let Some(c) = v.get("const") {
-                                const_values.entry(k.clone()).or_default().push(c.clone());
-                            }
-                            all_properties.entry(k.clone()).or_insert_with(|| v.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        // Merge collected const values into enum arrays.
-        for (name, values) in &const_values {
-            if values.len() > 1
-                && let Some(prop) = all_properties.get_mut(name)
-            {
-                let mut merged = prop.clone();
-                if let Some(obj) = merged.as_object_mut() {
-                    obj.remove("const");
-                    obj.insert("enum".to_string(), serde_json::Value::Array(values.clone()));
-                }
-                *prop = merged;
+                all_properties.insert(k.clone(), strip_schema_metadata(v));
             }
         }
 
@@ -1512,6 +1522,63 @@ fn schema_declares_type(schema: &serde_json::Value, expected: &str) -> bool {
     }
 }
 
+/// Recursively strip prose-only metadata fields from a schema value.
+///
+/// Preserves the contract (`type`, `enum`, `const`, `required`,
+/// `properties`, `items`, `oneOf`/`anyOf`/`allOf`, `additionalProperties`,
+/// `minimum`/`maximum`, etc.) and drops fields that only matter for
+/// human consumption (`description`, `title`, `default`, `examples`,
+/// `$schema`, `$id`, `$comment`, `format`). The result is the smallest
+/// faithful representation of the type contract — useful for embedding
+/// schemas in LLM tool definitions where every token costs.
+fn strip_schema_metadata(value: &serde_json::Value) -> serde_json::Value {
+    const STRIP: &[&str] = &[
+        "description",
+        "title",
+        "default",
+        "examples",
+        "$schema",
+        "$id",
+        "$comment",
+        "format",
+        "deprecated",
+        "readOnly",
+        "writeOnly",
+    ];
+
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                if STRIP.contains(&k.as_str()) {
+                    continue;
+                }
+                out.insert(k.clone(), strip_schema_metadata(v));
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(strip_schema_metadata).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// Strip metadata from every property value in a `properties` object.
+/// Returns the input unchanged if it isn't an object map.
+fn strip_props_metadata(value: &serde_json::Value) -> serde_json::Value {
+    match value.as_object() {
+        Some(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                out.insert(k.clone(), strip_schema_metadata(v));
+            }
+            serde_json::Value::Object(out)
+        }
+        None => value.clone(),
+    }
+}
+
 fn schema_is_typed_property(schema: &serde_json::Value) -> bool {
     matches!(
         schema.get("type"),
@@ -1964,27 +2031,41 @@ mod tests {
         assert!(compacted["properties"].as_object().unwrap().is_empty());
     }
 
+    /// Regression test: a tagged-enum / `oneOf` schema must preserve
+    /// each variant's `required` array so the LLM knows which fields
+    /// are mandatory for each `action`. Earlier versions of
+    /// `compact_schema` flattened the schema and dropped per-variant
+    /// required fields, causing the LLM to construct calls like
+    /// `{"action":"get_file"}` without `file_id`, which serde then
+    /// rejected at runtime. The current contract: keep `oneOf`,
+    /// keep each variant's properties + required, strip prose
+    /// metadata (description/default/title) to save tokens.
     #[test]
-    fn test_compact_schema_handles_oneof_variants() {
-        // GitHub-style schema: oneOf with no top-level properties, const per variant
+    fn test_compact_schema_preserves_oneof_variants_and_required() {
         let schema = serde_json::json!({
             "type": "object",
             "required": ["action"],
             "oneOf": [
                 {
+                    "type": "object",
                     "properties": {
-                        "action": { "const": "get_repo" },
-                        "owner": { "type": "string" },
-                        "repo": { "type": "string" }
+                        "action": { "type": "string", "const": "get_repo" },
+                        "owner": { "type": "string", "description": "Repo owner" },
+                        "repo": { "type": "string", "description": "Repo name" }
                     },
                     "required": ["action", "owner", "repo"]
                 },
                 {
+                    "type": "object",
                     "properties": {
-                        "action": { "const": "list_issues" },
+                        "action": { "type": "string", "const": "list_issues" },
                         "owner": { "type": "string" },
                         "repo": { "type": "string" },
-                        "state": { "type": "string", "enum": ["open", "closed", "all"] }
+                        "state": {
+                            "type": "string",
+                            "enum": ["open", "closed", "all"],
+                            "default": "open"
+                        }
                     },
                     "required": ["action", "owner", "repo"]
                 }
@@ -1992,39 +2073,132 @@ mod tests {
         });
 
         let compacted = super::WasmToolSchemas::compact_schema(&schema);
-        let props = compacted["properties"].as_object().unwrap();
 
-        // action: required + const values merged into enum → kept
-        let action = &props["action"];
-        assert!(
-            action.get("enum").is_some(),
-            "action const values should be merged into enum: {action}"
-        );
-        let action_enum = action["enum"].as_array().unwrap();
-        assert!(
-            action_enum.contains(&serde_json::json!("get_repo")),
-            "enum should contain get_repo"
-        );
-        assert!(
-            action_enum.contains(&serde_json::json!("list_issues")),
-            "enum should contain list_issues"
-        );
-        assert!(
-            action.get("const").is_none(),
-            "const should be removed after merging into enum"
-        );
+        // The top-level `oneOf` MUST survive — that's the whole point.
+        let one_of = compacted["oneOf"]
+            .as_array()
+            .expect("oneOf should be preserved on the compact schema");
+        assert_eq!(one_of.len(), 2);
 
-        // state: has enum → kept
+        // Variant 0 (get_repo) must keep `owner`/`repo` in its required array.
+        let v0 = &one_of[0];
+        let v0_required: Vec<&str> = v0["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(v0_required.contains(&"action"));
         assert!(
-            props.contains_key("state"),
-            "state should be kept (has enum)"
+            v0_required.contains(&"owner"),
+            "variant required array must survive compaction"
         );
-        // owner/repo: not in top-level required, no enum → intentionally dropped
-        // (variant-level required is omitted; discoverable via tool_info)
-        assert!(!props.contains_key("owner"), "owner should be dropped");
-        assert!(!props.contains_key("repo"), "repo should be dropped");
-        assert_eq!(compacted["additionalProperties"], true);
+        assert!(v0_required.contains(&"repo"));
+
+        // Variant 0 properties must still include owner/repo (typed).
+        let v0_props = v0["properties"].as_object().unwrap();
+        assert!(v0_props.contains_key("owner"));
+        assert!(v0_props.contains_key("repo"));
+        // Description must be stripped to save tokens.
+        let owner = &v0_props["owner"];
+        assert!(
+            owner.get("description").is_none(),
+            "description should be stripped to save tokens, got: {owner}"
+        );
+        // But the type must survive.
+        assert_eq!(owner["type"], "string");
+
+        // Variant 1 (list_issues) must also keep its required + types.
+        let v1 = &one_of[1];
+        let v1_required: Vec<&str> = v1["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(v1_required.contains(&"owner"));
+        assert!(v1_required.contains(&"repo"));
+
+        // The default on `state` should be stripped, but the enum survives.
+        let state = &v1["properties"]["state"];
+        assert!(state.get("default").is_none(), "default should be stripped");
+        assert!(state.get("enum").is_some(), "enum must survive");
+
+        // Top-level required and additionalProperties carry through.
         assert_eq!(compacted["required"], serde_json::json!(["action"]));
+        assert_eq!(compacted["additionalProperties"], true);
+    }
+
+    /// Specific repro for the google-drive bug: a schemars-derived
+    /// `oneOf` schema with one variant that has `file_id` as required.
+    /// After compaction, the `file_id` requirement must still be visible
+    /// to the LLM, otherwise it will call `{"action":"get_file"}` and
+    /// serde will reject it.
+    #[test]
+    fn test_compact_schema_preserves_file_id_required_for_get_file() {
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "GoogleDriveAction",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "const": "list_files" },
+                        "query": { "type": ["string", "null"], "default": null },
+                        "page_size": { "type": "integer", "default": 25 }
+                    },
+                    "required": ["action"]
+                },
+                {
+                    "type": "object",
+                    "description": "Get file metadata.",
+                    "properties": {
+                        "action": { "type": "string", "const": "get_file" },
+                        "file_id": { "description": "The file ID.", "type": "string" }
+                    },
+                    "required": ["action", "file_id"]
+                }
+            ]
+        });
+
+        let compacted = super::WasmToolSchemas::compact_schema(&schema);
+        let one_of = compacted["oneOf"].as_array().unwrap();
+
+        // Find the get_file variant.
+        let get_file = one_of
+            .iter()
+            .find(|v| {
+                v["properties"]
+                    .get("action")
+                    .and_then(|a| a.get("const"))
+                    .and_then(|c| c.as_str())
+                    == Some("get_file")
+            })
+            .expect("compact schema should still contain get_file variant");
+
+        let required: Vec<&str> = get_file["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            required.contains(&"file_id"),
+            "get_file's required array MUST still contain file_id after compaction; \
+             without this the LLM constructs malformed calls — got required={:?}",
+            required
+        );
+
+        // The `$schema` and `title` should be dropped from the top-level
+        // (they're noise to the LLM).
+        assert!(compacted.get("$schema").is_none());
+        assert!(compacted.get("title").is_none());
+
+        // And the per-variant `description` should also be stripped.
+        assert!(
+            get_file.get("description").is_none(),
+            "variant-level description should be stripped"
+        );
     }
 
     #[test]
