@@ -196,6 +196,7 @@ impl ConversationManager {
         project_id: ProjectId,
         user_id: &str,
         thread_config: ThreadConfig,
+        user_timezone: Option<&str>,
     ) -> Result<ThreadId, EngineError> {
         let conv_arc = self.get_conversation_lock(conversation_id).await?;
         let mut conv = conv_arc.lock().await;
@@ -253,6 +254,29 @@ impl ConversationManager {
                 // so deferring avoids an O(entries) allocation on those fast paths.
                 let history = build_history_from_entries(&conv.entries);
 
+                // Build initial thread metadata. Must be applied *before* the
+                // executor's background task starts — `set_thread_metadata`
+                // only updates the persisted record, not the in-memory thread
+                // the loop is reading from, so the first step would otherwise
+                // miss `user_timezone` / `source_channel`. The bridge router
+                // validates the timezone string before passing it in here.
+                let mut initial_metadata = serde_json::Map::new();
+                let base_channel = channel_name
+                    .split(':')
+                    .next()
+                    .unwrap_or(&channel_name)
+                    .to_string();
+                initial_metadata.insert(
+                    "source_channel".into(),
+                    serde_json::Value::String(base_channel),
+                );
+                if let Some(tz) = user_timezone {
+                    initial_metadata.insert(
+                        "user_timezone".into(),
+                        serde_json::Value::String(tz.to_string()),
+                    );
+                }
+
                 // Spawn new foreground thread with conversation history.
                 let thread_id = self
                     .thread_manager
@@ -264,20 +288,9 @@ impl ConversationManager {
                         None,
                         user_id,
                         history,
+                        initial_metadata,
                     )
                     .await?;
-
-                // Store the base channel name in thread metadata so the
-                // orchestrator can populate `source_channel` in the execution
-                // context (used by mission_create to default notify_channels).
-                let base_channel = channel_name
-                    .split(':')
-                    .next()
-                    .unwrap_or(&channel_name)
-                    .to_string();
-                self.thread_manager
-                    .set_thread_metadata(thread_id, "source_channel", &base_channel)
-                    .await;
 
                 thread_id
             }
@@ -771,7 +784,14 @@ mod tests {
         let project = ProjectId::new();
 
         let tid = cm
-            .handle_user_message(conv_id, "Hello", project, "user1", ThreadConfig::default())
+            .handle_user_message(
+                conv_id,
+                "Hello",
+                project,
+                "user1",
+                ThreadConfig::default(),
+                None,
+            )
             .await
             .unwrap();
 
@@ -838,6 +858,7 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
             )
             .await
             .unwrap();
@@ -930,7 +951,14 @@ mod tests {
 
         // Spawn a thread so the conversation has entries and active threads
         let tid = cm
-            .handle_user_message(conv_id, "Hello", project, "user1", ThreadConfig::default())
+            .handle_user_message(
+                conv_id,
+                "Hello",
+                project,
+                "user1",
+                ThreadConfig::default(),
+                None,
+            )
             .await
             .unwrap();
 
@@ -978,6 +1006,7 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
             )
             .await
         });
@@ -988,6 +1017,7 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
             )
             .await
         });

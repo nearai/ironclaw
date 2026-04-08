@@ -796,8 +796,9 @@ fn parse_cadence(
     let trimmed = s.trim().to_lowercase();
     if trimmed == "manual" {
         MissionCadence::Manual
-    } else if trimmed.contains(' ') && trimmed.split_whitespace().count() >= 5 {
-        // Looks like a cron expression
+    } else if trimmed.split_whitespace().count() >= 5 {
+        // Looks like a cron expression (5+ fields). `split_whitespace` handles
+        // tabs and newlines, not just spaces.
         MissionCadence::Cron {
             expression: s.trim().to_string(),
             timezone,

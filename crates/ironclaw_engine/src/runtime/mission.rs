@@ -101,8 +101,18 @@ impl MissionManager {
             {
                 let mut patched = mission.clone();
                 patched.next_fire_at = Some(next);
-                let _ = self.store.save_mission(&patched).await;
-                debug!(mission_id = %mission.id, next = %next, "backfilled next_fire_at for legacy cron mission");
+                match self.store.save_mission(&patched).await {
+                    Ok(()) => debug!(
+                        mission_id = %mission.id,
+                        next = %next,
+                        "backfilled next_fire_at for legacy cron mission"
+                    ),
+                    Err(e) => debug!(
+                        mission_id = %mission.id,
+                        error = %e,
+                        "failed to persist next_fire_at backfill; mission will retry on next bootstrap"
+                    ),
+                }
             }
             active_ids.push(mission.id);
         }
@@ -174,6 +184,19 @@ impl MissionManager {
         }
         if let Some(cadence) = updates.cadence {
             mission.cadence = cadence;
+            // Recompute scheduling state to match the new cadence. Without this,
+            // a Manual -> Cron switch leaves next_fire_at = None and the ticker
+            // never picks the mission up; a Cron expression/timezone change
+            // keeps firing on the old schedule until the mission is paused and
+            // resumed. Clear next_fire_at for non-cron cadences so a stale
+            // value can't trigger an unrelated cron path.
+            mission.next_fire_at = match &mission.cadence {
+                MissionCadence::Cron {
+                    expression,
+                    timezone,
+                } => next_cron_fire(expression, timezone.as_ref())?,
+                _ => None,
+            };
         }
         if let Some(channels) = updates.notify_channels {
             mission.notify_channels = channels;
@@ -341,7 +364,12 @@ impl MissionManager {
         updated.record_thread(thread_id);
         updated.threads_today += 1;
         updated.last_trigger_payload = trigger_payload;
-        // Advance next_fire_at for cron missions so the ticker schedules the next cycle
+        // Advance next_fire_at for cron missions so the ticker schedules the
+        // next cycle. Computed from `now()`, not from the previous fire time:
+        // if a tick was delayed (process down, busy loop) and several windows
+        // are missed, they coalesce into a single fire here rather than
+        // backfilling each missed slot. This is the catch-up semantics we want
+        // for long-running missions.
         if let MissionCadence::Cron {
             ref expression,
             ref timezone,
@@ -2889,6 +2917,152 @@ mod tests {
         assert!(
             mission.next_fire_at.unwrap() > chrono::Utc::now(),
             "recomputed next_fire_at should be in the future"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_mission_manual_to_cron_sets_next_fire_at() {
+        // Regression: a Manual -> Cron switch left next_fire_at = None and the
+        // mission never fired. update_mission must recompute the schedule.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "starts manual",
+                "goal",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(mission.next_fire_at.is_none());
+
+        mgr.update_mission(
+            id,
+            "test-user",
+            MissionUpdate {
+                cadence: Some(MissionCadence::Cron {
+                    expression: "0 */6 * * *".into(),
+                    timezone: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            mission.next_fire_at.is_some(),
+            "Manual -> Cron update should compute next_fire_at"
+        );
+        assert!(
+            mission.next_fire_at.unwrap() > chrono::Utc::now(),
+            "next_fire_at should be in the future"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_mission_cron_to_manual_clears_next_fire_at() {
+        // Regression: a stale next_fire_at must be cleared when switching away
+        // from Cron, otherwise the ticker could fire a non-cron mission.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "starts cron",
+                "goal",
+                MissionCadence::Cron {
+                    expression: "0 */6 * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            mgr.get_mission(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .next_fire_at
+                .is_some()
+        );
+
+        mgr.update_mission(
+            id,
+            "test-user",
+            MissionUpdate {
+                cadence: Some(MissionCadence::Manual),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            mission.next_fire_at.is_none(),
+            "non-cron cadence must clear next_fire_at"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_mission_cron_expression_change_recomputes_next_fire_at() {
+        // Regression: changing the cron expression must reset the schedule.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "cron edit",
+                "goal",
+                MissionCadence::Cron {
+                    expression: "0 0 1 1 *".into(), // once a year
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let before = mgr.get_mission(id).await.unwrap().unwrap().next_fire_at;
+
+        mgr.update_mission(
+            id,
+            "test-user",
+            MissionUpdate {
+                cadence: Some(MissionCadence::Cron {
+                    expression: "* * * * *".into(), // every minute
+                    timezone: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let after = mgr.get_mission(id).await.unwrap().unwrap().next_fire_at;
+        assert!(after.is_some());
+        assert_ne!(
+            before, after,
+            "schedule must be recomputed on cadence change"
+        );
+        assert!(
+            after.unwrap() < before.unwrap(),
+            "every-minute schedule should fire sooner than once-a-year"
         );
     }
 }

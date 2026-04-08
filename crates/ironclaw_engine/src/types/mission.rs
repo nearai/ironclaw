@@ -197,13 +197,22 @@ impl Mission {
 /// - 5-field (standard) -> prepend `0` (seconds) and append `*` (year)
 /// - 6-field -> append `*` (year)
 /// - 7-field -> pass through unchanged
-fn normalize_cron_expression(expression: &str) -> String {
+///
+/// Returns an error for any other field count rather than passing the input
+/// through to `cron::Schedule::from_str`, which would surface a confusing
+/// low-level parse error.
+fn normalize_cron_expression(expression: &str) -> Result<String, EngineError> {
     let trimmed = expression.trim();
     let fields: Vec<&str> = trimmed.split_whitespace().collect();
     match fields.len() {
-        5 => format!("0 {} *", fields.join(" ")),
-        6 => format!("{} *", fields.join(" ")),
-        _ => trimmed.to_string(),
+        5 => Ok(format!("0 {} *", fields.join(" "))),
+        6 => Ok(format!("{} *", fields.join(" "))),
+        7 => Ok(trimmed.to_string()),
+        n => Err(EngineError::Store {
+            reason: format!(
+                "invalid cron expression '{expression}': expected 5, 6, or 7 fields, got {n}"
+            ),
+        }),
     }
 }
 
@@ -216,7 +225,7 @@ pub fn next_cron_fire(
     expression: &str,
     timezone: Option<&ValidTimezone>,
 ) -> Result<Option<DateTime<Utc>>, EngineError> {
-    let normalized = normalize_cron_expression(expression);
+    let normalized = normalize_cron_expression(expression)?;
     let schedule = cron::Schedule::from_str(&normalized).map_err(|e| EngineError::Store {
         reason: format!("invalid cron expression '{expression}': {e}"),
     })?;
@@ -227,5 +236,64 @@ pub fn next_cron_fire(
             .map(|dt| dt.with_timezone(&Utc)))
     } else {
         Ok(schedule.upcoming(Utc).next())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Datelike, Timelike};
+
+    #[test]
+    fn rejects_four_field_cron() {
+        // Four-field input is not a recognized cron format. Surface a clear
+        // error rather than passing through to a low-level parse failure.
+        let err = next_cron_fire("* * * *", None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("expected 5, 6, or 7 fields"), "got: {msg}");
+    }
+
+    #[test]
+    fn accepts_five_field_cron() {
+        let next = next_cron_fire("0 9 * * *", None).unwrap();
+        assert!(next.is_some(), "5-field cron should produce a fire time");
+    }
+
+    #[test]
+    fn next_cron_fire_respects_timezone() {
+        // "0 9 * * *" in America/New_York should produce a UTC instant whose
+        // wall-clock time in NY is 09:00 on some date — and the resulting UTC
+        // hour should differ from a UTC-evaluated schedule (since NY is offset
+        // from UTC year-round).
+        let tz = ValidTimezone::parse("America/New_York").unwrap();
+        let in_ny = next_cron_fire("0 9 * * *", Some(&tz))
+            .unwrap()
+            .expect("schedule should produce a fire time");
+        let in_utc = next_cron_fire("0 9 * * *", None)
+            .unwrap()
+            .expect("schedule should produce a fire time");
+
+        // NY 09:00 in UTC is either 13:00 (EDT) or 14:00 (EST). UTC 09:00 is 09:00.
+        let ny_utc_hour = in_ny.hour();
+        assert!(
+            ny_utc_hour == 13 || ny_utc_hour == 14,
+            "NY 09:00 should map to UTC 13 or 14, got {ny_utc_hour}"
+        );
+        assert_eq!(in_utc.hour(), 9, "UTC schedule should fire at hour 9");
+        assert_ne!(
+            in_ny.hour(),
+            in_utc.hour(),
+            "tz-aware and tz-naive schedules should differ"
+        );
+
+        // Sanity: result is a real future date, not the epoch.
+        assert!(in_ny.year() >= 2026);
+    }
+
+    #[test]
+    fn normalize_six_field_cron() {
+        // 6-field (with seconds) should be accepted.
+        let next = next_cron_fire("0 0 9 * * *", None).unwrap();
+        assert!(next.is_some());
     }
 }

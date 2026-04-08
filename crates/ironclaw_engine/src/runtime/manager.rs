@@ -101,11 +101,17 @@ impl ThreadManager {
             parent_id,
             user_id,
             Vec::new(),
+            serde_json::Map::new(),
         )
         .await
     }
 
     /// Spawn a thread with initial conversation history.
+    ///
+    /// `initial_metadata` is applied to the thread's metadata map *before* the
+    /// background execution task starts, so the executor's in-memory `Thread`
+    /// observes those keys on the first step. Setting metadata after spawning
+    /// only updates the persisted record and is invisible to the running loop.
     #[allow(clippy::too_many_arguments)]
     pub async fn spawn_thread_with_history(
         &self,
@@ -116,6 +122,7 @@ impl ThreadManager {
         parent_id: Option<ThreadId>,
         user_id: impl Into<String>,
         initial_messages: Vec<crate::types::message::ThreadMessage>,
+        initial_metadata: serde_json::Map<String, serde_json::Value>,
     ) -> Result<ThreadId, EngineError> {
         let user_id = user_id.into();
         let mut thread = Thread::new(goal, thread_type, project_id, &user_id, config);
@@ -123,6 +130,16 @@ impl ThreadManager {
             thread = thread.with_parent(pid);
         }
         let thread_id = thread.id;
+
+        // Apply initial metadata before save_thread + start_thread so the
+        // executor's in-memory thread observes it on the first step.
+        if !initial_metadata.is_empty()
+            && let Some(obj) = thread.metadata.as_object_mut()
+        {
+            for (k, v) in initial_metadata {
+                obj.insert(k, v);
+            }
+        }
 
         // Register in tree
         if let Some(pid) = parent_id {
