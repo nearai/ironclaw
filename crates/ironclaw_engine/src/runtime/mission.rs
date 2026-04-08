@@ -3086,12 +3086,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn system_mission_requires_system_user_to_manage() {
+    async fn shared_mission_management_is_open_at_engine_layer() {
+        // Contract pinned by this test (matches the doc-comment on
+        // `pause_mission` / `resume_mission`):
+        //
+        //     "For shared missions, the caller (web handler) must verify
+        //      admin role before calling this. The engine only checks
+        //      ownership."
+        //
+        // i.e. shared (system-owned) missions can be paused/resumed by ANY
+        // user at the engine layer; admin enforcement lives in the web
+        // handler. The user-vs-user case is covered by
+        // `pause_resume_does_not_cross_users`.
+        //
+        // This test was previously written under the opposite assumption
+        // (that shared missions required the literal "system" user) and
+        // failed flakily once the LEGACY_SHARED_OWNER_ID alias landed,
+        // because pause_mission now correctly allows alice. Rewriting it
+        // to match the contract closes the flake.
         let store = Arc::new(TestStore::new());
         let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
         let project_id = ProjectId::new();
 
-        // Create a system mission
+        // "system" maps to OwnerId::Shared via LEGACY_SHARED_OWNER_ID.
         let system_id = mgr
             .create_mission(
                 project_id,
@@ -3103,23 +3120,27 @@ mod tests {
             )
             .await
             .unwrap();
-
-        // Regular user cannot pause system mission
-        let result = mgr.pause_mission(system_id, "alice").await;
+        let mission = mgr.get_mission(system_id).await.unwrap().unwrap();
         assert!(
-            matches!(result.unwrap_err(), EngineError::AccessDenied { .. }),
-            "regular user cannot manage system missions"
+            mission.owner_id().is_shared(),
+            "missions owned by 'system' must be classified as shared"
         );
 
-        // System user can pause (admin path passes "system" as user_id)
-        mgr.pause_mission(system_id, "system").await.unwrap();
+        // Any non-owning user can pause a shared mission via the engine —
+        // admin enforcement is the web handler's job.
+        mgr.pause_mission(system_id, "alice").await.unwrap();
         let m = mgr.get_mission(system_id).await.unwrap().unwrap();
         assert_eq!(m.status, MissionStatus::Paused);
 
-        // System user can resume
-        mgr.resume_mission(system_id, "system").await.unwrap();
+        // Any other user can resume it.
+        mgr.resume_mission(system_id, "bob").await.unwrap();
         let m = mgr.get_mission(system_id).await.unwrap().unwrap();
         assert_eq!(m.status, MissionStatus::Active);
+
+        // The system user (canonical owner identity) can also manage it.
+        mgr.pause_mission(system_id, "system").await.unwrap();
+        let m = mgr.get_mission(system_id).await.unwrap().unwrap();
+        assert_eq!(m.status, MissionStatus::Paused);
     }
 
     #[tokio::test]

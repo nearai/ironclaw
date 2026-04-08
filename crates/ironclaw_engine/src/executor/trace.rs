@@ -582,7 +582,14 @@ mod tests {
         ));
 
         let trace = build_trace(&thread);
-        match &trace.events[0].kind {
+        // `add_message` records its own MessageAdded events, so the
+        // ApprovalRequested isn't necessarily at index 0. Find it by kind.
+        let approval = trace
+            .events
+            .iter()
+            .find(|e| matches!(e.kind, EventKind::ApprovalRequested { .. }))
+            .expect("trace must contain the ApprovalRequested event");
+        match &approval.kind {
             EventKind::ApprovalRequested {
                 action_name,
                 call_id,
@@ -610,7 +617,11 @@ mod tests {
         assert!(json.contains("\"ApprovalRequested\""));
         assert!(json.contains("\"action_name\":\"tool_install\""));
         assert!(json.contains("\"call_id\":\"call_install_1\""));
-        assert!(json.contains("\"parameters\":{\"name\":\"notion\",\"kind\":\"mcp_server\"}"));
+        // serde_json's `Map` is alphabetically ordered without the
+        // `preserve_order` feature, so don't assert exact substring of
+        // the parameters object — just that both keys+values are present.
+        assert!(json.contains("\"name\":\"notion\""));
+        assert!(json.contains("\"kind\":\"mcp_server\""));
         assert!(json.contains("\"description\":\"Install an extension\""));
         assert!(json.contains("\"allow_always\":true"));
         assert!(json.contains("\"gate_name\":\"approval\""));
