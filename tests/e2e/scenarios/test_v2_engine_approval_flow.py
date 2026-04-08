@@ -156,9 +156,9 @@ async def _wait_for_approval(
     *,
     timeout: float = 45.0,
 ) -> dict:
-    """Poll /api/chat/history until pending_approval appears.
+    """Poll /api/chat/history until pending_gate appears.
 
-    Returns the pending_approval dict containing request_id, tool_name, etc.
+    Returns the pending_gate dict containing request_id, tool_name, etc.
     """
     for _ in range(int(timeout * 2)):
         r = await api_get(
@@ -168,7 +168,7 @@ async def _wait_for_approval(
         )
         r.raise_for_status()
         history = r.json()
-        pending = history.get("pending_approval")
+        pending = history.get("pending_gate")
         if pending and pending.get("request_id"):
             return pending
         await asyncio.sleep(0.5)
@@ -179,7 +179,7 @@ async def _wait_for_approval(
         r = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
         data = r.json()
         turns = data.get("turns", [])
-        pending = data.get("pending_approval")
+        pending = data.get("pending_gate")
         debug_info = f"turns={len(turns)}, pending={pending}"
         if turns:
             last_turn = turns[-1]
@@ -191,7 +191,7 @@ async def _wait_for_approval(
     except Exception as e:
         debug_info = f"error: {e}"
     raise AssertionError(
-        f"Timed out waiting for pending_approval in thread {thread_id}. "
+        f"Timed out waiting for pending_gate in thread {thread_id}. "
         f"Debug: {debug_info}"
     )
 
@@ -230,15 +230,15 @@ async def _wait_for_response(
     )
 
 
-async def _wait_for_no_pending_approval(base_url: str, thread_id: str, *, timeout: float = 45.0):
+async def _wait_for_no_pending_gate(base_url: str, thread_id: str, *, timeout: float = 45.0):
     for _ in range(int(timeout * 2)):
         r = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
         r.raise_for_status()
         history = r.json()
-        if not history.get("pending_approval"):
+        if not history.get("pending_gate"):
             return history
         await asyncio.sleep(0.5)
-    raise AssertionError(f"Timed out waiting for pending_approval to clear in thread {thread_id}")
+    raise AssertionError(f"Timed out waiting for pending_gate to clear in thread {thread_id}")
 
 
 async def _approve(
@@ -294,17 +294,17 @@ class TestV2EngineApprovalFlow:
 
         approve_a = await _approve(base_url, thread_a, pending_a["request_id"], "approve")
         assert approve_a.status_code == 202, approve_a.text
-        await _wait_for_no_pending_approval(base_url, thread_a, timeout=60)
+        await _wait_for_no_pending_gate(base_url, thread_a, timeout=60)
 
         history_b = await api_get(base_url, f"/api/chat/history?thread_id={thread_b}", timeout=15)
         history_b.raise_for_status()
-        still_pending_b = history_b.json().get("pending_approval")
+        still_pending_b = history_b.json().get("pending_gate")
         assert still_pending_b is not None, history_b.json()
         assert still_pending_b["request_id"] == pending_b["request_id"]
 
         approve_b = await _approve(base_url, thread_b, pending_b["request_id"], "approve")
         assert approve_b.status_code == 202, approve_b.text
-        await _wait_for_no_pending_approval(base_url, thread_b, timeout=60)
+        await _wait_for_no_pending_gate(base_url, thread_b, timeout=60)
 
     """Test the v2 engine tool approval lifecycle.
 
@@ -352,14 +352,14 @@ class TestV2EngineApprovalFlow:
                 last = (turns[-1].get("response") or "").lower()
                 if last and "requires approval" not in last:
                     break
-            # Also check if pending_approval is cleared (approval processed)
-            if not history.get("pending_approval"):
+            # Also check if pending_gate is cleared (approval processed)
+            if not history.get("pending_gate"):
                 break
 
-        # After approval, pending_approval should be cleared
-        assert history.get("pending_approval") is None, (
-            f"After approval, pending_approval should be cleared. "
-            f"Got: {history.get('pending_approval')}"
+        # After approval, pending_gate should be cleared
+        assert history.get("pending_gate") is None, (
+            f"After approval, pending_gate should be cleared. "
+            f"Got: {history.get('pending_gate')}"
         )
 
     async def test_approval_no(self, v2_approval_server):
@@ -409,9 +409,9 @@ class TestV2EngineApprovalFlow:
         ).lower()
 
         # After denial, approval prompt should no longer be pending
-        assert history.get("pending_approval") is None, (
-            f"After denial, pending_approval should be cleared. "
-            f"Got: {history.get('pending_approval')}"
+        assert history.get("pending_gate") is None, (
+            f"After denial, pending_gate should be cleared. "
+            f"Got: {history.get('pending_gate')}"
         )
 
     async def test_approval_always(self, v2_approval_server):
