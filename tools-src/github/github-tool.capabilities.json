@@ -16,7 +16,7 @@
     "notes": [
       "Use `tool_info(name: \"github\", detail: \"schema\")` for the full action schema before guessing fields.",
       "Supported families: repositories, issues, pull requests, reviews/comments, search, branches, code reads, file writes, releases, workflow dispatch/runs, and webhook normalization.",
-      "Not supported yet: forks, labels, milestones, projects, org/team admin, GraphQL, release asset uploads, and repository deletion."
+      "Not supported yet: labels, milestones, projects, org/team admin, GraphQL, release asset uploads, and repository deletion."
     ],
     "examples": [
       {
