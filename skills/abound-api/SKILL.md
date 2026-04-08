@@ -54,14 +54,21 @@ activation:
     - forex
   max_context_tokens: 3000
 credentials:
-  - name: abound_external_token
+  - name: abound_read_token
     provider: abound
     location:
       type: bearer
     hosts:
       - "devneobank.timesclub.co"
       - "dev.timesclub.co"
-    setup_instructions: "Provide your Abound bearer token. Set with: ironclaw secret set abound_external_token <YOUR_TOKEN>"
+    setup_instructions: "Provide your Abound read token. Set with: ironclaw secret set abound_read_token <YOUR_TOKEN>"
+  - name: abound_write_token
+    provider: abound
+    location:
+      type: bearer
+    hosts:
+      - "devneobank.timesclub.co"
+    setup_instructions: "Provide your Abound write token. Set with: ironclaw secret set abound_write_token <YOUR_TOKEN>"
   - name: abound_api_key
     provider: abound
     location:
