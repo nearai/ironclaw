@@ -754,11 +754,18 @@ mod tests {
 
         let _mutex = crate::config::helpers::lock_env();
         let prev = std::env::var("LLM_BACKEND").ok();
+        let prev_auth = std::env::var("NEARAI_AUTH_URL").ok();
+        let prev_base = std::env::var("NEARAI_BASE_URL").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::set_var("LLM_BACKEND", "anthropic");
+            // Use IP literals to avoid DNS resolution in sandboxed CI.
+            std::env::set_var("NEARAI_AUTH_URL", "https://8.8.8.8");
+            std::env::set_var("NEARAI_BASE_URL", "https://8.8.8.8");
         }
         let _env_guard = EnvGuard("LLM_BACKEND", prev);
+        let _env_guard_auth = EnvGuard("NEARAI_AUTH_URL", prev_auth);
+        let _env_guard_base = EnvGuard("NEARAI_BASE_URL", prev_base);
 
         let settings = Settings::default();
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -877,6 +884,9 @@ mod tests {
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
+            // Use IP literals to avoid DNS resolution in sandboxed CI.
+            std::env::set_var("NEARAI_AUTH_URL", "https://8.8.8.8");
+            std::env::set_var("NEARAI_BASE_URL", "https://8.8.8.8");
         }
         let settings = Settings::default();
         match check_llm_config(&settings) {

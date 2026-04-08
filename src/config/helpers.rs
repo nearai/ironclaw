@@ -304,37 +304,88 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
         // before the async runtime is fully driving I/O. If this ever moves to
         // a hot path, wrap in `tokio::task::spawn_blocking` or use
         // `tokio::net::lookup_host`.
-        use std::net::ToSocketAddrs;
-        let port = parsed.port().unwrap_or(443);
-        match (host, port).to_socket_addrs() {
-            Ok(addrs) => {
-                for addr in addrs {
-                    if is_dangerous_ip(&addr.ip()) {
-                        return Err(ConfigError::InvalidValue {
-                            key: field_name.to_string(),
-                            message: format!(
-                                "hostname '{}' resolves to private/internal IP '{}'. \
-                                 This is blocked to prevent SSRF attacks.",
-                                host,
-                                addr.ip()
-                            ),
-                        });
-                    }
-                }
-            }
-            Err(e) => {
-                return Err(ConfigError::InvalidValue {
-                    key: field_name.to_string(),
-                    message: format!(
-                        "failed to resolve hostname '{}': {}. \
-                         Base URLs must be resolvable at config time.",
-                        host, e
-                    ),
-                });
-            }
+        //
+        // In test mode, skip DNS resolution since CI sandboxes often lack
+        // external DNS. The dedicated `validate_base_url_rejects_dns_failure`
+        // test calls `resolve_and_check_hostname` directly to cover this path.
+        #[cfg(not(test))]
+        {
+            resolve_and_check_hostname(host, &parsed, field_name)?;
         }
+        #[cfg(test)]
+        let _ = host;
     }
 
+    Ok(())
+}
+
+/// DNS-based SSRF check: resolve a hostname and reject if any address is
+/// private/internal.  Extracted so the dedicated DNS-validation test can call
+/// it directly while `validate_base_url` skips DNS under `#[cfg(test)]`.
+fn resolve_and_check_hostname(
+    host: &str,
+    parsed: &reqwest::Url,
+    field_name: &str,
+) -> Result<(), ConfigError> {
+    use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
+    let is_dangerous_ip = |ip: &IpAddr| -> bool {
+        match ip {
+            IpAddr::V4(v4) => {
+                v4.is_private()
+                    || v4.is_loopback()
+                    || v4.is_link_local()
+                    || v4.is_multicast()
+                    || v4.is_unspecified()
+                    || *v4 == Ipv4Addr::new(169, 254, 169, 254)
+                    || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
+            }
+            IpAddr::V6(v6) => {
+                if let Some(v4) = v6.to_ipv4_mapped() {
+                    v4.is_private()
+                        || v4.is_loopback()
+                        || v4.is_link_local()
+                        || v4.is_multicast()
+                        || v4.is_unspecified()
+                        || v4 == Ipv4Addr::new(169, 254, 169, 254)
+                        || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
+                } else {
+                    v6.is_loopback()
+                        || v6.is_unspecified()
+                        || (v6.octets()[0] & 0xfe) == 0xfc
+                        || (v6.segments()[0] & 0xffc0) == 0xfe80
+                        || v6.octets()[0] == 0xff
+                }
+            }
+        }
+    };
+    let port = parsed.port().unwrap_or(443);
+    match (host, port).to_socket_addrs() {
+        Ok(addrs) => {
+            for addr in addrs {
+                if is_dangerous_ip(&addr.ip()) {
+                    return Err(ConfigError::InvalidValue {
+                        key: field_name.to_string(),
+                        message: format!(
+                            "hostname '{}' resolves to private/internal IP '{}'. \
+                             This is blocked to prevent SSRF attacks.",
+                            host,
+                            addr.ip()
+                        ),
+                    });
+                }
+            }
+        }
+        Err(e) => {
+            return Err(ConfigError::InvalidValue {
+                key: field_name.to_string(),
+                message: format!(
+                    "failed to resolve hostname '{}': {}. \
+                     Base URLs must be resolvable at config time.",
+                    host, e
+                ),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -629,8 +680,11 @@ mod tests {
             );
             return;
         }
-        // .invalid TLD is guaranteed to never resolve (RFC 6761)
-        let result = validate_base_url("https://ssrf-test.invalid", "TEST");
+        // .invalid TLD is guaranteed to never resolve (RFC 6761).
+        // Call `resolve_and_check_hostname` directly since `validate_base_url`
+        // skips DNS in `#[cfg(test)]` mode.
+        let parsed = reqwest::Url::parse("https://ssrf-test.invalid").unwrap();
+        let result = super::resolve_and_check_hostname("ssrf-test.invalid", &parsed, "TEST");
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
