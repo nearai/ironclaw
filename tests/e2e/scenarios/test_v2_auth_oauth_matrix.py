@@ -1708,8 +1708,10 @@ async def test_repl_http_auth_prompt_accepts_token_and_retries(auth_matrix_repl)
 )
 @pytest.mark.skip(
     reason=(
-        "PTY REPL approval echo remains flaky and is covered by engine-v2 gate "
-        "integration plus gateway OAuth/approval E2E coverage."
+        "PTY REPL approval echo remains flaky — the first 'make approval' "
+        "send doesn't always reach the REPL before the test reads, and the "
+        "approval gate is covered by engine-v2 gate integration plus the "
+        "gateway OAuth/approval E2E coverage."
     )
 )
 async def test_repl_approval_paths(auth_matrix_repl, reply, expected):
