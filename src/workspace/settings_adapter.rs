@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::OnceCell;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::db::{Database, SettingsStore};
 use crate::error::DatabaseError;
@@ -294,7 +294,13 @@ impl SettingsStore for WorkspaceSettingsAdapter {
         if validate_settings_key(key).is_ok() {
             let path = settings_path(key);
             if let Err(e) = self.workspace.delete(&path).await {
-                warn!(
+                // `debug!` not `warn!`: settings writes are reachable from
+                // REPL/CLI channels where `warn!`/`info!` output corrupts
+                // the terminal UI (CLAUDE.md → Code Style → logging). The
+                // legacy table remains the source of truth during
+                // migration, so a stale workspace doc is recoverable on
+                // the next write.
+                debug!(
                     key = %key,
                     error = %e,
                     "workspace delete failed in delete_setting; legacy table will still be updated"

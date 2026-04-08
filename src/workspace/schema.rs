@@ -27,17 +27,39 @@ pub fn validate_content_against_schema(
             errors: vec![format!("content is not valid JSON: {e}")],
         })?;
 
-    // NOTE: `jsonschema::validate` recompiles the schema on every call. This
-    // is intentionally not cached today: schema-validated writes are limited
-    // to settings/extension/skill state, which are rare user-initiated
-    // operations (not a hot path). If schema validation moves into a frequent
-    // write path, build a `Validator` once per distinct schema (e.g., via
-    // `OnceCell`/`DashMap` keyed on the schema's canonical JSON) and call
-    // `Validator::validate` here instead.
-    jsonschema::validate(schema, &instance).map_err(|e| WorkspaceError::SchemaValidation {
-        path: path.to_string(),
-        errors: vec![e.to_string()],
-    })
+    // NOTE: `validator_for` recompiles the schema on every call. This is
+    // intentionally not cached today: schema-validated writes are limited to
+    // settings/extension/skill state, which are rare user-initiated operations
+    // (not a hot path). If schema validation moves into a frequent write path,
+    // build a `Validator` once per distinct schema (e.g., via `OnceCell`/
+    // `DashMap` keyed on the schema's canonical JSON) and call
+    // `Validator::iter_errors` here instead.
+    //
+    // `validator_for` + `iter_errors` (instead of `jsonschema::validate`) so
+    // that we return *all* validation errors in a single round-trip — users
+    // fixing a misconfigured `llm_custom_providers` setting shouldn't have to
+    // submit five iterative writes to discover all the things that are wrong
+    // with their payload. It also separates "bad schema" errors (compile
+    // failure) from "bad content" errors (instance failure).
+    let validator =
+        jsonschema::validator_for(schema).map_err(|e| WorkspaceError::SchemaValidation {
+            path: path.to_string(),
+            errors: vec![format!("invalid schema: {e}")],
+        })?;
+
+    let errors: Vec<String> = validator
+        .iter_errors(&instance)
+        .map(|e| e.to_string())
+        .collect();
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(WorkspaceError::SchemaValidation {
+            path: path.to_string(),
+            errors,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -138,5 +160,53 @@ mod tests {
     fn empty_object_passes_permissive_schema() {
         let schema = json!({"type": "object"});
         assert!(validate_content_against_schema("test.json", "{}", &schema).is_ok());
+    }
+
+    #[test]
+    fn multiple_errors_are_all_reported() {
+        // Regression: `jsonschema::validate` only returns the first error,
+        // so users iteratively fix-and-retry. Switching to `iter_errors`
+        // collects every violation in one round.
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "name":  { "type": "string" },
+                "age":   { "type": "integer" },
+                "email": { "type": "string", "format": "email" }
+            },
+            "required": ["name", "age", "email"]
+        });
+        // Missing all three required fields AND has a wrong-typed extra key.
+        let content = r#"{"extra": 123}"#;
+        let err = validate_content_against_schema("test.json", content, &schema).unwrap_err();
+        match err {
+            WorkspaceError::SchemaValidation { errors, .. } => {
+                assert!(
+                    errors.len() >= 3,
+                    "expected at least 3 errors for 3 missing required fields, got {}: {errors:?}",
+                    errors.len()
+                );
+            }
+            other => panic!("expected SchemaValidation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_schema_is_distinguished_from_invalid_content() {
+        // A broken schema (e.g. `type` set to a non-string) should produce
+        // a clear "invalid schema" error rather than confusing the user
+        // about their content.
+        let broken_schema = json!({"type": 123});
+        let err = validate_content_against_schema("test.json", "{}", &broken_schema).unwrap_err();
+        match err {
+            WorkspaceError::SchemaValidation { errors, .. } => {
+                assert!(
+                    errors[0].contains("invalid schema"),
+                    "expected 'invalid schema' prefix, got: {:?}",
+                    errors[0]
+                );
+            }
+            other => panic!("expected SchemaValidation, got {other:?}"),
+        }
     }
 }

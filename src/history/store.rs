@@ -201,6 +201,22 @@ impl Store {
     }
 
     /// Create a lightweight system job for audit trail purposes.
+    ///
+    /// System jobs represent synchronous channel/CLI-initiated dispatches
+    /// that begin and end in the same instant. `created_at`, `started_at`,
+    /// and `completed_at` are all set to the same timestamp so audit
+    /// queries computing duration (`completed_at - started_at`) see 0, not
+    /// NULL, and dashboards filtering for "started but not yet completed"
+    /// don't misclassify these as never-started rows.
+    ///
+    /// ⚠️ Row growth: every `ToolDispatcher::dispatch()` call (gateway
+    /// handlers, CLI commands, routine ticks) creates one system job row.
+    /// `agent_jobs` is the durable audit anchor, not ephemeral LLM data,
+    /// so these rows are intentionally retained forever. If row count
+    /// becomes a concern for agent-job listing queries, prefer adding a
+    /// partial index (`WHERE category != 'system'`) rather than deleting
+    /// rows — deletion would violate the "LLM data is never deleted" rule
+    /// (CLAUDE.md).
     pub async fn create_system_job(
         &self,
         user_id: &str,
@@ -216,8 +232,8 @@ impl Store {
             INSERT INTO agent_jobs (
                 id, title, description, category, status, source,
                 user_id, actual_cost, repair_attempts, max_tokens,
-                total_tokens_used, created_at, completed_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                total_tokens_used, created_at, started_at, completed_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             "#,
             &[
                 &id,
@@ -232,7 +248,8 @@ impl Store {
                 &0i64,
                 &0i64,
                 &now,
-                &Some(now),
+                &Some(now), // started_at = created_at (instant start)
+                &Some(now), // completed_at = created_at (instant completion)
             ],
         )
         .await?;

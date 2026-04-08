@@ -17,7 +17,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use tracing::{debug, warn};
+use tracing::debug;
 use uuid::Uuid;
 
 use crate::context::{ActionRecord, JobContext};
@@ -97,7 +97,10 @@ impl ToolDispatcher {
     ///
     /// Approval checks are skipped — channel-initiated operations are
     /// user-confirmed by definition. Audit-trail persistence failures are
-    /// logged via `tracing::warn!` but do not mask the tool result.
+    /// logged via `tracing::debug!` but do not mask the tool result —
+    /// `debug!` is used (not `warn!`/`info!`) because dispatch calls may
+    /// originate from interactive CLI/REPL sessions where `info!`/`warn!`
+    /// output corrupts the terminal UI. See CLAUDE.md (Code Style → logging).
     pub async fn dispatch(
         &self,
         tool_name: &str,
@@ -182,7 +185,10 @@ impl ToolDispatcher {
         // 7. Persist the audit record. Awaited (not spawned) so short-lived
         //    callers (CLI commands) cannot terminate before the row is written.
         if let Err(e) = self.store.save_action(job_id, &action).await {
-            warn!(
+            // `debug!` not `warn!`: dispatch is reachable from interactive
+            // REPL/CLI channels where `warn!`/`info!` output corrupts the
+            // terminal UI (CLAUDE.md → Code Style → logging).
+            debug!(
                 error = %e,
                 tool = %resolved_name,
                 job_id = %job_id,
@@ -215,5 +221,329 @@ mod tests {
             format!("routine:{id}")
         );
         assert_eq!(DispatchSource::System.to_string(), "system");
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Integration tests for the full `ToolDispatcher::dispatch` pipeline.
+//
+// These tests exercise the load-bearing new code path (`dispatch` called
+// against a real tool, with a real libSQL-backed store), not just the
+// `DispatchSource::Display` formatting above. They assert the four
+// invariants the dispatcher promises callers:
+//
+// 1. **Audit trail persistence** — a row lands in `agent_jobs` + a
+//    matching `ActionRecord` lands in `job_actions`.
+// 2. **Sensitive parameter redaction** — `sensitive_params()` values
+//    appear as `"[REDACTED]"` in the persisted audit row (but the tool
+//    itself still sees the raw value).
+// 3. **Per-tool timeout honored** — a slow tool is aborted at the
+//    boundary declared by `execution_timeout()`.
+// 4. **Output sanitization runs** — `SafetyLayer::sanitize_tool_output`
+//    is applied before the pretty-printed output is stored.
+// ────────────────────────────────────────────────────────────────────────────
+#[cfg(all(test, feature = "libsql"))]
+mod integration_tests {
+    use super::*;
+    use crate::config::SafetyConfig;
+    use crate::context::JobContext;
+    use crate::db::Database;
+    use crate::db::libsql::LibSqlBackend;
+    use crate::tools::tool::{Tool, ToolError, ToolOutput};
+    use async_trait::async_trait;
+    use ironclaw_safety::SafetyLayer;
+    use std::time::Duration;
+
+    // ── Stub tools ──────────────────────────────────────────
+
+    /// Echoes its input back; declares `api_key` as sensitive so the
+    /// dispatcher must redact it in the persisted audit row.
+    struct RecordingTool {
+        captured: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+    }
+
+    #[async_trait]
+    impl Tool for RecordingTool {
+        fn name(&self) -> &str {
+            "recording_stub"
+        }
+        fn description(&self) -> &str {
+            "Test stub that captures params and echoes them back."
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "message": { "type": "string" },
+                    "api_key": { "type": "string" }
+                },
+                "required": ["message"]
+            })
+        }
+        fn sensitive_params(&self) -> &[&str] {
+            &["api_key"]
+        }
+        async fn execute(
+            &self,
+            params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            *self.captured.lock().expect("captured lock") = Some(params.clone());
+            Ok(ToolOutput::success(
+                serde_json::json!({
+                    "echo": params.get("message").cloned().unwrap_or(serde_json::Value::Null),
+                    "saw_api_key": params.get("api_key").is_some(),
+                }),
+                Duration::from_millis(1),
+            ))
+        }
+    }
+
+    /// Sleeps forever (well, 60s) but declares a 100ms timeout so the
+    /// dispatcher aborts it quickly and records a failure.
+    struct SlowTool;
+
+    #[async_trait]
+    impl Tool for SlowTool {
+        fn name(&self) -> &str {
+            "slow_stub"
+        }
+        fn description(&self) -> &str {
+            "Test stub that sleeps past its declared timeout."
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+        fn execution_timeout(&self) -> Duration {
+            Duration::from_millis(100)
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            unreachable!("slow_stub should have been killed by its per-tool timeout")
+        }
+    }
+
+    // ── Fixtures ────────────────────────────────────────────
+
+    async fn test_dispatcher() -> (
+        Arc<ToolDispatcher>,
+        Arc<LibSqlBackend>,
+        Arc<dyn Database>,
+        Arc<ToolRegistry>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let concrete = Arc::new(
+            LibSqlBackend::new_local(&dir.path().join("test.db"))
+                .await
+                .expect("libsql backend"),
+        );
+        concrete.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::clone(&concrete) as Arc<dyn Database>;
+
+        // Bootstrap the single-user owner row so FK constraints on
+        // agent_jobs.user_id are satisfied.
+        use crate::db::UserRecord;
+        let now = chrono::Utc::now();
+        db.create_user(&UserRecord {
+            id: "tester".to_string(),
+            email: None,
+            display_name: "tester".to_string(),
+            status: "active".to_string(),
+            role: "admin".to_string(),
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            created_by: None,
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .expect("create user");
+
+        let registry = Arc::new(ToolRegistry::new());
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 65_536,
+            injection_check_enabled: false,
+        }));
+        let dispatcher = Arc::new(ToolDispatcher::new(
+            Arc::clone(&registry),
+            safety,
+            Arc::clone(&db),
+        ));
+        (dispatcher, concrete, db, registry, dir)
+    }
+
+    /// Fetch every system-category job for the test user. `list_agent_jobs_for_user`
+    /// intentionally filters to `source = 'direct'` so system dispatches never
+    /// pollute agent-job listings — the test needs a direct query to bypass
+    /// that filter.
+    async fn fetch_system_jobs_for_user(
+        backend: &LibSqlBackend,
+        user_id: &str,
+    ) -> Vec<(Uuid, String)> {
+        use libsql::params;
+        let conn = backend.connect().await.expect("connect");
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, title FROM agent_jobs
+                WHERE category = 'system' AND user_id = ?1
+                ORDER BY created_at DESC
+                "#,
+                params![user_id],
+            )
+            .await
+            .expect("query");
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.expect("next") {
+            let id_str: String = row.get(0).expect("id text");
+            let title: String = row.get(1).expect("title text");
+            if let Ok(id) = id_str.parse::<Uuid>() {
+                out.push((id, title));
+            }
+        }
+        out
+    }
+
+    // ── Tests ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_persists_action_record_with_redacted_sensitive_params() {
+        let (dispatcher, backend, db, registry, _dir) = test_dispatcher().await;
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        registry
+            .register(Arc::new(RecordingTool {
+                captured: Arc::clone(&captured),
+            }))
+            .await;
+
+        let output = dispatcher
+            .dispatch(
+                "recording_stub",
+                serde_json::json!({
+                    "message": "hello world",
+                    "api_key": "super-secret-value"
+                }),
+                "tester",
+                DispatchSource::Channel("gateway".into()),
+            )
+            .await
+            .expect("dispatch should succeed");
+
+        // Invariant 1: tool sees the RAW (un-redacted) params — the
+        // `api_key` value must reach the tool itself.
+        let seen = captured.lock().unwrap().clone().expect("tool was called");
+        assert_eq!(
+            seen.get("api_key").and_then(|v| v.as_str()),
+            Some("super-secret-value"),
+            "tool must see the real sensitive value"
+        );
+        // Sanity: output contains what the tool returned.
+        assert_eq!(
+            output.result.get("echo").and_then(|v| v.as_str()),
+            Some("hello world")
+        );
+
+        // Invariant 2: a system job was created + the ActionRecord persisted.
+        // `create_system_job` sets `title = source`, so locate our job by
+        // the display-form of our `DispatchSource`. Use the raw-SQL helper
+        // because `list_agent_jobs_for_user` filters out `category = 'system'`
+        // rows on purpose.
+        let system_jobs = fetch_system_jobs_for_user(&backend, "tester").await;
+        let (system_job_id, _) = system_jobs
+            .iter()
+            .find(|(_, title)| title == "channel:gateway")
+            .cloned()
+            .expect("system job for the channel:gateway dispatch");
+        let actions = db
+            .get_job_actions(system_job_id)
+            .await
+            .expect("get job actions");
+        assert_eq!(actions.len(), 1, "exactly one action per dispatched call");
+        let action = &actions[0];
+        assert_eq!(action.tool_name, "recording_stub");
+        assert!(
+            action.success,
+            "action should be marked success for a Ok(ToolOutput) return"
+        );
+
+        // Invariant 3: sensitive params are redacted in the persisted
+        // `input` on the audit row. Non-sensitive values survive; the
+        // sensitive one becomes the `[REDACTED]` sentinel.
+        let persisted_input = &action.input;
+        assert_eq!(
+            persisted_input.get("message").and_then(|v| v.as_str()),
+            Some("hello world"),
+            "non-sensitive params must survive redaction: {persisted_input}"
+        );
+        assert_eq!(
+            persisted_input.get("api_key").and_then(|v| v.as_str()),
+            Some("[REDACTED]"),
+            "sensitive value must be redacted in the audit row: {persisted_input}"
+        );
+        let persisted_json = persisted_input.to_string();
+        assert!(
+            !persisted_json.contains("super-secret-value"),
+            "raw sensitive value must not appear anywhere in the audit row: {persisted_json}"
+        );
+
+        // Invariant 4: sanitized output is populated (sanitization ran).
+        assert!(
+            action.output_sanitized.is_some(),
+            "output_sanitized should be populated on the audit row"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_honors_per_tool_timeout_and_records_failure() {
+        let (dispatcher, backend, db, registry, _dir) = test_dispatcher().await;
+        registry.register(Arc::new(SlowTool)).await;
+
+        let start = Instant::now();
+        let result = dispatcher
+            .dispatch(
+                "slow_stub",
+                serde_json::json!({}),
+                "tester",
+                DispatchSource::System,
+            )
+            .await;
+        let elapsed = start.elapsed();
+
+        // Must return a `Timeout` error after roughly the 100ms bound — not
+        // the 60s the tool would sleep for.
+        assert!(
+            matches!(result, Err(ToolError::Timeout(_))),
+            "expected Timeout, got {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "dispatch must have enforced the per-tool 100ms timeout; actually slept {elapsed:?}"
+        );
+
+        // The audit row should still land, marked as a failure.
+        let system_jobs = fetch_system_jobs_for_user(&backend, "tester").await;
+        let (system_job_id, _) = system_jobs
+            .iter()
+            .find(|(_, title)| title == "system")
+            .cloned()
+            .expect("system job for the System-source dispatch");
+        let actions = db
+            .get_job_actions(system_job_id)
+            .await
+            .expect("get job actions");
+        assert_eq!(
+            actions.len(),
+            1,
+            "timeout should still record exactly one action"
+        );
+        assert!(
+            !actions[0].success,
+            "timed-out action must be marked success=false"
+        );
     }
 }

@@ -3103,7 +3103,16 @@ async fn extensions_setup_submit_handler(
             }
             Ok(Json(resp))
         }
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Err(e) => {
+            // Preserve the `activated` field on the failure path so clients
+            // (and regression tests) see an explicit `false` rather than
+            // `null`. `ActionResponse::fail` leaves `activated` as `None`,
+            // which serializes to `null` and makes "did activation fail?"
+            // ambiguous from the wire.
+            let mut resp = ActionResponse::fail(e.to_string());
+            resp.activated = Some(false);
+            Ok(Json(resp))
+        }
     }
 }
 
@@ -4049,7 +4058,11 @@ mod tests {
         let secrets = test_secrets_store();
         let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
 
-        let channel_name = "test-failing-channel";
+        // Extension names are canonicalized to snake_case (#2129), so use
+        // underscores here to match what `ext_mgr.configure()` will look up
+        // on disk. Using a dashed name would cause a spurious "Capabilities
+        // file not found" error instead of the intended activation failure.
+        let channel_name = "test_failing_channel";
         std::fs::write(
             wasm_channels_dir
                 .path()

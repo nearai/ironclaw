@@ -249,9 +249,7 @@ impl HybridStore {
             match ws.read(&old_path).await {
                 Ok(doc) => {
                     let already_present = ws.exists(&new_path).await.unwrap_or(false);
-                    if !already_present
-                        && let Err(e) = ws.write(&new_path, &doc.content).await
-                    {
+                    if !already_present && let Err(e) = ws.write(&new_path, &doc.content).await {
                         debug!(
                             old = %old_path,
                             new = %new_path,
