@@ -1,6 +1,8 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Mutex, OnceLock};
+
+use ipnet::IpNet;
 
 use crate::error::ConfigError;
 
@@ -219,56 +221,11 @@ fn is_allowlist_eligible_private_ip(ip: &IpAddr) -> bool {
     }
 }
 
-fn ipv4_in_cidr(ip: Ipv4Addr, base: Ipv4Addr, prefix: u8) -> bool {
-    let ip_u = u32::from(ip);
-    let base_u = u32::from(base);
-    let mask = if prefix == 0 {
-        0
-    } else {
-        u32::MAX << (32 - prefix)
-    };
-    (ip_u & mask) == (base_u & mask)
-}
-
-fn ipv6_in_cidr(ip: Ipv6Addr, base: Ipv6Addr, prefix: u8) -> bool {
-    let ip_u = u128::from_be_bytes(ip.octets());
-    let base_u = u128::from_be_bytes(base.octets());
-    let mask = if prefix == 0 {
-        0
-    } else {
-        u128::MAX << (128 - prefix)
-    };
-    (ip_u & mask) == (base_u & mask)
-}
-
 fn ip_in_cidr(ip: &IpAddr, cidr: &str) -> Result<bool, String> {
-    let (base_str, prefix_str) = cidr
-        .split_once('/')
-        .ok_or_else(|| format!("CIDR '{cidr}' is missing '/'"))?;
-    let base_ip: IpAddr = base_str
+    let net: IpNet = cidr
         .parse()
-        .map_err(|e| format!("invalid CIDR base '{base_str}': {e}"))?;
-    match (ip, base_ip) {
-        (IpAddr::V4(ipv4), IpAddr::V4(base_v4)) => {
-            let prefix: u8 = prefix_str
-                .parse()
-                .map_err(|e| format!("invalid IPv4 CIDR prefix '{prefix_str}': {e}"))?;
-            if prefix > 32 {
-                return Err(format!("IPv4 CIDR prefix out of range in '{cidr}'"));
-            }
-            Ok(ipv4_in_cidr(*ipv4, base_v4, prefix))
-        }
-        (IpAddr::V6(ipv6), IpAddr::V6(base_v6)) => {
-            let prefix: u8 = prefix_str
-                .parse()
-                .map_err(|e| format!("invalid IPv6 CIDR prefix '{prefix_str}': {e}"))?;
-            if prefix > 128 {
-                return Err(format!("IPv6 CIDR prefix out of range in '{cidr}'"));
-            }
-            Ok(ipv6_in_cidr(*ipv6, base_v6, prefix))
-        }
-        _ => Ok(false),
-    }
+        .map_err(|e| format!("invalid CIDR '{cidr}': {e}"))?;
+    Ok(net.contains(ip))
 }
 
 fn is_private_ip_allowed(ip: &IpAddr, allow_private_cidrs: &[String]) -> Result<bool, String> {

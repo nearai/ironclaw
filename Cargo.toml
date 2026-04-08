@@ -126,6 +126,7 @@ secrecy = { version = "0.10", features = ["serde"] }
 # URL parsing and encoding
 url = "2"
 urlencoding = "2"
+ipnet = "2"
 
 # Open URLs in browser
 open = "5"
