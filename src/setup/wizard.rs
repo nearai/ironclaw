@@ -909,6 +909,11 @@ impl SetupWizard {
             // Realign any historically modified migration checksums before
             // refinery validates them. See `crate::db::migration_fixup` and
             // issue #1328 for context.
+            //
+            // NOTE: this same fix-up call is duplicated in
+            // `src/history/store.rs::Store::run_migrations`. If you change
+            // one, change the other — both call sites embed refinery
+            // migrations independently and must stay in sync.
             crate::db::migration_fixup::realign_diverged_checksums(&mut client)
                 .await
                 .map_err(|e| SetupError::Database(format!("Migration fix-up failed: {}", e)))?;

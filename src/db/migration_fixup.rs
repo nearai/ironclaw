@@ -188,6 +188,13 @@ pub(crate) async fn realign_diverged_checksums_with(
             })?;
 
         if updated > 0 {
+            // `warn!` is intentional here even though CLAUDE.md warns
+            // against `info!`/`warn!` in background tasks (they corrupt
+            // the REPL/TUI). This fix-up runs during database migration
+            // at startup, *before* any channel/REPL/TUI is initialized,
+            // so terminal-rendering interference is impossible. If this
+            // call is ever moved later in startup, downgrade to `debug!`
+            // or pre-buffer the message.
             tracing::warn!(
                 migration = %migration_label,
                 rows = updated,
@@ -229,7 +236,16 @@ mod tests {
                     lineno + 1
                 )
             });
-            map.insert(key.trim().to_string(), parsed);
+            // Reject duplicate keys: a stray duplicate would silently
+            // overwrite an earlier pinned checksum and weaken the
+            // immutability guard. Detect it loudly during the test.
+            let key = key.trim().to_string();
+            if map.insert(key.clone(), parsed).is_some() {
+                panic!(
+                    "checksums.lock line {} contains duplicate migration key: {key}",
+                    lineno + 1
+                );
+            }
         }
         map
     }
@@ -357,7 +373,18 @@ mod tests {
                 }
             })
             .collect();
-        sql_files.sort();
+        // Natural-sort by parsed migration version (so V2 comes before
+        // V10), not lex-sort (which would order V10 before V2). The
+        // resulting lockfile reads in numeric order which makes review
+        // diffs easier to scan.
+        sql_files.sort_by_key(|path| {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            // V<n>__<name> → parse the digits between `V` and `__`.
+            stem.strip_prefix('V')
+                .and_then(|s| s.split_once("__"))
+                .and_then(|(v, _)| v.parse::<u32>().ok())
+                .unwrap_or(u32::MAX)
+        });
 
         let mut output = String::new();
         output.push_str(
@@ -637,5 +664,94 @@ mod tests {
             )
             .await
             .expect("cleanup post-run");
+    }
+
+    /// Regression test for the defensive check that rejects a
+    /// `KnownDivergence` whose canonical checksum is also listed in its
+    /// own `known_bad_checksums`. Such a misconfiguration would silently
+    /// rewrite already-correct rows to themselves; the production code
+    /// returns `Err(DatabaseError::Migration(...))` to refuse startup.
+    ///
+    /// Like the realignment integration test above, this requires a
+    /// `PgClient` and so is gated on `feature = "integration"`. The
+    /// error fires *before* any UPDATE query, so the test only needs a
+    /// reachable database — `refinery_schema_history` does not even
+    /// need to exist.
+    #[cfg(feature = "integration")]
+    #[tokio::test]
+    async fn rejects_canonical_in_known_bad_checksums() {
+        use deadpool_postgres::{Manager, Pool};
+        use tokio_postgres::{Config, NoTls};
+
+        let database_url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://localhost/ironclaw_test".to_string());
+        let config: Config = match database_url.parse() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipping: invalid DATABASE_URL ({e})");
+                return;
+            }
+        };
+        let mgr = Manager::new(config, NoTls);
+        let pool = match Pool::builder(mgr).max_size(2).build() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("skipping: failed to build pool ({e})");
+                return;
+            }
+        };
+        let mut client = match pool.get().await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipping: database unavailable ({e})");
+                return;
+            }
+        };
+
+        // Make sure refinery_schema_history exists so we exercise the
+        // post-history-check branch (the early-return on missing table
+        // would otherwise mask the validation we want to test).
+        client
+            .batch_execute(
+                "CREATE TABLE IF NOT EXISTS refinery_schema_history ( \
+                    version INT4 PRIMARY KEY, \
+                    name VARCHAR(255), \
+                    applied_on VARCHAR(255), \
+                    checksum VARCHAR(255))",
+            )
+            .await
+            .expect("create refinery_schema_history");
+
+        // Construct a deliberately-misconfigured divergence where the
+        // canonical checksum appears in its own known-bad list.
+        const TEST_SQL: &str = "-- bad-config test fixture\nSELECT 2;\n";
+        let canonical = Migration::unapplied("V99998__bad_config", TEST_SQL)
+            .unwrap()
+            .checksum();
+        let bad_divergences: &[KnownDivergence] = &[KnownDivergence {
+            version: 99998,
+            name: "bad_config",
+            sql: TEST_SQL,
+            known_bad_checksums: Box::leak(Box::new([canonical])),
+            explanation: "intentional misconfig for PR #2101 regression test",
+        }];
+
+        let result = super::realign_diverged_checksums_with(&mut client, bad_divergences).await;
+        match result {
+            Err(crate::error::DatabaseError::Migration(msg)) => {
+                assert!(
+                    msg.contains("known_bad_checksums"),
+                    "expected error to mention known_bad_checksums, got: {msg}",
+                );
+                assert!(
+                    msg.contains("V99998__bad_config"),
+                    "expected error to identify the offending migration label, got: {msg}",
+                );
+            }
+            Err(other) => panic!("expected Migration error, got: {other:?}"),
+            Ok(()) => {
+                panic!("expected Err — canonical checksum in known_bad list should refuse startup")
+            }
+        }
     }
 }
