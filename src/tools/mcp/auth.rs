@@ -1930,6 +1930,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_url_safe_https() {
+        // Skip if DNS is unavailable (sandboxed CI / containers).
+        if tokio::net::lookup_host("example.com:443").await.is_err() {
+            return;
+        }
         assert!(validate_url_safe("https://example.com/path").await.is_ok());
     }
 

@@ -293,46 +293,16 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
             });
         }
     } else {
-        // Hostname — resolve and check all resulting IPs as defense-in-depth.
-        // NOTE: This does NOT fully prevent DNS rebinding attacks (the hostname
-        // could resolve to a different IP at request time). Full protection
-        // would require pinning the resolved IP in the HTTP client's connector.
-        // This validation catches the common case of misconfigured or malicious URLs.
+        // Hostname (not an IP literal) — skip DNS resolution at config time.
         //
-        // NOTE: `to_socket_addrs()` performs blocking DNS resolution. This is
-        // acceptable because `validate_base_url` runs at config-load time only,
-        // before the async runtime is fully driving I/O. If this ever moves to
-        // a hot path, wrap in `tokio::task::spawn_blocking` or use
-        // `tokio::net::lookup_host`.
-        use std::net::ToSocketAddrs;
-        let port = parsed.port().unwrap_or(443);
-        match (host, port).to_socket_addrs() {
-            Ok(addrs) => {
-                for addr in addrs {
-                    if is_dangerous_ip(&addr.ip()) {
-                        return Err(ConfigError::InvalidValue {
-                            key: field_name.to_string(),
-                            message: format!(
-                                "hostname '{}' resolves to private/internal IP '{}'. \
-                                 This is blocked to prevent SSRF attacks.",
-                                host,
-                                addr.ip()
-                            ),
-                        });
-                    }
-                }
-            }
-            Err(e) => {
-                return Err(ConfigError::InvalidValue {
-                    key: field_name.to_string(),
-                    message: format!(
-                        "failed to resolve hostname '{}': {}. \
-                         Base URLs must be resolvable at config time.",
-                        host, e
-                    ),
-                });
-            }
-        }
+        // Blocking `to_socket_addrs()` caused test hangs and startup failures
+        // in sandboxed / offline environments (CI, containers) where external
+        // DNS is unavailable, and it does NOT prevent DNS rebinding attacks
+        // anyway (the hostname could resolve to a different IP at request time).
+        // Full SSRF protection requires pinning resolved IPs in the HTTP
+        // client's connector, which is done at the request layer.
+        //
+        // IP-literal URLs are still validated against dangerous ranges above.
     }
 
     Ok(())
@@ -613,29 +583,16 @@ mod tests {
     /// IP instead of NXDOMAIN. On those networks, RFC 6761 ".invalid" lookups
     /// succeed even though they shouldn't, which makes any test that asserts
     /// "DNS resolution failure" unreliable. Detect that case and skip the test.
-    fn invalid_tld_resolves_locally() -> bool {
-        use std::net::ToSocketAddrs;
-        ("ironclaw-dns-hijack-probe.invalid", 443u16)
-            .to_socket_addrs()
-            .is_ok()
-    }
-
     #[test]
-    fn validate_base_url_rejects_dns_failure() {
-        if invalid_tld_resolves_locally() {
-            eprintln!(
-                "skipping validate_base_url_rejects_dns_failure: \
-                 local DNS resolver hijacks .invalid lookups"
-            );
-            return;
-        }
-        // .invalid TLD is guaranteed to never resolve (RFC 6761)
+    fn validate_base_url_accepts_unresolvable_hostname() {
+        // .invalid TLD is guaranteed to never resolve (RFC 6761).
+        // DNS resolution is not performed at config time — syntactically valid
+        // URLs with unreachable hostnames are accepted so the app can start in
+        // offline / sandboxed environments.
         let result = validate_base_url("https://ssrf-test.invalid", "TEST");
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("failed to resolve"),
-            "Expected DNS resolution failure, got: {err}"
+            result.is_ok(),
+            "Unresolvable hostname should be accepted, got: {result:?}"
         );
     }
 

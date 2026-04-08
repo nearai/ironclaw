@@ -247,11 +247,17 @@ mod tests {
     #[tokio::test]
     async fn health_with_unreachable_url_is_false() {
         // Use RFC 5737 TEST-NET-1 (192.0.2.0/24) for reliable failure even behind proxies.
-        let tunnel = CustomTunnel::new(
-            "sleep 1".into(),
-            Some("http://192.0.2.1:9999/healthz".into()),
-            None,
-        );
+        let url = "http://192.0.2.1:9999/healthz";
+        // Skip if a local proxy intercepts all HTTP (e.g. sandboxed CI).
+        let probe = reqwest::Client::new()
+            .get(url)
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await;
+        if probe.is_ok() {
+            return;
+        }
+        let tunnel = CustomTunnel::new("sleep 1".into(), Some(url.into()), None);
         assert!(
             !tunnel.health_check().await,
             "Health check should fail for unreachable URL"
