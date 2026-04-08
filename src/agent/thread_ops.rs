@@ -12,8 +12,8 @@ use uuid::Uuid;
 use crate::agent::Agent;
 use crate::agent::compaction::ContextCompactor;
 use crate::agent::dispatcher::{
-    AgenticLoopResult, TurnUsageSummary, auth_instructions_or_default, capture_auth_prompt,
-    execute_chat_tool_standalone, parse_auth_result, persist_selected_auth_prompt,
+    AgenticLoopResult, ParsedAuthData, TurnUsageSummary, auth_instructions_or_default,
+    capture_auth_prompt, execute_chat_tool_standalone, persist_selected_auth_prompt,
     restore_selected_auth_prompt,
 };
 use crate::agent::session::{MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState};
@@ -1488,6 +1488,19 @@ impl Agent {
 
             // Handle approval if a tool needed it
             if let Some((approval_idx, tc, tool, allow_always)) = approval_needed {
+                // Emit auth prompt alongside the approval card so the user
+                // sees the connect button without waiting for approval to resolve.
+                if let Some((ref ext_name, ref auth_data)) = selected_auth_prompt {
+                    self.emit_auth_prompt(
+                        message,
+                        ext_name.clone(),
+                        auth_data.instructions.clone(),
+                        auth_data.auth_url.clone(),
+                        auth_data.setup_url.clone(),
+                    )
+                    .await;
+                }
+
                 let new_pending = PendingApproval {
                     request_id: Uuid::new_v4(),
                     tool_name: tc.name.clone(),
@@ -1545,21 +1558,13 @@ impl Agent {
                 if auth_data.awaiting_token {
                     let instructions =
                         auth_instructions_or_default(auth_data.instructions.as_deref());
-                    let auth_result = Ok(serde_json::json!({
-                        "name": ext_name.clone(),
-                        "instructions": instructions.clone(),
-                        "auth_url": auth_data.auth_url,
-                        "setup_url": auth_data.setup_url,
-                        "awaiting_token": true,
-                    })
-                    .to_string());
                     self.handle_auth_intercept(
                         &session,
                         thread_id,
                         message,
-                        &auth_result,
                         ext_name,
                         instructions.clone(),
+                        &auth_data,
                     )
                     .await;
                     return Ok(SubmissionResult::response(instructions));
@@ -1737,11 +1742,10 @@ impl Agent {
         session: &Arc<Mutex<Session>>,
         thread_id: Uuid,
         message: &IncomingMessage,
-        tool_result: &Result<String, Error>,
         ext_name: String,
         instructions: String,
+        auth_data: &ParsedAuthData,
     ) {
-        let auth_data = parse_auth_result(tool_result);
         {
             let mut sess = session.lock().await;
             if let Some(thread) = sess.threads.get_mut(&thread_id) {
@@ -1764,8 +1768,8 @@ impl Agent {
                 StatusUpdate::AuthRequired {
                     extension_name: ext_name,
                     instructions: Some(instructions.clone()),
-                    auth_url: auth_data.auth_url,
-                    setup_url: auth_data.setup_url,
+                    auth_url: auth_data.auth_url.clone(),
+                    setup_url: auth_data.setup_url.clone(),
                 },
                 &message.metadata,
             )

@@ -1171,8 +1171,26 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         }
 
         // Approval pauses take precedence over surfacing auth prompts. Persist
-        // the first prompt found so it can be replayed safely after approval.
+        // the prompt so it can be replayed after approval, and also emit it now
+        // so the user sees the connect button alongside the approval card.
         if let Some((approval_idx, tc, tool, allow_always)) = approval_needed {
+            if let Some((ref ext_name, ref auth_data)) = selected_auth_prompt {
+                let _ = self
+                    .agent
+                    .channels
+                    .send_status(
+                        &self.message.channel,
+                        StatusUpdate::AuthRequired {
+                            extension_name: ext_name.clone(),
+                            instructions: auth_data.instructions.clone(),
+                            auth_url: auth_data.auth_url.clone(),
+                            setup_url: auth_data.setup_url.clone(),
+                        },
+                        &self.message.metadata,
+                    )
+                    .await;
+            }
+
             let display_params = redact_params(&tc.arguments, tool.sensitive_params());
             let pending = PendingApproval {
                 request_id: Uuid::new_v4(),
@@ -1278,6 +1296,14 @@ fn normalize_extension_name(value: Option<&str>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// Only allow `https://` URLs for auth/setup links to prevent scheme injection
+/// (e.g. `javascript:`, `file://`).
+fn sanitize_auth_url(url: Option<&str>) -> Option<String> {
+    url.map(str::trim)
+        .filter(|u| u.starts_with("https://"))
+        .map(ToOwned::to_owned)
+}
+
 pub(super) fn auth_instructions_or_default(instructions: Option<&str>) -> String {
     instructions
         .unwrap_or(DEFAULT_AUTH_TOKEN_INSTRUCTIONS)
@@ -1288,14 +1314,13 @@ pub(super) fn persist_selected_auth_prompt(
     selected: Option<&(String, ParsedAuthData)>,
 ) -> Option<PendingAuthPrompt> {
     selected.and_then(|(extension_name, auth_data)| {
-        let extension_name = normalize_extension_name(Some(extension_name.as_str()))?;
-        Some(PendingAuthPrompt {
-            extension_name,
-            instructions: auth_data.instructions.clone(),
-            auth_url: auth_data.auth_url.clone(),
-            setup_url: auth_data.setup_url.clone(),
-            awaiting_token: auth_data.awaiting_token,
-        })
+        PendingAuthPrompt::new(
+            extension_name.trim().to_owned(),
+            auth_data.instructions.clone(),
+            auth_data.auth_url.clone(),
+            auth_data.setup_url.clone(),
+            auth_data.awaiting_token,
+        )
     })
 }
 
@@ -1340,16 +1365,18 @@ pub(super) fn parse_auth_result(result: &Result<String, Error>) -> ParsedAuthDat
             .and_then(|v| v.get("instructions"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
-        auth_url: parsed
-            .as_ref()
-            .and_then(|v| v.get("auth_url"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        setup_url: parsed
-            .as_ref()
-            .and_then(|v| v.get("setup_url"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+        auth_url: sanitize_auth_url(
+            parsed
+                .as_ref()
+                .and_then(|v| v.get("auth_url"))
+                .and_then(|v| v.as_str()),
+        ),
+        setup_url: sanitize_auth_url(
+            parsed
+                .as_ref()
+                .and_then(|v| v.get("setup_url"))
+                .and_then(|v| v.as_str()),
+        ),
         awaiting_token: parsed
             .as_ref()
             .and_then(|v| v.get("awaiting_token"))
@@ -1624,8 +1651,9 @@ mod tests {
     use ironclaw_safety::SafetyLayer;
 
     use super::{
-        capture_auth_prompt, check_auth_required, extract_auth_prompt,
-        persist_selected_auth_prompt, restore_selected_auth_prompt, selected_model_override,
+        capture_auth_prompt, check_auth_required, extract_auth_prompt, parse_auth_result,
+        persist_selected_auth_prompt, restore_selected_auth_prompt, sanitize_auth_url,
+        selected_model_override,
     };
     use crate::agent::session::PendingAuthPrompt;
 
@@ -2341,6 +2369,73 @@ mod tests {
         .to_string());
 
         assert!(extract_auth_prompt("tool_activate", &result).is_none());
+    }
+
+    #[test]
+    fn test_sanitize_auth_url_rejects_non_https_schemes() {
+        assert!(sanitize_auth_url(Some("javascript:alert(1)")).is_none());
+        assert!(sanitize_auth_url(Some("file:///etc/passwd")).is_none());
+        assert!(sanitize_auth_url(Some("http://example.com")).is_none());
+        assert!(sanitize_auth_url(Some("data:text/html,<h1>")).is_none());
+        assert!(sanitize_auth_url(Some("")).is_none());
+        assert!(sanitize_auth_url(None).is_none());
+    }
+
+    #[test]
+    fn test_sanitize_auth_url_allows_https() {
+        assert_eq!(
+            sanitize_auth_url(Some("https://accounts.google.com/o/oauth2/auth")),
+            Some("https://accounts.google.com/o/oauth2/auth".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_auth_result_strips_non_https_urls() {
+        let result: Result<String, Error> = Ok(serde_json::json!({
+            "name": "evil_ext",
+            "auth_url": "javascript:alert(1)",
+            "setup_url": "file:///etc/passwd",
+            "awaiting_token": true,
+        })
+        .to_string());
+
+        let auth_data = parse_auth_result(&result);
+        assert!(auth_data.auth_url.is_none(), "javascript: URL must be rejected");
+        assert!(auth_data.setup_url.is_none(), "file: URL must be rejected");
+        assert!(auth_data.awaiting_token);
+    }
+
+    #[test]
+    fn test_pending_auth_prompt_new_rejects_empty_name() {
+        assert!(PendingAuthPrompt::new(
+            "".to_string(),
+            None,
+            Some("https://example.com".to_string()),
+            None,
+            false,
+        )
+        .is_none());
+        assert!(PendingAuthPrompt::new(
+            "   ".to_string(),
+            None,
+            Some("https://example.com".to_string()),
+            None,
+            false,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn test_pending_auth_prompt_new_accepts_valid_name() {
+        let prompt = PendingAuthPrompt::new(
+            "gmail".to_string(),
+            None,
+            Some("https://example.com".to_string()),
+            None,
+            false,
+        );
+        assert!(prompt.is_some());
+        assert_eq!(prompt.unwrap().extension_name, "gmail");
     }
 
     #[test]

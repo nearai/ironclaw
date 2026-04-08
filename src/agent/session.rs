@@ -163,9 +163,13 @@ impl PendingAuth {
 
 /// Auth prompt captured during a tool turn and persisted if that turn pauses
 /// for approval before the prompt can be surfaced to the user.
+///
+/// Callers should use [`PendingAuthPrompt::new()`] which validates that
+/// `extension_name` is non-empty. Direct struct construction is only
+/// permitted in deserialization and test code.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingAuthPrompt {
-    /// Extension name to authenticate.
+    /// Extension name to authenticate (must be non-empty).
     pub extension_name: String,
     /// Optional instructions shown alongside the auth prompt.
     #[serde(default)]
@@ -179,6 +183,29 @@ pub struct PendingAuthPrompt {
     /// Whether the next user message should be intercepted as a token.
     #[serde(default)]
     pub awaiting_token: bool,
+}
+
+impl PendingAuthPrompt {
+    /// Create a new `PendingAuthPrompt`, returning `None` if `extension_name`
+    /// is empty or whitespace-only.
+    pub fn new(
+        extension_name: String,
+        instructions: Option<String>,
+        auth_url: Option<String>,
+        setup_url: Option<String>,
+        awaiting_token: bool,
+    ) -> Option<Self> {
+        if extension_name.trim().is_empty() {
+            return None;
+        }
+        Some(Self {
+            extension_name,
+            instructions,
+            auth_url,
+            setup_url,
+            awaiting_token,
+        })
+    }
 }
 
 /// Pending tool approval request stored on a thread.
