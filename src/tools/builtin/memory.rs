@@ -297,7 +297,9 @@ impl Tool for MemoryWriteTool {
         let allows_empty_content = target == "bootstrap";
 
         // At least one mode must be provided: content for write/append, or old_string for patch.
-        let is_patch_mode = params.get("old_string").and_then(|v| v.as_str()).is_some();
+        // Filter "null" and "" the same way as the actual old_string extraction below.
+        let is_patch_mode = params.get("old_string").and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty() && *s != "null").is_some();
         let has_content = !content.trim().is_empty();
         if !is_patch_mode && !has_content && !allows_empty_content {
             return Err(ToolError::InvalidParameters(
@@ -454,11 +456,12 @@ impl Tool for MemoryWriteTool {
                     });
                     return Ok(ToolOutput::success(output, start.elapsed()));
                 }
-                Err(_) if has_content => {
-                    // Patch failed (old_string not found) but content was also
-                    // provided — fall through to normal write/append instead of
-                    // erroring. LLMs frequently pass old_string alongside content
-                    // when they just want to append.
+                Err(crate::error::WorkspaceError::PatchFailed { .. }) if has_content => {
+                    // old_string not found but content was also provided —
+                    // fall through to normal write/append instead of erroring.
+                    // LLMs frequently pass old_string alongside content when
+                    // they just want to append. Only PatchFailed triggers this
+                    // fallback; storage/injection errors propagate normally.
                     tracing::info!(
                         path = %resolved_path,
                         "patch failed, falling back to write/append since content is present"

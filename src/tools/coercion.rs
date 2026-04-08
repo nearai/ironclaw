@@ -330,11 +330,17 @@ fn coerce_string_value(s: &str, schema: &serde_json::Value) -> Option<serde_json
 
     if schema_allows_type(schema, "string") {
         // Local LLMs (e.g. llama.cpp with --jinja) sometimes double-quote
-        // string values: the JSON string contains literal quote characters,
-        // e.g. `"\"private\""` instead of `"private"`. Strip them.
-        if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
-            let inner = &s[1..s.len() - 1];
-            return Some(serde_json::Value::String(inner.to_string()));
+        // string values by sending a JSON string literal as the string
+        // content, e.g. `"\"private\""` instead of `"private"`.
+        // Only unquote when the value itself parses as a valid JSON string
+        // literal so legitimate strings that intentionally start and end
+        // with quote characters are preserved.
+        if s.len() >= 2
+            && s.starts_with('"')
+            && s.ends_with('"')
+            && let Ok(parsed) = serde_json::from_str::<String>(s)
+        {
+            return Some(serde_json::Value::String(parsed));
         }
         return None;
     }
@@ -1060,5 +1066,62 @@ mod tests {
             result["requests"],
             serde_json::json!([{ "insertText": { "text": "hello" } }])
         );
+    }
+
+    #[test]
+    fn coerces_literal_null_string_to_json_null_for_nullable_field() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "layer": { "type": ["string", "null"] },
+                "content": { "type": "string" }
+            },
+            "required": ["content"]
+        });
+        let params = serde_json::json!({
+            "layer": "null",
+            "content": "hello"
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        assert_eq!(result["layer"], serde_json::Value::Null);
+        assert_eq!(result["content"], serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn strips_double_quoted_string_values() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "layer": { "type": "string" }
+            }
+        });
+        let params = serde_json::json!({
+            "layer": "\"private\""
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        assert_eq!(result["layer"], serde_json::json!("private"));
+    }
+
+    #[test]
+    fn preserves_legitimate_quoted_strings() {
+        // A string that starts and ends with quotes but isn't a valid JSON
+        // string literal should be left alone.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "text": { "type": "string" }
+            }
+        });
+        let params = serde_json::json!({
+            "text": "\"unmatched"
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        assert_eq!(result["text"], serde_json::json!("\"unmatched"));
     }
 }
