@@ -142,8 +142,8 @@ open = "5"
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
 # WASM sandbox for untrusted tool execution
-wasmtime = { version = "28", features = ["component-model"] }
-wasmtime-wasi = "28"  # WASI support for component model
+wasmtime = { version = "43", features = ["component-model"] }
+wasmtime-wasi = "43"  # WASI support for component model
 wasmparser = "0.220"  # WASM binary parsing for validation
 
 # Cryptography for secrets management
