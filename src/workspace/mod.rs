@@ -53,6 +53,7 @@ mod repository;
 pub mod schema;
 mod search;
 pub mod settings_adapter;
+pub use settings_adapter::WorkspaceSettingsAdapter;
 pub mod settings_schemas;
 
 pub use chunker::{ChunkConfig, chunk_document};
@@ -1214,8 +1215,12 @@ impl Workspace {
             schema::validate_content_against_schema(&path, content, schema)?;
         }
 
+        // `changed_by` is the actor identity (the user performing the write),
+        // not the layer scope. Metadata is resolved in the target layer's
+        // scope above so the layer's `.config` chain governs schema/indexing/
+        // versioning, but version attribution must record who wrote it.
         let _ = self
-            .maybe_save_version(doc.id, &doc.content, &metadata, Some(&scope))
+            .maybe_save_version(doc.id, &doc.content, &metadata, Some(&self.user_id))
             .await;
 
         self.storage.update_document(doc.id, content).await?;
@@ -1273,8 +1278,10 @@ impl Workspace {
             schema::validate_content_against_schema(&path, &new_content, schema)?;
         }
 
+        // `changed_by` is the actor identity, not the layer scope — see the
+        // matching comment in `write_to_layer`.
         let _ = self
-            .maybe_save_version(doc.id, &doc.content, &metadata, Some(&scope))
+            .maybe_save_version(doc.id, &doc.content, &metadata, Some(&self.user_id))
             .await;
 
         self.storage.update_document(doc.id, &new_content).await?;

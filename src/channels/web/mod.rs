@@ -199,7 +199,7 @@ impl GatewayChannel {
             near_rpc_url: self.state.near_rpc_url.clone(),
             near_network: self.state.near_network.clone(),
             oauth_sweep_shutdown: None, // sweep tasks are managed by with_oauth
-            tool_dispatcher: None,
+            tool_dispatcher: self.state.tool_dispatcher.clone(),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);

@@ -60,6 +60,13 @@ const EVENTS_PREFIX: &str = ".system/engine/runtime/events";
 const LEASES_PREFIX: &str = ".system/engine/runtime/leases";
 const CONVERSATIONS_PREFIX: &str = ".system/engine/runtime/conversations";
 
+/// Legacy `engine/...` root used before #2049 moved engine state under
+/// `.system/engine/...`. `migrate_legacy_engine_paths` rewrites any document
+/// found under this prefix into the new location at startup. Kept indefinitely
+/// so old workspaces upgrading after a long pause still get migrated.
+const LEGACY_ENGINE_ROOT: &str = "engine";
+const NEW_ENGINE_ROOT: &str = ".system/engine";
+
 // Well-known titles for special-case routing (must match engine crate constants)
 const ORCHESTRATOR_MAIN_TITLE: &str = "orchestrator:main";
 const ORCHESTRATOR_FAILURES_TITLE: &str = "orchestrator:failures";
@@ -103,6 +110,12 @@ impl HybridStore {
         let Some(ws) = self.workspace.as_ref() else {
             return;
         };
+
+        // Migrate any state still living under the legacy `engine/...`
+        // prefix into `.system/engine/...` BEFORE the loaders run, so the
+        // load below sees a single canonical location and orphaned legacy
+        // documents don't accumulate.
+        self.migrate_legacy_engine_paths(ws).await;
 
         self.load_knowledge_docs(ws).await;
         self.load_map(ws, PROJECTS_PREFIX, |project: Project| async {
@@ -168,6 +181,106 @@ impl HybridStore {
             docs,
             "loaded engine state from workspace"
         );
+    }
+
+    /// One-shot startup migration: rewrite any documents stored under the
+    /// legacy `engine/...` prefix into `.system/engine/...`.
+    ///
+    /// Pre-#2049 deployments persisted v2 engine state under `engine/...`.
+    /// After the unification under `.system/`, the loaders only look at the
+    /// new prefix — without this migration, all legacy state (projects,
+    /// missions, threads, leases, conversations, knowledge docs) would be
+    /// invisible after upgrade. The migration is idempotent: once nothing
+    /// remains under `engine/`, the call is a single workspace listing.
+    ///
+    /// Failures on individual files are logged at `debug!` but do not abort
+    /// the migration — the worst case is that the legacy file stays put and
+    /// we retry on the next startup.
+    async fn migrate_legacy_engine_paths(&self, ws: &Workspace) {
+        let all_paths = match ws.list_all().await {
+            Ok(paths) => paths,
+            Err(e) => {
+                debug!("legacy-engine migration: list_all failed: {e}");
+                return;
+            }
+        };
+
+        let legacy: Vec<String> = all_paths
+            .into_iter()
+            .filter(|p| {
+                // Match `engine/...` exactly (not `.system/engine/...` and not
+                // some other path that happens to contain "engine"). Strip
+                // any leading `/` first because some storages return absolute
+                // paths and others don't.
+                let trimmed = p.strip_prefix('/').unwrap_or(p);
+                trimmed == LEGACY_ENGINE_ROOT
+                    || trimmed.starts_with(&format!("{LEGACY_ENGINE_ROOT}/"))
+            })
+            .collect();
+
+        if legacy.is_empty() {
+            return;
+        }
+
+        debug!(
+            count = legacy.len(),
+            "migrating legacy engine paths to .system/engine/"
+        );
+
+        let mut migrated = 0usize;
+        let mut failed = 0usize;
+        for old_path in legacy {
+            // Compute the new path by replacing the leading `engine` segment
+            // with `.system/engine`. Preserves the rest of the path verbatim.
+            let trimmed = old_path.strip_prefix('/').unwrap_or(&old_path);
+            let suffix = trimmed
+                .strip_prefix(LEGACY_ENGINE_ROOT)
+                .and_then(|s| s.strip_prefix('/').or(Some(s)))
+                .unwrap_or("");
+            let new_path = if suffix.is_empty() {
+                NEW_ENGINE_ROOT.to_string()
+            } else {
+                format!("{NEW_ENGINE_ROOT}/{suffix}")
+            };
+
+            // Read old, write new, delete old. We tolerate the case where the
+            // new path already exists by skipping the rewrite (a partial
+            // previous migration may have already moved this file).
+            match ws.read(&old_path).await {
+                Ok(doc) => {
+                    let already_present = ws.exists(&new_path).await.unwrap_or(false);
+                    if !already_present
+                        && let Err(e) = ws.write(&new_path, &doc.content).await
+                    {
+                        debug!(
+                            old = %old_path,
+                            new = %new_path,
+                            "legacy-engine migration: write failed: {e}"
+                        );
+                        failed += 1;
+                        continue;
+                    }
+                    if let Err(e) = ws.delete(&old_path).await {
+                        debug!(
+                            old = %old_path,
+                            "legacy-engine migration: delete failed: {e}"
+                        );
+                        failed += 1;
+                        continue;
+                    }
+                    migrated += 1;
+                }
+                Err(e) => {
+                    debug!(
+                        old = %old_path,
+                        "legacy-engine migration: read failed: {e}"
+                    );
+                    failed += 1;
+                }
+            }
+        }
+
+        debug!(migrated, failed, "legacy-engine migration: complete");
     }
 
     /// Evict terminal (Done/Failed) threads from in-memory caches.
@@ -1301,5 +1414,143 @@ impl Store for HybridStore {
                 .await;
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "libsql"))]
+mod migration_tests {
+    use super::*;
+    use crate::db::Database;
+    use crate::db::libsql::LibSqlBackend;
+
+    /// Build a fresh in-memory libsql-backed workspace for migration tests.
+    async fn fresh_workspace() -> (Arc<Workspace>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("test.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("create libsql backend");
+        backend.run_migrations().await.expect("run migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+        let ws = Arc::new(Workspace::new_with_db("test_user", db));
+        (ws, dir)
+    }
+
+    #[tokio::test]
+    async fn legacy_engine_paths_are_migrated_to_system_engine() {
+        // Regression: pre-#2049, engine state was persisted under `engine/...`.
+        // Without an explicit migration the loaders only see `.system/engine/...`,
+        // and existing deployments would silently lose their engine state on
+        // upgrade. The HybridStore must rewrite legacy paths at startup.
+        let (ws, _dir) = fresh_workspace().await;
+
+        // Seed three legacy-shaped documents covering the directory roots
+        // that the engine actually uses.
+        ws.write("engine/projects/sample.json", r#"{"hello": "world"}"#)
+            .await
+            .expect("seed legacy projects file");
+        ws.write(
+            "engine/runtime/threads/active/abc.json",
+            r#"{"thread": "data"}"#,
+        )
+        .await
+        .expect("seed legacy thread file");
+        ws.write("engine/orchestrator/v1.py", "# legacy orchestrator")
+            .await
+            .expect("seed legacy orchestrator file");
+
+        // Run the migration.
+        let store = HybridStore::new(Some(Arc::clone(&ws)));
+        store.migrate_legacy_engine_paths(&ws).await;
+
+        // Files should now exist under the new prefix with the same content.
+        let new_proj = ws
+            .read(".system/engine/projects/sample.json")
+            .await
+            .expect("new projects file");
+        assert_eq!(new_proj.content, r#"{"hello": "world"}"#);
+        let new_thread = ws
+            .read(".system/engine/runtime/threads/active/abc.json")
+            .await
+            .expect("new thread file");
+        assert_eq!(new_thread.content, r#"{"thread": "data"}"#);
+        let new_orch = ws
+            .read(".system/engine/orchestrator/v1.py")
+            .await
+            .expect("new orchestrator file");
+        assert_eq!(new_orch.content, "# legacy orchestrator");
+
+        // Old paths should be gone (delete may leave the doc with empty
+        // content depending on storage; either is acceptable, but
+        // exists() must return false).
+        assert!(
+            !ws.exists("engine/projects/sample.json")
+                .await
+                .unwrap_or(true),
+            "legacy projects file should be removed"
+        );
+        assert!(
+            !ws.exists("engine/runtime/threads/active/abc.json")
+                .await
+                .unwrap_or(true),
+            "legacy thread file should be removed"
+        );
+        assert!(
+            !ws.exists("engine/orchestrator/v1.py").await.unwrap_or(true),
+            "legacy orchestrator file should be removed"
+        );
+
+        // Idempotent — running again on a clean workspace must not panic
+        // and must not resurrect anything.
+        store.migrate_legacy_engine_paths(&ws).await;
+    }
+
+    #[tokio::test]
+    async fn migration_skips_when_target_already_present() {
+        // If a partial previous migration left the new path populated, the
+        // migrator must NOT overwrite it — but it should still delete the
+        // legacy duplicate so it doesn't keep showing up.
+        let (ws, _dir) = fresh_workspace().await;
+
+        ws.write(".system/engine/projects/x.json", "new content")
+            .await
+            .expect("seed new path");
+        ws.write("engine/projects/x.json", "stale legacy content")
+            .await
+            .expect("seed legacy path");
+
+        let store = HybridStore::new(Some(Arc::clone(&ws)));
+        store.migrate_legacy_engine_paths(&ws).await;
+
+        // New path content preserved.
+        let new = ws
+            .read(".system/engine/projects/x.json")
+            .await
+            .expect("new path readable");
+        assert_eq!(new.content, "new content");
+        // Legacy duplicate cleared.
+        assert!(
+            !ws.exists("engine/projects/x.json").await.unwrap_or(true),
+            "legacy duplicate should be removed even when new path exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_is_noop_with_no_legacy_paths() {
+        let (ws, _dir) = fresh_workspace().await;
+        // Only `.system/engine/...` content present.
+        ws.write(".system/engine/projects/clean.json", "ok")
+            .await
+            .expect("seed");
+
+        let store = HybridStore::new(Some(Arc::clone(&ws)));
+        store.migrate_legacy_engine_paths(&ws).await;
+
+        // Untouched.
+        let doc = ws
+            .read(".system/engine/projects/clean.json")
+            .await
+            .expect("readable");
+        assert_eq!(doc.content, "ok");
     }
 }

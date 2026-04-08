@@ -955,12 +955,21 @@ async fn async_main() -> anyhow::Result<()> {
     // Clone context_manager for the reaper before it's moved into Agent::new()
     let reaper_context_manager = Arc::clone(&components.context_manager);
 
-    // Capture db reference for SIGHUP handler before it's moved into AgentDeps (Unix only)
+    // Capture settings store for SIGHUP handler before AppComponents is consumed.
+    // Prefer the workspace-backed adapter (so SIGHUP-driven config reloads pick
+    // up settings written through the workspace) and fall back to the raw db
+    // when no workspace is configured.
     #[cfg(unix)]
     let sighup_settings_store: Option<Arc<dyn ironclaw::db::SettingsStore>> = components
-        .db
+        .settings_store
         .as_ref()
-        .map(|db| Arc::clone(db) as Arc<dyn ironclaw::db::SettingsStore>);
+        .map(|s| Arc::clone(s) as Arc<dyn ironclaw::db::SettingsStore>)
+        .or_else(|| {
+            components
+                .db
+                .as_ref()
+                .map(|db| Arc::clone(db) as Arc<dyn ironclaw::db::SettingsStore>)
+        });
 
     let deps = AgentDeps {
         owner_id: config.owner_id.clone(),
