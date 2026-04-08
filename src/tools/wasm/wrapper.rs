@@ -1597,11 +1597,51 @@ fn schema_is_typed_property(schema: &serde_json::Value) -> bool {
             .is_some_and(serde_json::Value::is_object)
 }
 
+/// Build a hint to attach to a WASM tool error so the LLM can correct
+/// its next call without an extra round trip.
+///
+/// The previous version emitted only `Tip: call tool_info(...)`, which
+/// forced the agent to spend an entire turn fetching the schema it
+/// already had access to. The agent would read the error, call
+/// `tool_info`, get the schema back, and only then retry — burning
+/// two iterations to recover from one bad parameter. This version
+/// inlines the relevant schema info directly:
+///
+/// 1. **Tagged-enum / `oneOf` schemas**: extract a compact
+///    `action -> [required fields]` map. For google-drive that's
+///    ~400 chars / 100 tokens, vs. the ~$0.005-0.01 cost of an
+///    extra LLM turn. Tells the LLM exactly which fields it forgot
+///    for which action.
+/// 2. **Flat schemas**: dump the compact JSON inline if it's under
+///    `MAX_INLINE_SCHEMA_BYTES`, otherwise fall through to the old
+///    `tool_info` tip as a last-resort fallback for adversarial
+///    cases.
+///
+/// Container hints (arrays/objects need to be JSON literals, not
+/// quoted strings) are appended in either case — that's a separate
+/// LLM mistake mode that the schema alone doesn't surface.
 fn build_tool_usage_hint(tool_name: &str, schema: &serde_json::Value) -> String {
-    let mut hint = format!(
-        "Tip: call tool_info(name: \"{}\", include_schema: true) for the full parameter schema.",
-        tool_name
-    );
+    const MAX_INLINE_SCHEMA_BYTES: usize = 4_000;
+
+    let mut hint = String::new();
+
+    if let Some(map) = extract_action_required_map(schema) {
+        hint.push_str(&format!(
+            "Required fields per action for {tool_name}: {map}"
+        ));
+    } else {
+        match serde_json::to_string(schema) {
+            Ok(json) if json.len() <= MAX_INLINE_SCHEMA_BYTES => {
+                hint.push_str(&format!("Schema for {tool_name}: {json}"));
+            }
+            _ => {
+                hint.push_str(&format!(
+                    "Tip: call tool_info(name: \"{tool_name}\", include_schema: true) \
+                     for the full parameter schema (it was too large to inline)."
+                ));
+            }
+        }
+    }
 
     if schema_contains_container_properties(schema) {
         hint.push_str(
@@ -1610,6 +1650,47 @@ fn build_tool_usage_hint(tool_name: &str, schema: &serde_json::Value) -> String 
     }
 
     hint
+}
+
+/// Extract a compact `action -> [required fields]` map from a tagged
+/// enum / `oneOf` schema. Returns `None` for schemas without a
+/// recognisable `oneOf` of action-discriminated variants.
+///
+/// Output format: `list_files=[], get_file=[file_id], share_file=[file_id,email]`
+///
+/// Each variant must have a `properties.action.const` value (the
+/// discriminator) and may have a `required` array. The discriminator
+/// itself is filtered out of the per-action required list since
+/// it's always implicit.
+fn extract_action_required_map(schema: &serde_json::Value) -> Option<String> {
+    let one_of = schema.get("oneOf")?.as_array()?;
+    if one_of.is_empty() {
+        return None;
+    }
+
+    let mut entries: Vec<String> = Vec::new();
+    for variant in one_of {
+        let action = variant
+            .get("properties")
+            .and_then(|p| p.get("action"))
+            .and_then(|a| a.get("const"))
+            .and_then(|c| c.as_str())?;
+
+        let required: Vec<&str> = variant
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|s| *s != "action")
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        entries.push(format!("{action}=[{}]", required.join(",")));
+    }
+
+    Some(entries.join(", "))
 }
 
 /// Methods with side effects require `Content-Length` even when no body is
@@ -3102,6 +3183,147 @@ mod tests {
         let hint = super::build_tool_usage_hint("google_docs", &schema);
 
         assert!(hint.contains("native JSON arrays/objects")); // safety: test-only assertion
+    }
+
+    /// The hint must NOT recommend calling `tool_info` when the schema
+    /// information can be inlined directly. The previous implementation
+    /// always emitted "Tip: call tool_info(...)" which forced the agent
+    /// to spend an extra turn fetching what it could have received in
+    /// the error message.
+    #[test]
+    fn test_build_tool_usage_hint_inlines_oneof_required_map() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["action"],
+            "oneOf": [
+                {
+                    "properties": {
+                        "action": { "type": "string", "const": "list_files" }
+                    },
+                    "required": ["action"]
+                },
+                {
+                    "properties": {
+                        "action": { "type": "string", "const": "get_file" },
+                        "file_id": { "type": "string" }
+                    },
+                    "required": ["action", "file_id"]
+                },
+                {
+                    "properties": {
+                        "action": { "type": "string", "const": "share_file" },
+                        "file_id": { "type": "string" },
+                        "email": { "type": "string" }
+                    },
+                    "required": ["action", "file_id", "email"]
+                }
+            ]
+        });
+
+        let hint = super::build_tool_usage_hint("google-drive-tool", &schema);
+
+        // The hint must NOT recommend an extra round-trip via tool_info.
+        assert!(
+            !hint.contains("call tool_info"),
+            "hint should not recommend tool_info when info can be inlined; got: {hint}"
+        );
+        // The hint should map each action to its required fields,
+        // excluding the discriminator (which is always implicit).
+        assert!(hint.contains("list_files=[]"));
+        assert!(hint.contains("get_file=[file_id]"));
+        assert!(hint.contains("share_file=[file_id,email]"));
+        assert!(hint.contains("Required fields per action for google-drive-tool"));
+    }
+
+    /// For flat (non-oneOf) schemas, the hint should embed the schema
+    /// JSON directly as long as it's under the size budget.
+    #[test]
+    fn test_build_tool_usage_hint_inlines_flat_schema() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" }
+            },
+            "required": ["query"]
+        });
+
+        let hint = super::build_tool_usage_hint("web-search-tool", &schema);
+
+        assert!(
+            !hint.contains("call tool_info"),
+            "hint should not recommend tool_info for compact schemas; got: {hint}"
+        );
+        assert!(hint.contains("Schema for web-search-tool"));
+        assert!(hint.contains("\"query\""));
+        assert!(hint.contains("\"required\""));
+    }
+
+    /// Adversarial fallback: if the schema is huge enough to blow the
+    /// inline budget AND has no `oneOf` action map, we fall back to the
+    /// old `tool_info` tip rather than dumping multi-megabyte schemas
+    /// into every error message.
+    #[test]
+    fn test_build_tool_usage_hint_falls_back_for_huge_flat_schema() {
+        // Build a flat schema with many properties to exceed 4 KB.
+        let mut props = serde_json::Map::new();
+        for i in 0..200 {
+            props.insert(
+                format!("field_{i}"),
+                serde_json::json!({
+                    "type": "string",
+                    "description": "lorem ipsum dolor sit amet consectetur adipiscing elit"
+                }),
+            );
+        }
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": props,
+        });
+
+        let hint = super::build_tool_usage_hint("massive-tool", &schema);
+
+        assert!(
+            hint.contains("call tool_info"),
+            "huge flat schema should fall back to tool_info tip; got: {hint}"
+        );
+        assert!(hint.contains("too large to inline"));
+    }
+
+    /// Direct unit test for the helper.
+    #[test]
+    fn test_extract_action_required_map_strips_discriminator() {
+        let schema = serde_json::json!({
+            "oneOf": [
+                {
+                    "properties": { "action": { "const": "a" } },
+                    "required": ["action"]
+                },
+                {
+                    "properties": {
+                        "action": { "const": "b" },
+                        "x": { "type": "string" }
+                    },
+                    "required": ["action", "x"]
+                }
+            ]
+        });
+
+        let map = super::extract_action_required_map(&schema).expect("should produce map");
+        // The "action" discriminator must NOT appear in any per-action
+        // required list — it's always implicit.
+        assert_eq!(map, "a=[], b=[x]");
+    }
+
+    /// Schemas without `oneOf` should yield None so the caller falls
+    /// back to either inlining the flat schema or the tool_info tip.
+    #[test]
+    fn test_extract_action_required_map_returns_none_for_flat_schema() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "query": { "type": "string" } },
+            "required": ["query"]
+        });
+        assert!(super::extract_action_required_map(&schema).is_none());
     }
 
     /// Regression test: leak scan must run on raw headers (before credential
