@@ -288,6 +288,17 @@ impl LiveTestHarnessBuilder {
             trace_path.display()
         );
 
+        // Initialise a tracing subscriber so RUST_LOG actually captures the
+        // engine's debug/trace output during the run. `try_init` is a no-op
+        // when another test in the same process already initialised one.
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("ironclaw=info")),
+            )
+            .with_test_writer()
+            .try_init();
+
         // Load env from ~/.ironclaw/.env so LLM API keys are available.
         let _ = dotenvy::dotenv();
         ironclaw::bootstrap::load_ironclaw_env();
