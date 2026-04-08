@@ -891,7 +891,7 @@ pub async fn start_server(
         ))
         .layer(SetResponseHeaderLayer::if_not_present(
             header::HeaderName::from_static("content-security-policy"),
-            header::HeaderValue::from_static(BASE_CSP),
+            BASE_CSP_HEADER.clone(),
         ))
         .with_state(state.clone());
 
@@ -917,53 +917,82 @@ pub async fn start_server(
 //
 // A single source of truth for the gateway's CSP. The static value below is
 // used by the global response-header layer for every endpoint. The
-// `build_csp_with_nonce` helper produces an equivalent policy with a CSP
-// `'nonce-…'` source added to `script-src` — used only by `index_handler`
-// when it serves customized HTML containing inline `<script>` blocks.
+// ---- Content-Security-Policy construction ----------------------------
 //
-// Anything that needs to change about the CSP for the whole gateway should
-// be edited HERE so the per-response variant stays in lock-step.
+// The gateway serves two flavors of CSP on the same set of directives:
+//
+// * The static header applied by `SetResponseHeaderLayer` to *every*
+//   response (see [`BASE_CSP_HEADER`]). No inline scripts are authorized.
+// * A per-response variant produced by [`build_csp`] with a `'nonce-…'`
+//   source added to `script-src`, used only by `index_handler` when it
+//   serves customized HTML containing inline `<script>` blocks.
+//
+// Both variants MUST carry the same directive set except for `script-src`
+// — if one grows a new `connect-src` origin, the other silently stays on
+// the old policy, and customized pages end up under a stricter CSP than
+// plain pages (or vice versa). Previous versions of this file duplicated
+// the full directive string in two places, so adding a CDN to one was a
+// latent regression waiting to happen. Keep every directive as a named
+// constant and assemble both flavors via [`build_csp`] so there is a
+// single source of truth.
 
-/// Origins allowed by `script-src` in addition to `'self'`. The Copilot
-/// review caught that injected widget scripts and the layout-config script
-/// were being blocked by this CSP — they now carry a per-request nonce
-/// (see `index_handler`).
+/// `script-src` sources other than `'self'` and the per-response nonce.
 const SCRIPT_SRC_EXTRAS: &str =
     "https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://esm.sh";
+const STYLE_SRC: &str = "'self' 'unsafe-inline' https://fonts.googleapis.com";
+const FONT_SRC: &str = "https://fonts.gstatic.com data:";
+const CONNECT_SRC: &str =
+    "'self' https://esm.sh https://rpc.mainnet.near.org https://rpc.testnet.near.org";
+const IMG_SRC: &str =
+    "'self' data: blob: https://*.googleusercontent.com https://avatars.githubusercontent.com";
+const FRAME_SRC: &str = "https://accounts.google.com https://appleid.apple.com";
+const FORM_ACTION: &str =
+    "'self' https://accounts.google.com https://github.com https://appleid.apple.com";
 
-/// Static CSP applied to every gateway response by the response-header layer.
-/// `script-src` lists the explicit allowed CDNs but does NOT include
-/// `'unsafe-inline'`. Inline scripts (only present on the customized index
-/// page) are authorized via a per-response `'nonce-…'` source instead.
-const BASE_CSP: &str = "default-src 'self'; \
-     script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://esm.sh; \
-     style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
-     font-src https://fonts.gstatic.com data:; \
-     connect-src 'self' https://esm.sh https://rpc.mainnet.near.org https://rpc.testnet.near.org; \
-     img-src 'self' data: blob: https://*.googleusercontent.com https://avatars.githubusercontent.com; \
-     frame-src https://accounts.google.com https://appleid.apple.com; \
-     object-src 'none'; \
-     frame-ancestors 'none'; \
-     base-uri 'self'; \
-     form-action 'self' https://accounts.google.com https://github.com https://appleid.apple.com";
-
-/// Build a CSP equivalent to [`BASE_CSP`] but with `'nonce-{nonce}'` added to
-/// the `script-src` directive so a single inline `<script nonce="{nonce}">`
-/// block on the same response is authorized.
-fn build_csp_with_nonce(nonce: &str) -> String {
+/// Build a CSP string. When `nonce` is `Some`, the resulting policy adds
+/// `'nonce-{nonce}'` to `script-src` so a single inline `<script
+/// nonce="{nonce}">` block on the same response is authorized. When
+/// `nonce` is `None`, the policy matches the static header emitted by
+/// [`BASE_CSP_HEADER`]. This is the single source of truth for the
+/// gateway CSP — edit per-directive constants above, not the format
+/// string here.
+fn build_csp(nonce: Option<&str>) -> String {
+    let script_nonce = match nonce {
+        Some(n) => format!(" 'nonce-{n}'"),
+        None => String::new(),
+    };
     format!(
         "default-src 'self'; \
-         script-src 'self' 'nonce-{nonce}' {SCRIPT_SRC_EXTRAS}; \
-         style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
-         font-src https://fonts.gstatic.com data:; \
-         connect-src 'self' https://esm.sh https://rpc.mainnet.near.org https://rpc.testnet.near.org; \
-         img-src 'self' data: blob: https://*.googleusercontent.com https://avatars.githubusercontent.com; \
-         frame-src https://accounts.google.com https://appleid.apple.com; \
+         script-src 'self'{script_nonce} {SCRIPT_SRC_EXTRAS}; \
+         style-src {STYLE_SRC}; \
+         font-src {FONT_SRC}; \
+         connect-src {CONNECT_SRC}; \
+         img-src {IMG_SRC}; \
+         frame-src {FRAME_SRC}; \
          object-src 'none'; \
          frame-ancestors 'none'; \
          base-uri 'self'; \
-         form-action 'self' https://accounts.google.com https://github.com https://appleid.apple.com"
+         form-action {FORM_ACTION}"
     )
+}
+
+/// Static CSP header applied to every gateway response by the
+/// response-header layer. Assembled at first use via [`build_csp`] with no
+/// nonce. Falls back to a minimally-permissive `default-src 'self'` if the
+/// assembled value somehow fails to parse as a `HeaderValue` — in practice
+/// the assembled string is pure ASCII and this branch is unreachable, but
+/// production code in this repo doesn't use `.expect()` on request-path
+/// values.
+static BASE_CSP_HEADER: std::sync::LazyLock<header::HeaderValue> = std::sync::LazyLock::new(|| {
+    header::HeaderValue::from_str(&build_csp(None))
+        .unwrap_or_else(|_| header::HeaderValue::from_static("default-src 'self'"))
+});
+
+/// Build a CSP equivalent to the static header but with `'nonce-{nonce}'`
+/// added to the `script-src` directive. Thin wrapper kept for call-site
+/// readability (the name is the contract the nonce handler wants).
+fn build_csp_with_nonce(nonce: &str) -> String {
+    build_csp(Some(nonce))
 }
 
 /// Generate a fresh per-response CSP nonce. 16 random bytes hex-encoded
@@ -4477,6 +4506,43 @@ mod tests {
         if let Some(tx) = state.shutdown_tx.write().await.take() {
             let _ = tx.send(());
         }
+    }
+
+    #[test]
+    fn test_base_and_nonce_csp_agree_outside_script_src() {
+        // Regression for the drift risk flagged in PR #1725 review: the
+        // static header and the per-response nonce header must share every
+        // directive except `script-src`. Build both, strip `script-src …;`
+        // from each, and assert the remaining policy is byte-identical.
+        let base = build_csp(None);
+        let nonce = build_csp(Some("feedc0de"));
+
+        fn strip_script_src(csp: &str) -> String {
+            // Directives are separated by `; `. Drop the one that starts
+            // with `script-src` and rejoin the rest.
+            csp.split("; ")
+                .filter(|d| !d.trim_start().starts_with("script-src"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        }
+
+        assert_eq!(
+            strip_script_src(&base),
+            strip_script_src(&nonce),
+            "base CSP and nonce CSP must agree on every directive except script-src\n\
+             base:  {base}\n\
+             nonce: {nonce}"
+        );
+    }
+
+    #[test]
+    fn test_base_csp_header_matches_build_csp_none() {
+        // The lazy static header used by the response-header layer must be
+        // byte-identical to `build_csp(None)`. If the fallback branch of
+        // the LazyLock ever fires, the header would regress to
+        // `default-src 'self'` and this test would catch it.
+        let lazy = BASE_CSP_HEADER.to_str().expect("static CSP is ASCII");
+        assert_eq!(lazy, build_csp(None));
     }
 
     #[test]

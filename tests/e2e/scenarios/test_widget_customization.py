@@ -56,10 +56,17 @@ async def _wipe_customizations(base_url: str) -> None:
     """
     async with httpx.AsyncClient(timeout=10) as client:
         for path in _CUSTOM_PATHS:
-            await client.post(
+            resp = await client.post(
                 f"{base_url}/api/memory/write",
                 headers=auth_headers(),
                 json={"path": path, "content": "", "append": False},
+            )
+            # Surface cleanup failures immediately instead of letting a
+            # silent auth/server error bleed leftover workspace state into
+            # the next test and turn this suite flaky.
+            assert resp.status_code == 200, (
+                f"failed to wipe {path}: "
+                f"status={resp.status_code} body={resp.text!r}"
             )
 
 

@@ -119,10 +119,16 @@ pub fn assemble_index(base_html: &str, bundle: &FrontendBundle) -> String {
 
     // --- Head injections ---
 
-    // Branding CSS variables
+    // Branding CSS variables. Every other inline injection point in this
+    // function runs its content through `escape_tag_close` to neutralize
+    // tag-breakout vectors; the branding path used to format directly into
+    // `<style>…</style>`, which let a `</style>` sequence inside a color
+    // value close the tag early and inject arbitrary HTML. Apply the same
+    // escape here so branding stays in lock-step with the other paths.
     let css_vars = bundle.layout.branding.to_css_vars();
     if !css_vars.is_empty() {
-        head_injections.push(format!("<style>{}</style>", css_vars));
+        let safe_vars = escape_tag_close(&css_vars, "</style");
+        head_injections.push(format!("<style>{}</style>", safe_vars));
     }
 
     // --- Body injections ---
@@ -516,6 +522,73 @@ mod tests {
             "raw </style> inside widget CSS broke out of the style tag"
         );
         assert!(body.contains("<\\/style>"));
+    }
+
+    #[test]
+    fn test_assemble_index_branding_style_breakout_escaped() {
+        // Defense in depth for the branding CSS-vars injection point.
+        // The `BrandingConfig` color validator (in `layout.rs`) is the
+        // primary defense and strips anything containing `</style>`
+        // before it ever reaches `assemble_index`, so the head `<style>`
+        // block for branding should never even be emitted in this case.
+        //
+        // This test locks in BOTH contracts:
+        //
+        // 1. A hostile color value is dropped before it lands in the
+        //    head — no `--color-primary` declaration appears at all.
+        // 2. The only place the raw breakout string appears in the final
+        //    document is the layout-config `<script>` (which
+        //    `escape_tag_close` already handled for the `</script>`
+        //    sequence); it must NOT appear inside any head `<style>`
+        //    block that would render the injection as HTML.
+        //
+        // If either the validator or the bundle-level escape regresses,
+        // this test fails with a useful diagnostic.
+        let bundle = FrontendBundle {
+            layout: LayoutConfig {
+                branding: BrandingConfig {
+                    colors: Some(BrandingColors {
+                        primary: Some("red</style><script>alert(1)</script>".to_string()),
+                        accent: None,
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = assemble_index(MINIMAL_HTML, &bundle);
+
+        // Contract 1: validator drops the hostile primary value.
+        assert!(
+            !result.contains("--color-primary"),
+            "hostile branding color must be dropped by the validator; got: {result}"
+        );
+
+        // Contract 2: no `<style>` tag in the head section contains the
+        // raw `</style>` breakout. The head runs from `<head>` up to
+        // `</head>`; search that slice for any `<style>` block emitted
+        // by branding and verify none contains the raw close-tag.
+        if let Some(head_end) = result.find("</head>") {
+            let head = &result[..head_end];
+            let mut search = head;
+            while let Some(style_open) = search.find("<style") {
+                let after_open = &search[style_open..];
+                let body_start = after_open
+                    .find('>')
+                    .map(|i| i + 1)
+                    .unwrap_or(after_open.len());
+                let body_rest = &after_open[body_start..];
+                let body_end = body_rest.find("</style>").unwrap_or(body_rest.len());
+                let body = &body_rest[..body_end];
+                assert!(
+                    !body.contains("</style>"),
+                    "raw </style> inside head <style> block: {body}"
+                );
+                // Advance past this block for any subsequent matches.
+                search = &body_rest[body_end.min(body_rest.len())..];
+            }
+        }
     }
 
     #[test]

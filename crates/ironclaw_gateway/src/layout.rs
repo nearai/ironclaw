@@ -121,13 +121,24 @@ fn default_true() -> bool {
 
 impl BrandingConfig {
     /// Generate CSS custom property overrides for injection into `:root`.
+    ///
+    /// Color values are run through [`is_safe_css_color`] before
+    /// interpolation so a hostile `layout.json` cannot break out of the
+    /// `:root {}` block (e.g.
+    /// `red; } .chat-input[value^="s"] { background: url(...) }`) or close
+    /// the surrounding `<style>` tag. Invalid values are silently dropped
+    /// so the rest of the branding config still applies.
     pub fn to_css_vars(&self) -> String {
         let mut vars = Vec::new();
         if let Some(ref colors) = self.colors {
-            if let Some(ref primary) = colors.primary {
+            if let Some(ref primary) = colors.primary
+                && is_safe_css_color(primary)
+            {
                 vars.push(format!("--color-primary: {};", primary));
             }
-            if let Some(ref accent) = colors.accent {
+            if let Some(ref accent) = colors.accent
+                && is_safe_css_color(accent)
+            {
                 vars.push(format!("--color-accent: {};", accent));
             }
         }
@@ -137,6 +148,83 @@ impl BrandingConfig {
             format!(":root {{ {} }}", vars.join(" "))
         }
     }
+}
+
+/// Return `true` if `value` is a syntactically-safe CSS color literal.
+///
+/// Accepts a conservative subset of CSS color syntax:
+///
+/// * Hex literals: `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`.
+/// * Functional notation: `rgb(...)`, `rgba(...)`, `hsl(...)`, `hsla(...)`,
+///   `hwb(...)`, `lab(...)`, `lch(...)`, `oklab(...)`, `oklch(...)`,
+///   `color(...)`.
+/// * CSS named colors (alphabetic identifiers only).
+///
+/// Anything containing characters that could break out of a CSS property
+/// value (`;`, `{`, `}`, `<`, `>`, backslash, newline, quotes) or the
+/// `url(` prefix is rejected regardless of surface syntax. The primary
+/// goal is to keep attacker-controlled values from escaping the
+/// `:root { … }` block or the enclosing `<style>` tag — strict CSS Color
+/// Module conformance is *not* a goal, so this will reject some valid but
+/// unusual inputs (e.g. `color-mix(...)`) by design.
+pub(crate) fn is_safe_css_color(value: &str) -> bool {
+    let v = value.trim();
+    if v.is_empty() || v.len() > 128 {
+        return false;
+    }
+    // Reject any character that could terminate the declaration, close the
+    // surrounding block, break out of the `<style>` tag, or start a CSS
+    // comment (`*` handles both `/*` and `*/` because both require the
+    // asterisk; the bare `/` used in `rgb(0 0 0 / 50%)` stays legal).
+    if v.bytes().any(|b| {
+        matches!(
+            b,
+            b';' | b'{' | b'}' | b'<' | b'>' | b'"' | b'\'' | b'\\' | b'*' | b'\n' | b'\r' | b'\t'
+        )
+    }) {
+        return false;
+    }
+    let lower = v.to_ascii_lowercase();
+    // `url(...)` references — even inside function args — can point at
+    // arbitrary origins and leak request metadata. Never allow them in a
+    // branding color value.
+    if lower.contains("url(") {
+        return false;
+    }
+    // Hex literal: `#` followed by 3/4/6/8 hex digits.
+    if let Some(hex) = v.strip_prefix('#') {
+        let len_ok = matches!(hex.len(), 3 | 4 | 6 | 8);
+        let chars_ok = hex.chars().all(|c| c.is_ascii_hexdigit());
+        return len_ok && chars_ok;
+    }
+    // Functional notation: `ident(...)` where `ident` is a recognized
+    // color function and the body contains only digits, letters, spaces,
+    // commas, dots, percent signs, and parentheses. The outer parens must
+    // balance and the value must end with `)`.
+    if let Some(open) = v.find('(') {
+        let ident = &lower[..open];
+        let func_ok = matches!(
+            ident,
+            "rgb" | "rgba" | "hsl" | "hsla" | "hwb" | "lab" | "lch" | "oklab" | "oklch" | "color"
+        );
+        if !func_ok {
+            return false;
+        }
+        if !v.ends_with(')') {
+            return false;
+        }
+        let body = &v[open + 1..v.len() - 1];
+        let body_ok = body.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, ' ' | ',' | '.' | '%' | '+' | '-' | '/')
+        });
+        // `/` is allowed inside functional color syntax (e.g.
+        // `rgb(0 0 0 / 50%)`), but we already rejected the outer `url(`
+        // form above and the enclosing parens are required — a bare `/`
+        // inside the function body cannot escape the declaration.
+        return body_ok;
+    }
+    // Named color or CSS-wide keyword: alphabetic identifier only.
+    v.chars().all(|c| c.is_ascii_alphabetic())
 }
 
 #[cfg(test)]
@@ -212,5 +300,73 @@ mod tests {
         let config: LayoutConfig = serde_json::from_value(json).unwrap();
         assert_eq!(config.branding.title.as_deref(), Some("Test"));
         assert!(config.chat.suggestions.is_none());
+    }
+
+    #[test]
+    fn test_is_safe_css_color_accepts_common_forms() {
+        // Hex literals of every supported length.
+        assert!(is_safe_css_color("#fff"));
+        assert!(is_safe_css_color("#fff0"));
+        assert!(is_safe_css_color("#0066cc"));
+        assert!(is_safe_css_color("#0066ccaa"));
+        // Functional notation, including modern `rgb(... / alpha)` syntax.
+        assert!(is_safe_css_color("rgb(0, 0, 0)"));
+        assert!(is_safe_css_color("rgba(10, 20, 30, 0.5)"));
+        assert!(is_safe_css_color("rgb(0 0 0 / 50%)"));
+        assert!(is_safe_css_color("hsl(200, 50%, 50%)"));
+        assert!(is_safe_css_color("oklch(0.7 0.15 200)"));
+        // Named colors / keywords.
+        assert!(is_safe_css_color("red"));
+        assert!(is_safe_css_color("transparent"));
+        // Leading/trailing whitespace is tolerated.
+        assert!(is_safe_css_color("  #fff  "));
+    }
+
+    #[test]
+    fn test_is_safe_css_color_rejects_injection_vectors() {
+        // Declaration termination would let an attacker add a new
+        // declaration or close the `:root {}` block.
+        assert!(!is_safe_css_color("red;"));
+        assert!(!is_safe_css_color("red; } .chat-input { background: red }"));
+        // `<style>` tag breakout.
+        assert!(!is_safe_css_color("red</style><script>alert(1)</script>"));
+        assert!(!is_safe_css_color("#fff</STYLE>"));
+        // `url(...)` can pull from arbitrary origins.
+        assert!(!is_safe_css_color("url(https://attacker.example/leak)"));
+        assert!(!is_safe_css_color("rgb(url(x), 0, 0)"));
+        // CSS comments could hide payload from casual readers.
+        assert!(!is_safe_css_color("red /* ok */ "));
+        assert!(!is_safe_css_color("red*/"));
+        // Quotes / backslash / newline are never legal in a color value.
+        assert!(!is_safe_css_color("\"#fff\""));
+        assert!(!is_safe_css_color("#fff\\"));
+        assert!(!is_safe_css_color("#fff\nbad"));
+        // Unknown functions are rejected even with balanced parens.
+        assert!(!is_safe_css_color("expression(1)"));
+        // Empty or absurdly long values are rejected.
+        assert!(!is_safe_css_color(""));
+        assert!(!is_safe_css_color("   "));
+        assert!(!is_safe_css_color(&"#".repeat(200)));
+    }
+
+    #[test]
+    fn test_branding_css_vars_drops_unsafe_colors() {
+        // A hostile `layout.json` must not be able to slip a `;`-terminated
+        // or tag-breakout color past `to_css_vars`. Both fields are set;
+        // only the safe one should appear.
+        let branding = BrandingConfig {
+            colors: Some(BrandingColors {
+                primary: Some("red; } .chat-input { background: red".to_string()),
+                accent: Some("#ff6b00".to_string()),
+            }),
+            ..Default::default()
+        };
+        let css = branding.to_css_vars();
+        assert!(
+            !css.contains("chat-input"),
+            "primary injection leaked: {css}"
+        );
+        assert!(!css.contains("--color-primary"), "primary must be dropped");
+        assert!(css.contains("--color-accent: #ff6b00;"));
     }
 }

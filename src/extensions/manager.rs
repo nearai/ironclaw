@@ -9485,6 +9485,15 @@ mod tests {
         // have their colon URL-encoded to %3A, as this breaks the validation endpoint.
         // Previously: form_urlencoded::byte_serialize encoded the token, causing 404s.
         // Fixed by removing URL-encoding and using the token directly.
+        //
+        // `telegram_bot_api_url` honors `IRONCLAW_TEST_TELEGRAM_API_BASE_URL`,
+        // which other tests in this module set via `ScopedEnvVar` under the
+        // shared `lock_env()` mutex. We have to take the same lock and clear
+        // the override here, otherwise a parallel test holding the override
+        // races into our read and we see `http://127.0.0.1:.../bot…` instead
+        // of `https://api.telegram.org/bot…`. Clearing the var inside the
+        // lock makes this test deterministic.
+        let _env = ScopedEnvVar::set(TELEGRAM_TEST_API_BASE_ENV, "");
         let token = "123456789:AABBccDDeeFFgg_Test-Token";
 
         let url = telegram_bot_api_url(token, "getMe");
