@@ -59,12 +59,13 @@ pub(crate) async fn seed_initial_assistant_thread(
     });
 
     conn.execute(
-        "INSERT INTO conversations (id, channel, user_id, metadata, started_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+        "INSERT INTO conversations (id, channel, user_id, metadata, source_channel, started_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
         params![
             conversation_id.to_string(),
             "gateway",
             user_id,
             metadata.to_string(),
+            "gateway",
             started_at.clone(),
         ],
     )

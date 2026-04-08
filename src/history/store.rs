@@ -1598,7 +1598,8 @@ impl Store {
             INSERT INTO conversations (id, channel, user_id, thread_id, source_channel)
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (id) DO UPDATE
-            SET last_activity = NOW()
+            SET last_activity = NOW(),
+                source_channel = COALESCE(conversations.source_channel, EXCLUDED.source_channel)
             WHERE conversations.user_id = EXCLUDED.user_id
               AND conversations.channel = EXCLUDED.channel
             "#,
@@ -1869,7 +1870,20 @@ impl Store {
             .await?;
 
         if let Some(row) = row {
-            return Ok(row.get("id"));
+            let id: Uuid = row.get("id");
+            let source_channel: Option<String> = row.get("source_channel");
+            if source_channel.is_none() {
+                conn.execute(
+                    r#"
+                    UPDATE conversations
+                    SET source_channel = COALESCE(source_channel, $2)
+                    WHERE id = $1
+                    "#,
+                    &[&id, &channel],
+                )
+                .await?;
+            }
+            return Ok(id);
         }
 
         // Create a new assistant conversation
@@ -1877,8 +1891,8 @@ impl Store {
         let metadata = serde_json::json!({"thread_type": "assistant", "title": "Assistant"});
         conn.execute(
             r#"
-            INSERT INTO conversations (id, channel, user_id, metadata)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO conversations (id, channel, user_id, metadata, source_channel)
+            VALUES ($1, $2, $3, $4, $2)
             "#,
             &[&id, &channel, &user_id, &metadata],
         )
@@ -2345,8 +2359,8 @@ impl Store {
         client
             .execute(
                 r#"
-                INSERT INTO conversations (id, channel, user_id, metadata, started_at, last_activity)
-                VALUES ($1, 'gateway', $2, $3, $4, $4)
+                INSERT INTO conversations (id, channel, user_id, metadata, source_channel, started_at, last_activity)
+                VALUES ($1, 'gateway', $2, $3, 'gateway', $4, $4)
                 "#,
                 &[&conversation_id, &user_id, &metadata, &created_at],
             )

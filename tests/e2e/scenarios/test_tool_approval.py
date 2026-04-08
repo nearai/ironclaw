@@ -1,6 +1,7 @@
 """Scenario 6: Tool approval overlay UI behavior."""
 
 import asyncio
+import uuid
 
 from helpers import SEL, api_get, api_post
 
@@ -241,6 +242,108 @@ async def test_waiting_for_approval_message_no_error_prefix(page):
     assert "HTTP requests to external APIs" in msg_text, (
         f"Expected tool description in message. Got: {msg_text!r}"
     )
+
+
+async def test_v1_browser_approval_card_approve_resumes_tool(page):
+    """In the default v1 E2E harness, approving via the browser resumes the tool call."""
+    chat_input = page.locator(SEL["chat_input"])
+    assistant_messages = page.locator(SEL["message_assistant"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+
+    original_thread_id = await page.evaluate("() => currentThreadId")
+    await page.evaluate("() => createNewThread()")
+    await page.wait_for_function(
+        """(previousThreadId) => {
+            return !!currentThreadId && currentThreadId !== previousThreadId;
+        }""",
+        arg=original_thread_id,
+        timeout=10000,
+    )
+
+    label = f"browser-approve-{uuid.uuid4().hex[:8]}"
+    initial_assistant_count = await assistant_messages.count()
+
+    await chat_input.fill(f"make approval post {label}")
+    await chat_input.press("Enter")
+
+    card = page.locator(SEL["approval_card"]).last
+    await card.wait_for(state="visible", timeout=10000)
+
+    tool_name = await card.locator(SEL["approval_tool_name"]).text_content()
+    desc_text = await card.locator(SEL["approval_description"]).text_content()
+    assert tool_name == "http"
+    assert desc_text is not None and "HTTP requests to external APIs" in desc_text
+
+    pending_assistant_count = await assistant_messages.count()
+
+    await card.locator(SEL["approval_approve_btn"]).click()
+    await card.locator(SEL["approval_resolved"]).wait_for(state="visible", timeout=5000)
+    assert await card.locator(SEL["approval_resolved"]).text_content() == "Approved"
+
+    await page.wait_for_function(
+        """({ selector, minCount }) => {
+            return document.querySelectorAll(selector).length > minCount;
+        }""",
+        arg={
+            "selector": SEL["message_assistant"],
+            "minCount": pending_assistant_count,
+        },
+        timeout=15000,
+    )
+
+    last_msg = assistant_messages.last.locator(".message-content")
+    msg_text = await last_msg.inner_text()
+    assert "The http tool returned:" in msg_text, msg_text
+    assert '"status": 405' in msg_text or "Example Domain" in msg_text, msg_text
+
+    final_assistant_count = await assistant_messages.count()
+    assert final_assistant_count > initial_assistant_count
+
+
+async def test_v1_browser_seeded_assistant_thread_approve_resumes_tool(page):
+    """The seeded assistant thread should also allow browser approval in v1."""
+    chat_input = page.locator(SEL["chat_input"])
+    assistant_messages = page.locator(SEL["message_assistant"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+
+    label = f"seeded-assistant-approve-{uuid.uuid4().hex[:8]}"
+    initial_assistant_count = await assistant_messages.count()
+
+    await chat_input.fill(f"make approval post {label}")
+    await chat_input.press("Enter")
+
+    card = page.locator(SEL["approval_card"]).last
+    await card.wait_for(state="visible", timeout=10000)
+
+    tool_name = await card.locator(SEL["approval_tool_name"]).text_content()
+    desc_text = await card.locator(SEL["approval_description"]).text_content()
+    assert tool_name == "http"
+    assert desc_text is not None and "HTTP requests to external APIs" in desc_text
+
+    pending_assistant_count = await assistant_messages.count()
+
+    await card.locator(SEL["approval_approve_btn"]).click()
+    await card.locator(SEL["approval_resolved"]).wait_for(state="visible", timeout=5000)
+    assert await card.locator(SEL["approval_resolved"]).text_content() == "Approved"
+
+    await page.wait_for_function(
+        """({ selector, minCount }) => {
+            return document.querySelectorAll(selector).length > minCount;
+        }""",
+        arg={
+            "selector": SEL["message_assistant"],
+            "minCount": pending_assistant_count,
+        },
+        timeout=15000,
+    )
+
+    last_msg = assistant_messages.last.locator(".message-content")
+    msg_text = await last_msg.inner_text()
+    assert "The http tool returned:" in msg_text, msg_text
+    assert '"status": 405' in msg_text or "Example Domain" in msg_text, msg_text
+
+    final_assistant_count = await assistant_messages.count()
+    assert final_assistant_count > initial_assistant_count
 
 
 async def test_chat_reply_approve_resumes_pending_tool(ironclaw_server):
