@@ -2995,6 +2995,180 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fire_on_message_event_matches_pattern_and_channel_filter() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Mission with a channel-scoped message event trigger.
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "PR review nudge",
+                "Notify on PR review requests",
+                MissionCadence::OnEvent {
+                    event_pattern: "review requested".into(),
+                    channel: Some("github".into()),
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        // Wrong channel — should NOT fire even though pattern matches.
+        let spawned = mgr
+            .fire_on_message_event("slack", "review requested on PR #42", "alice", None)
+            .await
+            .unwrap();
+        assert!(spawned.is_empty(), "wrong channel should not fire");
+
+        // Right channel, wrong pattern — should NOT fire.
+        let spawned = mgr
+            .fire_on_message_event("github", "build green", "alice", None)
+            .await
+            .unwrap();
+        assert!(spawned.is_empty(), "wrong pattern should not fire");
+
+        // Right channel, right pattern — SHOULD fire.
+        let spawned = mgr
+            .fire_on_message_event(
+                "github",
+                "review requested on PR #42",
+                "alice",
+                Some(serde_json::json!({"pr": 42})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            spawned.len(),
+            1,
+            "matching event should fire exactly one mission"
+        );
+
+        // Channel filter is case-insensitive.
+        let spawned = mgr
+            .fire_on_message_event("GitHub", "review requested again", "alice", None)
+            .await
+            .unwrap();
+        assert_eq!(spawned.len(), 1, "channel match should be case-insensitive");
+
+        // Mission's thread history should now reflect both fires.
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(mission.thread_history.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn fire_on_message_event_without_channel_filter_matches_any_channel() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Mission with no channel filter — should match any channel.
+        mgr.create_mission(
+            project_id,
+            "alice",
+            "Universal pattern",
+            "Fire on the keyword anywhere",
+            MissionCadence::OnEvent {
+                event_pattern: "deploy now".into(),
+                channel: None,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        for channel in &["github", "slack", "gateway", "repl"] {
+            let spawned = mgr
+                .fire_on_message_event(channel, "please deploy now thanks", "alice", None)
+                .await
+                .unwrap();
+            assert_eq!(
+                spawned.len(),
+                1,
+                "no channel filter should match channel {channel}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fire_on_message_event_respects_owner_scope() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Alice owns a mission.
+        mgr.create_mission(
+            project_id,
+            "alice",
+            "Alice mission",
+            "react",
+            MissionCadence::OnEvent {
+                event_pattern: "ping".into(),
+                channel: None,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        // Bob fires the event with a matching pattern — should NOT fire
+        // alice's mission (per-user scoping).
+        let spawned = mgr
+            .fire_on_message_event("gateway", "ping", "bob", None)
+            .await
+            .unwrap();
+        assert!(
+            spawned.is_empty(),
+            "events from other users must not fire missions they don't own"
+        );
+
+        // Alice fires the event — SHOULD fire her mission.
+        let spawned = mgr
+            .fire_on_message_event("gateway", "ping", "alice", None)
+            .await
+            .unwrap();
+        assert_eq!(spawned.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fire_on_webhook_matches_path() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        mgr.create_mission(
+            project_id,
+            "alice",
+            "GitHub webhook",
+            "Handle GitHub events",
+            MissionCadence::Webhook {
+                path: "github".into(),
+                secret: None,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        // Wrong path — should NOT fire.
+        let spawned = mgr.fire_on_webhook("slack", "alice", None).await.unwrap();
+        assert!(spawned.is_empty());
+
+        // Right path — SHOULD fire.
+        let spawned = mgr
+            .fire_on_webhook(
+                "github",
+                "alice",
+                Some(serde_json::json!({"action": "opened"})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(spawned.len(), 1);
+    }
+
+    #[tokio::test]
     async fn ensure_learning_missions_idempotent_per_user() {
         let store = Arc::new(TestStore::new());
         let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);

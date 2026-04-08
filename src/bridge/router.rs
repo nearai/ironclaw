@@ -2095,6 +2095,18 @@ async fn handle_with_engine_inner(
         ));
     }
 
+    // Fire any active OnEvent missions whose pattern (and optional channel
+    // filter) match this inbound message. Mission firings here are side
+    // effects of the message — independent of, and parallel to, the normal
+    // conversation thread spawned below. Errors are logged but never block
+    // user-facing message handling.
+    //
+    // v1-created routines are NOT touched by this path: they live in the
+    // v1 routine store and are fired by the v1 RoutineEngine in the
+    // background. Missions created via the routine_create alias live in
+    // the engine store and are fired here.
+    fire_event_missions_for_message(state, message, content).await;
+
     // Send "Thinking..." status to the channel
     let _ = agent
         .channels
@@ -2173,6 +2185,60 @@ async fn handle_with_engine_inner(
 
     debug!(thread_id = %thread_id, "engine v2: thread spawned");
     await_thread_outcome(agent, state, message, conv_id, thread_id).await
+}
+
+/// Fire active OnEvent missions whose pattern matches the inbound message.
+///
+/// Builds a payload containing the message metadata that mission threads
+/// can read via `state["trigger_payload"]`. Skips empty content and
+/// system-channel messages. Errors are logged at debug level — a failure
+/// here must never block the user-facing message flow.
+async fn fire_event_missions_for_message(
+    state: &EngineState,
+    message: &IncomingMessage,
+    content: &str,
+) {
+    // Skip empty messages and routine system markers — there's nothing to
+    // pattern-match against and we don't want missions firing on every
+    // status update or empty user input.
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    let Some(mission_manager) = state.effect_adapter.mission_manager().await else {
+        return;
+    };
+
+    let payload = serde_json::json!({
+        "channel": message.channel,
+        "user_id": message.user_id,
+        "content": content,
+        "metadata": message.metadata,
+    });
+
+    match mission_manager
+        .fire_on_message_event(&message.channel, content, &message.user_id, Some(payload))
+        .await
+    {
+        Ok(spawned) if !spawned.is_empty() => {
+            debug!(
+                count = spawned.len(),
+                channel = %message.channel,
+                user_id = %message.user_id,
+                "engine v2: fired {} OnEvent mission(s) from inbound message",
+                spawned.len()
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            debug!(
+                channel = %message.channel,
+                error = %error,
+                "engine v2: fire_on_message_event failed; continuing with normal handling"
+            );
+        }
+    }
 }
 
 async fn await_thread_outcome(
