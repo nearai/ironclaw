@@ -55,12 +55,26 @@ impl<'de> Deserialize<'de> for ValidTimezone {
 ///
 /// Use with `#[serde(default, deserialize_with = "...")]` on fields that may
 /// contain invalid timezone strings from historical data. Invalid or empty
-/// values deserialize as `None` instead of failing the whole record.
+/// values deserialize as `None` instead of failing the whole record. Each
+/// drop is logged at `debug!` so a typo in fresh user config is at least
+/// observable in the logs even though the record loads.
 pub fn deserialize_option_lenient<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<ValidTimezone>, D::Error> {
     let opt: Option<String> = Option::deserialize(deserializer)?;
-    Ok(opt.as_deref().and_then(ValidTimezone::parse))
+    match opt {
+        Some(s) => match ValidTimezone::parse(&s) {
+            Some(tz) => Ok(Some(tz)),
+            None => {
+                tracing::debug!(
+                    raw = %s,
+                    "lenient deserializer dropped invalid IANA timezone string to None"
+                );
+                Ok(None)
+            }
+        },
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]

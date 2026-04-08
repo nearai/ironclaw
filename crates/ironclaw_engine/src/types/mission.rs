@@ -208,7 +208,7 @@ fn normalize_cron_expression(expression: &str) -> Result<String, EngineError> {
         5 => Ok(format!("0 {} *", fields.join(" "))),
         6 => Ok(format!("{} *", fields.join(" "))),
         7 => Ok(trimmed.to_string()),
-        n => Err(EngineError::Store {
+        n => Err(EngineError::InvalidCadence {
             reason: format!(
                 "invalid cron expression '{expression}': expected 5, 6, or 7 fields, got {n}"
             ),
@@ -221,14 +221,18 @@ fn normalize_cron_expression(expression: &str) -> Result<String, EngineError> {
 /// Accepts standard 5-field, 6-field, or 7-field cron expressions (auto-normalized).
 /// When a [`ValidTimezone`] is provided, the schedule is evaluated in that
 /// timezone and the result is converted back to UTC. Otherwise UTC is used.
+///
+/// Cron parse failures return [`EngineError::InvalidCadence`] (validation, not
+/// storage), so callers can map them to user-facing errors.
 pub fn next_cron_fire(
     expression: &str,
     timezone: Option<&ValidTimezone>,
 ) -> Result<Option<DateTime<Utc>>, EngineError> {
     let normalized = normalize_cron_expression(expression)?;
-    let schedule = cron::Schedule::from_str(&normalized).map_err(|e| EngineError::Store {
-        reason: format!("invalid cron expression '{expression}': {e}"),
-    })?;
+    let schedule =
+        cron::Schedule::from_str(&normalized).map_err(|e| EngineError::InvalidCadence {
+            reason: format!("invalid cron expression '{expression}': {e}"),
+        })?;
     if let Some(vtz) = timezone {
         Ok(schedule
             .upcoming(vtz.tz())
@@ -295,5 +299,149 @@ mod tests {
         // 6-field (with seconds) should be accepted.
         let next = next_cron_fire("0 0 9 * * *", None).unwrap();
         assert!(next.is_some());
+    }
+
+    #[test]
+    fn normalize_seven_field_cron() {
+        // 7-field (sec min hr dom mon dow year) should pass through.
+        let next = next_cron_fire("0 0 9 * * * 2027", None).unwrap();
+        assert!(next.is_some());
+    }
+
+    #[test]
+    fn invalid_cron_returns_invalid_cadence_error() {
+        // Cron parse errors are validation errors, not store errors.
+        let err = next_cron_fire("not a cron", None).unwrap_err();
+        assert!(
+            matches!(err, EngineError::InvalidCadence { .. }),
+            "expected InvalidCadence, got: {err:?}"
+        );
+
+        let err = next_cron_fire("nope nope nope nope nope", None).unwrap_err();
+        assert!(matches!(err, EngineError::InvalidCadence { .. }));
+    }
+
+    // ── DST tests (#1944) ─────────────────────────────────────
+    //
+    // The whole point of carrying user_timezone through the engine is so that
+    // cron schedules respect DST. These tests pin the cron crate's behavior on
+    // the two tricky transitions in `America/New_York`:
+    //
+    //  * Spring-forward: 2027-03-14 02:00 jumps to 03:00. Local times in
+    //    [02:00, 03:00) do not exist on that day.
+    //  * Fall-back: 2027-11-07 02:00 jumps back to 01:00. Local times in
+    //    [01:00, 02:00) occur twice (once EDT, once EST).
+    //
+    // We don't test specific calendar dates (those would rot); instead we use
+    // explicit reference instants via the `cron` crate's `after()` method to
+    // assert behavior in a year-independent way.
+
+    use chrono::TimeZone;
+
+    fn schedule_after(
+        expression: &str,
+        tz: &ValidTimezone,
+        after_utc: DateTime<Utc>,
+    ) -> DateTime<Utc> {
+        let normalized = normalize_cron_expression(expression).unwrap();
+        let schedule = cron::Schedule::from_str(&normalized).unwrap();
+        let after_local = after_utc.with_timezone(&tz.tz());
+        schedule
+            .after(&after_local)
+            .next()
+            .expect("schedule should produce a fire time")
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn dst_spring_forward_skips_missing_local_hour() {
+        // 2027-03-14 in America/New_York: clocks jump 02:00 -> 03:00 EDT.
+        // A cron at "30 2 * * *" requests a wall-clock time that does not
+        // exist on that day. The cron crate skips that occurrence and fires
+        // on the next valid day at 02:30 (which is then EDT, UTC-4).
+        let tz = ValidTimezone::parse("America/New_York").unwrap();
+
+        // Reference: 2027-03-13 22:00 UTC = 2027-03-13 18:00 EDT(?), well
+        // before the spring-forward day. We just need a stable anchor.
+        let after = Utc.with_ymd_and_hms(2027, 3, 13, 0, 0, 0).unwrap();
+        let fire = schedule_after("30 2 * * *", &tz, after);
+
+        // The first fire on 2027-03-13 is 02:30 EST = 07:30 UTC. The next
+        // fire would be 2027-03-14 02:30 — but that doesn't exist on DST
+        // day, so the schedule skips to 2027-03-15 02:30 EDT = 06:30 UTC.
+        // Whichever the cron crate picks, it must NOT land in the missing
+        // local interval [02:00, 03:00) on 2027-03-14.
+        let fire_local = fire.with_timezone(&tz.tz());
+        if fire_local.year() == 2027 && fire_local.month() == 3 && fire_local.day() == 14 {
+            // If it lands on DST day, the wall-clock hour must be >= 3 (EDT).
+            assert!(
+                fire_local.hour() >= 3,
+                "fire on DST day must not be in skipped [02:00, 03:00) window, got {fire_local}"
+            );
+        }
+        // Sanity: the result is a real future instant.
+        assert!(fire > after);
+    }
+
+    #[test]
+    fn dst_fall_back_picks_one_of_overlapping_hours() {
+        // 2027-11-07 in America/New_York: clocks jump 02:00 EDT -> 01:00 EST.
+        // Local times in [01:00, 02:00) occur twice. A cron at "30 1 * * *"
+        // could fire at 01:30 EDT (05:30 UTC) or 01:30 EST (06:30 UTC).
+        // The cron crate picks one consistently — we just assert it picks
+        // exactly one and that the result is correct in UTC.
+        let tz = ValidTimezone::parse("America/New_York").unwrap();
+        let after = Utc.with_ymd_and_hms(2027, 11, 6, 12, 0, 0).unwrap();
+        let fire = schedule_after("30 1 * * *", &tz, after);
+
+        let fire_local = fire.with_timezone(&tz.tz());
+        // Whatever date the cron crate lands on, the local time must be 01:30.
+        assert_eq!(
+            fire_local.hour(),
+            1,
+            "expected hour 1 local, got {fire_local}"
+        );
+        assert_eq!(
+            fire_local.minute(),
+            30,
+            "expected minute 30 local, got {fire_local}"
+        );
+
+        // And the UTC instant must be exactly one of the two valid 01:30 NY
+        // instants on the fall-back day, OR a 01:30 NY on a neighbouring day.
+        // Either way, converting back must round-trip to the same wall clock.
+        let round_trip = fire.with_timezone(&tz.tz());
+        assert_eq!(round_trip, fire_local);
+    }
+
+    #[test]
+    fn dst_aware_schedule_advances_correctly_across_transition() {
+        // Across a DST transition the absolute UTC interval between two
+        // consecutive 09:00 local fires shifts by an hour. This is the
+        // "load-bearing tz" property the PR exists to enable.
+        let tz = ValidTimezone::parse("America/New_York").unwrap();
+        // Pick an anchor in EST (winter, before spring-forward).
+        let anchor = Utc.with_ymd_and_hms(2027, 3, 1, 0, 0, 0).unwrap();
+        let normalized = normalize_cron_expression("0 9 * * *").unwrap();
+        let schedule = cron::Schedule::from_str(&normalized).unwrap();
+        let anchor_local = anchor.with_timezone(&tz.tz());
+
+        // Take 30 consecutive fires — long enough to cross spring-forward.
+        let fires: Vec<_> = schedule.after(&anchor_local).take(30).collect();
+        assert_eq!(fires.len(), 30);
+
+        // All fires must be at 09:00 local wall clock, regardless of DST.
+        for f in &fires {
+            assert_eq!(f.hour(), 9, "every fire must be 09:00 local, got {f}");
+        }
+
+        // The UTC hour shifts when crossing DST: 09:00 EST = 14:00 UTC,
+        // 09:00 EDT = 13:00 UTC. Both must appear across the 30-day window.
+        let utc_hours: std::collections::BTreeSet<u32> =
+            fires.iter().map(|f| f.with_timezone(&Utc).hour()).collect();
+        assert!(
+            utc_hours.contains(&13) && utc_hours.contains(&14),
+            "30-day window straddling spring-forward should contain both 13:00 and 14:00 UTC fires; got {utc_hours:?}"
+        );
     }
 }

@@ -3018,6 +3018,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_cron_mission_with_timezone_uses_tz_for_schedule() {
+        // Regression: every other cron test in this file passes timezone: None,
+        // so the tz path is only exercised at the unit level inside types/mission.
+        // This test threads a real ValidTimezone through MissionManager and
+        // asserts the resulting next_fire_at differs from the UTC equivalent —
+        // proving the bridge router → mission_create → next_cron_fire chain
+        // actually honors the user's timezone end-to-end.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+        let tz = crate::types::mission::ValidTimezone::parse("America/New_York").unwrap();
+
+        let id_tz = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "tz-aware",
+                "fires at 9am NY local",
+                MissionCadence::Cron {
+                    expression: "0 9 * * *".into(),
+                    timezone: Some(tz),
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let id_utc = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "tz-naive",
+                "fires at 9am UTC",
+                MissionCadence::Cron {
+                    expression: "0 9 * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let m_tz = mgr.get_mission(id_tz).await.unwrap().unwrap();
+        let m_utc = mgr.get_mission(id_utc).await.unwrap().unwrap();
+        let next_tz = m_tz.next_fire_at.expect("tz cron should have next_fire_at");
+        let next_utc = m_utc
+            .next_fire_at
+            .expect("utc cron should have next_fire_at");
+
+        // 9am NY = 13:00 or 14:00 UTC depending on DST; 9am UTC = 09:00 UTC.
+        use chrono::Timelike;
+        assert_ne!(
+            next_tz.hour(),
+            next_utc.hour(),
+            "tz-aware and tz-naive cron schedules must produce different UTC instants"
+        );
+        let tz_hour = next_tz.hour();
+        assert!(
+            tz_hour == 13 || tz_hour == 14,
+            "9am NY should land on UTC 13 or 14, got {tz_hour}"
+        );
+        assert_eq!(next_utc.hour(), 9, "9am UTC should land on UTC 9");
+    }
+
+    #[tokio::test]
     async fn update_mission_cron_expression_change_recomputes_next_fire_at() {
         // Regression: changing the cron expression must reset the schedule.
         let store = Arc::new(TestStore::new());
