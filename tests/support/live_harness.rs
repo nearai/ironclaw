@@ -369,6 +369,13 @@ impl LiveTestHarnessBuilder {
             .with_trace(trace)
             .with_max_tool_iterations(self.max_tool_iterations)
             .with_auto_approve_tools(true);
+        // Propagate engine_v2 so replay mirrors live recording. Without this,
+        // tests that recorded against engine v2 (mission_create, mission_fire,
+        // CodeAct orchestration, etc.) replay against v1 and the v2-only tools
+        // come back as "tool not found".
+        if self.engine_v2.unwrap_or(false) {
+            rig_builder = rig_builder.with_engine_v2();
+        }
         if let Some(ref name) = self.channel_name {
             rig_builder = rig_builder.with_channel_name(name.clone());
         }

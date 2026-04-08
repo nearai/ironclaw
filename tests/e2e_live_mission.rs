@@ -119,56 +119,14 @@ mod live_mission_tests {
 
         rig.send_message(&setup_prompt).await;
 
-        // Wait for the agent to finish the setup turn (one assistant response).
-        let setup_responses = rig
-            .wait_for_responses(1, Duration::from_secs(300))
-            .await;
-        assert!(
-            !setup_responses.is_empty(),
-            "expected the setup turn to produce at least one response"
-        );
-
-        let setup_text = setup_responses
-            .iter()
-            .map(|r| r.content.clone())
-            .collect::<Vec<_>>()
-            .join("\n");
-        eprintln!(
-            "[MissionTest] Setup response: {}",
-            setup_text.chars().take(400).collect::<String>()
-        );
-
-        // The agent must have actually invoked mission_create + mission_fire.
-        let started = rig.tool_calls_started();
-        eprintln!("[MissionTest] Tools after setup: {started:?}");
-        let used_create = started
-            .iter()
-            .any(|t| t == "mission_create" || t.starts_with("mission_create("));
-        let used_fire = started
-            .iter()
-            .any(|t| t == "mission_fire" || t.starts_with("mission_fire("));
-        assert!(
-            used_create,
-            "expected agent to call mission_create, got tools: {started:?}"
-        );
-        assert!(
-            used_fire,
-            "expected agent to call mission_fire, got tools: {started:?}"
-        );
-
-        // The setup turn's user-facing reply should refer to the mission by
-        // name (not by raw UUID). This pins the prompt fix that tells the
-        // model to reference missions by their name.
-        assert!(
-            setup_text.contains(MISSION_NAME),
-            "expected setup reply to mention mission name '{MISSION_NAME}'; got: {setup_text}"
-        );
-
-        // ── Wait for the mission's notification to land on the channel ─────
-        // `handle_mission_notification` prefixes the message with `**[name]**`.
-        // We give the mission a generous budget — fetching HN, parsing the
-        // page, and producing a 3-bullet digest can take many minutes
-        // against a slower model with a multi-step CodeAct loop.
+        // The setup turn produces TWO captured responses on the gateway
+        // channel — the foreground agent's reply ("I created the mission…")
+        // and the mission's notification (`**[name]** …`). In live mode they
+        // arrive ~30s apart, so a sequential `wait_for_responses(1, …)`
+        // happens to read the foreground reply first. In replay mode they
+        // race, so the test must be order-independent: wait for the slower
+        // event (the mission notification) and *then* split the captured set
+        // into "foreground" and "mission" buckets by the marker prefix.
         let mission_marker = format!("**[{MISSION_NAME}]**");
         let mission_deadline = Instant::now() + Duration::from_secs(900);
         let mission_text = match wait_for_response_containing(
@@ -195,6 +153,77 @@ mod live_mission_tests {
         eprintln!(
             "[MissionTest] Mission notification: {}",
             mission_text.chars().take(400).collect::<String>()
+        );
+
+        // Wait until the foreground reply (the response WITHOUT the
+        // `**[name]**` marker) has also been captured. In live mode it
+        // arrived first and is already there; in replay the mission
+        // notification often races ahead, so we may have to wait a bit.
+        let foreground_deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            let captured = rig
+                .wait_for_responses(0, Duration::from_millis(0))
+                .await;
+            let has_foreground = captured.iter().any(|r| !r.content.contains(&mission_marker));
+            if has_foreground {
+                break;
+            }
+            if Instant::now() >= foreground_deadline {
+                panic!(
+                    "foreground reply (response without `{mission_marker}` marker) did not \
+                     arrive within 2 minutes. Captured so far: {:#?}",
+                    captured.iter().map(|r| r.content.clone()).collect::<Vec<_>>()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        // Now grab everything captured during the setup turn and split it.
+        // The mission notification carries the `**[name]**` marker; the
+        // foreground reply does not.
+        let setup_responses = rig
+            .wait_for_responses(0, Duration::from_millis(0))
+            .await;
+        let foreground_setup_replies: Vec<String> = setup_responses
+            .iter()
+            .map(|r| r.content.clone())
+            .filter(|c| !c.contains(&mission_marker))
+            .collect();
+        let setup_text = foreground_setup_replies.join("\n");
+        eprintln!(
+            "[MissionTest] Foreground setup reply: {}",
+            setup_text.chars().take(400).collect::<String>()
+        );
+
+        // The agent must have actually invoked mission_create + mission_fire.
+        let started = rig.tool_calls_started();
+        eprintln!("[MissionTest] Tools after setup: {started:?}");
+        let used_create = started
+            .iter()
+            .any(|t| t == "mission_create" || t.starts_with("mission_create("));
+        let used_fire = started
+            .iter()
+            .any(|t| t == "mission_fire" || t.starts_with("mission_fire("));
+        assert!(
+            used_create,
+            "expected agent to call mission_create, got tools: {started:?}"
+        );
+        assert!(
+            used_fire,
+            "expected agent to call mission_fire, got tools: {started:?}"
+        );
+
+        // The foreground setup reply must mention the mission by name (not
+        // by raw UUID). Pins the prompt fix that tells the model to refer to
+        // missions by their `name`.
+        assert!(
+            !foreground_setup_replies.is_empty(),
+            "expected at least one foreground reply to the setup turn (without the \
+             `**[name]**` marker), got only: {setup_responses:#?}"
+        );
+        assert!(
+            setup_text.contains(MISSION_NAME),
+            "expected setup reply to mention mission name '{MISSION_NAME}'; got: {setup_text}"
         );
 
         // ── Verify the mission's output was persisted to the assistant

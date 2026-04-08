@@ -268,8 +268,7 @@ impl ConversationManager {
                     .to_string();
 
                 // Spawn new foreground thread with conversation history.
-                let thread_id = self
-                    .thread_manager
+                self.thread_manager
                     .spawn_thread_with_history(
                         content, // use message as goal
                         ThreadType::Foreground,
@@ -280,9 +279,7 @@ impl ConversationManager {
                         history,
                         Some(base_channel),
                     )
-                    .await?;
-
-                thread_id
+                    .await?
             }
         };
 
