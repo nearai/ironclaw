@@ -74,6 +74,7 @@ use crate::channels::web::util::{build_turns_from_db_messages, truncate_preview}
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::orchestrator::job_manager::ContainerJobManager;
+use crate::release::{check_for_update, current_version};
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
@@ -752,6 +753,7 @@ pub async fn start_server(
         )
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))
+        .route("/api/gateway/update", get(gateway_update_handler))
         // OpenAI-compatible API
         .route(
             "/v1/chat/completions",
@@ -3326,6 +3328,41 @@ async fn gateway_status_handler(
         llm_model: state.active_config.llm_model.clone(),
         enabled_channels: state.active_config.enabled_channels.clone(),
     })
+}
+
+async fn gateway_update_handler() -> Json<GatewayUpdateResponse> {
+    let current = match current_version() {
+        Ok(version) => version,
+        Err(err) => {
+            return Json(GatewayUpdateResponse {
+                current_version: env!("CARGO_PKG_VERSION").to_string(),
+                latest_version: None,
+                update_available: false,
+                release_name: None,
+                release_url: None,
+                error: Some(err.to_string()),
+            });
+        }
+    };
+
+    match check_for_update(current.clone()).await {
+        Ok(check) => Json(GatewayUpdateResponse {
+            current_version: check.current.to_string(),
+            latest_version: Some(check.latest.to_string()),
+            update_available: check.update_available(),
+            release_name: check.release_name,
+            release_url: Some(check.release_url),
+            error: None,
+        }),
+        Err(err) => Json(GatewayUpdateResponse {
+            current_version: current.to_string(),
+            latest_version: None,
+            update_available: false,
+            release_name: None,
+            release_url: None,
+            error: Some(err.to_string()),
+        }),
+    }
 }
 
 #[derive(serde::Serialize)]

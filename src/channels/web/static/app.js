@@ -5760,6 +5760,10 @@ document.getElementById('users-create-submit')?.addEventListener('click', functi
 // --- Gateway status widget ---
 
 let gatewayStatusInterval = null;
+let gatewayStatusData = null;
+let gatewayUpdateData = null;
+let gatewayUpdateError = null;
+let gatewayUpdatePromise = null;
 
 function startGatewayStatusPolling() {
   fetchGatewayStatus();
@@ -5788,59 +5792,154 @@ function shortModelName(model) {
   return m;
 }
 
+function safeExternalUrl(url) {
+  if (!url) return null;
+  try {
+    var parsed = new URL(url, window.location.origin);
+    var protocol = parsed.protocol.toLowerCase();
+    if (protocol === 'http:' || protocol === 'https:') {
+      return parsed.href;
+    }
+  } catch (e) {}
+  return null;
+}
+
+function renderGatewayUpdateSection() {
+  if (gatewayUpdateData === null && !gatewayUpdatePromise && !gatewayUpdateError) return '';
+
+  var html = '';
+  html += '<div class="gw-divider"></div>';
+  html += '<div class="gw-section-label">Update</div>';
+
+  if (gatewayUpdatePromise && gatewayUpdateData === null && !gatewayUpdateError) {
+    html += '<div class="gw-update-message">Checking for newer release…</div>';
+    return html;
+  }
+
+  if (gatewayUpdateError && gatewayUpdateData === null) {
+    html += '<div class="gw-update-message gw-update-error">' + escapeHtml(gatewayUpdateError) + '</div>';
+    return html;
+  }
+
+  if (!gatewayUpdateData) return html;
+
+  if (gatewayUpdateData.error) {
+    html += '<div class="gw-update-message gw-update-error">' + escapeHtml(gatewayUpdateData.error) + '</div>';
+    return html;
+  }
+
+  html += '<div class="gw-stat"><span>Current</span><span>' + escapeHtml(gatewayUpdateData.current_version || 'unknown') + '</span></div>';
+  if (gatewayUpdateData.latest_version) {
+    html += '<div class="gw-stat"><span>Latest</span><span>' + escapeHtml(gatewayUpdateData.latest_version) + '</span></div>';
+  }
+
+  if (gatewayUpdateData.update_available) {
+    html += '<div class="gw-update-message gw-update-available">Update available</div>';
+    if (gatewayUpdateData.release_name || gatewayUpdateData.release_url) {
+      var releaseLabel = gatewayUpdateData.release_name ? escapeHtml(gatewayUpdateData.release_name) : 'Open release notes';
+      var releaseHref = safeExternalUrl(gatewayUpdateData.release_url);
+      if (releaseHref) {
+        html += '<div class="gw-update-link-row">'
+          + '<a class="gw-update-link" href="' + escapeHtml(releaseHref) + '" target="_blank" rel="noopener noreferrer">'
+          + releaseLabel
+          + '</a>'
+          + '</div>';
+      } else {
+        html += '<div class="gw-update-message">' + releaseLabel + '</div>';
+      }
+    }
+  } else {
+    html += '<div class="gw-update-message gw-update-ok">Up to date</div>';
+  }
+
+  return html;
+}
+
+function renderGatewayPopover() {
+  var popover = document.getElementById('gateway-popover');
+  if (!popover) return;
+
+  var data = gatewayStatusData || {};
+  var html = '';
+
+  // Version
+  if (data.version) {
+    html += '<div class="gw-section-label">IronClaw v' + escapeHtml(data.version) + '</div>';
+    html += '<div class="gw-divider"></div>';
+  }
+
+  // Update check
+  html += renderGatewayUpdateSection();
+
+  // Connection info
+  html += '<div class="gw-section-label">' + I18n.t('dashboard.connections') + '</div>';
+  html += '<div class="gw-stat"><span>' + I18n.t('dashboard.sse') + '</span><span>' + (data.sse_connections || 0) + '</span></div>';
+  html += '<div class="gw-stat"><span>' + I18n.t('dashboard.websocket') + '</span><span>' + (data.ws_connections || 0) + '</span></div>';
+  html += '<div class="gw-stat"><span>' + I18n.t('dashboard.uptime') + '</span><span>' + formatDuration(data.uptime_secs) + '</span></div>';
+
+  // Cost tracker
+  if (data.daily_cost != null) {
+    html += '<div class="gw-divider"></div>';
+    html += '<div class="gw-section-label">' + I18n.t('dashboard.costToday') + '</div>';
+    html += '<div class="gw-stat"><span>' + I18n.t('dashboard.spent') + '</span><span>' + formatCost(data.daily_cost) + '</span></div>';
+    if (data.actions_this_hour != null) {
+      html += '<div class="gw-stat"><span>' + I18n.t('dashboard.actionsPerHour') + '</span><span>' + data.actions_this_hour + '</span></div>';
+    }
+  }
+
+  // Per-model token usage
+  if (data.model_usage && data.model_usage.length > 0) {
+    html += '<div class="gw-divider"></div>';
+    html += '<div class="gw-section-label">Token Usage</div>';
+    data.model_usage.sort(function(a, b) {
+      return (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens);
+    });
+    for (var i = 0; i < data.model_usage.length; i++) {
+      var m = data.model_usage[i];
+      var name = escapeHtml(shortModelName(m.model));
+      html += '<div class="gw-model-row">'
+        + '<span class="gw-model-name">' + name + '</span>'
+        + '<span class="gw-model-cost">' + escapeHtml(formatCost(m.cost)) + '</span>'
+        + '</div>';
+      html += '<div class="gw-token-detail">'
+        + '<span>in: ' + formatTokenCount(m.input_tokens) + '</span>'
+        + '<span>out: ' + formatTokenCount(m.output_tokens) + '</span>'
+        + '</div>';
+    }
+  }
+
+  popover.innerHTML = html;
+}
+
+function fetchGatewayUpdateStatus() {
+  if (gatewayUpdatePromise) return gatewayUpdatePromise;
+
+  gatewayUpdateError = null;
+  gatewayUpdatePromise = apiFetch('/api/gateway/update').then(function(data) {
+    gatewayUpdateData = data;
+    gatewayUpdatePromise = null;
+    gatewayUpdateError = null;
+    renderGatewayPopover();
+    return data;
+  }).catch(function(err) {
+    gatewayUpdateData = null;
+    gatewayUpdateError = err.message || String(err);
+    gatewayUpdatePromise = null;
+    renderGatewayPopover();
+    return null;
+  });
+
+  renderGatewayPopover();
+  return gatewayUpdatePromise;
+}
+
 function fetchGatewayStatus() {
   apiFetch('/api/gateway/status').then(function(data) {
+    gatewayStatusData = data;
     // Update restart button visibility
     restartEnabled = data.restart_enabled || false;
     updateRestartButtonVisibility();
-
-    var popover = document.getElementById('gateway-popover');
-    var html = '';
-
-    // Version
-    if (data.version) {
-      html += '<div class="gw-section-label">IronClaw v' + escapeHtml(data.version) + '</div>';
-      html += '<div class="gw-divider"></div>';
-    }
-
-    // Connection info
-    html += '<div class="gw-section-label">' + I18n.t('dashboard.connections') + '</div>';
-    html += '<div class="gw-stat"><span>' + I18n.t('dashboard.sse') + '</span><span>' + (data.sse_connections || 0) + '</span></div>';
-    html += '<div class="gw-stat"><span>' + I18n.t('dashboard.websocket') + '</span><span>' + (data.ws_connections || 0) + '</span></div>';
-    html += '<div class="gw-stat"><span>' + I18n.t('dashboard.uptime') + '</span><span>' + formatDuration(data.uptime_secs) + '</span></div>';
-
-    // Cost tracker
-    if (data.daily_cost != null) {
-      html += '<div class="gw-divider"></div>';
-      html += '<div class="gw-section-label">' + I18n.t('dashboard.costToday') + '</div>';
-      html += '<div class="gw-stat"><span>' + I18n.t('dashboard.spent') + '</span><span>' + formatCost(data.daily_cost) + '</span></div>';
-      if (data.actions_this_hour != null) {
-        html += '<div class="gw-stat"><span>' + I18n.t('dashboard.actionsPerHour') + '</span><span>' + data.actions_this_hour + '</span></div>';
-      }
-    }
-
-    // Per-model token usage
-    if (data.model_usage && data.model_usage.length > 0) {
-      html += '<div class="gw-divider"></div>';
-      html += '<div class="gw-section-label">Token Usage</div>';
-      data.model_usage.sort(function(a, b) {
-        return (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens);
-      });
-      for (var i = 0; i < data.model_usage.length; i++) {
-        var m = data.model_usage[i];
-        var name = escapeHtml(shortModelName(m.model));
-        html += '<div class="gw-model-row">'
-          + '<span class="gw-model-name">' + name + '</span>'
-          + '<span class="gw-model-cost">' + escapeHtml(formatCost(m.cost)) + '</span>'
-          + '</div>';
-        html += '<div class="gw-token-detail">'
-          + '<span>in: ' + formatTokenCount(m.input_tokens) + '</span>'
-          + '<span>out: ' + formatTokenCount(m.output_tokens) + '</span>'
-          + '</div>';
-      }
-    }
-
-    popover.innerHTML = html;
+    renderGatewayPopover();
   }).catch(function() {});
 }
 
@@ -7482,7 +7581,20 @@ document.getElementById('auth-connect-btn').addEventListener('click', () => auth
 document.getElementById('user-avatar-btn').addEventListener('click', function(e) {
   e.stopPropagation();
   var dd = document.getElementById('user-dropdown');
-  if (dd) dd.style.display = dd.style.display === 'none' ? '' : 'none';
+  var popover = document.getElementById('gateway-popover');
+  var opening = dd && dd.style.display === 'none';
+  if (dd) dd.style.display = opening ? '' : 'none';
+  if (popover) {
+    if (opening) {
+      popover.classList.add('visible');
+      renderGatewayPopover();
+      if (!gatewayUpdateData && !gatewayUpdatePromise) {
+        fetchGatewayUpdateStatus();
+      }
+    } else {
+      popover.classList.remove('visible');
+    }
+  }
 });
 // Close dropdown on click outside.
 document.addEventListener('click', function(e) {
@@ -7490,6 +7602,8 @@ document.addEventListener('click', function(e) {
   var account = document.getElementById('user-account');
   if (dd && account && !account.contains(e.target)) {
     dd.style.display = 'none';
+    var popover = document.getElementById('gateway-popover');
+    if (popover) popover.classList.remove('visible');
   }
 });
 // Logout handler.
