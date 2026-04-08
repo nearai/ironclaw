@@ -890,12 +890,15 @@ impl SetupWizard {
     }
 
     /// Run PostgreSQL migrations.
+    ///
+    /// Delegates to `crate::db::migration_fixup::run_postgres_migrations_with_fixup`,
+    /// which acquires the migration advisory lock, realigns any historically
+    /// diverged checksums (issue #1328), then runs refinery's embedded
+    /// migrations. Bundled into a single helper so this call site cannot
+    /// drift from `Store::run_migrations` (see PR #2101 review).
     #[cfg(feature = "postgres")]
     async fn run_migrations_postgres(&self) -> Result<(), SetupError> {
         if let Some(ref pool) = self.db_pool {
-            use refinery::embed_migrations;
-            embed_migrations!("migrations");
-
             if !self.config.quick {
                 print_info("Running migrations...");
             }
@@ -906,20 +909,7 @@ impl SetupWizard {
                 .await
                 .map_err(|e| SetupError::Database(format!("Pool error: {}", e)))?;
 
-            // Realign any historically modified migration checksums before
-            // refinery validates them. See `crate::db::migration_fixup` and
-            // issue #1328 for context.
-            //
-            // NOTE: this same fix-up call is duplicated in
-            // `src/history/store.rs::Store::run_migrations`. If you change
-            // one, change the other — both call sites embed refinery
-            // migrations independently and must stay in sync.
-            crate::db::migration_fixup::realign_diverged_checksums(&mut client)
-                .await
-                .map_err(|e| SetupError::Database(format!("Migration fix-up failed: {}", e)))?;
-
-            migrations::runner()
-                .run_async(&mut **client)
+            crate::db::migration_fixup::run_postgres_migrations_with_fixup(&mut client)
                 .await
                 .map_err(|e| SetupError::Database(format!("Migration failed: {}", e)))?;
 

@@ -60,24 +60,31 @@ use crate::error::DatabaseError;
 /// release. Add a new entry here only if the same accident ever happens
 /// again — the immutability test in `migrations/checksums.lock` is the
 /// preferred guard.
-pub(crate) struct KnownDivergence {
+/// One known historical migration whose on-disk content was modified after
+/// release.
+///
+/// Lifetime-generic so integration tests can construct stack-allocated
+/// instances with non-`'static` borrowed slices (avoiding `Box::leak` to
+/// satisfy `'static` bounds). Production `KNOWN_DIVERGENCES` is
+/// `&[KnownDivergence<'static>]` and is unaffected.
+pub(crate) struct KnownDivergence<'a> {
     pub(crate) version: i32,
-    pub(crate) name: &'static str,
+    pub(crate) name: &'a str,
     /// The current (canonical) SQL content, embedded at compile time.
-    pub(crate) sql: &'static str,
+    pub(crate) sql: &'a str,
     /// The exact set of historical bad checksums we are willing to rewrite
     /// for this migration. **The fix-up only fires when the stored checksum
     /// matches one of these literals** — any other divergence (manual
     /// tampering, hardware corruption, an unknown future regression) is
     /// left alone so refinery can still abort startup loudly.
-    pub(crate) known_bad_checksums: &'static [u64],
+    pub(crate) known_bad_checksums: &'a [u64],
     /// Human-readable explanation of why this divergence exists, surfaced
     /// in the realignment warning log so future entries are not coupled to
     /// the V6/#1328 wording.
-    pub(crate) explanation: &'static str,
+    pub(crate) explanation: &'a str,
 }
 
-const KNOWN_DIVERGENCES: &[KnownDivergence] = &[KnownDivergence {
+const KNOWN_DIVERGENCES: &[KnownDivergence<'static>] = &[KnownDivergence {
     version: 6,
     name: "routines",
     sql: include_str!("../../migrations/V6__routines.sql"),
@@ -91,9 +98,90 @@ const KNOWN_DIVERGENCES: &[KnownDivergence] = &[KnownDivergence {
                   V13__owner_scope_notify_targets.",
 }];
 
+/// Session-level PostgreSQL advisory lock key used to serialize concurrent
+/// migration runs across replicas. Set to issue number 1328 for grep-ability
+/// (`SELECT * FROM pg_locks WHERE locktype = 'advisory' AND objid = 1328`).
+const MIGRATION_LOCK_KEY: i64 = 1328;
+
+/// Run the full PostgreSQL migration sequence: acquire an advisory lock,
+/// realign any historically diverged checksums, then run refinery's embedded
+/// migrations. Releases the lock on every exit path including errors.
+///
+/// **This is the single entry point for running PostgreSQL migrations.** Both
+/// `Store::run_migrations` and `SetupWizard::run_migrations_postgres`
+/// delegate here. Adding a new migration entry point? Call this function;
+/// do not re-implement the fix-up + refinery sequence inline.
+///
+/// ## Why an advisory lock
+///
+/// Two replicas starting simultaneously against the same database can race:
+/// one finishes `realign_diverged_checksums` and commits, then the other's
+/// `refinery::Runner::run_async` reads its own SELECT-then-validate pair and
+/// the timing between them is unprotected, potentially causing spurious
+/// startup failures. The session-level advisory lock serializes the entire
+/// fix-up + refinery sequence per database. It also hardens the pre-existing
+/// refinery race that has always existed for concurrent multi-replica starts.
+///
+/// We use a *session-level* lock (not `pg_advisory_xact_lock`) because
+/// refinery's `run_async` opens its own internal transactions and an outer
+/// transaction-scoped lock would conflict with refinery's transaction
+/// boundaries.
+pub async fn run_postgres_migrations_with_fixup(
+    client: &mut PgClient,
+) -> Result<(), DatabaseError> {
+    use refinery::embed_migrations;
+    // The path is relative to `CARGO_MANIFEST_DIR`, not this file.
+    embed_migrations!("migrations");
+
+    // Acquire the lock. Blocks until released by any other holder.
+    client
+        .execute("SELECT pg_advisory_lock($1)", &[&MIGRATION_LOCK_KEY])
+        .await
+        .map_err(|e| DatabaseError::Migration(format!("acquire migration lock: {e}")))?;
+
+    // Run the realignment + refinery sequence, holding the lock for the
+    // duration. We capture the result and *always* release before
+    // returning, even on error.
+    //
+    // `client` is `&mut Object` (from `deadpool_postgres`); the triple
+    // deref reaches `tokio_postgres::Client` via
+    // `Object → ClientWrapper → Client`, which is what refinery's
+    // `AsyncMigrate` impl is bound to.
+    let result: Result<(), DatabaseError> = async {
+        realign_diverged_checksums_with(client, KNOWN_DIVERGENCES).await?;
+        migrations::runner()
+            .run_async(&mut ***client)
+            .await
+            .map_err(|e| DatabaseError::Migration(e.to_string()))?;
+        Ok(())
+    }
+    .await;
+
+    // Always release the lock. If the unlock itself fails, log it and
+    // surface the original migration error if there was one — losing the
+    // lock release is less important than reporting the underlying cause.
+    if let Err(e) = client
+        .execute("SELECT pg_advisory_unlock($1)", &[&MIGRATION_LOCK_KEY])
+        .await
+    {
+        tracing::error!(
+            error = %e,
+            "failed to release migration advisory lock — connection drop will \
+             release it eventually, but other replicas may block until then"
+        );
+    }
+
+    result
+}
+
 /// Realign `refinery_schema_history` rows whose stored checksum disagrees
 /// with the canonical checksum of the embedded migration. Must be called
 /// before `refinery::Runner::run_async`.
+///
+/// **Most callers should use [`run_postgres_migrations_with_fixup`]**, which
+/// bundles this with refinery and the advisory lock. This function is
+/// retained as a public entry point only for callers that already manage
+/// their own refinery invocation (none today).
 pub async fn realign_diverged_checksums(client: &mut PgClient) -> Result<(), DatabaseError> {
     realign_diverged_checksums_with(client, KNOWN_DIVERGENCES).await
 }
@@ -103,7 +191,7 @@ pub async fn realign_diverged_checksums(client: &mut PgClient) -> Result<(), Dat
 /// with real V6 rows in a shared test database.
 pub(crate) async fn realign_diverged_checksums_with(
     client: &mut PgClient,
-    divergences: &[KnownDivergence],
+    divergences: &[KnownDivergence<'_>],
 ) -> Result<(), DatabaseError> {
     // On a fresh install the history table does not yet exist. Refinery
     // will create it during the first `run_async()` call. There is nothing
@@ -586,15 +674,15 @@ mod tests {
             .unwrap()
             .checksum();
         let bad: u64 = canonical.wrapping_add(1);
-        let test_divergences: &[KnownDivergence] = &[KnownDivergence {
+        // `KnownDivergence` is lifetime-generic, so we can borrow a
+        // stack-allocated slice here — no `Box::leak` needed (would
+        // otherwise flag under leak sanitizers).
+        let bad_checksums = [bad];
+        let test_divergences = [KnownDivergence {
             version: TEST_VERSION,
             name: TEST_NAME,
             sql: TEST_SQL,
-            // Note: this is a `&'static [u64]` literal — `bad` is
-            // computed at runtime, so we use a slice we can build at
-            // runtime. The struct accepts a borrow with the same
-            // lifetime as the slice itself.
-            known_bad_checksums: Box::leak(Box::new([bad])),
+            known_bad_checksums: &bad_checksums,
             explanation: "test fixture for PR #2101 integration test",
         }];
 
@@ -622,7 +710,7 @@ mod tests {
             .expect("seed bad checksum");
 
         // Run the realignment with our synthetic divergence list.
-        super::realign_diverged_checksums_with(&mut client, test_divergences)
+        super::realign_diverged_checksums_with(&mut client, &test_divergences)
             .await
             .expect("realign");
 
@@ -643,7 +731,7 @@ mod tests {
 
         // Run the realignment a second time — it should be a no-op
         // because the row no longer matches any known-bad value.
-        super::realign_diverged_checksums_with(&mut client, test_divergences)
+        super::realign_diverged_checksums_with(&mut client, &test_divergences)
             .await
             .expect("realign idempotent");
         let row = client
@@ -728,15 +816,18 @@ mod tests {
         let canonical = Migration::unapplied("V99998__bad_config", TEST_SQL)
             .unwrap()
             .checksum();
-        let bad_divergences: &[KnownDivergence] = &[KnownDivergence {
+        // Stack-allocated, no Box::leak — `KnownDivergence` is
+        // lifetime-generic.
+        let bad_checksums = [canonical];
+        let bad_divergences = [KnownDivergence {
             version: 99998,
             name: "bad_config",
             sql: TEST_SQL,
-            known_bad_checksums: Box::leak(Box::new([canonical])),
+            known_bad_checksums: &bad_checksums,
             explanation: "intentional misconfig for PR #2101 regression test",
         }];
 
-        let result = super::realign_diverged_checksums_with(&mut client, bad_divergences).await;
+        let result = super::realign_diverged_checksums_with(&mut client, &bad_divergences).await;
         match result {
             Err(crate::error::DatabaseError::Migration(msg)) => {
                 assert!(

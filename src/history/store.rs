@@ -60,28 +60,14 @@ impl Store {
         Ok(Self { pool })
     }
 
-    /// Run database migrations (embedded via refinery).
+    /// Run database migrations: acquires the migration advisory lock,
+    /// realigns any historically diverged checksums (issue #1328), then
+    /// runs refinery's embedded migrations. All bundled into a single
+    /// helper so this call site cannot drift from
+    /// `SetupWizard::run_migrations_postgres` (see PR #2101 review).
     pub async fn run_migrations(&self) -> Result<(), DatabaseError> {
-        use refinery::embed_migrations;
-        embed_migrations!("migrations");
-
         let mut client = self.pool.get().await?;
-
-        // Realign any historically modified migration checksums before
-        // refinery validates them. See `crate::db::migration_fixup` and
-        // issue #1328 for context.
-        //
-        // NOTE: this same fix-up call is duplicated in
-        // `src/setup/wizard.rs::Wizard::run_migrations_postgres`. If you
-        // change one, change the other — both call sites embed refinery
-        // migrations independently and must stay in sync.
-        crate::db::migration_fixup::realign_diverged_checksums(&mut client).await?;
-
-        migrations::runner()
-            .run_async(&mut **client)
-            .await
-            .map_err(|e| DatabaseError::Migration(e.to_string()))?;
-        Ok(())
+        crate::db::migration_fixup::run_postgres_migrations_with_fixup(&mut client).await
     }
 
     /// Get a connection from the pool.
