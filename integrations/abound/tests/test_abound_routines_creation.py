@@ -204,6 +204,7 @@ print()
 # 3. Smart remittance: create routine
 # -----------------------------------------------------------
 print("--- 3. Smart remittance: create routine ---")
+routine_id = None
 try:
     if not target_rate:
         target_rate = 100
@@ -224,12 +225,44 @@ try:
     agent_text = extract_agent_text(response)
     print(f"  Agent response ({len(agent_text)} chars): {agent_text}")
 
+    # Extract routine ID for the next step
+    import re
+    routine_id = None
+    m = re.search(r'\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b', agent_text)
+    if m:
+        routine_id = m.group(1)
+        print(f"  Extracted routine ID: {routine_id}")
+
     has_routine = any(term in agent_text.lower() for term in [
         "routine", "schedule", "hourly", "every hour", "created", "set up",
         "notification", "notify", "alert", "mission",
     ])
     check("contains routine creation confirmation", has_routine,
           "agent response doesn't confirm routine creation")
+except Exception as e:
+    check("request succeeded", False, str(e))
+print()
+
+# -----------------------------------------------------------
+# 4. Fire routine via natural language and see output
+# -----------------------------------------------------------
+print("--- 4. Fire routine via natural language ---")
+try:
+    fire_input = (
+        f"Fire the routine {routine_id} now and tell me what happened."
+        if routine_id
+        else "Fire the USD/INR monitoring routine now and tell me what happened."
+    )
+    response = client.responses.create(
+        model="default",
+        input=fire_input,
+        timeout=180,
+    )
+    check("status completed", response.status == "completed", f"status={response.status}")
+    check("has output", len(response.output) > 0)
+
+    agent_text = extract_agent_text(response)
+    print(f"  Agent response ({len(agent_text)} chars): {agent_text}")
 except Exception as e:
     check("request succeeded", False, str(e))
 print()
