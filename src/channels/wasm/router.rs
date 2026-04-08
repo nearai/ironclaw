@@ -634,10 +634,7 @@ pub fn create_wasm_channel_router(
     router: Arc<WasmChannelRouter>,
     extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
 ) -> Router {
-    let mut state = RouterState::new(router);
-    if let Some(manager) = extension_manager {
-        state = state.with_extension_manager(manager);
-    }
+    let state = build_router_state(router, extension_manager);
 
     Router::new()
         .route("/wasm-channels/health", get(health_handler))
@@ -646,6 +643,33 @@ pub fn create_wasm_channel_router(
         .route("/webhook/{*path}", get(webhook_handler))
         .route("/webhook/{*path}", post(webhook_handler))
         .with_state(state)
+}
+
+/// Webhook-only variant for merging into the gateway server.
+///
+/// Excludes auxiliary routes (`/oauth/callback`, `/wasm-channels/health`)
+/// that would collide with the gateway's own routes.
+pub fn create_wasm_webhook_routes(
+    router: Arc<WasmChannelRouter>,
+    extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
+) -> Router {
+    let state = build_router_state(router, extension_manager);
+
+    Router::new()
+        .route("/webhook/{*path}", get(webhook_handler))
+        .route("/webhook/{*path}", post(webhook_handler))
+        .with_state(state)
+}
+
+fn build_router_state(
+    router: Arc<WasmChannelRouter>,
+    extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
+) -> RouterState {
+    let mut state = RouterState::new(router);
+    if let Some(manager) = extension_manager {
+        state = state.with_extension_manager(manager);
+    }
+    state
 }
 
 #[cfg(test)]

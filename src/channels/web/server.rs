@@ -5236,4 +5236,56 @@ mod tests {
         assert!(!is_local_origin("not-a-url"));
         assert!(!is_local_origin(""));
     }
+
+    #[tokio::test]
+    async fn test_additional_routes_reachable_and_no_collision() {
+        use std::net::SocketAddr;
+
+        use axum::routing::post;
+
+        let state = test_gateway_state(None);
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let auth = CombinedAuthState::from(crate::channels::web::auth::MultiAuthState::single(
+            "test-token".to_string(),
+            "test".to_string(),
+        ));
+
+        // Create a simple additional router simulating a webhook endpoint.
+        let extra = axum::Router::new().route(
+            "/webhook/test-channel",
+            post(|| async { axum::http::StatusCode::OK }),
+        );
+
+        let bound = start_server(addr, state, auth, vec![extra])
+            .await
+            .expect("server should start with additional routes");
+
+        let client = reqwest::Client::new();
+
+        // Additional route is reachable
+        let resp = client
+            .post(format!("http://{}/webhook/test-channel", bound))
+            .send()
+            .await
+            .expect("webhook route should be reachable");
+        assert_eq!(resp.status(), 200);
+
+        // Gateway's own /api/health still works (no collision)
+        let resp = client
+            .get(format!("http://{}/api/health", bound))
+            .send()
+            .await
+            .expect("health route should still work");
+        assert_eq!(resp.status(), 200);
+
+        // Gateway's own /oauth/callback still resolves (not overridden)
+        let resp = client
+            .get(format!("http://{}/oauth/callback", bound))
+            .send()
+            .await
+            .expect("oauth callback should still work");
+        // May return 400 (missing params) but NOT 404 — proves the gateway
+        // handler is still registered, not replaced by a webhook handler.
+        assert_ne!(resp.status(), 404);
+    }
 }

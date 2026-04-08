@@ -165,7 +165,7 @@ impl GatewayChannel {
     /// These routes use their own channel-specific auth (HMAC, Ed25519,
     /// secret headers) and bypass the gateway's bearer-token auth.
     pub fn with_webhook_routes(mut self, routes: Vec<axum::Router>) -> Self {
-        self.webhook_routes = routes;
+        self.webhook_routes.extend(routes);
         self
     }
 

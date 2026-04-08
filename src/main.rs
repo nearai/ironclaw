@@ -439,13 +439,18 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Collect webhook route fragments; a single WebhookServer hosts them all.
     let mut webhook_routes: Vec<axum::Router> = Vec::new();
+    // Gateway-safe subset: excludes routes that collide with the gateway's own
+    // routes (e.g. /oauth/callback). Used when merging webhooks into the gateway.
+    let mut gateway_webhook_routes: Vec<axum::Router> = Vec::new();
 
-    webhook_routes.push(webhooks::routes(ToolWebhookState {
+    let tool_webhook_routes = webhooks::routes(ToolWebhookState {
         tools: Arc::clone(&components.tools),
         routine_engine: Arc::clone(&shared_routine_engine_slot),
         user_id: config.owner_id.clone(),
         secrets_store: components.secrets_store.clone(),
-    }));
+    });
+    webhook_routes.push(tool_webhook_routes.clone());
+    gateway_webhook_routes.push(tool_webhook_routes);
 
     // Load WASM channels and register their webhook routes.
     // Ensure the channels directory exists so the WASM runtime initializes even when
@@ -483,6 +488,9 @@ async fn async_main() -> anyhow::Result<()> {
             }
             if let Some(routes) = result.webhook_routes {
                 webhook_routes.push(routes);
+            }
+            if let Some(routes) = result.gateway_webhook_routes {
+                gateway_webhook_routes.push(routes);
             }
         }
     }
@@ -552,8 +560,8 @@ async fn async_main() -> anyhow::Result<()> {
             );
         }
         let mut server = WebhookServer::new(WebhookServerConfig { addr });
-        for routes in &webhook_routes {
-            server.add_routes(routes.clone());
+        for routes in webhook_routes {
+            server.add_routes(routes);
         }
         server.start().await?;
         Some(Arc::new(tokio::sync::Mutex::new(server)))
@@ -796,9 +804,10 @@ async fn async_main() -> anyhow::Result<()> {
 
         tracing::debug!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
 
-        // Merge webhook routes into the gateway so they are reachable on the
-        // same port (needed for single-port deployments like Railway).
-        gw = gw.with_webhook_routes(webhook_routes.clone());
+        // Merge gateway-safe webhook routes so they are reachable on the same
+        // port (needed for single-port deployments like Railway).  Uses the
+        // collision-free subset that excludes /oauth/callback etc.
+        gw = gw.with_webhook_routes(gateway_webhook_routes.clone());
 
         // Capture SSE sender and routine engine slot before moving gw into channels.
         // IMPORTANT: This must come after all `with_*` calls since `rebuild_state`
