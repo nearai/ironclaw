@@ -186,6 +186,31 @@ pub(crate) fn parse_string_env(
     Ok(optional_env(key)?.unwrap_or_else(|| default.into()))
 }
 
+/// Setting keys that influence LLM/embeddings provider base URLs.
+///
+/// These keys are validated with the operator policy (which allows
+/// private/loopback endpoints), so they must only be writable and
+/// resolvable for admin users. The settings HTTP handlers reject
+/// non-admin writes/imports of these keys; `strip_admin_only_llm_keys`
+/// is the matching defense for the read/resolve path so a non-admin
+/// user (or pre-existing legacy DB row) cannot reactivate a private
+/// endpoint after this restriction landed.
+pub(crate) const ADMIN_ONLY_LLM_SETTING_KEYS: &[&str] = &[
+    "llm_builtin_overrides",
+    "llm_custom_providers",
+    "ollama_base_url",
+    "openai_compatible_base_url",
+];
+
+/// Remove admin-only LLM setting keys from a flat DB settings map.
+///
+/// Used by config resolution paths that load per-user DB settings for a
+/// non-operator user, to ensure they cannot inject private/loopback
+/// provider endpoints into the active LLM/embeddings configuration.
+pub(crate) fn strip_admin_only_llm_keys(map: &mut HashMap<String, serde_json::Value>) {
+    map.retain(|key, _| !ADMIN_ONLY_LLM_SETTING_KEYS.contains(&key.as_str()));
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BaseUrlPolicy {
     StrictSsrf,
@@ -304,18 +329,32 @@ fn validate_base_url_with_policy(
         let port = parsed
             .port()
             .unwrap_or(if scheme == "http" { 80 } else { 443 });
-        (host, port)
-            .to_socket_addrs()
-            .map_err(|e| ConfigError::InvalidValue {
-                key: field_name.to_string(),
-                message: format!(
-                    "failed to resolve hostname '{}': {}. \
-                     Base URLs must be resolvable at config time.",
-                    host, e
-                ),
-            })?
-            .map(|addr| addr.ip())
-            .collect::<Vec<_>>()
+        // `to_socket_addrs` performs blocking DNS resolution. This helper is
+        // also called from async request handlers (e.g. the LLM utility
+        // routes), so wrap the lookup in `block_in_place` when running on a
+        // multi-threaded tokio worker to avoid stalling other tasks. The
+        // `try_current()` check keeps sync callers (config bootstrap, CLI)
+        // working unchanged.
+        let resolve = || -> std::io::Result<Vec<IpAddr>> {
+            Ok((host, port)
+                .to_socket_addrs()?
+                .map(|addr| addr.ip())
+                .collect())
+        };
+        let lookup = match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(resolve)
+            }
+            _ => resolve(),
+        };
+        lookup.map_err(|e| ConfigError::InvalidValue {
+            key: field_name.to_string(),
+            message: format!(
+                "failed to resolve hostname '{}': {}. \
+                 Base URLs must be resolvable at config time.",
+                host, e
+            ),
+        })?
     };
 
     if scheme == "http" {
@@ -876,5 +915,88 @@ mod tests {
         assert_eq!(result, Some(99));
 
         unsafe { std::env::remove_var(key) };
+    }
+
+    // --- admin-only LLM key stripping (defense-in-depth for #1955) ---
+
+    #[test]
+    fn strip_admin_only_llm_keys_removes_all_known_keys() {
+        let mut map = HashMap::new();
+        map.insert(
+            "llm_builtin_overrides".to_string(),
+            serde_json::json!({"openai": {"base_url": "http://10.0.0.5"}}),
+        );
+        map.insert(
+            "llm_custom_providers".to_string(),
+            serde_json::json!([{"id": "x"}]),
+        );
+        map.insert(
+            "ollama_base_url".to_string(),
+            serde_json::json!("http://192.168.1.20:11434"),
+        );
+        map.insert(
+            "openai_compatible_base_url".to_string(),
+            serde_json::json!("http://100.64.0.1"),
+        );
+        map.insert("selected_model".to_string(), serde_json::json!("gpt-4o"));
+        map.insert("agent.name".to_string(), serde_json::json!("Iron"));
+
+        strip_admin_only_llm_keys(&mut map);
+
+        assert!(!map.contains_key("llm_builtin_overrides"));
+        assert!(!map.contains_key("llm_custom_providers"));
+        assert!(!map.contains_key("ollama_base_url"));
+        assert!(!map.contains_key("openai_compatible_base_url"));
+        // Non-admin keys must survive.
+        assert_eq!(
+            map.get("selected_model"),
+            Some(&serde_json::json!("gpt-4o"))
+        );
+        assert_eq!(map.get("agent.name"), Some(&serde_json::json!("Iron")));
+    }
+
+    #[test]
+    fn strip_admin_only_llm_keys_is_a_no_op_for_clean_map() {
+        let mut map = HashMap::new();
+        map.insert("selected_model".to_string(), serde_json::json!("gpt-4o"));
+        map.insert("llm_backend".to_string(), serde_json::json!("openai"));
+
+        strip_admin_only_llm_keys(&mut map);
+
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key("selected_model"));
+        assert!(map.contains_key("llm_backend"));
+    }
+
+    // --- async DNS regression (#1955: don't stall the tokio worker) ---
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn validate_base_url_safe_to_call_from_async_handler() {
+        // Regression test: validate_base_url_with_policy used to call the
+        // blocking `to_socket_addrs()` directly, which can stall a tokio
+        // worker thread when invoked from an async handler. The function
+        // now wraps the lookup in `block_in_place` on multi-threaded
+        // runtimes, so calling it from an async context must not panic
+        // and must produce a deterministic error.
+        let result = validate_base_url("http://ssrf-test.invalid", "TEST");
+        let err = result.expect_err("invalid host should fail validation");
+        let msg = err.to_string();
+        // Strict policy short-circuits before DNS, so we should get the
+        // localhost-only message rather than a DNS error.
+        assert!(
+            msg.contains("only allowed for localhost"),
+            "expected strict short-circuit, got: {msg}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn validate_operator_base_url_safe_to_call_from_async_handler() {
+        // The operator policy must also tolerate being called from async
+        // handlers (it is reachable from /api/llm/test_connection and
+        // /api/llm/list_models). Use IP literals so we don't depend on
+        // a working resolver.
+        assert!(validate_operator_base_url("http://127.0.0.1:11434", "TEST").is_ok());
+        assert!(validate_operator_base_url("http://192.168.1.10:11434", "TEST").is_ok());
+        assert!(validate_operator_base_url("http://169.254.169.254", "TEST").is_err());
     }
 }
