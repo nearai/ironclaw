@@ -1032,6 +1032,14 @@ impl WasmChannel {
     }
 
     /// Load broadcast metadata from settings store on startup.
+    ///
+    /// # Legacy migration (remove after ownership model rollout — tracked in #2100)
+    ///
+    /// If no metadata is found under `self.owner_scope_id`, a second lookup
+    /// under `"default"` is attempted for backward compatibility with instances
+    /// that stored broadcast metadata before the ownership model migration.
+    /// Remove this fallback once all deployments have run the
+    /// `migrate_default_owner` bootstrap step and restarted at least once.
     async fn load_broadcast_metadata(&self) {
         if let Some(ref store) = self.settings_store {
             match store
@@ -1046,6 +1054,7 @@ impl WasmChannel {
                     );
                 }
                 Ok(_) => {
+                    // LEGACY MIGRATION: remove after ownership model rollout — tracked in #2100
                     if self.owner_scope_id != "default" {
                         match store
                             .get_setting("default", &self.broadcast_metadata_key())
@@ -1163,9 +1172,12 @@ impl WasmChannel {
             );
             let queue_path = websocket_queue_path(&channel_name);
             let processing_queue_path = websocket_processing_queue_path(&channel_name);
-            let identify_payload =
-                resolve_websocket_identify_message(&config, websocket_secrets_store.as_deref())
-                    .await;
+            let identify_payload = resolve_websocket_identify_message(
+                &config,
+                websocket_secrets_store.as_deref(),
+                &owner_scope_id,
+            )
+            .await;
             let mut session_state = WebsocketSessionState::new(identify_payload.as_deref());
 
             'reconnect: loop {
@@ -2523,6 +2535,39 @@ impl WasmChannel {
         Ok(())
     }
 
+    /// Ensure the polling loop is running with the interval from `config`.
+    ///
+    /// Stops any existing polling task and starts a fresh one.  Safe to call
+    /// multiple times (e.g., from `refresh_active_channel` after re-running
+    /// `on_start`).
+    pub async fn ensure_polling(&self, config: &ChannelConfig) {
+        // Always stop any existing polling task first — if the channel switched
+        // from polling to webhook (or polling was disabled), the old task must
+        // not keep running.
+        let _ = self.poll_shutdown_tx.write().await.take();
+
+        if let Some(poll_config) = &config.poll
+            && poll_config.enabled
+        {
+            let interval = match self
+                .capabilities
+                .validate_poll_interval(poll_config.interval_ms)
+            {
+                Ok(ms) => ms,
+                Err(e) => {
+                    tracing::warn!(channel = %self.name, error = %e, "Polling interval rejected");
+                    return;
+                }
+            };
+
+            let (poll_shutdown_tx, poll_shutdown_rx) = oneshot::channel();
+            *self.poll_shutdown_tx.write().await = Some(poll_shutdown_tx);
+
+            self.start_polling(Duration::from_millis(interval as u64), poll_shutdown_rx);
+            tracing::debug!(channel = %self.name, interval_ms = interval, "Polling loop (re)started");
+        }
+    }
+
     /// Start the polling loop if configured.
     ///
     /// Since we can't hold `Arc<Self>` from `&self`, we pass all the components
@@ -3123,11 +3168,16 @@ fn websocket_processing_queue_path(channel_name: &str) -> String {
 async fn resolve_websocket_identify_message(
     config: &WebsocketRuntimeConfig,
     store: Option<&(dyn SecretsStore + Send + Sync)>,
+    owner_scope_id: &str,
 ) -> Option<String> {
     let identify = config.identify.clone()?;
     let secret_name = config.identify_secret_name.as_ref()?;
     let store = store?;
-    let secret = store.get_decrypted("default", secret_name).await.ok()?;
+    // Channel runtime secrets are instance-owned, resolved under the channel's owner scope.
+    let secret = store
+        .get_decrypted(owner_scope_id, secret_name)
+        .await
+        .ok()?;
     build_websocket_identify_message(&identify, secret.expose())
 }
 
@@ -4289,6 +4339,49 @@ mod tests {
         assert_eq!(json["op"], serde_json::json!(2));
         assert_eq!(json["d"]["token"], serde_json::json!("bot-token"));
         assert_eq!(json["d"]["intents"], serde_json::json!(513));
+    }
+
+    /// Regression test for #2069: websocket identify must use owner_scope_id,
+    /// not hardcoded "default".
+    #[tokio::test]
+    async fn test_resolve_websocket_identify_message_uses_owner_scope() {
+        use super::resolve_websocket_identify_message;
+        use crate::secrets::SecretsStore;
+        use crate::testing::credentials::test_secrets_store;
+
+        let store = test_secrets_store();
+
+        // Store secret under a specific owner, NOT under "default"
+        store
+            .create(
+                "owner_42",
+                crate::secrets::CreateSecretParams::new("discord_bot_token", "real_bot_token"),
+            )
+            .await
+            .expect("store token"); // safety: test code only
+
+        let config = WebsocketRuntimeConfig {
+            url: "wss://gateway.discord.gg/?v=10&encoding=json".to_string(),
+            connect_on_start: true,
+            identify: Some(serde_json::json!({
+                "intents": 513,
+                "properties": { "os": "linux", "browser": "ironclaw", "device": "ironclaw" }
+            })),
+            identify_secret_name: Some("discord_bot_token".to_string()),
+        };
+
+        // Should find the secret under "owner_42"
+        let payload = resolve_websocket_identify_message(&config, Some(&store), "owner_42").await;
+        assert!(payload.is_some(), "should resolve from owner scope"); // safety: test code only
+        let json: serde_json::Value = serde_json::from_str(payload.as_ref().unwrap()).unwrap(); // safety: test code only
+        assert_eq!(json["d"]["token"], serde_json::json!("real_bot_token"));
+
+        // Must NOT find the secret under "default"
+        let no_payload = resolve_websocket_identify_message(&config, Some(&store), "default").await;
+        assert!(
+            no_payload.is_none(),
+            "default scope must not find owner_42's secret"
+        );
     }
 
     #[test]

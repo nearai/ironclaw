@@ -11,10 +11,11 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::channels::web::auth::{AuthenticatedUser, ownership_identity};
+use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
-use crate::ownership::{OwnerId, can_act_on};
+use crate::orchestrator::job_manager::{ContainerJobManager, JobCreationParams, JobMode};
+use crate::ownership::Owned;
 
 fn db_error(context: &str, e: impl std::fmt::Display) -> (StatusCode, String) {
     tracing::error!(%e, context, "Database error in jobs handler");
@@ -28,22 +29,17 @@ async fn resolve_sandbox_restart_mode(
     store: &dyn crate::db::Database,
     stored_mode: &str,
     user_id: &str,
-) -> Result<
-    (
-        crate::orchestrator::job_manager::JobMode,
-        Option<crate::config::acp::AcpAgentConfig>,
-    ),
-    crate::config::acp::AcpConfigError,
-> {
+) -> Result<(JobMode, Option<crate::config::acp::AcpAgentConfig>), crate::config::acp::AcpConfigError>
+{
     if stored_mode == "claude_code" {
-        return Ok((crate::orchestrator::job_manager::JobMode::ClaudeCode, None));
+        return Ok((JobMode::ClaudeCode, None));
     }
 
     if let Some(agent_name) = stored_mode.strip_prefix("acp:") {
         let agent =
             crate::config::acp::get_enabled_acp_agent_for_user(Some(store), user_id, agent_name)
                 .await?;
-        return Ok((crate::orchestrator::job_manager::JobMode::Acp, Some(agent)));
+        return Ok((JobMode::Acp, Some(agent)));
     }
 
     if stored_mode == "acp" {
@@ -52,7 +48,24 @@ async fn resolve_sandbox_restart_mode(
         });
     }
 
-    Ok((crate::orchestrator::job_manager::JobMode::Worker, None))
+    Ok((JobMode::Worker, None))
+}
+
+/// Reject restart requests for modes disabled since the job was created.
+fn check_mode_enabled(mode: JobMode, jm: &ContainerJobManager) -> Result<(), (StatusCode, String)> {
+    if jm.is_mode_enabled(mode) {
+        Ok(())
+    } else {
+        let env_hint = match mode {
+            JobMode::ClaudeCode => " Set CLAUDE_CODE_ENABLED=true to re-enable.",
+            JobMode::Acp => " Set ACP_ENABLED=true to re-enable.",
+            JobMode::Worker => "", // Worker is always enabled; unreachable in practice.
+        };
+        Err((
+            StatusCode::CONFLICT,
+            format!("{mode} mode is no longer enabled.{env_hint}"),
+        ))
+    }
 }
 
 pub async fn jobs_list_handler(
@@ -191,8 +204,7 @@ pub async fn jobs_detail_handler(
     // Try sandbox job from DB first.
     match store.get_sandbox_job(job_id).await {
         Ok(Some(job)) => {
-            let actor = ownership_identity(&user);
-            if !can_act_on(&actor, &OwnerId::from(job.user_id.clone())) {
+            if !job.is_owned_by(&user.user_id) {
                 return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
             }
             let browse_id = std::path::Path::new(&job.project_dir)
@@ -263,8 +275,7 @@ pub async fn jobs_detail_handler(
     // Fall back to agent job from DB.
     match store.get_job(job_id).await {
         Ok(Some(ctx)) => {
-            let actor = ownership_identity(&user);
-            if !can_act_on(&actor, &OwnerId::from(ctx.user_id.clone())) {
+            if !ctx.is_owned_by(&user.user_id) {
                 return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
             }
             let elapsed_secs = ctx.started_at.map(|start| {
@@ -326,8 +337,7 @@ pub async fn jobs_cancel_handler(
     if let Some(ref store) = state.store {
         match store.get_sandbox_job(job_id).await {
             Ok(Some(job)) => {
-                let actor = ownership_identity(&user);
-                if !can_act_on(&actor, &OwnerId::from(job.user_id.clone())) {
+                if !job.is_owned_by(&user.user_id) {
                     return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
                 }
                 if job.status == "running" || job.status == "creating" {
@@ -366,8 +376,7 @@ pub async fn jobs_cancel_handler(
     if let Some(ref store) = state.store {
         match store.get_job(job_id).await {
             Ok(Some(job)) => {
-                let actor = ownership_identity(&user);
-                if !can_act_on(&actor, &OwnerId::from(job.user_id.clone())) {
+                if !job.is_owned_by(&user.user_id) {
                     return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
                 }
                 if job.state.is_active() {
@@ -423,8 +432,7 @@ pub async fn jobs_restart_handler(
     // Try sandbox job restart first.
     match store.get_sandbox_job(old_job_id).await {
         Ok(Some(old_job)) => {
-            let actor = ownership_identity(&user);
-            if !can_act_on(&actor, &OwnerId::from(old_job.user_id.clone())) {
+            if !old_job.is_owned_by(&user.user_id) {
                 return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
             }
             if old_job.status != "interrupted" && old_job.status != "failed" {
@@ -462,6 +470,9 @@ pub async fn jobs_restart_handler(
                 resolve_sandbox_restart_mode(store.as_ref(), &stored_mode, &old_job.user_id)
                     .await
                     .map_err(|e| (StatusCode::CONFLICT, format!("Cannot restart job: {}", e)))?;
+
+            check_mode_enabled(mode, jm.as_ref())?;
+
             let record = crate::history::SandboxJobRecord {
                 id: new_job_id,
                 task: task.clone(),
@@ -480,8 +491,8 @@ pub async fn jobs_restart_handler(
                 .await
                 .map_err(|e| db_error("jobs_restart_handler", e))?;
 
-            if mode != crate::orchestrator::job_manager::JobMode::Worker {
-                let mode_str = if mode == crate::orchestrator::job_manager::JobMode::Acp {
+            if mode != JobMode::Worker {
+                let mode_str = if mode == JobMode::Acp {
                     format!(
                         "acp:{}",
                         acp_agent
@@ -516,7 +527,7 @@ pub async fn jobs_restart_handler(
                     &task,
                     Some(project_dir),
                     mode,
-                    crate::orchestrator::job_manager::JobCreationParams {
+                    JobCreationParams {
                         credential_grants,
                         acp_agent,
                         ..Default::default()
@@ -564,8 +575,7 @@ pub async fn jobs_restart_handler(
     // Try agent job restart: dispatch a new job via the scheduler.
     match store.get_job(old_job_id).await {
         Ok(Some(old_job)) => {
-            let actor = ownership_identity(&user);
-            if !can_act_on(&actor, &OwnerId::from(old_job.user_id.clone())) {
+            if !old_job.is_owned_by(&user.user_id) {
                 return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
             }
             if old_job.state.is_active() {
@@ -650,8 +660,7 @@ pub async fn jobs_prompt_handler(
         && let Ok(Some(sandbox_job)) = s.get_sandbox_job(job_id).await
     {
         // Verify ownership.
-        let actor = ownership_identity(&user);
-        if !can_act_on(&actor, &OwnerId::from(sandbox_job.user_id.clone())) {
+        if !sandbox_job.is_owned_by(&user.user_id) {
             return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
         }
 
@@ -686,8 +695,7 @@ pub async fn jobs_prompt_handler(
     if let Some(ref store) = state.store {
         match store.get_job(job_id).await {
             Ok(Some(agent_job)) => {
-                let actor = ownership_identity(&user);
-                if !can_act_on(&actor, &OwnerId::from(agent_job.user_id.clone())) {
+                if !agent_job.is_owned_by(&user.user_id) {
                     return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
                 }
             }
@@ -740,13 +748,12 @@ pub async fn jobs_events_handler(
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
     // Verify ownership before returning events (check both sandbox and agent jobs).
-    let actor = ownership_identity(&user);
     let is_owner = match store.get_sandbox_job(job_id).await {
-        Ok(Some(job)) => can_act_on(&actor, &OwnerId::from(job.user_id.clone())),
+        Ok(Some(job)) => job.is_owned_by(&user.user_id),
         Ok(None) => {
             // Fall back to agent job ownership check.
             match store.get_job(job_id).await {
-                Ok(Some(ctx)) => can_act_on(&actor, &OwnerId::from(ctx.user_id.clone())),
+                Ok(Some(ctx)) => ctx.is_owned_by(&user.user_id),
                 _ => false,
             }
         }
@@ -808,8 +815,7 @@ pub async fn job_files_list_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
 
-    let actor = ownership_identity(&user);
-    if !can_act_on(&actor, &OwnerId::from(job.user_id.clone())) {
+    if !job.is_owned_by(&user.user_id) {
         return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
     }
 
@@ -877,8 +883,7 @@ pub async fn job_files_read_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
 
-    let actor = ownership_identity(&user);
-    if !can_act_on(&actor, &OwnerId::from(job.user_id.clone())) {
+    if !job.is_owned_by(&user.user_id) {
         return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
     }
 
@@ -914,6 +919,9 @@ pub async fn job_files_read_handler(
 mod tests {
     use super::*;
 
+    use crate::orchestrator::TokenStore;
+    use crate::orchestrator::job_manager::ContainerJobConfig;
+
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn sandbox_restart_mode_uses_original_job_owner_scope() {
@@ -934,7 +942,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(mode, crate::orchestrator::job_manager::JobMode::Acp);
+        assert_eq!(mode, JobMode::Acp);
         assert_eq!(
             agent.as_ref().map(|agent| agent.name.as_str()),
             Some("codex")
@@ -975,5 +983,47 @@ mod tests {
         assert_eq!(body, "Internal database error");
         assert!(!body.contains("relation"));
         assert!(!body.contains("does not exist"));
+    }
+
+    fn make_job_manager(claude_code: bool, acp: bool) -> ContainerJobManager {
+        ContainerJobManager::new(
+            ContainerJobConfig {
+                claude_code_enabled: claude_code,
+                acp_enabled: acp,
+                ..Default::default()
+            },
+            TokenStore::new(),
+        )
+    }
+
+    #[test]
+    fn test_check_mode_rejects_disabled_claude_code() {
+        let jm = make_job_manager(false, false);
+        let result = check_mode_enabled(JobMode::ClaudeCode, &jm);
+        let (status, body) = result.unwrap_err(); // safety: test
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body.contains("claude_code"),
+            "error should mention claude_code, got: {body}"
+        );
+    }
+
+    #[test]
+    fn test_check_mode_rejects_disabled_acp() {
+        let jm = make_job_manager(false, false);
+        let result = check_mode_enabled(JobMode::Acp, &jm);
+        let (status, body) = result.unwrap_err(); // safety: test
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body.contains("acp"),
+            "error should mention acp, got: {body}"
+        );
+    }
+
+    #[test]
+    fn test_check_mode_allows_worker_always() {
+        let jm = make_job_manager(false, false);
+        let result = check_mode_enabled(JobMode::Worker, &jm);
+        assert!(result.is_ok(), "worker mode should always be allowed");
     }
 }

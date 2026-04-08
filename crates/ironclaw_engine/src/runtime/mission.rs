@@ -127,7 +127,12 @@ impl MissionManager {
                 reason: format!("mission {id} not found"),
             })?;
 
-        if !mission.owner_id().is_shared() && !mission.is_owned_by(user_id) {
+        let allowed = if mission.owner_id().is_shared() {
+            crate::types::is_shared_owner(user_id)
+        } else {
+            mission.is_owned_by(user_id)
+        };
+        if !allowed {
             return Err(EngineError::AccessDenied {
                 user_id: user_id.to_string(),
                 entity: format!("mission {id}"),
@@ -161,14 +166,21 @@ impl MissionManager {
 
     /// Pause an active mission. No new threads will be spawned.
     ///
-    /// For shared missions, the caller (web handler) must
-    /// verify admin role before calling this. The engine only checks ownership.
+    /// Shared missions can only be managed by shared owners (system user).
     pub async fn pause_mission(&self, id: MissionId, user_id: &str) -> Result<(), EngineError> {
-        // Validate ownership. Shared missions require admin role (checked by caller).
-        if let Some(mission) = self.store.load_mission(id).await?
-            && !mission.is_owned_by(user_id)
-            && !mission.owner_id().is_shared()
-        {
+        let mission = self
+            .store
+            .load_mission(id)
+            .await?
+            .ok_or_else(|| EngineError::Store {
+                reason: format!("mission {id} not found"),
+            })?;
+        let allowed = if mission.owner_id().is_shared() {
+            crate::types::is_shared_owner(user_id)
+        } else {
+            mission.is_owned_by(user_id)
+        };
+        if !allowed {
             return Err(EngineError::AccessDenied {
                 user_id: user_id.to_string(),
                 entity: format!("mission {id}"),
@@ -184,14 +196,21 @@ impl MissionManager {
 
     /// Resume a paused mission.
     ///
-    /// For shared missions, the caller (web handler) must
-    /// verify admin role before calling this. The engine only checks ownership.
+    /// Shared missions can only be managed by shared owners (system user).
     pub async fn resume_mission(&self, id: MissionId, user_id: &str) -> Result<(), EngineError> {
-        // Validate ownership. Shared missions require admin role (checked by caller).
-        if let Some(mission) = self.store.load_mission(id).await?
-            && !mission.is_owned_by(user_id)
-            && !mission.owner_id().is_shared()
-        {
+        let mission = self
+            .store
+            .load_mission(id)
+            .await?
+            .ok_or_else(|| EngineError::Store {
+                reason: format!("mission {id} not found"),
+            })?;
+        let allowed = if mission.owner_id().is_shared() {
+            crate::types::is_shared_owner(user_id)
+        } else {
+            mission.is_owned_by(user_id)
+        };
+        if !allowed {
             return Err(EngineError::AccessDenied {
                 user_id: user_id.to_string(),
                 entity: format!("mission {id}"),

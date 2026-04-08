@@ -626,14 +626,6 @@ impl Agent {
                     .last()
                     .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                     .unwrap_or_default();
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::Status("Done".into()),
-                        &message.metadata,
-                    )
-                    .await;
 
                 // Persist tool calls then assistant response (user message already persisted at turn start)
                 self.persist_tool_calls(
@@ -1656,14 +1648,6 @@ impl Agent {
                         &response,
                     )
                     .await;
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::Status("Done".into()),
-                            &message.metadata,
-                        )
-                        .await;
                     if !suggestions.is_empty() {
                         let _ = self
                             .channels

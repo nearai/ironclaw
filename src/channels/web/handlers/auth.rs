@@ -265,7 +265,7 @@ async fn handle_callback(
     OsRng.fill_bytes(&mut token_bytes);
     let plaintext_token = hex::encode(token_bytes);
     let token_hash = crate::channels::web::auth::hash_token(&plaintext_token);
-    let token_prefix = &plaintext_token[..8];
+    let token_prefix = &plaintext_token[..8]; // safety: hex-encoded 32 bytes = 64 ASCII chars
 
     let token_name = if is_new {
         format!("oauth-{provider_name}-initial")
@@ -414,7 +414,7 @@ pub async fn near_verify_handler(
         account_id = %body.account_id,
         public_key = %body.public_key,
         signature_len = body.signature.len(),
-        signature_prefix = &body.signature[..body.signature.len().min(20)],
+        signature_prefix = safe_truncate(&body.signature, 20),
         "NEAR verify: decoding credentials"
     );
 
@@ -542,7 +542,7 @@ pub async fn near_verify_handler(
     OsRng.fill_bytes(&mut token_bytes);
     let plaintext_token = hex::encode(token_bytes);
     let token_hash = crate::channels::web::auth::hash_token(&plaintext_token);
-    let token_prefix = &plaintext_token[..8];
+    let token_prefix = &plaintext_token[..8]; // safety: hex-encoded 32 bytes = 64 ASCII chars
 
     let token_name = if is_new {
         "near-wallet-initial".to_string()
@@ -588,7 +588,7 @@ pub async fn near_verify_handler(
 /// Truncate a string safely for error messages (no byte-index panic on multibyte).
 fn safe_truncate(s: &str, max_chars: usize) -> &str {
     match s.char_indices().nth(max_chars) {
-        Some((idx, _)) => &s[..idx],
+        Some((idx, _)) => &s[..idx], // safety: idx from char_indices() is always a valid char boundary
         None => s,
     }
 }

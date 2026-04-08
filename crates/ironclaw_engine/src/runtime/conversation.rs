@@ -358,7 +358,7 @@ fn build_history_from_entries(
     // before this function runs). Also skip system entries (thread lifecycle
     // notifications aren't useful as LLM context).
     let history_entries = if entries.len() > 1 {
-        &entries[..entries.len() - 1]
+        &entries[..entries.len() - 1] // safety: slice index on Vec<Entry>, not a string — no UTF-8 concern
     } else {
         return Vec::new();
     };

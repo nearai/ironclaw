@@ -1,5 +1,5 @@
 {
-  "name": "google-sheets",
+  "name": "google_sheets",
   "display_name": "Google Sheets",
   "kind": "tool",
   "version": "0.2.1",

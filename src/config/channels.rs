@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::bootstrap::ironclaw_base_dir;
+use crate::channels::web::sse::DEFAULT_MAX_CONNECTIONS;
 use crate::config::helpers::{
     db_first_bool, db_first_optional_string, db_first_or_default, optional_env, parse_bool_env,
     parse_optional_env,
@@ -46,6 +47,8 @@ pub struct GatewayConfig {
     pub port: u16,
     /// Bearer token for authentication. Random hex generated at startup if unset.
     pub auth_token: Option<String>,
+    /// Maximum number of concurrent SSE/WebSocket connections.
+    pub max_connections: u64,
     /// Additional user scopes for workspace reads.
     ///
     /// When set, the workspace will be able to read (search, read, list) from
@@ -270,6 +273,17 @@ impl ChannelsConfig {
                     }
                     optional_env("GATEWAY_AUTH_TOKEN")?
                 },
+                max_connections: {
+                    let max =
+                        parse_optional_env("GATEWAY_MAX_CONNECTIONS", DEFAULT_MAX_CONNECTIONS)?;
+                    if max == 0 {
+                        return Err(ConfigError::InvalidValue {
+                            key: "GATEWAY_MAX_CONNECTIONS".to_string(),
+                            message: "must be greater than 0".to_string(),
+                        });
+                    }
+                    max
+                },
                 workspace_read_scopes,
                 memory_layers,
                 oidc,
@@ -446,6 +460,7 @@ mod tests {
             host: "127.0.0.1".to_string(),
             port: 3000,
             auth_token: Some("tok-abc".to_string()),
+            max_connections: 100,
             workspace_read_scopes: vec![],
             memory_layers: vec![],
             oidc: None,
@@ -461,6 +476,7 @@ mod tests {
             host: "0.0.0.0".to_string(),
             port: 3001,
             auth_token: None,
+            max_connections: 100,
             workspace_read_scopes: vec![],
             memory_layers: vec![],
             oidc: None,

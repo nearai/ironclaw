@@ -2100,7 +2100,7 @@ async fn await_thread_outcome(
                     .nth(1)
                     .and_then(|s| {
                         // Handle both JSON ("credential_name":"foo") and prose
-                        s.split(&['"', '\'', '`'][..])
+                        s.split(&['"', '\'', '`'][..]) // safety: slice of char array, not string byte slicing
                             .find(|seg| !seg.is_empty() && !seg.contains(':') && !seg.contains(' '))
                     })
                     .filter(|name| {
@@ -2771,7 +2771,7 @@ pub async fn list_engine_threads(
             let uuid = uuid::Uuid::parse_str(id).map_err(|e| engine_err("parse project_id", e))?;
             ironclaw_engine::ProjectId(uuid)
         }
-        None => state.default_project_id,
+        None => resolve_user_project(&state.store, user_id, state.default_project_id).await?,
     };
 
     let threads = state
@@ -3001,7 +3001,7 @@ pub async fn list_engine_missions(
             let uuid = uuid::Uuid::parse_str(id).map_err(|e| engine_err("parse project_id", e))?;
             ironclaw_engine::ProjectId(uuid)
         }
-        None => state.default_project_id,
+        None => resolve_user_project(&state.store, user_id, state.default_project_id).await?,
     };
 
     let missions = state
