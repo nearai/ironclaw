@@ -39,6 +39,7 @@ from helpers import (
 # All gateway customization state lives under this prefix in the workspace.
 _CUSTOM_PATHS = [
     ".system/gateway/custom.css",
+    ".system/gateway/layout.json",
     ".system/gateway/widgets/skills-viewer/manifest.json",
     ".system/gateway/widgets/skills-viewer/index.js",
 ]
@@ -310,5 +311,140 @@ async def test_chat_adds_skills_viewer_widget_to_top_panel(
             }"""
         )
         assert widget_root_attr == "skills-viewer", widget_root_attr
+    finally:
+        await context.close()
+
+
+async def test_layout_hidden_built_in_tab_and_image_upload_disabled(
+    browser, ironclaw_server, clean_customizations
+):
+    """Regression: layout.json flags must match the real DOM, not a hypothesis.
+
+    Two ``app.js`` selector bugs slid through code review on PR #1725
+    because the layout-config IIFE was written against a hypothetical DOM
+    rather than the one ``static/index.html`` actually ships:
+
+    1. ``tabs.hidden`` used the ``.tab-btn[data-tab="…"]`` selector, which
+       only matched widget-injected buttons (created by ``_addWidgetTab``
+       with ``className = 'tab-btn'``). Built-in tab ``<button>``\\s in
+       ``index.html`` are plain ``<button data-tab="chat">`` etc. with no
+       class, so hiding a built-in like ``"routines"`` silently no-opped.
+    2. ``chat.image_upload === false`` tried to hide ``#image-upload-btn``,
+       which doesn't exist — the real composer uses ``#attach-btn`` (the
+       paperclip) and ``#image-file-input`` (the hidden file input).
+
+    Both bugs share the same root cause: there was no e2e test that
+    actually loaded a customized layout and asked the browser whether the
+    flags took effect. This test is that missing coverage. The next
+    instance of this class of bug — somebody adds a new layout flag,
+    targets the wrong selector, and ships it — should fail this test
+    instead of a user.
+
+    Drives the layout via a direct ``/api/memory/write`` POST rather than
+    through chat: the customization path is independent of the agent
+    loop, and side-stepping chat keeps the test fast and decoupled from
+    the mock LLM's canned-response set.
+    """
+    # 1. Write a layout.json that exercises both flags. `tabs.hidden`
+    #    targets a *built-in* tab on purpose — the previous bug was that
+    #    only widget-provided tabs could be hidden, so testing with a
+    #    built-in is what catches the regression.
+    layout = {
+        "tabs": {"hidden": ["routines"]},
+        "chat": {"image_upload": False},
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(
+            f"{ironclaw_server}/api/memory/write",
+            headers=auth_headers(),
+            json={
+                "path": ".system/gateway/layout.json",
+                "content": json.dumps(layout),
+                "append": False,
+            },
+        )
+        assert resp.status_code == 200, (
+            f"failed to write layout.json: "
+            f"status={resp.status_code} body={resp.text!r}"
+        )
+
+    # 2. Reload in a fresh context so the gateway re-assembles the HTML
+    #    bundle with `window.__IRONCLAW_LAYOUT__` injected from the new
+    #    layout.json. The IIFE in `app.js` then applies the flags.
+    context, pg = await _open_authed_page(browser, ironclaw_server)
+    try:
+        # Wait for the tab bar to render before probing selectors —
+        # otherwise the layout IIFE may not have run yet on a slow CI
+        # machine and we'd race the assertion.
+        await pg.locator(".tab-bar").wait_for(state="visible", timeout=10000)
+
+        # 3. `tabs.hidden: ["routines"]` must hide the built-in routines
+        #    tab. Use `getComputedStyle` rather than reading the inline
+        #    `style` attribute so the assertion survives a future refactor
+        #    that swaps `style.display = 'none'` for a class toggle.
+        routines_display = await pg.evaluate(
+            """() => {
+              const btn = document.querySelector(
+                '.tab-bar button[data-tab=\"routines\"]'
+              );
+              return btn ? getComputedStyle(btn).display : 'missing';
+            }"""
+        )
+        assert routines_display == "none", (
+            f"built-in routines tab should be hidden by layout.tabs.hidden, "
+            f"got display={routines_display!r}"
+        )
+
+        # 4. The other built-in tabs must NOT be collateral damage. If a
+        #    future selector change started over-matching, this would
+        #    catch it before users noticed.
+        for visible_tab in ("chat", "memory", "settings"):
+            display = await pg.evaluate(
+                f"""() => {{
+                  const btn = document.querySelector(
+                    '.tab-bar button[data-tab=\"{visible_tab}\"]'
+                  );
+                  return btn ? getComputedStyle(btn).display : 'missing';
+                }}"""
+            )
+            assert display != "none", (
+                f"built-in tab {visible_tab!r} should still be visible, "
+                f"got display={display!r}"
+            )
+            assert display != "missing", (
+                f"built-in tab {visible_tab!r} disappeared from the DOM "
+                "entirely — index.html structure regressed"
+            )
+
+        # 5. `chat.image_upload: false` must hide the visible attach button
+        #    AND disable the underlying file input. Hiding only the button
+        #    would leave a programmatic
+        #    `document.getElementById('image-file-input').click()` path
+        #    open for a widget or extension to bypass the operator's
+        #    intent — the previous bug targeted a non-existent
+        #    `#image-upload-btn` and accomplished neither.
+        attach_state = await pg.evaluate(
+            """() => {
+              const btn = document.getElementById('attach-btn');
+              const input = document.getElementById('image-file-input');
+              return {
+                attachDisplay: btn ? getComputedStyle(btn).display : 'missing',
+                inputDisabled: input ? !!input.disabled : 'missing',
+                inputExists: !!input,
+              };
+            }"""
+        )
+        assert attach_state["attachDisplay"] == "none", (
+            f"#attach-btn should be hidden by chat.image_upload=false, "
+            f"got {attach_state!r}"
+        )
+        assert attach_state["inputExists"], (
+            "#image-file-input must exist in the DOM — index.html structure "
+            "regressed"
+        )
+        assert attach_state["inputDisabled"] is True, (
+            f"#image-file-input must be disabled by chat.image_upload=false, "
+            f"got {attach_state!r}"
+        )
     finally:
         await context.close()
