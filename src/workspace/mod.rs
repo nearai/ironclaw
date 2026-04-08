@@ -523,6 +523,10 @@ pub struct Workspace {
     /// When true, the system prompt includes admin-defined instructions from
     /// the `__admin__` scope. Set by `WorkspacePool` in multi-tenant mode.
     admin_prompt_enabled: bool,
+    /// Shared cache for the admin system prompt. When `Some`, the workspace
+    /// reads from this cache instead of hitting the database on every turn.
+    /// Populated by `WorkspacePool` in multi-tenant mode.
+    admin_prompt_cache: Option<Arc<tokio::sync::RwLock<Option<String>>>>,
 }
 
 impl Workspace {
@@ -543,6 +547,7 @@ impl Workspace {
             memory_layers,
             privacy_classifier: None,
             admin_prompt_enabled: false,
+            admin_prompt_cache: None,
         }
     }
 
@@ -564,6 +569,7 @@ impl Workspace {
             memory_layers,
             privacy_classifier: None,
             admin_prompt_enabled: false,
+            admin_prompt_cache: None,
         }
     }
 
@@ -672,6 +678,15 @@ impl Workspace {
         self
     }
 
+    /// Set the shared admin prompt cache (from `WorkspacePool`).
+    pub fn with_admin_prompt_cache(
+        mut self,
+        cache: Arc<tokio::sync::RwLock<Option<String>>>,
+    ) -> Self {
+        self.admin_prompt_cache = Some(cache);
+        self
+    }
+
     /// Get the configured memory layers.
     pub fn memory_layers(&self) -> &[crate::workspace::layer::MemoryLayer] {
         &self.memory_layers
@@ -745,6 +760,7 @@ impl Workspace {
             memory_layers,
             privacy_classifier: self.privacy_classifier.clone(),
             admin_prompt_enabled: self.admin_prompt_enabled,
+            admin_prompt_cache: self.admin_prompt_cache.clone(),
         }
     }
 
@@ -1532,6 +1548,48 @@ impl Workspace {
     }
 
     /// Inner implementation for system prompt building.
+    /// Read the admin system prompt, using the shared cache if available.
+    ///
+    /// Returns `None` if no admin prompt has been set, the document is empty,
+    /// or a non-recoverable error occurred. Only `DocumentNotFound` is silent;
+    /// other errors are logged at `debug!`.
+    async fn read_admin_prompt(&self) -> Option<String> {
+        // Fast path: check shared cache.
+        if let Some(ref cache) = self.admin_prompt_cache {
+            let guard = cache.read().await;
+            if let Some(ref content) = *guard {
+                return if content.is_empty() {
+                    None
+                } else {
+                    Some(content.clone())
+                };
+            }
+        }
+
+        // Slow path: DB read.
+        let result = match self
+            .storage
+            .get_document_by_path(ADMIN_SCOPE, None, paths::SYSTEM)
+            .await
+        {
+            Ok(doc) if !doc.content.is_empty() => Some(doc.content),
+            Ok(_) => None,
+            Err(WorkspaceError::DocumentNotFound { .. }) => None,
+            Err(e) => {
+                tracing::debug!("Failed to read admin system prompt: {}", e);
+                return None; // Don't cache errors
+            }
+        };
+
+        // Populate cache.
+        if let Some(ref cache) = self.admin_prompt_cache {
+            let mut guard = cache.write().await;
+            *guard = Some(result.clone().unwrap_or_default());
+        }
+
+        result
+    }
+
     async fn system_prompt_for_context_inner(
         &self,
         is_group_chat: bool,
@@ -1580,16 +1638,11 @@ impl Workspace {
 
         // Admin system prompt: shared instructions set by an admin.
         // Only read in multi-tenant mode (admin_prompt_enabled is set by WorkspacePool).
-        // Read directly from __admin__ scope with no agent_id — the admin prompt
-        // is global and applies to all users regardless of workspace config.
+        // Uses read_admin_prompt() which checks the shared cache first.
         if self.admin_prompt_enabled
-            && let Ok(doc) = self
-                .storage
-                .get_document_by_path(ADMIN_SCOPE, None, paths::SYSTEM)
-                .await
-            && !doc.content.is_empty()
+            && let Some(content) = self.read_admin_prompt().await
         {
-            parts.push(format!("## System Instructions\n\n{}", doc.content));
+            parts.push(format!("## System Instructions\n\n{}", content));
         }
 
         // Load identity files in order of importance.

@@ -89,6 +89,11 @@ pub async fn put_handler(
         (status, e.to_string())
     })?;
 
+    // Invalidate the cached admin prompt so all workspaces see the update.
+    if let Some(ref pool) = state.workspace_pool {
+        pool.invalidate_admin_prompt().await;
+    }
+
     Ok(Json(SystemPromptResponse {
         content: doc.content,
         updated_at: Some(doc.updated_at.to_rfc3339()),

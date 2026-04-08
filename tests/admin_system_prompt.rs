@@ -350,3 +350,64 @@ async fn put_accepts_system_prompt_within_limit() {
         "System prompt at exactly 64 KB should not be rejected as too large"
     );
 }
+
+// ─── Test 9: Admin prompt cache is used and invalidation works ────────
+
+#[tokio::test]
+async fn admin_prompt_cache_invalidation() {
+    let (db, _dir) = setup().await;
+
+    // Create a shared cache (simulating what WorkspacePool provides).
+    let cache = Arc::new(tokio::sync::RwLock::new(None));
+
+    let ws = Workspace::new_with_db("alice", Arc::clone(&db))
+        .with_admin_prompt()
+        .with_admin_prompt_cache(Arc::clone(&cache));
+
+    // No admin prompt initially — cache should be populated with empty.
+    let prompt = ws.system_prompt_for_context(false).await.unwrap();
+    assert!(
+        !prompt.contains("System Instructions"),
+        "No admin prompt should be present initially"
+    );
+    {
+        let guard = cache.read().await;
+        assert!(
+            guard.is_some(),
+            "Cache should be populated after first read"
+        );
+    }
+
+    // Seed admin system prompt.
+    seed(&db, ADMIN_SCOPE, paths::SYSTEM, "Be helpful and kind.").await;
+
+    // Without invalidation, the cached empty value is served.
+    let prompt = ws.system_prompt_for_context(false).await.unwrap();
+    assert!(
+        !prompt.contains("Be helpful"),
+        "Stale cache should still serve old (empty) value"
+    );
+
+    // Invalidate the cache.
+    {
+        let mut guard = cache.write().await;
+        *guard = None;
+    }
+
+    // After invalidation, the new admin prompt should appear.
+    let prompt = ws.system_prompt_for_context(false).await.unwrap();
+    assert!(
+        prompt.contains("Be helpful and kind"),
+        "After cache invalidation, new admin prompt should appear.\nPrompt:\n{prompt}"
+    );
+
+    // Cache should now hold the new value.
+    {
+        let guard = cache.read().await;
+        assert_eq!(
+            guard.as_deref(),
+            Some("Be helpful and kind."),
+            "Cache should hold the new admin prompt content"
+        );
+    }
+}
