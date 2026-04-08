@@ -130,6 +130,16 @@ pub(crate) async fn load_widget_manifests(workspace: &Workspace) -> Vec<WidgetMa
 /// Read and parse a single widget's `manifest.json`. Returns `None` (with a
 /// `warn!`) for parse failures and `None` silently when the file is missing.
 ///
+/// Validates the on-disk `directory_name` against [`is_safe_segment`] BEFORE
+/// touching the workspace. The widget loader feeds raw `Workspace::list`
+/// entry names through here, and any filesystem-backed `Workspace`
+/// implementation that doesn't normalize `.`/`..`/backslash/NUL components
+/// would otherwise allow a widget directory called `..` (or with embedded
+/// separators) to escape the `.system/gateway/widgets/` subtree via the
+/// composed `{WIDGETS_DIR}{directory_name}/...` paths. The validator is the
+/// same one the public `/api/frontend/widget/{id}/{*file}` endpoint already
+/// uses, so this brings widget *discovery* in line with widget *serving*.
+///
 /// Also enforces that `manifest.id` matches the on-disk directory name. The
 /// rest of the loader uses `directory_name` to compute file paths
 /// (`{WIDGETS_DIR}{directory_name}/index.js` etc.) while layout-config gating
@@ -142,6 +152,14 @@ async fn read_widget_manifest(
     workspace: &Workspace,
     directory_name: &str,
 ) -> Option<WidgetManifest> {
+    if !is_safe_segment(directory_name) {
+        tracing::warn!(
+            directory = directory_name,
+            "skipping widget: directory name is not a safe path segment \
+             (contains separator, traversal component, backslash, or NUL)"
+        );
+        return None;
+    }
     let manifest_path = format!("{WIDGETS_DIR}{directory_name}/manifest.json");
     let doc = workspace.read(&manifest_path).await.ok()?;
     let manifest = match serde_json::from_str::<WidgetManifest>(&doc.content) {
@@ -403,6 +421,31 @@ mod tests {
                 manifests.is_empty(),
                 "load_widget_manifests must skip mismatched widgets"
             );
+        }
+
+        /// Regression: a directory name that fails `is_safe_segment` (e.g.
+        /// `..`, embedded `/`, embedded `\`, NUL) must be skipped before any
+        /// path is composed. The validator was already enforced on the
+        /// public `/api/frontend/widget/{id}/{*file}` serving endpoint;
+        /// this test pins that the *discovery* loader respects the same
+        /// constraint, so a filesystem-backed `Workspace` implementation
+        /// that didn't normalize entry names couldn't be tricked into
+        /// reading outside the widgets subtree.
+        #[tokio::test]
+        async fn skips_widget_with_unsafe_directory_name() {
+            let (ws, _dir) = make_workspace().await;
+
+            // `read_widget_manifest` is the chokepoint both call sites
+            // share, so directly probing it covers both
+            // `load_widget_manifests` and `load_resolved_widgets`.
+            for unsafe_name in ["..", ".", "a/b", "a\\b", "evil\0name"] {
+                let manifest = read_widget_manifest(&ws, unsafe_name).await;
+                assert!(
+                    manifest.is_none(),
+                    "directory name {unsafe_name:?} must be rejected by \
+                     is_safe_segment"
+                );
+            }
         }
 
         /// Sanity check: matching id + directory mounts normally.

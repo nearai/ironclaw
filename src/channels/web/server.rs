@@ -1137,11 +1137,23 @@ fn layout_has_customizations(layout: &LayoutConfig) -> bool {
     let b = &layout.branding;
     let t = &layout.tabs;
     let c = &layout.chat;
+    // `branding.colors` is opaque to this function — `BrandingColors` may
+    // exist as `Some({})` (both fields `None`) or with values that the
+    // `is_safe_css_color` validator strips at injection time. Treating
+    // bare `colors.is_some()` as a customization forces the customized
+    // HTML path (and the per-response nonce CSP that comes with it) for
+    // layouts that produce zero effective branding output. Require at
+    // least one trimmed-non-empty color field, mirroring what
+    // `to_css_vars` actually emits.
+    let has_branding_colors = b.colors.as_ref().is_some_and(|colors| {
+        let nonempty = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+        nonempty(&colors.primary) || nonempty(&colors.accent)
+    });
     b.title.is_some()
         || b.subtitle.is_some()
         || b.logo_url.is_some()
         || b.favicon_url.is_some()
-        || b.colors.is_some()
+        || has_branding_colors
         || t.order.is_some()
         || t.hidden.is_some()
         || t.default_tab.is_some()
@@ -1155,6 +1167,32 @@ fn layout_has_customizations(layout: &LayoutConfig) -> bool {
 //
 // All frontend assets are embedded in the `ironclaw_gateway` crate.
 // These handlers serve them with appropriate MIME types and cache headers.
+
+/// Substitute [`NONCE_PLACEHOLDER`] sentinels in the assembled HTML with a
+/// fresh per-response CSP nonce.
+///
+/// **Why an attribute-targeted replace, not a bare string replace.** The
+/// assembled HTML embeds widget JavaScript inline (so a CSP-protected
+/// `<script src>` doesn't need to authenticate against `/api/frontend/widget/...`).
+/// A widget author has every right to write the literal string
+/// `__IRONCLAW_CSP_NONCE__` inside their own source — in a comment, a log
+/// line, a test fixture, or just as a constant they happen to define. A
+/// naive `html.replace(NONCE_PLACEHOLDER, nonce)` would silently rewrite
+/// every such occurrence into a per-request nonce, mutating widget code
+/// in a way the author didn't ask for.
+///
+/// The substitution here targets the full attribute form
+/// `nonce="__IRONCLAW_CSP_NONCE__"`, which is the exact shape
+/// `assemble_index` emits when stamping nonces onto `<script>` tags. The
+/// double-quoted sentinel is unambiguous in HTML context — it can never
+/// accidentally match free text in a JS module body, a comment, or a
+/// JSON payload. Inline `<style>` blocks deliberately get no nonce
+/// (style-src allows `'unsafe-inline'`) so they're untouched either way.
+fn stamp_nonce_into_html(html_with_placeholder: &str, nonce: &str) -> String {
+    let placeholder_attr = format!("nonce=\"{NONCE_PLACEHOLDER}\"");
+    let nonce_attr = format!("nonce=\"{nonce}\"");
+    html_with_placeholder.replace(&placeholder_attr, &nonce_attr)
+}
 
 async fn index_handler(State(state): State<Arc<GatewayState>>) -> Response {
     // Try to assemble customized HTML from workspace frontend config.
@@ -1183,7 +1221,7 @@ async fn index_handler(State(state): State<Arc<GatewayState>>) -> Response {
     // Setting `Content-Security-Policy` here suppresses the global
     // `SetResponseHeaderLayer::if_not_present` value for this response only.
     let nonce = generate_csp_nonce();
-    let html = html_with_placeholder.replace(NONCE_PLACEHOLDER, &nonce);
+    let html = stamp_nonce_into_html(&html_with_placeholder, &nonce);
     let csp = build_csp_with_nonce(&nonce);
 
     (
@@ -4731,6 +4769,72 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_stamp_nonce_into_html_replaces_attribute() {
+        // Vanilla case: a placeholder inside a `nonce="…"` attribute on
+        // a script tag must be substituted with the real nonce. Both
+        // the layout-config script and any widget script tags emitted
+        // by `assemble_index` carry the same attribute shape, so a
+        // single test covers every emission point.
+        let html = format!("<script nonce=\"{NONCE_PLACEHOLDER}\">window.X = 1;</script>");
+        let stamped = stamp_nonce_into_html(&html, "deadbeef");
+        assert!(
+            stamped.contains("nonce=\"deadbeef\""),
+            "real nonce attribute must be present after substitution: {stamped}"
+        );
+        assert!(
+            !stamped.contains(NONCE_PLACEHOLDER),
+            "placeholder must be gone after substitution: {stamped}"
+        );
+    }
+
+    #[test]
+    fn test_stamp_nonce_into_html_does_not_mutate_widget_body() {
+        // Regression for the PR #1725 Copilot finding: a bare-string
+        // replace would also rewrite any *body content* that happens to
+        // contain the literal sentinel — e.g. a widget JS module that
+        // mentions `__IRONCLAW_CSP_NONCE__` in a comment, log line, or
+        // string constant. The attribute-targeted replace must leave
+        // those untouched.
+        //
+        // Build a fragment with TWO sentinels: one inside the
+        // legitimate `nonce="…"` attribute (must be replaced) and one
+        // inside the script body as a string constant (must NOT be
+        // replaced).
+        let html = format!(
+            "<script type=\"module\" nonce=\"{NONCE_PLACEHOLDER}\">\n\
+             // hostile widget body — author writes the sentinel as a constant\n\
+             const SENTINEL = \"{NONCE_PLACEHOLDER}\";\n\
+             console.log(SENTINEL);\n\
+             </script>"
+        );
+        let stamped = stamp_nonce_into_html(&html, "cafebabe");
+
+        // Contract 1: the attribute was rewritten.
+        assert!(
+            stamped.contains("nonce=\"cafebabe\""),
+            "attribute must carry the per-response nonce: {stamped}"
+        );
+
+        // Contract 2: the body sentinel survived intact. The widget
+        // author's source must round-trip byte-for-byte.
+        assert!(
+            stamped.contains(&format!("const SENTINEL = \"{NONCE_PLACEHOLDER}\"")),
+            "widget body sentinel must NOT be rewritten: {stamped}"
+        );
+
+        // Contract 3: exactly one occurrence of the placeholder remains
+        // (the one in the body). If a future regression switches to a
+        // bare-string replace, this count would drop to 0 and the test
+        // would fail loudly with the diff.
+        assert_eq!(
+            stamped.matches(NONCE_PLACEHOLDER).count(),
+            1,
+            "exactly one placeholder occurrence (in widget body) must \
+             survive; the attribute one must be replaced. Got: {stamped}"
+        );
     }
 
     /// Multi-tenant cache safety: when `workspace_pool` is set,

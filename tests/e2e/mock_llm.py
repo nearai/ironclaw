@@ -545,12 +545,44 @@ def _normalize_tool_calls(tool_name: str, value: object) -> list[dict]:
     """
     if isinstance(value, list):
         calls = []
-        for item in value:
+        for index, item in enumerate(value):
+            # Defensive: a malformed pattern that returns a list of
+            # tuples / strings / None would otherwise crash with an
+            # opaque ``AttributeError: 'tuple' object has no attribute
+            # 'get'`` deep inside aiohttp's request handler, taking the
+            # whole mock server down mid-test. Raise a clear TypeError
+            # at the offending call site so the failing pattern is
+            # obvious from the traceback.
+            if not isinstance(item, dict):
+                raise TypeError(
+                    f"_normalize_tool_calls: TOOL_CALL_PATTERNS entry for "
+                    f"{tool_name!r} returned a list whose element [{index}] "
+                    f"is {type(item).__name__}, expected dict. "
+                    f"Each multi-call entry must be "
+                    f'{{"tool_name": ..., "arguments": ...}}.'
+                )
+            arguments = item.get("arguments", {})
+            if not isinstance(arguments, dict):
+                raise TypeError(
+                    f"_normalize_tool_calls: TOOL_CALL_PATTERNS entry for "
+                    f"{tool_name!r} element [{index}] has "
+                    f"arguments={type(arguments).__name__}, expected dict."
+                )
             calls.append({
                 "tool_name": item.get("tool_name", tool_name),
-                "arguments": item.get("arguments", {}),
+                "arguments": arguments,
             })
         return calls
+    # Single-call form: the legacy contract is that the args function
+    # returns a dict directly. Anything else (a tuple, a string, None)
+    # is a pattern bug — fail loudly here too rather than letting the
+    # bad shape ride through to the dispatcher.
+    if not isinstance(value, dict):
+        raise TypeError(
+            f"_normalize_tool_calls: TOOL_CALL_PATTERNS entry for "
+            f"{tool_name!r} returned {type(value).__name__}, expected "
+            "dict (single tool call) or list[dict] (multi-call)."
+        )
     return [{"tool_name": tool_name, "arguments": value}]
 
 
