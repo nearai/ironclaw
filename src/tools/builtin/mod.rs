@@ -70,9 +70,23 @@ pub(crate) fn media_type_from_path(path: &str) -> String {
 /// do not drift.
 pub(crate) fn image_api_endpoint_url(api_base_url: &str, path: &str) -> String {
     let base = api_base_url.trim_end_matches('/');
-    if base.ends_with("/v1") {
+    if has_version_like_path_suffix(base) {
         format!("{base}{path}")
     } else {
         format!("{base}/v1{path}")
     }
+}
+
+fn has_version_like_path_suffix(api_base_url: &str) -> bool {
+    let Ok(url) = url::Url::parse(api_base_url) else {
+        return false;
+    };
+    url.path_segments()
+        .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
+        .is_some_and(is_version_like_path_segment)
+}
+
+fn is_version_like_path_segment(segment: &str) -> bool {
+    let mut chars = segment.chars();
+    matches!(chars.next(), Some('v')) && matches!(chars.next(), Some(c) if c.is_ascii_digit())
 }

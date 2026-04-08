@@ -351,4 +351,30 @@ mod tests {
             "https://api.example.com/v1/images/generations"
         );
     }
+
+    #[test]
+    fn endpoint_url_preserves_existing_version_segment() {
+        let tool = ImageGenerateTool::new(
+            "https://api.example.com/v2".to_string(),
+            "test-key".to_string(),
+            "flux-1".to_string(),
+        );
+        assert_eq!(
+            tool.endpoint_url("/images/generations"),
+            "https://api.example.com/v2/images/generations"
+        );
+    }
+
+    #[test]
+    fn endpoint_url_preserves_version_like_suffixes() {
+        let tool = ImageGenerateTool::new(
+            "https://api.example.com/v1beta".to_string(),
+            "test-key".to_string(),
+            "flux-1".to_string(),
+        );
+        assert_eq!(
+            tool.endpoint_url("/images/generations"),
+            "https://api.example.com/v1beta/images/generations"
+        );
+    }
 }

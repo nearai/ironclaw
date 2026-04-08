@@ -2,9 +2,22 @@
 
 use std::borrow::Cow;
 
+pub(crate) const MAX_RECORDED_IMAGE_SENTINEL_BYTES: usize = 512 * 1024;
+const MAX_EMBEDDED_JSON_STRING_LAYERS: usize = 3;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GeneratedImageSentinel {
     pub(crate) value: serde_json::Value,
+}
+
+pub(crate) fn recorded_image_sentinel_cap_label() -> String {
+    if MAX_RECORDED_IMAGE_SENTINEL_BYTES.is_multiple_of(1024 * 1024) {
+        return format!("{} MiB", MAX_RECORDED_IMAGE_SENTINEL_BYTES / (1024 * 1024));
+    }
+    if MAX_RECORDED_IMAGE_SENTINEL_BYTES.is_multiple_of(1024) {
+        return format!("{} KiB", MAX_RECORDED_IMAGE_SENTINEL_BYTES / 1024);
+    }
+    format!("{} bytes", MAX_RECORDED_IMAGE_SENTINEL_BYTES)
 }
 
 impl GeneratedImageSentinel {
@@ -47,6 +60,44 @@ impl GeneratedImageSentinel {
         }
         format!("Generated image ({media_type})")
     }
+
+    pub(crate) fn compact_value_without_data_url(&self) -> serde_json::Value {
+        let mut summary = serde_json::Map::new();
+        summary.insert(
+            "type".to_string(),
+            serde_json::Value::String("image_generated".to_string()),
+        );
+        if let Some(media_type) = self.media_type() {
+            summary.insert(
+                "media_type".to_string(),
+                serde_json::Value::String(media_type.to_string()),
+            );
+        }
+        if let Some(path) = self.path()
+            && !path.is_empty()
+        {
+            summary.insert(
+                "path".to_string(),
+                serde_json::Value::String(path.to_string()),
+            );
+        }
+        summary.insert("data_omitted".to_string(), serde_json::Value::Bool(true));
+        summary.insert(
+            "omitted_reason".to_string(),
+            serde_json::Value::String(format!(
+                "exceeded the {} cap",
+                recorded_image_sentinel_cap_label()
+            )),
+        );
+        serde_json::Value::Object(summary)
+    }
+
+    pub(crate) fn record_content_for_thread_state(&self, output: &str) -> String {
+        if output.len() <= MAX_RECORDED_IMAGE_SENTINEL_BYTES {
+            return output.to_string();
+        }
+        self.compact_value_without_data_url().to_string()
+    }
 }
 
 fn normalize_embedded_json(value: &serde_json::Value) -> Option<Cow<'_, serde_json::Value>> {
@@ -59,7 +110,7 @@ fn normalize_embedded_json(value: &serde_json::Value) -> Option<Cow<'_, serde_js
     // through tool output, DB persistence, and history reconstruction. Unwrap a
     // few layers to tolerate that pipeline, but stop after a small fixed number
     // of rounds so malformed input cannot trigger unbounded reparsing.
-    for _ in 0..2 {
+    for _ in 1..MAX_EMBEDDED_JSON_STRING_LAYERS {
         match current {
             serde_json::Value::String(ref s) => {
                 current = serde_json::from_str::<serde_json::Value>(s).ok()?;
@@ -67,12 +118,18 @@ fn normalize_embedded_json(value: &serde_json::Value) -> Option<Cow<'_, serde_js
             _ => return Some(Cow::Owned(current)),
         }
     }
+    if matches!(current, serde_json::Value::String(_)) {
+        tracing::debug!(
+            max_layers = MAX_EMBEDDED_JSON_STRING_LAYERS,
+            "Generated image sentinel remained stringified after max unwrapping rounds"
+        );
+    }
     Some(Cow::Owned(current))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::GeneratedImageSentinel;
+    use super::{GeneratedImageSentinel, MAX_RECORDED_IMAGE_SENTINEL_BYTES};
 
     #[test]
     fn parses_double_stringified_sentinel() {
@@ -85,6 +142,22 @@ mod tests {
         let wrapped = serde_json::to_string(&sentinel).unwrap();
 
         let parsed = GeneratedImageSentinel::from_output(&wrapped).expect("sentinel");
+        assert_eq!(parsed.data_url(), Some("data:image/jpeg;base64,abc123"));
+        assert_eq!(parsed.media_type(), Some("image/jpeg"));
+    }
+
+    #[test]
+    fn parses_triple_stringified_sentinel() {
+        let sentinel = serde_json::json!({
+            "type": "image_generated",
+            "data": "data:image/jpeg;base64,abc123",
+            "media_type": "image/jpeg",
+        })
+        .to_string();
+        let wrapped = serde_json::to_string(&sentinel).unwrap();
+        let triple_wrapped = serde_json::to_string(&wrapped).unwrap();
+
+        let parsed = GeneratedImageSentinel::from_output(&triple_wrapped).expect("sentinel");
         assert_eq!(parsed.data_url(), Some("data:image/jpeg;base64,abc123"));
         assert_eq!(parsed.media_type(), Some("image/jpeg"));
     }
@@ -103,5 +176,24 @@ mod tests {
             sentinel.summary_for_context(),
             "Generated image (image/png) at workspace/out.png"
         );
+    }
+
+    #[test]
+    fn record_content_for_thread_state_omits_large_data_url() {
+        let oversized = "a".repeat(MAX_RECORDED_IMAGE_SENTINEL_BYTES);
+        let sentinel = GeneratedImageSentinel::from_value(&serde_json::json!({
+            "type": "image_generated",
+            "data": format!("data:image/png;base64,{oversized}"),
+            "media_type": "image/png",
+            "path": "workspace/out.png",
+        }))
+        .expect("sentinel");
+
+        let recorded = sentinel.record_content_for_thread_state(&sentinel.value.to_string());
+
+        assert!(!recorded.contains("data:image/png;base64"));
+        assert!(recorded.contains("\"type\":\"image_generated\""));
+        assert!(recorded.contains("\"data_omitted\":true"));
+        assert!(recorded.contains("\"path\":\"workspace/out.png\""));
     }
 }

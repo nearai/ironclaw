@@ -1184,7 +1184,7 @@ function createGeneratedImageElement(dataUrl, path, eventId) {
     card.dataset.imageEventId = eventId;
   }
 
-  if (dataUrl) {
+  if (isSafeGeneratedImageDataUrl(dataUrl)) {
     const img = document.createElement('img');
     img.className = 'generated-image';
     img.src = dataUrl;
@@ -1207,6 +1207,10 @@ function createGeneratedImageElement(dataUrl, path, eventId) {
   return card;
 }
 
+function isSafeGeneratedImageDataUrl(dataUrl) {
+  return typeof dataUrl === 'string' && /^data:image\//i.test(dataUrl);
+}
+
 function hasRenderedGeneratedImage(container, eventId) {
   if (!eventId) return false;
   return Array.from(container.querySelectorAll('.generated-image-card')).some((card) => {
@@ -1227,7 +1231,7 @@ function addGeneratedImage(dataUrl, path, eventId, shouldScroll = true) {
 }
 
 function rememberGeneratedImage(threadId, eventId, dataUrl, path) {
-  if (!threadId || !eventId || !dataUrl) return;
+  if (!threadId || !eventId || !isSafeGeneratedImageDataUrl(dataUrl)) return;
   const normalizedPath = path || null;
   let images = generatedImagesByThread.get(threadId);
   if (!images) {

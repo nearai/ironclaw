@@ -44,14 +44,14 @@ fn parse_image_generated_sentinel_from_value(
     event_id: String,
 ) -> Option<GeneratedImageInfo> {
     let sentinel = GeneratedImageSentinel::from_value(value)?;
-    let data_url = sentinel.data_url()?.to_string();
-    if data_url.is_empty() {
-        return None;
-    }
+    let data_url = sentinel
+        .data_url()
+        .filter(|data_url| !data_url.is_empty())
+        .map(str::to_string);
     let path = sentinel.path().map(String::from);
     Some(GeneratedImageInfo {
         event_id,
-        data_url: Some(data_url),
+        data_url,
         path,
     })
 }
@@ -483,6 +483,25 @@ mod tests {
             images[0].data_url.as_deref(),
             Some("data:image/jpeg;base64,abc123")
         );
+    }
+
+    #[test]
+    fn test_collect_generated_images_from_data_omitted_sentinel_keeps_placeholder_event() {
+        let sentinel = serde_json::json!({
+            "type": "image_generated",
+            "media_type": "image/png",
+            "path": "/tmp/cat.png",
+            "data_omitted": true,
+            "omitted_reason": "exceeded the 512 KiB cap"
+        });
+
+        let images =
+            collect_generated_images_from_tool_results(4, [(Some("call_img_3"), Some(&sentinel))]);
+
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].event_id, "call_img_3");
+        assert!(images[0].data_url.is_none());
+        assert_eq!(images[0].path.as_deref(), Some("/tmp/cat.png"));
     }
 
     #[test]

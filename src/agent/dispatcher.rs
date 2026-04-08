@@ -1165,7 +1165,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         (&tool_result, image_sentinel.as_ref())
                     {
                         (
-                            output.clone(),
+                            image_generation_record_content(output, sentinel),
                             image_generation_summary_tool_message(
                                 self.agent.safety(),
                                 &tc.name,
@@ -1519,6 +1519,10 @@ fn image_generation_summary_tool_message(
     let sanitized = safety.sanitize_tool_output(tool_name, &summary);
     let content = safety.wrap_for_llm(tool_name, &sanitized.content);
     ChatMessage::tool_result(tool_call_id, tool_name, content)
+}
+
+fn image_generation_record_content(output: &str, sentinel: &GeneratedImageSentinel) -> String {
+    sentinel.record_content_for_thread_state(output)
 }
 
 #[cfg(test)]
@@ -3009,6 +3013,24 @@ mod tests {
         assert!(!message.content.contains("data:image"));
         assert!(message.content.contains("\"type\":\"image_generated\""));
         assert!(message.content.contains("\"media_type\":\"image/png\""));
+    }
+
+    #[test]
+    fn test_image_generation_record_content_caps_large_payloads() {
+        let oversized = "a".repeat(crate::generated_images::MAX_RECORDED_IMAGE_SENTINEL_BYTES);
+        let sentinel = GeneratedImageSentinel::from_value(&serde_json::json!({
+            "type": "image_generated",
+            "data": format!("data:image/png;base64,{oversized}"),
+            "media_type": "image/png",
+            "path": "/tmp/example.png"
+        }))
+        .expect("sentinel");
+
+        let record = super::image_generation_record_content(&sentinel.value.to_string(), &sentinel);
+
+        assert!(!record.contains("data:image/png;base64"));
+        assert!(record.contains("\"type\":\"image_generated\""));
+        assert!(record.contains("\"data_omitted\":true"));
     }
 
     #[test]

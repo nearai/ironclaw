@@ -20,23 +20,14 @@ use crate::agent::submission::SubmissionResult;
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
-use crate::generated_images::GeneratedImageSentinel;
+use crate::generated_images::{
+    GeneratedImageSentinel, MAX_RECORDED_IMAGE_SENTINEL_BYTES, recorded_image_sentinel_cap_label,
+};
 use crate::llm::{ChatMessage, ToolCall};
 use crate::tools::redact_params;
 use ironclaw_common::truncate_preview;
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
-const MAX_PERSISTED_IMAGE_SENTINEL_BYTES: usize = 512 * 1024;
-
-fn persisted_image_sentinel_cap_label() -> String {
-    if MAX_PERSISTED_IMAGE_SENTINEL_BYTES.is_multiple_of(1024 * 1024) {
-        return format!("{} MiB", MAX_PERSISTED_IMAGE_SENTINEL_BYTES / (1024 * 1024));
-    }
-    if MAX_PERSISTED_IMAGE_SENTINEL_BYTES.is_multiple_of(1024) {
-        return format!("{} KiB", MAX_PERSISTED_IMAGE_SENTINEL_BYTES / 1024);
-    }
-    format!("{} bytes", MAX_PERSISTED_IMAGE_SENTINEL_BYTES)
-}
 
 fn tool_result_preview_for_persistence(result: &serde_json::Value) -> String {
     if GeneratedImageSentinel::from_value(result).is_some() {
@@ -54,12 +45,12 @@ fn tool_result_content_for_persistence(result: &serde_json::Value) -> String {
         // generated image on refresh without any schema changes. Keep a hard
         // cap so unexpectedly large data URLs do not grow DB rows without bound.
         let serialized = sentinel.value.to_string();
-        if serialized.len() <= MAX_PERSISTED_IMAGE_SENTINEL_BYTES {
+        if serialized.len() <= MAX_RECORDED_IMAGE_SENTINEL_BYTES {
             return serialized;
         }
         return format!(
             "Generated image omitted from persistence because it exceeded the {} cap",
-            persisted_image_sentinel_cap_label()
+            recorded_image_sentinel_cap_label()
         );
     }
     match result {
@@ -2365,7 +2356,7 @@ mod tests {
 
     #[test]
     fn test_tool_result_content_for_persistence_caps_oversized_image_sentinel() {
-        let oversized = "a".repeat(MAX_PERSISTED_IMAGE_SENTINEL_BYTES);
+        let oversized = "a".repeat(MAX_RECORDED_IMAGE_SENTINEL_BYTES);
         let result = serde_json::json!({
             "type": "image_generated",
             "data": format!("data:image/jpeg;base64,{oversized}"),
