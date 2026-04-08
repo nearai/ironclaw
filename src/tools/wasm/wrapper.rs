@@ -698,8 +698,11 @@ impl WasmToolSchemas {
     /// Derive a compact advertised schema from the full discovery schema.
     ///
     /// Collects properties from top-level `properties` and from
-    /// `oneOf`/`anyOf`/`allOf` variants. Keeps only properties that are in
-    /// the top-level `required` array or carry an `enum`/`const` constraint.
+    /// `oneOf`/`anyOf`/`allOf` variants. When a schema has typed top-level
+    /// properties, preserves them all in the advertised schema so the LLM sees
+    /// practical parameter hints for direct-object tools. For variant-only
+    /// schemas, keeps only properties that are in the top-level `required`
+    /// array or carry an `enum`/`const` constraint.
     /// For properties defined via `const` across multiple variants (e.g.
     /// `"action": {"const": "get_repo"}` in each `oneOf` branch), the `const`
     /// values are merged into a single `enum` array.
@@ -725,8 +728,12 @@ impl WasmToolSchemas {
             .unwrap_or_default();
 
         // Collect properties from top-level and oneOf/anyOf/allOf variants.
-        // For properties with `const` across variants, merge into an `enum`.
+        // For direct-object schemas, preserve all typed top-level properties.
+        // For variant-only schemas, merge `const` discriminators into enums so
+        // the LLM can still discover valid actions without loading the full
+        // discovery schema up front.
         let mut all_properties = serde_json::Map::new();
+        let mut top_level_typed = serde_json::Map::new();
         // Track const values per property to merge into enum.
         let mut const_values: std::collections::HashMap<String, Vec<serde_json::Value>> =
             std::collections::HashMap::new();
@@ -735,6 +742,9 @@ impl WasmToolSchemas {
             for (k, v) in props {
                 if all_properties.len() >= MAX_COMPACT_PROPERTIES {
                     break;
+                }
+                if schema_is_typed_property(v) {
+                    top_level_typed.insert(k.clone(), v.clone());
                 }
                 all_properties.insert(k.clone(), v.clone());
             }
@@ -776,6 +786,35 @@ impl WasmToolSchemas {
 
         if all_properties.is_empty() {
             return Self::permissive_schema();
+        }
+
+        if !top_level_typed.is_empty() {
+            let mut kept = top_level_typed;
+            for (name, prop) in &all_properties {
+                if (required.contains(name.as_str())
+                    || prop.get("enum").is_some()
+                    || prop.get("const").is_some())
+                    && !kept.contains_key(name)
+                {
+                    kept.insert(name.clone(), prop.clone());
+                }
+            }
+
+            let kept_required: Vec<serde_json::Value> = required
+                .iter()
+                .filter(|name| kept.contains_key(name.as_str()))
+                .map(|name| serde_json::Value::String(name.clone()))
+                .collect();
+
+            let mut result = serde_json::json!({
+                "type": "object",
+                "properties": kept,
+                "additionalProperties": true,
+            });
+            if !kept_required.is_empty() {
+                result["required"] = serde_json::Value::Array(kept_required);
+            }
+            return result;
         }
 
         let kept: serde_json::Map<String, serde_json::Value> = all_properties
@@ -1965,13 +2004,15 @@ mod tests {
         wrapper.schemas = super::WasmToolSchemas::new(discovery_schema.clone());
         wrapper.description = "Search documents".to_string();
 
-        // Advertised schema is auto-compacted: keeps required props, drops optional
+        // Advertised schema keeps all typed top-level properties so optional
+        // arguments remain visible to the LLM.
         assert_eq!(
             wrapper.parameters_schema(),
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string" }
+                    "query": { "type": "string" },
+                    "limit": { "type": "integer" }
                 },
                 "required": ["query"],
                 "additionalProperties": true
@@ -2042,7 +2083,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_schema_keeps_required_and_enum_properties() {
+    fn test_compact_schema_keeps_typed_top_level_properties() {
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -2064,15 +2105,11 @@ mod tests {
         let compacted = super::WasmToolSchemas::compact_schema(&schema);
         let props = compacted["properties"].as_object().unwrap();
 
-        // action: required + enum → kept
+        // Top-level typed properties remain visible to the LLM.
         assert!(props.contains_key("action"));
-        // format: has enum → kept
         assert!(props.contains_key("format"));
-        // query: not required, no enum → dropped
-        assert!(!props.contains_key("query"));
-        // limit: not required, no enum → dropped
-        assert!(!props.contains_key("limit"));
-        // additionalProperties lets the LLM still pass dropped props
+        assert!(props.contains_key("query"));
+        assert!(props.contains_key("limit"));
         assert_eq!(compacted["additionalProperties"], true);
         assert_eq!(compacted["required"], serde_json::json!(["action"]));
     }

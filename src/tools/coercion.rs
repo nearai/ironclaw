@@ -134,9 +134,23 @@ fn coerce_value(value: &serde_json::Value, schema: &serde_json::Value) -> serde_
             .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
         let mut coerced = obj.clone();
+        let mut keys_to_remove = Vec::new();
 
         for (key, current) in &mut coerced {
             if let Some(prop_schema) = properties.and_then(|props| props.get(key)) {
+                if let Some(s) = current.as_str() {
+                    let is_nullish =
+                        s.eq_ignore_ascii_case("null") || s.eq_ignore_ascii_case("none");
+                    if is_nullish && !required.contains(key.as_str()) {
+                        if prop_schema.get("default").is_some() {
+                            keys_to_remove.push(key.clone());
+                        } else {
+                            *current = serde_json::Value::Null;
+                        }
+                        continue;
+                    }
+                }
+
                 // LLMs send "" for optional fields instead of omitting them.
                 // Coerce to null only when the field is not required AND the schema
                 // allows null or doesn't allow string — a `type: "string"` field
@@ -156,6 +170,10 @@ fn coerce_value(value: &serde_json::Value, schema: &serde_json::Value) -> serde_
             if let Some(additional_schema) = additional_schema {
                 *current = coerce_value(current, additional_schema);
             }
+        }
+
+        for key in keys_to_remove {
+            coerced.remove(&key);
         }
 
         return serde_json::Value::Object(coerced);
@@ -328,6 +346,15 @@ fn coerce_string_value(s: &str, schema: &serde_json::Value) -> Option<serde_json
     }
 
     if schema_allows_type(schema, "string") {
+        // Some models emit a JSON string literal as the string contents,
+        // e.g. "\"private\"" instead of "private". Unwrap exactly one layer.
+        if s.len() >= 2
+            && s.starts_with('"')
+            && s.ends_with('"')
+            && let Ok(parsed) = serde_json::from_str::<String>(s)
+        {
+            return Some(serde_json::Value::String(parsed));
+        }
         return None;
     }
 
@@ -677,6 +704,97 @@ mod tests {
 
         // Required string-only field keeps empty string
         assert_eq!(result["name"], serde_json::json!(""));
+    }
+
+    #[test]
+    fn unwraps_double_quoted_string_value() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "calendar_id": { "type": "string" }
+            }
+        });
+        let params = serde_json::json!({
+            "calendar_id": "\"1rteko1f0ijt16ithkv7upn188@group.calendar.google.com\""
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        assert_eq!(
+            result["calendar_id"],
+            serde_json::json!("1rteko1f0ijt16ithkv7upn188@group.calendar.google.com")
+        );
+    }
+
+    #[test]
+    fn unwraps_double_quoted_rfc3339_string_value() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "time_min": { "type": "string" }
+            }
+        });
+        let params = serde_json::json!({
+            "time_min": "\"2026-04-08T00:00:00Z\""
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        assert_eq!(
+            result["time_min"],
+            serde_json::json!("2026-04-08T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn preserves_non_json_quoted_like_string() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "calendar_id": { "type": "string" }
+            }
+        });
+        let params = serde_json::json!({
+            "calendar_id": "\"unterminated"
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        assert_eq!(result["calendar_id"], serde_json::json!("\"unterminated"));
+    }
+
+    #[test]
+    fn nullish_optional_string_becomes_null() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" }
+            }
+        });
+        let params = serde_json::json!({
+            "query": "null"
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        assert_eq!(result["query"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn nullish_optional_string_with_default_is_omitted() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "calendar_id": { "type": "string", "default": "primary" }
+            }
+        });
+        let params = serde_json::json!({
+            "calendar_id": "null"
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        assert!(result.get("calendar_id").is_none());
     }
 
     #[test]
