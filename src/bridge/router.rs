@@ -1956,6 +1956,14 @@ async fn handle_with_engine_inner(
     let project_id =
         resolve_user_project(&state.store, &message.user_id, state.default_project_id).await?;
 
+    // Gateway users get their own per-user project, but skills are in the
+    // owner's default project. Pass the default project as a fallback so
+    // __list_skills__ can find them.
+    let mut thread_config = ThreadConfig::default();
+    if project_id != state.default_project_id {
+        thread_config.skill_project_id = Some(state.default_project_id);
+    }
+
     // Handle the message — spawns a new thread or injects into active one
     let thread_id = state
         .conversation_manager
@@ -1964,7 +1972,7 @@ async fn handle_with_engine_inner(
             content,
             project_id,
             &message.user_id,
-            ThreadConfig::default(),
+            thread_config,
         )
         .await
         .map_err(|e| engine_err("thread error", e))?;
@@ -2036,7 +2044,7 @@ async fn await_thread_outcome(
                     _ => {}
                 }
             }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
                 if !state.thread_manager.is_running(thread_id).await {
                     break;
                 }
