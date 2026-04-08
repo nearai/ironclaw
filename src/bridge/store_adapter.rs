@@ -193,10 +193,54 @@ impl HybridStore {
     /// invisible after upgrade. The migration is idempotent: once nothing
     /// remains under `engine/`, the call is a single workspace listing.
     ///
+    /// **Cheap preflight:** the steady-state startup case (post-migration)
+    /// must not run a full workspace scan every time. We first check
+    /// `ws.list("engine")` for any direct children. Only when that returns
+    /// at least one entry do we fall back to `ws.list_all()` for the
+    /// recursive discovery — most startups skip the full scan entirely.
+    ///
+    /// **Version history note:** the migration uses a read-write-delete
+    /// pattern, not a path-rename. Because `memory_document_versions` has
+    /// `ON DELETE CASCADE`, the legacy doc's version history is not
+    /// preserved into the new doc — the new doc starts a fresh version
+    /// chain. This is intentional and acceptable scope:
+    ///
+    /// - V2 engine state (projects, threads, leases, conversations,
+    ///   knowledge docs) is *runtime state*, rewritten on every state
+    ///   mutation. There is no curated user-edited version history at
+    ///   risk.
+    /// - V2 engine state was newly introduced in this PR. There is no
+    ///   production deployment with months of accumulated v2 history.
+    /// - Adding a path-preserving rename op to `Workspace`/`Database`
+    ///   would require new trait methods on both backends and is
+    ///   substantial scope creep for a fix-forward. If a future caller
+    ///   needs version-history-preserving rename, that operation should
+    ///   be added properly to the storage layer, not bolted onto the
+    ///   migration here.
+    ///
+    /// Document `metadata` IS preserved via `ws.update_metadata` after
+    /// the new doc is written.
+    ///
     /// Failures on individual files are logged at `debug!` but do not abort
     /// the migration — the worst case is that the legacy file stays put and
     /// we retry on the next startup.
     async fn migrate_legacy_engine_paths(&self, ws: &Workspace) {
+        // Cheap preflight: most startups have no legacy paths and must
+        // not pay for a full `list_all()` traversal. A direct
+        // `list("engine")` is one indexed lookup; if it returns nothing
+        // we're done.
+        match ws.list(LEGACY_ENGINE_ROOT).await {
+            Ok(entries) if entries.is_empty() => return,
+            Ok(_) => {}
+            Err(e) => {
+                debug!("legacy-engine migration: preflight list failed: {e}");
+                return;
+            }
+        }
+
+        // Preflight saw something — fall back to a full `list_all()` to
+        // pick up nested paths. (`list` is single-level only, so we need
+        // recursive enumeration to discover everything under `engine/`.)
         let all_paths = match ws.list_all().await {
             Ok(paths) => paths,
             Err(e) => {
@@ -243,13 +287,43 @@ impl HybridStore {
                 format!("{NEW_ENGINE_ROOT}/{suffix}")
             };
 
-            // Read old, write new, delete old. We tolerate the case where the
-            // new path already exists by skipping the rewrite (a partial
-            // previous migration may have already moved this file).
-            match ws.read(&old_path).await {
-                Ok(doc) => {
-                    let already_present = ws.exists(&new_path).await.unwrap_or(false);
-                    if !already_present && let Err(e) = ws.write(&new_path, &doc.content).await {
+            // Read old, write new (preserving metadata), delete old. We
+            // tolerate the case where the new path already exists by
+            // skipping the rewrite (a partial previous migration may have
+            // already moved this file).
+            let doc = match ws.read(&old_path).await {
+                Ok(doc) => doc,
+                Err(e) => {
+                    debug!(
+                        old = %old_path,
+                        "legacy-engine migration: read failed: {e}"
+                    );
+                    failed += 1;
+                    continue;
+                }
+            };
+
+            // Propagate `exists` errors instead of treating a transient
+            // failure as "file absent" — that would cause the migrator to
+            // overwrite an existing `.system/engine/...` doc when storage
+            // hiccups.
+            let already_present = match ws.exists(&new_path).await {
+                Ok(present) => present,
+                Err(e) => {
+                    debug!(
+                        old = %old_path,
+                        new = %new_path,
+                        "legacy-engine migration: exists check failed: {e}"
+                    );
+                    failed += 1;
+                    continue;
+                }
+            };
+
+            if !already_present {
+                let new_doc = match ws.write(&new_path, &doc.content).await {
+                    Ok(d) => d,
+                    Err(e) => {
                         debug!(
                             old = %old_path,
                             new = %new_path,
@@ -258,24 +332,34 @@ impl HybridStore {
                         failed += 1;
                         continue;
                     }
-                    if let Err(e) = ws.delete(&old_path).await {
-                        debug!(
-                            old = %old_path,
-                            "legacy-engine migration: delete failed: {e}"
-                        );
-                        failed += 1;
-                        continue;
-                    }
-                    migrated += 1;
-                }
-                Err(e) => {
+                };
+                // Preserve the legacy doc's metadata onto the new doc so
+                // schema/skip_indexing/skip_versioning/hygiene flags
+                // survive the migration. Logged-not-fatal because the
+                // content has already been moved.
+                if !doc.metadata.is_null()
+                    && let Err(e) = ws.update_metadata(new_doc.id, &doc.metadata).await
+                {
                     debug!(
                         old = %old_path,
-                        "legacy-engine migration: read failed: {e}"
+                        new = %new_path,
+                        "legacy-engine migration: metadata copy failed: {e}"
                     );
-                    failed += 1;
                 }
             }
+
+            if let Err(e) = ws.delete(&old_path).await {
+                debug!(
+                    old = %old_path,
+                    "legacy-engine migration: delete failed: {e}"
+                );
+                failed += 1;
+                continue;
+            }
+            // Always count successful path migrations — including the
+            // already_present case where we skipped the rewrite but
+            // still removed the legacy duplicate.
+            migrated += 1;
         }
 
         debug!(migrated, failed, "legacy-engine migration: complete");
@@ -1536,6 +1620,86 @@ mod migration_tests {
             !ws.exists("engine/projects/x.json").await.unwrap_or(true),
             "legacy duplicate should be removed even when new path exists"
         );
+    }
+
+    #[tokio::test]
+    async fn migration_preserves_document_metadata() {
+        // Regression: the migration originally only copied `doc.content`
+        // and silently dropped the `metadata` column. Custom metadata
+        // (e.g. schema, skip_indexing, hygiene flags) must survive the
+        // engine/ → .system/engine/ rewrite.
+        let (ws, _dir) = fresh_workspace().await;
+
+        let original = ws
+            .write("engine/projects/with_meta.json", r#"{"hello": "world"}"#)
+            .await
+            .expect("seed legacy doc");
+        let metadata = serde_json::json!({
+            "skip_indexing": true,
+            "skip_versioning": false,
+            "custom_marker": "engine-state"
+        });
+        ws.update_metadata(original.id, &metadata)
+            .await
+            .expect("seed metadata");
+
+        let store = HybridStore::new(Some(Arc::clone(&ws)));
+        store.migrate_legacy_engine_paths(&ws).await;
+
+        let migrated = ws
+            .read(".system/engine/projects/with_meta.json")
+            .await
+            .expect("migrated doc readable");
+        assert_eq!(migrated.content, r#"{"hello": "world"}"#);
+        // Metadata should be carried forward verbatim.
+        assert_eq!(
+            migrated
+                .metadata
+                .get("skip_indexing")
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "skip_indexing should be preserved: {:?}",
+            migrated.metadata
+        );
+        assert_eq!(
+            migrated
+                .metadata
+                .get("custom_marker")
+                .and_then(|v| v.as_str()),
+            Some("engine-state"),
+            "custom metadata fields should be preserved: {:?}",
+            migrated.metadata
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_preflight_skips_full_scan_when_no_legacy_paths() {
+        // The cheap preflight is the dominant code path on every
+        // post-migration startup. We can't easily measure that
+        // `list_all` was skipped from outside, but we can at least pin
+        // down the observable behavior: a workspace with zero legacy
+        // paths must produce zero migrations and zero failures, and
+        // unrelated content must remain untouched.
+        let (ws, _dir) = fresh_workspace().await;
+        ws.write("notes/clean.md", "untouched")
+            .await
+            .expect("seed unrelated doc");
+        ws.write(".system/engine/projects/already.json", "{}")
+            .await
+            .expect("seed already-migrated doc");
+
+        let store = HybridStore::new(Some(Arc::clone(&ws)));
+        store.migrate_legacy_engine_paths(&ws).await;
+
+        // Unrelated doc untouched.
+        let unrelated = ws.read("notes/clean.md").await.expect("unrelated readable");
+        assert_eq!(unrelated.content, "untouched");
+        // Already-migrated doc untouched.
+        let already = ws
+            .read(".system/engine/projects/already.json")
+            .await
+            .expect("already-migrated readable");
+        assert_eq!(already.content, "{}");
     }
 
     #[tokio::test]

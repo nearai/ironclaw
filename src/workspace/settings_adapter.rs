@@ -50,9 +50,31 @@ fn system_config_metadata_matches(
 /// Implements `SettingsStore` by reading/writing workspace documents at
 /// `.system/settings/{key}.json`. Falls back to the legacy `settings` table
 /// for reads during migration.
+///
+/// ## Multi-tenant scoping
+///
+/// `Workspace` is scoped to a single `user_id` at construction time, so any
+/// workspace read/write goes to *that* user's documents — independent of the
+/// `user_id` argument passed to a `SettingsStore` method. Without gating, a
+/// dual-write triggered for `user_B` would actually land in the
+/// **owner's** workspace, and a subsequent `user_A.get_setting(...)` would
+/// observe `user_B`'s value: a cross-user data leak.
+///
+/// To prevent that, the adapter is constructed with the workspace's owner
+/// `user_id` (`gate_user_id`) and **only** dual-writes / reads from
+/// workspace when the calling `user_id` matches. All other users fall
+/// through to the legacy `settings` table only — preserving the pre-#2049
+/// behavior they always had. This matches the long-term plan: per-user
+/// settings live in legacy until a per-user `WorkspaceSettingsAdapter`
+/// (one per `WorkspacePool` entry) is wired up; admin/global settings go
+/// through the workspace-backed path so they pick up schema validation.
 pub struct WorkspaceSettingsAdapter {
     workspace: Arc<Workspace>,
     legacy_store: Arc<dyn Database>,
+    /// Identity allowed to use the workspace-backed dual-write path. Set to
+    /// the workspace's owner `user_id` at construction. Any other caller
+    /// goes legacy-only — see the rationale on the struct doc above.
+    gate_user_id: String,
     /// Guards the lazy `ensure_system_config()` call so it runs at most once
     /// per adapter instance regardless of which write path triggers it. This
     /// removes the requirement that callers run `ensure_system_config()` at
@@ -62,11 +84,20 @@ pub struct WorkspaceSettingsAdapter {
 
 impl WorkspaceSettingsAdapter {
     pub fn new(workspace: Arc<Workspace>, legacy_store: Arc<dyn Database>) -> Self {
+        let gate_user_id = workspace.user_id().to_string();
         Self {
             workspace,
             legacy_store,
+            gate_user_id,
             system_config_seeded: OnceCell::new(),
         }
+    }
+
+    /// Returns true if the calling `user_id` is allowed to use the
+    /// workspace-backed dual-write/read path. False callers fall through to
+    /// the legacy table only.
+    fn workspace_allowed_for(&self, user_id: &str) -> bool {
+        user_id == self.gate_user_id
     }
 
     /// Ensure the `.system/.config` document exists with system defaults.
@@ -141,16 +172,16 @@ impl WorkspaceSettingsAdapter {
     /// Lazy idempotent wrapper around `ensure_system_config` used by write
     /// paths so callers don't have to remember to seed at startup. After the
     /// first successful call this becomes a cheap atomic load.
+    ///
+    /// Uses `OnceCell::get_or_try_init` so two concurrent first-callers do
+    /// not both run `ensure_system_config()`. The previous manual
+    /// `get()`/`set()` pattern was functionally correct (idempotent) but
+    /// wasteful under concurrent first-access; the OnceCell variant
+    /// guarantees single execution.
     async fn ensure_system_config_lazy(&self) -> Result<(), DatabaseError> {
-        // We can't return a borrow of `()` and propagate errors cleanly with
-        // OnceCell::get_or_try_init because the closure must be `'static`,
-        // so we manually check `get()` first.
-        if self.system_config_seeded.get().is_some() {
-            return Ok(());
-        }
-        self.ensure_system_config().await?;
-        // Ignore the SetError if another task raced us — both calls succeeded.
-        let _ = self.system_config_seeded.set(());
+        self.system_config_seeded
+            .get_or_try_init(|| async { self.ensure_system_config().await })
+            .await?;
         Ok(())
     }
 
@@ -240,8 +271,11 @@ impl SettingsStore for WorkspaceSettingsAdapter {
         user_id: &str,
         key: &str,
     ) -> Result<Option<serde_json::Value>, DatabaseError> {
-        // Try workspace first
-        if let Some(value) = self.read_from_workspace(key).await? {
+        // Owner-only workspace path: non-owner callers go straight to the
+        // legacy table to avoid reading from the wrong user's workspace.
+        if self.workspace_allowed_for(user_id)
+            && let Some(value) = self.read_from_workspace(key).await?
+        {
             return Ok(Some(value));
         }
         // Fall back to legacy table
@@ -253,22 +287,22 @@ impl SettingsStore for WorkspaceSettingsAdapter {
         user_id: &str,
         key: &str,
     ) -> Result<Option<SettingRow>, DatabaseError> {
-        // Try workspace first (only for valid keys; invalid keys can never
-        // exist in workspace and must not be used to construct paths).
-        if validate_settings_key(key).is_err() {
-            return self.legacy_store.get_setting_full(user_id, key).await;
-        }
-        let path = settings_path(key);
-        if let Ok(doc) = self.workspace.read(&path).await
-            && !doc.content.is_empty()
-        {
-            let value: serde_json::Value = serde_json::from_str(&doc.content)
-                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-            return Ok(Some(SettingRow {
-                key: key.to_string(),
-                value,
-                updated_at: doc.updated_at,
-            }));
+        // Owner-only workspace path. Non-owner callers, and invalid keys
+        // (which can never exist in workspace and must not be used to
+        // construct paths), go straight to the legacy table.
+        if self.workspace_allowed_for(user_id) && validate_settings_key(key).is_ok() {
+            let path = settings_path(key);
+            if let Ok(doc) = self.workspace.read(&path).await
+                && !doc.content.is_empty()
+            {
+                let value: serde_json::Value = serde_json::from_str(&doc.content)
+                    .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+                return Ok(Some(SettingRow {
+                    key: key.to_string(),
+                    value,
+                    updated_at: doc.updated_at,
+                }));
+            }
         }
         // Fall back to legacy table
         self.legacy_store.get_setting_full(user_id, key).await
@@ -280,18 +314,32 @@ impl SettingsStore for WorkspaceSettingsAdapter {
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
-        // Dual-write: workspace + legacy table
-        self.write_to_workspace(key, value).await?;
-        self.legacy_store.set_setting(user_id, key, value).await
+        // Dual-write order: legacy first, workspace second. The legacy
+        // table is the source-of-truth during migration (it backs the
+        // aggregate `list_settings` / `get_all_settings` reads), so writing
+        // it first guarantees those readers always see a consistent value
+        // even if the workspace write subsequently fails. A failed
+        // workspace write becomes self-healing on the next read-miss
+        // because per-key reads check the workspace first and fall back
+        // to legacy.
+        //
+        // Workspace writes are also gated to the owner — see the struct
+        // doc on `WorkspaceSettingsAdapter`.
+        self.legacy_store.set_setting(user_id, key, value).await?;
+        if self.workspace_allowed_for(user_id) {
+            self.write_to_workspace(key, value).await?;
+        }
+        Ok(())
     }
 
     async fn delete_setting(&self, user_id: &str, key: &str) -> Result<bool, DatabaseError> {
-        // Delete from both. Skip workspace for invalid keys (cannot exist there).
-        // We don't propagate workspace delete errors: the legacy table is the
-        // source of truth during migration, so a stale workspace doc on a
-        // failed delete is recoverable on next write. We do log the failure
-        // so partial-delete state is observable.
-        if validate_settings_key(key).is_ok() {
+        // Workspace delete is owner-gated — non-owner callers never wrote
+        // to the workspace, so there's nothing to delete from it. We also
+        // skip workspace for invalid keys (cannot exist there). Workspace
+        // delete failures are logged but not propagated: the legacy table
+        // is the source of truth during migration, so a stale workspace
+        // doc is recoverable on next write.
+        if self.workspace_allowed_for(user_id) && validate_settings_key(key).is_ok() {
             let path = settings_path(key);
             if let Err(e) = self.workspace.delete(&path).await {
                 // `debug!` not `warn!`: settings writes are reachable from
@@ -328,10 +376,22 @@ impl SettingsStore for WorkspaceSettingsAdapter {
         user_id: &str,
         settings: &HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
-        // Dual-write each setting to workspace. Collect the first error so
-        // partial-migration state is observable, but always run the legacy
-        // write so the legacy table stays the source of truth during
-        // migration even if some workspace writes fail.
+        // Legacy first (source of truth, drives aggregate reads), then
+        // workspace dual-write — same ordering as `set_setting`. Workspace
+        // writes are skipped entirely for non-owner callers to prevent the
+        // cross-tenant data leak (see struct doc).
+        self.legacy_store
+            .set_all_settings(user_id, settings)
+            .await?;
+
+        if !self.workspace_allowed_for(user_id) {
+            return Ok(());
+        }
+
+        // Owner path: dual-write each setting to workspace. Collect the
+        // first error so partial-migration state is observable, but never
+        // mask the (already-successful) legacy write — failures here are
+        // self-healing on the next per-key read.
         let mut workspace_error: Option<DatabaseError> = None;
         for (key, value) in settings {
             if let Err(e) = self.write_to_workspace(key, value).await {
@@ -341,10 +401,6 @@ impl SettingsStore for WorkspaceSettingsAdapter {
                 }
             }
         }
-
-        self.legacy_store
-            .set_all_settings(user_id, settings)
-            .await?;
 
         if let Some(err) = workspace_error {
             return Err(err);
@@ -506,5 +562,90 @@ mod tests {
             &cfg.metadata,
             &serde_json::Value::Null
         ));
+    }
+
+    /// Regression for the multi-tenant cross-user data leak: a non-owner
+    /// caller's `set_setting` must NOT touch the owner's workspace, and a
+    /// non-owner `get_setting` must NOT see the owner's workspace value.
+    /// All non-owner I/O must round-trip through the legacy table only.
+    #[tokio::test]
+    async fn workspace_settings_are_owner_gated_in_multi_tenant_mode() {
+        use crate::db::libsql::LibSqlBackend;
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("settings_gating.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("LibSqlBackend");
+        <LibSqlBackend as Database>::run_migrations(&backend)
+            .await
+            .expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+
+        // Workspace is constructed for the OWNER (mirroring how AppBuilder
+        // wires it from `config.owner_id`). The adapter therefore gates
+        // workspace reads/writes to caller `user_id == "owner"`.
+        let owner_ws = Arc::new(Workspace::new_with_db("owner", Arc::clone(&db)));
+        let adapter = WorkspaceSettingsAdapter::new(Arc::clone(&owner_ws), Arc::clone(&db));
+        adapter.ensure_system_config().await.unwrap();
+
+        // Owner writes a setting through the dual-write path.
+        adapter
+            .set_setting("owner", "llm_backend", &serde_json::json!("anthropic"))
+            .await
+            .expect("owner write");
+
+        // Non-owner ("alice") writes a setting with the same key but a
+        // different value. This must NOT touch the owner's workspace.
+        adapter
+            .set_setting("alice", "llm_backend", &serde_json::json!("openai"))
+            .await
+            .expect("alice write");
+
+        // The OWNER's workspace doc must still hold the owner's value —
+        // alice's write must have gone to legacy only.
+        let owner_ws_doc = owner_ws
+            .read(".system/settings/llm_backend.json")
+            .await
+            .expect("owner workspace doc still readable");
+        let owner_ws_value: serde_json::Value =
+            serde_json::from_str(&owner_ws_doc.content).expect("parse owner ws value");
+        assert_eq!(
+            owner_ws_value,
+            serde_json::json!("anthropic"),
+            "owner's workspace doc must NOT have been overwritten by alice's write"
+        );
+
+        // The legacy table is per-user, so each user reads back their own
+        // value.
+        let alice_value = adapter
+            .get_setting("alice", "llm_backend")
+            .await
+            .expect("alice read")
+            .expect("alice setting present in legacy");
+        assert_eq!(alice_value, serde_json::json!("openai"));
+        let owner_value = adapter
+            .get_setting("owner", "llm_backend")
+            .await
+            .expect("owner read")
+            .expect("owner setting present");
+        assert_eq!(owner_value, serde_json::json!("anthropic"));
+
+        // Critical: alice's `get_setting` must NEVER see the owner's
+        // workspace value when only legacy holds alice's value. We verify
+        // by deleting alice's legacy entry directly via the underlying
+        // store and asserting alice now sees `None` — not the owner's
+        // workspace value bleeding through.
+        db.delete_setting("alice", "llm_backend")
+            .await
+            .expect("clear alice legacy");
+        let alice_after_delete = adapter
+            .get_setting("alice", "llm_backend")
+            .await
+            .expect("alice read after delete");
+        assert!(
+            alice_after_delete.is_none(),
+            "alice must NOT see the owner's workspace value through the gate \
+             (cross-user data leak); got {alice_after_delete:?}"
+        );
     }
 }
