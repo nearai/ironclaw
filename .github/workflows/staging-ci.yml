@@ -114,25 +114,7 @@ jobs:
           echo "has_changes=${HAS_CHANGES}" >> "$GITHUB_OUTPUT"
           echo "diff_range=${DIFF_RANGE}" >> "$GITHUB_OUTPUT"
 
-  # ── Run full test suite ──────────────────────────────────────────
-  tests:
-    name: Test Suite
-    needs: check-changes
-    if: needs.check-changes.outputs.has_changes == 'true'
-    uses: ./.github/workflows/test.yml
-    with:
-      ref: ${{ needs.check-changes.outputs.current_head }}
-
-  # ── Run E2E browser tests ────────────────────────────────────────
-  e2e:
-    name: E2E Browser Tests
-    needs: check-changes
-    if: needs.check-changes.outputs.has_changes == 'true'
-    uses: ./.github/workflows/e2e.yml
-    with:
-      ref: ${{ needs.check-changes.outputs.current_head }}
-
-  # ── Create promotion PR (triggers claude-review.yml on the PR) ──
+  # ── Create promotion PR (triggers tests + claude-review on the PR) ──
   create-promotion-pr:
     name: Create Promotion PR
     needs: [resolve-promotion-base, check-changes]
@@ -229,9 +211,8 @@ jobs:
           PR_BODY+=$'\n'"*Auto-updated by staging promotion metadata workflow*"
           PR_BODY+=$'\n'"<!-- staging-ci-current:end -->"
           PR_BODY+=$'\n\n'"Waiting for gates:"
-          PR_BODY+=$'\n'"- Tests: pending"
-          PR_BODY+=$'\n'"- E2E: pending"
-          PR_BODY+=$'\n'"- Claude Code review: pending (will post comments on this PR)"
+          PR_BODY+=$'\n'"- Tests: running on PR (staging-promotion-tests.yml)"
+          PR_BODY+=$'\n'"- Claude Code review: running on PR (claude-review.yml)"
           PR_BODY+=$'\n\n'"---"
           PR_BODY+=$'\n'"*Auto-created by staging-ci workflow*"
 
@@ -246,18 +227,16 @@ jobs:
           echo "pr_number=${PR_NUM}" >> "$GITHUB_OUTPUT"
           echo "Created promotion PR #${PR_NUM}"
 
-  # ── Gate: wait for review, process findings, merge or block ─────
+  # ── Gate: wait for PR checks, process Claude findings, merge ────
   gate:
     name: Staging Gate
-    needs: [check-changes, tests, e2e, create-promotion-pr]
+    needs: [check-changes, create-promotion-pr]
     if: >
       always() &&
       needs.check-changes.outputs.has_changes == 'true' &&
-      needs.tests.result == 'success' &&
-      needs.e2e.result == 'success' &&
       needs.create-promotion-pr.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 60
     permissions:
       contents: write
       pull-requests: write
@@ -269,7 +248,6 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: staging
-          # Need full history to recompute the final promoted range before merge.
           fetch-depth: 0
           persist-credentials: false
 
@@ -289,46 +267,78 @@ jobs:
             echo "token=${{ github.token }}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Wait for Claude review job
+      - name: Wait for PR checks
+        id: wait-checks
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           PR_NUMBER: ${{ needs.create-promotion-pr.outputs.pr_number }}
           REPO: ${{ github.repository }}
         run: |
           if [ -z "$PR_NUMBER" ]; then
-            echo "No PR number — skipping wait"
+            echo "No PR number — skipping"
+            echo "checks_passed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           PR_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid --jq '.headRefOid' || echo "")
           if [ -z "$PR_SHA" ]; then
             echo "::warning::Could not get PR head SHA"
+            echo "checks_passed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "Polling for Claude Code Review job on PR #${PR_NUMBER} (SHA: ${PR_SHA})..."
-          TIMEOUT=1200  # 20 minutes
+          echo "Waiting for checks on PR #${PR_NUMBER} (SHA: ${PR_SHA})..."
+
+          # Grace period: label-triggered workflows need time to register check runs.
+          echo "Waiting 90s for check runs to register..."
+          sleep 90
+
+          TIMEOUT=3000  # 50 minutes
           ELAPSED=0
           INTERVAL=30
+          # Require at least one non-skipped check to prevent passing on zero real tests
+          MIN_NON_SKIPPED=1
 
           while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
-            STATUS=$(gh api "repos/${REPO}/commits/${PR_SHA}/check-runs" \
-              --jq '[.check_runs[] | select(.name == "Claude Code Review") | .conclusion // .status] | first // "pending"' 2>/dev/null || echo "pending")
+            # Get all check runs, excluding Railway deployments
+            CHECKS_JSON=$(gh api "repos/${REPO}/commits/${PR_SHA}/check-runs" \
+              --jq '[.check_runs[] | select(.app.slug != "railway-app" and .app.slug != "railway")]' 2>/dev/null || echo "[]")
 
-            if [ "$STATUS" = "success" ] || [ "$STATUS" = "failure" ] || [ "$STATUS" = "cancelled" ]; then
-              echo "Claude review job completed with status: ${STATUS} (${ELAPSED}s)"
+            PENDING=$(echo "$CHECKS_JSON" | jq '[.[] | select(.status != "completed")] | length')
+            FAILED=$(echo "$CHECKS_JSON" | jq '[.[] | select(.conclusion == "failure")] | length')
+            SKIPPED=$(echo "$CHECKS_JSON" | jq '[.[] | select(.conclusion == "skipped")] | length')
+            TOTAL=$(echo "$CHECKS_JSON" | jq 'length')
+            NON_SKIPPED=$((TOTAL - SKIPPED))
+
+            echo "Checks: ${TOTAL} total, $((TOTAL - PENDING)) completed, ${PENDING} pending, ${FAILED} failed, ${SKIPPED} skipped (${ELAPSED}s)"
+
+            if [ "$TOTAL" -gt 0 ] && [ "$PENDING" -eq 0 ]; then
+              if [ "$FAILED" -gt 0 ]; then
+                echo "::error::${FAILED} check(s) failed on PR #${PR_NUMBER}:"
+                echo "$CHECKS_JSON" | jq -r '.[] | select(.conclusion == "failure") | "  FAILED: \(.name)"'
+                echo "checks_passed=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              if [ "$NON_SKIPPED" -lt "$MIN_NON_SKIPPED" ]; then
+                echo "::error::All checks were skipped — no tests actually ran"
+                echo "checks_passed=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "All ${TOTAL} checks passed (${NON_SKIPPED} non-skipped)!"
+              echo "checks_passed=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
 
-            echo "Claude review status: ${STATUS} (${ELAPSED}s elapsed)"
             sleep "$INTERVAL"
             ELAPSED=$((ELAPSED + INTERVAL))
           done
 
-          echo "::warning::Claude review job not completed after ${TIMEOUT}s"
+          echo "::error::Checks did not complete within ${TIMEOUT}s"
+          echo "checks_passed=false" >> "$GITHUB_OUTPUT"
 
-      - name: Process Claude review comments and create issues
+      - name: Process Claude review findings
         id: process-findings
+        if: steps.wait-checks.outputs.checks_passed == 'true'
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           PR_NUMBER: ${{ needs.create-promotion-pr.outputs.pr_number }}
@@ -360,14 +370,13 @@ jobs:
             --jq "${JQ_FILTER} | .html_url // empty" 2>/dev/null || echo "")
 
           if [ -z "$BODY" ]; then
-            echo "::warning::No Claude review comment found for PR #${PR_NUMBER} — treating as blocking"
-            echo "has_blocking=true" >> "$GITHUB_OUTPUT"
+            echo "No Claude review comment found — treating as non-blocking"
+            echo "has_blocking=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           # Parse [SEVERITY:CONFIDENCE] tags from each numbered finding
-          # Matrix: CRITICAL always→issue, ≥80→block. HIGH ≥50→issue. MEDIUM ≥80→issue. LOW ≥80→issue.
-          # Use process substitution so variables propagate to parent shell
+          # Matrix: CRITICAL ≥80→block. All severities create issues at their thresholds.
           while read -r line; do
             TAG=$(echo "$line" | grep -oE '^\[(CRITICAL|HIGH|MEDIUM|LOW):[0-9]+\]')
             SEVERITY="${TAG#\[}"
@@ -434,13 +443,18 @@ jobs:
         env:
           PR_NUMBER: ${{ needs.create-promotion-pr.outputs.pr_number }}
           SKIP_GATE: ${{ inputs.skip_claude_gate }}
+          CHECKS_PASSED: ${{ steps.wait-checks.outputs.checks_passed }}
           HAS_BLOCKING: ${{ steps.process-findings.outputs.has_blocking }}
         run: |
-          SKIP_INPUT="$SKIP_GATE"
+          if [ "$CHECKS_PASSED" != "true" ]; then
+            echo "::error::PR checks did not pass — blocking promotion"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
 
           if [ "$HAS_BLOCKING" = "true" ]; then
             echo "::warning::Claude review found blocking issues (CRITICAL ≥80 confidence)"
-            if [ "$SKIP_INPUT" = "true" ]; then
+            if [ "$SKIP_GATE" = "true" ]; then
               echo "::warning::Gate overridden by skip_claude_gate workflow input"
               echo "passed=true" >> "$GITHUB_OUTPUT"
             else
@@ -450,14 +464,10 @@ jobs:
               exit 1
             fi
           else
-            echo "No blocking findings. Gate passed."
+            echo "All checks passed, no blocking findings. Gate passed."
             echo "passed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # Only merge PRs targeting main. Chained PRs (targeting another
-      # promotion branch) stay open — when the base PR merges into main,
-      # GitHub auto-retargets the chained PR. Merging chained PRs would
-      # trigger delete_branch_on_merge, auto-closing downstream PRs.
       - name: Merge promotion PR
         id: merge
         if: steps.evaluate.outputs.passed == 'true'
@@ -467,44 +477,40 @@ jobs:
         run: |
           source .github/scripts/pr-body-utils.sh
           if [ -n "$PR_NUMBER" ]; then
+            TITLE=$(gh pr view "$PR_NUMBER" --json title --jq '.title')
             BASE=$(gh pr view "$PR_NUMBER" --json baseRefName --jq '.baseRefName')
-            if [ "$BASE" = "main" ]; then
-              echo "Merging promotion PR #${PR_NUMBER} (targets main)"
-              TITLE=$(gh pr view "$PR_NUMBER" --json title --jq '.title')
-              HEAD_BRANCH=$(gh pr view "$PR_NUMBER" --json headRefName --jq '.headRefName')
-              git fetch origin "${BASE}" "${HEAD_BRANCH}"
-              CURRENT_RANGE="origin/${BASE}..origin/${HEAD_BRANCH}"
-              MAX_COMMITS=50
-              load_commit_summary "${CURRENT_RANGE}" "${MAX_COMMITS}"
-              {
-                echo "staging-promotion-summary-v1"
-                echo "promotion-pr: #${PR_NUMBER}"
-                echo "base: ${BASE}"
-                echo "head: ${HEAD_BRANCH}"
-                echo "current-range: ${CURRENT_RANGE}"
-                echo "current-commit-count: ${COMMIT_COUNT}"
-                echo ""
-                echo "Current commits in this promotion (${COMMIT_COUNT}):"
-                echo "${COMMIT_MD}"
-              } > /tmp/staging-promotion-merge-body.md
-              gh pr merge "$PR_NUMBER" --merge --subject "#${PR_NUMBER} $TITLE" --body-file /tmp/staging-promotion-merge-body.md
-              echo "merged=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "PR #${PR_NUMBER} targets '${BASE}' (not main) — leaving open for chain resolution"
-              echo "merged=false" >> "$GITHUB_OUTPUT"
-            fi
+            HEAD_BRANCH=$(gh pr view "$PR_NUMBER" --json headRefName --jq '.headRefName')
+            git fetch origin "${BASE}" "${HEAD_BRANCH}"
+            CURRENT_RANGE="origin/${BASE}..origin/${HEAD_BRANCH}"
+            MAX_COMMITS=50
+            load_commit_summary "${CURRENT_RANGE}" "${MAX_COMMITS}"
+            {
+              echo "staging-promotion-summary-v1"
+              echo "promotion-pr: #${PR_NUMBER}"
+              echo "base: ${BASE}"
+              echo "head: ${HEAD_BRANCH}"
+              echo "current-range: ${CURRENT_RANGE}"
+              echo "current-commit-count: ${COMMIT_COUNT}"
+              echo ""
+              echo "Current commits in this promotion (${COMMIT_COUNT}):"
+              echo "${COMMIT_MD}"
+            } > /tmp/staging-promotion-merge-body.md
+            echo "Merging promotion PR #${PR_NUMBER} (${HEAD_BRANCH} → ${BASE})"
+            gh pr merge "$PR_NUMBER" --merge \
+              --subject "#${PR_NUMBER} ${TITLE}" \
+              --body-file /tmp/staging-promotion-merge-body.md
+            echo "merged=true" >> "$GITHUB_OUTPUT"
           fi
 
   # ── Update tested tag (always, so next batch covers only new commits) ──
   update-tag:
     name: Update staging-tested tag
-    needs: [check-changes, tests, e2e, create-promotion-pr, gate]
+    needs: [check-changes, create-promotion-pr, gate]
     if: >
       always() &&
       needs.check-changes.outputs.has_changes == 'true' &&
-      needs.tests.result == 'success' &&
-      needs.e2e.result == 'success' &&
-      needs.create-promotion-pr.result == 'success'
+      needs.create-promotion-pr.result == 'success' &&
+      needs.gate.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -524,7 +530,7 @@ jobs:
   # ── Report ───────────────────────────────────────────────────────
   report:
     name: Staging CI Summary
-    needs: [check-changes, tests, e2e, create-promotion-pr, gate, update-tag]
+    needs: [check-changes, create-promotion-pr, gate, update-tag]
     if: always() && needs.check-changes.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -537,8 +543,6 @@ jobs:
             echo ""
             echo "| Check | Result |"
             echo "|-------|--------|"
-            echo "| Tests | ${{ needs.tests.result }} |"
-            echo "| E2E | ${{ needs.e2e.result }} |"
             echo "| Promotion PR | ${{ needs.create-promotion-pr.result }} |"
             echo "| Gate | ${{ needs.gate.result }} |"
             echo "| Tag Updated | ${{ needs.update-tag.result }} |"

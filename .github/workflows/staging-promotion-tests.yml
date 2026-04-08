@@ -1,0 +1,27 @@
+name: Staging Promotion Tests
+
+on:
+  pull_request:
+    types: [labeled]
+
+concurrency:
+  group: staging-promotion-tests-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Promotion Tests
+    if: contains(github.event.pull_request.labels.*.name, 'staging-promotion')
+    uses: ./.github/workflows/test.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
+
+  e2e:
+    name: Promotion E2E
+    if: contains(github.event.pull_request.labels.*.name, 'staging-promotion')
+    uses: ./.github/workflows/e2e.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
