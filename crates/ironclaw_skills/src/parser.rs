@@ -229,4 +229,24 @@ Test prompt.
         assert_eq!(result.manifest.name, "mixed-endings");
         assert_eq!(result.prompt_content, "Prompt text.\n");
     }
+
+    #[test]
+    fn test_legacy_metadata_openclaw_requires_is_ignored() {
+        let content = r#"---
+name: legacy-requires
+metadata:
+  openclaw:
+    requires:
+      bins: ["docker"]
+      env: ["KUBECONFIG"]
+      skills: ["companion"]
+---
+
+Legacy prompt.
+"#;
+        let result = parse_skill_md(content).expect("legacy shape still parses");
+        assert!(result.manifest.requires.bins.is_empty());
+        assert!(result.manifest.requires.env.is_empty());
+        assert!(result.manifest.requires.skills.is_empty());
+    }
 }

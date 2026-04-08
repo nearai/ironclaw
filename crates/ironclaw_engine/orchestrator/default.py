@@ -663,32 +663,26 @@ def run_loop(context, goal, actions, state, config):
             # Handle FINAL emitted as a structured tool call. FINAL is a
             # CodeAct sentinel for completion — when the LLM tries to call
             # it via tool_calls instead of inside a code block, the engine's
-            # action executor has no lease for it and the call fails. Treat
-            # any FINAL tool call as a completion signal: take the first
-            # argument (or content/answer/result) as the response text.
+            # action executor has no lease for it and the call fails. If FINAL
+            # is co-emitted with other calls, execute the non-FINAL calls first
+            # so persistence side effects are not silently dropped.
+            final_call = None
+            executable_calls = []
             for c in calls:
-                if c.get("name", "") == "FINAL":
-                    params = c.get("params", {}) or {}
-                    answer = (
-                        params.get("answer")
-                        or params.get("result")
-                        or params.get("content")
-                        or params.get("text")
-                        or response.get("content", "")
-                        or ""
-                    )
-                    __transition_to__("completed", "FINAL via tool_calls")
-                    return complete_result(state, "completed", str(answer))
+                if c.get("name", "") == "FINAL" and final_call is None:
+                    final_call = c
+                else:
+                    executable_calls.append(c)
 
             # Execute all tool calls in parallel via the batch host function.
             # Rust handles preflight (lease/policy), parallel execution via
             # JoinSet, and event emission in call order.
-            results = __execute_actions_parallel__(calls)
+            results = __execute_actions_parallel__(executable_calls)
             for idx in range(len(results)):
                 r = results[idx]
                 if r is None:
                     continue
-                call = calls[idx] if idx < len(calls) else {}
+                call = executable_calls[idx] if idx < len(executable_calls) else {}
                 call_id = call.get("call_id", "")
                 action_name = r.get("action_name", call.get("name", ""))
                 output = r.get("output")
@@ -715,7 +709,7 @@ def run_loop(context, goal, actions, state, config):
                     })
                     gate = r
                     # Get action info from the original call or the result
-                    orig_call = calls[r_idx] if r_idx < len(calls) else {}
+                    orig_call = executable_calls[r_idx] if r_idx < len(executable_calls) else {}
                     __transition_to__("waiting", "gate paused: " + gate.get("gate_name", "unknown"))
                     return {
                         "outcome": "gate_paused",
@@ -757,6 +751,19 @@ def run_loop(context, goal, actions, state, config):
                         "call_id": r.get("call_id", ""),
                         "parameters": r.get("parameters", {}),
                     }
+
+            if final_call is not None:
+                params = final_call.get("params", {}) or {}
+                answer = (
+                    params.get("answer")
+                    or params.get("result")
+                    or params.get("content")
+                    or params.get("text")
+                    or response.get("content", "")
+                    or ""
+                )
+                __transition_to__("completed", "FINAL via tool_calls")
+                return complete_result(state, "completed", str(answer))
 
             __save_checkpoint__(state, {
                 "nudge_count": consecutive_nudges,

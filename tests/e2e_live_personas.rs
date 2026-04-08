@@ -87,12 +87,11 @@ mod persona_tests {
     }
 
     fn should_run_test(test_name: &str) -> bool {
-        if trace_fixture_path(test_name).exists() {
-            true
-        } else if std::env::var("IRONCLAW_LIVE_TEST")
-            .ok()
-            .filter(|v| !v.is_empty() && v != "0")
-            .is_some()
+        if trace_fixture_path(test_name).exists()
+            || std::env::var("IRONCLAW_LIVE_TEST")
+                .ok()
+                .filter(|v| !v.is_empty() && v != "0")
+                .is_some()
         {
             true
         } else {
@@ -185,11 +184,7 @@ mod persona_tests {
         );
     }
 
-    async fn wait_for_check(
-        harness: &LiveTestHarness,
-        check: &PersonaCheck,
-        timeout: Duration,
-    ) {
+    async fn wait_for_check(harness: &LiveTestHarness, check: &PersonaCheck, timeout: Duration) {
         let deadline = Instant::now() + timeout;
         loop {
             let workspace = read_under(harness, "commitments/").await;

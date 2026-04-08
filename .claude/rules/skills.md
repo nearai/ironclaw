@@ -39,6 +39,11 @@ requires:
 # Skill instructions here...
 ```
 
+Only the top-level `requires:` block is supported. The legacy nested shape
+`metadata.openclaw.requires` is unsupported and ignored by the current parser,
+so older external skills must be migrated instead of relying on silent
+compatibility.
+
 ## Selection Pipeline
 
 1. **Gating** -- Check binary/env/config requirements; skip skills whose prerequisites are missing
