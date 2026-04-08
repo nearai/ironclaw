@@ -149,6 +149,16 @@ fn coerce_value(value: &serde_json::Value, schema: &serde_json::Value) -> serde_
                     *current = serde_json::Value::Null;
                     continue;
                 }
+                // LLMs (especially local models via llama.cpp --jinja) send
+                // the literal string "null" instead of JSON null for optional
+                // fields. Unlike "", "null" is never intentional content —
+                // convert it for any non-required field regardless of type.
+                if current.as_str() == Some("null")
+                    && !required.contains(key.as_str())
+                {
+                    *current = serde_json::Value::Null;
+                    continue;
+                }
                 *current = coerce_value(current, prop_schema);
                 continue;
             }
@@ -1092,9 +1102,9 @@ mod tests {
     }
 
     #[test]
-    fn keeps_literal_null_string_for_nullable_string_field() {
-        // When a field allows both string and null, "null" is a valid
-        // string value and should NOT be coerced.
+    fn converts_null_string_to_null_for_nullable_string_field() {
+        // "null" is never intentional content — convert to JSON null
+        // for any non-required field, even if the schema allows string.
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -1107,9 +1117,7 @@ mod tests {
 
         let result = prepare_params_for_schema(&params, &schema);
 
-        // "null" is kept as a string — the memory_write tool handles
-        // this case with its own filter.
-        assert_eq!(result["layer"], serde_json::json!("null"));
+        assert_eq!(result["layer"], serde_json::Value::Null);
     }
 
     #[test]
@@ -1146,5 +1154,45 @@ mod tests {
         let result = prepare_params_for_schema(&params, &schema);
 
         assert_eq!(result["text"], serde_json::json!("\"unmatched"));
+    }
+
+    #[test]
+    fn converts_null_string_to_null_for_non_required_string_field() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "time_min": { "type": "string" },
+                "action": { "type": "string" }
+            },
+            "required": ["action"]
+        });
+        let params = serde_json::json!({
+            "time_min": "null",
+            "action": "list_events"
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        assert_eq!(result["time_min"], serde_json::Value::Null);
+        assert_eq!(result["action"], serde_json::json!("list_events"));
+    }
+
+    #[test]
+    fn keeps_null_string_for_required_string_field() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" }
+            },
+            "required": ["query"]
+        });
+        let params = serde_json::json!({
+            "query": "null"
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        // Required fields keep "null" as-is — don't silently drop required values
+        assert_eq!(result["query"], serde_json::json!("null"));
     }
 }

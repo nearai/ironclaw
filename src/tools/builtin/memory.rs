@@ -299,7 +299,7 @@ impl Tool for MemoryWriteTool {
         // At least one mode must be provided: content for write/append, or old_string for patch.
         // Filter "null" and "" the same way as the actual old_string extraction below.
         let is_patch_mode = params.get("old_string").and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty() && *s != "null").is_some();
+            .filter(|s| !s.is_empty()).is_some();
         let has_content = !content.trim().is_empty();
         if !is_patch_mode && !has_content && !allows_empty_content {
             return Err(ToolError::InvalidParameters(
@@ -361,7 +361,7 @@ impl Tool for MemoryWriteTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
-        let layer = params.get("layer").and_then(|v| v.as_str()).filter(|s| !s.is_empty() && *s != "null");
+        let layer = params.get("layer").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
         let force = params
             .get("force")
             .and_then(|v| v.as_bool())
@@ -421,7 +421,7 @@ impl Tool for MemoryWriteTool {
         }
 
         // Patch mode: if old_string is provided, do search-and-replace instead of write/append.
-        let old_string = params.get("old_string").and_then(|v| v.as_str()).filter(|s| !s.is_empty() && *s != "null");
+        let old_string = params.get("old_string").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
         if let Some(old_str) = old_string {
             if old_str.is_empty() {
                 return Err(ToolError::InvalidParameters(
