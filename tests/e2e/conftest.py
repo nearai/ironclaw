@@ -5,7 +5,6 @@ Function-scoped: fresh browser context and page per test.
 """
 
 import asyncio
-import json
 import os
 import signal
 import socket
@@ -440,6 +439,8 @@ async def ironclaw_server(
         "ROUTINES_ENABLED": "true",
         "HEARTBEAT_ENABLED": "false",
         "EMBEDDING_ENABLED": "false",
+        # Secrets encryption (needed for admin secret provisioning)
+        "SECRETS_MASTER_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         # WASM tool/channel support
         "WASM_ENABLED": "true",
         "WASM_TOOLS_DIR": wasm_tools_dir,
@@ -1113,11 +1114,6 @@ async def page(ironclaw_server, browser):
     await pg.goto(f"{ironclaw_server}/?token={AUTH_TOKEN}")
     # Wait for the app to initialize (auth screen hidden, SSE connected)
     await pg.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
-    # Wait for SSE connection (onopen sets sseHasConnectedBefore = true)
-    await pg.wait_for_function(
-        "() => typeof sseHasConnectedBefore !== 'undefined' && sseHasConnectedBefore === true",
-        timeout=10000,
-    )
     yield pg
     await context.close()
 
@@ -1143,100 +1139,6 @@ async def length_preserving_page(length_preserving_server, browser):
     yield pg
     await context.close()
 
-# ---------------------------------------------------------------------------
-# Slack E2E fixtures
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(scope="session")
-async def fake_slack_server():
-    """Start the fake Slack API server for E2E tests."""
-    fake_api_path = Path(__file__).parent / "fake_slack_api.py"
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable,
-        str(fake_api_path),
-        "--port",
-        "0",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    port = await wait_for_port_line(proc, r"FAKE_SLACK_PORT=(\d+)")
-    base_url = f"http://127.0.0.1:{port}"
-    await wait_for_ready(f"{base_url}/__mock/sent_messages", timeout=10)
-    yield base_url
-    proc.send_signal(signal.SIGINT)
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=5)
-    except asyncio.TimeoutError:
-        proc.kill()
-
-
-@pytest.fixture(scope="session")
-async def slack_e2e_server(ironclaw_binary, mock_llm_server, fake_slack_server):
-    """IronClaw instance wired to the fake Slack API for E2E Slack tests."""
-    tmp = tempfile.mkdtemp(prefix="ic-slack-e2e-")
-    db_path = os.path.join(tmp, "slack_e2e.db")
-    home_dir = os.path.join(tmp, "home")
-    channels_dir = os.path.join(tmp, "channels")
-    os.makedirs(home_dir, exist_ok=True)
-    os.makedirs(channels_dir, exist_ok=True)
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-
-    env = {
-        "GATEWAY_ENABLED": "true",
-        "GATEWAY_HOST": "127.0.0.1",
-        "GATEWAY_PORT": str(port),
-        "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
-        "GATEWAY_USER_ID": "e2e-tester",
-        "CLI_ENABLED": "false",
-        "LLM_BACKEND": "openai_compatible",
-        "LLM_BASE_URL": mock_llm_server,
-        "LLM_MODEL": "mock-model",
-        "DATABASE_BACKEND": "libsql",
-        "LIBSQL_PATH": db_path,
-        "HOME_DIR": home_dir,
-        "CHANNELS_DIR": channels_dir,
-        "SANDBOX_ENABLED": "false",
-        "ROUTINES_ENABLED": "false",
-        "HEARTBEAT_ENABLED": "false",
-        "EMBEDDING_ENABLED": "false",
-        "SKILLS_ENABLED": "false",
-        "ONBOARD_COMPLETED": "true",
-        "IRONCLAW_TEST_HTTP_REWRITE_MAP": json.dumps(
-            {
-                "slack.com": fake_slack_server,
-                "files.slack.com": fake_slack_server,
-            }
-        ),
-        "SECRETS_MASTER_KEY": "dGVzdC1zbGFjay1tYXN0ZXIta2V5LTMyYnl0ZXM=",
-        "PATH": os.environ.get("PATH", ""),
-    }
-
-    proc = await asyncio.create_subprocess_exec(
-        str(ironclaw_binary),
-        "--no-onboard",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
-
-    base_url = f"http://127.0.0.1:{port}"
-    http_url = f"{base_url}/webhook/slack"
-    await wait_for_ready(f"{base_url}/api/health", timeout=60)
-    yield {
-        "base_url": base_url,
-        "http_url": http_url,
-        "fake_slack_url": fake_slack_server,
-        "channels_dir": channels_dir,
-    }
-    proc.send_signal(signal.SIGINT)
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=10)
-    except asyncio.TimeoutError:
-        proc.kill()
 
 # ── Telegram E2E fixtures ────────────────────────────────────────────────
 
