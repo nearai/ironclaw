@@ -234,7 +234,20 @@ Raw provider
 
 ## Streaming Support
 
-No streaming support. All providers use non-streaming (blocking) Chat Completions requests. The `complete()` and `complete_with_tools()` methods return only after the full response is available.
+The `LlmProvider` trait has optional streaming methods:
+
+```rust
+async fn complete_streaming(&self, request, chunk_tx: StreamingChunkSender) -> Result<CompletionResponse, LlmError>;
+async fn complete_with_tools_streaming(&self, request, chunk_tx: StreamingChunkSender) -> Result<ToolCompletionResponse, LlmError>;
+```
+
+`StreamingChunkSender` is `tokio::sync::mpsc::Sender<String>` — each `String` is one text delta.
+
+**Default behavior:** Both methods fall back to the blocking `complete()` / `complete_with_tools()` and drop the sender (no chunks emitted). Existing providers that do not implement streaming continue to work unchanged.
+
+**Wrapper override requirement:** Decorator wrappers (retry, circuit breaker, smart routing, failover, cache, recording, token refresh) **must override both streaming methods** — the trait default bypasses the wrapper's semantics. This is the same rule as for `complete()` / `complete_with_tools()` per `.claude/rules/review-discipline.md`.
+
+**Currently implemented:** No provider implements native streaming yet. The `openai_compatible_streaming` backend (planned) will be the first.
 
 ## Trace Recording
 

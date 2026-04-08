@@ -383,6 +383,21 @@ pub struct ModelMetadata {
     pub context_length: Option<u32>,
 }
 
+/// Sender used to deliver streaming text deltas from a streaming-capable
+/// `LlmProvider` back to the caller (typically the agent dispatcher).
+///
+/// Each `String` is one text delta. Order across `send` calls is preserved
+/// (mpsc FIFO). Backpressure: if the receiver is slow, the producer awaits
+/// on `send`. If the receiver has been dropped, `send` returns `Err` and the
+/// producer should treat that as "consumer no longer interested" and finish
+/// the stream cleanly.
+///
+/// Providers that do not implement streaming (i.e. rely on the trait's
+/// default impls of `complete_streaming` / `complete_with_tools_streaming`)
+/// simply drop the sender at the start of the call, which is a no-op for
+/// callers that don't read from the receiver.
+pub type StreamingChunkSender = tokio::sync::mpsc::Sender<String>;
+
 /// Trait for LLM providers.
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
@@ -400,6 +415,50 @@ pub trait LlmProvider: Send + Sync {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError>;
+
+    /// Stream a chat completion, delivering text deltas through `chunk_tx`
+    /// while still returning the final aggregated `CompletionResponse`.
+    ///
+    /// Default implementation falls back to the blocking `complete` call and
+    /// drops the sender, so existing providers that do not implement
+    /// streaming continue to work unchanged. Providers wishing to support
+    /// real streaming should override this method and send each text delta
+    /// through `chunk_tx` as it arrives from the upstream API.
+    ///
+    /// **Decorator wrappers must override this method** (do not rely on the
+    /// default impl), or the wrapper's semantics — retry, circuit breaker,
+    /// smart routing, failover, recording, token refresh — would be silently
+    /// bypassed for streaming requests. See `.claude/rules/review-discipline.md`
+    /// "Decorator/wrapper trait delegation".
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        chunk_tx: StreamingChunkSender,
+    ) -> Result<CompletionResponse, LlmError> {
+        // Default fallback: drop the sender (no chunks emitted) and use the
+        // existing blocking path. Callers that ignore the receiver get the
+        // same behavior they would have gotten from `complete()`.
+        drop(chunk_tx);
+        self.complete(request).await
+    }
+
+    /// Stream a tool-aware completion, delivering text deltas through
+    /// `chunk_tx` while still returning the final aggregated
+    /// `ToolCompletionResponse`. Tool-call deltas are accumulated by the
+    /// provider and surfaced only via the return value, not via `chunk_tx`.
+    ///
+    /// Default implementation falls back to the blocking
+    /// `complete_with_tools` call and drops the sender. See the doc comment
+    /// on `complete_streaming` for the wrapper-override requirement.
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        chunk_tx: StreamingChunkSender,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        // Default fallback: same shape as `complete_streaming`.
+        drop(chunk_tx);
+        self.complete_with_tools(request).await
+    }
 
     /// List available models from the provider.
     /// Default implementation returns empty list.
@@ -552,6 +611,174 @@ mod model_override_tests {
         let mut real =
             ToolCompletionRequest::new(vec![ChatMessage::user("hi")], tools).with_model("qwen3");
         assert_eq!(real.take_model_override().as_deref(), Some("qwen3"));
+    }
+}
+
+#[cfg(test)]
+mod streaming_default_tests {
+    //! Regression coverage for the trait's default `complete_streaming` /
+    //! `complete_with_tools_streaming` impls. These exist so that any
+    //! provider that does not implement streaming continues to work
+    //! transparently when called via the streaming entry points — the
+    //! sender is dropped (no chunks emitted) and the blocking path runs.
+    //!
+    //! These tests guard the contract that decorator wrappers will rely on
+    //! while they migrate to native streaming overrides one by one.
+
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::llm::error::LlmError;
+
+    /// Test stub that returns a deterministic response from the blocking
+    /// methods and panics if either streaming method is called directly
+    /// without going through the trait default impls.
+    struct BlockingStub;
+
+    #[async_trait]
+    impl LlmProvider for BlockingStub {
+        fn model_name(&self) -> &str {
+            "blocking-stub"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Ok(CompletionResponse {
+                content: "blocking-complete".to_string(),
+                input_tokens: 1,
+                output_tokens: 2,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Ok(ToolCompletionResponse {
+                content: Some("blocking-tools".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 3,
+                output_tokens: 4,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_default_falls_back_to_blocking_with_no_chunks() {
+        let provider = BlockingStub;
+        let (tx, mut rx) = mpsc::channel::<String>(8);
+
+        let response = provider
+            .complete_streaming(
+                CompletionRequest::new(vec![ChatMessage::user("hi")]),
+                tx,
+            )
+            .await
+            .expect("blocking fallback should succeed");
+
+        assert_eq!(response.content, "blocking-complete");
+        assert_eq!(response.input_tokens, 1);
+        assert_eq!(response.output_tokens, 2);
+
+        // Sender was dropped at the start of the default impl, so the
+        // receiver should now be closed and yield no chunks.
+        assert!(
+            rx.recv().await.is_none(),
+            "default impl must not emit any chunks"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_streaming_default_falls_back_to_blocking_with_no_chunks() {
+        let provider = BlockingStub;
+        let (tx, mut rx) = mpsc::channel::<String>(8);
+
+        let tools = vec![ToolDefinition {
+            name: "echo".to_string(),
+            description: "Echo input".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+
+        let response = provider
+            .complete_with_tools_streaming(
+                ToolCompletionRequest::new(vec![ChatMessage::user("hi")], tools),
+                tx,
+            )
+            .await
+            .expect("blocking fallback should succeed");
+
+        assert_eq!(response.content.as_deref(), Some("blocking-tools"));
+        assert!(response.tool_calls.is_empty());
+        assert_eq!(response.input_tokens, 3);
+        assert_eq!(response.output_tokens, 4);
+
+        assert!(
+            rx.recv().await.is_none(),
+            "default impl must not emit any chunks"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_default_does_not_panic_when_receiver_already_dropped() {
+        // Caller drops the receiver before invoking the streaming method.
+        // The default impl drops the sender unconditionally, so it must
+        // not panic, deadlock, or surface a SendError to the caller.
+        let provider = BlockingStub;
+        let (tx, rx) = mpsc::channel::<String>(8);
+        drop(rx);
+
+        let response = provider
+            .complete_streaming(
+                CompletionRequest::new(vec![ChatMessage::user("hi")]),
+                tx,
+            )
+            .await
+            .expect("blocking fallback should succeed regardless of receiver state");
+
+        assert_eq!(response.content, "blocking-complete");
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_default_does_not_deadlock_when_receiver_dropped_after_send() {
+        // Sanity check the producer-cancel path used by streaming-aware
+        // providers: dropping the sender from inside the default impl
+        // should immediately close the channel for any concurrent reader.
+        let provider = BlockingStub;
+        let (tx, mut rx) = mpsc::channel::<String>(8);
+
+        let producer = tokio::spawn(async move {
+            provider
+                .complete_streaming(
+                    CompletionRequest::new(vec![ChatMessage::user("hi")]),
+                    tx,
+                )
+                .await
+        });
+
+        // Receiver observes the channel close (sender was dropped inside
+        // the default impl) and exits cleanly with `None`.
+        let chunk = rx.recv().await;
+        assert!(chunk.is_none(), "receiver should observe channel closure");
+
+        let response = producer
+            .await
+            .expect("producer task should not panic")
+            .expect("blocking fallback should succeed");
+        assert_eq!(response.content, "blocking-complete");
     }
 }
 
