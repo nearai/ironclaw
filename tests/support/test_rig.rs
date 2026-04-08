@@ -34,6 +34,70 @@ use ironclaw::llm::recording::{HttpExchange, HttpInterceptor, ReplayingHttpInter
 /// response stream so tests don't need to account for them manually.
 const BOOTSTRAP_GREETING_MARKER: &str = "always-on chief of staff";
 
+/// Clone a libSQL database file into a destination path so the test rig
+/// can open the copy without ever touching the source. Used by the live
+/// harness to seed from `~/.ironclaw/ironclaw.db` so live tests get
+/// real secrets, history, and memory in an isolated sandbox.
+///
+/// We copy `<src>.db` and any sibling `<src>.db-wal` / `<src>.db-shm`
+/// files. SQLite uses the WAL/SHM siblings to track in-flight writes;
+/// shipping them along keeps the destination consistent with the
+/// source's last checkpoint. If the source is being written to by
+/// another process during the copy the destination may capture a
+/// torn read of the WAL — SQLite handles that on first open by
+/// rolling back to the last consistent state in the main file.
+///
+/// Migrations are still applied to the destination after this returns
+/// (in the build path), so the test binary's schema version takes
+/// precedence even if the source clone was on an older schema.
+fn seed_libsql_db_from(source: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+    if !source.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("source libSQL DB not found: {}", source.display()),
+        ));
+    }
+
+    eprintln!(
+        "[TestRig] Seeding temp DB from {} → {}",
+        source.display(),
+        dest.display()
+    );
+
+    std::fs::copy(source, dest)?;
+
+    // SQLite WAL/SHM siblings are always `<main>-wal` and `<main>-shm`
+    // (a single dash, not `.db-wal`). For `bar.db` that yields
+    // `bar.db-wal`; for an extensionless `bar` it yields `bar-wal`.
+    for ext in ["-wal", "-shm"] {
+        let src_with_ext = sibling_with_suffix(source, ext);
+        if src_with_ext.exists() {
+            let dest_with_ext = sibling_with_suffix(dest, ext);
+            if let Err(e) = std::fs::copy(&src_with_ext, &dest_with_ext) {
+                // Best-effort: WAL/SHM may vanish mid-copy as the source
+                // checkpoints. Log and continue — SQLite will recover.
+                eprintln!(
+                    "[TestRig] WARNING: failed to copy WAL sibling {}: {}",
+                    src_with_ext.display(),
+                    e
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Append `suffix` to a path's filename, returning a sibling path.
+/// E.g. `/foo/bar.db` + `.db-wal` → `/foo/bar.db.db-wal`. Caller is
+/// responsible for whether the suffix actually corresponds to a real
+/// SQLite layout — `seed_libsql_db_from` tries multiple suffix forms.
+fn sibling_with_suffix(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(suffix);
+    std::path::PathBuf::from(s)
+}
+
 /// A running test agent with methods to inject messages and inspect results.
 pub struct TestRig {
     /// The test channel for sending messages and reading captures.
@@ -434,6 +498,7 @@ pub struct TestRigBuilder {
     keep_bootstrap: bool,
     engine_v2: bool,
     channel_name_override: Option<String>,
+    seed_db_from: Option<std::path::PathBuf>,
 }
 
 impl TestRigBuilder {
@@ -455,6 +520,7 @@ impl TestRigBuilder {
             keep_bootstrap: false,
             engine_v2: false,
             channel_name_override: None,
+            seed_db_from: None,
         }
     }
 
@@ -465,6 +531,23 @@ impl TestRigBuilder {
     /// channels) behave the same as in production.
     pub fn with_channel_name(mut self, name: impl Into<String>) -> Self {
         self.channel_name_override = Some(name.into());
+        self
+    }
+
+    /// Seed the test rig's temp libSQL database from an existing file
+    /// before opening it.
+    ///
+    /// Used by the live test harness to clone the user's real
+    /// `~/.ironclaw/ironclaw.db` into the test rig's temp dir so the
+    /// run gets access to real secrets, history, and memory — without
+    /// touching the source. The clone is opened by the test rig's own
+    /// `LibSqlBackend`; mutations stay inside the temp dir and are
+    /// dropped when the rig shuts down.
+    ///
+    /// Migrations are still applied to the cloned file so the test
+    /// binary's schema version takes precedence over the source's.
+    pub fn with_seed_db_from(mut self, path: std::path::PathBuf) -> Self {
+        self.seed_db_from = Some(path);
         self
     }
 
@@ -618,18 +701,48 @@ impl TestRigBuilder {
             keep_bootstrap,
             engine_v2,
             channel_name_override,
+            seed_db_from,
         } = self;
 
         // 1. Create temp dir + libSQL database + run migrations.
+        //
+        // If `seed_db_from` is set (live test mode), copy the source DB
+        // file into our temp dir before opening it. We copy `.db` plus
+        // any sibling `.db-wal` / `.db-shm` files so SQLite has a
+        // consistent picture of the source's WAL state. The copy is
+        // best-effort: if a sibling file is missing or vanishes mid-copy,
+        // SQLite handles it on first open (WAL replay or fresh checkpoint).
         let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
         let db_path = temp_dir.path().join("test_rig.db");
+
+        if let Some(ref source) = seed_db_from {
+            seed_libsql_db_from(source, &db_path).expect("failed to clone source libSQL DB");
+        }
+
         let backend = LibSqlBackend::new_local(&db_path)
             .await
             .expect("failed to create test LibSqlBackend");
+        // Migrations are idempotent — they're safe to run on a fresh
+        // temp DB AND on a cloned real DB (the libSQL incremental
+        // migration loop checks `_migrations.version` and skips applied
+        // versions). This guarantees the test binary's schema version
+        // takes precedence over whatever schema the source clone was on.
         backend
             .run_migrations()
             .await
             .expect("failed to run migrations");
+
+        // Build the backend-specific handles so AppBuilder can wire the
+        // secrets store. `with_database()` alone leaves handles=None,
+        // which silently disables `SecretsStore` and breaks every test
+        // that needs OAuth/encrypted credentials. `with_database_and_handles()`
+        // is the right pairing.
+        let db_handles = ironclaw::db::DatabaseHandles {
+            #[cfg(feature = "libsql")]
+            libsql_db: Some(backend.shared_db()),
+            #[cfg(feature = "postgres")]
+            pg_pool: None,
+        };
         let db: Arc<dyn ironclaw::db::Database> = Arc::new(backend);
 
         // 2. Build Config.
@@ -701,7 +814,7 @@ impl TestRigBuilder {
             session,
             log_broadcaster,
         );
-        builder.with_database(Arc::clone(&db));
+        builder.with_database_and_handles(Arc::clone(&db), db_handles);
         builder.with_llm(llm);
         let mut components = builder
             .build_all()
@@ -925,12 +1038,27 @@ impl TestRigBuilder {
         // override (via `with_channel_name`) takes precedence so tests can
         // mirror real-world channel naming for features keyed on the channel
         // name (e.g. mission notifications routed back to the source channel).
-        let test_channel = if let Some(ref name) = channel_name_override {
-            Arc::new(TestChannel::new().with_name(name.clone()))
-        } else if self.keep_bootstrap {
-            Arc::new(TestChannel::new().with_name("gateway"))
+        //
+        // Channel user_id selection: when the test rig was seeded from a
+        // real libSQL DB (`seed_db_from` set), align the channel user
+        // identity with the config's owner_id so that secret lookups
+        // (`secrets WHERE user_id = ?`) hit the rows the source DB
+        // already has. Without this, the rig would seed real secrets
+        // but every credential lookup would key off the hardcoded
+        // `"test-user"` and miss them. For non-seeded tests we keep
+        // the historical `"test-user"` default so existing tests don't
+        // change behaviour.
+        let channel_user_id = if seed_db_from.is_some() {
+            components.config.owner_id.clone()
         } else {
-            Arc::new(TestChannel::new())
+            "test-user".to_string()
+        };
+        let test_channel = if let Some(ref name) = channel_name_override {
+            Arc::new(TestChannel::with_user_id(channel_user_id).with_name(name.clone()))
+        } else if keep_bootstrap {
+            Arc::new(TestChannel::with_user_id(channel_user_id).with_name("gateway"))
+        } else {
+            Arc::new(TestChannel::with_user_id(channel_user_id))
         };
         let handle = TestChannelHandle::new(Arc::clone(&test_channel));
         let channel_manager = ChannelManager::new();

@@ -323,6 +323,36 @@ impl LiveTestHarnessBuilder {
             config.agent.engine_v2, config.agent.allow_local_tools, config.agent.auto_approve_tools,
         );
 
+        // If the resolved config points at a local libSQL file (the
+        // typical `~/.ironclaw/ironclaw.db` setup), clone it into the
+        // test rig's temp dir so live tests get real OAuth secrets,
+        // memory, and history without polluting the source. The clone
+        // happens inside `TestRigBuilder::build()`. Remote replicas
+        // (`libsql_url` set) are not cloneable from a file copy and
+        // are left to start from an empty test DB.
+        let seed_db_from = match config.database.backend {
+            ironclaw::config::DatabaseBackend::LibSql if config.database.libsql_url.is_none() => {
+                config
+                    .database
+                    .libsql_path
+                    .clone()
+                    .filter(|p| p.exists())
+                    .or_else(|| {
+                        let default = ironclaw::config::default_libsql_path();
+                        default.exists().then_some(default)
+                    })
+            }
+            _ => None,
+        };
+        if let Some(ref src) = seed_db_from {
+            eprintln!("[LiveTest] Will clone libSQL DB from {}", src.display());
+        } else {
+            eprintln!(
+                "[LiveTest] No source libSQL DB found to clone — \
+                 test rig will start from an empty database (no real secrets)"
+            );
+        }
+
         let session = Arc::new(SessionManager::new(SessionConfig::default()));
         let (provider, cheap_llm, _) = ironclaw::llm::build_provider_chain(&config.llm, session)
             .await
@@ -346,6 +376,9 @@ impl LiveTestHarnessBuilder {
             .with_max_tool_iterations(self.max_tool_iterations);
         if let Some(ref name) = self.channel_name {
             rig_builder = rig_builder.with_channel_name(name.clone());
+        }
+        if let Some(src) = seed_db_from {
+            rig_builder = rig_builder.with_seed_db_from(src);
         }
         let rig = rig_builder.build().await;
 

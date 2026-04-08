@@ -117,8 +117,31 @@ impl AppBuilder {
     }
 
     /// Inject a pre-created database, skipping `init_database()`.
+    ///
+    /// **Warning:** this leaves `self.handles` as `None`, which means
+    /// `init_secrets()` cannot construct a real `SecretsStore` (the store
+    /// needs a backend-specific handle, not the generic `Arc<dyn Database>`).
+    /// Tests that need credentials/OAuth/encrypted secrets must use
+    /// [`AppBuilder::with_database_and_handles`] instead so the secrets
+    /// path stays wired.
     pub fn with_database(&mut self, db: Arc<dyn Database>) {
         self.db = Some(db);
+    }
+
+    /// Inject a pre-created database **and** the matching backend-specific
+    /// handles, skipping `init_database()`.
+    ///
+    /// Use this whenever the test will exercise code paths that touch
+    /// `SecretsStore` (OAuth, encrypted credentials, secrets-backed WASM
+    /// tools). For libSQL backends the handles are constructed via
+    /// `LibSqlBackend::shared_db()`; for PostgreSQL via `PgBackend::pool()`.
+    pub fn with_database_and_handles(
+        &mut self,
+        db: Arc<dyn Database>,
+        handles: crate::db::DatabaseHandles,
+    ) {
+        self.db = Some(db);
+        self.handles = Some(handles);
     }
 
     /// Inject a pre-created LLM provider, skipping `init_llm()`.
