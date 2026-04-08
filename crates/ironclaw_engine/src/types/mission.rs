@@ -343,13 +343,13 @@ mod tests {
         tz: &ValidTimezone,
         after_utc: DateTime<Utc>,
     ) -> DateTime<Utc> {
-        let normalized = normalize_cron_expression(expression).unwrap();
-        let schedule = cron::Schedule::from_str(&normalized).unwrap();
+        let normalized = normalize_cron_expression(expression).unwrap(); // safety: test helper
+        let schedule = cron::Schedule::from_str(&normalized).unwrap(); // safety: test helper
         let after_local = after_utc.with_timezone(&tz.tz());
         schedule
             .after(&after_local)
             .next()
-            .expect("schedule should produce a fire time")
+            .expect("schedule should produce a fire time") // safety: test helper
             .with_timezone(&Utc)
     }
 
