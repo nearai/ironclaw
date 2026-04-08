@@ -771,9 +771,7 @@ fn scan_preview_for_errors(preview: &str) -> Option<String> {
     if preview.contains("SyntaxError") && !is_benign_error(preview) {
         return Some("Python SyntaxError in CodeAct execution".to_string());
     }
-    if preview.contains("Traceback (most recent call last)")
-        && !is_benign_error(preview)
-    {
+    if preview.contains("Traceback (most recent call last)") && !is_benign_error(preview) {
         return Some("Python traceback in CodeAct execution".to_string());
     }
     // JSON-style error payloads from tool wrappers
