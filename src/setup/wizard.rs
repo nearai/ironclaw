@@ -4496,6 +4496,9 @@ mod tests {
         let _lock = lock_env();
         // Ensure the real env var is unset so the only source is the overlay.
         let _guard = EnvGuard::clear("NEARAI_API_KEY");
+        // Clear NEARAI_BASE_URL to prevent leaks from other tests that stub
+        // NearAI URLs to loopback for DNS-free validation.
+        let _guard2 = EnvGuard::clear("NEARAI_BASE_URL");
 
         crate::config::helpers::set_runtime_env("NEARAI_API_KEY", "test-key-from-overlay");
         let config = build_nearai_model_fetch_config();

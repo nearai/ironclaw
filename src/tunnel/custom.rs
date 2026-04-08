@@ -246,10 +246,11 @@ mod tests {
 
     #[tokio::test]
     async fn health_with_unreachable_url_is_false() {
-        // Use RFC 5737 TEST-NET-1 (192.0.2.0/24) for reliable failure even behind proxies.
+        // Use loopback on an unlikely port — guarantees connection-refused
+        // without network access and without being intercepted by HTTP proxies.
         let tunnel = CustomTunnel::new(
             "sleep 1".into(),
-            Some("http://192.0.2.1:9999/healthz".into()),
+            Some("http://127.0.0.1:1/healthz".into()),
             None,
         );
         assert!(

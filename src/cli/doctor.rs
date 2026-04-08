@@ -756,6 +756,8 @@ mod tests {
         let prev = std::env::var("LLM_BACKEND").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
+            std::env::set_var("NEARAI_AUTH_URL", "http://127.0.0.1:19999");
+            std::env::set_var("NEARAI_BASE_URL", "http://127.0.0.1:19998");
             std::env::set_var("LLM_BACKEND", "anthropic");
         }
         let _env_guard = EnvGuard("LLM_BACKEND", prev);
@@ -876,6 +878,8 @@ mod tests {
         let _guard = crate::config::helpers::lock_env();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
+            std::env::set_var("NEARAI_AUTH_URL", "http://127.0.0.1:19999");
+            std::env::set_var("NEARAI_BASE_URL", "http://127.0.0.1:19998");
             std::env::remove_var("LLM_BACKEND");
         }
         let settings = Settings::default();

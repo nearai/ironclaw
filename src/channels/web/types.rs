@@ -527,7 +527,7 @@ impl ActionResponse {
             auth_url: None,
             awaiting_token: None,
             instructions: None,
-            activated: None,
+            activated: Some(false),
 
             verification: None,
             onboarding_state: None,

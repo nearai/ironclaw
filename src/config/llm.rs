@@ -689,10 +689,22 @@ mod tests {
         parse_extra_headers_with_key(val, "TEST_HEADERS")
     }
 
+    /// Stub NearAI URLs to loopback so `validate_base_url()` never attempts
+    /// DNS resolution.  Must be called under `ENV_MUTEX`.
+    ///
+    /// SAFETY: only called from test helpers that already hold `lock_env()`.
+    unsafe fn stub_nearai_urls() {
+        unsafe {
+            std::env::set_var("NEARAI_AUTH_URL", "http://127.0.0.1:19999");
+            std::env::set_var("NEARAI_BASE_URL", "http://127.0.0.1:19998");
+        }
+    }
+
     /// Clear all openai-compatible-related env vars.
     fn clear_openai_compatible_env() {
         // SAFETY: Only called under ENV_MUTEX in tests.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("LLM_BASE_URL");
             std::env::remove_var("LLM_MODEL");
@@ -838,6 +850,7 @@ mod tests {
     fn clear_ollama_env() {
         // SAFETY: Only called under ENV_MUTEX in tests.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("OLLAMA_BASE_URL");
             std::env::remove_var("OLLAMA_MODEL");
@@ -916,6 +929,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("GROQ_API_KEY");
             std::env::remove_var("GROQ_MODEL");
@@ -941,6 +955,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("TINFOIL_API_KEY");
             std::env::remove_var("TINFOIL_MODEL");
@@ -969,6 +984,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("ZAI_API_KEY");
             std::env::remove_var("ZAI_MODEL");
@@ -994,6 +1010,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            stub_nearai_urls();
             std::env::set_var("LLM_BACKEND", "github-copilot");
             std::env::set_var("GITHUB_COPILOT_TOKEN", "gho_test_token");
             std::env::set_var(
@@ -1042,6 +1059,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_BACKEND");
         }
 
@@ -1104,6 +1122,10 @@ mod tests {
     #[test]
     fn nearai_aliases_all_resolve_to_nearai() {
         let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            stub_nearai_urls();
+        }
 
         for alias in &["nearai", "near_ai", "near"] {
             // SAFETY: Under ENV_MUTEX.
@@ -1179,6 +1201,7 @@ mod tests {
     fn clear_anthropic_env() {
         // SAFETY: Only called under ENV_MUTEX in tests.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("ANTHROPIC_API_KEY");
             std::env::remove_var("ANTHROPIC_OAUTH_TOKEN");
@@ -1373,6 +1396,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_REQUEST_TIMEOUT_SECS");
         }
         let config = LlmConfig::resolve(&Settings::default()).expect("resolve");
@@ -1384,6 +1408,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            stub_nearai_urls();
             std::env::set_var("LLM_REQUEST_TIMEOUT_SECS", "300");
         }
         let config = LlmConfig::resolve(&Settings::default()).expect("resolve");
@@ -1401,6 +1426,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("LLM_MODEL");
         }
@@ -1444,6 +1470,7 @@ mod tests {
         }
         let _cleanup = RemoveOnDrop("LLM_BACKEND");
         unsafe {
+            stub_nearai_urls();
             std::env::set_var("LLM_BACKEND", "nearai");
             std::env::remove_var("LLM_MODEL");
         }
@@ -1475,6 +1502,7 @@ mod tests {
     fn clear_openai_codex_env() {
         // SAFETY: Only called under ENV_MUTEX in tests.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("OPENAI_CODEX_MODEL");
             std::env::remove_var("OPENAI_MODEL");
@@ -1486,6 +1514,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("GROQ_MODEL");
         }
@@ -1538,6 +1567,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("GROQ_MODEL");
         }
@@ -1595,6 +1625,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("GROQ_API_KEY");
             std::env::remove_var("GROQ_MODEL");
@@ -1734,6 +1765,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_BACKEND");
             std::env::set_var("GROQ_API_KEY", "gsk_from_env");
             std::env::remove_var("GROQ_MODEL");
@@ -1777,6 +1809,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_BACKEND");
             std::env::set_var("GROQ_MODEL", "model-from-env");
         }
@@ -1814,6 +1847,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_BACKEND");
             std::env::set_var("LLM_MODEL", "model-from-env");
         }
@@ -1879,6 +1913,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_BACKEND");
             std::env::set_var("NEARAI_MODEL", "nearai-from-env");
         }
@@ -1906,6 +1941,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_BACKEND");
             std::env::set_var("NEARAI_MODEL", "model-from-env");
         }
@@ -1942,6 +1978,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("NEARAI_MODEL");
         }
@@ -1974,6 +2011,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            std::env::set_var("NEARAI_AUTH_URL", "http://127.0.0.1:19999");
             std::env::remove_var("LLM_BACKEND");
             std::env::set_var("NEARAI_BASE_URL", "http://localhost:9001");
             std::env::remove_var("NEARAI_API_KEY");
@@ -2011,6 +2049,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            std::env::set_var("NEARAI_AUTH_URL", "http://127.0.0.1:19999");
             std::env::remove_var("LLM_BACKEND");
             std::env::set_var("NEARAI_BASE_URL", "http://localhost:9001");
             std::env::remove_var("NEARAI_API_KEY");
@@ -2038,6 +2077,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_BACKEND");
             std::env::set_var("NEARAI_API_KEY", "key-from-env");
         }
@@ -2079,6 +2119,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            std::env::set_var("NEARAI_AUTH_URL", "http://127.0.0.1:19999");
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("NEARAI_BASE_URL");
             std::env::remove_var("NEARAI_API_KEY");
@@ -2124,6 +2165,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_BACKEND");
             std::env::set_var("GROQ_BASE_URL", "http://localhost:9003");
             std::env::remove_var("GROQ_API_KEY");
@@ -2173,6 +2215,7 @@ mod tests {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
+            stub_nearai_urls();
             std::env::remove_var("LLM_BACKEND");
             std::env::set_var("NEARAI_MODEL", "env-model");
         }
