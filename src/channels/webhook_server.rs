@@ -342,16 +342,28 @@ mod tests {
             .expect("Failed to send request");
         assert_eq!(response.status(), 200, "Server should be listening");
 
-        // Try to restart on an invalid address (port 1 typically requires elevated privileges)
+        // Attempt to bind a port that should fail. Port 1 requires elevated
+        // privileges on most systems, but CI containers may run as root.
+        // Fall back to binding the same port that is already in use.
         let invalid_addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
 
-        // Attempt bind (should fail); server state is untouched because we
-        // never call install_listener on failure.
         let app = server
             .merged_router_clone()
             .expect("Router should exist after start()");
         let result = tokio::net::TcpListener::bind(invalid_addr).await;
-        assert!(result.is_err(), "Bind to privileged port should fail");
+        if result.is_ok() {
+            // Running as root — privileged bind succeeded. Drop it and try
+            // the already-occupied port instead so the rest of the test
+            // still exercises the rollback path.
+            drop(result);
+            let result2 = tokio::net::TcpListener::bind(addr1).await;
+            assert!(
+                result2.is_err(),
+                "Bind to already-occupied port should fail"
+            );
+        } else {
+            assert!(result.is_err(), "Bind to privileged port should fail");
+        }
         // `app` is dropped — server state unchanged (rollback by construction)
         drop(app);
 

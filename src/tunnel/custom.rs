@@ -158,7 +158,7 @@ impl Tunnel for CustomTunnel {
                 .timeout(std::time::Duration::from_secs(5))
                 .send()
                 .await
-                .is_ok();
+                .is_ok_and(|r| r.status().is_success());
         }
 
         let guard = self.proc.lock().await;
