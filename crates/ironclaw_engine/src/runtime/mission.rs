@@ -645,7 +645,9 @@ impl MissionManager {
                                     )
                                     .await
                                 {
-                                    debug!("event listener: failed to fire conversation insights: {e}");
+                                    debug!(
+                                        "event listener: failed to fire conversation insights: {e}"
+                                    );
                                 }
                             }
                         }
@@ -1571,7 +1573,7 @@ fn is_recoverable_action_failure(error: &str) -> bool {
     is_recoverable_auth_failure_text(error)
 }
 
-fn action_params_summary<'a>(event: &'a crate::types::event::ThreadEvent) -> Option<&'a str> {
+fn action_params_summary(event: &crate::types::event::ThreadEvent) -> Option<&str> {
     match &event.kind {
         crate::types::event::EventKind::ActionExecuted { params_summary, .. }
         | crate::types::event::EventKind::ActionFailed { params_summary, .. } => {
