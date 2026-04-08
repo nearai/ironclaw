@@ -2400,29 +2400,36 @@ mod tests {
         .to_string());
 
         let auth_data = parse_auth_result(&result);
-        assert!(auth_data.auth_url.is_none(), "javascript: URL must be rejected");
+        assert!(
+            auth_data.auth_url.is_none(),
+            "javascript: URL must be rejected"
+        );
         assert!(auth_data.setup_url.is_none(), "file: URL must be rejected");
         assert!(auth_data.awaiting_token);
     }
 
     #[test]
     fn test_pending_auth_prompt_new_rejects_empty_name() {
-        assert!(PendingAuthPrompt::new(
-            "".to_string(),
-            None,
-            Some("https://example.com".to_string()),
-            None,
-            false,
-        )
-        .is_none());
-        assert!(PendingAuthPrompt::new(
-            "   ".to_string(),
-            None,
-            Some("https://example.com".to_string()),
-            None,
-            false,
-        )
-        .is_none());
+        assert!(
+            PendingAuthPrompt::new(
+                "".to_string(),
+                None,
+                Some("https://example.com".to_string()),
+                None,
+                false,
+            )
+            .is_none()
+        );
+        assert!(
+            PendingAuthPrompt::new(
+                "   ".to_string(),
+                None,
+                Some("https://example.com".to_string()),
+                None,
+                false,
+            )
+            .is_none()
+        );
     }
 
     #[test]
