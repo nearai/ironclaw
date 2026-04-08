@@ -268,7 +268,7 @@ impl MissionManager {
     ///
     /// Shared missions can only be managed by shared owners (system user).
     pub async fn resume_mission(&self, id: MissionId, user_id: &str) -> Result<(), EngineError> {
-        let mission = self
+        let mut mission = self
             .store
             .load_mission(id)
             .await?
@@ -286,19 +286,21 @@ impl MissionManager {
                 entity: format!("mission {id}"),
             });
         }
-        self.store
-            .update_mission_status(id, MissionStatus::Active)
-            .await?;
-        // Recompute next_fire_at for cron missions so the ticker picks them up
-        if let Some(mut mission) = self.store.load_mission(id).await?
-            && let MissionCadence::Cron {
-                ref expression,
-                ref timezone,
-            } = mission.cadence
+        // Mutate-and-save in a single round-trip. The previous implementation
+        // did `update_mission_status(Active)` and then a separate `load+save`
+        // to recompute next_fire_at — between the two writes, a concurrent
+        // `update_mission`/`fire_mission` could modify other fields that the
+        // second save would then silently overwrite with the stale reload.
+        mission.status = MissionStatus::Active;
+        if let MissionCadence::Cron {
+            ref expression,
+            ref timezone,
+        } = mission.cadence
         {
             mission.next_fire_at = next_cron_fire(expression, timezone.as_ref())?;
-            self.store.save_mission(&mission).await?;
         }
+        mission.updated_at = chrono::Utc::now();
+        self.store.save_mission(&mission).await?;
         let mut active = self.active.write().await;
         if !active.contains(&id) {
             active.push(id);
@@ -379,6 +381,13 @@ impl MissionManager {
             )
             .await?;
 
+        // Install the outcome watcher *before* persisting the mission update.
+        // The watcher only depends on `thread_id` (it joins via ThreadManager
+        // and reloads the mission record itself), so installing it first
+        // ensures a transient `save_mission` failure below cannot orphan the
+        // running thread by skipping the watcher install.
+        self.spawn_mission_outcome_watcher(id, thread_id);
+
         // Record the thread + trigger payload in mission history
         let mut updated = mission;
         updated.record_thread(thread_id);
@@ -390,17 +399,30 @@ impl MissionManager {
         // are missed, they coalesce into a single fire here rather than
         // backfilling each missed slot. This is the catch-up semantics we want
         // for long-running missions.
+        //
+        // A parse error here is unlikely (the expression validated at create
+        // time) but possible if persisted data is corrupt. We log and preserve
+        // the existing `next_fire_at` rather than aborting fire — the thread
+        // is already running and the watcher is already installed, and at
+        // worst the schedule is delayed by one cycle until the next tick.
         if let MissionCadence::Cron {
             ref expression,
             ref timezone,
         } = updated.cadence
         {
-            updated.next_fire_at = next_cron_fire(expression, timezone.as_ref())?;
+            match next_cron_fire(expression, timezone.as_ref()) {
+                Ok(next) => updated.next_fire_at = next,
+                Err(e) => debug!(
+                    mission_id = %id,
+                    expression = %expression,
+                    error = %e,
+                    "failed to advance next_fire_at after fire; preserving existing value"
+                ),
+            }
         }
         self.store.save_mission(&updated).await?;
 
         debug!(mission_id = %id, thread_id = %thread_id, "mission fired");
-        self.spawn_mission_outcome_watcher(id, thread_id);
 
         Ok(Some(thread_id))
     }
@@ -3148,6 +3170,148 @@ mod tests {
         assert!(
             after.unwrap() < before.unwrap(),
             "every-minute schedule should fire sooner than once-a-year"
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_mission_with_corrupt_cron_expression_does_not_orphan_thread() {
+        // Regression: previously fire_mission used `?` on next_cron_fire after
+        // spawning the thread. A persisted mission with a corrupt cron string
+        // would spawn the thread, then abort fire_mission with an Err — leaving
+        // the thread running with no entry in thread_history, no incremented
+        // budget, and (when also reordered) no outcome watcher installed.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "corrupt cron",
+                "goal",
+                MissionCadence::Cron {
+                    expression: "0 */6 * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        // Capture the original next_fire_at — we expect fire to *preserve* it
+        // (rather than replace with None or recompute) when the expression
+        // can't be parsed.
+        let original_next = mgr
+            .get_mission(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .next_fire_at
+            .expect("create should populate next_fire_at");
+
+        // Corrupt the persisted expression directly in the test store.
+        {
+            let mut missions = store.missions.write().await;
+            if let Some(m) = missions.get_mut(&id)
+                && let MissionCadence::Cron {
+                    ref mut expression, ..
+                } = m.cadence
+            {
+                *expression = "this is not a cron".to_string();
+            }
+        }
+
+        // Fire must succeed despite the corrupt expression.
+        let thread_id = mgr
+            .fire_mission(id, "test-user", None)
+            .await
+            .expect("fire_mission must not fail on corrupt cron");
+        assert!(thread_id.is_some(), "fire should spawn a thread");
+        let thread_id = thread_id.unwrap();
+
+        // The mission record must reflect the fire: thread tracked + budget
+        // incremented. Without the fix, save_mission was never reached.
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            mission.thread_history.contains(&thread_id),
+            "thread should be recorded in thread_history"
+        );
+        assert_eq!(
+            mission.threads_today, 1,
+            "threads_today should be incremented even if next_fire_at couldn't recompute"
+        );
+        // next_fire_at should be preserved (not cleared) since we couldn't
+        // compute a new one.
+        assert_eq!(
+            mission.next_fire_at,
+            Some(original_next),
+            "next_fire_at must be preserved when next_cron_fire fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_mission_preserves_concurrent_field_changes() {
+        // Regression: resume_mission used to do update_mission_status() then a
+        // separate load+save round-trip to recompute next_fire_at. Now it does
+        // a single mutate-and-save with the mission already loaded for the
+        // ownership check, eliminating the extra interleave window.
+        //
+        // We can't deterministically exercise the TOCTOU window in a unit
+        // test, but we can assert the new contract: resume_mission writes the
+        // mission's other fields (e.g. threads_today) faithfully and does not
+        // depend on a separate update_mission_status round-trip succeeding.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "resume preserve",
+                "goal",
+                MissionCadence::Cron {
+                    expression: "0 */6 * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        mgr.pause_mission(id, "test-user").await.unwrap();
+
+        // Simulate a concurrent writer that bumps threads_today between pause
+        // and resume. With the old two-write resume path, the second
+        // load+save could clobber this. With the single-save path it cannot
+        // be clobbered by THIS resume call.
+        {
+            let mut missions = store.missions.write().await;
+            if let Some(m) = missions.get_mut(&id) {
+                m.threads_today = 7;
+                m.goal = "concurrently updated goal".to_string();
+            }
+        }
+
+        mgr.resume_mission(id, "test-user").await.unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(mission.status, MissionStatus::Active);
+        // The concurrent update happened *before* resume_mission's load, so
+        // the resume should observe and preserve those values rather than
+        // resetting to creation-time defaults.
+        assert_eq!(
+            mission.threads_today, 7,
+            "resume must not reset threads_today to a stale value"
+        );
+        assert_eq!(
+            mission.goal, "concurrently updated goal",
+            "resume must not clobber goal updated before its load"
+        );
+        assert!(
+            mission.next_fire_at.is_some(),
+            "resume should still recompute next_fire_at for cron"
         );
     }
 }
