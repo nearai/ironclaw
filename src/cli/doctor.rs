@@ -701,6 +701,19 @@ fn check_binary(name: &str, args: &[&str]) -> CheckResult {
 mod tests {
     use crate::cli::doctor::*;
 
+    struct EnvGuard(&'static str, Option<String>);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: Under ENV_MUTEX.
+            unsafe {
+                match &self.1 {
+                    Some(val) => std::env::set_var(self.0, val),
+                    None => std::env::remove_var(self.0),
+                }
+            }
+        }
+    }
+
     #[test]
     fn check_binary_finds_sh() {
         match check_binary("sh", &["-c", "echo ok"]) {
@@ -739,19 +752,6 @@ mod tests {
 
     #[test]
     fn check_nearai_session_skips_for_non_nearai_backend() {
-        struct EnvGuard(&'static str, Option<String>);
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                // SAFETY: Under ENV_MUTEX.
-                unsafe {
-                    match &self.1 {
-                        Some(val) => std::env::set_var(self.0, val),
-                        None => std::env::remove_var(self.0),
-                    }
-                }
-            }
-        }
-
         let _mutex = crate::config::helpers::lock_env();
         let prev = std::env::var("LLM_BACKEND").ok();
         let prev_auth = std::env::var("NEARAI_AUTH_URL").ok();
@@ -881,6 +881,9 @@ mod tests {
     #[test]
     fn check_llm_config_shows_nearai_model_for_nearai_backend() {
         let _guard = crate::config::helpers::lock_env();
+        let prev_backend = std::env::var("LLM_BACKEND").ok();
+        let prev_auth = std::env::var("NEARAI_AUTH_URL").ok();
+        let prev_base = std::env::var("NEARAI_BASE_URL").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -888,6 +891,9 @@ mod tests {
             std::env::set_var("NEARAI_AUTH_URL", "https://8.8.8.8");
             std::env::set_var("NEARAI_BASE_URL", "https://8.8.8.8");
         }
+        let _env_guard_backend = EnvGuard("LLM_BACKEND", prev_backend);
+        let _env_guard_auth = EnvGuard("NEARAI_AUTH_URL", prev_auth);
+        let _env_guard_base = EnvGuard("NEARAI_BASE_URL", prev_base);
         let settings = Settings::default();
         match check_llm_config(&settings) {
             CheckResult::Pass(msg) => {
