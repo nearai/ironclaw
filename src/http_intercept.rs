@@ -51,35 +51,26 @@ struct HostRemapHttpInterceptor {
     client: reqwest::Client,
 }
 
-/// Headers that may carry credentials and must NEVER be forwarded to a remap
-/// target. The remap is a *test affordance* — its target is an arbitrary
-/// developer-supplied URL that has no claim to the credentials the original
-/// request was carrying for the upstream API.
-const CREDENTIAL_HEADER_BLOCKLIST: &[&str] = &[
-    "authorization",
-    "proxy-authorization",
-    "cookie",
-    "set-cookie",
-    "x-api-key",
-    "x-auth-token",
-    "x-access-token",
-    "x-csrf-token",
-    "api-key",
-    "openai-api-key",
-    "anthropic-api-key",
-    "x-anthropic-api-key",
-    "x-goog-api-key",
-];
-
-fn is_credential_header(name: &str) -> bool {
-    CREDENTIAL_HEADER_BLOCKLIST
-        .iter()
-        .any(|h| name.eq_ignore_ascii_case(h))
-}
-
 /// Restrict remap targets to loopback so that even if a stray
-/// `IRONCLAW_TEST_HTTP_REMAP` env var sneaks into a debug build, the worst
-/// case is forwarding non-credential request data to the local machine.
+/// `IRONCLAW_TEST_HTTP_REMAP` env var sneaks into a debug build, the
+/// remap can only forward to a local listener — never an external URL.
+/// Combined with the `cfg(any(test, debug_assertions))` gate at the call
+/// site in `app.rs`, this is the security boundary for the remap feature.
+///
+/// **Why we forward request headers (including `Authorization`) verbatim:**
+/// the remap is a test affordance for integration scenarios that need to
+/// verify the *full* outbound request — including bearer tokens — reached
+/// the (mock) destination. The e2e auth/OAuth matrix relies on this to
+/// assert that the right token was attached to the right request after
+/// the OAuth flow completed. Stripping credential headers would defeat
+/// the test affordance entirely.
+///
+/// The residual threat model is: "attacker has env var control on a
+/// debug/test build of the binary AND a listener on the same loopback
+/// interface". An attacker with both already has trivial ways to
+/// exfiltrate credentials (process introspection, binary patching,
+/// reading the secrets store directly), so the marginal risk from
+/// loopback-only header forwarding is acceptable.
 fn is_loopback_target(base_url: &str) -> bool {
     let Ok(parsed) = reqwest::Url::parse(base_url) else {
         return false;
@@ -148,12 +139,10 @@ impl HttpInterceptor for HostRemapHttpInterceptor {
         let rewritten_url = self.rewrite_url(&request.url)?;
         let method = reqwest::Method::from_bytes(request.method.as_bytes()).ok()?;
         let mut builder = self.client.request(method, rewritten_url);
+        // Forward headers verbatim. Loopback-only target restriction +
+        // cfg(test/debug_assertions) gating are the security boundary;
+        // see the doc comment on `is_loopback_target`.
         for (name, value) in &request.headers {
-            // Strip credential-bearing headers — the remap target is a test
-            // affordance, not the upstream API the credentials were minted for.
-            if is_credential_header(name) {
-                continue;
-            }
             builder = builder.header(name, value);
         }
         if let Some(body) = &request.body {
@@ -206,20 +195,6 @@ pub fn chain(
 mod tests {
     use super::*;
     use std::sync::Mutex;
-
-    #[test]
-    fn credential_header_blocklist_is_case_insensitive() {
-        assert!(is_credential_header("Authorization"));
-        assert!(is_credential_header("authorization"));
-        assert!(is_credential_header("AUTHORIZATION"));
-        assert!(is_credential_header("Cookie"));
-        assert!(is_credential_header("X-Api-Key"));
-        assert!(is_credential_header("x-anthropic-api-key"));
-        assert!(is_credential_header("OpenAI-Api-Key"));
-        assert!(!is_credential_header("Content-Type"));
-        assert!(!is_credential_header("Accept"));
-        assert!(!is_credential_header("User-Agent"));
-    }
 
     #[test]
     fn loopback_target_validation() {
