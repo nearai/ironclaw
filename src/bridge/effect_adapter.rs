@@ -47,6 +47,13 @@ pub struct EffectBridgeAdapter {
     mission_manager: RwLock<Option<Arc<ironclaw_engine::MissionManager>>>,
     /// Centralized auth manager for pre-flight credential checks.
     auth_manager: RwLock<Option<Arc<AuthManager>>>,
+    /// Optional HTTP interceptor for trace recording / replay. When set, every
+    /// tool call dispatched through this adapter gets it stamped onto its
+    /// `JobContext`, so the built-in `http`/`web_fetch`/etc. tools route their
+    /// outbound requests through the interceptor. Without this, engine v2 tool
+    /// calls bypass the recorder entirely — recorded traces end up with zero
+    /// `http_exchanges` and replay can't substitute responses.
+    http_interceptor: RwLock<Option<Arc<dyn crate::llm::recording::HttpInterceptor>>>,
 }
 
 impl EffectBridgeAdapter {
@@ -65,7 +72,18 @@ impl EffectBridgeAdapter {
             rate_limiter: RateLimiter::new(),
             mission_manager: RwLock::new(None),
             auth_manager: RwLock::new(None),
+            http_interceptor: RwLock::new(None),
         }
+    }
+
+    /// Install the trace HTTP interceptor on this adapter. Every JobContext
+    /// the adapter constructs for tool dispatch will carry a clone of this
+    /// interceptor, so http-aware tools will record/replay through it.
+    pub async fn set_http_interceptor(
+        &self,
+        interceptor: Arc<dyn crate::llm::recording::HttpInterceptor>,
+    ) {
+        *self.http_interceptor.write().await = Some(interceptor);
     }
 
     /// Mirror the v1 dispatcher behavior for globally auto-approved tools.
@@ -759,11 +777,17 @@ impl EffectBridgeAdapter {
             Ok(HookOutcome::Continue { .. }) => {}
         }
 
-        let job_ctx = JobContext::with_user(
+        let mut job_ctx = JobContext::with_user(
             &context.user_id,
             "engine_v2",
             format!("Thread {}", context.thread_id),
         );
+        // Stamp the trace HTTP interceptor onto the per-call JobContext so
+        // tools that respect it (http, web_fetch, etc.) route their outbound
+        // requests through the recorder/replayer.
+        if let Some(ref interceptor) = *self.http_interceptor.read().await {
+            job_ctx.http_interceptor = Some(Arc::clone(interceptor));
+        }
 
         let result = crate::tools::execute::execute_tool_with_safety(
             &self.tools,

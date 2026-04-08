@@ -547,6 +547,15 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         )
         .with_global_auto_approve(agent.config().auto_approve_tools),
     );
+    // Propagate the trace HTTP interceptor (live recording or replay) so
+    // engine v2 tool dispatch records/replays HTTP exchanges. Without this,
+    // recorded traces miss every outbound call made from the engine v2 path
+    // and replay can't substitute responses.
+    if let Some(ref interceptor) = agent.deps.http_interceptor {
+        effect_adapter
+            .set_http_interceptor(Arc::clone(interceptor))
+            .await;
+    }
 
     // Build centralized auth manager for pre-flight credential checks.
     let has_secrets = agent.tools().secrets_store().is_some();
