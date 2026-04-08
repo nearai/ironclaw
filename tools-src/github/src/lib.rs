@@ -950,7 +950,10 @@ fn fork_repo(
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
+    validate_input_length(owner, "owner")?;
+    validate_input_length(repo, "repo")?;
     if let Some(org) = organization {
+        validate_input_length(org, "organization")?;
         if !validate_path_segment(org) {
             return Err("Invalid organization name".into());
         }
