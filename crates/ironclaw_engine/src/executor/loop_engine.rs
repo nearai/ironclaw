@@ -617,7 +617,8 @@ mod tests {
         let outcome = exec.run().await.unwrap();
         assert!(matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "Done!"));
         assert_eq!(exec.thread.step_count, 2);
-        // Orchestrator stores working messages in internal_messages
+        // The orchestrator stores working transcript in internal_messages;
+        // thread.messages only has system prompt + final assistant response.
         assert!(exec.thread.internal_messages.len() >= 3);
     }
 
@@ -735,7 +736,8 @@ mod tests {
             matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "The answer is 42")
         );
         assert_eq!(exec.thread.step_count, 2);
-        // Nudge is stored in orchestrator's working messages (internal transcript)
+        // The nudge message lives in the orchestrator's working transcript
+        // (internal_messages), not in the public thread.messages.
         assert!(
             exec.thread
                 .internal_messages
@@ -873,7 +875,8 @@ mod tests {
             matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "done, x was 30")
         );
         assert_eq!(exec.thread.step_count, 2);
-        // The output metadata from first step should be in internal messages
+        // The output metadata from first step should be in internal_messages
+        // (the orchestrator stores working transcript there, not in messages)
         assert!(
             exec.thread
                 .internal_messages

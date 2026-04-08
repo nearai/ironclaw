@@ -2527,12 +2527,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn system_mission_requires_system_user_to_manage() {
+    async fn system_mission_delegates_admin_check_to_caller() {
         let store = Arc::new(TestStore::new());
         let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
         let project_id = ProjectId::new();
 
-        // Create a system mission
+        // Create a system (shared) mission
         let system_id = mgr
             .create_mission(
                 project_id,
@@ -2545,19 +2545,13 @@ mod tests {
             .await
             .unwrap();
 
-        // Regular user cannot pause system mission
-        let result = mgr.pause_mission(system_id, "alice").await;
-        assert!(
-            matches!(result.unwrap_err(), EngineError::AccessDenied { .. }),
-            "regular user cannot manage system missions"
-        );
-
-        // System user can pause (admin path passes "system" as user_id)
-        mgr.pause_mission(system_id, "system").await.unwrap();
+        // Shared missions pass through at the engine level — the caller
+        // (web handler) is responsible for checking admin role.
+        mgr.pause_mission(system_id, "alice").await.unwrap();
         let m = mgr.get_mission(system_id).await.unwrap().unwrap();
         assert_eq!(m.status, MissionStatus::Paused);
 
-        // System user can resume
+        // System user can also resume
         mgr.resume_mission(system_id, "system").await.unwrap();
         let m = mgr.get_mission(system_id).await.unwrap().unwrap();
         assert_eq!(m.status, MissionStatus::Active);

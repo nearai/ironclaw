@@ -555,12 +555,12 @@ mod tests {
         ));
 
         let trace = build_trace(&thread);
-        let approval = trace
+        let approval_event = trace
             .events
             .iter()
             .find(|e| matches!(&e.kind, EventKind::ApprovalRequested { .. }))
-            .expect("should have ApprovalRequested event");
-        match &approval.kind {
+            .expect("trace must contain an ApprovalRequested event");
+        match &approval_event.kind {
             EventKind::ApprovalRequested {
                 action_name,
                 call_id,
@@ -588,6 +588,7 @@ mod tests {
         assert!(json.contains("\"ApprovalRequested\""));
         assert!(json.contains("\"action_name\":\"tool_install\""));
         assert!(json.contains("\"call_id\":\"call_install_1\""));
+        // Check parameter keys individually since serde_json map order is not guaranteed.
         assert!(json.contains("\"name\":\"notion\""));
         assert!(json.contains("\"kind\":\"mcp_server\""));
         assert!(json.contains("\"description\":\"Install an extension\""));
