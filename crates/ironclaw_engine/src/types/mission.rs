@@ -181,6 +181,32 @@ impl Mission {
         cadence: MissionCadence,
     ) -> Self {
         let now = Utc::now();
+
+        // Event-triggered cadences (OnEvent / OnSystemEvent / Webhook) are
+        // *reactive*: a single noisy channel can fire them on every
+        // matching message. Cron / Manual cadences are *proactive* and
+        // self-paced. Set tighter defaults for the reactive variants so a
+        // mission created without explicit guardrails cannot accidentally
+        // flood the LLM if its pattern is too loose. The routine alias
+        // path overrides these via post-create update when the LLM
+        // supplies explicit guardrails / advanced settings.
+        let is_reactive = matches!(
+            cadence,
+            MissionCadence::OnEvent { .. }
+                | MissionCadence::OnSystemEvent { .. }
+                | MissionCadence::Webhook { .. }
+        );
+        let (default_max_threads_per_day, default_cooldown_secs, default_max_concurrent) =
+            if is_reactive {
+                // 5-minute cooldown, ~24 fires/day, single-instance — same
+                // floor v1 routine_create used for event-driven routines.
+                (24, 300, 1)
+            } else {
+                // Existing defaults for cron/manual missions; no cooldown,
+                // no concurrency cap, generous daily budget.
+                (10, 0, 0)
+            };
+
         Self {
             id: MissionId::new(),
             project_id,
@@ -197,10 +223,10 @@ impl Mission {
             notify_channels: Vec::new(),
             notify_user: None,
             context_paths: Vec::new(),
-            max_threads_per_day: 10,
+            max_threads_per_day: default_max_threads_per_day,
             threads_today: 0,
-            cooldown_secs: 0,
-            max_concurrent: 0,
+            cooldown_secs: default_cooldown_secs,
+            max_concurrent: default_max_concurrent,
             dedup_window_secs: 0,
             last_fire_at: None,
             last_trigger_payload: None,

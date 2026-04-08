@@ -746,9 +746,11 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         debug!("engine v2: bootstrap_user failed: {e}");
     }
 
-    // Create mission manager and start cron ticker. Attach a
-    // WorkspaceReader so missions with `context_paths` can preload workspace
-    // documents into their meta-prompt at fire time.
+    // Create mission manager and start cron ticker. Attach:
+    // - WorkspaceReader so missions with `context_paths` can preload
+    //   workspace documents into their meta-prompt at fire time.
+    // - BudgetGate over the host's CostGuard so a mission fire is refused
+    //   when the user has exhausted their daily LLM budget.
     let mut mission_manager_inner =
         MissionManager::new(store_dyn.clone(), Arc::clone(&thread_manager));
     if let Some(workspace) = agent.workspace().cloned() {
@@ -756,6 +758,10 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
             Arc::new(crate::bridge::WorkspaceReaderAdapter::new(workspace));
         mission_manager_inner = mission_manager_inner.with_workspace_reader(reader);
     }
+    let cost_guard = Arc::clone(&agent.deps.cost_guard);
+    let budget_gate: Arc<dyn ironclaw_engine::BudgetGate> =
+        Arc::new(crate::bridge::CostGuardBudgetGate::new(cost_guard));
+    mission_manager_inner = mission_manager_inner.with_budget_gate(budget_gate);
     let mission_manager = Arc::new(mission_manager_inner);
     if let Err(e) = thread_manager.recover_project_threads(project_id).await {
         debug!("engine v2: recover_project_threads failed: {e}");
@@ -2198,11 +2204,32 @@ async fn fire_event_missions_for_message(
     message: &IncomingMessage,
     content: &str,
 ) {
-    // Skip empty messages and routine system markers — there's nothing to
-    // pattern-match against and we don't want missions firing on every
-    // status update or empty user input.
+    // Skip empty messages — there's nothing to pattern-match against
+    // and we don't want missions firing on every status update or empty
+    // user input.
     let trimmed = content.trim();
     if trimmed.is_empty() {
+        return;
+    }
+
+    // Recursion guards. Channel adapters that echo the agent's own
+    // outbound text back as inbound events MUST set is_agent_broadcast
+    // (Slack/Discord-style); messages produced as a side effect of a
+    // mission firing MUST set triggering_mission_id (chain-recursion
+    // across distinct missions). Either flag means: do not re-fire.
+    if message.is_agent_broadcast {
+        debug!(
+            channel = %message.channel,
+            "engine v2: skipping mission firing — message is an agent broadcast echo"
+        );
+        return;
+    }
+    if let Some(ref upstream) = message.triggering_mission_id {
+        debug!(
+            channel = %message.channel,
+            upstream_mission_id = %upstream,
+            "engine v2: skipping mission firing — message originated from a mission"
+        );
         return;
     }
 

@@ -4,11 +4,11 @@
 //! progress. The manager handles lifecycle (create, pause, resume, complete)
 //! and delegates thread spawning to [`ThreadManager`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::memory::RetrievalEngine;
 use crate::runtime::manager::ThreadManager;
@@ -21,6 +21,55 @@ use crate::types::mission::{Mission, MissionCadence, MissionId, MissionStatus};
 use crate::types::project::ProjectId;
 use crate::types::shared_owner_id;
 use crate::types::thread::{ThreadConfig, ThreadId, ThreadState, ThreadType};
+
+/// Per-mission compiled regex cache. We compile patterns lazily on first
+/// match attempt and discard them when the mission updates or deletes its
+/// cadence. The cache is process-local — restarts repopulate on demand.
+type EventRegexCache = HashMap<MissionId, regex::Regex>;
+
+/// Maximum compiled regex size, mirroring the v1 routine engine. Patterns
+/// that exceed this are refused at compile time so a hostile or buggy
+/// mission cannot pin the matcher with a pathological regex.
+const MAX_EVENT_REGEX_SIZE: usize = 64 * 1024;
+
+/// Per-user fire-rate ceiling expressed as a token bucket. Independent of
+/// per-mission `cooldown_secs`, this is a *global* cap across all of a
+/// user's missions so a user that owns many event-triggered missions can't
+/// collectively flood the LLM.
+#[derive(Debug, Clone)]
+pub struct FireRateLimit {
+    /// Maximum number of fires permitted within `window`.
+    pub max_fires: u32,
+    /// Sliding-window duration. Fires older than this are evicted.
+    pub window: std::time::Duration,
+}
+
+impl Default for FireRateLimit {
+    /// 100 mission firings per user per hour. Generous enough that normal
+    /// cron + a handful of event-driven missions don't notice it; tight
+    /// enough that a misbehaving pattern is bounded.
+    fn default() -> Self {
+        Self {
+            max_fires: 100,
+            window: std::time::Duration::from_secs(3600),
+        }
+    }
+}
+
+/// Engine-side budget abstraction. Implementations decide whether the
+/// `user_id` still has enough LLM/financial budget to spawn another
+/// mission thread. The host implements this over its existing
+/// `CostGuard`.
+///
+/// When `MissionManager` has no `BudgetGate` attached, all fires are
+/// allowed (back-compat for embedders that don't use a budget).
+#[async_trait::async_trait]
+pub trait BudgetGate: Send + Sync {
+    /// Returns `true` if a mission fire is allowed for `user_id`. The
+    /// `mission_id` is included so adapters can apply per-mission policies
+    /// if they wish; most implementations will only consult `user_id`.
+    async fn allow_mission_fire(&self, user_id: &str, mission_id: MissionId) -> bool;
+}
 
 /// Notification emitted when a mission thread completes.
 ///
@@ -78,6 +127,16 @@ pub struct MissionManager {
     /// Per-mission dedup table for event-triggered firings. Cleared
     /// opportunistically when entries fall outside the dedup window.
     dedup_table: RwLock<HashMap<DedupKey, chrono::DateTime<chrono::Utc>>>,
+    /// Compiled regex cache for `OnEvent` mission patterns. Lazily filled
+    /// on first match attempt; entries are evicted on mission update/delete.
+    event_regex_cache: RwLock<EventRegexCache>,
+    /// Per-user sliding-window fire log used by the global rate limiter.
+    /// Each `VecDeque` holds firing timestamps within the configured window.
+    user_fire_log: RwLock<HashMap<String, VecDeque<chrono::DateTime<chrono::Utc>>>>,
+    /// Global per-user fire-rate ceiling.
+    rate_limit: FireRateLimit,
+    /// Optional budget gate consulted before each fire.
+    budget_gate: Option<Arc<dyn BudgetGate>>,
 }
 
 impl MissionManager {
@@ -90,6 +149,10 @@ impl MissionManager {
             notification_tx,
             workspace: None,
             dedup_table: RwLock::new(HashMap::new()),
+            event_regex_cache: RwLock::new(HashMap::new()),
+            user_fire_log: RwLock::new(HashMap::new()),
+            rate_limit: FireRateLimit::default(),
+            budget_gate: None,
         }
     }
 
@@ -98,6 +161,19 @@ impl MissionManager {
     /// supply a reader.
     pub fn with_workspace_reader(mut self, reader: Arc<dyn WorkspaceReader>) -> Self {
         self.workspace = Some(reader);
+        self
+    }
+
+    /// Attach a budget gate so each fire consults the host's spend limit.
+    /// When unattached, all fires are allowed (back-compat).
+    pub fn with_budget_gate(mut self, gate: Arc<dyn BudgetGate>) -> Self {
+        self.budget_gate = Some(gate);
+        self
+    }
+
+    /// Override the per-user fire-rate limit. Defaults to 100 fires/hour.
+    pub fn with_rate_limit(mut self, limit: FireRateLimit) -> Self {
+        self.rate_limit = limit;
         self
     }
 
@@ -204,6 +280,10 @@ impl MissionManager {
 
         mission.updated_at = chrono::Utc::now();
         self.store.save_mission(&mission).await?;
+        // The cadence (and therefore event_pattern) may have changed.
+        // Drop the cached compiled regex; the next match attempt
+        // recompiles from the current pattern.
+        self.evict_event_regex(id).await;
         debug!(mission_id = %id, "mission updated");
         Ok(())
     }
@@ -263,6 +343,7 @@ impl MissionManager {
             .update_mission_status(id, MissionStatus::Completed)
             .await?;
         self.active.write().await.retain(|mid| *mid != id);
+        self.evict_event_regex(id).await;
         debug!(mission_id = %id, "mission completed");
         Ok(())
     }
@@ -338,6 +419,34 @@ impl MissionManager {
                 );
                 return Ok(None);
             }
+        }
+
+        // Per-user global rate limit. Independent of per-mission cooldown,
+        // this is a sliding-window cap across *all* of the user's missions
+        // so a user with many event-triggered missions can't collectively
+        // flood the LLM. The check is recorded only when it passes — a
+        // refusal does not consume a slot.
+        if !self.check_and_record_user_rate(&mission.user_id).await {
+            debug!(
+                mission_id = %id,
+                user_id = %mission.user_id,
+                max_fires = self.rate_limit.max_fires,
+                window_secs = self.rate_limit.window.as_secs(),
+                "per-user mission fire rate limit reached"
+            );
+            return Ok(None);
+        }
+
+        // Budget gate: when the host wires a `BudgetGate` (typically over
+        // its CostGuard), refuse to fire when the user is out of budget.
+        // Unattached gate = always allow.
+        if !self.budget_allows(&mission.user_id, id).await {
+            debug!(
+                mission_id = %id,
+                user_id = %mission.user_id,
+                "mission fire refused by budget gate"
+            );
+            return Ok(None);
         }
 
         // Load context_paths from the workspace if a reader is attached.
@@ -567,20 +676,23 @@ impl MissionManager {
                 continue;
             }
 
-            let matches = match &mission.cadence {
+            let channel_ok = match &mission.cadence {
                 MissionCadence::OnEvent {
-                    event_pattern,
                     channel: cadence_channel,
-                } => {
-                    let channel_ok = cadence_channel
-                        .as_ref()
-                        .is_none_or(|c| c.eq_ignore_ascii_case(channel));
-                    channel_ok && text.contains(event_pattern.as_str())
-                }
-                _ => false,
+                    ..
+                } => cadence_channel
+                    .as_ref()
+                    .is_none_or(|c| c.eq_ignore_ascii_case(channel)),
+                _ => continue,
             };
-
-            if !matches {
+            if !channel_ok {
+                continue;
+            }
+            // Regex match (with size-limited compile + per-mission cache).
+            // The substring fallback used previously was too loose: it
+            // matched "the review was requested yesterday" against
+            // "review requested" and would flood on busy channels.
+            if !self.event_regex_matches(&mission, text).await {
                 continue;
             }
 
@@ -1187,6 +1299,85 @@ impl MissionManager {
         }
         table.insert(key, now);
         false
+    }
+
+    /// Test whether `text` matches `mission`'s OnEvent regex. Compiles the
+    /// pattern lazily on first match attempt and caches it. Patterns that
+    /// fail to compile (or exceed `MAX_EVENT_REGEX_SIZE`) are logged at
+    /// warn level and never match.
+    async fn event_regex_matches(&self, mission: &Mission, text: &str) -> bool {
+        let MissionCadence::OnEvent { event_pattern, .. } = &mission.cadence else {
+            return false;
+        };
+
+        // Cache hit fast path.
+        if let Some(re) = self.event_regex_cache.read().await.get(&mission.id) {
+            return re.is_match(text);
+        }
+
+        // Compile under the write lock and double-check (another caller may
+        // have raced ahead and inserted the same key).
+        let mut cache = self.event_regex_cache.write().await;
+        if let Some(re) = cache.get(&mission.id) {
+            return re.is_match(text);
+        }
+        match regex::RegexBuilder::new(event_pattern)
+            .size_limit(MAX_EVENT_REGEX_SIZE)
+            .build()
+        {
+            Ok(re) => {
+                let matches = re.is_match(text);
+                cache.insert(mission.id, re);
+                matches
+            }
+            Err(error) => {
+                warn!(
+                    mission_id = %mission.id,
+                    pattern = %event_pattern,
+                    error = %error,
+                    "OnEvent mission regex failed to compile (or exceeded size limit); refusing to match"
+                );
+                false
+            }
+        }
+    }
+
+    /// Drop the compiled regex for `mission_id`, forcing recompile on the
+    /// next match attempt. Called when a mission's cadence changes or it is
+    /// deleted.
+    async fn evict_event_regex(&self, mission_id: MissionId) {
+        self.event_regex_cache.write().await.remove(&mission_id);
+    }
+
+    /// Per-user global rate limiter check. Sliding window of timestamps;
+    /// returns `true` if a new fire is allowed and records the timestamp.
+    /// Returns `false` if the window is full.
+    async fn check_and_record_user_rate(&self, user_id: &str) -> bool {
+        let now = chrono::Utc::now();
+        let window = chrono::Duration::from_std(self.rate_limit.window)
+            .unwrap_or_else(|_| chrono::Duration::seconds(self.rate_limit.window.as_secs() as i64));
+        let cutoff = now - window;
+
+        let mut log = self.user_fire_log.write().await;
+        let entries = log.entry(user_id.to_string()).or_default();
+        // Evict expired entries from the front.
+        while entries.front().is_some_and(|ts| *ts < cutoff) {
+            entries.pop_front();
+        }
+        if entries.len() as u32 >= self.rate_limit.max_fires {
+            return false;
+        }
+        entries.push_back(now);
+        true
+    }
+
+    /// Consult the budget gate (if attached). Returns `true` when the gate
+    /// is unattached or explicitly allows the fire.
+    async fn budget_allows(&self, user_id: &str, mission_id: MissionId) -> bool {
+        match self.budget_gate.as_ref() {
+            Some(gate) => gate.allow_mission_fire(user_id, mission_id).await,
+            None => true,
+        }
     }
 
     fn spawn_mission_outcome_watcher(&self, mission_id: MissionId, thread_id: ThreadId) {
@@ -2994,6 +3185,49 @@ mod tests {
         );
     }
 
+    /// Helper: create an event mission with the reactive-default guardrails
+    /// disabled so the test can fire it repeatedly without tripping cooldown
+    /// or daily caps. Patterns are caller-supplied; everything else stays
+    /// at the engine defaults *except* the guardrails we explicitly null out.
+    async fn create_unguarded_event_mission(
+        mgr: &MissionManager,
+        project_id: ProjectId,
+        user_id: &str,
+        name: &str,
+        pattern: &str,
+        channel: Option<&str>,
+    ) -> MissionId {
+        let id = mgr
+            .create_mission(
+                project_id,
+                user_id,
+                name,
+                "react to events",
+                MissionCadence::OnEvent {
+                    event_pattern: pattern.to_string(),
+                    channel: channel.map(String::from),
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        // Disable reactive defaults for tests that want to assert the
+        // matcher behavior without tripping cooldown / max_concurrent.
+        mgr.update_mission(
+            id,
+            user_id,
+            MissionUpdate {
+                cooldown_secs: Some(0),
+                max_concurrent: Some(0),
+                max_threads_per_day: Some(0),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        id
+    }
+
     #[tokio::test]
     async fn fire_on_message_event_matches_pattern_and_channel_filter() {
         let store = Arc::new(TestStore::new());
@@ -3001,20 +3235,15 @@ mod tests {
         let project_id = ProjectId::new();
 
         // Mission with a channel-scoped message event trigger.
-        let id = mgr
-            .create_mission(
-                project_id,
-                "alice",
-                "PR review nudge",
-                "Notify on PR review requests",
-                MissionCadence::OnEvent {
-                    event_pattern: "review requested".into(),
-                    channel: Some("github".into()),
-                },
-                Vec::new(),
-            )
-            .await
-            .unwrap();
+        let id = create_unguarded_event_mission(
+            &mgr,
+            project_id,
+            "alice",
+            "PR review nudge",
+            "review requested",
+            Some("github"),
+        )
+        .await;
 
         // Wrong channel — should NOT fire even though pattern matches.
         let spawned = mgr
@@ -3065,19 +3294,15 @@ mod tests {
         let project_id = ProjectId::new();
 
         // Mission with no channel filter — should match any channel.
-        mgr.create_mission(
+        create_unguarded_event_mission(
+            &mgr,
             project_id,
             "alice",
             "Universal pattern",
-            "Fire on the keyword anywhere",
-            MissionCadence::OnEvent {
-                event_pattern: "deploy now".into(),
-                channel: None,
-            },
-            Vec::new(),
+            "deploy now",
+            None,
         )
-        .await
-        .unwrap();
+        .await;
 
         for channel in &["github", "slack", "gateway", "repl"] {
             let spawned = mgr
@@ -3099,19 +3324,8 @@ mod tests {
         let project_id = ProjectId::new();
 
         // Alice owns a mission.
-        mgr.create_mission(
-            project_id,
-            "alice",
-            "Alice mission",
-            "react",
-            MissionCadence::OnEvent {
-                event_pattern: "ping".into(),
-                channel: None,
-            },
-            Vec::new(),
-        )
-        .await
-        .unwrap();
+        create_unguarded_event_mission(&mgr, project_id, "alice", "Alice mission", "ping", None)
+            .await;
 
         // Bob fires the event with a matching pattern — should NOT fire
         // alice's mission (per-user scoping).
@@ -3166,6 +3380,273 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(spawned.len(), 1);
+    }
+
+    /// Regression for the substring-match flooding bug:
+    /// `text.contains("review requested")` would match unrelated phrases
+    /// like "I just reviewed your request" — way too loose. The matcher
+    /// is now regex-based, so word-boundary-aware patterns no longer
+    /// flood on accidental substrings.
+    #[tokio::test]
+    async fn fire_on_message_event_uses_regex_with_word_boundaries() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Word-boundary regex for "deploy".
+        create_unguarded_event_mission(
+            &mgr,
+            project_id,
+            "alice",
+            "Deploy watcher",
+            r"\bdeploy\b",
+            None,
+        )
+        .await;
+
+        // Should NOT match: "deployed" / "deployment" / "redeploy".
+        for noisy in &[
+            "I just deployed the change",
+            "the deployment finished",
+            "going to redeploy later",
+        ] {
+            let spawned = mgr
+                .fire_on_message_event("gateway", noisy, "alice", None)
+                .await
+                .unwrap();
+            assert!(spawned.is_empty(), "regex with \\b must not match: {noisy}");
+        }
+
+        // SHOULD match: standalone "deploy".
+        let spawned = mgr
+            .fire_on_message_event("gateway", "please deploy now", "alice", None)
+            .await
+            .unwrap();
+        assert_eq!(spawned.len(), 1, "standalone 'deploy' must match");
+    }
+
+    /// Regression: an OnEvent mission created via `create_mission` without
+    /// explicit guardrails must inherit reactive defaults (cooldown 300s,
+    /// max_concurrent 1, daily cap 24) so accidentally-loose patterns
+    /// can't burn the LLM budget.
+    #[tokio::test]
+    async fn event_triggered_missions_get_reactive_defaults() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "Default reactive mission",
+                "react",
+                MissionCadence::OnEvent {
+                    event_pattern: "anything".into(),
+                    channel: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(
+            mission.cooldown_secs, 300,
+            "OnEvent missions default to a 5-minute cooldown"
+        );
+        assert_eq!(
+            mission.max_concurrent, 1,
+            "OnEvent missions default to single-instance"
+        );
+        assert_eq!(
+            mission.max_threads_per_day, 24,
+            "OnEvent missions default to 24 fires/day"
+        );
+    }
+
+    /// Manual / Cron missions retain the prior generous defaults — they
+    /// are self-paced and don't risk flooding from external events.
+    #[tokio::test]
+    async fn manual_and_cron_missions_keep_proactive_defaults() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let manual_id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "manual",
+                "do it on demand",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let manual = mgr.get_mission(manual_id).await.unwrap().unwrap();
+        assert_eq!(manual.cooldown_secs, 0);
+        assert_eq!(manual.max_concurrent, 0);
+        assert_eq!(manual.max_threads_per_day, 10);
+
+        let cron_id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "cron",
+                "every six hours",
+                MissionCadence::Cron {
+                    expression: "0 */6 * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let cron = mgr.get_mission(cron_id).await.unwrap().unwrap();
+        assert_eq!(cron.cooldown_secs, 0);
+        assert_eq!(cron.max_concurrent, 0);
+        assert_eq!(cron.max_threads_per_day, 10);
+    }
+
+    /// The per-user sliding-window rate limiter must refuse fires once
+    /// the cap is reached and recover after the window slides past.
+    #[tokio::test]
+    async fn per_user_rate_limit_blocks_excess_fires() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>).with_rate_limit(
+            FireRateLimit {
+                max_fires: 3,
+                window: std::time::Duration::from_secs(60),
+            },
+        );
+        let project_id = ProjectId::new();
+
+        create_unguarded_event_mission(
+            &mgr,
+            project_id,
+            "alice",
+            "rate-limited mission",
+            r"go",
+            None,
+        )
+        .await;
+
+        // First 3 fires should succeed; the 4th should be silently dropped.
+        for i in 0..3 {
+            let spawned = mgr
+                .fire_on_message_event("gateway", "go", "alice", None)
+                .await
+                .unwrap();
+            assert_eq!(spawned.len(), 1, "fire {i} should succeed");
+        }
+        let spawned = mgr
+            .fire_on_message_event("gateway", "go", "alice", None)
+            .await
+            .unwrap();
+        assert!(spawned.is_empty(), "rate-limited fire should be dropped");
+    }
+
+    /// `BudgetGate::allow_mission_fire` returning false must abort the
+    /// fire without spawning a thread or recording history.
+    #[tokio::test]
+    async fn budget_gate_can_refuse_mission_fires() {
+        struct DenyAll;
+        #[async_trait::async_trait]
+        impl BudgetGate for DenyAll {
+            async fn allow_mission_fire(&self, _user_id: &str, _mission_id: MissionId) -> bool {
+                false
+            }
+        }
+
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>)
+            .with_budget_gate(Arc::new(DenyAll));
+        let project_id = ProjectId::new();
+
+        let id =
+            create_unguarded_event_mission(&mgr, project_id, "alice", "blocked", r"go", None).await;
+
+        let spawned = mgr
+            .fire_on_message_event("gateway", "go", "alice", None)
+            .await
+            .unwrap();
+        assert!(spawned.is_empty(), "BudgetGate denial must block the fire");
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            mission.thread_history.is_empty(),
+            "denied fire must not record any threads"
+        );
+    }
+
+    /// Updating a mission must evict its cached compiled regex so the next
+    /// match attempt picks up the new pattern.
+    #[tokio::test]
+    async fn updating_event_pattern_invalidates_regex_cache() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id =
+            create_unguarded_event_mission(&mgr, project_id, "alice", "swappable", r"alpha", None)
+                .await;
+
+        // Initial pattern matches "alpha".
+        let spawned = mgr
+            .fire_on_message_event("gateway", "alpha", "alice", None)
+            .await
+            .unwrap();
+        assert_eq!(spawned.len(), 1);
+
+        // Swap the cadence to a new pattern.
+        mgr.update_mission(
+            id,
+            "alice",
+            MissionUpdate {
+                cadence: Some(MissionCadence::OnEvent {
+                    event_pattern: r"beta".into(),
+                    channel: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // The old pattern must no longer match.
+        let spawned = mgr
+            .fire_on_message_event("gateway", "alpha", "alice", None)
+            .await
+            .unwrap();
+        assert!(spawned.is_empty(), "stale regex cache must be evicted");
+
+        // The new pattern must match.
+        let spawned = mgr
+            .fire_on_message_event("gateway", "beta", "alice", None)
+            .await
+            .unwrap();
+        assert_eq!(spawned.len(), 1, "new pattern must take effect");
+    }
+
+    /// A pattern that fails to compile (or exceeds the size cap) must be
+    /// logged and never match — it must not panic, hang, or fall through
+    /// to a substring search.
+    #[tokio::test]
+    async fn invalid_event_regex_never_matches() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // `[` is not a valid regex; compilation must fail.
+        create_unguarded_event_mission(&mgr, project_id, "alice", "broken pattern", "[", None)
+            .await;
+
+        let spawned = mgr
+            .fire_on_message_event("gateway", "anything", "alice", None)
+            .await
+            .unwrap();
+        assert!(spawned.is_empty(), "invalid regex must not match anything");
     }
 
     #[tokio::test]
