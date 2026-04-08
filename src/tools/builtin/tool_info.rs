@@ -14,7 +14,18 @@ use async_trait::async_trait;
 
 use crate::context::JobContext;
 use crate::tools::registry::ToolRegistry;
-use crate::tools::tool::{Tool, ToolDiscoverySummary, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{
+    EngineCompatibility, EngineVersion, Tool, ToolDiscoverySummary, ToolError, ToolOutput,
+    require_str,
+};
+
+fn is_compatible(compat: EngineCompatibility, version: EngineVersion) -> bool {
+    match compat {
+        EngineCompatibility::Both => true,
+        EngineCompatibility::V1Only => version == EngineVersion::V1,
+        EngineCompatibility::V2Only => version == EngineVersion::V2,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolInfoDetail {
@@ -142,6 +153,13 @@ impl Tool for ToolInfoTool {
         let tool = registry.get(name).await.ok_or_else(|| {
             ToolError::InvalidParameters(format!("No tool named '{name}' is registered"))
         })?;
+
+        // Reject tools that are not available in the current engine version.
+        if !is_compatible(tool.engine_compatibility(), registry.engine_version()) {
+            return Err(ToolError::InvalidParameters(format!(
+                "Tool '{name}' is not available in the current engine version"
+            )));
+        }
 
         let schema = tool.discovery_schema();
         let param_names = schema_param_names(&schema);

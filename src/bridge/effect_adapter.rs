@@ -746,14 +746,7 @@ impl EffectExecutor for EffectBridgeAdapter {
         &self,
         _leases: &[CapabilityLease],
     ) -> Result<Vec<ActionDef>, EngineError> {
-        // Engine-version filtering is handled at the registry level: each tool
-        // declares its engine_compatibility(), and the registry excludes V1Only
-        // tools when asked for V2Only definitions. This replaces the old ad-hoc
-        // is_v1_only_tool() / is_v1_auth_tool() string-matching.
-        let tool_defs = self
-            .tools
-            .tool_definitions_for_engine(crate::tools::EngineVersion::V2)
-            .await;
+        let tool_defs = self.tools.tool_definitions().await;
 
         let actions = tool_defs
             .into_iter()

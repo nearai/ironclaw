@@ -521,12 +521,9 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     // Generate the engine workspace README
     store.generate_engine_readme().await;
 
-    // Build capability registry from available tools (v2-compatible only)
+    // Build capability registry from available tools (auto-filtered by engine version)
     let mut capabilities = CapabilityRegistry::new();
-    let tool_defs = agent
-        .tools()
-        .tool_definitions_for_engine(crate::tools::EngineVersion::V2)
-        .await;
+    let tool_defs = agent.tools().tool_definitions().await;
     if !tool_defs.is_empty() {
         capabilities.register(Capability {
             name: "tools".into(),
