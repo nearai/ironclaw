@@ -47,12 +47,24 @@ pub async fn get_handler(
     }
 }
 
+/// Maximum size for an admin system prompt (64 KB).
+const MAX_SYSTEM_PROMPT_SIZE: usize = 64 * 1024;
+
 /// `PUT /api/admin/system-prompt` — set the admin system prompt.
 pub async fn put_handler(
     State(state): State<Arc<GatewayState>>,
     AdminUser(_admin): AdminUser,
     Json(req): Json<SystemPromptRequest>,
 ) -> Result<Json<SystemPromptResponse>, (StatusCode, String)> {
+    // Enforce size limit — this content is injected into every user's system
+    // prompt, so an unbounded size could exhaust token budgets.
+    if req.content.len() > MAX_SYSTEM_PROMPT_SIZE {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "System prompt exceeds 64 KB limit".to_string(),
+        ));
+    }
+
     // Gate behind multi-tenant mode.
     if state.workspace_pool.is_none() {
         return Err((

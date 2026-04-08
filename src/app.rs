@@ -384,6 +384,14 @@ impl AppBuilder {
 
             // In multi-tenant mode, enable admin system prompt on the owner
             // workspace so the dispatcher reads SYSTEM.md from __admin__ scope.
+            //
+            // NOTE: `is_multi_tenant` is evaluated once at startup. If the
+            // server starts with no users (single-user mode) and users are
+            // added later, the owner workspace frozen in `Arc` will NOT have
+            // `admin_prompt_enabled`. A server restart is required after the
+            // first user is created to activate admin prompts on the owner
+            // workspace. Tenant workspaces created via `WorkspacePool` are
+            // unaffected — they always call `.with_admin_prompt()`.
             if is_multi_tenant {
                 ws = ws.with_admin_prompt();
             }

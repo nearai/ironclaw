@@ -11,8 +11,11 @@
 //! 4. Empty SYSTEM.md produces no section in the system prompt
 #![cfg(feature = "libsql")]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use ironclaw::channels::web::auth::{MultiAuthState, UserIdentity};
+use ironclaw::channels::web::test_helpers::TestGatewayBuilder;
 use ironclaw::db::Database;
 use ironclaw::db::libsql::LibSqlBackend;
 use ironclaw::workspace::{ADMIN_SCOPE, Workspace, paths};
@@ -264,5 +267,86 @@ async fn scoped_to_user_preserves_admin_prompt() {
     assert!(
         prompt.contains("Bob is analytical"),
         "Scoped workspace should read Bob's identity.\nPrompt:\n{prompt}"
+    );
+}
+
+// ─── Test 7: PUT rejects system prompt exceeding 64 KB ────────────────
+
+#[tokio::test]
+async fn put_rejects_oversized_system_prompt() {
+    let mut tokens = HashMap::new();
+    tokens.insert(
+        "tok-admin".to_string(),
+        UserIdentity {
+            user_id: "admin".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: vec![],
+        },
+    );
+    let auth = MultiAuthState::multi(tokens);
+
+    let (addr, _state) = TestGatewayBuilder::new()
+        .start_multi(auth)
+        .await
+        .expect("start test server");
+
+    // Build a payload that exceeds 64 KB.
+    let oversized_content = "x".repeat(64 * 1024 + 1);
+    let body = serde_json::json!({ "content": oversized_content });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .put(format!("http://{addr}/api/admin/system-prompt"))
+        .header("Authorization", "Bearer tok-admin")
+        .json(&body)
+        .send()
+        .await
+        .expect("send request");
+
+    assert_eq!(
+        resp.status().as_u16(),
+        413,
+        "Oversized system prompt should be rejected with 413 Payload Too Large"
+    );
+}
+
+// ─── Test 8: PUT accepts system prompt within 64 KB limit ─────────────
+
+#[tokio::test]
+async fn put_accepts_system_prompt_within_limit() {
+    let mut tokens = HashMap::new();
+    tokens.insert(
+        "tok-admin".to_string(),
+        UserIdentity {
+            user_id: "admin".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: vec![],
+        },
+    );
+    let auth = MultiAuthState::multi(tokens);
+
+    let (addr, _state) = TestGatewayBuilder::new()
+        .start_multi(auth)
+        .await
+        .expect("start test server");
+
+    // A payload exactly at the limit should NOT be rejected as too large.
+    // (It will fail with 404 since workspace_pool is None, but not 413.)
+    let content = "x".repeat(64 * 1024);
+    let body = serde_json::json!({ "content": content });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .put(format!("http://{addr}/api/admin/system-prompt"))
+        .header("Authorization", "Bearer tok-admin")
+        .json(&body)
+        .send()
+        .await
+        .expect("send request");
+
+    assert_ne!(
+        resp.status().as_u16(),
+        413,
+        "System prompt at exactly 64 KB should not be rejected as too large"
     );
 }
