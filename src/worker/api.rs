@@ -91,7 +91,7 @@ pub struct CompletionReport {
 }
 
 /// Payload sent to the orchestrator for each job event (shared by worker and Claude Code bridge).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JobEventPayload {
     pub event_type: String,
     pub data: serde_json::Value,

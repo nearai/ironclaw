@@ -1,5 +1,5 @@
 {
-  "name": "google-calendar",
+  "name": "google_calendar",
   "display_name": "Google Calendar",
   "kind": "tool",
   "version": "0.2.1",

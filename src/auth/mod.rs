@@ -151,11 +151,12 @@ async fn load_auth_descriptors(
     store: &dyn SettingsStore,
     user_id: &str,
 ) -> Result<HashMap<String, AuthDescriptor>, crate::error::DatabaseError> {
-    debug_assert_ne!(
-        user_id, "default",
-        "auth descriptors should remain user-scoped; global reads must stay explicit"
-    );
-
+    // NOTE: `user_id == "default"` is a *legitimate* value in single-tenant
+    // deployments where `Config::owner_id` defaults to "default". The
+    // multi-tenant safety concern this module guards against is *implicit*
+    // global fallback reads, not single-user owners. The
+    // `DefaultFallback::AdminOnly` policy in `resolve_secret_for_runtime` is
+    // what enforces the actual cross-tenant boundary.
     let cache = auth_descriptor_cache();
     if let Some(descriptors) = cache.lock().await.get(user_id).cloned() {
         return Ok(descriptors);
@@ -197,6 +198,25 @@ pub async fn auth_descriptor_for_secret(
     }
 }
 
+/// Per-user serialization lock for `upsert_auth_descriptor`. Without this,
+/// two concurrent upserts for the same `user_id` can lose updates: each loads
+/// the same base descriptor map from the DB, mutates only its own entry, and
+/// the second writer's `set_setting` overwrites the first writer's descriptor.
+async fn upsert_lock(user_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        tokio::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    let registry = LOCKS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
+    let mut locks = registry.lock().await;
+    if let Some(lock) = locks.get(user_id).and_then(Weak::upgrade) {
+        return lock;
+    }
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(user_id.to_string(), Arc::downgrade(&lock));
+    lock
+}
+
 pub async fn upsert_auth_descriptor(
     store: Option<&dyn SettingsStore>,
     user_id: &str,
@@ -205,6 +225,11 @@ pub async fn upsert_auth_descriptor(
     let Some(store) = store else {
         return;
     };
+
+    // Hold a per-user lock for the entire load → mutate → persist → cache
+    // update cycle so concurrent upserts cannot drop each other's changes.
+    let lock = upsert_lock(user_id).await;
+    let _guard = lock.lock().await;
 
     let mut descriptors = match load_auth_descriptors(store, user_id).await {
         Ok(descriptors) => descriptors,
@@ -306,10 +331,10 @@ where
         Ok(token) => Ok(Some(token.expose().to_string())),
         Err(SecretError::NotFound(_)) => Ok(None),
         Err(SecretError::Expired) => {
-            tracing::info!(target = "auth", subject = %log_name, "Access token expired, attempting refresh");
+            tracing::debug!(target = "auth", subject = %log_name, "Access token expired, attempting refresh");
             match refresh().await {
                 Ok(token) => {
-                    tracing::info!(target = "auth", subject = %log_name, "Access token refreshed successfully");
+                    tracing::debug!(target = "auth", subject = %log_name, "Access token refreshed successfully");
                     Ok(Some(token))
                 }
                 Err(error) => Err(error),
@@ -381,7 +406,12 @@ async fn persist_refreshed_oauth_tokens(
         access_params = access_params.with_provider(provider);
     }
     if let Some(expires_in) = token_response.expires_in {
-        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_in as i64);
+        // Saturating cast: an `expires_in` value above `i64::MAX` would
+        // silently wrap to a negative duration and immediately invalidate the
+        // freshly-stored token. Real OAuth providers cap this at minutes/days,
+        // but defend against the corner case anyway.
+        let expires_secs = i64::try_from(expires_in).unwrap_or(i64::MAX);
+        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_secs);
         access_params = access_params.with_expiry(expires_at);
     }
 
@@ -517,9 +547,35 @@ pub async fn refresh_oauth_access_token(
         }
     };
 
+    // Cap the response body at 64 KiB. Legitimate OAuth token responses are
+    // a few hundred bytes; a misbehaving or hostile token endpoint must not
+    // be able to OOM the process by streaming an unbounded body.
+    //
+    // Pre-check `Content-Length`: when the server sends an honest header that
+    // exceeds the cap, reject *before* `bytes()` allocates the buffer. The
+    // post-read length check below remains as defense for chunked / unknown
+    // content-length / lying headers, but for the common honest case the
+    // big body is never materialized.
+    const MAX_TOKEN_BODY_BYTES: usize = 64 * 1024;
+    if let Some(content_length) = response.content_length()
+        && content_length > MAX_TOKEN_BODY_BYTES as u64
+    {
+        tracing::warn!(
+            content_length,
+            limit = MAX_TOKEN_BODY_BYTES,
+            "OAuth token refresh Content-Length exceeds size limit; refusing to read body"
+        );
+        return false;
+    }
+
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body_bytes = response
+            .bytes()
+            .await
+            .map(|b| b.slice(..b.len().min(MAX_TOKEN_BODY_BYTES)))
+            .unwrap_or_default();
+        let body = String::from_utf8_lossy(&body_bytes);
         tracing::warn!(
             status = %status,
             body = %body,
@@ -528,7 +584,22 @@ pub async fn refresh_oauth_access_token(
         return false;
     }
 
-    let token_data: serde_json::Value = match response.json().await {
+    let body_bytes = match response.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to read token refresh response body");
+            return false;
+        }
+    };
+    if body_bytes.len() > MAX_TOKEN_BODY_BYTES {
+        tracing::warn!(
+            len = body_bytes.len(),
+            limit = MAX_TOKEN_BODY_BYTES,
+            "OAuth token refresh response exceeds size limit"
+        );
+        return false;
+    }
+    let token_data: serde_json::Value = match serde_json::from_slice(&body_bytes) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %e, "Failed to parse token refresh response");
@@ -591,7 +662,7 @@ async fn maybe_refresh_before_read(
         return false;
     }
 
-    tracing::info!(
+    tracing::debug!(
         secret_name = %secret_name,
         "Access token expired or near expiry, attempting refresh"
     );

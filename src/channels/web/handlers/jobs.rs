@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::channels::web::auth::{AuthenticatedUser, ownership_identity};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use crate::orchestrator::job_manager::{ContainerJobManager, JobCreationParams, JobMode};
 use crate::ownership::{OwnerId, can_act_on};
 
 fn db_error(context: &str, e: impl std::fmt::Display) -> (StatusCode, String) {
@@ -28,22 +29,17 @@ async fn resolve_sandbox_restart_mode(
     store: &dyn crate::db::Database,
     stored_mode: &str,
     user_id: &str,
-) -> Result<
-    (
-        crate::orchestrator::job_manager::JobMode,
-        Option<crate::config::acp::AcpAgentConfig>,
-    ),
-    crate::config::acp::AcpConfigError,
-> {
+) -> Result<(JobMode, Option<crate::config::acp::AcpAgentConfig>), crate::config::acp::AcpConfigError>
+{
     if stored_mode == "claude_code" {
-        return Ok((crate::orchestrator::job_manager::JobMode::ClaudeCode, None));
+        return Ok((JobMode::ClaudeCode, None));
     }
 
     if let Some(agent_name) = stored_mode.strip_prefix("acp:") {
         let agent =
             crate::config::acp::get_enabled_acp_agent_for_user(Some(store), user_id, agent_name)
                 .await?;
-        return Ok((crate::orchestrator::job_manager::JobMode::Acp, Some(agent)));
+        return Ok((JobMode::Acp, Some(agent)));
     }
 
     if stored_mode == "acp" {
@@ -52,7 +48,24 @@ async fn resolve_sandbox_restart_mode(
         });
     }
 
-    Ok((crate::orchestrator::job_manager::JobMode::Worker, None))
+    Ok((JobMode::Worker, None))
+}
+
+/// Reject restart requests for modes disabled since the job was created.
+fn check_mode_enabled(mode: JobMode, jm: &ContainerJobManager) -> Result<(), (StatusCode, String)> {
+    if jm.is_mode_enabled(mode) {
+        Ok(())
+    } else {
+        let env_hint = match mode {
+            JobMode::ClaudeCode => " Set CLAUDE_CODE_ENABLED=true to re-enable.",
+            JobMode::Acp => " Set ACP_ENABLED=true to re-enable.",
+            JobMode::Worker => "", // Worker is always enabled; unreachable in practice.
+        };
+        Err((
+            StatusCode::CONFLICT,
+            format!("{mode} mode is no longer enabled.{env_hint}"),
+        ))
+    }
 }
 
 pub async fn jobs_list_handler(
@@ -462,6 +475,8 @@ pub async fn jobs_restart_handler(
                 resolve_sandbox_restart_mode(store.as_ref(), &stored_mode, &old_job.user_id)
                     .await
                     .map_err(|e| (StatusCode::CONFLICT, format!("Cannot restart job: {}", e)))?;
+            check_mode_enabled(mode, jm.as_ref())?;
+
             // Carry the original mcp_servers filter and max_iterations cap
             // through the restart. Without this the restarted job would mount
             // the *full* MCP master config (the opposite of the original
@@ -490,8 +505,8 @@ pub async fn jobs_restart_handler(
                 .await
                 .map_err(|e| db_error("jobs_restart_handler", e))?;
 
-            if mode != crate::orchestrator::job_manager::JobMode::Worker {
-                let mode_str = if mode == crate::orchestrator::job_manager::JobMode::Acp {
+            if mode != JobMode::Worker {
+                let mode_str = if mode == JobMode::Acp {
                     format!(
                         "acp:{}",
                         acp_agent
@@ -525,31 +540,11 @@ pub async fn jobs_restart_handler(
             // when the user has servers configured (staging-regressions
             // issue 3 — the orchestrator used to read from a hardcoded host
             // file path that bootstrap moves into the DB on first run).
-            let master_mcp_config = match crate::tools::mcp::config::load_mcp_servers_from_db(
+            let master_mcp_config = crate::tools::mcp::config::load_master_mcp_config_value(
                 store.as_ref(),
                 &old_job.user_id,
             )
-            .await
-            {
-                Ok(file) if !file.servers.is_empty() => serde_json::to_value(&file)
-                    .inspect_err(|e| {
-                        tracing::warn!(
-                            error = %e,
-                            "Failed to serialize MCP master config on restart; \
-                             per-job MCP mount will be skipped"
-                        );
-                    })
-                    .ok(),
-                Ok(_) => None,
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "Failed to load MCP master config from DB on restart; \
-                         per-job MCP mount will be skipped"
-                    );
-                    None
-                }
-            };
+            .await;
 
             let project_dir = std::path::PathBuf::from(&old_job.project_dir);
             let create_result = jm
@@ -558,7 +553,7 @@ pub async fn jobs_restart_handler(
                     &task,
                     Some(project_dir),
                     mode,
-                    crate::orchestrator::job_manager::JobCreationParams {
+                    JobCreationParams {
                         credential_grants,
                         mcp_servers: restart_mcp_servers,
                         max_iterations: restart_max_iterations,
@@ -958,6 +953,9 @@ pub async fn job_files_read_handler(
 mod tests {
     use super::*;
 
+    use crate::orchestrator::TokenStore;
+    use crate::orchestrator::job_manager::ContainerJobConfig;
+
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn sandbox_restart_mode_uses_original_job_owner_scope() {
@@ -978,7 +976,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(mode, crate::orchestrator::job_manager::JobMode::Acp);
+        assert_eq!(mode, JobMode::Acp);
         assert_eq!(
             agent.as_ref().map(|agent| agent.name.as_str()),
             Some("codex")
@@ -1019,5 +1017,47 @@ mod tests {
         assert_eq!(body, "Internal database error");
         assert!(!body.contains("relation"));
         assert!(!body.contains("does not exist"));
+    }
+
+    fn make_job_manager(claude_code: bool, acp: bool) -> ContainerJobManager {
+        ContainerJobManager::new(
+            ContainerJobConfig {
+                claude_code_enabled: claude_code,
+                acp_enabled: acp,
+                ..Default::default()
+            },
+            TokenStore::new(),
+        )
+    }
+
+    #[test]
+    fn test_check_mode_rejects_disabled_claude_code() {
+        let jm = make_job_manager(false, false);
+        let result = check_mode_enabled(JobMode::ClaudeCode, &jm);
+        let (status, body) = result.unwrap_err(); // safety: test
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body.contains("claude_code"),
+            "error should mention claude_code, got: {body}"
+        );
+    }
+
+    #[test]
+    fn test_check_mode_rejects_disabled_acp() {
+        let jm = make_job_manager(false, false);
+        let result = check_mode_enabled(JobMode::Acp, &jm);
+        let (status, body) = result.unwrap_err(); // safety: test
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body.contains("acp"),
+            "error should mention acp, got: {body}"
+        );
+    }
+
+    #[test]
+    fn test_check_mode_allows_worker_always() {
+        let jm = make_job_manager(false, false);
+        let result = check_mode_enabled(JobMode::Worker, &jm);
+        assert!(result.is_ok(), "worker mode should always be allowed");
     }
 }

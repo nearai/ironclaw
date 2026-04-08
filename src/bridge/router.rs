@@ -746,11 +746,23 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         debug!("engine v2: bootstrap_user failed: {e}");
     }
 
-    // Create mission manager and start cron ticker
-    let mission_manager = Arc::new(MissionManager::new(
-        store_dyn.clone(),
-        Arc::clone(&thread_manager),
-    ));
+    // Create mission manager and start cron ticker. Attach:
+    // - WorkspaceReader so missions with `context_paths` can preload
+    //   workspace documents into their meta-prompt at fire time.
+    // - BudgetGate over the host's CostGuard so a mission fire is refused
+    //   when the user has exhausted their daily LLM budget.
+    let mut mission_manager_inner =
+        MissionManager::new(store_dyn.clone(), Arc::clone(&thread_manager));
+    if let Some(workspace) = agent.workspace().cloned() {
+        let reader: Arc<dyn ironclaw_engine::WorkspaceReader> =
+            Arc::new(crate::bridge::WorkspaceReaderAdapter::new(workspace));
+        mission_manager_inner = mission_manager_inner.with_workspace_reader(reader);
+    }
+    let cost_guard = Arc::clone(&agent.deps.cost_guard);
+    let budget_gate: Arc<dyn ironclaw_engine::BudgetGate> =
+        Arc::new(crate::bridge::CostGuardBudgetGate::new(cost_guard));
+    mission_manager_inner = mission_manager_inner.with_budget_gate(budget_gate);
+    let mission_manager = Arc::new(mission_manager_inner);
     if let Err(e) = thread_manager.recover_project_threads(project_id).await {
         debug!("engine v2: recover_project_threads failed: {e}");
     }
@@ -966,12 +978,10 @@ pub async fn resolve_engine_auth_callback(
         })
         .collect();
 
-    if matching.is_empty() {
-        return Ok(AuthCallbackContinuation::None);
-    }
-
     matching.sort_by_key(|gate| gate.created_at);
-    let pending = matching.pop().unwrap(); // safety: is_empty() checked above
+    let Some(pending) = matching.pop() else {
+        return Ok(AuthCallbackContinuation::None);
+    };
 
     if pending.action_name == "authentication_fallback" {
         if let Some(content) = pending.original_message.clone() {
@@ -2091,6 +2101,18 @@ async fn handle_with_engine_inner(
         ));
     }
 
+    // Fire any active OnEvent missions whose pattern (and optional channel
+    // filter) match this inbound message. Mission firings here are side
+    // effects of the message — independent of, and parallel to, the normal
+    // conversation thread spawned below. Errors are logged but never block
+    // user-facing message handling.
+    //
+    // v1-created routines are NOT touched by this path: they live in the
+    // v1 routine store and are fired by the v1 RoutineEngine in the
+    // background. Missions created via the routine_create alias live in
+    // the engine store and are fired here.
+    fire_event_missions_for_message(state, message, content).await;
+
     // Send "Thinking..." status to the channel
     let _ = agent
         .channels
@@ -2169,6 +2191,81 @@ async fn handle_with_engine_inner(
 
     debug!(thread_id = %thread_id, "engine v2: thread spawned");
     await_thread_outcome(agent, state, message, conv_id, thread_id).await
+}
+
+/// Fire active OnEvent missions whose pattern matches the inbound message.
+///
+/// Builds a payload containing the message metadata that mission threads
+/// can read via `state["trigger_payload"]`. Skips empty content and
+/// system-channel messages. Errors are logged at debug level — a failure
+/// here must never block the user-facing message flow.
+async fn fire_event_missions_for_message(
+    state: &EngineState,
+    message: &IncomingMessage,
+    content: &str,
+) {
+    // Skip empty messages — there's nothing to pattern-match against
+    // and we don't want missions firing on every status update or empty
+    // user input.
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    // Recursion guards. Channel adapters that echo the agent's own
+    // outbound text back as inbound events MUST set is_agent_broadcast
+    // (Slack/Discord-style); messages produced as a side effect of a
+    // mission firing MUST set triggering_mission_id (chain-recursion
+    // across distinct missions). Either flag means: do not re-fire.
+    if message.is_agent_broadcast {
+        debug!(
+            channel = %message.channel,
+            "engine v2: skipping mission firing — message is an agent broadcast echo"
+        );
+        return;
+    }
+    if let Some(ref upstream) = message.triggering_mission_id {
+        debug!(
+            channel = %message.channel,
+            upstream_mission_id = %upstream,
+            "engine v2: skipping mission firing — message originated from a mission"
+        );
+        return;
+    }
+
+    let Some(mission_manager) = state.effect_adapter.mission_manager().await else {
+        return;
+    };
+
+    let payload = serde_json::json!({
+        "channel": message.channel,
+        "user_id": message.user_id,
+        "content": content,
+        "metadata": message.metadata,
+    });
+
+    match mission_manager
+        .fire_on_message_event(&message.channel, content, &message.user_id, Some(payload))
+        .await
+    {
+        Ok(spawned) if !spawned.is_empty() => {
+            debug!(
+                count = spawned.len(),
+                channel = %message.channel,
+                user_id = %message.user_id,
+                "engine v2: fired {} OnEvent mission(s) from inbound message",
+                spawned.len()
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            debug!(
+                channel = %message.channel,
+                error = %error,
+                "engine v2: fire_on_message_event failed; continuing with normal handling"
+            );
+        }
+    }
 }
 
 async fn await_thread_outcome(
@@ -2288,7 +2385,7 @@ async fn await_thread_outcome(
 
                 // Extract credential name from the response text and validate
                 // it against the expected pattern (alphanumeric + underscores).
-                let cred_name = text
+                let parsed_cred_name = text
                     .split("credential_name")
                     .nth(1)
                     .and_then(|s| {
@@ -2302,8 +2399,28 @@ async fn await_thread_outcome(
                             && name.len() <= 64
                             && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                     })
-                    .unwrap_or("unknown")
-                    .to_string();
+                    .map(|s| s.to_string());
+
+                // Defense against credential-name injection: only honor a
+                // fallback auth gate when the parsed name is actually a
+                // registered credential. A tool that fabricates an
+                // `authentication_required` message with a chosen credential
+                // name must not be able to coerce the user into providing an
+                // unrelated secret. Test/embed harnesses without a credential
+                // registry preserve existing behavior.
+                let Some(cred_name) = parsed_cred_name.filter(|name| {
+                    agent
+                        .tools()
+                        .credential_registry()
+                        .is_none_or(|reg| reg.has_secret(name))
+                }) else {
+                    tracing::warn!(
+                        thread_id = %thread_id,
+                        "text-based auth fallback rejected unknown or missing credential name from tool output"
+                    );
+                    // Hand the original response back without inserting a gate.
+                    return Ok(Some(text.clone()));
+                };
 
                 // Look up setup instructions via AuthManager (or fall back to inline lookup)
                 let setup_hint = state
@@ -2534,12 +2651,17 @@ async fn handle_mission_notification(
 
     let full_text = format!("**[{}]** {text}", notif.mission_name);
 
+    // `notify_user` takes precedence over the mission owner's user_id when
+    // set — it lets a routine/mission deliver to a specific recipient
+    // (channel target) different from the mission's owning user.
+    let broadcast_user = notif.notify_user.as_deref().unwrap_or(&notif.user_id);
+
     for channel_name in &notif.notify_channels {
         // Send via channel broadcast (proactive, no incoming message required)
         if let Err(e) = channels
             .broadcast(
                 channel_name,
-                &notif.user_id,
+                broadcast_user,
                 OutgoingResponse::text(&full_text),
             )
             .await

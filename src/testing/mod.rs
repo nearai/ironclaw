@@ -830,6 +830,48 @@ mod tests {
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
+    async fn test_ensure_conversation_backfills_legacy_source_channel() {
+        let harness = TestHarnessBuilder::new().build().await;
+        let db = &harness.db;
+
+        let conv_id = uuid::Uuid::new_v4();
+
+        assert!(
+            db.ensure_conversation(conv_id, "gateway", "carol", None, None)
+                .await
+                .expect("ensure legacy conversation"),
+            "legacy ensure should create the row"
+        );
+
+        let source_before = db
+            .get_conversation_source_channel(conv_id)
+            .await
+            .expect("read source channel before backfill");
+        assert!(
+            source_before.is_none(),
+            "legacy conversation should start with NULL source_channel"
+        );
+
+        assert!(
+            db.ensure_conversation(conv_id, "gateway", "carol", None, Some("gateway"))
+                .await
+                .expect("ensure backfill conversation"),
+            "owned ensure should backfill the legacy row"
+        );
+
+        let source_after = db
+            .get_conversation_source_channel(conv_id)
+            .await
+            .expect("read source channel after backfill");
+        assert_eq!(
+            source_after.as_deref(),
+            Some("gateway"),
+            "ensure_conversation should backfill a legacy NULL source_channel"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
     async fn test_paginated_messages() {
         let harness = TestHarnessBuilder::new().build().await;
         let db = &harness.db;

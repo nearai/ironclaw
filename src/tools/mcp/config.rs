@@ -636,6 +636,45 @@ pub async fn load_mcp_servers_from_db(
     }
 }
 
+/// Load the MCP master config from the database and serialize it as a
+/// `serde_json::Value` ready to hand to the orchestrator's per-job MCP mount.
+///
+/// Returns `Ok(None)` when the user has no servers configured (so the caller
+/// can skip the per-job mount entirely instead of mounting an empty config),
+/// and degrades any I/O or serialization failure into `Ok(None)` after a
+/// `tracing::warn!` — the per-job MCP mount is best-effort and the caller
+/// should keep going rather than failing the whole job.
+///
+/// This is the shared implementation for callers that need to thread the
+/// master config through `JobCreationParams::master_mcp_config`. Centralizing
+/// it ensures the load + filter + serialize sequence stays consistent across
+/// the job tool, the gateway restart handler, and any future call site.
+pub async fn load_master_mcp_config_value(
+    store: &dyn crate::db::Database,
+    user_id: &str,
+) -> Option<serde_json::Value> {
+    match load_mcp_servers_from_db(store, user_id).await {
+        Ok(file) if !file.servers.is_empty() => match serde_json::to_value(&file) {
+            Ok(value) => Some(value),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to serialize MCP master config; per-job MCP mount will be skipped"
+                );
+                None
+            }
+        },
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "Failed to load MCP master config from DB; per-job MCP mount will be skipped"
+            );
+            None
+        }
+    }
+}
+
 /// Save MCP server configurations to the database settings table.
 pub async fn save_mcp_servers_to_db(
     store: &dyn crate::db::Database,

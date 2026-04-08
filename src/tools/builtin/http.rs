@@ -588,7 +588,18 @@ impl Tool for HttpTool {
         // without auth and check the response status — many endpoints (e.g.
         // GitHub public repo search) work without authentication.  Only if
         // the server returns 401/403 do we raise `authentication_required`.
-        let mut missing_credential: Option<String> = None;
+        //
+        // We track *why* the credential is unavailable so the 401/403 handler
+        // can send the user down the right remediation path: a `Missing`
+        // credential needs to be configured, while a `RefreshFailed` credential
+        // already exists but its refresh token is dead and the user must
+        // re-authenticate.
+        #[derive(Clone, Copy, Debug)]
+        enum MissingReason {
+            NotConfigured,
+            RefreshFailed,
+        }
+        let mut missing_credential: Option<(String, MissingReason)> = None;
         if let (Some(registry), Some(store)) = (
             self.credential_registry.as_ref(),
             self.secrets_store.as_ref(),
@@ -639,7 +650,13 @@ impl Tool for HttpTool {
                             error = ?error,
                             "Credential unavailable — proceeding without auth"
                         );
-                        missing_credential = Some(mapping.secret_name.clone());
+                        let reason = match error {
+                            crate::auth::CredentialResolutionError::RefreshFailed => {
+                                MissingReason::RefreshFailed
+                            }
+                            _ => MissingReason::NotConfigured,
+                        };
+                        missing_credential = Some((mapping.secret_name.clone(), reason));
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -797,18 +814,34 @@ impl Tool for HttpTool {
 
         // If the server returned 401/403 and we had a missing credential,
         // surface the authentication_required error so the auth flow triggers.
+        // Distinguish "never configured" from "refresh failed" so the user is
+        // sent to the right remediation path (configure vs re-authenticate).
         if matches!(status, 401 | 403)
-            && let Some(ref cred_name) = missing_credential
+            && let Some((cred_name, reason)) = missing_credential.as_ref()
         {
-            return Err(ToolError::ExecutionFailed(
-                serde_json::json!({
-                    "error": "authentication_required",
-                    "credential_name": cred_name,
-                    "message": format!(
+            let (error_kind, message) = match reason {
+                MissingReason::NotConfigured => (
+                    "authentication_required",
+                    format!(
                         "Credential '{}' is not configured. \
                          The server returned HTTP {}. Set up credentials to access this endpoint.",
                         cred_name, status
-                    )
+                    ),
+                ),
+                MissingReason::RefreshFailed => (
+                    "authentication_refresh_failed",
+                    format!(
+                        "Credential '{}' exists but its OAuth refresh failed. \
+                         The server returned HTTP {}. Re-authenticate this credential to repair the stored tokens.",
+                        cred_name, status
+                    ),
+                ),
+            };
+            return Err(ToolError::ExecutionFailed(
+                serde_json::json!({
+                    "error": error_kind,
+                    "credential_name": cred_name,
+                    "message": message,
                 })
                 .to_string(),
             ));

@@ -103,6 +103,10 @@ pub struct ContainerJobConfig {
     /// Whether per-job MCP server filtering is enabled.
     /// When false, `mcp_servers` param on `create_job` is ignored.
     pub mcp_per_job_enabled: bool,
+    /// Whether Claude Code sandbox mode is available (from CLAUDE_CODE_ENABLED).
+    pub claude_code_enabled: bool,
+    /// Whether ACP agent mode is available (from ACP_ENABLED).
+    pub acp_enabled: bool,
 }
 
 impl Default for ContainerJobConfig {
@@ -121,6 +125,8 @@ impl Default for ContainerJobConfig {
             acp_memory_limit_mb: 4096,
             acp_timeout_secs: 1800,
             mcp_per_job_enabled: false,
+            claude_code_enabled: false,
+            acp_enabled: false,
         }
     }
 }
@@ -265,6 +271,25 @@ impl ContainerJobManager {
         }
     }
 
+    /// Whether Claude Code mode is enabled for job creation.
+    pub fn claude_code_enabled(&self) -> bool {
+        self.config.claude_code_enabled
+    }
+
+    /// Whether ACP agent mode is enabled for job creation.
+    pub fn acp_enabled(&self) -> bool {
+        self.config.acp_enabled
+    }
+
+    /// Whether the given job mode is allowed by the current configuration.
+    pub fn is_mode_enabled(&self, mode: JobMode) -> bool {
+        match mode {
+            JobMode::Worker => true,
+            JobMode::ClaudeCode => self.config.claude_code_enabled,
+            JobMode::Acp => self.config.acp_enabled,
+        }
+    }
+
     fn extend_acp_env(
         &self,
         env_vec: &mut Vec<String>,
@@ -318,6 +343,12 @@ impl ContainerJobManager {
         mode: JobMode,
         params: JobCreationParams,
     ) -> Result<String, OrchestratorError> {
+        if !self.is_mode_enabled(mode) {
+            return Err(OrchestratorError::ModeDisabled {
+                mode: mode.to_string(),
+            });
+        }
+
         // Generate auth token (stored in TokenStore, never logged)
         let token = self.token_store.create_token(job_id).await;
 
@@ -767,6 +798,19 @@ impl ContainerJobManager {
     }
 }
 
+/// Human-readable label for a `serde_json::Value` discriminant; used in error
+/// messages when a master MCP config field has the wrong shape.
+fn type_name_of(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
 /// Generate a per-job MCP config file from caller-provided master data,
 /// optionally filtering to specific servers.
 ///
@@ -818,11 +862,31 @@ async fn generate_worker_mcp_config(
     // mount has the same shape regardless of source — pre-fix, the no-filter
     // path returned the master file as-is, which only worked when the master
     // was a real on-disk file.
-    let servers_iter = master["servers"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter();
+    //
+    // The `servers` field is the load-bearing part of the config — if it is
+    // missing or the wrong type the master JSON is malformed and we must
+    // surface that loudly rather than silently mounting nothing. The trusted
+    // helper (`load_master_mcp_config_value`) always serializes a real
+    // `McpServersFile`, so reaching this branch means a future caller passed
+    // foreign JSON that does not match our expected shape.
+    let servers_value =
+        master
+            .get("servers")
+            .ok_or_else(|| OrchestratorError::ContainerCreationFailed {
+                job_id,
+                reason: "MCP master config is missing the required `servers` field".to_string(),
+            })?;
+    let servers_array =
+        servers_value
+            .as_array()
+            .ok_or_else(|| OrchestratorError::ContainerCreationFailed {
+                job_id,
+                reason: format!(
+                    "MCP master config `servers` field must be an array, got {}",
+                    type_name_of(servers_value)
+                ),
+            })?;
+    let servers_iter = servers_array.clone().into_iter();
     let filtered_servers: Vec<serde_json::Value> = match server_names {
         None => servers_iter
             .filter(|s| s["enabled"].as_bool().unwrap_or(true))
@@ -1012,6 +1076,59 @@ mod tests {
     fn test_container_job_config_acp_timeout_default() {
         let config = ContainerJobConfig::default();
         assert_eq!(config.acp_timeout_secs, 1800);
+    }
+
+    #[test]
+    fn test_container_job_config_claude_code_disabled_by_default() {
+        let config = ContainerJobConfig::default();
+        assert!(!config.claude_code_enabled);
+    }
+
+    #[test]
+    fn test_container_job_config_acp_disabled_by_default() {
+        let config = ContainerJobConfig::default();
+        assert!(!config.acp_enabled);
+    }
+
+    #[test]
+    fn test_is_mode_enabled_matches_individual_accessors() {
+        let manager = ContainerJobManager::new(
+            ContainerJobConfig {
+                claude_code_enabled: true,
+                acp_enabled: false,
+                ..Default::default()
+            },
+            TokenStore::new(),
+        );
+        assert!(manager.is_mode_enabled(JobMode::Worker));
+        assert!(manager.is_mode_enabled(JobMode::ClaudeCode));
+        assert!(!manager.is_mode_enabled(JobMode::Acp));
+    }
+
+    #[tokio::test]
+    async fn test_create_job_rejects_disabled_mode() {
+        let manager = ContainerJobManager::new(
+            ContainerJobConfig {
+                claude_code_enabled: false,
+                acp_enabled: false,
+                ..Default::default()
+            },
+            TokenStore::new(),
+        );
+        let result = manager
+            .create_job(
+                Uuid::new_v4(),
+                "test task",
+                None,
+                JobMode::ClaudeCode,
+                JobCreationParams::default(),
+            )
+            .await;
+        let err = result.unwrap_err().to_string(); // safety: test
+        assert!(
+            err.contains("not enabled"),
+            "expected mode-disabled error, got: {err}"
+        );
     }
 
     #[test]
@@ -1388,5 +1505,38 @@ mod tests {
         assert!(servers.iter().any(|s| s["name"] == "notion")); // safety: test fixture
 
         let _ = std::fs::remove_file(&out_path);
+    }
+
+    /// Regression for PR #2116 review: a master config that is missing the
+    /// `servers` field — or has it as something other than a JSON array —
+    /// must surface a `ContainerCreationFailed` error rather than silently
+    /// no-op'ing the per-job MCP mount. The previous `unwrap_or_default()`
+    /// path treated malformed JSON as "no servers" and quietly skipped the
+    /// mount, which is exactly the silent-failure mode that staging-regressions
+    /// issue 3 produced via a different code path.
+    #[tokio::test]
+    async fn test_mcp_config_missing_servers_field_errors() {
+        let job_id = Uuid::new_v4();
+
+        // `servers` field absent entirely.
+        let master = serde_json::json!({"schema_version": 1});
+        let err = generate_worker_mcp_config(Some(&master), None, job_id)
+            .await
+            .expect_err("missing `servers` field must error");
+        assert!(
+            err.to_string()
+                .contains("missing the required `servers` field"),
+            "expected explicit missing-field error, got: {err}"
+        );
+
+        // `servers` present but the wrong shape (object, not array).
+        let master = serde_json::json!({"servers": {"name": "x"}});
+        let err = generate_worker_mcp_config(Some(&master), None, job_id)
+            .await
+            .expect_err("non-array `servers` field must error");
+        assert!(
+            err.to_string().contains("must be an array"),
+            "expected explicit type-mismatch error, got: {err}"
+        );
     }
 }

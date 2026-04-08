@@ -468,6 +468,9 @@ pub struct ExtensionManager {
     wasm_tools_dir: PathBuf,
     wasm_channels_dir: PathBuf,
     latent_wasm_provider_actions: RwLock<HashMap<String, Vec<LatentProviderAction>>>,
+    /// Per-server URL cache for `mcp_supports_auth` metadata discovery.
+    /// Avoids re-issuing a network probe on every `list()` call.
+    mcp_auth_support_cache: RwLock<HashMap<String, bool>>,
 
     // WASM channel hot-activation infrastructure (set post-construction)
     channel_runtime: RwLock<Option<ChannelRuntimeState>>,
@@ -642,6 +645,7 @@ impl ExtensionManager {
             wasm_tools_dir,
             wasm_channels_dir,
             latent_wasm_provider_actions: RwLock::new(HashMap::new()),
+            mcp_auth_support_cache: RwLock::new(HashMap::new()),
             channel_runtime: RwLock::new(None),
             relay_channel_manager: RwLock::new(None),
             secrets,
@@ -1575,7 +1579,7 @@ impl ExtensionManager {
                     .get(&name)
                     .await
                     .ok_or_else(|| ExtensionError::NotInstalled(name.clone()))?;
-                tracing::info!(
+                tracing::debug!(
                     extension = %name,
                     kind = %entry.kind,
                     "Auto-installing registry extension on first use"
@@ -2710,11 +2714,20 @@ impl ExtensionManager {
             )
             .await;
         }
-        if let Some(ref store) = self.store {
+        let result = if let Some(ref store) = self.store {
             crate::tools::mcp::config::add_mcp_server_db(store.as_ref(), user_id, config).await
         } else {
             crate::tools::mcp::config::add_mcp_server(config).await
+        };
+        if result.is_ok() {
+            // A newly configured MCP server may have a matching registry
+            // entry that was previously surfaced as a latent provider
+            // action. Drop the cache so the next listing reflects its
+            // installed/active status.
+            self.invalidate_latent_wasm_provider_actions_cache().await;
+            self.mcp_auth_support_cache.write().await.clear();
         }
+        result
     }
 
     async fn update_mcp_server(
@@ -2751,12 +2764,17 @@ impl ExtensionManager {
         }
         let mut servers = self.load_mcp_servers(user_id).await?;
         servers.upsert(config);
-        if let Some(ref store) = self.store {
+        let result = if let Some(ref store) = self.store {
             crate::tools::mcp::config::save_mcp_servers_to_db(store.as_ref(), user_id, &servers)
                 .await
         } else {
             crate::tools::mcp::config::save_mcp_servers(&servers).await
+        };
+        if result.is_ok() {
+            self.invalidate_latent_wasm_provider_actions_cache().await;
+            self.mcp_auth_support_cache.write().await.clear();
         }
+        result
     }
 
     async fn remove_mcp_server(
@@ -2764,11 +2782,19 @@ impl ExtensionManager {
         name: &str,
         user_id: &str,
     ) -> Result<(), crate::tools::mcp::config::ConfigError> {
-        if let Some(ref store) = self.store {
+        let result = if let Some(ref store) = self.store {
             crate::tools::mcp::config::remove_mcp_server_db(store.as_ref(), user_id, name).await
         } else {
             crate::tools::mcp::config::remove_mcp_server(name).await
+        };
+        if result.is_ok() {
+            // Removing a server flips it back to the latent/uninstalled
+            // state; drop the cache so the registry-discovery path can
+            // resurface it as a latent provider action.
+            self.invalidate_latent_wasm_provider_actions_cache().await;
+            self.mcp_auth_support_cache.write().await.clear();
         }
+        result
     }
 
     // ── Private helpers ──────────────────────────────────────────────────
@@ -3224,8 +3250,7 @@ impl ExtensionManager {
         // 100 MB cap on decompressed entry size to prevent decompression bombs
         const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024;
 
-        let wasm_filename = format!("{}.wasm", name);
-        let caps_filename = format!("{}.capabilities.json", name);
+        let archive_names = crate::extensions::naming::ArchiveFilenames::new(name);
         let mut found_wasm = false;
         let mut found_caps = false;
         let mut fallback_wasm: Option<Vec<u8>> = None;
@@ -3267,11 +3292,11 @@ impl ExtensionManager {
             std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                 .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
 
-            if filename == wasm_filename {
+            if archive_names.is_wasm(filename) {
                 std::fs::write(target_wasm, &data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 found_wasm = true;
-            } else if filename == caps_filename {
+            } else if archive_names.is_caps(filename) {
                 std::fs::write(target_caps, &data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 found_caps = true;
@@ -3295,16 +3320,12 @@ impl ExtensionManager {
         if !found_wasm {
             if multiple_wasm_candidates {
                 return Err(ExtensionError::InstallFailed(format!(
-                    "tar.gz archive does not contain '{}' and has multiple .wasm entries",
-                    wasm_filename
+                    "{} and the archive has multiple .wasm entries",
+                    archive_names.wasm_not_found_msg()
                 )));
             }
-            let data = fallback_wasm.ok_or_else(|| {
-                ExtensionError::InstallFailed(format!(
-                    "tar.gz archive does not contain '{}'",
-                    wasm_filename
-                ))
-            })?;
+            let data = fallback_wasm
+                .ok_or_else(|| ExtensionError::InstallFailed(archive_names.wasm_not_found_msg()))?;
             std::fs::write(target_wasm, &data)
                 .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
             tracing::debug!(
@@ -3929,10 +3950,16 @@ impl ExtensionManager {
             return true;
         }
 
+        // Cache hit: avoid the network probe on every list() call. Cache is
+        // keyed by server URL and invalidated when MCP server config changes.
+        if let Some(&cached) = self.mcp_auth_support_cache.read().await.get(&server.url) {
+            return cached;
+        }
+
         // Metadata discovery uses the bounded MCP OAuth client timeouts in
         // `discover_full_oauth_metadata()`, so this list-path probe cannot hang
         // indefinitely on a hostile or slow server URL.
-        match discover_full_oauth_metadata(&server.url).await {
+        let supports = match discover_full_oauth_metadata(&server.url).await {
             Ok(_) => true,
             Err(crate::tools::mcp::auth::AuthError::NotSupported) => false,
             Err(error) => {
@@ -3944,7 +3971,12 @@ impl ExtensionManager {
                 );
                 false
             }
-        }
+        };
+        self.mcp_auth_support_cache
+            .write()
+            .await
+            .insert(server.url.clone(), supports);
+        supports
     }
 
     async fn start_secret_oauth_flow(
@@ -8332,6 +8364,66 @@ mod tests {
         assert_eq!(
             search.parameters_schema["properties"]["query"]["type"],
             "string"
+        );
+    }
+
+    /// Regression: configuring or removing an MCP server must invalidate
+    /// the cached `latent_wasm_provider_actions` map. The cache is built by
+    /// scanning the registry for uninstalled `WasmTool`/`McpServer` entries;
+    /// without invalidation, a registry-backed MCP entry that the user just
+    /// configured (or just removed) would remain in the stale cache and
+    /// either be filtered as "active" forever, or reappear as latent until
+    /// some unrelated operation evicted the cache.
+    #[tokio::test]
+    async fn latent_wasm_provider_actions_cache_invalidates_on_mcp_changes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "warm_cache_tool",
+            r#"{ "description": "warm the cache" }"#,
+        );
+        let manager =
+            make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+
+        // Warm the per-user latent cache.
+        let _ = manager.latent_provider_actions("test").await;
+        assert!(
+            manager
+                .latent_wasm_provider_actions
+                .read()
+                .await
+                .contains_key("test"),
+            "cache should be populated after first call"
+        );
+
+        // add_mcp_server must invalidate the cache.
+        let server = McpServerConfig::new("notion", "https://mcp.notion.com/mcp");
+        manager
+            .add_mcp_server(server, "test")
+            .await
+            .expect("add mcp server");
+        assert!(
+            manager.latent_wasm_provider_actions.read().await.is_empty(),
+            "cache should be cleared after add_mcp_server"
+        );
+
+        // Re-warm the cache, then verify remove_mcp_server invalidates it.
+        let _ = manager.latent_provider_actions("test").await;
+        assert!(
+            manager
+                .latent_wasm_provider_actions
+                .read()
+                .await
+                .contains_key("test"),
+            "cache should be repopulated"
+        );
+        manager
+            .remove_mcp_server("notion", "test")
+            .await
+            .expect("remove mcp server");
+        assert!(
+            manager.latent_wasm_provider_actions.read().await.is_empty(),
+            "cache should be cleared after remove_mcp_server"
         );
     }
 

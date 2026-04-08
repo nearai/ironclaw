@@ -337,7 +337,14 @@ impl AppBuilder {
             tools_builder =
                 tools_builder.with_credentials(Arc::clone(&credential_registry), Arc::clone(ss));
         }
-        let http_interceptor = crate::http_intercept::remap_from_env();
+        // Test-only HTTP host remapping. Gated to debug/test builds so a stray
+        // `IRONCLAW_TEST_HTTP_REMAP` env var on a release deployment cannot
+        // silently redirect outbound HTTP from production to a test endpoint.
+        let http_interceptor = if cfg!(any(test, debug_assertions)) {
+            crate::http_intercept::remap_from_env()
+        } else {
+            None
+        };
         if let Some(ref interceptor) = http_interceptor {
             tools_builder = tools_builder.with_http_interceptor(Arc::clone(interceptor));
         }

@@ -444,7 +444,19 @@ impl AuthManager {
             return Err(ExtensionError::NotInstalled(extension_name.to_string()));
         };
 
-        let mut params = crate::secrets::CreateSecretParams::new(extension_name, trimmed);
+        // Defense in depth: only ever write under the registered credential
+        // name from the skill manifest, never the caller-provided string.
+        // `get_credential_spec` already filters by `c.name == extension_name`,
+        // so this is a tautology today, but it locks the invariant against
+        // future drift in the lookup logic.
+        if spec.name != extension_name {
+            return Err(ExtensionError::ValidationFailed(format!(
+                "Credential name mismatch: requested '{}', resolved '{}'",
+                extension_name, spec.name
+            )));
+        }
+
+        let mut params = crate::secrets::CreateSecretParams::new(&spec.name, trimmed);
         if !spec.provider.is_empty() {
             params = params.with_provider(spec.provider.clone());
         }
@@ -455,7 +467,7 @@ impl AuthManager {
             .map_err(|e| ExtensionError::Other(format!("Failed to store credential: {e}")))?;
 
         Ok(ConfigureResult {
-            message: format!("Credential '{}' stored.", extension_name),
+            message: format!("Credential '{}' stored.", spec.name),
             activated: true,
             restart_required: false,
             auth_url: None,
@@ -962,6 +974,37 @@ Test skill
             .await
             .expect("stored secret");
         assert_eq!(stored.expose(), "ya29.test-token");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn submit_auth_token_rejects_unknown_credential_name() {
+        // Regression: the skill-credential fallback path must only write
+        // secrets whose name is declared by an installed skill manifest.
+        // An unrecognized name must not result in a stored secret.
+        let _env_guard = crate::config::helpers::lock_env();
+        let store = test_store();
+        let skills_dir = tempfile::tempdir().expect("skills dir");
+        let skill_registry = make_skill_registry_with_google_oauth(skills_dir.path()).await;
+        let mgr = AuthManager::new(Arc::clone(&store), Some(skill_registry), None, None);
+
+        let result = mgr
+            .submit_auth_token("not_a_declared_credential", "attacker-value", "user1")
+            .await;
+        assert!(
+            matches!(result, Err(ExtensionError::NotInstalled(_))),
+            "expected NotInstalled, got {:?}",
+            result
+        );
+        // No secret should have been persisted under the attacker-supplied name.
+        let stored = store
+            .get_decrypted("user1", "not_a_declared_credential")
+            .await;
+        assert!(
+            matches!(stored, Err(crate::secrets::SecretError::NotFound(_))),
+            "no secret should be stored for an undeclared credential name, got {:?}",
+            stored
+        );
     }
 
     #[tokio::test]

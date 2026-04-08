@@ -617,8 +617,17 @@ mod tests {
         let outcome = exec.run().await.unwrap();
         assert!(matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "Done!"));
         assert_eq!(exec.thread.step_count, 2);
-        // Should have: system(nudge not counted), assistant+actions, action_result, assistant
-        assert!(exec.thread.messages.len() >= 3);
+        // The action result must be appended to the thread transcript
+        // (otherwise the second LLM call wouldn't see the tool output).
+        // Internal messages carry the action_result; visible messages only
+        // carry assistant text. Assert via internal_messages.
+        assert!(
+            exec.thread
+                .internal_messages
+                .iter()
+                .any(|m| m.role == crate::types::message::MessageRole::ActionResult),
+            "action result must be recorded as an internal message"
+        );
     }
 
     #[tokio::test]
@@ -714,35 +723,16 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn tool_intent_nudge_injected() {
-        let (mut exec, _tx) = make_loop(
-            vec![
-                text_response("Let me search for that"),
-                text_response("The answer is 42"),
-            ],
-            vec![],
-            ThreadConfig {
-                enable_tool_intent_nudge: true,
-                max_tool_intent_nudges: 2,
-                ..ThreadConfig::default()
-            },
-        )
-        .await;
-
-        let outcome = exec.run().await.unwrap();
-        assert!(
-            matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "The answer is 42")
-        );
-        assert_eq!(exec.thread.step_count, 2);
-        // Should have nudge system message
-        assert!(
-            exec.thread
-                .messages
-                .iter()
-                .any(|m| m.content.contains("did not include any tool calls"))
-        );
-    }
+    // NOTE: The tool-intent nudge logic moved out of `loop_engine.rs` and
+    // now lives entirely in the Python orchestrator (`orchestrator/
+    // default.py`, around the "did not include any tool calls" string).
+    // The Rust loop is no longer the path that injects nudges, so a
+    // loop_engine-level test no longer exercises the production code.
+    //
+    // Coverage for the nudge feature lives alongside the orchestrator's
+    // own tests (see `signals_tool_intent_*` in `executor::orchestrator`).
+    // Don't reintroduce a loop_engine test for this without first moving
+    // the injection logic back into Rust.
 
     #[tokio::test]
     async fn events_are_recorded() {
@@ -873,10 +863,12 @@ mod tests {
             matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "done, x was 30")
         );
         assert_eq!(exec.thread.step_count, 2);
-        // The output metadata from first step should be in messages
+        // The output metadata from the first step is plumbed into the
+        // internal transcript so the next LLM call can see it; the
+        // user-visible `messages` only carries assistant text.
         assert!(
             exec.thread
-                .messages
+                .internal_messages
                 .iter()
                 .any(|m| m.content.contains("x = 30"))
         );
