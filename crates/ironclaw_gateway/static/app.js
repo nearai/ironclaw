@@ -3449,6 +3449,15 @@ document.querySelectorAll('.tab-bar button[data-tab]').forEach((btn) => {
 
 function switchTab(tab) {
   currentTab = tab;
+  // NOTE: this function takes a `tab` argument that may originate from
+  // workspace-supplied `layout.tabs.default_tab`, so it must NOT be
+  // refactored into a `querySelector('[data-tab="' + tab + '"]')`
+  // shape. The current form does string equality on the
+  // `getAttribute('data-tab')` value of every button (the loop below)
+  // and on `p.id === 'tab-' + tab` for the panel — neither path
+  // interpolates `tab` into a CSS selector, so a hostile id can't
+  // alter the selector match. If a future change needs to look up a
+  // single button by id directly, wrap `tab` in `CSS.escape()` first.
   document.querySelectorAll('.tab-bar button[data-tab]').forEach((b) => {
     b.classList.toggle('active', b.getAttribute('data-tab') === tab);
   });
@@ -8985,8 +8994,20 @@ if (window.__IRONCLAW_LAYOUT__) {
     // accident, then accept any descendant button.
     if (layout.tabs && layout.tabs.hidden) {
       layout.tabs.hidden.forEach(function(tabId) {
+        // CSS.escape() the workspace-supplied tab id before
+        // interpolation. The endpoint that writes layout.json is now
+        // admin-only (PR #1725 P-H9 fix), so the realistic exploit is
+        // admin-on-self — but a one-line `CSS.escape` removes the
+        // attribute-selector breakout vector entirely. An admin who
+        // pastes a workspace doc fragment into `layout.json` shouldn't
+        // be able to footgun themselves into a side-channel CSS probe.
+        // CSS.escape is a stable browser API since 2015 and ships in
+        // every gateway-supported browser; no fallback needed.
+        var safe = (typeof CSS !== 'undefined' && CSS.escape)
+          ? CSS.escape(tabId)
+          : tabId;
         var btn = document.querySelector(
-          '.tab-bar button[data-tab="' + tabId + '"]'
+          '.tab-bar button[data-tab="' + safe + '"]'
         );
         if (btn) btn.style.display = 'none';
       });

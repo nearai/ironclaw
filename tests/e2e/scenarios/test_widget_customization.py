@@ -527,24 +527,38 @@ async def test_customized_index_carries_csp_nonce_on_every_inline_script(
 
     body = resp.text
 
-    # 4. Contract B: every injected `<script>` block carries the same
-    #    nonce attribute. Walk every `<script ...>` opening tag in the
-    #    body and assert it has `nonce="<the nonce we extracted>"`.
+    # 4. Contract B: every *inline* injected `<script>` block carries the
+    #    same nonce attribute. The base `static/index.html` ships
+    #    several `<script src="...">` tags (i18n bundles, theme-init,
+    #    app.js, marked, DOMPurify) — those are external scripts
+    #    authorized by `script-src 'self' <CDNs>` in the gateway CSP and
+    #    deliberately do NOT carry a nonce. Only the inline blocks that
+    #    `assemble_index` injects (layout JSON island + widget modules)
+    #    need to be nonce-gated. Filtering on the absence of `src=` is
+    #    the cleanest way to separate the two — a future regression
+    #    that drops the nonce off an inline script still fails this
+    #    check, but a baseline `<script src=...>` no longer trips it.
+    #
     #    Skip the inline branding `<style>` blocks — those don't need a
     #    nonce because the gateway's CSP allows `'unsafe-inline'` for
-    #    `style-src`. The test pins that decision: if a future change
-    #    starts nonce-gating styles, the Rust unit test
-    #    `test_assemble_index_widget_style_has_no_nonce` would fail
-    #    first, but this e2e check covers the request-path side too.
+    #    `style-src`. The Rust unit test
+    #    `test_assemble_index_widget_style_has_no_nonce` pins that
+    #    decision; this e2e check covers the request-path side too.
     expected_attr = f'nonce="{nonce}"'
-    script_tags = re.findall(r"<script\b[^>]*>", body)
-    assert script_tags, (
-        "customized HTML must contain at least one <script> tag (the layout JSON injection); "
-        f"got body[:500]={body[:500]!r}"
+    all_script_tags = re.findall(r"<script\b[^>]*>", body)
+    inline_script_tags = [
+        tag for tag in all_script_tags if not re.search(r"\bsrc\s*=", tag)
+    ]
+    assert inline_script_tags, (
+        "customized HTML must contain at least one inline <script> tag "
+        "(the layout JSON island injected by assemble_index). If this "
+        "assertion fires, the customization assembly path stopped emitting "
+        "inline scripts entirely. "
+        f"All <script> tags seen: {all_script_tags!r}"
     )
-    for tag in script_tags:
+    for tag in inline_script_tags:
         assert expected_attr in tag, (
-            f"every injected <script> must carry nonce attribute matching the "
+            f"every inline <script> must carry nonce attribute matching the "
             f"response CSP nonce {nonce!r}; tag without match: {tag!r}"
         )
 

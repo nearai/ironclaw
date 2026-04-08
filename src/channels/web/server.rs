@@ -1074,6 +1074,32 @@ async fn compute_frontend_cache_key(workspace: &crate::workspace::Workspace) -> 
 /// See `crates/ironclaw_gateway/static/app.js` — the layout-config IIFE
 /// already reads `window.__IRONCLAW_LAYOUT__`, which a future change can
 /// populate from a `fetch('/api/frontend/layout')` after auth.
+///
+/// **Cache key TOCTOU window (known and accepted).** The fast-path cache
+/// key is computed by [`compute_frontend_cache_key`] in a single
+/// `Workspace::list` call, but the slow-path data read
+/// (`read_layout_config` + `load_resolved_widgets`) happens *after* that
+/// key is observed, in separate workspace operations. A workspace write
+/// landing between the two — operator edits `layout.json` while a
+/// request is mid-rebuild — can therefore produce a cache entry whose
+/// HTML was assembled from a layout *newer* than the key it's stored
+/// under. The next request after the writes settle will recompute the
+/// key, see a different fingerprint, and replace the cache entry, so
+/// the staleness window is always self-correcting and bounded by one
+/// rebuild round-trip.
+///
+/// This is intentional. Making the read+key+store sequence atomic would
+/// require a workspace-level read lock that the rest of the gateway
+/// doesn't take, and would punish the (much hotter) cache hit path with
+/// extra coordination. The acceptability rests on three observations:
+/// (a) the staleness window is bounded by a single `list()` call's
+/// worth of wall time, (b) the cache is per-process so the staleness
+/// can never outlive `Drop` of `GatewayState`, and (c) layout writes
+/// are rare and operator-initiated — there is no realistic workload
+/// that fires a write at the cadence required to keep the entry
+/// permanently stale. If a future workload changes that calculus, the
+/// right fix is a workspace version generation counter, not a lock
+/// around this function.
 async fn build_frontend_html(state: &GatewayState) -> Option<String> {
     if state.workspace_pool.is_some() {
         // Multi-tenant: refuse the assembly path entirely. See the function
