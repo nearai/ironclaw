@@ -39,17 +39,44 @@ pub struct BrandingConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle: Option<String>,
 
-    /// URL to a logo image.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub logo_url: Option<String>,
+    /// URL to a logo image. Always read via [`Self::safe_logo_url`] —
+    /// the field is `pub(crate)` so external Rust callers must route
+    /// through the validating getter, and the [`skip_unsafe_url`] serde
+    /// predicate drops unsafe values from the JSON output so the JS
+    /// side (`window.__IRONCLAW_LAYOUT__` and
+    /// `GET /api/frontend/layout`) never sees them.
+    #[serde(default, skip_serializing_if = "skip_unsafe_url")]
+    pub(crate) logo_url: Option<String>,
 
-    /// URL to a custom favicon.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub favicon_url: Option<String>,
+    /// URL to a custom favicon. Same access discipline as
+    /// [`Self::logo_url`] — read via [`Self::safe_favicon_url`].
+    #[serde(default, skip_serializing_if = "skip_unsafe_url")]
+    pub(crate) favicon_url: Option<String>,
 
     /// Color overrides (injected as CSS custom properties on `:root`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub colors: Option<BrandingColors>,
+}
+
+/// Serde `skip_serializing_if` predicate for branding URL fields.
+/// Returns `true` (drop the field from JSON output) when the value is
+/// missing, empty, or fails [`is_safe_url`].
+///
+/// This closes the wire-format leg of the URL validation: even if a
+/// future intra-crate Rust caller bypasses the `safe_logo_url` /
+/// `safe_favicon_url` getters and writes a hostile value into the
+/// `pub(crate)` field directly, the JSON serialized to the JS side
+/// (`window.__IRONCLAW_LAYOUT__`) and the response body of
+/// `GET /api/frontend/layout` simply omit the field entirely — no
+/// `null`, no `javascript:` payload, nothing for a future consumer to
+/// inadvertently render. Belt-and-braces with the type-level visibility
+/// downgrade.
+///
+/// `skip_serializing_if` predicates take a `&Option<String>` and return
+/// `bool`; we negate the "is present and safe" check so the field is
+/// dropped on every other branch.
+fn skip_unsafe_url(value: &Option<String>) -> bool {
+    !value.as_deref().is_some_and(is_safe_url)
 }
 
 /// Color overrides for the UI theme.
@@ -184,6 +211,49 @@ impl BrandingConfig {
     pub fn safe_favicon_url(&self) -> Option<&str> {
         self.favicon_url.as_deref().filter(|v| is_safe_url(v))
     }
+}
+
+/// Return `true` if `value` is a safe widget identifier for use in HTML
+/// attributes, CSS attribute selectors, and workspace path segments.
+///
+/// Widget ids land in three places where the surrounding syntax matters:
+///
+/// 1. **HTML attributes** like `data-widget="<id>"` — already protected
+///    by `escape_html_attr` at the bundle layer, but a defense-in-depth
+///    failure of that escape on a hostile id is the kind of cascading
+///    bug we want to make impossible at the type level.
+/// 2. **CSS attribute selectors** in `scope_css`'s
+///    `[data-widget="<id>"]` prefix — this is the un-escaped path the
+///    paranoid review flagged. A literal `"` or `]` in the id would
+///    close the selector and inject an arbitrary CSS rule.
+/// 3. **Workspace path segments** in
+///    `.system/gateway/widgets/{id}/index.js` — `is_safe_segment` is the
+///    primary defense here, but the two checks should agree on what
+///    "safe" means.
+///
+/// The accepted form is intentionally narrow: a single ASCII alphanumeric
+/// followed by zero or more `[a-zA-Z0-9._-]`, capped at 64 chars. This
+/// covers every existing widget fixture (`skills-viewer`, `dashboard_v2`,
+/// `a.b.c`, `widget-1`) while making CSS / HTML / path injection
+/// impossible by construction. Operators who need a broader charset
+/// can lobby for it in a follow-up; widening a regex is a one-line
+/// change, narrowing one after a release is a breaking change.
+pub fn is_safe_widget_id(value: &str) -> bool {
+    if value.is_empty() || value.len() > 64 {
+        return false;
+    }
+    let mut chars = value.chars();
+    // First char must be alphanumeric so an id can never look like an
+    // option flag (`-foo`), a hidden file (`.foo`), or a separator
+    // fragment.
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphanumeric() {
+        return false;
+    }
+    // Subsequent chars: alphanumeric, dot, hyphen, underscore.
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
 /// Return `true` if `value` is a syntactically-safe URL for use in `<img
@@ -444,6 +514,71 @@ mod tests {
     }
 
     #[test]
+    fn test_is_safe_widget_id_accepts_existing_fixtures() {
+        // Every widget id used in this PR's test fixtures and the
+        // FRONTEND.md examples must remain valid — narrowing the regex
+        // after these have shipped would be a breaking change.
+        for id in [
+            "skills-viewer",
+            "dashboard",
+            "dashboard_v2",
+            "widget-1",
+            "a.b.c",
+            "evil", // hostile-payload fixtures pick valid ids on purpose
+            "evil-css",
+            "styled",
+            "empty",
+            "real-id",
+            "spoofed-id",
+            "x",
+            "0",
+            "abc123",
+            "a",
+        ] {
+            assert!(
+                is_safe_widget_id(id),
+                "fixture widget id {id:?} must remain valid"
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_safe_widget_id_rejects_injection_payloads() {
+        // CSS attribute-selector breakout — the paranoid review's P-W4
+        // example. A `"` or `]` would close the `[data-widget="…"]`
+        // prefix in `scope_css` and let the rest of the id inject
+        // arbitrary CSS rules.
+        assert!(!is_safe_widget_id("x\"],.evil{color:red}[x"));
+        assert!(!is_safe_widget_id("a]"));
+        assert!(!is_safe_widget_id("a\""));
+        // HTML attribute breakout shapes (escape_html_attr would catch
+        // them, but we want defense in depth at the type level too).
+        assert!(!is_safe_widget_id("a><script>alert(1)</script>"));
+        assert!(!is_safe_widget_id("a onerror=alert(1)"));
+        // Path traversal / separators (already caught by
+        // `is_safe_segment` in handlers/frontend.rs, but the two checks
+        // should agree on what's safe).
+        assert!(!is_safe_widget_id(".."));
+        assert!(!is_safe_widget_id("a/b"));
+        assert!(!is_safe_widget_id("a\\b"));
+        assert!(!is_safe_widget_id("a\0b"));
+        // Whitespace, control chars, non-ASCII.
+        assert!(!is_safe_widget_id("a b"));
+        assert!(!is_safe_widget_id("a\nb"));
+        assert!(!is_safe_widget_id("日本語"));
+        // Leading non-alphanumeric — id can't look like a flag, hidden
+        // file, or separator fragment.
+        assert!(!is_safe_widget_id("-foo"));
+        assert!(!is_safe_widget_id(".foo"));
+        assert!(!is_safe_widget_id("_foo"));
+        // Empty / overlong.
+        assert!(!is_safe_widget_id(""));
+        assert!(!is_safe_widget_id(&"a".repeat(65)));
+        // 64 chars exactly is the limit.
+        assert!(is_safe_widget_id(&"a".repeat(64)));
+    }
+
+    #[test]
     fn test_is_safe_url_accepts_common_forms() {
         // Absolute HTTPS — the default operator path.
         assert!(is_safe_url("https://example.com/logo.png"));
@@ -540,6 +675,61 @@ mod tests {
             ..Default::default()
         };
         assert!(absent.safe_logo_url().is_none());
+    }
+
+    #[test]
+    fn test_branding_serialize_drops_hostile_urls() {
+        // The wire-format leg of the URL validation. The Rust field is
+        // `pub(crate)` so external code must use the safe getters, but a
+        // future *intra-crate* caller could still write a hostile value
+        // into the field directly. The custom serializer ensures that
+        // hostile value never reaches the JS side via
+        // `window.__IRONCLAW_LAYOUT__` or `GET /api/frontend/layout`.
+        let hostile = BrandingConfig {
+            title: Some("Acme".to_string()),
+            logo_url: Some("javascript:alert(1)".to_string()),
+            favicon_url: Some("data:text/html,<script>alert(1)</script>".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&hostile).expect("serialize");
+
+        // Title survives — it's a separate field with its own escape
+        // path (HTML-escaped at injection time).
+        assert!(json.contains("\"title\":\"Acme\""));
+
+        // Hostile URL fields must NOT appear in the JSON output. The
+        // skip_serializing_if + custom serializer combo means they're
+        // omitted entirely (not present as `null`).
+        assert!(
+            !json.contains("logo_url"),
+            "logo_url with javascript: scheme must be dropped from JSON: {json}"
+        );
+        assert!(
+            !json.contains("favicon_url"),
+            "favicon_url with data: scheme must be dropped from JSON: {json}"
+        );
+        assert!(
+            !json.contains("javascript:"),
+            "javascript: payload must not appear anywhere in serialized output: {json}"
+        );
+        assert!(
+            !json.contains("data:text"),
+            "data: payload must not appear anywhere in serialized output: {json}"
+        );
+    }
+
+    #[test]
+    fn test_branding_serialize_preserves_safe_urls() {
+        // Safe URLs must round-trip through the serializer unchanged so
+        // legitimate operator branding still reaches the JS side.
+        let safe = BrandingConfig {
+            logo_url: Some("https://example.com/logo.png".to_string()),
+            favicon_url: Some("/favicon.ico".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&safe).expect("serialize");
+        assert!(json.contains("\"logo_url\":\"https://example.com/logo.png\""));
+        assert!(json.contains("\"favicon_url\":\"/favicon.ico\""));
     }
 
     #[test]

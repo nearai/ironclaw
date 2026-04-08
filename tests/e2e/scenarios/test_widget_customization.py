@@ -24,6 +24,7 @@ Both flows drive the agent through chat triggers defined in
 """
 
 import json
+import re
 
 import httpx
 import pytest
@@ -448,3 +449,112 @@ async def test_layout_hidden_built_in_tab_and_image_upload_disabled(
         )
     finally:
         await context.close()
+
+
+async def test_customized_index_carries_csp_nonce_on_every_inline_script(
+    ironclaw_server, clean_customizations
+):
+    """Regression: customized HTML must ship a per-response CSP nonce.
+
+    The gateway's customization assembly path injects inline ``<script>``
+    blocks (layout JSON + widget modules) into the HTML, which would be
+    blocked by the static CSP unless every script carries a ``nonce=``
+    attribute matching a ``Content-Security-Policy: ...'nonce-…'``
+    header on the response. The mechanism is unit-tested in
+    ``test_stamp_nonce_into_html_*`` (Rust) but there was no e2e proof
+    that the full pipeline — workspace mutation → ``index_handler`` →
+    nonce stamping → response header — actually wires up correctly under
+    a real HTTP request.
+
+    This is the missing test for that pipeline. The reviewer flagged
+    "no CSP nonce verification" as a coverage gap in the
+    ``feat/frontend-extension-system`` audit. Drives the request through
+    ``httpx`` rather than Playwright because we need to read the
+    response headers byte-for-byte (a browser ``EventSource`` /
+    ``fetch`` won't expose all CSP-related headers, and Playwright's
+    ``page.goto`` happens at the JS layer where the nonce has already
+    been validated and consumed by the browser).
+    """
+    # 1. Write a layout that forces the customized HTML path. Branding
+    #    title is enough — `layout_has_customizations` returns true on
+    #    any non-empty title, which routes index_handler through
+    #    `build_frontend_html` and the nonce stamping path.
+    layout = {"branding": {"title": "Acme AI"}}
+    async with httpx.AsyncClient(timeout=10) as client:
+        write = await client.post(
+            f"{ironclaw_server}/api/memory/write",
+            headers=auth_headers(),
+            json={
+                "path": ".system/gateway/layout.json",
+                "content": json.dumps(layout),
+                "append": False,
+            },
+        )
+        assert write.status_code == 200, (
+            f"failed to write layout.json: "
+            f"status={write.status_code} body={write.text!r}"
+        )
+
+        # 2. Hit `/` directly. The bootstrap route is unauthenticated,
+        #    so no token is required — but we send one anyway to mirror
+        #    a real browser load (the browser fires the auth screen
+        #    after the HTML lands).
+        resp = await client.get(
+            f"{ironclaw_server}/?token={AUTH_TOKEN}",
+            headers=auth_headers(),
+        )
+    assert resp.status_code == 200, resp.text
+
+    # 3. Contract A: response carries a per-response CSP header with a
+    #    `'nonce-...'` source in `script-src`. The static CSP layer
+    #    emits a different header (no nonce); a customized response
+    #    must override it.
+    csp = resp.headers.get("content-security-policy")
+    assert csp is not None, (
+        f"customized index must emit Content-Security-Policy header; got headers={dict(resp.headers)}"
+    )
+    nonce_match = re.search(r"'nonce-([0-9a-f]+)'", csp)
+    assert nonce_match is not None, (
+        f"CSP must include a 'nonce-...' source in script-src, got: {csp}"
+    )
+    nonce = nonce_match.group(1)
+    # The nonce is generated as 16 random bytes hex-encoded → 32 chars.
+    # Pin the length so a future regression that drops to 8 bytes (or
+    # accidentally truncates) fails here with an actionable diff.
+    assert len(nonce) == 32, (
+        f"CSP nonce must be 32 hex chars (16 random bytes), got {len(nonce)}: {nonce}"
+    )
+
+    body = resp.text
+
+    # 4. Contract B: every injected `<script>` block carries the same
+    #    nonce attribute. Walk every `<script ...>` opening tag in the
+    #    body and assert it has `nonce="<the nonce we extracted>"`.
+    #    Skip the inline branding `<style>` blocks — those don't need a
+    #    nonce because the gateway's CSP allows `'unsafe-inline'` for
+    #    `style-src`. The test pins that decision: if a future change
+    #    starts nonce-gating styles, the Rust unit test
+    #    `test_assemble_index_widget_style_has_no_nonce` would fail
+    #    first, but this e2e check covers the request-path side too.
+    expected_attr = f'nonce="{nonce}"'
+    script_tags = re.findall(r"<script\b[^>]*>", body)
+    assert script_tags, (
+        "customized HTML must contain at least one <script> tag (the layout JSON injection); "
+        f"got body[:500]={body[:500]!r}"
+    )
+    for tag in script_tags:
+        assert expected_attr in tag, (
+            f"every injected <script> must carry nonce attribute matching the "
+            f"response CSP nonce {nonce!r}; tag without match: {tag!r}"
+        )
+
+    # 5. Contract C: the placeholder sentinel must be gone — if a
+    #    future regression breaks the substitution (e.g. switches the
+    #    helper to a no-op), the placeholder would still be in the
+    #    body and the browser would reject every script as
+    #    nonce-mismatch. Catching this here gives a clearer
+    #    diagnostic than "blank page in Chrome".
+    assert "__IRONCLAW_CSP_NONCE__" not in body, (
+        "NONCE_PLACEHOLDER sentinel must be substituted before serving — "
+        "found unmodified placeholder in response body"
+    )

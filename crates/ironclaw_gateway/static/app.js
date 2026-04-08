@@ -1476,12 +1476,30 @@ function sanitizeRenderedHtml(html) {
  * Runs registered chat renderers first, then falls back to built-in JSON detection.
  */
 function upgradeStructuredData(contentEl) {
-  // 1. Run registered chat renderers
+  // 1. Run registered chat renderers.
+  //
+  // Each registered renderer receives the live `.message-content` element
+  // and the textContent. The renderer is allowed to mutate the element —
+  // attach event listeners, set data attributes, swap inner DOM — but any
+  // HTML it injects must still pass DOMPurify before it reaches the user.
+  // `renderMarkdown` already runs `sanitizeRenderedHtml` on the markdown
+  // output BEFORE this function is called, but a renderer that does
+  // `contentEl.innerHTML = '<form action="https://attacker">...'` would
+  // bypass that sanitization step entirely. Re-run the sanitizer on
+  // whatever the renderer leaves behind so the same HTML allowlist
+  // applies regardless of how the content got there.
+  //
+  // CSP already blocks `<script>` execution either way; this guards the
+  // form/iframe/object/clickjack-overlay vector that doesn't trip CSP.
   var renderers = (window.IronClaw && IronClaw._chatRenderers) || [];
   for (var i = 0; i < renderers.length; i++) {
     try {
       if (renderers[i].match(contentEl.textContent, contentEl)) {
         renderers[i].render(contentEl, contentEl.textContent);
+        // Post-renderer sanitization — DOMPurify is idempotent on
+        // already-safe HTML, so the cost on the happy path is bounded
+        // by the sanitizer's own walk of the post-renderer subtree.
+        contentEl.innerHTML = sanitizeRenderedHtml(contentEl.innerHTML);
         return; // First matching renderer wins
       }
     } catch (e) {
@@ -8792,13 +8810,43 @@ IronClaw.registerChatRenderer = function(def) {
  * API object exposed to widgets for safe interaction with the app.
  */
 IronClaw.api = {
-  /** Authenticated fetch wrapper — injects the session token. */
+  /**
+   * Authenticated fetch wrapper — injects the session token.
+   *
+   * **Same-origin enforcement.** The session token is injected into the
+   * `Authorization` header on every call, so a cross-origin URL would
+   * leak the token to an attacker-controlled host. Resolve the requested
+   * path against the page's own origin and reject anything that lands on
+   * a different origin. Site-relative paths (`/api/foo`) and same-origin
+   * absolute URLs are still allowed; everything else (`https://evil.example/...`,
+   * protocol-relative `//evil.example/...`, `javascript:`, `data:`) is
+   * rejected with a clear `TypeError` so the widget author sees the
+   * misuse at the offending call site instead of having the request fly
+   * silently to a hostile host.
+   */
   fetch: function(path, opts) {
+    var resolved;
+    try {
+      resolved = new URL(path, window.location.origin);
+    } catch (e) {
+      return Promise.reject(
+        new TypeError('IronClaw.api.fetch: invalid URL ' + JSON.stringify(path))
+      );
+    }
+    if (resolved.origin !== window.location.origin) {
+      return Promise.reject(
+        new TypeError(
+          'IronClaw.api.fetch: cross-origin requests are not allowed (got ' +
+          resolved.origin + ', expected ' + window.location.origin +
+          '). Use a relative path or a same-origin absolute URL.'
+        )
+      );
+    }
     opts = opts || {};
     opts.headers = Object.assign({}, opts.headers || {}, {
       'Authorization': 'Bearer ' + token
     });
-    return fetch(path, opts);
+    return fetch(resolved.toString(), opts);
   },
 
   /** Subscribe to an SSE/WebSocket event type. Returns an unsubscribe function. */

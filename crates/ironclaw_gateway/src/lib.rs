@@ -20,6 +20,7 @@ mod widget;
 pub use bundle::{FrontendBundle, NONCE_PLACEHOLDER, ResolvedWidget, assemble_index};
 pub use layout::{
     BrandingColors, BrandingConfig, ChatConfig, LayoutConfig, TabConfig, WidgetInstanceConfig,
+    is_safe_widget_id,
 };
 pub use widget::{WidgetManifest, WidgetSlot, scope_css};
 

@@ -14,9 +14,9 @@ use axum::{
     response::IntoResponse,
 };
 
-use ironclaw_gateway::{LayoutConfig, ResolvedWidget, WidgetManifest};
+use ironclaw_gateway::{LayoutConfig, ResolvedWidget, WidgetManifest, is_safe_widget_id};
 
-use crate::channels::web::auth::AuthenticatedUser;
+use crate::channels::web::auth::{AdminUser, AuthenticatedUser};
 use crate::channels::web::handlers::memory::resolve_workspace;
 use crate::channels::web::server::GatewayState;
 use crate::workspace::Workspace;
@@ -72,9 +72,19 @@ pub async fn frontend_layout_handler(
 /// `PUT /api/frontend/layout` — update the layout configuration.
 ///
 /// Writes the provided layout config to `.system/gateway/layout.json`.
+///
+/// **Admin-only.** Layout changes are global in single-tenant mode and
+/// shape what every user of the gateway sees: branding, hidden tabs,
+/// disabled widgets. Allowing any `member`-role token to call this
+/// endpoint would let a low-privilege account effectively deface the UI
+/// for the operator. Locked down to `AdminUser` so the same role gate
+/// that protects user management and secrets management also protects
+/// the chrome of the page itself. In multi-tenant mode this still
+/// resolves the per-user workspace via `resolve_workspace`, so admins
+/// configuring their own tenant get the expected behavior.
 pub async fn frontend_layout_update_handler(
     State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
+    AdminUser(user): AdminUser,
     Json(layout): Json<LayoutConfig>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let workspace = resolve_workspace(&state, &user).await?;
@@ -173,6 +183,27 @@ async fn read_widget_manifest(
             return None;
         }
     };
+    // Belt-and-braces: even though `manifest.id` is also checked against
+    // `directory_name` below, the id flows directly into HTML attributes
+    // (`data-widget="<id>"`) and CSS attribute selectors
+    // (`scope_css`'s `[data-widget="<id>"]` prefix). The latter has no
+    // escape pass — a manifest id like `x"],.evil{color:red}[x` would
+    // close the attribute selector and inject arbitrary CSS rules.
+    // Validate the id against the same charset rules the directory name
+    // already passes (`is_safe_widget_id` is the canonical check) so a
+    // hostile id is rejected at load time, before any rendering layer
+    // sees it. The reject-then-mismatch-check ordering matters: a hostile
+    // id is logged as "unsafe charset" rather than as a directory
+    // mismatch, which is the more useful diagnostic.
+    if !is_safe_widget_id(&manifest.id) {
+        tracing::warn!(
+            path = %manifest_path,
+            manifest_id = %manifest.id,
+            "skipping widget: manifest.id contains characters outside the \
+             safe widget identifier charset (alphanumeric + `._-`, ≤64 chars)"
+        );
+        return None;
+    }
     if manifest.id != directory_name {
         tracing::warn!(
             path = %manifest_path,
@@ -266,11 +297,18 @@ pub async fn frontend_widget_file_handler(
     let workspace = resolve_workspace(&state, &user).await?;
     let path = format!("{WIDGETS_DIR}{id}/{file}");
 
-    let doc = workspace.read(&path).await.map_err(|_| {
-        (
-            StatusCode::NOT_FOUND,
-            format!("Widget file not found: {path}"),
-        )
+    // Don't echo the resolved workspace path back to the caller — that
+    // leaks the `.system/gateway/widgets/...` layout to anyone probing
+    // the endpoint and gives an attacker a free oracle for "what
+    // directories exist". Log the full path internally so debugging
+    // a 404 still works, then return a generic message to the client.
+    let doc = workspace.read(&path).await.map_err(|e| {
+        tracing::warn!(
+            workspace_path = %path,
+            error = %e,
+            "widget file not found"
+        );
+        (StatusCode::NOT_FOUND, "Widget file not found".to_string())
     })?;
 
     // Determine MIME type from the file extension (case-insensitive — the
@@ -446,6 +484,48 @@ mod tests {
                      is_safe_segment"
                 );
             }
+        }
+
+        /// Regression for the paranoid review's P-W4 / P-H10 finding:
+        /// a manifest whose `id` would inject CSS or HTML must be
+        /// rejected at load time, even if the on-disk directory name
+        /// passes `is_safe_segment`. The id flows directly into
+        /// `[data-widget="<id>"]` in `scope_css` (no escape pass) and
+        /// into `data-widget="<id>"` HTML attributes — the
+        /// type-level check `is_safe_widget_id` makes both vectors
+        /// impossible regardless of the rendering layer.
+        #[tokio::test]
+        async fn skips_widget_when_manifest_id_fails_charset_check() {
+            let (ws, _dir) = make_workspace().await;
+            // Directory name is a perfectly valid segment...
+            let dir_name = "evil";
+            // ...but the manifest id is the CSS-selector breakout
+            // payload from serrrfirat's P-W4 example.
+            let manifest = serde_json::json!({
+                "id": "x\"],.evil{color:red}[x",
+                "name": "Evil",
+                "slot": "tab",
+            });
+            ws.write(
+                &format!("{WIDGETS_DIR}{dir_name}/manifest.json"),
+                &manifest.to_string(),
+            )
+            .await
+            .expect("write manifest");
+            ws.write(&format!("{WIDGETS_DIR}{dir_name}/index.js"), "/* test */")
+                .await
+                .expect("write index.js");
+
+            assert!(
+                read_widget_manifest(&ws, dir_name).await.is_none(),
+                "manifest with CSS-selector-breakout id must be rejected"
+            );
+            assert!(
+                load_resolved_widgets(&ws, &LayoutConfig::default())
+                    .await
+                    .is_empty(),
+                "load_resolved_widgets must skip charset-failing widgets"
+            );
         }
 
         /// Sanity check: matching id + directory mounts normally.
