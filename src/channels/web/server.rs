@@ -1013,26 +1013,7 @@ fn generate_csp_nonce() -> String {
 use ironclaw_gateway::assets;
 use ironclaw_gateway::{FrontendBundle, LayoutConfig, NONCE_PLACEHOLDER};
 
-use crate::channels::web::handlers::frontend::load_resolved_widgets;
-
-/// Read and parse `.system/gateway/layout.json` from the workspace. Malformed
-/// JSON logs a warning and falls back to the default layout so a broken file
-/// cannot crash the page load.
-async fn read_layout_config(workspace: &crate::workspace::Workspace) -> LayoutConfig {
-    match workspace.read(".system/gateway/layout.json").await {
-        Ok(doc) => match serde_json::from_str(&doc.content) {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    ".system/gateway/layout.json is invalid — falling back to default layout"
-                );
-                LayoutConfig::default()
-            }
-        },
-        Err(_) => LayoutConfig::default(),
-    }
-}
+use crate::channels::web::handlers::frontend::{load_resolved_widgets, read_layout_config};
 
 /// Compute a cheap cache key for `build_frontend_html` — one `list` call
 /// against `.system/gateway/`. The directory entry for `widgets/` carries the
@@ -1141,6 +1122,7 @@ fn layout_has_customizations(layout: &LayoutConfig) -> bool {
         || t.default_tab.is_some()
         || c.suggestions.is_some()
         || c.image_upload.is_some()
+        || c.upgrade_inline_json.is_some()
         || !layout.widgets.is_empty()
 }
 
@@ -1193,7 +1175,22 @@ async fn index_handler(State(state): State<Arc<GatewayState>>) -> Response {
         .into_response()
 }
 
-async fn css_handler(State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
+/// Compute the strong ETag value for a CSS body.
+///
+/// Strong validators are quoted, sha-prefixed, and truncated to 16 hex chars
+/// (64 bits) — collisions are statistically irrelevant for cache validation
+/// and the short form keeps headers compact. The same scheme is used for
+/// both the embedded base stylesheet and the workspace-customized variant
+/// so a flip between the two flavors naturally invalidates the client's
+/// cached copy.
+fn css_etag(body: &str) -> String {
+    let digest = Sha256::digest(body.as_bytes());
+    let hex = hex::encode(digest);
+    // 16 hex chars = 64 bits, plenty for content addressing.
+    format!("\"sha256-{}\"", &hex[..16])
+}
+
+async fn css_handler(State(state): State<Arc<GatewayState>>, headers: HeaderMap) -> Response {
     // Append custom CSS from `.system/gateway/custom.css` if it exists.
     //
     // The hot path (no workspace overlay) borrows `assets::STYLE_CSS` directly
@@ -1211,13 +1208,47 @@ async fn css_handler(State(state): State<Arc<GatewayState>>) -> impl IntoRespons
         },
         None => std::borrow::Cow::Borrowed(assets::STYLE_CSS),
     };
+
+    // Strong validator over the assembled body. The cache key naturally
+    // tracks both base stylesheet edits (compile-time) and `custom.css`
+    // edits (workspace mutation) — operators no longer need to ask users
+    // to hard-refresh after tweaking branding.
+    let etag = css_etag(&css);
+
+    // Conditional GET: if the client already holds this exact body, send a
+    // 304 with no body and let the browser reuse its cached copy. RFC 9110
+    // §13.1.2 — `If-None-Match` is a list of validators; we accept either
+    // an exact match or the literal `*`. Anything else falls through to a
+    // full 200 response.
+    if let Some(value) = headers.get(header::IF_NONE_MATCH)
+        && let Ok(s) = value.to_str()
+        && s.split(',').any(|v| {
+            let v = v.trim();
+            v == "*" || v == etag
+        })
+    {
+        return (
+            StatusCode::NOT_MODIFIED,
+            [
+                (header::ETAG, etag.as_str()),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+        )
+            .into_response();
+    }
+
     (
         [
-            (header::CONTENT_TYPE, "text/css"),
-            (header::CACHE_CONTROL, "no-cache"),
+            (header::CONTENT_TYPE, "text/css".to_string()),
+            // Keep `no-cache` so the browser always revalidates — combined
+            // with the ETag this gives us "fast 304" semantics rather than
+            // a stale `max-age` window where operator edits don't show up.
+            (header::CACHE_CONTROL, "no-cache".to_string()),
+            (header::ETAG, etag),
         ],
         css,
     )
+        .into_response()
 }
 
 async fn js_handler() -> impl IntoResponse {
@@ -4581,6 +4612,100 @@ mod tests {
             a.chars().all(|c| c.is_ascii_hexdigit()),
             "nonce must be lowercase hex"
         );
+    }
+
+    #[test]
+    fn test_css_etag_is_strong_validator_format() {
+        // Strong validators are double-quoted (no `W/` prefix). The
+        // sha-prefix lets future readers identify the digest function at a
+        // glance, and 16 hex chars (64 bits) is plenty for content-address
+        // collision avoidance on a single-tenant CSS payload.
+        let etag = css_etag("body { color: red; }");
+        assert!(etag.starts_with("\"sha256-"));
+        assert!(etag.ends_with('"'));
+        assert!(!etag.starts_with("W/"));
+        // Header value must be ASCII so it can land in a `HeaderValue`.
+        assert!(etag.is_ascii());
+    }
+
+    #[test]
+    fn test_css_etag_changes_when_body_changes() {
+        // The whole point of the ETag: editing `custom.css` must produce
+        // a new validator so the browser fetches the updated body.
+        let base = css_etag("body { color: red; }");
+        let edited = css_etag("body { color: blue; }");
+        assert_ne!(base, edited);
+        // Adding even a single byte must invalidate.
+        let appended = css_etag("body { color: red; } ");
+        assert_ne!(base, appended);
+    }
+
+    #[test]
+    fn test_css_etag_stable_for_identical_body() {
+        // Two requests against the same assembled body must produce the
+        // same validator — otherwise every request misses the cache.
+        let body = "body { color: red; }";
+        assert_eq!(css_etag(body), css_etag(body));
+    }
+
+    #[tokio::test]
+    async fn test_css_handler_returns_etag_and_serves_304_on_match() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        // Pure-static path: no workspace overlay, so the body is exactly
+        // the embedded `STYLE_CSS`. Cheap and deterministic.
+        let state = test_gateway_state(None);
+        let app = Router::new()
+            .route("/style.css", get(css_handler))
+            .with_state(state);
+
+        // First request: 200 with ETag header.
+        let req = axum::http::Request::builder()
+            .uri("/style.css")
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let etag = resp
+            .headers()
+            .get(header::ETAG)
+            .expect("ETag header must be present on 200")
+            .to_str()
+            .expect("ETag is ASCII")
+            .to_string();
+        assert!(etag.starts_with("\"sha256-"));
+
+        // Second request with `If-None-Match` matching the validator: 304
+        // and an empty body. The browser keeps its cached copy.
+        let req = axum::http::Request::builder()
+            .uri("/style.css")
+            .header(header::IF_NONE_MATCH, &etag)
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+        let body = axum::body::to_bytes(resp.into_body(), 1024)
+            .await
+            .expect("body");
+        assert!(body.is_empty(), "304 must have an empty body");
+
+        // Third request with a stale validator: 200 again. Operators
+        // expect this when `custom.css` changes underneath them — the
+        // browser revalidates, sees the body shifted, and fetches anew.
+        let req = axum::http::Request::builder()
+            .uri("/style.css")
+            .header(header::IF_NONE_MATCH, "\"sha256-0000000000000000\"")
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

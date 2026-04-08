@@ -28,33 +28,45 @@ const LAYOUT_PATH: &str = ".system/gateway/layout.json";
 /// kept so it can be passed straight to `Workspace::list()`.
 const WIDGETS_DIR: &str = ".system/gateway/widgets/";
 
-/// `GET /api/frontend/layout` — return the current layout configuration.
+/// Read and parse `.system/gateway/layout.json` from the workspace.
 ///
-/// Reads `.system/gateway/layout.json` from the workspace. Returns an empty
-/// default config if the file doesn't exist or is invalid (with a warning
-/// logged for the invalid case).
-pub async fn frontend_layout_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-) -> Result<Json<LayoutConfig>, (StatusCode, String)> {
-    let workspace = resolve_workspace(&state, &user).await?;
-
-    let layout = match workspace.read(LAYOUT_PATH).await {
+/// * Missing file → returns [`LayoutConfig::default`] silently. A workspace
+///   with no customizations is the common case and shouldn't generate log
+///   noise.
+/// * Malformed JSON → logs a `warn!` with the parse error and falls back to
+///   the default. A broken file must never be allowed to crash a page load.
+///
+/// Single source of truth for layout reads: both
+/// [`frontend_layout_handler`] (the public `GET /api/frontend/layout`
+/// endpoint) and `build_frontend_html` in
+/// `src/channels/web/server.rs` call through here so a future change to the
+/// fallback / parse / warning behavior only needs to land in one place.
+pub async fn read_layout_config(workspace: &Workspace) -> LayoutConfig {
+    match workspace.read(LAYOUT_PATH).await {
         Ok(doc) => match serde_json::from_str(&doc.content) {
             Ok(l) => l,
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     path = LAYOUT_PATH,
-                    "layout.json is invalid — returning default layout"
+                    "layout.json is invalid — falling back to default layout"
                 );
                 LayoutConfig::default()
             }
         },
         Err(_) => LayoutConfig::default(),
-    };
+    }
+}
 
-    Ok(Json(layout))
+/// `GET /api/frontend/layout` — return the current layout configuration.
+///
+/// Thin wrapper over [`read_layout_config`].
+pub async fn frontend_layout_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+) -> Result<Json<LayoutConfig>, (StatusCode, String)> {
+    let workspace = resolve_workspace(&state, &user).await?;
+    Ok(Json(read_layout_config(&workspace).await))
 }
 
 /// `PUT /api/frontend/layout` — update the layout configuration.

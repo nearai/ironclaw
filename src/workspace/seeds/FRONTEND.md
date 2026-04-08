@@ -50,3 +50,22 @@ Create custom UI components in `.system/gateway/widgets/{id}/`. The directory na
 - `PUT /api/frontend/layout` — update layout config
 - `GET /api/frontend/widgets` — list installed widgets
 - `GET /api/frontend/widget/{id}/{file}` — serve widget file
+
+## Security model
+
+**Widgets run inside the gateway page with full session authority.** A widget's `index.js` is loaded as an inline ES module (under a per-response CSP nonce) into the same browser document as the rest of the gateway UI, which means:
+
+- Widgets can call any gateway API the logged-in user can call. The runtime exposes `IronClaw.api.fetch(...)`, which forwards the user's bearer token automatically — there is no per-widget capability sandbox.
+- Widgets can read and modify the same DOM as the built-in tabs, including the chat input, message history, and any other widget on the page.
+- Widget CSS is scoped to `[data-widget="{id}"]`, but JavaScript is **not** sandboxed. A widget can reach out of its tab panel via `document.querySelector` and touch global state.
+
+This is acceptable because the trust boundary lives one layer up: widgets are loaded from `.system/gateway/widgets/` in the **workspace**, which is itself a privileged store accessible only via authenticated `memory_write` calls. Anything that can write a widget file can already drive the agent directly. The widget runtime is therefore an extension surface for the operator, not a sandbox for untrusted code — treat installing a widget the same way you would treat running a script under your own user.
+
+**Practical implications:**
+
+- Do not install widgets from sources you wouldn't paste into a terminal as a shell script.
+- A widget that calls `IronClaw.api.fetch('/api/memory/write', ...)` can mutate any workspace file, including its own source — review widget code before installing it.
+- The path-traversal validator (`is_safe_segment` / `is_safe_relative_path` in `src/channels/web/handlers/frontend.rs`) and the `manifest.id == directory_name` check protect against widget-to-widget confusion, not against malicious-but-well-formed widgets.
+- Defense-in-depth XSS protection (`escape_tag_close` for inline script/style breakouts, `is_safe_css_color` for branding values, CSP nonces) keeps a hostile `layout.json` field from breaking the page chrome — but those defenses do not apply to widget JS, which is intentionally given full execution authority.
+
+The gateway CSP allows `'nonce-…'` only for `<script>` tags emitted by `assemble_index`, so a widget cannot inject *additional* inline scripts at runtime — but it can absolutely use `IronClaw.api.fetch` and `eval`-equivalent constructs that don't trip the CSP. Operators who want stricter isolation should run untrusted UI code in an `<iframe sandbox>` mounted by a *trusted* widget rather than registering it directly.

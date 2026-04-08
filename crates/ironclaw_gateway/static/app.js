@@ -1489,8 +1489,18 @@ function upgradeStructuredData(contentEl) {
     }
   }
 
-  // 2. Built-in: detect and upgrade inline JSON objects
-  upgradeInlineJson(contentEl);
+  // 2. Built-in: detect and upgrade inline JSON objects.
+  //
+  // Off by default — the bracket-counting heuristic false-positives on
+  // any prose containing balanced `{...}` (e.g. an assistant explaining
+  // "set the value to {x: 1, y: 2}"), and the rewrite then mangles the
+  // explanation into a styled card. Operators that pipe structured data
+  // through chat opt in via `chat.upgrade_inline_json` in
+  // `.system/gateway/layout.json`.
+  var layoutCfg = window.__IRONCLAW_LAYOUT__;
+  if (layoutCfg && layoutCfg.chat && layoutCfg.chat.upgrade_inline_json === true) {
+    upgradeInlineJson(contentEl);
+  }
 }
 
 /**
@@ -8891,8 +8901,16 @@ function _addWidgetTab(def) {
     def.init(panel, IronClaw.api);
   } catch (e) {
     console.error('[IronClaw] Widget "' + def.id + '" init failed:', e);
+    // Escape both the widget id and the thrown message before injecting
+    // them into the error banner. CSP blocks the script vector here, but
+    // every other branch in this file routes user-controlled strings
+    // through escapeHtml(), and an unescaped innerHTML write is a
+    // discipline regression that future readers shouldn't have to
+    // re-litigate. textContent would also work, but innerHTML lets the
+    // styled <div> survive without an extra wrapper element.
     panel.innerHTML = '<div style="padding:2rem;color:var(--color-error,red);">Widget "' +
-      def.id + '" failed to load: ' + (e.message || e) + '</div>';
+      escapeHtml(def.id) + '" failed to load: ' +
+      escapeHtml(String(e && e.message ? e.message : e)) + '</div>';
   }
 }
 

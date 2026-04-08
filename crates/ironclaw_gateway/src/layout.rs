@@ -90,6 +90,18 @@ pub struct ChatConfig {
     /// Enable image upload in the chat input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_upload: Option<bool>,
+
+    /// Opt in to converting inline JSON-shaped fragments in assistant
+    /// messages into styled data cards (`upgradeInlineJson` in `app.js`).
+    ///
+    /// Disabled by default because the heuristic pattern-matches any
+    /// balanced `{...}` in rendered markdown — prose containing JSON-like
+    /// text (`"yes, set the value to {x: 1, y: 2}"`) gets false-positive
+    /// rewritten into a card. Operators that drive structured data
+    /// through chat (e.g., a workflow that emits real JSON in every
+    /// reply) can flip this on; everyone else gets prose left alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upgrade_inline_json: Option<bool>,
 }
 
 /// Per-widget instance configuration.
@@ -347,6 +359,28 @@ mod tests {
         assert!(!is_safe_css_color(""));
         assert!(!is_safe_css_color("   "));
         assert!(!is_safe_css_color(&"#".repeat(200)));
+    }
+
+    #[test]
+    fn test_chat_upgrade_inline_json_defaults_to_none() {
+        // The opt-in flag must default to `None` (== not set, treated as
+        // off) so an existing layout.json without the field doesn't
+        // suddenly start rewriting prose into JSON cards after upgrade.
+        let cfg: ChatConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.upgrade_inline_json.is_none());
+    }
+
+    #[test]
+    fn test_chat_upgrade_inline_json_roundtrips_explicit_true() {
+        let cfg: ChatConfig = serde_json::from_str(r#"{"upgrade_inline_json": true}"#).unwrap();
+        assert_eq!(cfg.upgrade_inline_json, Some(true));
+        // Round-trip through serialize so the JS-visible JSON shape is
+        // pinned: explicit `true` survives, default `None` is omitted.
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("\"upgrade_inline_json\":true"));
+        let omitted: ChatConfig = ChatConfig::default();
+        let json = serde_json::to_string(&omitted).unwrap();
+        assert!(!json.contains("upgrade_inline_json"));
     }
 
     #[test]
