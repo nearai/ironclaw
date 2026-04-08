@@ -24,7 +24,9 @@ use crate::orchestrator::auth::CredentialGrant;
 use crate::orchestrator::job_manager::{ContainerJobManager, JobCreationParams, JobMode};
 use crate::ownership::Owned;
 use crate::secrets::SecretsStore;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{
+    ApprovalRequirement, EngineCompatibility, Tool, ToolError, ToolOutput, require_str,
+};
 use ironclaw_common::AppEvent;
 
 /// Lazy scheduler reference, filled after Agent::new creates the Scheduler.
@@ -1065,6 +1067,10 @@ impl Tool for CreateJobTool {
     fn requires_sanitization(&self) -> bool {
         false
     }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
+    }
 }
 
 /// Tool for listing jobs.
@@ -1381,6 +1387,10 @@ impl Tool for CancelJobTool {
 
     fn requires_sanitization(&self) -> bool {
         false
+    }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
     }
 }
 

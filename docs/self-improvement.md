@@ -204,10 +204,14 @@ The mission is capped at 5 threads per day (`max_threads_per_day: 5`).
 
 ## Debugging Self-Improvement
 
-Enable trace logging to see the self-improvement loop in action:
+Enable trace logging to see the self-improvement loop in action.
+`IRONCLAW_RECORD_TRACE=1` is the unified flag — it enables `RecordingLlm`,
+which captures every LLM interaction into a shared `trace_*.json` fixture
+file. Engine v2 reuses the same provider chain, so its LLM calls are recorded
+through the same mechanism (no separate engine trace file):
 
 ```bash
-ENGINE_V2=true ENGINE_V2_TRACE=1 RUST_LOG=ironclaw_engine=debug cargo run
+ENGINE_V2=true IRONCLAW_RECORD_TRACE=1 RUST_LOG=ironclaw_engine=debug cargo run
 ```
 
 Look for:

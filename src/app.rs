@@ -326,14 +326,16 @@ impl AppBuilder {
 
         // Initialize tool registry with credential injection support
         let credential_registry = Arc::new(SharedCredentialRegistry::new());
-        let tools = if let Some(ref ss) = self.secrets_store {
-            Arc::new(
-                ToolRegistry::new()
-                    .with_credentials(Arc::clone(&credential_registry), Arc::clone(ss)),
-            )
+        let engine_version = if crate::bridge::is_engine_v2_enabled() {
+            crate::tools::EngineVersion::V2
         } else {
-            Arc::new(ToolRegistry::new())
+            crate::tools::EngineVersion::V1
         };
+        let mut registry = ToolRegistry::new().with_engine_version(engine_version);
+        if let Some(ref ss) = self.secrets_store {
+            registry = registry.with_credentials(Arc::clone(&credential_registry), Arc::clone(ss));
+        }
+        let tools = Arc::new(registry);
         tools.register_builtin_tools();
         tools.register_tool_info();
 
