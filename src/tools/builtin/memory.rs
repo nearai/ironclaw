@@ -359,7 +359,7 @@ impl Tool for MemoryWriteTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
-        let layer = params.get("layer").and_then(|v| v.as_str());
+        let layer = params.get("layer").and_then(|v| v.as_str()).filter(|s| !s.is_empty() && *s != "null");
         let force = params
             .get("force")
             .and_then(|v| v.as_bool())
@@ -419,18 +419,15 @@ impl Tool for MemoryWriteTool {
         }
 
         // Patch mode: if old_string is provided, do search-and-replace instead of write/append.
-        let old_string = params.get("old_string").and_then(|v| v.as_str());
+        let old_string = params.get("old_string").and_then(|v| v.as_str()).filter(|s| !s.is_empty() && *s != "null");
         if let Some(old_str) = old_string {
             if old_str.is_empty() {
                 return Err(ToolError::InvalidParameters(
                     "old_string cannot be empty".to_string(),
                 ));
             }
-            if layer.is_some() {
-                return Err(ToolError::InvalidParameters(
-                    "patch mode (old_string/new_string) cannot be combined with layer".to_string(),
-                ));
-            }
+            // Silently ignore layer in patch mode — LLMs frequently pass both.
+            // The layer parameter has no effect when doing search-and-replace.
             let new_str = params
                 .get("new_string")
                 .and_then(|v| v.as_str())
@@ -444,18 +441,31 @@ impl Tool for MemoryWriteTool {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
-            let result = workspace
+            match workspace
                 .patch(&resolved_path, old_str, new_str, replace_all)
                 .await
-                .map_err(map_write_err)?;
-
-            let output = serde_json::json!({
-                "status": "patched",
-                "path": resolved_path,
-                "replacements": result.replacements,
-                "content_length": result.document.content.len(),
-            });
-            return Ok(ToolOutput::success(output, start.elapsed()));
+            {
+                Ok(result) => {
+                    let output = serde_json::json!({
+                        "status": "patched",
+                        "path": resolved_path,
+                        "replacements": result.replacements,
+                        "content_length": result.document.content.len(),
+                    });
+                    return Ok(ToolOutput::success(output, start.elapsed()));
+                }
+                Err(_) if has_content => {
+                    // Patch failed (old_string not found) but content was also
+                    // provided — fall through to normal write/append instead of
+                    // erroring. LLMs frequently pass old_string alongside content
+                    // when they just want to append.
+                    tracing::info!(
+                        path = %resolved_path,
+                        "patch failed, falling back to write/append since content is present"
+                    );
+                }
+                Err(e) => return Err(map_write_err(e)),
+            }
         }
 
         // When a layer is specified, route through layer-aware methods for ALL targets.

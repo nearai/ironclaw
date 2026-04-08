@@ -323,11 +323,19 @@ fn coerce_string_value(s: &str, schema: &serde_json::Value) -> Option<serde_json
     // LLMs often send "" instead of null for optional fields. Coerce empty
     // strings to null when the schema allows null but not string, or allows
     // both but the value is empty (a string field with content "" is kept).
-    if s.is_empty() && schema_allows_type(schema, "null") && !schema_allows_type(schema, "string") {
+    // LLMs send "" or the literal string "null" instead of JSON null.
+    if (s.is_empty() || s == "null") && schema_allows_type(schema, "null") && !schema_allows_type(schema, "string") {
         return Some(serde_json::Value::Null);
     }
 
     if schema_allows_type(schema, "string") {
+        // Local LLMs (e.g. llama.cpp with --jinja) sometimes double-quote
+        // string values: the JSON string contains literal quote characters,
+        // e.g. `"\"private\""` instead of `"private"`. Strip them.
+        if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+            let inner = &s[1..s.len() - 1];
+            return Some(serde_json::Value::String(inner.to_string()));
+        }
         return None;
     }
 
