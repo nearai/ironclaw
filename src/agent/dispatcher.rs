@@ -48,6 +48,7 @@ pub(super) enum AgenticLoopResult {
     },
     /// Auth flow initiated — config card already sent, suppress text response.
     AuthPending {
+        instructions: String,
         turn_usage: TurnUsageSummary,
     },
 }
@@ -317,7 +318,7 @@ impl Agent {
                 pending,
                 turn_usage,
             }),
-            Ok(LoopOutcome::AuthPending) => Ok(AgenticLoopResult::AuthPending { turn_usage }),
+            Ok(LoopOutcome::AuthPending(instructions)) => Ok(AgenticLoopResult::AuthPending { instructions, turn_usage }),
             Err(error) => Ok(AgenticLoopResult::Failed { error, turn_usage }),
         }
     }
@@ -1049,7 +1050,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         }
 
         // === Phase 3: Post-flight (sequential, in original order) ===
-        let mut deferred_auth = false;
+        let mut deferred_auth: Option<String> = None;
 
         for (pf_idx, (tc, outcome)) in preflight.into_iter().enumerate() {
             match outcome {
@@ -1140,7 +1141,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     }
 
                     // Check for auth awaiting
-                    if !deferred_auth
+                    if deferred_auth.is_none()
                         && let Some((ext_name, instructions)) =
                             check_auth_required(&tc.name, &tool_result)
                     {
@@ -1165,7 +1166,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                                 &self.message.metadata,
                             )
                             .await;
-                        deferred_auth = true;
+                        deferred_auth = Some(instructions);
                     }
 
                     // Stash full output so subsequent tools can reference it
@@ -1208,8 +1209,8 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         }
 
         // Return auth-pending after all results are recorded (card already sent)
-        if deferred_auth {
-            return Ok(Some(LoopOutcome::AuthPending));
+        if let Some(instructions) = deferred_auth {
+            return Ok(Some(LoopOutcome::AuthPending(instructions)));
         }
 
         // Handle approval if a tool needed it

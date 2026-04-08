@@ -226,7 +226,10 @@ async def test_auth_required_sse_without_duplicate_response(auth_sse_server):
     async def collect_sse():
         try:
             async with sse_stream(base_url, timeout=60) as resp:
-                async for raw_line in resp.content:
+                while len(collected_events) < 50:
+                    raw_line = await resp.content.readline()
+                    if not raw_line:
+                        break
                     line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
                     if line.startswith("data:"):
                         try:
@@ -234,8 +237,6 @@ async def test_auth_required_sse_without_duplicate_response(auth_sse_server):
                             collected_events.append(data)
                         except json.JSONDecodeError:
                             pass
-                    if len(collected_events) > 50:
-                        break
         except asyncio.CancelledError:
             pass
 
@@ -254,11 +255,15 @@ async def test_auth_required_sse_without_duplicate_response(auth_sse_server):
     )
     assert send_r.status_code == 202
 
-    # Wait for events to arrive
+    # Wait for auth_required, then collect for a grace period to catch any
+    # trailing duplicate response events that might arrive shortly after.
     deadline = asyncio.get_running_loop().time() + 45
+    auth_seen_at = None
     while asyncio.get_running_loop().time() < deadline:
         event_types = [e.get("type") for e in collected_events]
-        if "auth_required" in event_types:
+        if "auth_required" in event_types and auth_seen_at is None:
+            auth_seen_at = asyncio.get_running_loop().time()
+        if auth_seen_at and (asyncio.get_running_loop().time() - auth_seen_at) > 3:
             break
         await asyncio.sleep(0.5)
 

@@ -3889,7 +3889,12 @@ function showConfigureModal(name, options) {
       }
       renderConfigureModal(name, secrets, setupFields, setup.onboarding || null, options);
     })
-    .catch((err) => showToast(I18n.t('extensions.setupLoadFailed', { message: err.message }), 'error'));
+    .catch((err) => {
+      showToast(I18n.t('extensions.setupLoadFailed', { message: err.message }), 'error');
+      if (options && options.authData) {
+        showAuthCard(options.authData);
+      }
+    });
 }
 
 function renderConfigureModal(name, secrets, setupFields, onboarding, options) {
@@ -4147,8 +4152,10 @@ function cancelAuthFromConfigureModal(overlay) {
     : apiFetch('/api/chat/auth-cancel', { method: 'POST', body: { extension_name: extName, thread_id: threadId || currentThreadId || undefined } });
   request.catch(function() {});
   overlay.remove();
-  setAuthFlowPending(false);
-  enableChatInput();
+  if (!document.querySelector('.configure-overlay') && !document.querySelector('.auth-card')) {
+    setAuthFlowPending(false);
+    enableChatInput();
+  }
 }
 
 function currentUserIsAdmin() {
