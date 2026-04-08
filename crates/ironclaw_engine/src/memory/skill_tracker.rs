@@ -21,7 +21,14 @@ pub struct SkillTracker {
 fn compute_content_hash(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
-    format!("sha256:{:x}", hasher.finalize())
+    format!(
+        "sha256:{}",
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>()
+    )
 }
 
 impl SkillTracker {
@@ -108,11 +115,10 @@ impl SkillTracker {
             });
         }
 
-        let archived_hash = if meta.content_hash.is_empty() {
-            compute_content_hash(&doc.content)
-        } else {
-            meta.content_hash.clone()
-        };
+        // Always recompute from actual content — meta.content_hash may have
+        // drifted if the doc was updated outside this tracker (e.g. direct
+        // memory_write).
+        let archived_hash = compute_content_hash(&doc.content);
         meta.revisions.push(SkillRevision {
             version: meta.version,
             content: doc.content.clone(),
@@ -122,6 +128,11 @@ impl SkillTracker {
             content_hash: archived_hash,
             archived_at: Some(chrono::Utc::now()),
         });
+        // Cap in-memory revisions at 10 to bound metadata size on every
+        // load_memory_doc.  This is a pragmatic trade-off: full prompt
+        // snapshots embedded in the skill JSON can grow to many KB per
+        // revision.  Older revisions are dropped; if long-term retention is
+        // needed, they should be externalized to separate MemoryDocs.
         if meta.revisions.len() > 10 {
             let keep_from = meta.revisions.len() - 10;
             meta.revisions.drain(0..keep_from);
@@ -180,6 +191,8 @@ impl SkillTracker {
             meta.content_hash = revision.content_hash;
             meta.revisions
                 .retain(|archived| archived.version < revision.version);
+            meta.repairs
+                .retain(|repair| repair.to_version <= revision.version);
             meta.parent_version = meta.revisions.iter().map(|archived| archived.version).max();
             revision.content
         } else {

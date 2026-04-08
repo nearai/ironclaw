@@ -462,7 +462,19 @@ impl MissionManager {
                         }
 
                         let trace = crate::executor::trace::build_trace(&thread);
+                        // Single pass over events for both skill-repair and
+                        // error-diagnosis triggers (avoids repeated iteration
+                        // on large event logs).
+                        let (error_messages, _observed_actions) =
+                            collect_errors_and_actions(&thread);
                         let active_skills = thread.active_skills();
+
+                        // ── Trigger 1: Skill repair ───────────────────────
+                        // NOTE: skill-repair and error-diagnosis can both fire
+                        // for the same thread. Each targets a different mission
+                        // so they won't collide, but both may spawn concurrent
+                        // threads. This is intentional — skill-repair fixes the
+                        // *skill* while error-diagnosis fixes the *prompt/orchestrator*.
                         if !active_skills.is_empty() {
                             let tracker = SkillTracker::new(Arc::clone(&mgr.store));
                             let success = thread_completed_successfully(&thread, &trace);
@@ -505,8 +517,6 @@ impl MissionManager {
                                     })
                                 })
                                 .collect();
-
-                            let error_messages = collect_error_messages(&thread);
 
                             let payload = serde_json::json!({
                                 "source_thread_id": event.thread_id.0.to_string(),
@@ -1480,46 +1490,36 @@ fn triggered_skill_provenance(mission: &Mission, doc_id: DocId) -> Option<Active
         .and_then(|skills| skills.into_iter().find(|skill| skill.doc_id == doc_id))
 }
 
-fn collect_error_messages(thread: &Thread) -> Vec<String> {
-    thread
-        .events
-        .iter()
-        .filter_map(|event| {
-            if let crate::types::event::EventKind::ActionFailed {
-                action_name, error, ..
-            } = &event.kind
-                && !is_recoverable_action_failure(error)
-            {
-                Some(format!("{action_name}: {error}"))
-            } else {
-                None
-            }
-        })
-        .take(10)
-        .collect()
-}
-
-fn collect_observed_actions(thread: &Thread) -> Vec<String> {
+/// Collects error messages and deduplicated observed action names in a single
+/// pass over `thread.events`.  Previous implementation used separate passes
+/// which is wasteful for threads with large event logs.
+fn collect_errors_and_actions(thread: &Thread) -> (Vec<String>, Vec<String>) {
+    let mut error_messages = Vec::new();
     let mut actions = Vec::new();
     let mut seen = HashSet::new();
 
     for event in &thread.events {
-        let action_name = match &event.kind {
-            crate::types::event::EventKind::ActionExecuted { action_name, .. }
-            | crate::types::event::EventKind::ActionFailed { action_name, .. } => {
-                Some(action_name.clone())
+        match &event.kind {
+            crate::types::event::EventKind::ActionFailed {
+                action_name, error, ..
+            } => {
+                if !is_recoverable_action_failure(error) && error_messages.len() < 10 {
+                    error_messages.push(format!("{action_name}: {error}"));
+                }
+                if seen.insert(action_name.clone()) {
+                    actions.push(action_name.clone());
+                }
             }
-            _ => None,
-        };
-
-        if let Some(action_name) = action_name
-            && seen.insert(action_name.clone())
-        {
-            actions.push(action_name);
+            crate::types::event::EventKind::ActionExecuted { action_name, .. } => {
+                if seen.insert(action_name.clone()) {
+                    actions.push(action_name.clone());
+                }
+            }
+            _ => {}
         }
     }
 
-    actions
+    (error_messages, actions)
 }
 
 fn learning_terminal_state(
@@ -1717,8 +1717,7 @@ fn build_skill_gap_payload(
     trace: &ExecutionTrace,
     active_skills: &[ActiveSkillProvenance],
 ) -> Option<serde_json::Value> {
-    let error_messages = collect_error_messages(thread);
-    let observed_actions = collect_observed_actions(thread);
+    let (error_messages, observed_actions) = collect_errors_and_actions(thread);
     let repair_hints = infer_skill_repair_hints(thread, trace, &error_messages, &observed_actions);
     if repair_hints.is_empty() {
         return None;
