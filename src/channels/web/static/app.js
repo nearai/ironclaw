@@ -1868,6 +1868,7 @@ function showJobCard(data) {
     browseBtn.className = 'job-card-browse';
     browseBtn.href = data.browse_url;
     browseBtn.target = '_blank';
+    browseBtn.rel = 'noopener noreferrer';
     browseBtn.textContent = I18n.t('jobs.browse');
     card.appendChild(browseBtn);
   }
@@ -2292,7 +2293,9 @@ function showAuthCard(data) {
       oauthLink.className = 'auth-oauth';
       oauthLink.href = parsedAuthUrl.href;
       oauthLink.target = '_blank';
-      oauthLink.rel = 'noopener';
+      // Match the other external links: include `noreferrer` so the
+      // OAuth provider does not see the in-app Referer header.
+      oauthLink.rel = 'noopener noreferrer';
       oauthLink.textContent = I18n.t('authRequired.authenticateWith', {name: data.extension_name});
       links.appendChild(oauthLink);
     }
@@ -4765,7 +4768,7 @@ function renderJobDetail(job) {
     headerHtml += '<button class="btn-restart" data-action="restart-job" data-id="' + escapeHtml(job.id) + '">Retry</button>';
   }
   if (job.browse_url) {
-    headerHtml += '<a class="btn-browse" href="' + escapeHtml(job.browse_url) + '" target="_blank">Browse Files</a>';
+    headerHtml += '<a class="btn-browse" href="' + escapeHtml(job.browse_url) + '" target="_blank" rel="noopener noreferrer">Browse Files</a>';
   }
 
   header.innerHTML = headerHtml;
@@ -6228,7 +6231,7 @@ function renderCatalogSkillCard(entry, installedNames) {
   name.textContent = entry.name || entry.slug;
   name.href = 'https://clawhub.ai/skills/' + encodeURIComponent(entry.slug);
   name.target = '_blank';
-  name.rel = 'noopener';
+  name.rel = 'noopener noreferrer';
   name.style.textDecoration = 'none';
   name.style.color = 'inherit';
   name.title = I18n.t('skills.viewOnClawHub');
