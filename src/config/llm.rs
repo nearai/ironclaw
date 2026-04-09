@@ -135,9 +135,15 @@ impl LlmConfig {
         }
 
         // Session config (used by NearAI provider for OAuth/session-token auth)
-        let nearai_auth_url = optional_env("NEARAI_AUTH_URL")?
-            .unwrap_or_else(|| "https://private.near.ai".to_string());
-        validate_base_url(&nearai_auth_url, "NEARAI_AUTH_URL")?;
+        let nearai_auth_url_env = optional_env("NEARAI_AUTH_URL")?;
+        let nearai_auth_url = nearai_auth_url_env
+            .as_deref()
+            .unwrap_or("https://private.near.ai")
+            .to_string();
+        // Only validate user-supplied URLs; the well-known default doesn't need DNS checks.
+        if nearai_auth_url_env.is_some() {
+            validate_base_url(&nearai_auth_url, "NEARAI_AUTH_URL")?;
+        }
         let session = SessionConfig {
             auth_base_url: nearai_auth_url,
             session_path: optional_env("NEARAI_SESSION_PATH")?
@@ -163,16 +169,20 @@ impl LlmConfig {
         } else {
             crate::llm::DEFAULT_MODEL.to_string()
         };
-        let nearai_base_url = if let Some(url) = nearai_override.and_then(|o| o.base_url.clone()) {
-            url
-        } else if let Some(url) = optional_env("NEARAI_BASE_URL")? {
-            url
+        let nearai_base_url_explicit = nearai_override
+            .and_then(|o| o.base_url.clone())
+            .or(optional_env("NEARAI_BASE_URL")?);
+        let nearai_base_url = if let Some(url) = &nearai_base_url_explicit {
+            url.clone()
         } else if nearai_api_key.is_some() {
             "https://cloud-api.near.ai".to_string()
         } else {
             "https://private.near.ai".to_string()
         };
-        validate_base_url(&nearai_base_url, "NEARAI_BASE_URL")?;
+        // Only validate user-supplied URLs; the well-known defaults don't need DNS checks.
+        if nearai_base_url_explicit.is_some() {
+            validate_base_url(&nearai_base_url, "NEARAI_BASE_URL")?;
+        }
         let nearai = NearAiConfig {
             model: nearai_model,
             cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
@@ -261,12 +271,22 @@ impl LlmConfig {
                 .or(optional_env("OPENAI_CODEX_MODEL")?)
                 .or(optional_env("OPENAI_MODEL")?)
                 .unwrap_or_else(|| "gpt-5.3-codex".to_string());
-            let auth_endpoint = optional_env("OPENAI_CODEX_AUTH_URL")?
-                .unwrap_or_else(|| "https://auth.openai.com".to_string());
-            validate_base_url(&auth_endpoint, "OPENAI_CODEX_AUTH_URL")?;
-            let api_base_url = optional_env("OPENAI_CODEX_API_URL")?
-                .unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".to_string());
-            validate_base_url(&api_base_url, "OPENAI_CODEX_API_URL")?;
+            let codex_auth_env = optional_env("OPENAI_CODEX_AUTH_URL")?;
+            let auth_endpoint = codex_auth_env
+                .as_deref()
+                .unwrap_or("https://auth.openai.com")
+                .to_string();
+            if codex_auth_env.is_some() {
+                validate_base_url(&auth_endpoint, "OPENAI_CODEX_AUTH_URL")?;
+            }
+            let codex_api_env = optional_env("OPENAI_CODEX_API_URL")?;
+            let api_base_url = codex_api_env
+                .as_deref()
+                .unwrap_or("https://chatgpt.com/backend-api/codex")
+                .to_string();
+            if codex_api_env.is_some() {
+                validate_base_url(&api_base_url, "OPENAI_CODEX_API_URL")?;
+            }
             let client_id = optional_env("OPENAI_CODEX_CLIENT_ID")?
                 .unwrap_or_else(|| "app_EMoamEEZ73f0CkXaXp7hrann".to_string());
             let session_path = optional_env("OPENAI_CODEX_SESSION_PATH")?

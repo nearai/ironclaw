@@ -347,14 +347,25 @@ fn validate_base_url_with_policy(
             }
             _ => resolve(),
         };
-        lookup.map_err(|e| ConfigError::InvalidValue {
-            key: field_name.to_string(),
-            message: format!(
-                "failed to resolve hostname '{}': {}. \
-                 Base URLs must be resolvable at config time.",
-                host, e
-            ),
-        })?
+        match lookup {
+            Ok(ips) => ips,
+            Err(e) => {
+                if scheme == "https" && policy == BaseUrlPolicy::AllowPrivateNetwork {
+                    // Operator-configured HTTPS URLs: DNS failure is non-fatal.
+                    // The connection will fail at use time; SSRF risk is minimal
+                    // since HTTPS endpoints are public and operator-trusted.
+                    return Ok(());
+                }
+                return Err(ConfigError::InvalidValue {
+                    key: field_name.to_string(),
+                    message: format!(
+                        "failed to resolve hostname '{}': {}. \
+                         Base URLs must be resolvable at config time.",
+                        host, e
+                    ),
+                });
+            }
+        }
     };
 
     if scheme == "http" {
