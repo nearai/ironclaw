@@ -1958,7 +1958,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_url_safe_https() {
-        assert!(validate_url_safe("https://example.com/path").await.is_ok());
+        // Use an IP literal to avoid DNS dependency in sandboxed environments.
+        // 8.8.8.8 is a well-known public IP, so it exercises the same SSRF
+        // validation path without requiring hostname resolution.
+        assert!(validate_url_safe("https://8.8.8.8/path").await.is_ok());
     }
 
     #[tokio::test]
