@@ -965,7 +965,7 @@ body {
 .scroll-to-bottom-btn {
   position: absolute;
   right: var(--space-4);
-  bottom: 96px;
+  bottom: calc(var(--chat-input-height, 72px) + var(--space-3));
   width: 28px;
   height: 28px;
   padding: 0;
