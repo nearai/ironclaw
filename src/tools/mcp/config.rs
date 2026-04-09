@@ -419,9 +419,13 @@ fn derive_nearai_mcp_url(base_url: &str) -> String {
     format!("{}/mcp", base)
 }
 
-pub(crate) fn nearai_mcp_server_from_env() -> Option<McpServerConfig> {
-    let base_url = crate::config::helpers::env_or_override("NEARAI_BASE_URL")?;
-    let api_key = crate::config::helpers::env_or_override("NEARAI_API_KEY")?;
+pub(crate) fn nearai_mcp_server_from_env() -> Result<Option<McpServerConfig>, ConfigError> {
+    let Some(base_url) = crate::config::helpers::env_or_override("NEARAI_BASE_URL") else {
+        return Ok(None);
+    };
+    let Some(api_key) = crate::config::helpers::env_or_override("NEARAI_API_KEY") else {
+        return Ok(None);
+    };
 
     let catalog = crate::registry::embedded::load_embedded();
     let manifest = catalog.get(NEARAI_MCP_REGISTRY_KEY);
@@ -439,20 +443,20 @@ pub(crate) fn nearai_mcp_server_from_env() -> Option<McpServerConfig> {
         .with_headers(headers)
         .with_description(description);
 
-    match server.validate() {
-        Ok(()) => Some(server),
-        Err(err) => {
-            tracing::warn!("Ignoring invalid NEAR AI MCP bootstrap config: {}", err);
-            None
-        }
-    }
+    server
+        .validate()
+        .map_err(|err| ConfigError::InvalidConfig {
+            reason: format!("invalid NEAR AI MCP bootstrap config: {}", err),
+        })?;
+
+    Ok(Some(server))
 }
 
 pub async fn bootstrap_nearai_mcp_server(
     db: Option<&dyn crate::db::Database>,
     user_id: &str,
 ) -> Result<bool, ConfigError> {
-    let Some(server) = nearai_mcp_server_from_env() else {
+    let Some(server) = nearai_mcp_server_from_env()? else {
         return Ok(false);
     };
 
@@ -1291,7 +1295,9 @@ mod tests {
             std::env::set_var("NEARAI_API_KEY", "test-nearai-key");
         }
 
-        let server = nearai_mcp_server_from_env().expect("server from env");
+        let server = nearai_mcp_server_from_env()
+            .expect("env-based NEAR AI MCP config should parse")
+            .expect("server from env");
         let catalog = crate::registry::embedded::load_embedded();
         let expected_description = catalog
             .get(super::NEARAI_MCP_REGISTRY_KEY)
@@ -1306,6 +1312,28 @@ mod tests {
         assert_eq!(
             server.headers.get("Authorization").map(String::as_str),
             Some("Bearer test-nearai-key")
+        );
+
+        // SAFETY: Tests serialize env access with lock_env().
+        unsafe {
+            std::env::remove_var("NEARAI_BASE_URL");
+            std::env::remove_var("NEARAI_API_KEY");
+        }
+    }
+
+    #[test]
+    fn test_nearai_mcp_server_from_env_reports_invalid_config() {
+        let _guard = crate::config::helpers::lock_env();
+        // SAFETY: Tests serialize env access with lock_env().
+        unsafe {
+            std::env::set_var("NEARAI_BASE_URL", "not a url");
+            std::env::set_var("NEARAI_API_KEY", "test-nearai-key");
+        }
+
+        let err = nearai_mcp_server_from_env().expect_err("invalid env should error");
+        assert!(
+            matches!(err, ConfigError::InvalidConfig { .. }),
+            "expected invalid config error, got {err:?}"
         );
 
         // SAFETY: Tests serialize env access with lock_env().
