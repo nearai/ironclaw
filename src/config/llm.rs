@@ -693,13 +693,29 @@ mod tests {
         parse_extra_headers_with_key(val, "TEST_HEADERS")
     }
 
-    /// Clear all openai-compatible-related env vars.
+    /// Clear all openai-compatible-related env vars and set DNS-safe NearAI defaults.
     fn clear_openai_compatible_env() {
         // SAFETY: Only called under ENV_MUTEX in tests.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("LLM_BASE_URL");
             std::env::remove_var("LLM_MODEL");
+        }
+        set_dns_safe_nearai_env();
+    }
+
+    /// Set NearAI env vars to a public IP literal so DNS resolution is not
+    /// needed and SSRF validation passes in sandboxed/offline CI environments
+    /// where `private.near.ai` is unreachable.
+    ///
+    /// Must be called under ENV_MUTEX.
+    fn set_dns_safe_nearai_env() {
+        // Use a public IP literal (93.184.215.14 = example.com) to avoid both
+        // DNS resolution and StrictSsrf private-IP rejection.
+        // SAFETY: Only called under ENV_MUTEX in tests.
+        unsafe {
+            std::env::set_var("NEARAI_AUTH_URL", "https://93.184.215.14");
+            std::env::set_var("NEARAI_BASE_URL", "https://93.184.215.14");
         }
     }
 
@@ -710,7 +726,7 @@ mod tests {
 
         let settings = Settings {
             llm_backend: Some("openai_compatible".to_string()),
-            openai_compatible_base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            openai_compatible_base_url: Some("https://93.184.215.14/api/v1".to_string()),
             selected_model: Some("openai/gpt-5.1-codex".to_string()),
             ..Default::default()
         };
@@ -732,7 +748,7 @@ mod tests {
 
         let settings = Settings {
             llm_backend: Some("openai_compatible".to_string()),
-            openai_compatible_base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            openai_compatible_base_url: Some("https://93.184.215.14/api/v1".to_string()),
             selected_model: Some("openai/gpt-5.1-codex".to_string()),
             ..Default::default()
         };
@@ -851,6 +867,7 @@ mod tests {
     #[test]
     fn ollama_uses_selected_model_when_ollama_model_unset() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         clear_ollama_env();
 
         let settings = Settings {
@@ -868,6 +885,7 @@ mod tests {
     #[test]
     fn ollama_selected_model_overrides_env() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         clear_ollama_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -952,6 +970,7 @@ mod tests {
     #[test]
     fn registry_provider_resolves_groq() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -959,9 +978,19 @@ mod tests {
             std::env::remove_var("GROQ_MODEL");
         }
 
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "groq".to_string(),
+            crate::settings::LlmBuiltinOverride {
+                api_key: None,
+                model: None,
+                base_url: Some("https://93.184.215.14/openai/v1".to_string()),
+            },
+        );
         let settings = Settings {
             llm_backend: Some("groq".to_string()),
             selected_model: Some("llama-3.3-70b-versatile".to_string()),
+            llm_builtin_overrides: overrides,
             ..Default::default()
         };
 
@@ -970,13 +999,14 @@ mod tests {
         let provider = cfg.provider.expect("provider config should be present");
         assert_eq!(provider.provider_id, "groq");
         assert_eq!(provider.model, "llama-3.3-70b-versatile");
-        assert_eq!(provider.base_url, "https://api.groq.com/openai/v1");
+        assert_eq!(provider.base_url, "https://93.184.215.14/openai/v1");
         assert_eq!(provider.protocol, ProviderProtocol::OpenAiCompletions);
     }
 
     #[test]
     fn registry_provider_resolves_tinfoil() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -984,15 +1014,25 @@ mod tests {
             std::env::remove_var("TINFOIL_MODEL");
         }
 
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "tinfoil".to_string(),
+            crate::settings::LlmBuiltinOverride {
+                api_key: None,
+                model: None,
+                base_url: Some("https://93.184.215.14/v1".to_string()),
+            },
+        );
         let settings = Settings {
             llm_backend: Some("tinfoil".to_string()),
+            llm_builtin_overrides: overrides,
             ..Default::default()
         };
 
         let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(cfg.backend, "tinfoil");
         let provider = cfg.provider.expect("provider config should be present");
-        assert_eq!(provider.base_url, "https://inference.tinfoil.sh/v1");
+        assert_eq!(provider.base_url, "https://93.184.215.14/v1");
         assert_eq!(provider.model, "kimi-k2-5");
         assert!(
             provider
@@ -1005,6 +1045,7 @@ mod tests {
     #[test]
     fn registry_provider_alias_resolves_zai() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1012,9 +1053,19 @@ mod tests {
             std::env::remove_var("ZAI_MODEL");
         }
 
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "bigmodel".to_string(),
+            crate::settings::LlmBuiltinOverride {
+                api_key: None,
+                model: None,
+                base_url: Some("https://93.184.215.14/api/paas/v4".to_string()),
+            },
+        );
         let settings = Settings {
             llm_backend: Some("bigmodel".to_string()),
             selected_model: Some("glm-5".to_string()),
+            llm_builtin_overrides: overrides,
             ..Default::default()
         };
 
@@ -1023,13 +1074,14 @@ mod tests {
         let provider = cfg.provider.expect("provider config should be present");
         assert_eq!(provider.provider_id, "zai");
         assert_eq!(provider.model, "glm-5");
-        assert_eq!(provider.base_url, "https://api.z.ai/api/paas/v4");
+        assert_eq!(provider.base_url, "https://93.184.215.14/api/paas/v4");
         assert_eq!(provider.protocol, ProviderProtocol::OpenAiCompletions);
     }
 
     #[test]
     fn registry_provider_resolves_github_copilot_alias() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::set_var("LLM_BACKEND", "github-copilot");
@@ -1040,13 +1092,25 @@ mod tests {
             );
         }
 
-        let settings = Settings::default();
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "github-copilot".to_string(),
+            crate::settings::LlmBuiltinOverride {
+                api_key: None,
+                model: None,
+                base_url: Some("https://93.184.215.14".to_string()),
+            },
+        );
+        let settings = Settings {
+            llm_builtin_overrides: overrides,
+            ..Default::default()
+        };
 
         let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(cfg.backend, "github_copilot");
         let provider = cfg.provider.expect("provider config should be present");
         assert_eq!(provider.provider_id, "github_copilot");
-        assert_eq!(provider.base_url, "https://api.githubcopilot.com");
+        assert_eq!(provider.base_url, "https://93.184.215.14");
         assert_eq!(provider.model, "gpt-4o");
         assert!(
             provider
@@ -1078,6 +1142,7 @@ mod tests {
     #[test]
     fn nearai_backend_has_no_registry_provider() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1142,6 +1207,7 @@ mod tests {
     #[test]
     fn nearai_aliases_all_resolve_to_nearai() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
 
         for alias in &["nearai", "near_ai", "near"] {
             // SAFETY: Under ENV_MUTEX.
@@ -1230,6 +1296,7 @@ mod tests {
         use secrecy::ExposeSecret;
 
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         clear_anthropic_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1268,6 +1335,7 @@ mod tests {
         use secrecy::ExposeSecret;
 
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         clear_anthropic_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1301,6 +1369,7 @@ mod tests {
     #[test]
     fn non_anthropic_provider_has_no_oauth_token() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         clear_anthropic_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1409,6 +1478,7 @@ mod tests {
     #[test]
     fn test_request_timeout_defaults_to_120() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_REQUEST_TIMEOUT_SECS");
@@ -1420,6 +1490,7 @@ mod tests {
     #[test]
     fn test_request_timeout_configurable() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::set_var("LLM_REQUEST_TIMEOUT_SECS", "300");
@@ -1437,6 +1508,7 @@ mod tests {
     #[test]
     fn custom_provider_resolves_when_backend_matches_id() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1472,6 +1544,7 @@ mod tests {
     #[test]
     fn db_llm_backend_takes_priority_over_env_var() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX. RAII guard removes LLM_BACKEND on drop so
         // a panicking assertion cannot leak the env var to other tests.
         struct RemoveOnDrop(&'static str);
@@ -1509,19 +1582,28 @@ mod tests {
 
     // ── OpenAI Codex tests ──────────────────────────────────────────
 
-    /// Clear all openai-codex-related env vars.
+    /// Clear all openai-codex-related env vars and set DNS-safe defaults
+    /// for auth/API URLs that would otherwise require DNS resolution.
     fn clear_openai_codex_env() {
         // SAFETY: Only called under ENV_MUTEX in tests.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("OPENAI_CODEX_MODEL");
             std::env::remove_var("OPENAI_MODEL");
+            // Set DNS-safe IP-literal URLs to avoid DNS resolution for
+            // auth.openai.com and chatgpt.com defaults.
+            std::env::set_var("OPENAI_CODEX_AUTH_URL", "https://93.184.215.14");
+            std::env::set_var(
+                "OPENAI_CODEX_API_URL",
+                "https://93.184.215.14/backend-api/codex",
+            );
         }
     }
 
     #[test]
     fn builtin_override_model_used_when_no_selected_model() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1534,7 +1616,7 @@ mod tests {
             crate::settings::LlmBuiltinOverride {
                 api_key: None,
                 model: Some("llama-3.1-8b-instant".to_string()),
-                base_url: None,
+                base_url: Some("https://93.184.215.14/openai/v1".to_string()),
             },
         );
         let settings = Settings {
@@ -1554,6 +1636,7 @@ mod tests {
     #[test]
     fn openai_codex_resolves_config() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         clear_openai_codex_env();
 
         let settings = Settings {
@@ -1574,6 +1657,7 @@ mod tests {
     #[test]
     fn selected_model_takes_priority_over_builtin_override_model() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1586,7 +1670,7 @@ mod tests {
             crate::settings::LlmBuiltinOverride {
                 api_key: None,
                 model: Some("llama-3.1-8b-instant".to_string()),
-                base_url: None,
+                base_url: Some("https://93.184.215.14/openai/v1".to_string()),
             },
         );
         let settings = Settings {
@@ -1607,6 +1691,7 @@ mod tests {
     #[test]
     fn openai_codex_model_env_resolution() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         clear_openai_codex_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1631,6 +1716,7 @@ mod tests {
     #[test]
     fn builtin_override_api_key_used_when_no_env_var() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1644,7 +1730,7 @@ mod tests {
             crate::settings::LlmBuiltinOverride {
                 api_key: Some("gsk_test_key".to_string()),
                 model: Some("llama-3.3-70b-versatile".to_string()),
-                base_url: None,
+                base_url: Some("https://93.184.215.14/openai/v1".to_string()),
             },
         );
         let settings = Settings {
@@ -1669,6 +1755,7 @@ mod tests {
     #[test]
     fn openai_codex_falls_back_to_openai_model() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         clear_openai_codex_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1693,6 +1780,7 @@ mod tests {
     #[test]
     fn openai_codex_falls_back_to_selected_model() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         clear_openai_codex_env();
 
         let settings = Settings {
@@ -1710,6 +1798,7 @@ mod tests {
     #[test]
     fn openai_codex_rejects_ssrf_api_url() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         clear_openai_codex_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1741,6 +1830,7 @@ mod tests {
     #[test]
     fn openai_codex_rejects_ssrf_auth_url() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         clear_openai_codex_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1770,6 +1860,7 @@ mod tests {
     #[test]
     fn builtin_override_api_key_wins_over_env_var() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1783,7 +1874,7 @@ mod tests {
             crate::settings::LlmBuiltinOverride {
                 api_key: Some("gsk_from_db".to_string()),
                 model: None,
-                base_url: None,
+                base_url: Some("https://93.184.215.14/openai/v1".to_string()),
             },
         );
         let settings = Settings {
@@ -1813,6 +1904,7 @@ mod tests {
     #[test]
     fn builtin_override_model_wins_over_env_var() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1825,7 +1917,7 @@ mod tests {
             crate::settings::LlmBuiltinOverride {
                 api_key: None,
                 model: Some("model-from-db".to_string()),
-                base_url: None,
+                base_url: Some("https://93.184.215.14/openai/v1".to_string()),
             },
         );
         let settings = Settings {
@@ -1850,6 +1942,7 @@ mod tests {
     #[test]
     fn custom_provider_selected_model_wins_over_env() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1887,6 +1980,7 @@ mod tests {
     #[test]
     fn openai_codex_selected_model_wins_over_env() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         clear_openai_codex_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1915,6 +2009,7 @@ mod tests {
     #[test]
     fn nearai_selected_model_wins_over_env() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1942,6 +2037,7 @@ mod tests {
     #[test]
     fn nearai_override_model_wins_over_env() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1978,6 +2074,7 @@ mod tests {
     #[test]
     fn nearai_selected_model_wins_over_override_model() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -2010,6 +2107,7 @@ mod tests {
     #[test]
     fn nearai_override_base_url_wins_over_env() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -2047,6 +2145,7 @@ mod tests {
     #[test]
     fn nearai_env_base_url_used_when_no_override() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -2074,6 +2173,7 @@ mod tests {
     #[test]
     fn nearai_override_api_key_wins_over_env() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -2115,11 +2215,20 @@ mod tests {
     #[test]
     fn nearai_base_url_auto_selects_when_no_override_or_env() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("NEARAI_BASE_URL");
             std::env::remove_var("NEARAI_API_KEY");
+        }
+
+        // This test uses the real default NearAI URLs which require DNS.
+        // Skip in sandboxed environments where DNS is unavailable.
+        use std::net::ToSocketAddrs;
+        if ("private.near.ai", 443u16).to_socket_addrs().is_err() {
+            eprintln!("skipping: DNS unavailable for private.near.ai");
+            return;
         }
 
         // No API key → should default to private.near.ai
@@ -2160,6 +2269,7 @@ mod tests {
     #[test]
     fn registry_provider_override_base_url_wins_over_env() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -2209,6 +2319,7 @@ mod tests {
     #[test]
     fn nearai_resolve_ignores_default_selected_model() {
         let _guard = lock_env();
+        set_dns_safe_nearai_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");

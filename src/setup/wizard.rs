@@ -4498,6 +4498,14 @@ mod tests {
         let _lock = lock_env();
         // Ensure the real env var is unset so the only source is the overlay.
         let _guard = EnvGuard::clear("NEARAI_API_KEY");
+        // Set DNS-safe NearAI auth URL for sandboxed CI environments.
+        // Don't set NEARAI_BASE_URL — the test verifies automatic URL selection.
+        // Remove it explicitly in case a prior test set it (env vars persist across tests).
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("NEARAI_AUTH_URL", "https://93.184.215.14");
+            std::env::remove_var("NEARAI_BASE_URL");
+        }
 
         crate::config::helpers::set_runtime_env("NEARAI_API_KEY", "test-key-from-overlay");
         let config = build_nearai_model_fetch_config();
