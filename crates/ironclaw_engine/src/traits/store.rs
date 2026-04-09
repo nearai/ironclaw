@@ -136,14 +136,20 @@ pub trait Store: Send + Sync {
     /// lives in. Used by `__list_skills__` so that admin-installed skills
     /// (migrated into the owner's default project) are visible to gateway users
     /// whose threads run in a per-user project.
+    ///
+    /// The caller is expected to sort and dedupe the merged result alongside any
+    /// other doc sources (e.g. the user's own docs), so this method does not
+    /// sort — it only dedupes by `DocId` to collapse duplicates across owner
+    /// candidates.
     async fn list_skills_global(&self) -> Result<Vec<MemoryDoc>, EngineError> {
         let mut docs = Vec::new();
         for owner_id in shared_owner_candidates() {
             docs.extend(self.list_memory_docs_by_owner(owner_id).await?);
         }
         docs.retain(|d| d.doc_type == crate::types::memory::DocType::Skill);
-        docs.sort_by_key(|d| d.id.0);
-        docs.dedup_by_key(|d| d.id);
+        // Dedupe within the shared set; sort happens at the call site.
+        let mut seen = std::collections::HashSet::new();
+        docs.retain(|d| seen.insert(d.id));
         Ok(docs)
     }
 
@@ -152,7 +158,12 @@ pub trait Store: Send + Sync {
     /// Default implementation fans out over ALL projects via `list_all_projects`.
     /// This is necessary for shared owners (`__shared__`, `system`) who don't own
     /// any projects themselves but have docs stored inside other users' projects.
-    /// Implementors with a flat store should override for efficiency.
+    ///
+    /// **Performance warning:** the default is O(projects × docs-per-project) and
+    /// is called from the `__list_skills__` hot path on every thread step via
+    /// `list_skills_global`. Production `Store` implementations **must** override
+    /// this with a flat query (e.g. `WHERE user_id = $1`) — leaving the default in
+    /// place will turn skill listing into a bottleneck as project count grows.
     async fn list_memory_docs_by_owner(
         &self,
         user_id: &str,

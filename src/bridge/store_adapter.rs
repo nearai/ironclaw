@@ -1043,13 +1043,29 @@ fn deserialize_knowledge_doc(content: &str) -> Option<MemoryDoc> {
         .and_then(|v| v.as_str())
         .and_then(|s| uuid::Uuid::parse_str(s).ok())
         .map(ProjectId)
-        .unwrap_or(ProjectId(uuid::Uuid::nil()));
+        .unwrap_or_else(|| {
+            debug!(
+                doc_id = %id,
+                "knowledge doc missing project_id frontmatter; loading as nil — \
+                 this indicates a doc serialized before project_id/user_id were \
+                 persisted and it will not be visible to project-scoped queries"
+            );
+            ProjectId(uuid::Uuid::nil())
+        });
 
     let user_id = yaml
         .get("user_id")
         .and_then(|v| v.as_str())
-        .unwrap_or("legacy")
-        .to_string();
+        .map(String::from)
+        .unwrap_or_else(|| {
+            debug!(
+                doc_id = %id,
+                "knowledge doc missing user_id frontmatter; loading as \"legacy\" — \
+                 this indicates a doc serialized before project_id/user_id were \
+                 persisted and it will not be visible to owner-scoped queries"
+            );
+            "legacy".to_string()
+        });
 
     Some(MemoryDoc {
         id: DocId(id),

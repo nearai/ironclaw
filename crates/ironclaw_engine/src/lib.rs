@@ -641,7 +641,13 @@ pub(crate) mod tests {
 
         assert_eq!(skills.len(), 2, "both user and shared skills must appear");
         let ids: Vec<_> = skills.iter().map(|d| d.id).collect();
-        assert!(ids.contains(&shared_skill.id), "shared skill must be visible");
-        assert!(ids.contains(&alice_skill.id), "alice's own skill must be visible");
+        assert!(
+            ids.contains(&shared_skill.id),
+            "shared skill must be visible"
+        );
+        assert!(
+            ids.contains(&alice_skill.id),
+            "alice's own skill must be visible"
+        );
     }
 }
