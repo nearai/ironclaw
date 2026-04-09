@@ -109,6 +109,7 @@ jobs:
           ALL_EXEMPT=true
           while IFS= read -r file; do
             case "$file" in
+              .github/*) ;;
               src/channels/web/static/*) ;;
               *.md) ;;
               *) ALL_EXEMPT=false; break ;;
