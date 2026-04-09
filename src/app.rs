@@ -140,6 +140,7 @@ impl AppBuilder {
             return Ok(());
         }
 
+        let connect_start = std::time::Instant::now();
         let (db, handles) = if self.flags.skip_db_migrations {
             crate::db::connect_without_migrations(&self.config.database)
                 .await
@@ -149,21 +150,36 @@ impl AppBuilder {
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?
         };
+        crate::bootstrap::log_startup_timing(
+            "app_builder.init_database.connect",
+            connect_start.elapsed(),
+        );
         self.handles = Some(handles);
 
         // Post-init: ensure owner user row exists and rewrite 'default' user_id rows.
+        let bootstrap_start = std::time::Instant::now();
         bootstrap_ownership(db.as_ref(), &self.config)
             .await
             .map_err(|e| anyhow::anyhow!("bootstrap_ownership failed: {e}"))?;
+        crate::bootstrap::log_startup_timing(
+            "app_builder.init_database.bootstrap_ownership",
+            bootstrap_start.elapsed(),
+        );
 
         // Post-init: migrate disk config, reload config from DB, attach session, cleanup
+        let migrate_start = std::time::Instant::now();
         if let Err(e) =
             crate::bootstrap::migrate_disk_to_db(db.as_ref(), &self.config.owner_id).await
         {
             tracing::warn!("Disk-to-DB settings migration failed: {}", e);
         }
+        crate::bootstrap::log_startup_timing(
+            "app_builder.init_database.migrate_disk_to_db",
+            migrate_start.elapsed(),
+        );
 
         let toml_path = self.toml_path.as_deref();
+        let config_from_db_start = std::time::Instant::now();
         // is_operator=true: owner_id is the operator/admin scope.
         match Config::from_db_with_toml(db.as_ref(), &self.config.owner_id, toml_path, true).await {
             Ok(db_config) => {
@@ -177,10 +193,19 @@ impl AppBuilder {
                 );
             }
         }
+        crate::bootstrap::log_startup_timing(
+            "app_builder.init_database.config_from_db",
+            config_from_db_start.elapsed(),
+        );
 
+        let attach_store_start = std::time::Instant::now();
         self.session
             .attach_store(db.clone(), &self.config.owner_id)
             .await;
+        crate::bootstrap::log_startup_timing(
+            "app_builder.init_database.attach_session_store",
+            attach_store_start.elapsed(),
+        );
 
         // Fire-and-forget housekeeping — no need to block startup.
         let db_cleanup = db.clone();
@@ -863,8 +888,19 @@ impl AppBuilder {
 
     /// Run all init phases in order and return the assembled components.
     pub async fn build_all(mut self) -> Result<AppComponents, anyhow::Error> {
+        let init_database_start = std::time::Instant::now();
         self.init_database().await?;
+        crate::bootstrap::log_startup_timing(
+            "app_builder.init_database.total",
+            init_database_start.elapsed(),
+        );
+
+        let init_secrets_start = std::time::Instant::now();
         self.init_secrets().await?;
+        crate::bootstrap::log_startup_timing(
+            "app_builder.init_secrets",
+            init_secrets_start.elapsed(),
+        );
 
         // Post-init validation: backends with dedicated config (nearai, gemini_oauth,
         // bedrock, openai_codex) handle their own credential resolution. For registry-based
@@ -881,19 +917,25 @@ impl AppBuilder {
             );
         }
 
+        let init_llm_start = std::time::Instant::now();
         let (llm, cheap_llm, recording_handle) = if let Some(llm) = self.llm_override.take() {
             (llm, None, None)
         } else {
             self.init_llm().await?
         };
+        crate::bootstrap::log_startup_timing("app_builder.init_llm", init_llm_start.elapsed());
+
+        let init_tools_start = std::time::Instant::now();
         let (safety, tools, embeddings, workspace, builder, credential_registry) =
             self.init_tools(&llm).await?;
+        crate::bootstrap::log_startup_timing("app_builder.init_tools", init_tools_start.elapsed());
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
         let agent_session_manager =
             Arc::new(AgentSessionManager::new().with_hooks(Arc::clone(&hooks)));
 
+        let init_extensions_start = std::time::Instant::now();
         let (
             mcp_session_manager,
             mcp_process_manager,
@@ -902,9 +944,14 @@ impl AppBuilder {
             catalog_entries,
             dev_loaded_tool_names,
         ) = self.init_extensions(&tools, &hooks).await?;
+        crate::bootstrap::log_startup_timing(
+            "app_builder.init_extensions",
+            init_extensions_start.elapsed(),
+        );
 
         // Load bootstrap-completed flag from settings so that existing users
         // who already completed onboarding don't re-get bootstrap injection.
+        let workspace_seed_start = std::time::Instant::now();
         if let Some(ref ws) = workspace {
             let toml_path = crate::settings::Settings::default_toml_path();
             if let Ok(Some(settings)) = crate::settings::Settings::load_toml(&toml_path)
@@ -963,8 +1010,13 @@ impl AppBuilder {
                 });
             }
         }
+        crate::bootstrap::log_startup_timing(
+            "app_builder.workspace_seed",
+            workspace_seed_start.elapsed(),
+        );
 
         // Skills system
+        let skills_start = std::time::Instant::now();
         let (skill_registry, skill_catalog) = if self.config.skills.enabled {
             let mut registry = SkillRegistry::new(self.config.skills.local_dir.clone())
                 .with_installed_dir(self.config.skills.installed_dir.clone())
@@ -986,6 +1038,7 @@ impl AppBuilder {
         } else {
             (None, None)
         };
+        crate::bootstrap::log_startup_timing("app_builder.skills", skills_start.elapsed());
 
         let context_manager = Arc::new(ContextManager::new(self.config.agent.max_parallel_jobs));
         let cost_guard = Arc::new(crate::agent::cost_guard::CostGuard::new(
@@ -1004,7 +1057,12 @@ impl AppBuilder {
         // Seed per-user tool permission defaults into the database.
         // This runs after all tools (built-in, WASM, MCP) are registered so
         // that every tool name is known.  Existing entries are never overwritten.
+        let seed_permissions_start = std::time::Instant::now();
         seed_tool_permissions(&tools, self.db.as_ref(), &self.config.owner_id).await;
+        crate::bootstrap::log_startup_timing(
+            "app_builder.seed_tool_permissions",
+            seed_permissions_start.elapsed(),
+        );
 
         Ok(AppComponents {
             config: self.config,
