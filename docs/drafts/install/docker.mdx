@@ -1,0 +1,249 @@
+---
+title: Docker Installation
+sidebarTitle: Docker
+description: Run IronClaw in a Docker container
+---
+
+Run IronClaw inside a Docker container. This provides isolation and consistency across environments.
+
+<Warning>
+**Important distinction:** IronClaw runs **alongside** Docker (for job sandboxing), not inside Docker by default. This page covers running IronClaw itself in a container — a different use case from the default installation.
+</Warning>
+
+## When to Use Docker
+
+- **Testing**: Quick experiments without modifying your system
+- **Consistent environments**: Same configuration across dev/staging/prod
+- **Multi-tenant**: Run multiple IronClaw instances on one host
+- **CI/CD**: Automated deployments
+
+## Quick Start
+
+```bash
+# Create data directory
+mkdir -p ~/.ironclaw
+
+# Run IronClaw
+docker run -d \
+  --name ironclaw \
+  -v ~/.ironclaw:/home/ironclaw/.ironclaw \
+  # enabling this mount will allow the container to control the docker daemon, use at own risk
+  # -v /var/run/docker.sock:/var/run/docker.sock \
+  -p 3000:3000 \
+  -p 8080:8080 \
+  # Pin to a specific IronClaw version for reproducible, rollback-friendly deployments.
+  nearai/ironclaw:latest 
+```
+
+## Docker Compose
+
+Save as `docker-compose.yml`:
+
+```yaml
+version: '3.8'
+
+services:
+  ironclaw:
+    # Pin to a specific IronClaw version for reproducible, rollback-friendly deployments.
+    image: nearai/ironclaw:latest
+    container_name: ironclaw
+    restart: unless-stopped
+
+    volumes:
+      # Persistent data
+      - ~/.ironclaw:/home/ironclaw/.ironclaw
+
+      # Docker socket for sandbox jobs, also exposes your docker host to this container!
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    ports:
+      # Web Gateway
+      - "3000:3000"
+      # HTTP Webhook
+      - "8080:8080"
+
+    environment:
+      # Required: database backend
+      - DATABASE_BACKEND=libsql
+
+      # Optional: LLM backend
+      - LLM_BACKEND=nearai
+      - NEARAI_SESSION_TOKEN=${NEARAI_SESSION_TOKEN}
+
+      # Optional: Web Gateway
+      - GATEWAY_ENABLED=true
+      - GATEWAY_HOST=0.0.0.0
+      - GATEWAY_PORT=3000
+
+      # Optional: HTTP Webhook
+      - HTTP_ENABLED=true
+      - HTTP_HOST=0.0.0.0
+      - HTTP_PORT=8080
+
+# Optional: PostgreSQL instead of libSQL
+#  postgres:
+#    image: pgvector/pgvector:pg15
+#    environment:
+#      POSTGRES_USER: ironclaw
+#      POSTGRES_PASSWORD: changeme
+#      POSTGRES_DB: ironclaw
+#    volumes:
+#      - postgres_data:/var/lib/postgresql/data
+#
+#volumes:
+#  postgres_data:
+```
+
+Start:
+
+```bash
+docker compose up -d
+```
+
+## Volume Mounts
+
+| Host Path | Container Path | Purpose |
+|-----------|---------------|---------|
+| `~/.ironclaw` | `/home/ironclaw/.ironclaw` | Config, database, logs |
+| `/var/run/docker.sock` | `/var/run/docker.sock` | Launch sandbox containers |
+
+## Environment Variables
+
+Pass configuration via environment variables:
+
+```bash
+docker run -d \
+  --name ironclaw \
+  -e DATABASE_BACKEND=libsql \
+  -e LLM_BACKEND=nearai \
+  -e NEARAI_SESSION_TOKEN=sess_xxx \
+  -e GATEWAY_ENABLED=true \
+  -v ~/.ironclaw:/home/ironclaw/.ironclaw \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -p 3000:3000 \
+  nearai/ironclaw:latest
+```
+
+See [Configuration Reference](/setup/configuration) for all options.
+
+## Docker-in-Docker Considerations
+
+IronClaw can launch sandbox containers. In Docker, this requires:
+
+1. **Docker socket mount** (shown above): Allows IronClaw to launch sibling containers
+2. **Privileged mode** (optional): Only if sandbox jobs need elevated permissions
+
+```bash
+# With privileged mode (not recommended unless needed)
+docker run -d \
+  --name ironclaw \
+  --privileged \
+  -v ~/.ironclaw:/home/ironclaw/.ironclaw \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  ...
+```
+
+## Custom Data Directory
+
+To use a different data location:
+
+```bash
+mkdir -p /opt/ironclaw/data
+
+docker run -d \
+  --name ironclaw \
+  -e IRONCLAW_BASE_DIR=/data \
+  -v /opt/ironclaw/data:/data \
+  ...
+```
+
+## Reverse Proxy (HTTPS)
+
+For external access, put a reverse proxy in front:
+
+### Caddy
+
+```caddy
+# Caddyfile
+webg.example.com {
+  reverse_proxy localhost:3000
+}
+```
+
+### nginx
+
+```nginx
+server {
+  listen 443 ssl;
+  server_name webg.example.com;
+
+  ssl_certificate /path/to/cert.pem;
+  ssl_certificate_key /path/to/key.pem;
+
+  location / {
+    proxy_pass http://localhost:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+  }
+}
+```
+
+## Updating
+
+```bash
+# Pull latest image
+docker pull nearai/ironclaw:latest
+
+# Recreate container
+docker stop ironclaw
+docker rm ironclaw
+docker run -d \
+  --name ironclaw \
+  -v ~/.ironclaw:/home/ironclaw/.ironclaw \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -p 3000:3000 \
+  nearai/ironclaw:latest
+
+# Or with docker compose
+docker compose pull
+docker compose up -d
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Cannot connect to Docker daemon" icon="x-circle">
+    Ensure Docker socket is mounted:
+    ```bash
+    docker run ... -v /var/run/docker.sock:/var/run/docker.sock ...
+    ```
+  </Accordion>
+
+  <Accordion title="Permission denied on data directory" icon="lock">
+    Fix ownership:
+    ```bash
+    sudo chown -R 1000:1000 ~/.ironclaw
+    ```
+  </Accordion>
+
+  <Accordion title="Port already in use" icon="network">
+    Change port mapping:
+    ```bash
+    -p 3002:3000  # Maps host port 3002 to container port 3000
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="settings" href="/setup/configuration">
+    Full environment variable reference
+  </Card>
+  <Card title="VPS Install" icon="server" href="/install/vps">
+    Production deployment guide
+  </Card>
+</CardGroup>

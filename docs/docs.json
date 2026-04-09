@@ -1,0 +1,307 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "almond",
+  "name": "IronClaw",
+  "colors": {
+    "primary": "#1191f0",
+    "light": "#1191f0",
+    "dark": "#1191f0"
+  },
+  "favicon": "/images/logo/favicon.ico",
+  "logo": {
+    "light": "/images/logo/logo.svg",
+    "dark": "/images/logo/logo-dark.svg"
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "Get Support",
+        "href": "https://t.me/ironclawAI"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Deploy Now",
+      "href": "https://agent.near.ai/"
+    }
+  },
+  "navigation": {
+    "languages": [
+      {
+        "language": "en",
+        "tabs": [
+          {
+            "tab": " ",
+            "groups": [
+              {
+                "group": " ",
+                "pages": [
+                  "index",
+                  "quickstart",
+                  "onboard"
+                ]
+              },
+              {
+                "group": "Capabilities",
+                "icon": "cubes",
+                "pages": [
+                  "capabilities/overview",
+                  {
+                    "group": "Core Capabilities",
+                    "pages": [
+                      "security",
+                      {
+                        "group": "Memory",
+                        "pages": [
+                          "capabilities/memory/memory",
+                          "capabilities/memory/identity"
+                        ]
+                      },
+                      {
+                        "group": "Routines",
+                        "pages": [
+                          "capabilities/routines/cron",
+                          "capabilities/routines/heartbeat",
+                          "capabilities/routines/reactive"
+                        ]
+                      },
+                      {
+                        "group": "Jobs",
+                        "pages": [
+                          "capabilities/jobs/jobs",
+                          "capabilities/jobs/self-repair"
+                        ]
+                      },
+                      "capabilities/skills",
+                      "capabilities/sandboxed-tools"
+                    ]
+                  }
+                ]
+              },
+              {
+                "group": "Channels",
+                "icon": "message",
+                "pages": [
+                  "channels/overview",
+                  {
+                    "group": "Built-in Channels",
+                    "pages": [
+                      "tunnel",
+                      "channels/local",
+                      "channels/discord",
+                      "channels/telegram",
+                      "channels/webhook",
+                      "channels/signal"
+                    ]
+                  }
+                ]
+              },
+              {
+                "group": "Extensions (Tools)",
+                "icon": "hammer",
+                "pages": [
+                  "extensions/overview",
+                  {
+                    "group": "Built-in Extensions",
+                    "pages": [
+                      "extensions/file-tools",
+                      "extensions/github",
+                      {
+                        "group": "Google",
+                        "pages": [
+                          "extensions/google/oauth-setup",
+                          "extensions/google/gmail",
+                          "extensions/google/calendar",
+                          "extensions/google/docs",
+                          "extensions/google/drive",
+                          "extensions/google/sheets",
+                          "extensions/google/slides"
+                        ]
+                      },
+                      "extensions/mcp",
+                      "extensions/web-search",
+                      "extensions/shell"
+                    ]
+                  }
+                ]
+              },
+              {
+                "group": "Tutorials",
+                "icon": "graduation-cap",
+                "pages": [
+                  "extensions/building-a-tool",
+                  {
+                    "group": "Host IronClaw on...",
+                    "pages": [
+                      "infrastructure/droplet"
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "language": "zh",
+        "navbar": {
+          "links": [
+            {
+              "label": "支持",
+              "href": "https://t.me/ironclawAI"
+            }
+          ],
+          "primary": {
+            "type": "button",
+            "label": "立即部署",
+            "href": "https://agent.near.ai/"
+          }
+        },
+        "tabs": [
+          {
+            "tab": " ",
+            "groups": [
+              {
+                "group": " ",
+                "pages": [
+                  "zh/index",
+                  "zh/quickstart",
+                  "zh/onboard"
+                ]
+              },
+              {
+                "group": "核心能力",
+                "icon": "cubes",
+                "pages": [
+                  "zh/capabilities/overview",
+                  {
+                    "group": "核心能力",
+                    "pages": [
+                      "zh/security",
+                      {
+                        "group": "记忆",
+                        "pages": [
+                          "zh/capabilities/memory/memory",
+                          "zh/capabilities/memory/identity"
+                        ]
+                      },
+                      {
+                        "group": "例程",
+                        "pages": [
+                          "zh/capabilities/routines/cron",
+                          "zh/capabilities/routines/heartbeat",
+                          "zh/capabilities/routines/reactive"
+                        ]
+                      },
+                      {
+                        "group": "任务",
+                        "pages": [
+                          "zh/capabilities/jobs/jobs",
+                          "zh/capabilities/jobs/self-repair"
+                        ]
+                      },
+                      "zh/capabilities/skills",
+                      "zh/capabilities/sandboxed-tools"
+                    ]
+                  }
+                ]
+              },
+              {
+                "group": "渠道",
+                "icon": "message",
+                "pages": [
+                  "zh/channels/overview",
+                  {
+                    "group": "内置渠道",
+                    "pages": [
+                      "zh/tunnel",
+                      "zh/channels/local",
+                      "zh/channels/signal",
+                      "zh/channels/telegram",
+                      "zh/channels/webhook"
+                    ]
+                  }
+                ]
+              },
+              {
+                "group": "扩展（工具）",
+                "icon": "hammer",
+                "pages": [
+                  "zh/extensions/overview",
+                  {
+                    "group": "内置扩展",
+                    "pages": [
+                      "zh/extensions/file-tools",
+                      "zh/extensions/github",
+                      {
+                        "group": "Google",
+                        "pages": [
+                          "zh/extensions/google/oauth-setup",
+                          "zh/extensions/google/gmail",
+                          "zh/extensions/google/calendar",
+                          "zh/extensions/google/docs",
+                          "zh/extensions/google/drive",
+                          "zh/extensions/google/sheets",
+                          "zh/extensions/google/slides"
+                        ]
+                      },
+                      "zh/extensions/mcp",
+                      "zh/extensions/web-search",
+                      "zh/extensions/shell"
+                    ]
+                  }
+                ]
+              },
+              {
+                "group": "教程",
+                "icon": "graduation-cap",
+                "pages": [
+                  "zh/extensions/building-a-tool",
+                  {
+                    "group": "在以下平台托管 IronClaw",
+                    "pages": [
+                      "zh/infrastructure/droplet"
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "global": {
+      "anchors": [
+        {
+          "anchor": "Agent Dashboard",
+          "href": "https://agent.near.ai/",
+          "icon": "sliders"
+        },
+        {
+          "anchor": "NEAR AI Cloud",
+          "href": "https://cloud.near.ai",
+          "icon": "cloud"
+        }
+      ]
+    }
+  },
+  "contextual": {
+    "options": [
+      "copy",
+      "view",
+      "chatgpt",
+      "claude",
+      "perplexity",
+      "mcp",
+      "cursor",
+      "vscode"
+    ]
+  },
+  "footer": {
+    "socials": {
+      "x": "https://x.com/near_ai",
+      "github": "https://github.com/nearai",
+      "linkedin": "https://linkedin.com/company/near-ai"
+    }
+  }
+}
