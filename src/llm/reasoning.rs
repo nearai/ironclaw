@@ -1748,7 +1748,7 @@ const TOOL_TAG_PATTERNS: &[&str] = &[
 /// Properly closed tags (e.g. `<tool_call>...</tool_call>`) are left intact for
 /// `clean_response()` to strip normally. Tags inside fenced markdown code blocks
 /// or inline code spans are ignored. See issue #789.
-fn truncate_at_tool_tags(text: &str) -> String {
+pub fn truncate_at_tool_tags(text: &str) -> String {
     let code_regions = find_code_regions(text);
     // Use ASCII-only lowercasing so byte offsets stay valid for the original
     // string. Full `to_lowercase()` can change byte lengths for non-ASCII

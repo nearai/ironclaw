@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
-use crate::llm::clean_response;
+use crate::llm::{clean_response, truncate_at_tool_tags};
 use crate::llm::error::LlmError;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
@@ -36,7 +36,7 @@ impl LlmProvider for CleaningProvider {
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let mut resp = self.inner.complete(request).await?;
-        resp.content = clean_response(&resp.content);
+        resp.content = clean_response(&truncate_at_tool_tags(&resp.content));
         Ok(resp)
     }
 
@@ -46,7 +46,12 @@ impl LlmProvider for CleaningProvider {
     ) -> Result<ToolCompletionResponse, LlmError> {
         let mut resp = self.inner.complete_with_tools(request).await?;
         if let Some(ref content) = resp.content {
-            resp.content = Some(clean_response(content));
+            resp.content = Some(clean_response(&truncate_at_tool_tags(content)));
+        }
+        for tc in &mut resp.tool_calls {
+            if let Some(ref r) = tc.reasoning {
+                tc.reasoning = Some(clean_response(&truncate_at_tool_tags(r)));
+            }
         }
         Ok(resp)
     }
@@ -340,6 +345,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn strips_to_empty_when_only_think_tags() {
+        struct OnlyThinkProvider;
+
+        #[async_trait]
+        impl LlmProvider for OnlyThinkProvider {
+            fn model_name(&self) -> &str {
+                "only-think"
+            }
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                Ok(CompletionResponse {
+                    content: "<think>reasoning only, no visible output</think>".to_string(),
+                    input_tokens: 8,
+                    output_tokens: 6,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+            async fn complete_with_tools(
+                &self,
+                _req: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                unreachable!()
+            }
+        }
+
+        let provider = CleaningProvider::new(Arc::new(OnlyThinkProvider));
+        let req = CompletionRequest::new(vec![ChatMessage::user("test")]);
+        let resp = provider.complete(req).await.unwrap();
+        assert!(
+            resp.content.trim().is_empty(),
+            "expected empty content after stripping think-only response, got: {:?}",
+            resp.content
+        );
+    }
+
+    #[tokio::test]
     async fn strips_multiple_think_blocks() {
         struct MultiThinkProvider;
 
@@ -462,5 +510,128 @@ mod tests {
         let req = ToolCompletionRequest::new(vec![ChatMessage::user("test")], vec![]);
         let resp = provider.complete_with_tools(req).await.unwrap();
         assert_eq!(resp.content, None);
+    }
+
+    #[tokio::test]
+    async fn truncates_unclosed_tool_call_tags() {
+        struct UnclosedToolTagProvider;
+
+        #[async_trait]
+        impl LlmProvider for UnclosedToolTagProvider {
+            fn model_name(&self) -> &str {
+                "unclosed"
+            }
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                Ok(CompletionResponse {
+                    content: "<think>hmm</think>The answer is 42\n<tool_call>{\"name\": \"search\"}"
+                        .to_string(),
+                    input_tokens: 10,
+                    output_tokens: 8,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+            async fn complete_with_tools(
+                &self,
+                _req: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                Ok(ToolCompletionResponse {
+                    content: Some(
+                        "<think>plan</think>Here you go\n<tool_call>{\"name\": \"fetch\"}"
+                            .to_string(),
+                    ),
+                    tool_calls: vec![],
+                    input_tokens: 10,
+                    output_tokens: 8,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+        }
+
+        let provider = CleaningProvider::new(Arc::new(UnclosedToolTagProvider));
+
+        // complete() path
+        let req = CompletionRequest::new(vec![ChatMessage::user("test")]);
+        let resp = provider.complete(req).await.unwrap();
+        assert_eq!(resp.content, "The answer is 42");
+
+        // complete_with_tools() path
+        let req = ToolCompletionRequest::new(vec![ChatMessage::user("test")], vec![]);
+        let resp = provider.complete_with_tools(req).await.unwrap();
+        assert_eq!(resp.content.as_deref(), Some("Here you go"));
+    }
+
+    #[tokio::test]
+    async fn cleans_reasoning_field_on_tool_calls() {
+        struct ReasoningToolProvider;
+
+        #[async_trait]
+        impl LlmProvider for ReasoningToolProvider {
+            fn model_name(&self) -> &str {
+                "reasoning-tool"
+            }
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                unreachable!()
+            }
+            async fn complete_with_tools(
+                &self,
+                _req: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                use crate::llm::provider::ToolCall;
+                Ok(ToolCompletionResponse {
+                    content: None,
+                    tool_calls: vec![
+                        ToolCall {
+                            id: "call_1".to_string(),
+                            name: "search".to_string(),
+                            arguments: serde_json::json!({"q": "test"}),
+                            reasoning: Some(
+                                "<think>I need to search</think>Searching now\n<tool_call>{}"
+                                    .to_string(),
+                            ),
+                        },
+                        ToolCall {
+                            id: "call_2".to_string(),
+                            name: "fetch".to_string(),
+                            arguments: serde_json::json!({}),
+                            reasoning: None,
+                        },
+                    ],
+                    input_tokens: 15,
+                    output_tokens: 10,
+                    finish_reason: FinishReason::ToolUse,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+        }
+
+        let provider = CleaningProvider::new(Arc::new(ReasoningToolProvider));
+        let req = ToolCompletionRequest::new(vec![ChatMessage::user("test")], vec![]);
+        let resp = provider.complete_with_tools(req).await.unwrap();
+
+        assert_eq!(resp.tool_calls.len(), 2);
+        // First tool call: thinking tags stripped and unclosed tool_call truncated
+        assert_eq!(
+            resp.tool_calls[0].reasoning.as_deref(),
+            Some("Searching now")
+        );
+        // Second tool call: None reasoning preserved
+        assert_eq!(resp.tool_calls[1].reasoning, None);
     }
 }
