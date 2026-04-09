@@ -1754,7 +1754,8 @@ async fn handle_list_skills(
         return ExtFunctionResult::Return(json_to_monty(&serde_json::json!([])));
     };
 
-    // User's own skills.
+    // User's docs in their project (all doc types — skill filtering happens
+    // below in the `filter(|d| d.doc_type == Skill)` pass).
     let mut docs = match store
         .list_memory_docs(thread.project_id, &thread.user_id)
         .await

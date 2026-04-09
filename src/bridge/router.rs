@@ -4050,6 +4050,12 @@ mod tests {
         ) -> Result<Vec<ironclaw_engine::MemoryDoc>, ironclaw_engine::EngineError> {
             Ok(vec![])
         }
+        async fn list_memory_docs_by_owner(
+            &self,
+            _user_id: &str,
+        ) -> Result<Vec<ironclaw_engine::MemoryDoc>, ironclaw_engine::EngineError> {
+            Ok(vec![])
+        }
         async fn save_lease(
             &self,
             _: &ironclaw_engine::CapabilityLease,

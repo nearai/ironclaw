@@ -393,6 +393,19 @@ impl Store for TestStore {
     ) -> Result<Vec<MemoryDoc>, EngineError> {
         Ok(self.docs.read().await.clone())
     }
+    async fn list_memory_docs_by_owner(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<MemoryDoc>, EngineError> {
+        Ok(self
+            .docs
+            .read()
+            .await
+            .iter()
+            .filter(|d| d.user_id == user_id)
+            .cloned()
+            .collect())
+    }
     async fn save_lease(&self, lease: &CapabilityLease) -> Result<(), EngineError> {
         let mut leases = self.leases.write().await;
         leases.retain(|l| l.id != lease.id);

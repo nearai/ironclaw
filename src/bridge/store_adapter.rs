@@ -933,19 +933,43 @@ fn slugify(title: &str, id: &str) -> String {
 // ── Frontmatter serialization ───────────────────────────────
 
 /// Serialize a MemoryDoc as YAML frontmatter + markdown content.
+/// Escape a string for embedding inside a YAML double-quoted scalar.
+///
+/// YAML double-quoted scalars require `\`, `"`, and control characters to be
+/// escaped. Newlines (`\n`, `\r`), tabs (`\t`), and backslashes are the most
+/// common offenders in user-supplied identifiers (e.g. OIDC `sub` claims).
+fn yaml_quoted_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn serialize_knowledge_doc(doc: &MemoryDoc) -> String {
     let mut frontmatter = String::from("---\n");
     frontmatter.push_str(&format!("id: \"{}\"\n", doc.id.0));
     frontmatter.push_str(&format!("project_id: \"{}\"\n", doc.project_id.0));
-    frontmatter.push_str(&format!("user_id: \"{}\"\n", doc.user_id));
+    frontmatter.push_str(&format!(
+        "user_id: \"{}\"\n",
+        yaml_quoted_escape(&doc.user_id)
+    ));
     frontmatter.push_str(&format!("doc_type: \"{:?}\"\n", doc.doc_type));
-    frontmatter.push_str(&format!("title: \"{}\"\n", doc.title.replace('"', "\\\"")));
+    frontmatter.push_str(&format!("title: \"{}\"\n", yaml_quoted_escape(&doc.title)));
     if !doc.tags.is_empty() {
         frontmatter.push_str(&format!(
             "tags: [{}]\n",
             doc.tags
                 .iter()
-                .map(|t| format!("\"{t}\""))
+                .map(|t| format!("\"{}\"", yaml_quoted_escape(t)))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
