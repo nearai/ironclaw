@@ -1861,36 +1861,80 @@ impl Agent {
                         content: content.clone(),
                         thread_id: message.thread_id.clone(),
                     };
-                    match self.hooks().run(&hook_event).await {
+                    let content = match self.hooks().run(&hook_event).await {
                         Err(crate::hooks::HookError::Rejected { reason }) => {
-                            Ok(SubmissionResult::ok_with_message(format!(
+                            // Match the main UserInput path's rejection behavior.
+                            return Ok(HandleOutcome::Respond(format!(
                                 "[Message rejected: {reason}]"
-                            )))
+                            )));
+                        }
+                        Err(err) => {
+                            // Match the main UserInput path's error behavior.
+                            return Ok(HandleOutcome::Respond(format!(
+                                "[Message blocked by hook policy: {err}]"
+                            )));
                         }
                         Ok(crate::hooks::HookOutcome::Continue {
                             modified: Some(new_content),
-                        }) => {
-                            self.process_user_input(
-                                message,
-                                tenant.clone(),
-                                session,
-                                thread_id,
-                                &new_content,
-                            )
+                        }) => new_content,
+                        _ => content, // Continue — no modification
+                    };
+
+                    // Process as user input with the drain loop so queued
+                    // messages during processing are merged, matching the
+                    // Submission::UserInput arm's behavior.
+                    let mut result = self
+                        .process_user_input(
+                            message,
+                            tenant.clone(),
+                            session.clone(),
+                            thread_id,
+                            &content,
+                        )
+                        .await;
+
+                    while let Ok(SubmissionResult::Response { content: outgoing }) = &result {
+                        let merged = {
+                            let mut sess = session.lock().await;
+                            sess.threads
+                                .get_mut(&thread_id)
+                                .and_then(|thread| thread.drain_pending_messages())
+                        };
+                        let Some(next_content) = merged else {
+                            break;
+                        };
+
+                        if let Err(e) = self
+                            .respond_then_done(message, OutgoingResponse::text(outgoing.clone()))
                             .await
+                        {
+                            tracing::warn!(
+                                %thread_id,
+                                "Failed to send intermediate drain-loop response: {e}"
+                            );
                         }
-                        _ => {
-                            // Continue — fail-open errors already logged
-                            self.process_user_input(
-                                message,
+
+                        let mut queued_msg = message.clone();
+                        queued_msg.attachments.clear();
+                        result = self
+                            .process_user_input(
+                                &queued_msg,
                                 tenant.clone(),
-                                session,
+                                session.clone(),
                                 thread_id,
-                                &content,
+                                &next_content,
                             )
-                            .await
+                            .await;
+
+                        if !matches!(&result, Ok(SubmissionResult::Response { .. })) {
+                            let mut sess = session.lock().await;
+                            if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                                thread.requeue_drained(next_content);
+                            }
                         }
                     }
+
+                    result
                 }
             }
             Submission::Plan { sub } => {
