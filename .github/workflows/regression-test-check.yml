@@ -100,7 +100,7 @@ jobs:
             exit 0
           fi
 
-          # --- 3. Exempt static-only / docs-only changes ---
+          # --- 3. Exempt static-only / docs-only / CI-only changes ---
           if [ -z "$CHANGED_FILES" ]; then
             echo "No changed files — skipping."
             exit 0
@@ -111,12 +111,17 @@ jobs:
             case "$file" in
               src/channels/web/static/*) ;;
               *.md) ;;
+              .github/*) ;;
+              .githooks/*) ;;
+              scripts/*) ;;
+              *.yml) ;;
+              *.yaml) ;;
               *) ALL_EXEMPT=false; break ;;
             esac
           done <<< "$CHANGED_FILES"
 
           if [ "$ALL_EXEMPT" = true ]; then
-            echo "All changes are static assets or docs — skipping."
+            echo "All changes are static assets, docs, or CI/infrastructure — skipping."
             exit 0
           fi
 
