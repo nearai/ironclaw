@@ -187,7 +187,8 @@ impl SubmissionParser {
         // The parser is stateless — it cannot check whether an approval is
         // actually pending. The routing layer in agent_loop.rs downgrades bare
         // keywords to UserInput when no approval is pending; slash-prefixed
-        // variants (/approve, /deny) always route as ApprovalResponse.
+        // variants (e.g. /approve, /deny, /yes, /no, /always) always route
+        // as ApprovalResponse.
         match lower.as_str() {
             "yes" | "y" | "approve" | "ok" | "/approve" | "/yes" | "/y" => {
                 return Submission::ApprovalResponse {
