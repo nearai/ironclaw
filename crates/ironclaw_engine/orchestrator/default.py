@@ -675,6 +675,7 @@ def run_loop(context, goal, actions, state, config):
             # is co-emitted with other calls, execute the non-FINAL calls first
             # so persistence side effects are not silently dropped.
             final_call = None
+            duplicate_finals_dropped = 0
             executable_calls = []
             for c in calls:
                 if c.get("name", "") == "FINAL":
@@ -683,8 +684,18 @@ def run_loop(context, goal, actions, state, config):
                     # normal action and fail with a lease error.
                     if final_call is None:
                         final_call = c
+                    else:
+                        duplicate_finals_dropped += 1
                     continue
                 executable_calls.append(c)
+
+            if duplicate_finals_dropped > 0:
+                # Surface the drop so traces show why fewer FINALs were
+                # executed than the LLM emitted.
+                __emit_event__(
+                    "duplicate_final_dropped",
+                    count=duplicate_finals_dropped,
+                )
 
             # Append the assistant message with only the executable calls.
             # FINAL is filtered out of `action_calls` so the message history
@@ -794,12 +805,25 @@ def run_loop(context, goal, actions, state, config):
                     if not answer:
                         # Fall back to the assistant's content text. This may
                         # contain the model's full explanation rather than the
-                        # intended terse answer — emit a trace event so the
+                        # intended terse answer — truncate aggressively so we
+                        # don't ship thousands of tokens of reasoning as the
+                        # final answer, and emit a trace event so the
                         # ambiguity is visible.
-                        answer = response.get("content", "") or ""
+                        fallback_content = response.get("content", "") or ""
+                        FINAL_FALLBACK_MAX_CHARS = 500
+                        truncated = False
+                        if len(fallback_content) > FINAL_FALLBACK_MAX_CHARS:
+                            fallback_content = (
+                                fallback_content[:FINAL_FALLBACK_MAX_CHARS]
+                                + "… [truncated by orchestrator: FINAL was emitted with no recognizable answer param]"
+                            )
+                            truncated = True
+                        answer = fallback_content
                         __emit_event__(
                             "final_fallback",
                             reason="no recognizable answer param on FINAL",
+                            truncated=truncated,
+                            original_length=len(response.get("content", "") or ""),
                         )
                 __transition_to__("completed", "FINAL via tool_calls")
                 return complete_result(state, "completed", str(answer))

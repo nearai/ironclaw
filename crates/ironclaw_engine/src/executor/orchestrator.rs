@@ -1843,6 +1843,16 @@ async fn handle_record_skill_usage(
 /// matches anywhere in `text`. Invalid regex or a size-limit violation
 /// returns `False` silently. Used by the Python skill selector for regex
 /// pattern scoring (Monty has no `re` module).
+///
+/// **Security: ReDoS safety.** This handler accepts arbitrary patterns from
+/// the Python orchestrator (which itself receives them from skill manifests)
+/// and runs them on user-supplied text. Safety relies on the `regex` crate's
+/// linear-time matching guarantee (no backreferences, no lookaround) plus the
+/// 64 KiB compiled-size cap below. If the `regex` crate is ever swapped for
+/// `fancy-regex` (which supports backreferences and is NOT linear-time), this
+/// becomes a real ReDoS vector. The `compile_error!` block in
+/// `crates/ironclaw_engine/src/lib.rs` enforces that `fancy-regex` cannot be
+/// pulled in for this call site.
 fn handle_regex_match(args: &[MontyObject]) -> ExtFunctionResult {
     let pattern = args.first().map(monty_to_string).unwrap_or_default();
     let text = args.get(1).map(monty_to_string).unwrap_or_default();

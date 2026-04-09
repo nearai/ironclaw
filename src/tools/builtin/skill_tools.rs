@@ -72,6 +72,41 @@ impl ChainInstallReport {
     }
 }
 
+/// Acquire a read lock on the skill registry, recovering from poisoning.
+///
+/// `std::sync::RwLock` becomes "poisoned" if a writer panics while holding it,
+/// after which every subsequent `.read()` / `.write()` returns `Err`. The
+/// skill registry only ever holds replace-on-success state (commits happen
+/// after successful disk writes and validation), so a poisoned lock is safe
+/// to recover from — failing every future `skill_install` call is a worse
+/// outcome than ignoring the panic. We log loudly so the underlying panic
+/// stays visible.
+fn registry_read(
+    registry: &Arc<std::sync::RwLock<SkillRegistry>>,
+) -> std::sync::RwLockReadGuard<'_, SkillRegistry> {
+    registry.read().unwrap_or_else(|poison| {
+        tracing::error!(
+            "skill registry RwLock was poisoned (a previous writer panicked); \
+             recovering — skill state may be from before the panic"
+        );
+        poison.into_inner()
+    })
+}
+
+/// Acquire a write lock on the skill registry, recovering from poisoning.
+/// See [`registry_read`] for the rationale.
+fn registry_write(
+    registry: &Arc<std::sync::RwLock<SkillRegistry>>,
+) -> std::sync::RwLockWriteGuard<'_, SkillRegistry> {
+    registry.write().unwrap_or_else(|poison| {
+        tracing::error!(
+            "skill registry RwLock was poisoned (a previous writer panicked); \
+             recovering — skill state may be from before the panic"
+        );
+        poison.into_inner()
+    })
+}
+
 async fn install_missing_skill_dependencies<F, Fut>(
     registry: &Arc<std::sync::RwLock<SkillRegistry>>,
     registry_url: &str,
@@ -83,9 +118,7 @@ where
     Fut: Future<Output = Result<String, SkillFetchError>>,
 {
     let (user_dir, initial_missing) = {
-        let guard = registry
-            .read()
-            .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
+        let guard = registry_read(registry);
         let missing = required_skills
             .into_iter()
             .filter(|name| !guard.has(name))
@@ -110,9 +143,7 @@ where
         // another concurrent install) BEFORE applying the cap, so already-
         // installed deps don't count toward `skipped_dependencies`.
         {
-            let guard = registry
-                .read()
-                .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
+            let guard = registry_read(registry);
             if guard.has(&dep_name) {
                 continue;
             }
@@ -147,9 +178,7 @@ where
                             Failed(String),
                         }
                         let outcome: CommitOutcome = {
-                            let mut guard = registry.write().map_err(|e| {
-                                ToolError::ExecutionFailed(format!("Lock poisoned: {}", e))
-                            })?;
+                            let mut guard = registry_write(registry);
                             if guard.has(&name) {
                                 CommitOutcome::Duplicate
                             } else {
@@ -249,7 +278,7 @@ fn build_skill_install_output(
     if !report.skipped.is_empty() {
         output["skipped_dependencies"] = serde_json::json!(&report.skipped);
         output["skipped_dependencies_message"] = serde_json::json!(format!(
-            "{} dependency chain exceeded MAX_CHAIN_DEPS={}; these were not attempted and must be installed manually: {}",
+            "{} dependency chain hit the MAX_CHAIN_DEPS={} *attempt* cap (intentional bound on fetch time from large/malicious manifests). These deps were not attempted and must be installed manually with a follow-up `skill_install` call: {}",
             report.skipped.len(),
             MAX_CHAIN_DEPS,
             report.skipped.join(", ")
@@ -613,6 +642,7 @@ impl Tool for SkillInstallTool {
                     serde_json::json!({
                         "name": name,
                         "status": "already_installed",
+                        "trust": "installed",
                         "message": format!(
                             "Skill '{}' is already active — no install needed.",
                             name

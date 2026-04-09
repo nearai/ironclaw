@@ -285,6 +285,25 @@ fn extract_code_block(text: &str) -> Option<String> {
 /// Rejects: lines starting with `-`, `*`, `|`, `>`, `:`, digits followed by
 /// `.` (markdown lists, tables, blockquotes, headings, numbered lists),
 /// bare prose, etc.
+/// Returns true when `line` contains an identifier-style function call
+/// (an identifier or attribute path immediately followed by `(`).
+///
+/// Avoids the false positives `trimmed.contains('(')` produced for markdown
+/// links like `[text](url)` and prose like "See (docs)" — neither has an
+/// alphanumeric/underscore character directly before the `(`.
+fn has_identifier_call(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'(' && i > 0 {
+            let prev = bytes[i - 1];
+            if prev.is_ascii_alphanumeric() || prev == b'_' {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn looks_like_python(code: &str) -> bool {
     const PY_KEYWORDS: &[&str] = &[
         "import", "from", "def", "class", "if", "for", "while", "return", "print", "FINAL", "try",
@@ -316,8 +335,15 @@ fn looks_like_python(code: &str) -> bool {
         if trimmed.chars().next().is_some_and(|c| c.is_ascii_digit()) && trimmed.contains(". ") {
             return false;
         }
-        // Function call: `name(...)` or `name = ...`
-        if trimmed.contains('(') || trimmed.contains('=') {
+        // Function call: an identifier (or attribute path) followed by `(`,
+        // e.g. `foo(...)`, `obj.method(...)`. We require the `(` to be
+        // preceded by an identifier char so markdown links like `[text](url)`
+        // and prose like "See (docs)" don't get classified as Python.
+        if has_identifier_call(trimmed) {
+            return true;
+        }
+        // Assignment: `name = ...` (but not `==` comparisons in prose).
+        if trimmed.contains('=') {
             return true;
         }
         // First word matches a Python keyword.
@@ -589,6 +615,25 @@ mod tests {
         assert!(
             extract_code_block(text).is_none(),
             "prose inside bare ``` should NOT be treated as Python"
+        );
+    }
+
+    #[test]
+    fn bare_backtick_markdown_link_is_rejected() {
+        // Regression test for PR #1736 review (Copilot, 3057247912):
+        // `looks_like_python` previously matched any line containing `(`,
+        // which classified markdown links like `[text](url)` and prose
+        // like "See (docs)" as Python and forwarded them to Monty as code.
+        let link_text = "Read more:\n```\n[the docs](https://example.com)\n```";
+        assert!(
+            extract_code_block(link_text).is_none(),
+            "markdown link inside bare ``` should NOT be treated as Python"
+        );
+
+        let parens_prose = "Note:\n```\nSee (docs) for details on the API.\n```";
+        assert!(
+            extract_code_block(parens_prose).is_none(),
+            "prose with parenthetical inside bare ``` should NOT be treated as Python"
         );
     }
 
