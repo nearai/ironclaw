@@ -329,17 +329,35 @@ fn validate_base_url_with_policy(
         let port = parsed
             .port()
             .unwrap_or(if scheme == "http" { 80 } else { 443 });
-        // `to_socket_addrs` performs blocking DNS resolution. This helper is
-        // also called from async request handlers (e.g. the LLM utility
+        // `to_socket_addrs` performs blocking DNS resolution.  This helper
+        // is also called from async request handlers (e.g. the LLM utility
         // routes), so wrap the lookup in `block_in_place` when running on a
-        // multi-threaded tokio worker to avoid stalling other tasks. The
+        // multi-threaded tokio worker to avoid stalling other tasks.  The
         // `try_current()` check keeps sync callers (config bootstrap, CLI)
         // working unchanged.
-        let resolve = || -> std::io::Result<Vec<IpAddr>> {
-            Ok((host, port)
-                .to_socket_addrs()?
-                .map(|addr| addr.ip())
-                .collect())
+        //
+        // A 10-second timeout prevents the entire process from hanging when
+        // the DNS resolver blocks indefinitely (e.g. sandboxed environments
+        // or broken resolvers).
+        let host_owned = host.to_string();
+        let resolve = move || -> std::io::Result<Vec<IpAddr>> {
+            use std::sync::mpsc;
+            use std::time::Duration;
+            let (tx, rx) = mpsc::channel();
+            let h = host_owned.clone();
+            std::thread::spawn(move || {
+                let result = (h.as_str(), port)
+                    .to_socket_addrs()
+                    .map(|addrs| addrs.map(|a| a.ip()).collect::<Vec<_>>());
+                let _ = tx.send(result);
+            });
+            rx.recv_timeout(Duration::from_secs(10))
+                .unwrap_or_else(|_| {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "DNS resolution timed out after 10s",
+                    ))
+                })
         };
         let lookup = match tokio::runtime::Handle::try_current() {
             Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
@@ -728,9 +746,22 @@ mod tests {
     /// "DNS resolution failure" unreliable. Detect that case and skip the test.
     fn invalid_tld_resolves_locally() -> bool {
         use std::net::ToSocketAddrs;
-        ("ironclaw-dns-hijack-probe.invalid", 443u16)
-            .to_socket_addrs()
-            .is_ok()
+        use std::sync::mpsc;
+        use std::time::Duration;
+        // Spawn the DNS lookup in a thread with a channel timeout so
+        // that sandboxed / restricted-DNS environments (where the
+        // resolver may block indefinitely for .invalid TLDs) don't
+        // hang the entire test suite.
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let resolved = ("ironclaw-dns-hijack-probe.invalid", 443u16)
+                .to_socket_addrs()
+                .is_ok();
+            let _ = tx.send(resolved);
+        });
+        // If DNS doesn't respond within 5 seconds, treat it as
+        // "DNS is broken" and skip the test (same as hijacked DNS).
+        rx.recv_timeout(Duration::from_secs(5)).unwrap_or(true)
     }
 
     #[test]
@@ -742,8 +773,27 @@ mod tests {
             );
             return;
         }
-        // .invalid TLD is guaranteed to never resolve (RFC 6761)
-        let result = validate_base_url("https://ssrf-test.invalid", "TEST");
+        // The validate_base_url call also performs DNS resolution which
+        // can hang in restricted-DNS environments, so run it in a
+        // thread with a timeout.
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            // .invalid TLD is guaranteed to never resolve (RFC 6761)
+            let result = validate_base_url("https://ssrf-test.invalid", "TEST");
+            let _ = tx.send(result);
+        });
+        let result = match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(r) => r,
+            Err(_) => {
+                eprintln!(
+                    "skipping validate_base_url_rejects_dns_failure: \
+                     DNS resolution timed out"
+                );
+                return;
+            }
+        };
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
