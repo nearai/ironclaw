@@ -35,6 +35,45 @@ Skills pass through four stages before injection:
 
   <Step title="Score">
     Each gated skill is scored against the current message using a deterministic algorithm: keyword matches, tag overlaps, and regex pattern matches. Higher scores indicate stronger relevance.
+
+    Scoring is fully deterministic — no LLM involved. A skill must declare its activation criteria in the frontmatter so the scorer knows what to match.
+
+    <Warning>
+    A skill without an `activation` block scores zero on every message and is never injected.
+    </Warning>
+
+    ```yaml
+    ---
+    name: my-skill
+    version: 0.1.0
+    description: Short description shown in skill list
+    activation:
+      keywords:
+        - deploy
+        - rollback
+      patterns:
+        - "deploy to.*production"
+        - "rollback.*release"
+      tags:
+        - devops
+      exclude_keywords:
+        - dry-run
+      max_context_tokens: 2000
+    ---
+    ```
+
+    | Field                | Purpose                                                                                         |
+    |----------------------|-------------------------------------------------------------------------------------------------|
+    | `keywords`           | Word or phrase matches. Exact word match scores higher than substring.                          |
+    | `patterns`           | Regex patterns. Each match adds significant weight — use for intent-specific phrases.           |
+    | `tags`               | Short labels for broad domain matching (e.g. `blockchain`, `cli`).                             |
+    | `exclude_keywords`   | Veto list — if any appear in the message, the skill scores zero regardless of other matches.    |
+    | `max_context_tokens` | Token budget this skill may consume per turn. Omitting it leaves the skill with a 1-token budget, effectively excluding it. |
+
+    <Tip>
+    If a skill appears in `ironclaw skills list` but the agent doesn't use it, the most common cause is a missing or empty `activation` block.
+    </Tip>
+
   </Step>
 
   <Step title="Budget">
@@ -72,6 +111,22 @@ IronClaw discovers skills from three locations, checked in order:
 | `~/.ironclaw/installed_skills/` | Installed | Registry-installed skills from ClawHub                      |
 
 Skills in trusted directories are loaded as-is. Skills in `installed_skills/` have their tool access capped by the attenuation layer regardless of what they declare.
+
+Each skill lives in its own subdirectory named after the skill:
+
+```
+~/.ironclaw/skills/
+└── my-skill/
+    └── SKILL.md
+```
+
+To verify that a skill was picked up correctly:
+
+```bash
+ironclaw skills list
+```
+
+A correctly installed skill appears with its name, version, and trust level. If a skill is missing from the list, check the directory structure and SKILL.md validity.
 
 ---
 
