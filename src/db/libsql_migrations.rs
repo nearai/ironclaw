@@ -597,7 +597,8 @@ CREATE TABLE IF NOT EXISTS users (
     created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
     metadata TEXT NOT NULL DEFAULT '{}',
     max_agents INTEGER,
-    max_tokens INTEGER
+    max_tokens INTEGER,
+    tokens_used INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS api_tokens (
@@ -841,7 +842,8 @@ CREATE TABLE IF NOT EXISTS users (
     created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
     metadata TEXT NOT NULL DEFAULT '{}',
     max_agents INTEGER,
-    max_tokens INTEGER
+    max_tokens INTEGER,
+    tokens_used INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS api_tokens (
@@ -969,6 +971,13 @@ ALTER TABLE users ADD COLUMN max_agents INTEGER;
 ALTER TABLE users ADD COLUMN max_tokens INTEGER;
 "#,
     ),
+    (
+        22,
+        "user_tokens_used",
+        r#"
+ALTER TABLE users ADD COLUMN tokens_used INTEGER NOT NULL DEFAULT 0;
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already
@@ -980,6 +989,7 @@ const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] = &[
     (18, "dynamic_tools", "scope"),
     (21, "users", "max_agents"),
     (21, "users", "max_tokens"),
+    (22, "users", "tokens_used"),
 ];
 
 /// Check whether `table` already contains `column` via `pragma_table_info`.

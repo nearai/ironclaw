@@ -332,6 +332,8 @@ pub struct UserRecord {
     pub max_agents: Option<i32>,
     /// Total cumulative token quota. None = no quota (fail-closed).
     pub max_tokens: Option<i64>,
+    /// Cumulative tokens consumed. Incremented on each LLM call.
+    pub tokens_used: i64,
 }
 
 /// An API token for authenticating requests (hash stored, never plaintext).
@@ -1020,6 +1022,9 @@ pub trait UserStore: Send + Sync {
         &self,
         user_id: Option<&str>,
     ) -> Result<Vec<UserSummaryStats>, DatabaseError>;
+
+    /// Atomically increment a user's cumulative token usage counter.
+    async fn increment_user_tokens(&self, user_id: &str, tokens: i64) -> Result<(), DatabaseError>;
 
     /// Create a user and their initial API token atomically.
     /// If either operation fails, both are rolled back.

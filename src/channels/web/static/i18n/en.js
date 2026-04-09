@@ -90,7 +90,15 @@ I18n.register('en', {
   'users.columns.cost': 'Cost',
   'users.columns.lastActive': 'Last Active',
   'users.columns.created': 'Created',
+  'users.columns.quota': 'Quota',
   'users.columns.actions': 'Actions',
+  'users.quotaAgents': '{n} agents max',
+  'users.editQuota': 'Quota',
+  'users.maxAgentsPlaceholder': 'Max agents (optional)',
+  'users.maxTokensPlaceholder': 'Max tokens (optional)',
+  'users.promptMaxAgents': 'Max agents for {name} (empty = no quota):',
+  'users.promptMaxTokens': 'Max tokens for {name} (empty = no quota):',
+  'users.failedQuotaUpdate': 'Failed to update quota',
 
   // Status
   'status.connected': 'Connected',

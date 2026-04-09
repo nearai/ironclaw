@@ -5643,6 +5643,18 @@ function renderUsersList(users) {
       actions += '<button class="btn-small" data-action="change-role" data-user-id="' + escapeHtml(u.id) + '" data-role="member">' + I18n.t('users.makeMember') + '</button> ';
     }
     actions += '<button class="btn-small" data-action="create-token" data-user-id="' + escapeHtml(u.id) + '" data-user-name="' + escapeHtml(u.display_name) + '">' + I18n.t('users.addToken') + '</button>';
+    actions += '<button class="btn-small" data-action="edit-quota" data-user-id="' + escapeHtml(u.id) + '" data-user-name="' + escapeHtml(u.display_name) + '" data-max-agents="' + (u.max_agents != null ? u.max_agents : '') + '" data-max-tokens="' + (u.max_tokens != null ? u.max_tokens : '') + '">' + I18n.t('users.editQuota') + '</button>';
+    // Build quota display
+    var quotaParts = [];
+    if (u.max_agents != null) {
+      quotaParts.push(I18n.t('users.quotaAgents', { n: u.max_agents }));
+    }
+    if (u.max_tokens != null) {
+      var used = u.tokens_used || 0;
+      var pct = u.max_tokens > 0 ? Math.round(used / u.max_tokens * 100) : 0;
+      quotaParts.push(formatTokenCount(used) + ' / ' + formatTokenCount(u.max_tokens) + ' tokens (' + pct + '%)');
+    }
+    var quotaCell = quotaParts.length > 0 ? quotaParts.join('<br>') : '<span style="color:var(--text-muted)">—</span>';
     return '<tr>'
       + '<td class="user-id" title="' + escapeHtml(u.id) + '">' + escapeHtml(u.id.substring(0, 8)) + '…</td>'
       + '<td>' + escapeHtml(u.display_name) + '</td>'
@@ -5651,6 +5663,7 @@ function renderUsersList(users) {
       + '<td><span class="status-badge ' + statusClass + '">' + escapeHtml(u.status) + '</span></td>'
       + '<td>' + (u.job_count || 0) + '</td>'
       + '<td>' + formatCost(u.total_cost) + '</td>'
+      + '<td class="quota-cell">' + quotaCell + '</td>'
       + '<td>' + (u.last_active_at ? formatRelativeTime(u.last_active_at) : '—') + '</td>'
       + '<td>' + formatRelativeTime(u.created_at) + '</td>'
       + '<td>' + actions + '</td>'
@@ -5692,6 +5705,32 @@ function createTokenForUser(userId, displayName) {
   }).catch(function(e) { alert(I18n.t('users.failedCreate') + ': ' + e.message); });
 }
 
+function editQuota(userId, displayName, currentMaxAgents, currentMaxTokens) {
+  var maxAgents = prompt(I18n.t('users.promptMaxAgents', { name: displayName }), currentMaxAgents);
+  if (maxAgents === null) return; // cancelled
+  var maxTokens = prompt(I18n.t('users.promptMaxTokens', { name: displayName }), currentMaxTokens);
+  if (maxTokens === null) return; // cancelled
+
+  var body = {};
+  if (maxAgents === '' || maxAgents === '0') {
+    body.max_agents = maxAgents === '' ? null : 0;
+  } else {
+    body.max_agents = parseInt(maxAgents, 10) || null;
+  }
+  if (maxTokens === '' || maxTokens === '0') {
+    body.max_tokens = maxTokens === '' ? null : 0;
+  } else {
+    body.max_tokens = parseInt(maxTokens, 10) || null;
+  }
+
+  apiFetch('api/admin/users/' + userId, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(function() { loadUsers(); })
+    .catch(function(e) { alert(I18n.t('users.failedQuotaUpdate') + ': ' + e.message); });
+}
+
 function showTokenBanner(tokenValue, title) {
   var banner = document.getElementById('users-token-result');
   if (!banner) return;
@@ -5719,6 +5758,7 @@ document.getElementById('users-table')?.addEventListener('click', function(e) {
   else if (action === 'activate-user') activateUser(userId);
   else if (action === 'change-role') changeUserRole(userId, btn.getAttribute('data-role'));
   else if (action === 'create-token') createTokenForUser(userId, userName || '');
+  else if (action === 'edit-quota') editQuota(userId, userName || '', btn.getAttribute('data-max-agents') || '', btn.getAttribute('data-max-tokens') || '');
 });
 
 // Wire up Users tab create form
@@ -5736,6 +5776,8 @@ document.getElementById('users-create-submit')?.addEventListener('click', functi
   var displayName = document.getElementById('user-display-name').value.trim();
   var email = document.getElementById('user-email').value.trim();
   var role = document.getElementById('user-role').value;
+  var maxAgents = document.getElementById('user-max-agents').value.trim();
+  var maxTokens = document.getElementById('user-max-tokens').value.trim();
   if (!displayName) { alert(I18n.t('users.displayNameRequired')); return; }
 
   apiFetch('api/admin/users', {
@@ -5745,11 +5787,15 @@ document.getElementById('users-create-submit')?.addEventListener('click', functi
       display_name: displayName,
       email: email || undefined,
       role: role,
+      max_agents: maxAgents ? parseInt(maxAgents, 10) : undefined,
+      max_tokens: maxTokens ? parseInt(maxTokens, 10) : undefined,
     }),
   }).then(function(data) {
     document.getElementById('users-create-form').style.display = 'none';
     document.getElementById('user-display-name').value = '';
     document.getElementById('user-email').value = '';
+    document.getElementById('user-max-agents').value = '';
+    document.getElementById('user-max-tokens').value = '';
     if (data.token) {
       showTokenBanner(data.token, I18n.t('users.userCreated'));
     }

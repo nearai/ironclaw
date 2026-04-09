@@ -517,13 +517,15 @@
                 <input type="text" id="user-display-name" data-i18n-placeholder="users.displayNamePlaceholder" placeholder="Display name" autocomplete="off" />
                 <input type="text" id="user-email" data-i18n-placeholder="users.emailPlaceholder" placeholder="Email (optional)" autocomplete="off" />
                 <select id="user-role"><option value="member" data-i18n="users.roleMember">Member</option><option value="admin" data-i18n="users.roleAdmin">Admin</option></select>
+                <input type="number" id="user-max-agents" data-i18n-placeholder="users.maxAgentsPlaceholder" placeholder="Max agents (optional)" min="0" autocomplete="off" />
+                <input type="number" id="user-max-tokens" data-i18n-placeholder="users.maxTokensPlaceholder" placeholder="Max tokens (optional)" min="0" autocomplete="off" />
                 <button id="users-create-submit" class="btn-primary" data-i18n="users.create">Create</button>
                 <button id="users-create-cancel" class="btn-secondary" data-i18n="users.cancel">Cancel</button>
               </div>
               <div id="users-token-result" style="display:none" class="users-token-banner"></div>
               <table class="routines-table" id="users-table">
                 <thead><tr>
-                  <th data-i18n="users.columns.id">ID</th><th data-i18n="users.columns.displayName">Display Name</th><th data-i18n="users.columns.email">Email</th><th data-i18n="users.columns.role">Role</th><th data-i18n="users.columns.status">Status</th><th data-i18n="users.columns.jobs">Jobs</th><th data-i18n="users.columns.cost">Cost</th><th data-i18n="users.columns.lastActive">Last Active</th><th data-i18n="users.columns.created">Created</th><th data-i18n="users.columns.actions">Actions</th>
+                  <th data-i18n="users.columns.id">ID</th><th data-i18n="users.columns.displayName">Display Name</th><th data-i18n="users.columns.email">Email</th><th data-i18n="users.columns.role">Role</th><th data-i18n="users.columns.status">Status</th><th data-i18n="users.columns.jobs">Jobs</th><th data-i18n="users.columns.cost">Cost</th><th data-i18n="users.columns.quota">Quota</th><th data-i18n="users.columns.lastActive">Last Active</th><th data-i18n="users.columns.created">Created</th><th data-i18n="users.columns.actions">Actions</th>
                 </tr></thead>
                 <tbody id="users-tbody"></tbody>
               </table>

@@ -708,6 +708,15 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             if let Err(e) = store.record_llm_call(&record).await {
                 tracing::warn!("Failed to persist LLM call to DB: {}", e);
             }
+
+            // Increment cumulative token counter for quota enforcement.
+            let total_tokens =
+                i64::from(output.usage.input_tokens) + i64::from(output.usage.output_tokens);
+            if total_tokens > 0 {
+                if let Err(e) = store.increment_user_tokens(total_tokens).await {
+                    tracing::warn!("Failed to increment token counter: {}", e);
+                }
+            }
         }
 
         self.record_turn_usage(output.usage, call_cost);

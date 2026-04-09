@@ -90,7 +90,15 @@ I18n.register('ko', {
   'users.columns.cost': '비용',
   'users.columns.lastActive': '마지막 활동',
   'users.columns.created': '생성일',
+  'users.columns.quota': '할당량',
   'users.columns.actions': '작업',
+  'users.quotaAgents': '최대 {n}개 에이전트',
+  'users.editQuota': '할당량',
+  'users.maxAgentsPlaceholder': '최대 에이전트 수 (선택)',
+  'users.maxTokensPlaceholder': '최대 토큰 수 (선택)',
+  'users.promptMaxAgents': '{name}의 최대 에이전트 수 (비워두면=할당량 없음):',
+  'users.promptMaxTokens': '{name}의 최대 토큰 수 (비워두면=할당량 없음):',
+  'users.failedQuotaUpdate': '할당량 업데이트 실패',
 
   // 상태
   'status.connected': '연결됨',

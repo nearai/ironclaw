@@ -2432,7 +2432,7 @@ impl Store {
     pub async fn get_user(&self, id: &str) -> Result<Option<UserRecord>, DatabaseError> {
         let conn = self.conn().await?;
         let row = conn
-            .query_opt("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata, max_agents, max_tokens FROM users WHERE id = $1", &[&id])
+            .query_opt("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata, max_agents, max_tokens, tokens_used FROM users WHERE id = $1", &[&id])
             .await?;
         Ok(row.map(|r| row_to_user(&r)))
     }
@@ -2444,7 +2444,7 @@ impl Store {
     ) -> Result<Option<UserRecord>, DatabaseError> {
         let conn = self.conn().await?;
         let row = conn
-            .query_opt("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata, max_agents, max_tokens FROM users WHERE LOWER(email) = LOWER($1)", &[&email])
+            .query_opt("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata, max_agents, max_tokens, tokens_used FROM users WHERE LOWER(email) = LOWER($1)", &[&email])
             .await?;
         Ok(row.map(|r| row_to_user(&r)))
     }
@@ -2455,13 +2455,13 @@ impl Store {
         let rows = match status {
             Some(s) => {
                 conn.query(
-                    "SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata, max_agents, max_tokens FROM users WHERE status = $1 ORDER BY created_at DESC",
+                    "SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata, max_agents, max_tokens, tokens_used FROM users WHERE status = $1 ORDER BY created_at DESC",
                     &[&s],
                 )
                 .await?
             }
             None => {
-                conn.query("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata, max_agents, max_tokens FROM users ORDER BY created_at DESC", &[])
+                conn.query("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata, max_agents, max_tokens, tokens_used FROM users ORDER BY created_at DESC", &[])
                     .await?
             }
         };
@@ -2685,7 +2685,7 @@ impl Store {
                 r#"
                 SELECT t.id, t.user_id, t.name, t.token_prefix, t.expires_at, t.last_used_at, t.created_at, t.revoked_at,
                        u.id as u_id, u.email, u.display_name, u.status, u.role, u.created_at as u_created_at, u.updated_at, u.last_login_at, u.created_by, u.metadata,
-                       u.max_agents, u.max_tokens
+                       u.max_agents, u.max_tokens, u.tokens_used
                 FROM api_tokens t
                 JOIN users u ON t.user_id = u.id
                 WHERE t.token_hash = $1
@@ -2720,6 +2720,7 @@ impl Store {
                 metadata: r.get("metadata"),
                 max_agents: r.get("max_agents"),
                 max_tokens: r.get("max_tokens"),
+                tokens_used: r.get("tokens_used"),
             };
             (token, user)
         }))
@@ -2922,6 +2923,21 @@ impl Store {
         }
         Ok(stats)
     }
+
+    /// Atomically increment a user's cumulative token usage counter.
+    pub async fn increment_user_tokens(
+        &self,
+        user_id: &str,
+        tokens: i64,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE users SET tokens_used = tokens_used + $1 WHERE id = $2",
+            &[&tokens, &user_id],
+        )
+        .await?;
+        Ok(())
+    }
 }
 
 #[cfg(feature = "postgres")]
@@ -2939,6 +2955,7 @@ fn row_to_user(row: &tokio_postgres::Row) -> UserRecord {
         metadata: row.get("metadata"),
         max_agents: row.get("max_agents"),
         max_tokens: row.get("max_tokens"),
+        tokens_used: row.get("tokens_used"),
     }
 }
 

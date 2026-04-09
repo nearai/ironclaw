@@ -1203,6 +1203,7 @@ pub async fn bootstrap_ownership(
         metadata: serde_json::Value::Object(Default::default()),
         max_agents: None,
         max_tokens: None,
+        tokens_used: 0,
     })
     .await?;
 

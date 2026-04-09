@@ -55,6 +55,7 @@ pub async fn run_pairing_command(cmd: PairingCommand) -> Result<(), anyhow::Erro
         metadata: serde_json::Value::Object(Default::default()),
         max_agents: None,
         max_tokens: None,
+        tokens_used: 0,
     })
     .await
     .ok();
