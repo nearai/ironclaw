@@ -174,7 +174,10 @@ impl LogLevelHandle {
 ///
 /// Returns the `LogLevelHandle` so callers can swap the filter at runtime.
 /// The fmt layer and `WebLogLayer` are attached alongside the reloadable filter.
-pub fn init_tracing(log_broadcaster: Arc<LogBroadcaster>) -> Arc<LogLevelHandle> {
+pub fn init_tracing(
+    log_broadcaster: Arc<LogBroadcaster>,
+    suppress_stderr: bool,
+) -> Arc<LogLevelHandle> {
     let raw_filter =
         std::env::var("RUST_LOG").unwrap_or_else(|_| "ironclaw=info,tower_http=warn".to_string());
 
@@ -203,13 +206,19 @@ pub fn init_tracing(log_broadcaster: Arc<LogBroadcaster>) -> Arc<LogLevelHandle>
         base_filter,
     ));
 
-    tracing_subscriber::registry()
-        .with(reload_layer)
-        .with(
+    let fmt_layer = if suppress_stderr {
+        None
+    } else {
+        Some(
             tracing_subscriber::fmt::layer()
                 .with_target(false)
                 .with_writer(crate::tracing_fmt::TruncatingStderr::default()),
         )
+    };
+
+    tracing_subscriber::registry()
+        .with(reload_layer)
+        .with(fmt_layer)
         .with(WebLogLayer::new(log_broadcaster))
         .init();
 

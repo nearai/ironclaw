@@ -102,7 +102,7 @@ async fn cmd_serve(config_path: Option<&Path>) -> anyhow::Result<()> {
 
     // Initialize full tracing (with LogBroadcaster for /api/logs/events).
     let log_broadcaster = Arc::new(LogBroadcaster::new());
-    let log_level_handle = init_tracing(Arc::clone(&log_broadcaster));
+    let log_level_handle = init_tracing(Arc::clone(&log_broadcaster), false);
 
     tracing::info!("Starting standalone gateway...");
 

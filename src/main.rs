@@ -350,7 +350,7 @@ async fn async_main() -> anyhow::Result<()> {
     // Initialize tracing with a reloadable EnvFilter so the gateway can switch
     // log levels at runtime without restarting.
     let log_level_handle =
-        ironclaw::channels::web::log_layer::init_tracing(Arc::clone(&log_broadcaster));
+        ironclaw::channels::web::log_layer::init_tracing(Arc::clone(&log_broadcaster), false);
 
     tracing::debug!("Starting IronClaw...");
     tracing::debug!("Loaded configuration for agent: {}", config.agent.name);
