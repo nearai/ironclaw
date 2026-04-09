@@ -5184,10 +5184,12 @@ impl ExtensionManager {
             .await
             .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
 
-        let tool_names: Vec<String> = mcp_tools
-            .iter()
-            .map(|t| format!("{}_{}", name, t.name))
-            .collect();
+        // Source the reported names from the wrapper itself, not from the
+        // raw McpTool list. The wrapper canonicalizes dashes to underscores
+        // (see `mcp_tool_id`) so the registry key, the LLM-facing schema,
+        // the `/tools` listing, and the activation result all agree on a
+        // single snake_case identifier.
+        let tool_names: Vec<String> = tool_impls.iter().map(|t| t.name().to_string()).collect();
 
         for tool in tool_impls {
             self.tool_registry.register(tool).await;
@@ -5245,7 +5247,7 @@ impl ExtensionManager {
             };
 
             LatentProviderAction {
-                action_name: format!("{}_{}", server.name, tool.name),
+                action_name: crate::tools::mcp::mcp_tool_id(&server.name, &tool.name),
                 provider_extension: server.name.clone(),
                 description: format!(
                     "{} The runtime will connect/authenticate this provider automatically before use.",
