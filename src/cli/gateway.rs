@@ -33,6 +33,9 @@ const START_HEALTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// Polling interval when waiting for health check.
 const START_HEALTH_POLL: std::time::Duration = std::time::Duration::from_millis(300);
 
+/// Maximum time to wait for graceful shutdown before aborting the server task.
+const GRACEFUL_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum GatewayCommand {
     /// Run the web gateway in the foreground (Ctrl-C to stop).
@@ -201,8 +204,24 @@ async fn cmd_serve(config_path: Option<&Path>) -> anyhow::Result<()> {
         let _ = tx.send(());
     }
 
-    // Await the server task so in-flight requests can drain gracefully.
-    let _ = server_handle.await;
+    // Await the server task so in-flight requests can drain gracefully, but do
+    // not block shutdown forever if a request never finishes.
+    let mut server_handle = server_handle;
+    tokio::select! {
+        result = &mut server_handle => {
+            if let Err(error) = result {
+                tracing::warn!(%error, "Gateway server task exited during shutdown");
+            }
+        }
+        _ = tokio::time::sleep(GRACEFUL_SHUTDOWN_TIMEOUT) => {
+            tracing::warn!(
+                timeout_secs = GRACEFUL_SHUTDOWN_TIMEOUT.as_secs(),
+                "Gateway server did not shut down in time; aborting task"
+            );
+            server_handle.abort();
+            let _ = server_handle.await;
+        }
+    }
 
     // Clean up token file and PID lock.
     cleanup_gateway_token_file(&token_path);
@@ -290,9 +309,7 @@ fn restrict_windows_file_permissions(path: &Path) {
     // permissions and grants only the current user full control.
     let username = std::env::var("USERNAME").unwrap_or_default();
     if username.is_empty() {
-        tracing::warn!(
-            "Cannot restrict token file permissions: %USERNAME% not set"
-        );
+        tracing::warn!("Cannot restrict token file permissions: %USERNAME% not set");
         return;
     }
 
@@ -329,11 +346,13 @@ fn open_log_file(path: &Path) -> std::io::Result<std::fs::File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .mode(0o600)
-            .open(path)
+            .open(path)?;
+        restrict_unix_file_permissions(path)?;
+        Ok(file)
     }
     #[cfg(windows)]
     {
@@ -351,6 +370,13 @@ fn open_log_file(path: &Path) -> std::io::Result<std::fs::File> {
             .append(true)
             .open(path)
     }
+}
+
+#[cfg(unix)]
+fn restrict_unix_file_permissions(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
 fn cleanup_gateway_token_file(path: &Path) {
@@ -371,27 +397,10 @@ async fn cmd_start(config_path: Option<&Path>) -> anyhow::Result<()> {
         .gateway
         .clone()
         .ok_or_else(|| anyhow::anyhow!("Gateway is not enabled. Set GATEWAY_ENABLED=true"))?;
-
-    // Best-effort pre-flight check: try to acquire the PID lock to detect
-    // an already-running instance. This is NOT authoritative — there is a
-    // TOCTOU window between this check and the child's PidLock::acquire_at
-    // in `cmd_serve`. The child's lock is the real mutual exclusion point.
-    // If two `gateway start` commands race, the loser's child will fail to
-    // acquire the lock and exit, which the parent detects via health-check
-    // timeout or process exit.
-    let pid_path = gateway_pid_lock_path();
-    match PidLock::acquire_at(pid_path.clone()) {
-        Ok(lock) => {
-            // Lock acquired — no other instance holds it. Release immediately
-            // so the child can acquire it.
-            drop(lock);
-        }
-        Err(crate::bootstrap::PidLockError::AlreadyRunning { pid }) => {
-            anyhow::bail!("Gateway is already running (PID {pid})");
-        }
-        Err(crate::bootstrap::PidLockError::Io(e)) => {
-            anyhow::bail!("Cannot check gateway PID lock: {e}");
-        }
+    if gw_config.port == 0 {
+        anyhow::bail!(
+            "gateway start does not support port 0; set a fixed GATEWAY_PORT or use `gateway serve`"
+        );
     }
 
     // Spawn `ironclaw gateway serve` as a detached child process.
@@ -672,8 +681,13 @@ fn is_pid_lock_held(path: &Path) -> bool {
             // Lock held by the gateway process.
             true
         }
-        Err(_) => {
+        Err(e) => {
             // Other I/O error (permissions, etc.) — assume not held.
+            tracing::debug!(
+                path = %path.display(),
+                error = %e,
+                "Failed to inspect PID lock state"
+            );
             false
         }
     }
@@ -851,6 +865,27 @@ mod tests {
 
         let mode = std::fs::metadata(&token_path)
             .expect("token metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn open_log_file_tightens_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let log_path = dir.path().join("gateway.log");
+        std::fs::write(&log_path, "old log").expect("seed log file");
+        std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o644))
+            .expect("loosen permissions");
+
+        let _file = open_log_file(&log_path).expect("open log file");
+
+        let mode = std::fs::metadata(&log_path)
+            .expect("log metadata")
             .permissions()
             .mode()
             & 0o777;
