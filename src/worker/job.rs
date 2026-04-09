@@ -397,6 +397,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             recovery_state: tokio::sync::Mutex::new(AutonomousRecoveryState::default()),
             has_text_response: std::sync::atomic::AtomicBool::new(false),
             cached_user_info: tokio::sync::OnceCell::new(),
+            cached_admin_tool_policy: tokio::sync::OnceCell::new(),
         };
 
         let config = AgenticLoopConfig {
@@ -1175,21 +1176,23 @@ struct JobDelegate<'a> {
     /// When true, an empty follow-up response is treated as job completion
     /// rather than a retry signal (prevents spurious failures in routines).
     has_text_response: std::sync::atomic::AtomicBool,
-    /// Cached (user_id, role) for admin tool policy filtering. Populated once
+    /// Cached (user_id, is_admin) for admin tool policy filtering. Populated once
     /// on first access to avoid repeated DB lookups.
-    cached_user_info: tokio::sync::OnceCell<(String, crate::ownership::UserRole)>,
+    cached_user_info: tokio::sync::OnceCell<(String, bool)>,
+    /// Cached admin tool policy result for this worker loop.
+    cached_admin_tool_policy: crate::tools::permissions::AdminToolPolicyCache,
 }
 
 impl<'a> JobDelegate<'a> {
     const MAX_CONSECUTIVE_RATE_LIMITS: usize = 10;
 
-    /// Resolve and cache (user_id, role) for admin tool policy filtering.
+    /// Resolve and cache (user_id, is_admin) for admin tool policy filtering.
     ///
     /// Reads the job's `user_id` from the context manager and looks up the
-    /// user's role from the database. Falls back to `Member` when the DB
+    /// user's role from the database. Falls back to `false` when the DB
     /// lookup fails or no store is configured (safe default: non-admin users
     /// still see the filtered tool list).
-    async fn resolve_user_info(&self) -> &(String, crate::ownership::UserRole) {
+    async fn resolve_user_info(&self) -> &(String, bool) {
         self.cached_user_info
             .get_or_init(|| async {
                 let user_id = self
@@ -1200,23 +1203,23 @@ impl<'a> JobDelegate<'a> {
                     .map(|ctx| ctx.user_id.clone())
                     .unwrap_or_default();
 
-                let role = if let Some(store) = self.worker.store() {
-                    match store.db().get_user(&user_id).await {
-                        Ok(Some(user)) => crate::ownership::UserRole::from_db_role(&user.role),
-                        Ok(None) => crate::ownership::UserRole::Member,
+                let is_admin = if let Some(store) = self.worker.store() {
+                    match store.get_user_role(&user_id).await {
+                        Ok(Some(role)) => role.is_admin(),
+                        Ok(None) => false,
                         Err(e) => {
                             tracing::debug!(
                                 job_id = %self.worker.job_id,
-                                "Failed to look up user role, defaulting to Member: {e}"
+                                "Failed to look up user role, defaulting to non-admin: {e}"
                             );
-                            crate::ownership::UserRole::Member
+                            false
                         }
                     }
                 } else {
-                    crate::ownership::UserRole::Member
+                    false
                 };
 
-                (user_id, role)
+                (user_id, is_admin)
             })
             .await
     }
@@ -1422,15 +1425,37 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             let tool_defs = self.worker.tools().tool_definitions().await;
 
             // Apply admin tool policy filtering (multi-tenant only).
-            let (user_id, role) = self.resolve_user_info().await;
+            let (user_id, is_admin) = self.resolve_user_info().await;
+            let admin_policy = self
+                .cached_admin_tool_policy
+                .get_or_init(|| async {
+                    let Some(store) = self.worker.store() else {
+                        return crate::tools::permissions::AdminToolPolicyState::Missing;
+                    };
+
+                    match store.get_admin_tool_policy().await {
+                        Ok(Some(policy)) => {
+                            crate::tools::permissions::AdminToolPolicyState::Loaded(policy)
+                        }
+                        Ok(None) => crate::tools::permissions::AdminToolPolicyState::Missing,
+                        Err(error) => {
+                            tracing::warn!(
+                                job_id = %self.worker.job_id,
+                                %error,
+                                "Failed to load admin tool policy for worker, failing closed"
+                            );
+                            crate::tools::permissions::AdminToolPolicyState::FailClosed
+                        }
+                    }
+                })
+                .await;
             let tool_defs = crate::tools::permissions::filter_admin_disabled_tools(
                 tool_defs,
                 self.worker.deps.multi_tenant,
-                role,
+                *is_admin,
                 user_id,
-                self.worker.store().map(|s| s.db()),
-            )
-            .await;
+                admin_policy,
+            );
 
             reason_ctx.available_tools = tool_defs;
         }
@@ -2466,6 +2491,7 @@ mod tests {
             recovery_state: tokio::sync::Mutex::new(AutonomousRecoveryState::default()),
             has_text_response: std::sync::atomic::AtomicBool::new(false),
             cached_user_info: tokio::sync::OnceCell::new(),
+            cached_admin_tool_policy: tokio::sync::OnceCell::new(),
         };
 
         let mut reason_ctx = ReasoningContext::new();

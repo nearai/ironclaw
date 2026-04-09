@@ -238,6 +238,7 @@ impl Agent {
             user_tz,
             turn_usage: std::sync::Mutex::new(TurnUsageSummary::default()),
             cached_tool_permissions: std::sync::Mutex::new(None),
+            cached_admin_tool_policy: tokio::sync::OnceCell::new(),
         };
 
         // If /skill-name mentions were expanded, rewrite the last user message
@@ -350,6 +351,7 @@ struct ChatDelegate<'a> {
     turn_usage: std::sync::Mutex<TurnUsageSummary>,
     cached_tool_permissions:
         std::sync::Mutex<Option<std::collections::HashMap<String, PermissionState>>>,
+    cached_admin_tool_policy: crate::tools::permissions::AdminToolPolicyCache,
 }
 
 impl ChatDelegate<'_> {
@@ -424,14 +426,19 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
         // Apply admin tool policy first so admin-disabled tools are removed
         // before per-user permission filtering and session auto-approval.
+        let is_admin = self.tenant.identity().role.is_admin();
+        let admin_policy = crate::tools::permissions::load_cached_admin_tool_policy(
+            self.agent.store(),
+            &self.cached_admin_tool_policy,
+        )
+        .await;
         let tool_defs = crate::tools::permissions::filter_admin_disabled_tools(
             tool_defs,
             self.agent.config.multi_tenant,
-            &self.tenant.identity().role,
+            is_admin,
             self.tenant.user_id(),
-            self.agent.store(),
-        )
-        .await;
+            admin_policy,
+        );
 
         // Apply per-user tool permission filtering.
         //

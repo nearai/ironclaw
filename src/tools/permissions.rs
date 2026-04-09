@@ -5,7 +5,7 @@
 //! table of tier defaults (`TOOL_RISK_DEFAULTS`) is used as the fallback when
 //! no per-user override exists.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
@@ -104,6 +104,15 @@ pub const ADMIN_SETTINGS_USER_ID: &str = "__admin__";
 /// Settings key where the admin tool policy is stored.
 pub const ADMIN_TOOL_POLICY_KEY: &str = "admin_tool_policy";
 
+/// Maximum serialized size of the admin tool policy JSON payload.
+pub const ADMIN_TOOL_POLICY_MAX_BYTES: usize = 32 * 1024;
+
+/// Maximum length of a tool name stored in the admin tool policy.
+pub const ADMIN_TOOL_NAME_MAX_LEN: usize = 128;
+
+/// Maximum length of a per-user override key stored in the admin tool policy.
+pub const ADMIN_POLICY_USER_KEY_MAX_LEN: usize = 256;
+
 /// Admin-defined tool restrictions that override per-user permissions.
 ///
 /// Stored as a single JSON value in the `settings` table under
@@ -114,7 +123,7 @@ pub const ADMIN_TOOL_POLICY_KEY: &str = "admin_tool_policy";
 pub struct AdminToolPolicy {
     /// Tool names disabled for ALL non-admin users.
     #[serde(default)]
-    pub disabled_tools: Vec<String>,
+    pub disabled_tools: HashSet<String>,
 
     /// Additional tool names disabled for specific users, keyed by `user_id`.
     #[serde(default)]
@@ -124,7 +133,7 @@ pub struct AdminToolPolicy {
 impl AdminToolPolicy {
     /// Returns `true` if `tool_name` is admin-disabled for the given `user_id`.
     pub fn is_tool_disabled(&self, tool_name: &str, user_id: &str) -> bool {
-        if self.disabled_tools.iter().any(|t| t == tool_name) {
+        if self.disabled_tools.contains(tool_name) {
             return true;
         }
         if let Some(user_tools) = self.user_disabled_tools.get(user_id) {
@@ -137,6 +146,81 @@ impl AdminToolPolicy {
     pub fn is_empty(&self) -> bool {
         self.disabled_tools.is_empty() && self.user_disabled_tools.is_empty()
     }
+}
+
+/// Cached admin tool policy state for a single agentic loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdminToolPolicyState {
+    /// No admin policy is stored.
+    Missing,
+    /// A valid admin policy was loaded successfully.
+    Loaded(AdminToolPolicy),
+    /// The policy could not be read or parsed; fail closed by hiding tools.
+    FailClosed,
+}
+
+/// Per-loop cache used to avoid re-reading the admin tool policy on every LLM turn.
+pub type AdminToolPolicyCache = tokio::sync::OnceCell<AdminToolPolicyState>;
+
+/// Validate the wire format for an admin-disabled tool name.
+pub fn is_valid_admin_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= ADMIN_TOOL_NAME_MAX_LEN
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+/// Validate a `user_disabled_tools` map key.
+pub fn is_valid_admin_policy_user_key(user_id: &str) -> bool {
+    !user_id.is_empty()
+        && user_id.len() <= ADMIN_POLICY_USER_KEY_MAX_LEN
+        && user_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Validate the full admin tool policy payload before persisting it.
+pub fn validate_admin_tool_policy(policy: &AdminToolPolicy) -> Result<(), String> {
+    for name in &policy.disabled_tools {
+        if !is_valid_admin_tool_name(name) {
+            return Err(format!("Invalid tool name: '{name}'"));
+        }
+    }
+
+    for (user_id, tools) in &policy.user_disabled_tools {
+        if !is_valid_admin_policy_user_key(user_id) {
+            return Err(format!("Invalid user_id: '{user_id}'"));
+        }
+
+        for name in tools {
+            if !is_valid_admin_tool_name(name) {
+                return Err(format!("Invalid tool name for user '{user_id}': '{name}'"));
+            }
+        }
+    }
+
+    let serialized = serde_json::to_vec(policy)
+        .map_err(|e| format!("Failed to serialize admin tool policy: {e}"))?;
+    if serialized.len() > ADMIN_TOOL_POLICY_MAX_BYTES {
+        return Err(format!(
+            "Admin tool policy exceeds the maximum size of {} bytes",
+            ADMIN_TOOL_POLICY_MAX_BYTES
+        ));
+    }
+
+    Ok(())
+}
+
+/// Deserialize an admin tool policy and log parse failures explicitly.
+pub fn parse_admin_tool_policy(
+    value: serde_json::Value,
+    source: &'static str,
+) -> Result<AdminToolPolicy, serde_json::Error> {
+    serde_json::from_value(value).map_err(|error| {
+        tracing::warn!(source, %error, "Failed to deserialize admin tool policy");
+        error
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -166,62 +250,65 @@ pub fn effective_permission(
 // Shared admin tool policy filter
 // ---------------------------------------------------------------------------
 
-/// Load the admin tool policy from the database and filter out disabled tools.
+/// Load the admin tool policy once for the current loop and cache the result.
+pub async fn load_cached_admin_tool_policy<'a>(
+    db: Option<&'a std::sync::Arc<dyn crate::db::Database>>,
+    cache: &'a AdminToolPolicyCache,
+) -> &'a AdminToolPolicyState {
+    cache
+        .get_or_init(|| async move {
+            let Some(db) = db else {
+                return AdminToolPolicyState::Missing;
+            };
+
+            match db
+                .get_setting(ADMIN_SETTINGS_USER_ID, ADMIN_TOOL_POLICY_KEY)
+                .await
+            {
+                Ok(Some(value)) => match parse_admin_tool_policy(value, "database") {
+                    Ok(policy) => AdminToolPolicyState::Loaded(policy),
+                    Err(_) => AdminToolPolicyState::FailClosed,
+                },
+                Ok(None) => AdminToolPolicyState::Missing,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "Failed to load admin tool policy, failing closed"
+                    );
+                    AdminToolPolicyState::FailClosed
+                }
+            }
+        })
+        .await
+}
+
+/// Filter out tools blocked by the admin tool policy.
 ///
-/// Returns the filtered tool list. In non-multi-tenant mode or for admin users,
-/// returns the input list unchanged. On DB errors, returns an empty list
+/// Returns the input list unchanged for admin users or in single-tenant mode.
+/// When the policy failed to load or parse, returns an empty tool list
 /// (fail-closed) to preserve admin restrictions.
-pub async fn filter_admin_disabled_tools(
+pub fn filter_admin_disabled_tools(
     tool_defs: Vec<crate::llm::ToolDefinition>,
     multi_tenant: bool,
-    role: &crate::ownership::UserRole,
+    is_admin: bool,
     user_id: &str,
-    db: Option<&std::sync::Arc<dyn crate::db::Database>>,
+    policy_state: &AdminToolPolicyState,
 ) -> Vec<crate::llm::ToolDefinition> {
-    // Only enforce in multi-tenant mode for non-admin users.
-    if !multi_tenant || *role == crate::ownership::UserRole::Admin {
+    if !multi_tenant || is_admin {
         return tool_defs;
     }
 
-    let Some(db) = db else {
-        return tool_defs;
-    };
-
-    let admin_policy: AdminToolPolicy = match db
-        .get_setting(ADMIN_SETTINGS_USER_ID, ADMIN_TOOL_POLICY_KEY)
-        .await
-    {
-        Ok(Some(value)) => match serde_json::from_value(value) {
-            Ok(policy) => policy,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to deserialize admin tool policy, returning empty tool list \
-                     (fail-closed): {}",
-                    e
-                );
-                return Vec::new();
-            }
-        },
-        Ok(None) => return tool_defs,
-        Err(e) => {
-            tracing::warn!(
-                "Failed to load admin tool policy, returning empty tool list (fail-closed): {}",
-                e
-            );
-            return Vec::new();
-        }
+    let admin_policy = match policy_state {
+        AdminToolPolicyState::Missing => return tool_defs,
+        AdminToolPolicyState::Loaded(policy) => policy,
+        AdminToolPolicyState::FailClosed => return Vec::new(),
     };
 
     if admin_policy.is_empty() {
         return tool_defs;
     }
 
-    let global_disabled: std::collections::HashSet<&str> = admin_policy
-        .disabled_tools
-        .iter()
-        .map(String::as_str)
-        .collect();
-    let user_disabled: std::collections::HashSet<&str> = admin_policy
+    let user_disabled: HashSet<&str> = admin_policy
         .user_disabled_tools
         .get(user_id)
         .into_iter()
@@ -232,13 +319,10 @@ pub async fn filter_admin_disabled_tools(
     tool_defs
         .into_iter()
         .filter(|def| {
-            if global_disabled.contains(def.name.as_str())
+            if admin_policy.disabled_tools.contains(def.name.as_str())
                 || user_disabled.contains(def.name.as_str())
             {
-                tracing::debug!(
-                    tool = %def.name,
-                    "Excluding tool disabled by admin policy"
-                );
+                tracing::debug!(tool = %def.name, "Excluding tool disabled by admin policy");
                 false
             } else {
                 true
@@ -298,7 +382,10 @@ mod tests {
     #[test]
     fn test_admin_tool_policy_global_disabled() {
         let policy = AdminToolPolicy {
-            disabled_tools: vec!["build_software".to_string(), "tool_install".to_string()],
+            disabled_tools: HashSet::from([
+                "build_software".to_string(),
+                "tool_install".to_string(),
+            ]),
             ..Default::default()
         };
         assert!(policy.is_tool_disabled("build_software", "any_user"));
@@ -324,7 +411,7 @@ mod tests {
         let mut user_tools = HashMap::new();
         user_tools.insert("alice".to_string(), vec!["shell".to_string()]);
         let policy = AdminToolPolicy {
-            disabled_tools: vec!["build_software".to_string()],
+            disabled_tools: HashSet::from(["build_software".to_string()]),
             user_disabled_tools: user_tools,
         };
         assert!(policy.is_tool_disabled("build_software", "alice"));
@@ -345,7 +432,7 @@ mod tests {
         let mut user_tools = HashMap::new();
         user_tools.insert("alice".to_string(), vec!["shell".to_string()]);
         let policy = AdminToolPolicy {
-            disabled_tools: vec!["build_software".to_string()],
+            disabled_tools: HashSet::from(["build_software".to_string()]),
             user_disabled_tools: user_tools,
         };
         let json = serde_json::to_value(&policy).expect("serialize");
@@ -356,9 +443,33 @@ mod tests {
     #[test]
     fn test_admin_tool_policy_deserialize_partial() {
         let json = serde_json::json!({"disabled_tools": ["build_software"]});
-        let policy: AdminToolPolicy = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(policy.disabled_tools, vec!["build_software"]);
+        let policy = parse_admin_tool_policy(json, "test").expect("deserialize");
+        assert!(policy.disabled_tools.contains("build_software"));
         assert!(policy.user_disabled_tools.is_empty());
+    }
+
+    #[test]
+    fn test_validate_admin_tool_policy_rejects_bad_tool_name() {
+        let policy = AdminToolPolicy {
+            disabled_tools: HashSet::from(["../shell".to_string()]),
+            ..Default::default()
+        };
+
+        let error = validate_admin_tool_policy(&policy).expect_err("policy should be rejected");
+        assert!(error.contains("Invalid tool name"));
+    }
+
+    #[test]
+    fn test_validate_admin_tool_policy_rejects_bad_user_key() {
+        let mut user_tools = HashMap::new();
+        user_tools.insert("../alice".to_string(), vec!["shell".to_string()]);
+        let policy = AdminToolPolicy {
+            user_disabled_tools: user_tools,
+            ..Default::default()
+        };
+
+        let error = validate_admin_tool_policy(&policy).expect_err("policy should be rejected");
+        assert!(error.contains("Invalid user_id"));
     }
 
     #[test]

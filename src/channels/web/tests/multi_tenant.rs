@@ -1125,10 +1125,8 @@ mod admin_tool_policy {
             .unwrap();
         let policy: crate::tools::permissions::AdminToolPolicy =
             serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            policy.disabled_tools,
-            vec!["build_software".to_string(), "tool_install".to_string()]
-        );
+        assert!(policy.disabled_tools.contains("build_software"));
+        assert!(policy.disabled_tools.contains("tool_install"));
         assert!(policy.is_tool_disabled("shell", "alice"));
         assert!(!policy.is_tool_disabled("shell", "bob"));
     }
@@ -1164,6 +1162,107 @@ mod admin_tool_policy {
         // Empty tool name should be rejected
         let bad_policy = serde_json::json!({
             "disabled_tools": [""]
+        });
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/api/admin/tool-policy")
+            .header("Authorization", "Bearer tok-admin")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_string(&bad_policy).unwrap()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Path-like tool names should also be rejected.
+        let bad_policy = serde_json::json!({
+            "disabled_tools": ["../shell"]
+        });
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/api/admin/tool-policy")
+            .header("Authorization", "Bearer tok-admin")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_string(&bad_policy).unwrap()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_tool_policy_put_validates_user_disabled_tool_keys() {
+        let (db, _dir) = test_db().await;
+        let state = build_multi_tenant_state(db);
+
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "tok-admin".to_string(),
+            UserIdentity {
+                user_id: "admin-user".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: vec![],
+            },
+        );
+        let auth = MultiAuthState::multi(tokens);
+
+        let app = Router::new()
+            .route(
+                "/api/admin/tool-policy",
+                get(tool_policy_get_handler).put(tool_policy_put_handler),
+            )
+            .layer(middleware::from_fn_with_state(
+                crate::channels::web::auth::CombinedAuthState::from(auth),
+                auth_middleware,
+            ))
+            .with_state(state);
+
+        let bad_policy = serde_json::json!({
+            "user_disabled_tools": {
+                "../member-user": ["shell"]
+            }
+        });
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/api/admin/tool-policy")
+            .header("Authorization", "Bearer tok-admin")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_string(&bad_policy).unwrap()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_tool_policy_put_rejects_oversized_policy() {
+        let (db, _dir) = test_db().await;
+        let state = build_multi_tenant_state(db);
+
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "tok-admin".to_string(),
+            UserIdentity {
+                user_id: "admin-user".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: vec![],
+            },
+        );
+        let auth = MultiAuthState::multi(tokens);
+
+        let app = Router::new()
+            .route(
+                "/api/admin/tool-policy",
+                get(tool_policy_get_handler).put(tool_policy_put_handler),
+            )
+            .layer(middleware::from_fn_with_state(
+                crate::channels::web::auth::CombinedAuthState::from(auth),
+                auth_middleware,
+            ))
+            .with_state(state);
+
+        let oversized_tools: Vec<String> = (0..5_000).map(|i| format!("tool_{i}")).collect();
+        let bad_policy = serde_json::json!({
+            "disabled_tools": oversized_tools
         });
         let req = Request::builder()
             .method(Method::PUT)

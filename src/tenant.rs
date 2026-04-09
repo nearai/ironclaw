@@ -521,18 +521,62 @@ impl SystemScope {
         Self { inner: db }
     }
 
-    /// Expose the underlying database handle for system-level operations that
-    /// need raw access (e.g. loading admin tool policy with a fixed user_id).
-    pub fn db(&self) -> &Arc<dyn Database> {
-        &self.inner
-    }
-
     /// Construct a per-user workspace for system-process operations.
     ///
     /// Used by the heartbeat and routine engine to get a workspace scoped to
     /// a specific user without exposing the raw database handle.
     pub fn workspace_for_user(&self, user_id: impl Into<String>) -> Workspace {
         Workspace::new_with_db(user_id, Arc::clone(&self.inner))
+    }
+
+    /// Load the current admin tool policy from the shared admin settings scope.
+    pub async fn get_admin_tool_policy(
+        &self,
+    ) -> Result<Option<crate::tools::permissions::AdminToolPolicy>, DatabaseError> {
+        match self
+            .inner
+            .get_setting(
+                crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+                crate::tools::permissions::ADMIN_TOOL_POLICY_KEY,
+            )
+            .await?
+        {
+            Some(value) => {
+                crate::tools::permissions::parse_admin_tool_policy(value, "system_scope")
+                    .map(Some)
+                    .map_err(|error| DatabaseError::Serialization(error.to_string()))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Replace the current admin tool policy in the shared admin settings scope.
+    pub async fn set_admin_tool_policy(
+        &self,
+        policy: &crate::tools::permissions::AdminToolPolicy,
+    ) -> Result<(), DatabaseError> {
+        crate::tools::permissions::validate_admin_tool_policy(policy)
+            .map_err(DatabaseError::Serialization)?;
+        let value = serde_json::to_value(policy)
+            .map_err(|error| DatabaseError::Serialization(error.to_string()))?;
+        self.inner
+            .set_setting(
+                crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+                crate::tools::permissions::ADMIN_TOOL_POLICY_KEY,
+                &value,
+            )
+            .await
+    }
+
+    /// Read a user's role for system-process authorization decisions.
+    pub async fn get_user_role(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<crate::ownership::UserRole>, DatabaseError> {
+        self.inner
+            .get_user(user_id)
+            .await
+            .map(|record| record.map(|user| crate::ownership::UserRole::from_db_role(&user.role)))
     }
 
     // === Routine engine ===

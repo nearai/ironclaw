@@ -61,6 +61,11 @@ impl UserRole {
             Self::Member
         }
     }
+
+    /// Returns `true` when the role has admin privileges.
+    pub fn is_admin(&self) -> bool {
+        matches!(self, Self::Admin)
+    }
 }
 
 /// Scope of a tool or skill. Extension point — nothing sets `Global` yet.
@@ -150,6 +155,8 @@ mod tests {
         assert_eq!(UserRole::from_db_role("ADMIN"), UserRole::Admin);
         assert_eq!(UserRole::from_db_role("member"), UserRole::Member);
         assert_eq!(UserRole::from_db_role("owner"), UserRole::Member);
+        assert!(UserRole::Admin.is_admin());
+        assert!(!UserRole::Member.is_admin());
     }
 
     // --- Owned trait tests ---

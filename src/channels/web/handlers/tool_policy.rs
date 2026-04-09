@@ -10,7 +10,10 @@ use axum::{Json, extract::State, http::StatusCode};
 
 use crate::channels::web::auth::AdminUser;
 use crate::channels::web::server::GatewayState;
-use crate::tools::permissions::{ADMIN_SETTINGS_USER_ID, ADMIN_TOOL_POLICY_KEY, AdminToolPolicy};
+use crate::tools::permissions::{
+    ADMIN_SETTINGS_USER_ID, ADMIN_TOOL_POLICY_KEY, AdminToolPolicy, parse_admin_tool_policy,
+    validate_admin_tool_policy,
+};
 
 /// GET /api/admin/tool-policy — retrieve the current admin tool policy.
 ///
@@ -35,8 +38,8 @@ pub async fn tool_policy_get_handler(
         .get_setting(ADMIN_SETTINGS_USER_ID, ADMIN_TOOL_POLICY_KEY)
         .await
     {
-        Ok(Some(value)) => serde_json::from_value(value).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "Failed to parse admin tool policy");
+        Ok(Some(value)) => parse_admin_tool_policy(value, "http_get").unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Returning default admin tool policy after parse failure");
             AdminToolPolicy::default()
         }),
         Ok(None) => AdminToolPolicy::default(),
@@ -53,7 +56,8 @@ pub async fn tool_policy_get_handler(
 /// Body must be a JSON `AdminToolPolicy`. Tool names and user IDs are
 /// validated for basic sanity (non-empty, reasonable length).
 ///
-/// This endpoint is a full replace (last write wins), not a merge/patch.
+/// This endpoint is a full replacement with last-write-wins semantics.
+/// Each PUT overwrites the previously stored policy; there is no merge/patch.
 ///
 /// Only available in multi-tenant mode (returns 404 in single-user deployments).
 pub async fn tool_policy_put_handler(
@@ -68,31 +72,7 @@ pub async fn tool_policy_put_handler(
         ));
     }
 
-    // Validate tool names
-    for name in &policy.disabled_tools {
-        if name.is_empty() || name.len() > 128 {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("Invalid tool name: '{name}'"),
-            ));
-        }
-    }
-    for (user_id, tools) in &policy.user_disabled_tools {
-        if user_id.is_empty() || user_id.len() > 256 {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("Invalid user_id: '{user_id}'"),
-            ));
-        }
-        for name in tools {
-            if name.is_empty() || name.len() > 128 {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid tool name for user '{user_id}': '{name}'"),
-                ));
-            }
-        }
-    }
+    validate_admin_tool_policy(&policy).map_err(|error| (StatusCode::BAD_REQUEST, error))?;
 
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
