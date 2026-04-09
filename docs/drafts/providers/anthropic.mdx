@@ -1,0 +1,122 @@
+---
+title: Anthropic
+sidebarTitle: Anthropic
+description: Claude models via Anthropic API
+---
+
+Use Anthropic's Claude models directly via their official API.
+
+## Overview
+
+Anthropic provides state-of-the-art language models with exceptional reasoning capabilities and long context windows.
+
+**Key features:**
+- **Claude Sonnet** — Best balance of speed and capability
+- **Long context** — Up to 200K tokens
+- **Safety focus** — Built-in Constitutional AI
+
+## Configuration
+
+```bash
+# ~/.ironclaw/.env
+
+LLM_BACKEND=anthropic
+ANTHROPIC_API_KEY=sk-ant-api03-...
+```
+
+## Getting an API Key
+
+1. Visit https://console.anthropic.com
+2. Create an account
+3. Generate an API key
+4. Copy the key (starts with `sk-ant-`)
+
+## Available Models
+
+| Model | Context | Best For |
+|-------|---------|----------|
+| `claude-sonnet-4-20250514` | 200K | Complex reasoning, coding (recommended) |
+| `claude-3-5-sonnet-20241022` | 200K | General purpose, great performance |
+| `claude-3-5-haiku-20241022` | 200K | Fast responses, simple tasks |
+
+## Setup
+
+### Via Wizard
+
+```bash
+ironclaw onboard
+```
+
+1. Step 3: Select "Anthropic"
+2. Enter your API key
+3. Step 4: Select a model
+
+### Manual Configuration
+
+```bash
+# Edit ~/.ironclaw/.env
+export LLM_BACKEND=anthropic
+export ANTHROPIC_API_KEY=sk-ant-api03-...
+
+# Optional: custom base URL
+export ANTHROPIC_BASE_URL=https://api.anthropic.com
+```
+
+Restart IronClaw:
+```bash
+ironclaw run
+```
+
+## Enterprise / Custom Base URL
+
+For enterprise deployments with custom endpoints:
+
+```bash
+export ANTHROPIC_BASE_URL=https://your-enterprise.anthropic.com
+```
+
+## Cost
+
+Approximate pricing (per 1K tokens):
+
+| Model | Input | Output |
+|-------|-------|--------|
+| Claude Sonnet 4 | $3.00 | $15.00 |
+| Claude 3.5 Sonnet | $3.00 | $15.00 |
+| Claude 3.5 Haiku | $0.25 | $1.25 |
+
+See [Anthropic pricing](https://www.anthropic.com/pricing) for current rates.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Invalid API key" icon="key">
+    - Verify key starts with `sk-ant-`
+    - Check for extra spaces
+    - Ensure key is active in console
+  </Accordion>
+
+  <Accordion title="Rate limit exceeded" icon="clock">
+    - Anthropic has rate limits per tier
+    - Check your tier in console
+    - Consider upgrading or implementing retries
+  </Accordion>
+
+  <Accordion title="Model not found" icon="x-circle">
+    - Verify model name spelling
+    - Check model availability for your tier
+    - Try a different model
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="NEAR AI" icon="star" href="/providers/nearai">
+    Default provider with OAuth option
+  </Card>
+
+  <Card title="OpenAI" icon="circle" href="/providers/openai">
+    Alternative: GPT models
+  </Card>
+</CardGroup>

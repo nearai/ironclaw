@@ -202,6 +202,14 @@ pub struct SkillOAuthConfig {
     pub authorization_url: String,
     pub token_url: String,
     #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub client_id_env: Option<String>,
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    #[serde(default)]
+    pub client_secret_env: Option<String>,
+    #[serde(default)]
     pub scopes: Vec<String>,
     #[serde(default)]
     pub use_pkce: bool,

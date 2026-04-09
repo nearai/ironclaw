@@ -1,0 +1,110 @@
+---
+title: 响应式例程
+description: 基于事件与 webhook 的自动化
+---
+
+响应式例程按事件触发，而非固定时间。适合“有事发生就执行”的场景，例如文件更新、Webhook 回调、内部事件触发。
+
+---
+
+## 触发类型
+
+### 事件触发
+
+可监听的内部事件包括：
+
+| 事件 | 触发时机 |
+|------|----------|
+| `job.completed` | 任意任务成功完成 |
+| `job.failed` | 任意任务进入失败状态 |
+| `memory.write` | 记忆文档创建或更新 |
+| `routine.run` | 其他例程完成一次运行 |
+| `heartbeat` | 心跳系统触发 |
+
+可加过滤条件，例如仅监听 `inbox/` 下写入：
+
+```json
+{
+  "trigger": {
+    "type": "event",
+    "event": "memory.write",
+    "filter": {
+      "path_prefix": "inbox/"
+    }
+  }
+}
+```
+
+### Webhook 触发
+
+可暴露 HTTP 端点，收到请求即触发：
+
+```json
+{
+  "trigger": {
+    "type": "webhook",
+    "path": "/hooks/deploy-complete",
+    "secret": "${DEPLOY_WEBHOOK_SECRET}"
+  }
+}
+```
+
+端点格式：
+
+```text
+POST https://<your-ironclaw-host>/hooks/<path>
+Authorization: Bearer <secret>
+```
+
+<Note>
+Webhook 触发配置暂未完整暴露在 Web UI，可先通过 `routine_create` 或聊天命令创建。
+</Note>
+
+---
+
+## Guardrails（护栏）
+
+护栏用于限制单次运行资源，响应式例程尤其需要护栏，因为触发频率可能不可控。
+
+```json
+{
+  "guardrails": {
+    "max_tokens": 8000,
+    "max_tool_calls": 20,
+    "allowed_tools": ["memory_write", "memory_read", "memory_search"],
+    "timeout_secs": 120,
+    "rate_limit": {
+      "max_runs": 10,
+      "window_secs": 3600
+    }
+  }
+}
+```
+
+| 护栏项 | 说明 |
+|--------|------|
+| `max_tokens` | 累计 token 超限即停止 |
+| `max_tool_calls` | 工具调用次数上限 |
+| `allowed_tools` | 工具白名单（空表示不限） |
+| `timeout_secs` | 运行超时硬终止 |
+| `rate_limit.max_runs` | 时间窗口内最大运行次数 |
+| `rate_limit.window_secs` | 限流窗口（秒） |
+
+<Warning>
+Webhook 触发例程务必设置 `rate_limit`，否则外部服务误配置会导致无限触发。
+</Warning>
+
+---
+
+## 执行上下文
+
+响应式任务会收到触发事件上下文：
+
+- Webhook 触发：包含请求体
+- 事件触发：包含事件载荷（如任务 ID、记忆路径）
+
+动作提示可直接引用：
+
+```text
+action: "A job just completed: ${event.job_id}. Get the status and write a summary."
+```

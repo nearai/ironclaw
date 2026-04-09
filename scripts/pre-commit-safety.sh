@@ -78,14 +78,99 @@ if git diff --cached --quiet 2>/dev/null; then
     # No staged changes -- compare working tree against a resolved base ref
     BASE_REF="$(resolve_base_ref)"
     DIFF_OUTPUT=$(git diff "$BASE_REF" -- '*.rs' 2>/dev/null || true)
+    CHANGED_FILES=$(git diff --name-only "$BASE_REF" -- '*.rs' 2>/dev/null || true)
 else
     DIFF_OUTPUT=$(git diff --cached -U0 -- '*.rs' 2>/dev/null || true)
+    CHANGED_FILES=$(git diff --cached --name-only --diff-filter=AM -- '*.rs' 2>/dev/null || true)
 fi
 
 # Early exit if there are no relevant .rs changes
 if [ -z "$DIFF_OUTPUT" ]; then
     exit 0
 fi
+
+# Build a "test mod start line" lookup per changed file by scanning the actual
+# file content. The previous heuristic relied on `mod tests` appearing in the
+# git diff hunk header (`@@ ... mod tests @@`), but that context only shows up
+# for tiny edits inside a known test fn — and never for brand-new files added
+# in a merge. Reading the file directly catches both cases.
+TEST_BOUNDARIES_FILE=$(mktemp)
+trap 'rm -f "$TEST_BOUNDARIES_FILE"' EXIT
+for f in $CHANGED_FILES; do
+    [ -f "$f" ] || continue
+    test_line=$(awk '
+        /^#\[cfg\(test\)\]/ { cfg_at = NR; next }
+        cfg_at && /^mod tests([[:space:]]*\{)?[[:space:]]*$/ { print NR; exit }
+        cfg_at && NF > 0 && !/^[[:space:]]*$/ { cfg_at = 0 }
+    ' "$f")
+    if [ -n "$test_line" ]; then
+        printf '%s\t%s\n' "$f" "$test_line" >> "$TEST_BOUNDARIES_FILE"
+    fi
+done
+
+# Filter a unified diff (DIFF_OUTPUT-shaped) to drop `+` lines that come from
+# test code: either inside a `#[cfg(test)] mod tests` block (per the
+# precomputed boundaries) or in any file under the top-level `tests/` dir.
+# Marker, header, and context lines pass through untouched so downstream
+# grep/awk pipelines still see file/hunk anchors.
+strip_test_mod_lines() {
+    awk -v boundaries="$TEST_BOUNDARIES_FILE" '
+        BEGIN {
+            while ((getline line < boundaries) > 0) {
+                idx = index(line, "\t")
+                if (idx) {
+                    f = substr(line, 1, idx - 1)
+                    test_start[f] = substr(line, idx + 1) + 0
+                }
+            }
+            close(boundaries)
+            cur_file = ""
+            cur_start = 0
+            cur_skip_all = 0
+            new_line = 0
+        }
+        /^\+\+\+ b\// {
+            cur_file = substr($0, 7)
+            cur_start = (cur_file in test_start) ? test_start[cur_file] : 0
+            cur_skip_all = (cur_file ~ /^tests\//)
+            new_line = 0
+            print
+            next
+        }
+        /^\+\+\+ / {
+            cur_file = ""; cur_start = 0; cur_skip_all = 0; new_line = 0
+            print
+            next
+        }
+        /^--- / { print; next }
+        /^@@ / {
+            # Parse new-file starting line from `@@ -X[,Y] +U[,V] @@`
+            n = split($0, parts, " ")
+            for (i = 1; i <= n; i++) {
+                if (substr(parts[i], 1, 1) == "+") {
+                    range = substr(parts[i], 2)
+                    c = index(range, ",")
+                    if (c) range = substr(range, 1, c - 1)
+                    new_line = range + 0 - 1
+                    break
+                }
+            }
+            print
+            next
+        }
+        /^\+/ {
+            new_line++
+            if (cur_skip_all) next
+            if (cur_start > 0 && new_line >= cur_start) next
+            print
+            next
+        }
+        /^-/ { print; next }
+        { new_line++; print }
+    '
+}
+
+DIFF_OUTPUT_NO_TESTS=$(printf '%s\n' "$DIFF_OUTPUT" | strip_test_mod_lines)
 
 WARNINGS=0
 
@@ -101,9 +186,9 @@ warn() {
 
 # 1. Unsafe UTF-8 byte slicing: &s[..N] or &s[..some_var] on strings
 #    Safe patterns: is_char_boundary, char_indices, // safety:
-if echo "$DIFF_OUTPUT" | grep -nE '^\+' | grep -E '\[\.\..*\]' | grep -vE 'is_char_boundary|char_indices|// safety:|as_bytes|Vec<|&\[u8\]|\[u8\]|bytes\(\)|&bytes' | head -3 | grep -q .; then
+if echo "$DIFF_OUTPUT_NO_TESTS" | grep -nE '^\+' | grep -E '\[\.\..*\]' | grep -vE 'is_char_boundary|char_indices|// safety:|as_bytes|Vec<|&\[u8\]|\[u8\]|bytes\(\)|&bytes' | head -3 | grep -q .; then
     warn "UTF8" "Possible unsafe byte-index string slicing. Use is_char_boundary() or char_indices()."
-    echo "$DIFF_OUTPUT" | grep -nE '^\+' | grep -E '\[\.\..*\]' | grep -vE 'is_char_boundary|char_indices|// safety:|as_bytes|Vec<|&\[u8\]|\[u8\]|bytes\(\)|&bytes' | head -3 | sed 's/^/    /'
+    echo "$DIFF_OUTPUT_NO_TESTS" | grep -nE '^\+' | grep -E '\[\.\..*\]' | grep -vE 'is_char_boundary|char_indices|// safety:|as_bytes|Vec<|&\[u8\]|\[u8\]|bytes\(\)|&bytes' | head -3 | sed 's/^/    /'
 fi
 
 # 2. Case-sensitive file extension checks
@@ -114,9 +199,9 @@ if echo "$DIFF_OUTPUT" | grep -nE '^\+.*ends_with\("\.([pP][nN][gG]|[jJ][pP][eE]
 fi
 
 # 3. Hardcoded /tmp paths in test files
-if echo "$DIFF_OUTPUT" | grep -nE '^\+.*"/tmp/' | grep -vE 'tempfile|tempdir|// safety:' | head -3 | grep -q .; then
+if echo "$DIFF_OUTPUT_NO_TESTS" | grep -nE '^\+.*"/tmp/' | grep -vE 'tempfile|tempdir|// safety:' | head -3 | grep -q .; then
     warn "TMPDIR" "Hardcoded /tmp path. Use tempfile::tempdir() for parallel-safe tests."
-    echo "$DIFF_OUTPUT" | grep -nE '^\+.*"/tmp/' | grep -vE 'tempfile|tempdir|// safety:' | head -3 | sed 's/^/    /'
+    echo "$DIFF_OUTPUT_NO_TESTS" | grep -nE '^\+.*"/tmp/' | grep -vE 'tempfile|tempdir|// safety:' | head -3 | sed 's/^/    /'
 fi
 
 # 4. Logging tool parameters without redaction
@@ -167,7 +252,7 @@ fi
 #    Matches added lines containing panic-inducing calls.
 #    Excludes test files, test modules, and debug_assert (compiled out in release).
 #    Suppress with "// safety: <reason>".
-PROD_DIFF="$DIFF_OUTPUT"
+PROD_DIFF="$DIFF_OUTPUT_NO_TESTS"
 # Strip hunks from test-only files (tests/ directory, *_test.rs, test_*.rs)
 PROD_DIFF=$(echo "$PROD_DIFF" | grep -v '^+++ b/tests/' || true)
 # Strip hunks whose @@ context line indicates a test module.

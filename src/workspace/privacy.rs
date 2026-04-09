@@ -86,10 +86,22 @@ impl ConfigurablePrivacyClassifier {
     /// Create a classifier from user-supplied regex strings.
     ///
     /// Returns an error if any pattern fails to compile.
+    ///
+    /// Patterns are compiled with explicit `size_limit` and
+    /// `dfa_size_limit` of 1 MiB. Rust's `regex` crate is ReDoS-immune
+    /// (linear-time matching), so the runtime risk from operator-supplied
+    /// patterns is bounded — but a typoed multi-megabyte pattern could
+    /// still try to allocate a giant DFA at compile time. The explicit
+    /// limits make that bound visible and consistent across the codebase.
     pub fn new(pattern_strs: Vec<String>) -> Result<Self, regex::Error> {
         let patterns = pattern_strs
             .iter()
-            .map(|p| Regex::new(p))
+            .map(|p| {
+                regex::RegexBuilder::new(p)
+                    .size_limit(1 << 20) // 1 MiB compiled regex
+                    .dfa_size_limit(1 << 20)
+                    .build()
+            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { patterns })
     }

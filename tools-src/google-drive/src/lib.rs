@@ -59,100 +59,13 @@ impl exports::near::agent::tool::Guest for GoogleDriveTool {
     }
 
     fn schema() -> String {
-        r#"{
-            "type": "object",
-            "required": ["action"],
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["list_files", "get_file", "download_file", "upload_file", "update_file", "create_folder", "delete_file", "trash_file", "share_file", "list_permissions", "remove_permission", "list_shared_drives"],
-                    "description": "The Google Drive operation to perform"
-                },
-                "file_id": {
-                    "type": "string",
-                    "description": "File ID. Required for: get_file, download_file, update_file, delete_file, trash_file, share_file, list_permissions, remove_permission"
-                },
-                "query": {
-                    "type": "string",
-                    "description": "Drive search query (e.g., \"name contains 'report'\", \"mimeType = 'application/pdf'\"). Used by: list_files"
-                },
-                "page_size": {
-                    "type": "integer",
-                    "description": "Max results (default: 25, max: 1000). Used by: list_files, list_shared_drives",
-                    "default": 25
-                },
-                "order_by": {
-                    "type": "string",
-                    "description": "Sort order (e.g., 'modifiedTime desc', 'name'). Used by: list_files"
-                },
-                "corpora": {
-                    "type": "string",
-                    "enum": ["user", "drive", "domain", "allDrives"],
-                    "description": "Search scope: 'user' (default), 'drive' (shared drive), 'domain', 'allDrives'. Used by: list_files",
-                    "default": "user"
-                },
-                "drive_id": {
-                    "type": "string",
-                    "description": "Shared drive ID (required when corpora is 'drive'). Used by: list_files"
-                },
-                "page_token": {
-                    "type": "string",
-                    "description": "Token for next page of results. Used by: list_files"
-                },
-                "export_mime_type": {
-                    "type": "string",
-                    "description": "Export format for Google Workspace files (e.g., 'text/plain', 'text/csv'). Used by: download_file"
-                },
-                "name": {
-                    "type": "string",
-                    "description": "File/folder name. Required for: upload_file, create_folder. Optional for: update_file"
-                },
-                "content": {
-                    "type": "string",
-                    "description": "File content (text). Required for: upload_file"
-                },
-                "mime_type": {
-                    "type": "string",
-                    "description": "MIME type (default: 'text/plain'). Used by: upload_file",
-                    "default": "text/plain"
-                },
-                "parent_id": {
-                    "type": "string",
-                    "description": "Parent folder ID (omit for root). Used by: upload_file, create_folder"
-                },
-                "description": {
-                    "type": "string",
-                    "description": "File/folder description. Used by: upload_file, update_file, create_folder"
-                },
-                "move_to_parent": {
-                    "type": "string",
-                    "description": "Move file to this folder ID. Used by: update_file"
-                },
-                "starred": {
-                    "type": "boolean",
-                    "description": "Star or unstar the file. Used by: update_file"
-                },
-                "email": {
-                    "type": "string",
-                    "description": "Recipient email address. Required for: share_file"
-                },
-                "role": {
-                    "type": "string",
-                    "enum": ["reader", "commenter", "writer", "organizer"],
-                    "description": "Permission level (default: 'reader'). Used by: share_file",
-                    "default": "reader"
-                },
-                "message": {
-                    "type": "string",
-                    "description": "Optional message in sharing notification. Used by: share_file"
-                },
-                "permission_id": {
-                    "type": "string",
-                    "description": "Permission ID to remove (from list_permissions). Required for: remove_permission"
-                }
-            }
-        }"#
-        .to_string()
+        // Derived from `GoogleDriveAction` via `schemars::JsonSchema` so the
+        // advertised schema can never drift from the serde contract. Each
+        // enum variant becomes a `oneOf` entry with its own `required`
+        // array — the agent sees that `file_id` is required when
+        // `action == "get_file"`, etc.
+        let schema = schemars::schema_for!(types::GoogleDriveAction);
+        serde_json::to_string(&schema).expect("schema serialization is infallible")
     }
 
     fn description() -> String {

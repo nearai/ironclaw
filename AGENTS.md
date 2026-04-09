@@ -77,6 +77,7 @@ Start with these deeper docs as needed:
 - If you change implementation status for any feature tracked in `FEATURE_PARITY.md`, update that file in the same branch.
 - Do not open a PR that changes feature behavior without checking `FEATURE_PARITY.md` for needed status updates (`❌`, `🚧`, `✅`, notes, and priorities).
 - Add the narrowest tests that validate the change: unit tests for local logic, integration tests for runtime/DB/routing behavior, and E2E or trace coverage for gateway, approvals, extensions, or other user-visible flows.
+- **Test through the caller, not just the helper.** When a predicate/classifier/transform helper gates a side effect (HTTP, DB write, OAuth flow, UI mutation, tool execution) and has any wrapper or computed input between it and that side effect, a unit test on the helper alone is not sufficient regression coverage. Add a test that drives the actual call site (`*_handler`, `factory::create_*`, `manager::*`) at the integration tier or higher. Mocks of multi-arg runtime APIs must capture every argument the production caller passes. See `.claude/rules/testing.md` for the full rule and bug examples.
 
 ## Risk and Change Discipline
 

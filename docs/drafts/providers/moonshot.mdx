@@ -1,0 +1,194 @@
+---
+title: Moonshot AI
+description: Kimi K2.5 and other Moonshot models via OpenAI-compatible API
+---
+
+[Moonshot AI](https://platform.moonshot.ai) provides state-of-the-art large language models including Kimi K2.5, featuring advanced reasoning capabilities and an extensive context window.
+
+## Overview
+
+Moonshot AI offers the Kimi family of models through an OpenAI-compatible API:
+
+- **Kimi K2.5** — State-of-the-art reasoning with 256K context window
+- **Kimi K1.6** — Long-context model for document analysis
+- **OpenAI-compatible** — Standard `/v1/chat/completions` endpoint
+- **Competitive pricing** — Pay-as-you-go token-based billing
+
+## Configuration
+
+```bash
+# ~/.ironclaw/.env
+
+LLM_BACKEND=openai_compatible
+LLM_BASE_URL=https://api.moonshot.ai/v1
+LLM_API_KEY=sk-...
+LLM_MODEL=kimi-k2-5
+```
+
+## Getting an API Key
+
+1. Visit [platform.moonshot.ai](https://platform.moonshot.ai)
+2. Create an account and complete verification
+3. Generate an API key from the dashboard
+4. Copy the key and add it to your `.env` file
+
+## Available Models
+
+| Model | Context Window | Description |
+|-------|----------------|-------------|
+| `kimi-k2-5` | 256,000 tokens | Flagship reasoning model (recommended) |
+| `kimi-k1.6` | 2,000,000 tokens | Ultra-long context for documents |
+| `kimi-k2-5-instruct` | 256,000 tokens | Instruction-tuned variant |
+
+<Note>
+Model IDs may vary. Check the [Moonshot documentation](https://platform.moonshot.ai/docs/overview) for the latest available models and exact IDs.
+</Note>
+
+## Setup
+
+### Via Wizard
+
+```bash
+ironclaw onboard
+```
+
+1. Step 3: Select "Other (OpenAI-compatible)"
+2. Enter base URL: `https://api.moonshot.ai/v1`
+3. Enter your API key
+4. Step 4: Enter model name: `kimi-k2-5`
+
+### Manual Configuration
+
+```bash
+# Add to ~/.ironclaw/.env
+export LLM_BACKEND=openai_compatible
+export LLM_BASE_URL=https://api.moonshot.ai/v1
+export LLM_API_KEY=sk-your-moonshot-key
+export LLM_MODEL=kimi-k2-5
+```
+
+Restart IronClaw:
+```bash
+ironclaw run
+```
+
+## Using Kimi K2.5
+
+Kimi K2.5 is Moonshot's flagship model with advanced capabilities:
+
+### Strengths
+
+- **Long context** — 256K token window for large documents
+- **Strong reasoning** — Excellent for complex analysis
+- **Multilingual** — Strong performance in Chinese and English
+- **Tool use** — Supports function calling
+
+### Example Use Cases
+
+<CodeGroup>
+```bash Document Analysis
+# Kimi's long context excels at analyzing large documents
+"Summarize this 100-page PDF and extract key findings"
+```
+
+```bash Code Review
+# Strong reasoning for code analysis
+"Review this Rust module for potential bugs and improvements"
+```
+
+```bash Complex Reasoning
+# Multi-step problem solving
+"Analyze these three approaches and recommend the best one with justification"
+```
+</CodeGroup>
+
+## API Compatibility
+
+Moonshot implements the OpenAI Chat Completions API:
+
+```
+POST https://api.moonshot.ai/v1/chat/completions
+```
+
+Supported features:
+- Streaming responses (`stream: true`)
+- Function calling / tool use
+- System messages
+- Temperature and top-p sampling
+
+<Note>
+Some OpenAI-specific features like logprobs may not be available. Refer to Moonshot's API documentation for the latest feature support.
+</Note>
+
+## Pricing
+
+Moonshot uses pay-as-you-go pricing based on tokens consumed:
+
+| Model | Input (per 1M tokens) | Output (per 1M tokens) |
+|-------|----------------------|------------------------|
+| Kimi K2.5 | Check current rates | Check current rates |
+| Kimi K1.6 | Check current rates | Check current rates |
+
+Visit [platform.moonshot.ai/pricing](https://platform.moonshot.ai/pricing) for current rates.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="API key invalid" icon="key">
+    - Verify your API key is correctly copied
+    - Ensure your account is verified
+    - Check for any account restrictions
+  </Accordion>
+
+  <Accordion title="Model not found" icon="search">
+    - Confirm the exact model ID from the Moonshot dashboard
+    - Try `kimi-k2-5` or `kimi-k2-5-instruct`
+    - Check the model is available in your region
+  </Accordion>
+
+  <Accordion title="Rate limiting" icon="gauge">
+    - Moonshot may rate-limit requests
+    - Implement exponential backoff for retries
+    - Consider upgrading your plan for higher limits
+  </Accordion>
+
+  <Accordion title="Context length exceeded" icon="maximize">
+    - Kimi K2.5 supports 256K tokens
+    - Use `memory_write` to store large documents
+    - Chunk large inputs when possible
+  </Accordion>
+</AccordionGroup>
+
+## Comparison with Tinfoil
+
+Both providers offer Kimi K2.5, but with different tradeoffs:
+
+| Feature | Moonshot | Tinfoil |
+|---------|----------|---------|
+| **Model** | Kimi K2.5 | Kimi K2.5 |
+| **Privacy** | Standard | TEE-encrypted |
+| **Pricing** | Direct pay-as-you-go | Tinfoil rates |
+| **Attestation** | No | Hardware-verified |
+| **Use case** | General use | Maximum privacy |
+
+Choose **Moonshot** for direct API access and competitive pricing. Choose **Tinfoil** when you need TEE privacy guarantees.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Tinfoil" icon="shield" href="/providers/tinfoil">
+    TEE-secured Kimi inference alternative
+  </Card>
+
+  <Card title="OpenAI-Compatible" icon="layers" href="/providers/openai-compatible">
+    Other compatible providers
+  </Card>
+
+  <Card title="Configuration" icon="settings" href="/setup/configuration">
+    Full environment variable reference
+  </Card>
+
+  <Card title="OpenAI" icon="circle" href="/providers/openai">
+    Compare with GPT models
+  </Card>
+</CardGroup>

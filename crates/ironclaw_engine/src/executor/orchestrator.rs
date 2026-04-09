@@ -19,6 +19,7 @@
 //! - `__get_actions__` — available tool definitions
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use std::collections::HashMap;
 
@@ -26,11 +27,12 @@ use monty::{
     ExtFunctionResult, LimitedTracker, MontyObject, MontyRun, NameLookupResult, PrintWriter,
     ResourceLimits, RunProgress,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::capability::lease::LeaseManager;
 use crate::capability::policy::PolicyEngine;
 use crate::memory::RetrievalEngine;
+use crate::runtime::lease_refresh::reconcile_dynamic_tool_lease;
 use crate::runtime::messaging::{SignalReceiver, ThreadOutcome, ThreadSignal};
 use crate::traits::effect::{EffectExecutor, ThreadExecutionContext};
 use crate::traits::llm::{LlmBackend, LlmCallConfig};
@@ -97,6 +99,23 @@ const MAX_FAILURES_BEFORE_ROLLBACK: u64 = 3;
 
 /// Well-known title for orchestrator failure tracking.
 const FAILURE_TRACKER_TITLE: &str = "orchestrator:failures";
+const LEASE_REFRESH_WARN_INTERVAL_SECS: u64 = 60;
+
+fn warn_on_lease_refresh_failure(context: &'static str, error: &crate::types::error::EngineError) {
+    static LAST_WARN_TS: AtomicU64 = AtomicU64::new(0);
+
+    let now = chrono::Utc::now().timestamp().max(0) as u64;
+    let last = LAST_WARN_TS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) >= LEASE_REFRESH_WARN_INTERVAL_SECS
+        && LAST_WARN_TS
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        warn!(context, error = %error, "dynamic lease refresh failed");
+    } else {
+        debug!(context, error = %error, "dynamic lease refresh failed");
+    }
+}
 
 /// Load orchestrator code: runtime version from Store, or compiled-in default.
 ///
@@ -394,9 +413,12 @@ pub async fn execute_orchestrator(
                             args,
                             kwargs,
                             thread,
-                            llm,
-                            effects,
-                            leases,
+                            LlmCompleteDeps {
+                                llm,
+                                effects,
+                                leases,
+                                store,
+                            },
                             &mut total_tokens,
                         )
                         .await
@@ -447,7 +469,7 @@ pub async fn execute_orchestrator(
                     "__check_budget__" => handle_check_budget(thread),
 
                     // __get_actions__()
-                    "__get_actions__" => handle_get_actions(thread, effects, leases).await,
+                    "__get_actions__" => handle_get_actions(thread, effects, leases, store).await,
 
                     // __list_skills__(max_candidates, max_tokens)
                     "__list_skills__" => handle_list_skills(args, thread, store).await,
@@ -533,6 +555,13 @@ pub async fn execute_orchestrator(
 
 // ── Host function handlers ──────────────────────────────────
 
+struct LlmCompleteDeps<'a> {
+    llm: &'a Arc<dyn LlmBackend>,
+    effects: &'a Arc<dyn EffectExecutor>,
+    leases: &'a Arc<LeaseManager>,
+    store: Option<&'a Arc<dyn Store>>,
+}
+
 /// Handle `__llm_complete__(messages, actions, config)`.
 ///
 /// Calls the LLM and returns the response as a dict:
@@ -542,9 +571,7 @@ async fn handle_llm_complete(
     args: &[MontyObject],
     _kwargs: &[(MontyObject, MontyObject)],
     thread: &mut Thread,
-    llm: &Arc<dyn LlmBackend>,
-    effects: &Arc<dyn EffectExecutor>,
-    leases: &Arc<LeaseManager>,
+    deps: LlmCompleteDeps<'_>,
     total_tokens: &mut TokenUsage,
 ) -> ExtFunctionResult {
     use crate::types::step::LlmResponse;
@@ -556,8 +583,21 @@ async fn handle_llm_complete(
         .and_then(json_to_thread_messages)
         .unwrap_or_else(|| thread.messages.clone());
 
-    let active_leases = leases.active_for_thread(thread.id).await;
-    let actions = effects
+    if let Err(e) = reconcile_dynamic_tool_lease(
+        thread,
+        deps.effects,
+        deps.leases,
+        deps.store,
+        &crate::LeasePlanner::new(),
+    )
+    .await
+    {
+        warn_on_lease_refresh_failure("llm_complete", &e);
+    }
+
+    let active_leases = deps.leases.active_for_thread(thread.id).await;
+    let actions = deps
+        .effects
         .available_actions(&active_leases)
         .await
         .unwrap_or_default();
@@ -582,7 +622,7 @@ async fn handle_llm_complete(
         metadata: HashMap::new(),
     };
 
-    match llm.complete(&messages, &actions, &config).await {
+    match deps.llm.complete(&messages, &actions, &config).await {
         Ok(output) => {
             total_tokens.input_tokens += output.usage.input_tokens;
             total_tokens.output_tokens += output.usage.output_tokens;
@@ -1292,7 +1332,12 @@ async fn handle_execute_actions_parallel(
             user_id: thread.user_id.clone(),
             step_id,
             current_call_id: Some(pc.call_id.clone()),
-            source_channel: None,
+            // Read source_channel from thread metadata so downstream tools
+            // (e.g. mission_create) can default notify_channels to the
+            // originating channel. Hardcoding `None` here was a bug — it
+            // silently dropped the gateway routing for any tool dispatched
+            // through the parallel batch path.
+            source_channel: thread_source_channel(thread),
         };
         let ps = summarize_params(&pc.name, &pc.params);
         let (result_json, event, output) = execute_single_action(
@@ -1315,6 +1360,9 @@ async fn handle_execute_actions_parallel(
         // Multiple calls: execute in parallel via JoinSet
         let mut join_set = tokio::task::JoinSet::new();
         let effects = effects.clone();
+        // Capture once outside the loop — the thread's metadata is stable
+        // for the duration of the parallel batch.
+        let parallel_source_channel = thread_source_channel(thread);
 
         for (idx, lease) in runnable {
             let pc_name = parsed[idx].name.clone();
@@ -1329,7 +1377,8 @@ async fn handle_execute_actions_parallel(
                 user_id: thread.user_id.clone(),
                 step_id,
                 current_call_id: Some(pc_call_id.clone()),
-                source_channel: None,
+                // See comment above — read from thread metadata, not None.
+                source_channel: parallel_source_channel.clone(),
             };
             let ps = summarize_params(&pc_name, &pc_params);
 
@@ -1735,10 +1784,18 @@ fn handle_check_budget(thread: &Thread) -> ExtFunctionResult {
 
 /// Handle `__get_actions__()`.
 async fn handle_get_actions(
-    thread: &Thread,
+    thread: &mut Thread,
     effects: &Arc<dyn EffectExecutor>,
     leases: &Arc<LeaseManager>,
+    store: Option<&Arc<dyn Store>>,
 ) -> ExtFunctionResult {
+    if let Err(e) =
+        reconcile_dynamic_tool_lease(thread, effects, leases, store, &crate::LeasePlanner::new())
+            .await
+    {
+        warn_on_lease_refresh_failure("get_actions", &e);
+    }
+
     let active_leases = leases.active_for_thread(thread.id).await;
     match effects.available_actions(&active_leases).await {
         Ok(actions) => {

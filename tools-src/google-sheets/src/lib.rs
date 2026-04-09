@@ -67,105 +67,10 @@ impl exports::near::agent::tool::Guest for GoogleSheetsTool {
     }
 
     fn schema() -> String {
-        r#"{
-            "type": "object",
-            "required": ["action"],
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["create_spreadsheet", "get_spreadsheet", "read_values", "batch_read_values", "write_values", "append_values", "clear_values", "add_sheet", "delete_sheet", "rename_sheet", "format_cells"],
-                    "description": "The Google Sheets operation to perform"
-                },
-                "spreadsheet_id": {
-                    "type": "string",
-                    "description": "Spreadsheet ID (same as Google Drive file ID). Required for all actions except create_spreadsheet"
-                },
-                "title": {
-                    "type": "string",
-                    "description": "Title/name. Required for: create_spreadsheet, add_sheet, rename_sheet"
-                },
-                "sheet_names": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Names for sheets (tabs, defaults to ['Sheet1']). Used by: create_spreadsheet"
-                },
-                "range": {
-                    "type": "string",
-                    "description": "A1 notation range (e.g., 'Sheet1!A1:D10'). Required for: read_values, write_values, append_values, clear_values"
-                },
-                "ranges": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "List of A1 notation ranges. Required for: batch_read_values"
-                },
-                "values": {
-                    "type": "array",
-                    "items": { "type": "array" },
-                    "description": "2D array of values (rows of columns). Required for: write_values, append_values"
-                },
-                "value_input_option": {
-                    "type": "string",
-                    "enum": ["RAW", "USER_ENTERED"],
-                    "description": "How to interpret input (USER_ENTERED parses like the UI, RAW stores as-is, default: USER_ENTERED). Used by: write_values, append_values",
-                    "default": "USER_ENTERED"
-                },
-                "sheet_id": {
-                    "type": "integer",
-                    "description": "Numeric sheet ID (from get_spreadsheet, NOT the sheet name). Required for: delete_sheet, rename_sheet, format_cells"
-                },
-                "start_row": {
-                    "type": "integer",
-                    "description": "Start row (0-indexed, inclusive). Required for: format_cells"
-                },
-                "end_row": {
-                    "type": "integer",
-                    "description": "End row (0-indexed, exclusive). Required for: format_cells"
-                },
-                "start_column": {
-                    "type": "integer",
-                    "description": "Start column (0-indexed, inclusive). Required for: format_cells"
-                },
-                "end_column": {
-                    "type": "integer",
-                    "description": "End column (0-indexed, exclusive). Required for: format_cells"
-                },
-                "bold": {
-                    "type": "boolean",
-                    "description": "Make text bold. Used by: format_cells"
-                },
-                "italic": {
-                    "type": "boolean",
-                    "description": "Make text italic. Used by: format_cells"
-                },
-                "font_size": {
-                    "type": "integer",
-                    "description": "Font size in points. Used by: format_cells"
-                },
-                "text_color": {
-                    "type": "string",
-                    "description": "Text color as hex (e.g., '#FF0000'). Used by: format_cells"
-                },
-                "background_color": {
-                    "type": "string",
-                    "description": "Cell background color as hex (e.g., '#FFFF00'). Used by: format_cells"
-                },
-                "horizontal_alignment": {
-                    "type": "string",
-                    "enum": ["LEFT", "CENTER", "RIGHT"],
-                    "description": "Horizontal text alignment. Used by: format_cells"
-                },
-                "number_format": {
-                    "type": "string",
-                    "description": "Number format pattern (e.g., '#,##0.00', 'yyyy-mm-dd'). Used by: format_cells"
-                },
-                "number_format_type": {
-                    "type": "string",
-                    "enum": ["NUMBER", "CURRENCY", "PERCENT", "DATE", "TIME", "TEXT"],
-                    "description": "Type of number format (default: NUMBER). Used by: format_cells"
-                }
-            }
-        }"#
-        .to_string()
+        // Derived from `GoogleSheetsAction` via `schemars::JsonSchema` so the
+        // advertised schema can never drift from the serde contract.
+        let schema = schemars::schema_for!(types::GoogleSheetsAction);
+        serde_json::to_string(&schema).expect("schema serialization is infallible")
     }
 
     fn description() -> String {

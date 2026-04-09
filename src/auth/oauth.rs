@@ -1,18 +1,13 @@
-//! Shared OAuth infrastructure: built-in credentials, callback server, landing pages.
+//! Shared OAuth flow infrastructure, callback server, and landing pages.
 //!
 //! Every OAuth flow in the codebase (WASM tool auth, MCP server auth, NEAR AI login)
 //! uses the same callback port, landing page, and listener logic from this module.
 //!
-//! # Built-in Credentials
-//!
-//! Some providers ship with built-in OAuth credentials so users don't need to
-//! register their own OAuth app just to get started. Today this module only
-//! includes built-in defaults for Google-family tools, and those defaults can
-//! be overridden by provider-specific environment variables when needed.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+
+use crate::tools::wasm::{ssrf_safe_client_builder_for_target, validate_and_resolve_http_target};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngCore;
@@ -20,71 +15,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
+pub use crate::auth::providers::{
+    OAuthCredentials, builtin_client_id_override_env, builtin_credentials,
+    hosted_proxy_client_secret,
+};
 use crate::secrets::{CreateSecretParams, SecretsStore};
-
-// ── Built-in credentials ────────────────────────────────────────────────
-
-pub struct OAuthCredentials {
-    pub client_id: &'static str,
-    pub client_secret: &'static str,
-}
-
-/// Google OAuth "Desktop App" credentials, shared across all Google tools.
-/// Compile-time env vars override the hardcoded defaults below.
-const GOOGLE_CLIENT_ID: &str = match option_env!("IRONCLAW_GOOGLE_CLIENT_ID") {
-    Some(v) => v,
-    None => "564604149681-efo25d43rs85v0tibdepsmdv5dsrhhr0.apps.googleusercontent.com",
-};
-const GOOGLE_CLIENT_SECRET: &str = match option_env!("IRONCLAW_GOOGLE_CLIENT_SECRET") {
-    Some(v) => v,
-    None => "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",
-};
-
-/// Returns built-in OAuth credentials for a provider, keyed by secret_name.
-///
-/// The secret_name comes from the tool's capabilities.json `auth.secret_name` field.
-/// Returns `None` if no built-in credentials are configured for that provider.
-pub fn builtin_credentials(secret_name: &str) -> Option<OAuthCredentials> {
-    match secret_name {
-        "google_oauth_token" => Some(OAuthCredentials {
-            client_id: GOOGLE_CLIENT_ID,
-            client_secret: GOOGLE_CLIENT_SECRET,
-        }),
-        _ => None,
-    }
-}
-
-/// Returns the compile-time override env var name, if this provider supports one.
-pub fn builtin_client_id_override_env(secret_name: &str) -> Option<&'static str> {
-    match secret_name {
-        "google_oauth_token" => Some("IRONCLAW_GOOGLE_CLIENT_ID"),
-        _ => None,
-    }
-}
-
-/// Suppress the baked-in desktop OAuth client secret when a hosted proxy is configured.
-///
-/// In hosted deployments, IronClaw may resolve the platform Google client ID from
-/// environment variables while still falling back to the baked-in desktop secret.
-/// That client_id/client_secret mismatch breaks Google token exchange and refresh.
-///
-/// When the proxy is configured, the platform will inject the correct server-side
-/// secret for matching platform credentials, so the baked-in secret must be omitted.
-pub fn hosted_proxy_client_secret(
-    client_secret: &Option<String>,
-    builtin: Option<&OAuthCredentials>,
-    exchange_proxy_configured: bool,
-) -> Option<String> {
-    if !exchange_proxy_configured {
-        return client_secret.clone();
-    }
-
-    let builtin_secret = builtin.map(|credentials| credentials.client_secret);
-    match (client_secret, builtin_secret) {
-        (Some(resolved), Some(baked_in)) if resolved == baked_in => None,
-        _ => client_secret.clone(),
-    }
-}
 
 // ── Shared callback server ──────────────────────────────────────────────
 
@@ -96,6 +31,21 @@ pub use crate::llm::oauth_helpers::{
 };
 
 // ── Shared OAuth flow steps ─────────────────────────────────────────
+
+/// Truncate `body` to at most `max_bytes` UTF-8 bytes, walking back to the
+/// nearest char boundary so the result is always a valid `&str`. Appends
+/// `"..."` when truncation actually happens. Used to bound any
+/// upstream-controlled response text we interpolate into error strings.
+fn truncate_at_char_boundary(body: &str, max_bytes: usize) -> String {
+    if body.len() <= max_bytes {
+        return body.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &body[..end])
+}
 
 /// Response from the OAuth token exchange.
 pub struct OAuthTokenResponse {
@@ -216,6 +166,14 @@ pub async fn exchange_oauth_code(
 }
 
 /// Exchange an OAuth authorization code for tokens with generic extra form parameters.
+///
+/// **SSRF + redirect hardening.** `token_url` is supply-chain controlled (it
+/// originates in tool capabilities JSON), so the URL is validated through
+/// [`validate_and_resolve_http_target`] before the request, the client is
+/// pinned to the resolved address via [`ssrf_safe_client_builder_for_target`],
+/// and `redirect(Policy::none())` is set so an attacker cannot redirect the
+/// authorization code, PKCE verifier, or `client_secret` to a different host.
+/// Error responses have their bodies truncated before being interpolated.
 #[allow(clippy::too_many_arguments)]
 pub async fn exchange_oauth_code_with_params(
     token_url: &str,
@@ -227,7 +185,15 @@ pub async fn exchange_oauth_code_with_params(
     access_token_field: &str,
     extra_token_params: &HashMap<String, String>,
 ) -> Result<OAuthTokenResponse, OAuthCallbackError> {
-    let client = reqwest::Client::new();
+    let resolved_target = validate_and_resolve_http_target(token_url)
+        .await
+        .map_err(|e| OAuthCallbackError::Io(format!("Token URL rejected: {e}")))?;
+    let client = ssrf_safe_client_builder_for_target(&resolved_target)
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| OAuthCallbackError::Io(format!("build HTTP client: {e}")))?;
+
     let mut token_params = vec![
         ("grant_type", "authorization_code".to_string()),
         ("code", code.to_string()),
@@ -259,9 +225,14 @@ pub async fn exchange_oauth_code_with_params(
     if !token_response.status().is_success() {
         let status = token_response.status();
         let body = token_response.text().await.unwrap_or_default();
+        // Truncate the upstream body before bubbling it into our error
+        // string. OAuth error responses can echo partial token material,
+        // request details, or unbounded vendor messages — surfacing the
+        // raw body verbatim is both a leak risk and a log-bloat risk.
+        let truncated = truncate_at_char_boundary(&body, 500);
         return Err(OAuthCallbackError::Io(format!(
             "Token exchange failed: {} - {}",
-            status, body
+            status, truncated
         )));
     }
 
@@ -360,7 +331,17 @@ pub async fn store_oauth_tokens(
     }
 
     if let Some(secs) = expires_in {
-        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
+        // Saturate on overflow: a hostile / buggy provider returning
+        // `u64::MAX` for `expires_in` would either wrap to a negative
+        // i64 (immediately invalidating the token) or panic in older
+        // chrono versions. `try_seconds` returns `None` past chrono's
+        // internal millisecond limit; saturate to `TimeDelta::MAX` so
+        // the token simply lives "effectively forever" rather than
+        // poisoning storage. Mirrors the pattern in `auth/mod.rs`.
+        let expires_secs = i64::try_from(secs).unwrap_or(i64::MAX);
+        let expires_delta =
+            chrono::Duration::try_seconds(expires_secs).unwrap_or(chrono::TimeDelta::MAX);
+        let expires_at = chrono::Utc::now() + expires_delta;
         params = params.with_expiry(expires_at);
     }
 
@@ -399,12 +380,25 @@ pub async fn store_oauth_tokens(
 /// Sends a request to the configured endpoint with the token as a Bearer header.
 /// Returns `Ok(())` if the response status matches the expected success status,
 /// or an error with details if validation fails (wrong account, expired token, etc.).
+///
+/// **SSRF hardening.** `validation.url` is supply-chain controlled (it lives
+/// in the tool's capabilities JSON), so without validation a malicious tool
+/// author could redirect IronClaw to send the freshly-minted access token to
+/// an internal endpoint as `Authorization: Bearer <token>`. We resolve and
+/// validate the URL through [`validate_and_resolve_http_target`] and pin
+/// reqwest to the validated address via [`ssrf_safe_client_builder_for_target`],
+/// plus disable redirects so a 302 from a public-looking host cannot bounce
+/// the bearer-bearing request to an internal one.
 pub async fn validate_oauth_token(
     token: &str,
     validation: &crate::tools::wasm::ValidationEndpointSchema,
 ) -> Result<(), OAuthCallbackError> {
-    let client = reqwest::Client::builder()
+    let resolved_target = validate_and_resolve_http_target(&validation.url)
+        .await
+        .map_err(|e| OAuthCallbackError::Io(format!("Validation URL rejected: {e}")))?;
+    let client = ssrf_safe_client_builder_for_target(&resolved_target)
         .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| OAuthCallbackError::Io(format!("Failed to build HTTP client: {}", e)))?;
 
@@ -430,15 +424,7 @@ pub async fn validate_oauth_token(
     } else {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        let truncated: String = if body.len() > 200 {
-            let mut end = 200;
-            while end > 0 && !body.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!("{}...", &body[..end])
-        } else {
-            body
-        };
+        let truncated = truncate_at_char_boundary(&body, 200);
         Err(OAuthCallbackError::Io(format!(
             "Token validation failed: HTTP {} (expected {}): {}",
             status, validation.success_status, truncated
@@ -977,7 +963,7 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::sync::{Mutex, oneshot};
 
-    use crate::cli::oauth_defaults::{
+    use crate::auth::oauth::{
         builtin_credentials, callback_host, callback_url, is_loopback_host, landing_html,
     };
     use crate::config::helpers::lock_env;
@@ -1511,7 +1497,7 @@ mod tests {
     fn test_build_oauth_url_basic() {
         use std::collections::HashMap;
 
-        use crate::cli::oauth_defaults::build_oauth_url;
+        use crate::auth::oauth::build_oauth_url;
 
         let result = build_oauth_url(
             "https://accounts.google.com/o/oauth2/auth",
@@ -1540,7 +1526,7 @@ mod tests {
     fn test_build_oauth_url_with_pkce() {
         use std::collections::HashMap;
 
-        use crate::cli::oauth_defaults::build_oauth_url;
+        use crate::auth::oauth::build_oauth_url;
 
         let result = build_oauth_url(
             "https://auth.example.com/authorize",
@@ -1562,7 +1548,7 @@ mod tests {
     fn test_build_oauth_url_with_extra_params() {
         use std::collections::HashMap;
 
-        use crate::cli::oauth_defaults::build_oauth_url;
+        use crate::auth::oauth::build_oauth_url;
 
         let mut extra = HashMap::new();
         extra.insert("access_type".to_string(), "offline".to_string());
@@ -1585,7 +1571,7 @@ mod tests {
     fn test_build_oauth_url_state_is_unique() {
         use std::collections::HashMap;
 
-        use crate::cli::oauth_defaults::build_oauth_url;
+        use crate::auth::oauth::build_oauth_url;
 
         let result1 = build_oauth_url(
             "https://auth.example.com/authorize",
@@ -1616,7 +1602,7 @@ mod tests {
         unsafe {
             std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
         }
-        assert!(!crate::cli::oauth_defaults::use_gateway_callback());
+        assert!(!crate::auth::oauth::use_gateway_callback());
         unsafe {
             if let Some(val) = original {
                 std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
@@ -1635,7 +1621,7 @@ mod tests {
                 "https://kind-deer.agent1.near.ai",
             );
         }
-        assert!(crate::cli::oauth_defaults::use_gateway_callback());
+        assert!(crate::auth::oauth::use_gateway_callback());
         unsafe {
             if let Some(val) = original {
                 std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
@@ -1653,7 +1639,7 @@ mod tests {
         unsafe {
             std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", "http://127.0.0.1:3001");
         }
-        assert!(!crate::cli::oauth_defaults::use_gateway_callback());
+        assert!(!crate::auth::oauth::use_gateway_callback());
         unsafe {
             if let Some(val) = original {
                 std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
@@ -1671,7 +1657,7 @@ mod tests {
         unsafe {
             std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", "");
         }
-        assert!(!crate::cli::oauth_defaults::use_gateway_callback());
+        assert!(!crate::auth::oauth::use_gateway_callback());
         unsafe {
             if let Some(val) = original {
                 std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
@@ -1683,7 +1669,7 @@ mod tests {
 
     #[test]
     fn test_build_platform_state_with_instance() {
-        use crate::cli::oauth_defaults::{build_platform_state, decode_hosted_oauth_state};
+        use crate::auth::oauth::{build_platform_state, decode_hosted_oauth_state};
 
         let _guard = lock_env();
         let original = std::env::var("IRONCLAW_INSTANCE_NAME").ok();
@@ -1707,7 +1693,7 @@ mod tests {
 
     #[test]
     fn test_build_platform_state_without_instance() {
-        use crate::cli::oauth_defaults::{build_platform_state, decode_hosted_oauth_state};
+        use crate::auth::oauth::{build_platform_state, decode_hosted_oauth_state};
 
         let _guard = lock_env();
         let original = std::env::var("IRONCLAW_INSTANCE_NAME").ok();
@@ -1734,7 +1720,7 @@ mod tests {
 
     #[test]
     fn test_build_platform_state_with_openclaw_instance() {
-        use crate::cli::oauth_defaults::{build_platform_state, decode_hosted_oauth_state};
+        use crate::auth::oauth::{build_platform_state, decode_hosted_oauth_state};
 
         let _guard = lock_env();
         let original_ic = std::env::var("IRONCLAW_INSTANCE_NAME").ok();
@@ -1771,7 +1757,7 @@ mod tests {
         let _gateway_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-token"));
 
         assert_eq!(
-            crate::cli::oauth_defaults::oauth_proxy_auth_token().as_deref(),
+            crate::auth::oauth::oauth_proxy_auth_token().as_deref(),
             Some("shared-proxy-secret")
         );
     }
@@ -1783,7 +1769,7 @@ mod tests {
         let _gateway_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-token"));
 
         assert_eq!(
-            crate::cli::oauth_defaults::oauth_proxy_auth_token().as_deref(),
+            crate::auth::oauth::oauth_proxy_auth_token().as_deref(),
             Some("gateway-token")
         );
     }
@@ -1795,7 +1781,7 @@ mod tests {
         let _gateway_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-token"));
 
         assert_eq!(
-            crate::cli::oauth_defaults::oauth_proxy_auth_token().as_deref(),
+            crate::auth::oauth::oauth_proxy_auth_token().as_deref(),
             Some("gateway-token")
         );
     }
@@ -1806,12 +1792,12 @@ mod tests {
         let _proxy_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", None);
         let _gateway_guard = set_env_var("GATEWAY_AUTH_TOKEN", None);
 
-        assert_eq!(crate::cli::oauth_defaults::oauth_proxy_auth_token(), None);
+        assert_eq!(crate::auth::oauth::oauth_proxy_auth_token(), None);
     }
 
     #[test]
     fn test_strip_instance_prefix_with_colon() {
-        use crate::cli::oauth_defaults::strip_instance_prefix;
+        use crate::auth::oauth::strip_instance_prefix;
 
         assert_eq!(strip_instance_prefix("kind-deer:abc123"), "abc123");
         assert_eq!(strip_instance_prefix("my-instance:xyz"), "xyz");
@@ -1819,7 +1805,7 @@ mod tests {
 
     #[test]
     fn test_strip_instance_prefix_without_colon() {
-        use crate::cli::oauth_defaults::strip_instance_prefix;
+        use crate::auth::oauth::strip_instance_prefix;
 
         assert_eq!(strip_instance_prefix("abc123"), "abc123");
         assert_eq!(strip_instance_prefix(""), "");
@@ -1827,7 +1813,7 @@ mod tests {
 
     #[test]
     fn test_decode_hosted_oauth_state_accepts_legacy_formats() {
-        use crate::cli::oauth_defaults::decode_hosted_oauth_state;
+        use crate::auth::oauth::decode_hosted_oauth_state;
 
         let decoded = decode_hosted_oauth_state("kind-deer:abc12345").expect("legacy prefixed");
         assert_eq!(decoded.flow_id, "abc12345");
@@ -1842,7 +1828,7 @@ mod tests {
 
     #[test]
     fn test_decode_hosted_oauth_state_rejects_non_envelope_ic2_prefix() {
-        use crate::cli::oauth_defaults::decode_hosted_oauth_state;
+        use crate::auth::oauth::decode_hosted_oauth_state;
 
         // "ic2." prefix must parse as a valid versioned envelope — never fall
         // through to legacy handling, which would use the full malformed
@@ -1853,7 +1839,7 @@ mod tests {
 
     #[test]
     fn test_decode_hosted_oauth_state_rejects_tampered_checksum() {
-        use crate::cli::oauth_defaults::{decode_hosted_oauth_state, encode_hosted_oauth_state};
+        use crate::auth::oauth::{decode_hosted_oauth_state, encode_hosted_oauth_state};
 
         let encoded = encode_hosted_oauth_state("abc123", Some("kind-deer"));
         let tampered = format!("{encoded}broken");
@@ -1868,7 +1854,7 @@ mod tests {
     fn test_build_oauth_url_includes_resource_via_extra_params() {
         use std::collections::HashMap;
 
-        use crate::cli::oauth_defaults::build_oauth_url;
+        use crate::auth::oauth::build_oauth_url;
 
         let mut extra = HashMap::new();
         extra.insert(
@@ -1903,7 +1889,7 @@ mod tests {
     /// handling where the full envelope would be used as the flow_id (#1441).
     #[test]
     fn test_decode_versioned_state_rejects_malformed_envelopes() {
-        use crate::cli::oauth_defaults::decode_hosted_oauth_state;
+        use crate::auth::oauth::decode_hosted_oauth_state;
 
         // Missing checksum separator (no second dot after prefix)
         let err =
@@ -1938,7 +1924,7 @@ mod tests {
     /// Ensures the registration key and lookup key are always identical (#1441).
     #[test]
     fn test_oauth_flow_key_round_trip_consistency() {
-        use crate::cli::oauth_defaults::{decode_hosted_oauth_state, encode_hosted_oauth_state};
+        use crate::auth::oauth::{decode_hosted_oauth_state, encode_hosted_oauth_state};
 
         let nonce = "test-nonce-abc123";
         let encoded = encode_hosted_oauth_state(nonce, Some("my-instance"));
@@ -1963,7 +1949,7 @@ mod tests {
     /// Legacy flow IDs that are too short must be rejected (#1443).
     #[test]
     fn test_legacy_state_rejects_short_flow_id() {
-        use crate::cli::oauth_defaults::decode_hosted_oauth_state;
+        use crate::auth::oauth::decode_hosted_oauth_state;
 
         let err = decode_hosted_oauth_state("abc").expect_err("short raw flow_id");
         assert!(err.contains("too short"), "unexpected error: {err}");
@@ -1975,7 +1961,7 @@ mod tests {
     /// Legacy flow IDs with invalid characters must be rejected (#1443).
     #[test]
     fn test_legacy_state_rejects_invalid_characters() {
-        use crate::cli::oauth_defaults::decode_hosted_oauth_state;
+        use crate::auth::oauth::decode_hosted_oauth_state;
 
         let err = decode_hosted_oauth_state("flow id with spaces!").expect_err("spaces in flow_id");
         assert!(
@@ -1994,7 +1980,7 @@ mod tests {
     /// Legacy instance names with invalid characters must be rejected (#1444).
     #[test]
     fn test_legacy_state_rejects_invalid_instance_name() {
-        use crate::cli::oauth_defaults::decode_hosted_oauth_state;
+        use crate::auth::oauth::decode_hosted_oauth_state;
 
         let err = decode_hosted_oauth_state("bad instance!:valid-flow-id-12345")
             .expect_err("invalid instance name");
@@ -2004,7 +1990,7 @@ mod tests {
     /// Excessively long legacy flow IDs must be rejected (#1443).
     #[test]
     fn test_legacy_state_rejects_oversized_flow_id() {
-        use crate::cli::oauth_defaults::decode_hosted_oauth_state;
+        use crate::auth::oauth::decode_hosted_oauth_state;
 
         let long_id = "a".repeat(200);
         let err = decode_hosted_oauth_state(&long_id).expect_err("oversized flow_id");
@@ -2014,7 +2000,7 @@ mod tests {
     /// Valid legacy flow IDs at boundary lengths are accepted.
     #[test]
     fn test_legacy_state_accepts_boundary_lengths() {
-        use crate::cli::oauth_defaults::decode_hosted_oauth_state;
+        use crate::auth::oauth::decode_hosted_oauth_state;
 
         // Exactly 8 chars (minimum)
         let decoded = decode_hosted_oauth_state("abcd1234").expect("8-char flow_id");

@@ -10,6 +10,9 @@
 //! types become thin wrappers that delegate to `Arc<dyn Database>`.
 
 #[cfg(feature = "postgres")]
+pub mod migration_fixup;
+
+#[cfg(feature = "postgres")]
 pub mod postgres;
 
 #[cfg(feature = "postgres")]
@@ -328,6 +331,20 @@ pub struct UserRecord {
     /// Who created/invited this user (nullable for bootstrap users).
     pub created_by: Option<String>,
     pub metadata: serde_json::Value,
+}
+
+impl UserRecord {
+    /// Returns `true` if this user holds the admin role.
+    ///
+    /// Comparison is case-insensitive so a future row that stores
+    /// `"Admin"` (e.g. from a manual SQL fix or a renaming refactor)
+    /// still authenticates as admin instead of silently failing
+    /// closed. Use this helper everywhere instead of literal
+    /// `user.role == "admin"` so the canonicalisation rule lives in
+    /// one place.
+    pub fn is_admin(&self) -> bool {
+        self.role.eq_ignore_ascii_case("admin")
+    }
 }
 
 /// An API token for authenticating requests (hash stored, never plaintext).
