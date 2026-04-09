@@ -44,18 +44,32 @@ impl Store {
 
     /// Create a new store and connect to the database.
     pub async fn new(config: &DatabaseConfig) -> Result<Self, DatabaseError> {
+        let config_build_start = std::time::Instant::now();
         let mut cfg = Config::new();
         cfg.url = Some(config.url().to_string());
         cfg.pool = Some(deadpool_postgres::PoolConfig {
             max_size: config.pool_size,
             ..Default::default()
         });
+        crate::bootstrap::log_startup_timing(
+            "db.postgres.store_new.config_build",
+            config_build_start.elapsed(),
+        );
 
+        let create_pool_start = std::time::Instant::now();
         let pool = crate::db::tls::create_pool(&cfg, config.ssl_mode)
             .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        crate::bootstrap::log_startup_timing(
+            "db.postgres.store_new.create_pool",
+            create_pool_start.elapsed(),
+        );
 
-        // Test connection
+        let first_pool_get_start = std::time::Instant::now();
         let _ = pool.get().await?;
+        crate::bootstrap::log_startup_timing(
+            "db.postgres.store_new.first_pool_get",
+            first_pool_get_start.elapsed(),
+        );
 
         Ok(Self { pool })
     }
@@ -65,11 +79,22 @@ impl Store {
         use refinery::embed_migrations;
         embed_migrations!("migrations");
 
+        let migration_pool_get_start = std::time::Instant::now();
         let mut client = self.pool.get().await?;
+        crate::bootstrap::log_startup_timing(
+            "db.postgres.run_migrations.pool_get",
+            migration_pool_get_start.elapsed(),
+        );
+
+        let migration_run_start = std::time::Instant::now();
         migrations::runner()
             .run_async(&mut **client)
             .await
             .map_err(|e| DatabaseError::Migration(e.to_string()))?;
+        crate::bootstrap::log_startup_timing(
+            "db.postgres.run_migrations.run_async",
+            migration_run_start.elapsed(),
+        );
         Ok(())
     }
 
@@ -498,6 +523,12 @@ pub struct SandboxJobRecord {
     pub credential_grants_json: String,
 }
 
+impl crate::ownership::Owned for SandboxJobRecord {
+    fn owner_user_id(&self) -> &str {
+        &self.user_id
+    }
+}
+
 /// Summary of sandbox job counts grouped by status.
 #[derive(Debug, Clone, Default)]
 pub struct SandboxJobSummary {
@@ -520,6 +551,12 @@ pub struct AgentJobRecord {
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub failure_reason: Option<String>,
+}
+
+impl crate::ownership::Owned for AgentJobRecord {
+    fn owner_user_id(&self) -> &str {
+        &self.user_id
+    }
 }
 
 /// Summary counts for agent (non-sandbox) jobs.
@@ -1871,7 +1908,7 @@ impl Store {
         let row = conn
             .query_opt(
                 r#"
-                SELECT id FROM conversations
+                SELECT id, source_channel FROM conversations
                 WHERE user_id = $1 AND channel = $2 AND metadata->>'thread_type' = 'assistant'
                 LIMIT 1
                 "#,
@@ -1880,7 +1917,20 @@ impl Store {
             .await?;
 
         if let Some(row) = row {
-            return Ok(row.get("id"));
+            let id: Uuid = row.get("id");
+            let source_channel: Option<String> = row.get("source_channel");
+            if source_channel.is_none() {
+                conn.execute(
+                    r#"
+                    UPDATE conversations
+                    SET source_channel = $2
+                    WHERE id = $1 AND source_channel IS NULL
+                    "#,
+                    &[&id, &channel],
+                )
+                .await?;
+            }
+            return Ok(id);
         }
 
         // Create a new assistant conversation
@@ -1888,10 +1938,10 @@ impl Store {
         let metadata = serde_json::json!({"thread_type": "assistant", "title": "Assistant"});
         conn.execute(
             r#"
-            INSERT INTO conversations (id, channel, user_id, metadata)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO conversations (id, channel, user_id, metadata, source_channel)
+            VALUES ($1, $2, $3, $4, $5)
             "#,
-            &[&id, &channel, &user_id, &metadata],
+            &[&id, &channel, &user_id, &metadata, &channel],
         )
         .await?;
 

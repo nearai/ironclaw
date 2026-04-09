@@ -17,7 +17,7 @@ use crate::agent::dispatcher::{
 };
 use crate::agent::session::{MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState};
 use crate::agent::submission::SubmissionResult;
-use crate::channels::{IncomingMessage, StatusUpdate};
+use crate::channels::{ChatApprovalPrompt, HistoryMessage, IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
 use crate::llm::{ChatMessage, ToolCall};
@@ -26,12 +26,100 @@ use ironclaw_common::truncate_preview;
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
 
+#[derive(Clone)]
+struct PendingApprovalStatusSnapshot {
+    request_id: String,
+    tool_name: String,
+    description: String,
+    parameters: serde_json::Value,
+    allow_always: bool,
+}
+
+impl From<&PendingApproval> for PendingApprovalStatusSnapshot {
+    fn from(pending: &PendingApproval) -> Self {
+        let parameters = if pending.display_parameters.is_null() {
+            pending.parameters.clone()
+        } else {
+            pending.display_parameters.clone()
+        };
+
+        Self {
+            request_id: pending.request_id.to_string(),
+            tool_name: pending.tool_name.clone(),
+            description: pending.description.clone(),
+            parameters,
+            allow_always: pending.allow_always,
+        }
+    }
+}
+
 fn requires_preexisting_uuid_thread(channel: &str) -> bool {
     // Gateway-style channels send server-issued conversation UUIDs.
     // Unknown UUIDs should be rejected instead of silently creating a new thread.
     matches!(channel, "gateway" | "test")
 }
 
+fn history_messages_from_thread(thread: &crate::agent::session::Thread) -> Vec<HistoryMessage> {
+    let mut messages = Vec::new();
+
+    for turn in &thread.turns {
+        if !turn.user_input.is_empty() {
+            messages.push(HistoryMessage {
+                role: "user".to_string(),
+                content: turn.user_input.clone(),
+                timestamp: turn.started_at,
+            });
+        }
+
+        if let Some(response) = turn.response.as_ref() {
+            messages.push(HistoryMessage {
+                role: "assistant".to_string(),
+                content: response.clone(),
+                timestamp: turn.completed_at.unwrap_or(turn.started_at),
+            });
+        }
+    }
+
+    messages
+}
+
+fn approval_prompt_from_pending(pending: &PendingApproval) -> ChatApprovalPrompt {
+    let parameters = if pending.display_parameters.is_null() {
+        pending.parameters.clone()
+    } else {
+        pending.display_parameters.clone()
+    };
+
+    ChatApprovalPrompt {
+        request_id: pending.request_id.to_string(),
+        tool_name: pending.tool_name.clone(),
+        description: pending.description.clone(),
+        parameters,
+        allow_always: pending.allow_always,
+    }
+}
+
+fn thread_summaries_from_conversations(
+    mut conversations: Vec<crate::history::ConversationSummary>,
+) -> Vec<crate::channels::ThreadSummary> {
+    conversations.sort_by(|a, b| {
+        b.last_activity
+            .cmp(&a.last_activity)
+            .then_with(|| b.started_at.cmp(&a.started_at))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    conversations
+        .into_iter()
+        .map(|c| crate::channels::ThreadSummary {
+            id: c.id.to_string(),
+            title: c.title,
+            message_count: c.message_count,
+            last_activity: c.last_activity.to_rfc3339(),
+            channel: c.channel,
+        })
+        .collect()
+}
 fn turn_usage_from_result(result: &Result<AgenticLoopResult, Error>) -> Option<&TurnUsageSummary> {
     match result {
         Ok(AgenticLoopResult::Response { turn_usage, .. })
@@ -40,7 +128,6 @@ fn turn_usage_from_result(result: &Result<AgenticLoopResult, Error>) -> Option<&
         Err(_) => None,
     }
 }
-
 impl Agent {
     /// Hydrate a historical thread from DB into memory if not already present.
     ///
@@ -237,7 +324,7 @@ impl Agent {
         );
 
         // First check thread state without holding lock during I/O
-        let (thread_state, approval_context) = {
+        let (thread_state, approval_context, approval_status) = {
             let sess = session.lock().await;
             let thread = sess
                 .threads
@@ -248,7 +335,11 @@ impl Agent {
                     crate::agent::agent_loop::truncate_for_preview(&a.description, 80);
                 (a.tool_name.clone(), desc_preview)
             });
-            (thread.state, approval_context)
+            let approval_status = thread
+                .pending_approval
+                .as_ref()
+                .map(PendingApprovalStatusSnapshot::from);
+            (thread.state, approval_context, approval_status)
         };
 
         tracing::debug!(
@@ -334,6 +425,22 @@ impl Agent {
                     thread_id = %thread_id,
                     "Thread awaiting approval, rejecting new input"
                 );
+                if let Some(ref pending) = approval_status {
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::ApprovalNeeded {
+                                request_id: pending.request_id.clone(),
+                                tool_name: pending.tool_name.clone(),
+                                description: pending.description.clone(),
+                                parameters: pending.parameters.clone(),
+                                allow_always: pending.allow_always,
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+                }
                 let msg = match approval_context {
                     Some((tool_name, desc_preview)) => format!(
                         "Waiting for approval: {tool_name} — {desc_preview}. Use /interrupt to cancel."
@@ -575,14 +682,6 @@ impl Agent {
                     .last()
                     .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                     .unwrap_or_default();
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::Status("Done".into()),
-                        &message.metadata,
-                    )
-                    .await;
 
                 // Persist tool calls then assistant response (user message already persisted at turn start)
                 self.persist_tool_calls(
@@ -1162,9 +1261,11 @@ impl Agent {
                 .channels
                 .send_status(
                     &message.channel,
-                    StatusUpdate::ToolStarted {
-                        name: pending.tool_name.clone(),
-                    },
+                    StatusUpdate::tool_started_with_id(
+                        pending.tool_name.clone(),
+                        &pending.parameters,
+                        Some(pending.tool_call_id.clone()),
+                    ),
                     &message.metadata,
                 )
                 .await;
@@ -1180,6 +1281,7 @@ impl Agent {
                     &message.channel,
                     StatusUpdate::tool_completed(
                         pending.tool_name.clone(),
+                        Some(pending.tool_call_id.clone()),
                         &tool_result,
                         &pending.display_parameters,
                         tool_ref.as_deref(),
@@ -1198,6 +1300,7 @@ impl Agent {
                         StatusUpdate::ToolResult {
                             name: pending.tool_name.clone(),
                             preview: output.clone(),
+                            call_id: Some(pending.tool_call_id.clone()),
                         },
                         &message.metadata,
                     )
@@ -1326,9 +1429,11 @@ impl Agent {
                         .channels
                         .send_status(
                             &message.channel,
-                            StatusUpdate::ToolStarted {
-                                name: tc.name.clone(),
-                            },
+                            StatusUpdate::tool_started_with_id(
+                                tc.name.clone(),
+                                &tc.arguments,
+                                Some(tc.id.clone()),
+                            ),
                             &message.metadata,
                         )
                         .await;
@@ -1344,6 +1449,7 @@ impl Agent {
                             &message.channel,
                             StatusUpdate::tool_completed(
                                 tc.name.clone(),
+                                Some(tc.id.clone()),
                                 &result,
                                 &tc.arguments,
                                 deferred_tool.as_deref(),
@@ -1373,9 +1479,11 @@ impl Agent {
                         let _ = channels
                             .send_status(
                                 &channel,
-                                StatusUpdate::ToolStarted {
-                                    name: tc.name.clone(),
-                                },
+                                StatusUpdate::tool_started_with_id(
+                                    tc.name.clone(),
+                                    &tc.arguments,
+                                    Some(tc.id.clone()),
+                                ),
                                 &metadata,
                             )
                             .await;
@@ -1395,6 +1503,7 @@ impl Agent {
                                 &channel,
                                 StatusUpdate::tool_completed(
                                     tc.name.clone(),
+                                    Some(tc.id.clone()),
                                     &result,
                                     &tc.arguments,
                                     par_tool.as_deref(),
@@ -1459,6 +1568,7 @@ impl Agent {
                             StatusUpdate::ToolResult {
                                 name: tc.name.clone(),
                                 preview: output.clone(),
+                                call_id: Some(tc.id.clone()),
                             },
                             &message.metadata,
                         )
@@ -1617,14 +1727,6 @@ impl Agent {
                         &response,
                     )
                     .await;
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::Status("Done".into()),
-                            &message.metadata,
-                        )
-                        .await;
                     if !suggestions.is_empty() {
                         let _ = self
                             .channels
@@ -1931,13 +2033,49 @@ impl Agent {
         message: &IncomingMessage,
         target_thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
+        // Try hydrating from DB if not already in session.
+        let thread_id_str = target_thread_id.to_string();
+        if let Some(rejection) = self.maybe_hydrate_thread(message, &thread_id_str).await {
+            return Ok(SubmissionResult::error(rejection));
+        }
+
         let session = self
             .session_manager
             .get_or_create_session(&message.user_id)
             .await;
-        let mut sess = session.lock().await;
+        let (switched, messages, pending_approval) = {
+            let mut sess = session.lock().await;
+            if sess.switch_thread(target_thread_id) {
+                let history = sess
+                    .threads
+                    .get(&target_thread_id)
+                    .map(history_messages_from_thread)
+                    .unwrap_or_default();
+                let pending_approval = sess
+                    .threads
+                    .get(&target_thread_id)
+                    .and_then(|thread| thread.pending_approval.as_ref())
+                    .map(approval_prompt_from_pending);
+                (true, history, pending_approval)
+            } else {
+                (false, Vec::new(), None)
+            }
+        };
 
-        if sess.switch_thread(target_thread_id) {
+        if switched {
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::ConversationHistory {
+                        thread_id: target_thread_id.to_string(),
+                        messages,
+                        pending_approval,
+                    },
+                    &message.metadata,
+                )
+                .await;
+
             Ok(SubmissionResult::ok_with_message(format!(
                 "Switched to thread {}",
                 target_thread_id
@@ -1970,6 +2108,54 @@ impl Agent {
         } else {
             Ok(SubmissionResult::error("Checkpoint not found."))
         }
+    }
+
+    /// List past conversations from the database and emit a `ThreadList`
+    /// status update so the TUI can show the interactive resume picker.
+    pub(super) async fn process_list_threads(
+        &self,
+        _session: Arc<Mutex<Session>>,
+        message: &IncomingMessage,
+    ) -> Result<SubmissionResult, Error> {
+        let Some(db) = self.store() else {
+            return Ok(SubmissionResult::ok_with_message(
+                "No database configured — cannot list conversations.".to_string(),
+            ));
+        };
+
+        let conversations = match db
+            .list_conversations_all_channels(&message.user_id, 20)
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!("Failed to list conversations: {e}");
+                return Ok(SubmissionResult::error(format!(
+                    "Failed to list conversations: {e}"
+                )));
+            }
+        };
+
+        let summaries = thread_summaries_from_conversations(conversations);
+
+        if summaries.is_empty() {
+            return Ok(SubmissionResult::ok_with_message(
+                "No conversations to resume.".to_string(),
+            ));
+        }
+
+        let _ = self
+            .channels
+            .send_status(
+                &message.channel,
+                StatusUpdate::ThreadList { threads: summaries },
+                &message.metadata,
+            )
+            .await;
+
+        Ok(SubmissionResult::Ok {
+            message: Some(String::new()),
+        })
     }
 }
 
@@ -2079,7 +2265,66 @@ fn rebuild_chat_messages_from_db(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
+    use std::time::Duration;
+
+    use crate::agent::AgentDeps;
+    use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+    use crate::channels::{ChannelManager, IncomingMessage, StatusUpdate};
+    use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
+    use crate::context::ContextManager;
+    use crate::hooks::HookRegistry;
+    use crate::testing::{StubChannel, StubLlm};
+    use crate::tools::ToolRegistry;
+    use chrono::TimeZone;
+    use ironclaw_safety::SafetyLayer;
     use rust_decimal::Decimal;
+
+    #[test]
+    fn thread_summaries_are_sorted_by_last_activity_descending() {
+        let conversations = vec![
+            crate::history::ConversationSummary {
+                id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+                title: Some("older".to_string()),
+                message_count: 1,
+                started_at: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 0, 0).unwrap(),
+                last_activity: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 5, 0).unwrap(),
+                thread_type: None,
+                channel: "gateway".to_string(),
+            },
+            crate::history::ConversationSummary {
+                id: Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
+                title: Some("newest".to_string()),
+                message_count: 2,
+                started_at: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 10, 0).unwrap(),
+                last_activity: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 30, 0).unwrap(),
+                thread_type: None,
+                channel: "gateway".to_string(),
+            },
+            crate::history::ConversationSummary {
+                id: Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap(),
+                title: Some("middle".to_string()),
+                message_count: 3,
+                started_at: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 8, 0).unwrap(),
+                last_activity: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 15, 0).unwrap(),
+                thread_type: None,
+                channel: "gateway".to_string(),
+            },
+        ];
+
+        let summaries = thread_summaries_from_conversations(conversations);
+        let titles: Vec<Option<String>> = summaries.into_iter().map(|s| s.title).collect();
+
+        assert_eq!(
+            titles,
+            vec![
+                Some("newest".to_string()),
+                Some("middle".to_string()),
+                Some("older".to_string()),
+            ]
+        );
+    }
 
     #[test]
     fn test_rebuild_chat_messages_user_assistant_only() {
@@ -2295,6 +2540,77 @@ mod tests {
         }
     }
 
+    async fn make_test_agent_with_status_channel(
+        channel_name: &str,
+    ) -> (Agent, Arc<StdMutex<Vec<StatusUpdate>>>) {
+        let (stub, _sender) = StubChannel::new(channel_name);
+        let statuses = stub.captured_statuses_handle();
+        let manager = ChannelManager::new();
+        manager.add(Box::new(stub)).await;
+
+        let deps = AgentDeps {
+            owner_id: "default".to_string(),
+            store: None,
+            llm: Arc::new(StubLlm::default()),
+            cheap_llm: None,
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+            })),
+            tools: Arc::new(ToolRegistry::new()),
+            workspace: None,
+            extension_manager: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skills_config: SkillsConfig::default(),
+            hooks: Arc::new(HookRegistry::new()),
+            cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            sse_tx: None,
+            http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            builder: None,
+            llm_backend: "nearai".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+        };
+
+        let agent = Agent::new(
+            AgentConfig {
+                name: "test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_cost_per_user_per_day_cents: None,
+                max_tool_iterations: 50,
+                auto_approve_tools: false,
+                default_timezone: "UTC".to_string(),
+                max_jobs_per_user: None,
+                max_tokens_per_job: 0,
+                multi_tenant: false,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
+                engine_v2: false,
+            },
+            deps,
+            Arc::new(manager),
+            None,
+            None,
+            None,
+            Some(Arc::new(ContextManager::new(1))),
+            None,
+        );
+
+        (agent, statuses)
+    }
+
     #[tokio::test]
     async fn test_awaiting_approval_rejection_includes_tool_context() {
         // Test that when a thread is in AwaitingApproval state and receives a new message,
@@ -2365,6 +2681,159 @@ mod tests {
             }
             _ => panic!("Expected approval rejection message"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_switch_thread_emits_history_with_pending_approval() {
+        use crate::agent::session::{PendingApproval, Thread};
+        use uuid::Uuid;
+
+        let (agent, statuses) = make_test_agent_with_status_channel("tui").await;
+        let session = agent
+            .session_manager
+            .get_or_create_session("test-user")
+            .await;
+        let session_id = session.lock().await.id;
+
+        let other_thread_id = Uuid::new_v4();
+        let target_thread_id = Uuid::new_v4();
+        let mut target_thread = Thread::with_id(target_thread_id, session_id, Some("tui"));
+        target_thread.start_turn("Review the diff");
+        target_thread.complete_turn("Waiting for approval.");
+        target_thread.await_approval(PendingApproval {
+            request_id: Uuid::new_v4(),
+            tool_name: "shell".to_string(),
+            parameters: serde_json::json!({"command": "echo hello"}),
+            display_parameters: serde_json::json!({"command": "[REDACTED]"}),
+            description: "Execute: echo hello".to_string(),
+            tool_call_id: "call_0".to_string(),
+            context_messages: vec![],
+            deferred_tool_calls: vec![],
+            user_timezone: None,
+            allow_always: true,
+        });
+
+        {
+            let mut sess = session.lock().await;
+            sess.threads.insert(
+                other_thread_id,
+                Thread::with_id(other_thread_id, session_id, Some("tui")),
+            );
+            sess.threads.insert(target_thread_id, target_thread);
+            sess.active_thread = Some(other_thread_id);
+        }
+
+        let message =
+            IncomingMessage::new("tui", "test-user", format!("/thread {target_thread_id}"));
+        let result = agent
+            .process_switch_thread(&message, target_thread_id)
+            .await
+            .expect("switch thread");
+
+        match result {
+            crate::agent::submission::SubmissionResult::Ok {
+                message: Some(text),
+            } => assert!(text.contains(&target_thread_id.to_string())),
+            other => panic!("expected ok switch-thread result, got {other:?}"),
+        }
+
+        let statuses = statuses.lock().expect("poisoned").clone();
+        assert!(
+            statuses.iter().any(|status| matches!(
+                status,
+                StatusUpdate::ConversationHistory {
+                    thread_id,
+                    messages,
+                    pending_approval,
+                } if thread_id == &target_thread_id.to_string()
+                    && messages.len() == 2
+                    && messages[0].role == "user"
+                    && messages[0].content == "Review the diff"
+                    && messages[1].role == "assistant"
+                    && messages[1].content == "Waiting for approval."
+                    && pending_approval
+                        .as_ref()
+                        .is_some_and(|approval| approval.tool_name == "shell"
+                            && approval.parameters == serde_json::json!({"command": "[REDACTED]"})
+                            && approval.allow_always)
+            )),
+            "expected conversation history status with pending approval, got: {statuses:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_awaiting_approval_reemits_status_for_followup_message() {
+        use crate::agent::session::{PendingApproval, Session, Thread};
+
+        let (agent, statuses) = make_test_agent_with_status_channel("tui").await;
+        let mut session = Session::new("test-user");
+        let thread_id = Uuid::new_v4();
+        let mut thread = Thread::with_id(thread_id, session.id, Some("tui"));
+
+        let pending = PendingApproval {
+            request_id: Uuid::new_v4(),
+            tool_name: "shell".to_string(),
+            parameters: serde_json::json!({"command": "echo secret"}),
+            display_parameters: serde_json::json!({"command": "[REDACTED]"}),
+            description: "Execute: echo secret".to_string(),
+            tool_call_id: "call_0".to_string(),
+            context_messages: vec![],
+            deferred_tool_calls: vec![],
+            user_timezone: None,
+            allow_always: true,
+        };
+        thread.await_approval(pending.clone());
+        session.threads.insert(thread_id, thread);
+
+        let session = Arc::new(Mutex::new(session));
+        let rate = agent.deps.tenant_rates.get_or_create("test-user").await;
+        let tenant = crate::tenant::TenantCtx::new(
+            crate::ownership::Identity::new(
+                crate::ownership::OwnerId::from("test-user"),
+                crate::ownership::UserRole::Member,
+            ),
+            None,
+            None,
+            Arc::clone(&agent.deps.cost_guard),
+            rate,
+        );
+        let message = IncomingMessage::new("tui", "test-user", "what now?");
+
+        let result = agent
+            .process_user_input(&message, tenant, session, thread_id, &message.content)
+            .await
+            .expect("process user input");
+
+        match result {
+            crate::agent::submission::SubmissionResult::Ok {
+                message: Some(text),
+            } => {
+                assert!(
+                    text.contains("Waiting for approval"),
+                    "expected waiting text, got: {text}"
+                );
+            }
+            other => panic!("expected pending ok result, got {other:?}"),
+        }
+
+        let statuses = statuses.lock().expect("poisoned").clone();
+        assert!(
+            statuses.iter().any(|status| matches!(
+                status,
+                StatusUpdate::ApprovalNeeded {
+                    request_id,
+                    tool_name,
+                    description,
+                    parameters,
+                    allow_always,
+                } if request_id == &pending.request_id.to_string()
+                    && tool_name == "shell"
+                    && description == "Execute: echo secret"
+                    && parameters == &serde_json::json!({"command": "[REDACTED]"})
+                    && *allow_always
+            )),
+            "expected approval status to be re-emitted, got: {statuses:?}"
+        );
     }
 
     #[test]

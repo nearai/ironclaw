@@ -108,6 +108,8 @@ pub async fn settings_set_handler(
     Path(key): Path<String>,
     Json(body): Json<SettingWriteRequest>,
 ) -> Result<StatusCode, StatusCode> {
+    ensure_setting_write_allowed(&user, &key)?;
+
     let store = state
         .store
         .as_ref()
@@ -240,6 +242,8 @@ pub async fn settings_delete_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Path(key): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
+    ensure_setting_write_allowed(&user, &key)?;
+
     let store = state
         .store
         .as_ref()
@@ -289,6 +293,8 @@ pub async fn settings_import_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Json(body): Json<SettingsImportRequest>,
 ) -> Result<StatusCode, StatusCode> {
+    ensure_settings_import_allowed(&user, &body.settings)?;
+
     let store = state
         .store
         .as_ref()
@@ -315,6 +321,50 @@ pub async fn settings_import_handler(
         })?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn is_admin_only_setting_key(key: &str) -> bool {
+    // Single source of truth lives in `crate::config::helpers` so the
+    // write-side gate here cannot drift from the read-side strip filter.
+    crate::config::helpers::ADMIN_ONLY_LLM_SETTING_KEYS.contains(&key)
+}
+
+fn ensure_setting_write_allowed(
+    user: &crate::channels::web::auth::UserIdentity,
+    key: &str,
+) -> Result<(), StatusCode> {
+    if is_admin_only_setting_key(key) && user.role != "admin" {
+        tracing::warn!(
+            user_id = %user.user_id,
+            role = %user.role,
+            key = %key,
+            "Rejected non-admin write to admin-only setting"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    Ok(())
+}
+
+fn ensure_settings_import_allowed(
+    user: &crate::channels::web::auth::UserIdentity,
+    settings: &std::collections::HashMap<String, serde_json::Value>,
+) -> Result<(), StatusCode> {
+    if user.role == "admin" {
+        return Ok(());
+    }
+
+    if let Some(key) = settings.keys().find(|key| is_admin_only_setting_key(key)) {
+        tracing::warn!(
+            user_id = %user.user_id,
+            role = %user.role,
+            key = %key,
+            "Rejected non-admin import containing admin-only setting"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -767,6 +817,15 @@ async fn annotate_secret_key_presence(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use axum::{
+        Json,
+        extract::{Path, State},
+        http::StatusCode,
+    };
+
+    use crate::channels::web::auth::UserIdentity;
 
     #[test]
     fn test_mask_settings_api_keys_builtin_overrides() {
@@ -855,6 +914,7 @@ mod tests {
             scheduler: None,
             owner_id: "test".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
+            server_started: std::sync::atomic::AtomicBool::new(false),
             ws_tracker: None,
             llm_provider: None,
             skill_registry: None,
@@ -878,7 +938,18 @@ mod tests {
             near_rpc_url: None,
             near_network: None,
             oauth_sweep_shutdown: None,
+            standby_control: None,
+            runtime_overrides: crate::channels::web::server::GatewayRuntimeOverrides::default(),
         }
+    }
+
+    async fn test_gateway_state_with_store(
+        secrets: Arc<dyn SecretsStore + Send + Sync>,
+    ) -> (Arc<GatewayState>, tempfile::TempDir) {
+        let (db, tmp) = crate::testing::test_db().await;
+        let mut state = test_gateway_state(secrets);
+        state.store = Some(db);
+        (Arc::new(state), tmp)
     }
 
     #[tokio::test]
@@ -1122,6 +1193,83 @@ mod tests {
     fn test_validate_custom_providers_non_array_is_ok() {
         let input = serde_json::json!("not-an-array");
         assert!(validate_custom_providers(&input).is_ok());
+    }
+
+    #[test]
+    fn test_admin_only_setting_keys_include_network_destinations() {
+        assert!(is_admin_only_setting_key("llm_builtin_overrides"));
+        assert!(is_admin_only_setting_key("llm_custom_providers"));
+        assert!(is_admin_only_setting_key("ollama_base_url"));
+        assert!(is_admin_only_setting_key("openai_compatible_base_url"));
+        assert!(!is_admin_only_setting_key("selected_model"));
+    }
+
+    #[tokio::test]
+    async fn test_settings_set_rejects_member_for_admin_only_key() {
+        let secrets = test_secrets_store();
+        let (state, _tmp) = test_gateway_state_with_store(secrets).await;
+
+        let status = settings_set_handler(
+            State(state),
+            AuthenticatedUser(UserIdentity {
+                user_id: "member".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Path("ollama_base_url".to_string()),
+            Json(SettingWriteRequest {
+                value: serde_json::json!("http://192.168.1.50:11434"),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_settings_delete_rejects_member_for_admin_only_key() {
+        let secrets = test_secrets_store();
+        let (state, _tmp) = test_gateway_state_with_store(secrets).await;
+
+        let status = settings_delete_handler(
+            State(state),
+            AuthenticatedUser(UserIdentity {
+                user_id: "member".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Path("llm_custom_providers".to_string()),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_settings_import_rejects_member_for_admin_only_keys() {
+        let secrets = test_secrets_store();
+        let (state, _tmp) = test_gateway_state_with_store(secrets).await;
+        let mut settings = HashMap::new();
+        settings.insert(
+            "openai_compatible_base_url".to_string(),
+            serde_json::json!("https://192.168.1.60/v1"),
+        );
+
+        let status = settings_import_handler(
+            State(state),
+            AuthenticatedUser(UserIdentity {
+                user_id: "member".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Json(SettingsImportRequest { settings }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     // --- Tool permissions helpers ---

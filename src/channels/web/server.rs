@@ -26,6 +26,7 @@ use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
+use crate::ownership::Owned;
 use axum::http::HeaderMap;
 
 use crate::agent::SessionManager;
@@ -51,8 +52,8 @@ use crate::channels::web::handlers::llm::{
     llm_list_models_handler, llm_providers_handler, llm_test_connection_handler,
 };
 use crate::channels::web::handlers::memory::{
-    memory_cards_handler, memory_list_handler, memory_read_handler, memory_search_handler,
-    memory_tree_handler, memory_write_handler,
+    memory_list_handler, memory_read_handler, memory_search_handler, memory_tree_handler,
+    memory_write_handler,
 };
 use crate::channels::web::handlers::routines::{
     routines_delete_handler, routines_detail_handler, routines_list_handler,
@@ -254,6 +255,9 @@ pub struct WorkspacePool {
     search_config: crate::config::WorkspaceSearchConfig,
     workspace_config: crate::config::WorkspaceConfig,
     cache: tokio::sync::RwLock<std::collections::HashMap<String, Arc<Workspace>>>,
+    /// Cached admin system prompt content. `None` = not yet loaded;
+    /// `Some("")` = loaded but empty/not set.
+    admin_prompt_cache: Arc<tokio::sync::RwLock<Option<String>>>,
 }
 
 impl WorkspacePool {
@@ -271,14 +275,24 @@ impl WorkspacePool {
             search_config,
             workspace_config,
             cache: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+            admin_prompt_cache: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
+    /// Clear the admin prompt cache. Called after the PUT handler updates
+    /// the prompt so all workspaces see the new content on the next turn.
+    pub async fn invalidate_admin_prompt(&self) {
+        let mut guard = self.admin_prompt_cache.write().await;
+        *guard = None;
+    }
+
     /// Build a workspace for a user, applying search config, embeddings,
-    /// global read scopes, and memory layers.
+    /// global read scopes, memory layers, and admin prompt.
     fn build_workspace(&self, user_id: &str) -> Workspace {
         let mut ws = Workspace::new_with_db(user_id, Arc::clone(&self.db))
-            .with_search_config(&self.search_config);
+            .with_search_config(&self.search_config)
+            .with_admin_prompt()
+            .with_admin_prompt_cache(Arc::clone(&self.admin_prompt_cache));
 
         if let Some(ref emb) = self.embeddings {
             ws = ws.with_embeddings_cached(Arc::clone(emb), self.embedding_cache_config.clone());
@@ -487,6 +501,8 @@ pub async fn start_server(
     // Public routes (no auth)
     let public = Router::new()
         .route("/api/health", get(health_handler))
+        .route("/api/standby/status", get(standby_status_handler))
+        .route("/api/configure", post(configure_handler))
         .route("/oauth/callback", get(oauth_callback_handler))
         .route(
             "/oauth/slack/callback",
@@ -544,21 +560,12 @@ pub async fn start_server(
         .route("/api/chat/history", get(chat_history_handler))
         .route("/api/chat/threads", get(chat_threads_handler))
         .route("/api/chat/thread/new", post(chat_new_thread_handler))
-        .route(
-            "/api/chat/thread/{id}/rename",
-            post(chat_rename_thread_handler),
-        )
-        .route(
-            "/api/chat/thread/{id}/archive",
-            post(chat_archive_thread_handler),
-        )
         // Memory
         .route("/api/memory/tree", get(memory_tree_handler))
         .route("/api/memory/list", get(memory_list_handler))
         .route("/api/memory/read", get(memory_read_handler))
         .route("/api/memory/write", post(memory_write_handler))
         .route("/api/memory/search", post(memory_search_handler))
-        .route("/api/memory/cards", get(memory_cards_handler))
         // Jobs
         .route("/api/jobs", get(jobs_list_handler))
         .route("/api/jobs/summary", get(jobs_summary_handler))
@@ -715,6 +722,14 @@ pub async fn start_server(
             "/api/admin/users/{user_id}/secrets/{name}",
             put(super::handlers::secrets::secrets_put_handler)
                 .delete(super::handlers::secrets::secrets_delete_handler),
+        )
+        // Admin system prompt — tighter body cap than the global 10 MB so an
+        // oversized payload is rejected before being parsed into memory.
+        .route(
+            "/api/admin/system-prompt",
+            get(super::handlers::system_prompt::get_handler)
+                .put(super::handlers::system_prompt::put_handler)
+                .layer(DefaultBodyLimit::max(128 * 1024)),
         )
         // Usage reporting (admin)
         .route(
@@ -988,11 +1003,29 @@ async fn i18n_app_handler() -> impl IntoResponse {
 
 // --- Health ---
 
-async fn health_handler() -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "healthy",
-        channel: "gateway",
-    })
+async fn health_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> (StatusCode, Json<HealthResponse>) {
+    if let Some(control) = state.standby_control.as_ref() {
+        let snapshot = control.startup_snapshot().await;
+        if !snapshot.configure_ready && !snapshot.runtime_started {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(HealthResponse {
+                    status: "starting",
+                    channel: "gateway",
+                }),
+            );
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(HealthResponse {
+            status: "healthy",
+            channel: "gateway",
+        }),
+    )
 }
 
 /// Return an OAuth error landing page response.
@@ -1714,6 +1747,62 @@ async fn chat_send_handler(
     ))
 }
 
+async fn configure_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
+    Json(request): Json<TidePoolConfigureRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let control = state.standby_control.as_ref().ok_or((
+        StatusCode::NOT_FOUND,
+        "standby configure is not enabled".to_string(),
+    ))?;
+
+    let token = bearer_token(&headers)
+        .ok_or((StatusCode::UNAUTHORIZED, "missing bearer token".to_string()))?;
+    if !control.authenticate(token) {
+        return Err((StatusCode::UNAUTHORIZED, "invalid bearer token".to_string()));
+    }
+    if !control.is_configure_ready().await {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "standby runtime is still prewarming".to_string(),
+        ));
+    }
+
+    control
+        .begin_configure()
+        .await
+        .map_err(|message| (StatusCode::CONFLICT, message.to_string()))?;
+
+    let result = control.enqueue(request).await;
+    let success = matches!(result, Ok(Ok(())));
+    control.finish_configure(success).await;
+
+    match result {
+        Ok(Ok(())) => Ok(StatusCode::OK),
+        Ok(Err(failure)) => Err((failure.status, failure.message)),
+        Err(message) => Err((StatusCode::INTERNAL_SERVER_ERROR, message)),
+    }
+}
+
+async fn standby_status_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
+) -> Result<Json<crate::standby::StandbyStartupSnapshot>, (StatusCode, String)> {
+    let control = state.standby_control.as_ref().ok_or((
+        StatusCode::NOT_FOUND,
+        "standby configure is not enabled".to_string(),
+    ))?;
+
+    let token = bearer_token(&headers)
+        .ok_or((StatusCode::UNAUTHORIZED, "missing bearer token".to_string()))?;
+    if !control.authenticate(token) {
+        return Err((StatusCode::UNAUTHORIZED, "invalid bearer token".to_string()));
+    }
+
+    Ok(Json(control.startup_snapshot().await))
+}
+
 async fn chat_approval_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -1878,6 +1967,8 @@ async fn chat_auth_token_handler(
             resp.auth_url = result.auth_url.clone();
             resp.verification = result.verification.clone();
             resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
+            resp.onboarding_state = result.onboarding_state;
+            resp.onboarding = result.onboarding.clone();
 
             if result.verification.is_some() {
                 state.sse.broadcast_for_user(
@@ -1903,6 +1994,23 @@ async fn chat_auth_token_handler(
                         thread_id: req.thread_id.clone(),
                     },
                 );
+                if result.pairing_required {
+                    state.sse.broadcast_for_user(
+                        &user.user_id,
+                        AppEvent::PairingRequired {
+                            channel: req.extension_name.clone(),
+                            instructions: result
+                                .onboarding
+                                .as_ref()
+                                .and_then(|o| o.pairing_instructions.clone()),
+                            onboarding: result
+                                .onboarding
+                                .clone()
+                                .and_then(|onboarding| serde_json::to_value(onboarding).ok()),
+                            thread_id: req.thread_id.clone(),
+                        },
+                    );
+                }
             } else {
                 state.sse.broadcast_for_user(
                     &user.user_id,
@@ -2482,120 +2590,6 @@ async fn chat_new_thread_handler(
     Ok(Json(info))
 }
 
-/// Maximum length (in characters) for a user-supplied thread title.
-const MAX_THREAD_TITLE_CHARS: usize = 200;
-
-/// `POST /api/chat/thread/{id}/rename`
-///
-/// Updates a conversation's user-visible title via `metadata.title`.
-/// The original first-user-message-derived title is preserved as a fallback for any
-/// consumer that does not read the metadata override.
-async fn chat_rename_thread_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Path(thread_id): Path<Uuid>,
-    Json(body): Json<RenameThreadRequest>,
-) -> Result<Json<ThreadInfo>, (StatusCode, String)> {
-    let title = body.title.trim().to_string();
-    if title.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "Title must not be empty".into()));
-    }
-    if title.chars().count() > MAX_THREAD_TITLE_CHARS {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("Title exceeds {MAX_THREAD_TITLE_CHARS} characters"),
-        ));
-    }
-
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Persistence not available".to_string(),
-    ))?;
-
-    // Ownership check first — return 404 (not 403) so we don't leak existence.
-    let owned = store
-        .conversation_belongs_to_user(thread_id, &user.user_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    if !owned {
-        return Err((StatusCode::NOT_FOUND, "Thread not found".into()));
-    }
-
-    let title_value = serde_json::Value::String(title.clone());
-    store
-        .update_conversation_metadata_field(thread_id, "title", &title_value)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // Re-read metadata for thread_type so the response shape stays consistent with list_threads.
-    let metadata = store
-        .get_conversation_metadata(thread_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .unwrap_or_else(|| serde_json::json!({}));
-    let thread_type = metadata
-        .get("thread_type")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-
-    let now = chrono::Utc::now().to_rfc3339();
-    Ok(Json(ThreadInfo {
-        id: thread_id,
-        state: "Idle".to_string(),
-        turn_count: 0,
-        created_at: now.clone(),
-        updated_at: now,
-        title: Some(title),
-        thread_type,
-        channel: Some("gateway".to_string()),
-    }))
-}
-
-/// `POST /api/chat/thread/{id}/archive`
-///
-/// Soft-deletes a conversation by setting `metadata.archived = true`.
-/// IronClaw never physically deletes LLM data (see `.claude/rules/database.md`).
-/// `list_conversations_all_channels` filters out archived rows so the gateway
-/// frontend treats archive as user-facing "delete".
-///
-/// If the archived thread is the in-memory active thread, the active pointer is cleared
-/// so a fresh thread will be picked up on the next interaction. The in-memory thread
-/// HashMap entry is intentionally left intact in case an SSE turn is still in flight.
-async fn chat_archive_thread_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Path(thread_id): Path<Uuid>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Persistence not available".to_string(),
-    ))?;
-
-    let owned = store
-        .conversation_belongs_to_user(thread_id, &user.user_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    if !owned {
-        return Err((StatusCode::NOT_FOUND, "Thread not found".into()));
-    }
-
-    store
-        .update_conversation_metadata_field(thread_id, "archived", &serde_json::Value::Bool(true))
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // Clear the in-memory active pointer if it matches the archived thread.
-    if let Some(ref sm) = state.session_manager {
-        let session = sm.get_or_create_session(&user.user_id).await;
-        let mut sess = session.lock().await;
-        if sess.active_thread == Some(thread_id) {
-            sess.active_thread = None;
-        }
-    }
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
 // Job handlers moved to handlers/jobs.rs
 // --- Logs handlers ---
 
@@ -2687,39 +2681,58 @@ async fn extensions_list_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let mut owner_bound_channels = std::collections::HashSet::new();
-    for ext in &installed {
-        if ext.kind == crate::extensions::ExtensionKind::WasmChannel
-            && ext_mgr.has_wasm_channel_owner_binding(&ext.name).await
-        {
-            owner_bound_channels.insert(ext.name.clone());
-        }
+    let mut extensions = Vec::with_capacity(installed.len());
+    for ext in installed {
+        let ready_for_active = if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
+            !ext_mgr.channel_requires_pairing(&ext.name).await
+        } else {
+            false
+        };
+        let activation_status =
+            crate::channels::web::handlers::extensions::derive_activation_status(
+                &ext,
+                ready_for_active,
+            );
+        let onboarding_state = if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
+            Some(if ext.activation_error.is_some() {
+                ChannelOnboardingState::Failed
+            } else if !ext.authenticated {
+                ChannelOnboardingState::SetupRequired
+            } else if ext.active {
+                if ready_for_active {
+                    ChannelOnboardingState::Ready
+                } else {
+                    ChannelOnboardingState::PairingRequired
+                }
+            } else {
+                ChannelOnboardingState::ActivationInProgress
+            })
+        } else {
+            None
+        };
+        let onboarding = if let Some(state) = onboarding_state {
+            ext_mgr.channel_onboarding_for_state(&ext.name, state).await
+        } else {
+            None
+        };
+        extensions.push(ExtensionInfo {
+            name: ext.name,
+            display_name: ext.display_name,
+            kind: ext.kind.to_string(),
+            description: ext.description,
+            url: ext.url,
+            authenticated: ext.authenticated,
+            active: ext.active,
+            tools: ext.tools,
+            needs_setup: ext.needs_setup,
+            has_auth: ext.has_auth,
+            activation_status,
+            activation_error: ext.activation_error,
+            version: ext.version,
+            onboarding_state,
+            onboarding,
+        });
     }
-    let extensions = installed
-        .into_iter()
-        .map(|ext| {
-            let activation_status =
-                crate::channels::web::handlers::extensions::derive_activation_status(
-                    &ext,
-                    owner_bound_channels.contains(&ext.name),
-                );
-            ExtensionInfo {
-                name: ext.name,
-                display_name: ext.display_name,
-                kind: ext.kind.to_string(),
-                description: ext.description,
-                url: ext.url,
-                authenticated: ext.authenticated,
-                active: ext.active,
-                tools: ext.tools,
-                needs_setup: ext.needs_setup,
-                has_auth: ext.has_auth,
-                activation_status,
-                activation_error: ext.activation_error,
-                version: ext.version,
-            }
-        })
-        .collect();
 
     Ok(Json(ExtensionListResponse { extensions }))
 }
@@ -2961,7 +2974,7 @@ async fn verify_project_ownership(state: &GatewayState, project_id: &str, user_i
         return false;
     };
     match store.get_sandbox_job(job_id).await {
-        Ok(Some(job)) => job.user_id == user_id,
+        Ok(Some(job)) => job.is_owned_by(user_id),
         _ => false,
     }
 }
@@ -3101,11 +3114,13 @@ async fn extensions_setup_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    let canonical_name = crate::extensions::naming::canonicalize_extension_name(&name)
+        .unwrap_or_else(|_| name.clone());
     let kind = ext_mgr
         .list(None, false, &user.user_id)
         .await
         .ok()
-        .and_then(|list| list.into_iter().find(|e| e.name == name))
+        .and_then(|list| list.into_iter().find(|e| e.name == canonical_name))
         .map(|e| e.kind.to_string())
         .unwrap_or_default();
 
@@ -3114,6 +3129,8 @@ async fn extensions_setup_handler(
         kind,
         secrets: setup.secrets,
         fields: setup.fields,
+        onboarding_state: setup.onboarding_state,
+        onboarding: setup.onboarding,
     }))
 }
 
@@ -3143,12 +3160,11 @@ async fn extensions_setup_submit_handler(
                 ActionResponse::fail(result.message)
             };
             resp.activated = Some(result.activated);
-            if result.restart_required || !result.activated {
-                resp.needs_restart = Some(true);
-            }
             resp.auth_url = result.auth_url.clone();
             resp.verification = result.verification.clone();
             resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
+            resp.onboarding_state = result.onboarding_state;
+            resp.onboarding = result.onboarding.clone();
             if result.verification.is_none() {
                 // Broadcast auth_completed so the chat UI can dismiss any in-progress
                 // auth card or setup modal that was triggered by tool_auth/tool_activate.
@@ -3161,6 +3177,23 @@ async fn extensions_setup_submit_handler(
                         thread_id: None,
                     },
                 );
+                if result.pairing_required {
+                    state.sse.broadcast_for_user(
+                        &user.user_id,
+                        AppEvent::PairingRequired {
+                            channel: name.clone(),
+                            instructions: result
+                                .onboarding
+                                .as_ref()
+                                .and_then(|o| o.pairing_instructions.clone()),
+                            onboarding: result
+                                .onboarding
+                                .clone()
+                                .and_then(|onboarding| serde_json::to_value(onboarding).ok()),
+                            thread_id: None,
+                        },
+                    );
+                }
             }
             Ok(Json(resp))
         }
@@ -3225,7 +3258,38 @@ async fn pairing_approve_handler(
     ))?;
     let owner_id = crate::ownership::OwnerId::from(user.user_id.clone());
     match store.approve(&channel, &code, &owner_id).await {
-        Ok(()) => Ok(Json(ActionResponse::ok("Pairing approved.".to_string()))),
+        Ok(()) => {
+            let onboarding = if let Some(ext_mgr) = state.extension_manager.as_ref() {
+                ext_mgr
+                    .channel_onboarding_for_state(&channel, ChannelOnboardingState::Ready)
+                    .await
+            } else {
+                None
+            };
+            state.sse.broadcast_for_user(
+                &user.user_id,
+                AppEvent::PairingCompleted {
+                    channel: channel.clone(),
+                    success: true,
+                    message: format!("Ownership claimed for '{channel}'. The channel is ready."),
+                    thread_id: None,
+                },
+            );
+            state.sse.broadcast_for_user(
+                &user.user_id,
+                AppEvent::ExtensionStatus {
+                    extension_name: channel.clone(),
+                    status: "active".to_string(),
+                    message: None,
+                },
+            );
+            let mut resp = ActionResponse::ok(format!(
+                "Ownership claimed for '{channel}'. The channel is ready."
+            ));
+            resp.onboarding_state = Some(ChannelOnboardingState::Ready);
+            resp.onboarding = onboarding;
+            Ok(Json(resp))
+        }
         Err(crate::error::DatabaseError::NotFound { .. }) => Ok(Json(ActionResponse::fail(
             "Invalid or expired pairing code.".to_string(),
         ))),
@@ -3258,7 +3322,7 @@ async fn routines_runs_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
-    if routine.user_id != user.user_id {
+    if !routine.is_owned_by(&user.user_id) {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 
@@ -3613,6 +3677,258 @@ mod tests {
         Router::new()
             .route("/oauth/callback", get(oauth_callback_handler))
             .with_state(state)
+    }
+
+    fn test_configure_router(state: Arc<GatewayState>) -> Router {
+        Router::new()
+            .route("/api/health", get(health_handler))
+            .route("/api/standby/status", get(standby_status_handler))
+            .route("/api/configure", post(configure_handler))
+            .with_state(state)
+    }
+
+    fn test_standby_state(control: Arc<crate::standby::StandbyControl>) -> Arc<GatewayState> {
+        Arc::new(GatewayState {
+            msg_tx: tokio::sync::RwLock::new(None),
+            sse: Arc::new(SseManager::new()),
+            workspace: None,
+            workspace_pool: None,
+            session_manager: None,
+            log_broadcaster: None,
+            log_level_handle: None,
+            extension_manager: None,
+            tool_registry: None,
+            store: None,
+            job_manager: None,
+            prompt_queue: None,
+            owner_id: "test".to_string(),
+            shutdown_tx: tokio::sync::RwLock::new(None),
+            server_started: std::sync::atomic::AtomicBool::new(false),
+            ws_tracker: None,
+            llm_provider: None,
+            skill_registry: None,
+            skill_catalog: None,
+            scheduler: None,
+            chat_rate_limiter: PerUserRateLimiter::new(30, 60),
+            oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
+            webhook_rate_limiter: RateLimiter::new(10, 60),
+            registry_entries: vec![],
+            cost_guard: None,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+            startup_time: std::time::Instant::now(),
+            active_config: ActiveConfigSnapshot::default(),
+            secrets_store: None,
+            db_auth: None,
+            pairing_store: None,
+            oauth_providers: None,
+            oauth_state_store: None,
+            oauth_base_url: None,
+            oauth_allowed_domains: Vec::new(),
+            near_nonce_store: None,
+            near_rpc_url: None,
+            near_network: None,
+            oauth_sweep_shutdown: None,
+            standby_control: Some(control),
+            runtime_overrides: GatewayRuntimeOverrides::default(),
+        })
+    }
+
+    fn sample_configure_request() -> TidePoolConfigureRequest {
+        TidePoolConfigureRequest {
+            agent_id: Uuid::nil(),
+            llm: crate::standby::TidePoolConfigureLlm {
+                backend: "openai".to_string(),
+                model: "gpt-4.1".to_string(),
+                api_key: Some("secret".to_string()),
+                base_url: Some("https://example.com".to_string()),
+            },
+            mcp_servers: Vec::new(),
+            channels: Vec::new(),
+            persona: crate::standby::TidePoolConfigurePersona {
+                soul: "helpful".to_string(),
+                parameters: serde_json::json!({}),
+                skills: Vec::new(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_configure_requires_bearer_token() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let control = crate::standby::StandbyControl::new("gateway-token", tx);
+        let app = test_configure_router(test_standby_state(control));
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/configure")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&sample_configure_request()).expect("serialize request"),
+            ))
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_standby_status_requires_bearer_token() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let control = crate::standby::StandbyControl::new("gateway-token", tx);
+        let app = test_configure_router(test_standby_state(control));
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/standby/status")
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_standby_status_reports_waiting_ready_snapshot() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let control = crate::standby::StandbyControl::new("gateway-token", tx);
+        control
+            .mark_configure_ready("standby.waiting_for_configure")
+            .await;
+        let app = test_configure_router(test_standby_state(control));
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/standby/status")
+            .header(axum::http::header::AUTHORIZATION, "Bearer gateway-token")
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let snapshot: crate::standby::StandbyStartupSnapshot =
+            serde_json::from_slice(&body).expect("snapshot json");
+        assert_eq!(snapshot.phase, "waiting");
+        assert!(snapshot.configure_ready);
+        assert!(!snapshot.runtime_started);
+        assert_eq!(snapshot.last_stage, "standby.waiting_for_configure");
+    }
+
+    #[tokio::test]
+    async fn test_configure_happy_path_and_repeat_conflict() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let control = crate::standby::StandbyControl::new("gateway-token", tx);
+        control
+            .mark_configure_ready("standby.waiting_for_configure")
+            .await;
+        let app = test_configure_router(test_standby_state(control));
+
+        tokio::spawn(async move {
+            if let Some(command) = rx.recv().await {
+                let _ = command.response_tx.send(Ok(()));
+            }
+        });
+
+        let request_body =
+            serde_json::to_vec(&sample_configure_request()).expect("serialize request");
+
+        let first = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/configure")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header(axum::http::header::AUTHORIZATION, "Bearer gateway-token")
+            .body(Body::from(request_body.clone()))
+            .expect("first request");
+        let first_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), first)
+            .await
+            .expect("first response");
+        assert_eq!(first_resp.status(), StatusCode::OK);
+
+        let second = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/configure")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header(axum::http::header::AUTHORIZATION, "Bearer gateway-token")
+            .body(Body::from(request_body))
+            .expect("second request");
+        let second_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, second)
+            .await
+            .expect("second response");
+        assert_eq!(second_resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_standby_health_and_configure_wait_for_prewarm() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let control = crate::standby::StandbyControl::new("gateway-token", tx);
+        let app = test_configure_router(test_standby_state(Arc::clone(&control)));
+
+        let health_before = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/health")
+            .body(Body::empty())
+            .expect("health-before request");
+        let health_before_resp =
+            ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), health_before)
+                .await
+                .expect("health-before response");
+        assert_eq!(health_before_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let configure_before = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/configure")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header(axum::http::header::AUTHORIZATION, "Bearer gateway-token")
+            .body(Body::from(
+                serde_json::to_vec(&sample_configure_request()).expect("serialize request"),
+            ))
+            .expect("configure-before request");
+        let configure_before_resp =
+            ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), configure_before)
+                .await
+                .expect("configure-before response");
+        assert_eq!(
+            configure_before_resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        control
+            .mark_configure_ready("standby.waiting_for_configure")
+            .await;
+
+        let health_after = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/health")
+            .body(Body::empty())
+            .expect("health-after request");
+        let health_after_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, health_after)
+            .await
+            .expect("health-after response");
+        assert_eq!(health_after_resp.status(), StatusCode::OK);
     }
 
     #[cfg(feature = "libsql")]
@@ -4078,7 +4394,7 @@ mod tests {
         let secrets = test_secrets_store();
         let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
 
-        let channel_name = "test-failing-channel";
+        let channel_name = "test_failing_channel";
         std::fs::write(
             wasm_channels_dir
                 .path()
@@ -4152,63 +4468,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_extensions_setup_submit_telegram_verification_does_not_broadcast_auth_required() {
+    async fn test_llm_test_connection_allows_admin_private_base_url() {
         use axum::body::Body;
-        use tokio::time::{Duration, timeout};
         use tower::ServiceExt;
 
-        let secrets = test_secrets_store();
-        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
-
-        std::fs::write(
-            wasm_channels_dir.path().join("telegram.wasm"),
-            b"\0asm fake",
-        )
-        .expect("write fake telegram wasm");
-        let caps = serde_json::json!({
-            "type": "channel",
-            "name": "telegram",
-            "setup": {
-                "required_secrets": [
-                    {
-                        "name": "telegram_bot_token",
-                        "prompt": "Enter your Telegram Bot API token (from @BotFather)"
-                    }
-                ]
-            }
-        });
-        std::fs::write(
-            wasm_channels_dir.path().join("telegram.capabilities.json"),
-            serde_json::to_string(&caps).expect("serialize telegram caps"),
-        )
-        .expect("write telegram caps");
-
-        ext_mgr
-            .set_test_telegram_pending_verification("iclaw-7qk2m9", Some("test_hot_bot"))
-            .await;
-
-        let state = test_gateway_state(Some(ext_mgr));
-        let mut receiver = state.sse.sender().subscribe();
+        let state = test_gateway_state(None);
         let app = Router::new()
             .route(
-                "/api/extensions/{name}/setup",
-                post(extensions_setup_submit_handler),
+                "/api/llm/test_connection",
+                post(llm_test_connection_handler),
             )
             .with_state(state);
 
         let req_body = serde_json::json!({
-            "secrets": {
-                "telegram_bot_token": "123456789:ABCdefGhI"
-            }
+            "adapter": "openai",
+            "base_url": "http://127.0.0.1:9/v1",
+            "model": "test-model"
         });
         let mut req = axum::http::Request::builder()
             .method("POST")
-            .uri("/api/extensions/telegram/setup")
+            .uri("/api/llm/test_connection")
             .header("content-type", "application/json")
             .body(Body::from(req_body.to_string()))
             .expect("request");
-        // Inject AuthenticatedUser so the handler's extractor succeeds
-        // without needing the full auth middleware layer.
         req.extensions_mut().insert(UserIdentity {
             user_id: "test".to_string(),
             role: "admin".to_string(),
@@ -4224,29 +4506,80 @@ mod tests {
             .await
             .expect("body");
         let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
-        assert_eq!(parsed["success"], serde_json::Value::Bool(true));
-        assert_eq!(parsed["activated"], serde_json::Value::Bool(false));
-        assert_eq!(parsed["verification"]["code"], "iclaw-7qk2m9");
+        assert_eq!(parsed["ok"], serde_json::Value::Bool(false));
+        let message = parsed["message"].as_str().unwrap_or_default();
+        assert!(
+            !message.contains("Invalid base URL"),
+            "private localhost endpoint should pass validation: {message}"
+        );
+    }
 
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
-        loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            match timeout(remaining, receiver.recv()).await {
-                Ok(Ok(scoped))
-                    if matches!(
-                        scoped.event,
-                        crate::channels::web::types::AppEvent::AuthRequired { .. }
-                    ) =>
-                {
-                    panic!("verification responses should not emit auth_required SSE events")
-                }
-                Ok(Ok(_)) => continue,
-                Ok(Err(_)) | Err(_) => break,
-            }
-        }
+    #[tokio::test]
+    async fn test_llm_test_connection_requires_admin_role() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let state = test_gateway_state(None);
+        let app = Router::new()
+            .route(
+                "/api/llm/test_connection",
+                post(llm_test_connection_handler),
+            )
+            .with_state(state);
+
+        let req_body = serde_json::json!({
+            "adapter": "openai",
+            "base_url": "http://127.0.0.1:9/v1",
+            "model": "test-model"
+        });
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/llm/test_connection")
+            .header("content-type", "application/json")
+            .body(Body::from(req_body.to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_llm_list_models_requires_admin_role() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let state = test_gateway_state(None);
+        let app = Router::new()
+            .route("/api/llm/list_models", post(llm_list_models_handler))
+            .with_state(state);
+
+        let req_body = serde_json::json!({
+            "adapter": "openai",
+            "base_url": "http://127.0.0.1:9/v1"
+        });
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/llm/list_models")
+            .header("content-type", "application/json")
+            .body(Body::from(req_body.to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     fn expired_flow_created_at() -> Option<std::time::Instant> {

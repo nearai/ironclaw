@@ -15,6 +15,7 @@ use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobState;
 use crate::error::Error;
 use crate::llm::{ChatMessage, Reasoning};
+use crate::ownership::Owned;
 
 /// Format a count with a suffix, using K/M abbreviations for large numbers.
 fn format_count(n: u64, suffix: &str) -> String {
@@ -25,6 +26,18 @@ fn format_count(n: u64, suffix: &str) -> String {
     } else {
         format!("{} {}", n, suffix)
     }
+}
+
+fn format_vertical_list(title: &str, items: &[String]) -> String {
+    if items.is_empty() {
+        return format!("{}:\n  (none)", title);
+    }
+
+    let mut out = format!("{}:\n", title);
+    for item in items {
+        out.push_str(&format!("  {}\n", item));
+    }
+    out.trim_end().to_string()
 }
 
 impl Agent {
@@ -134,7 +147,7 @@ impl Agent {
                 }
 
                 let ctx = self.context_manager.get_context(uuid).await?;
-                if ctx.user_id != tenant.user_id() {
+                if !ctx.is_owned_by(tenant.user_id()) {
                     return Err(crate::error::JobError::NotFound { id: uuid }.into());
                 }
 
@@ -202,7 +215,7 @@ impl Agent {
             .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
 
         let ctx = self.context_manager.get_context(uuid).await?;
-        if ctx.user_id != tenant.user_id() {
+        if !ctx.is_owned_by(tenant.user_id()) {
             return Err(crate::error::JobError::NotFound { id: uuid }.into());
         }
 
@@ -282,7 +295,7 @@ impl Agent {
             .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
 
         let ctx = self.context_manager.get_context(uuid).await?;
-        if ctx.user_id != tenant.user_id() {
+        if !ctx.is_owned_by(tenant.user_id()) {
             return Err(crate::error::JobError::NotFound { id: uuid }.into());
         }
 
@@ -708,7 +721,7 @@ impl Agent {
                 "  /interrupt        Stop current operation\n",
                 "  /new              New conversation thread\n",
                 "  /thread <id>      Switch to thread\n",
-                "  /resume <id>      Resume from checkpoint\n",
+                "  /resume           Resume a previous conversation\n",
                 "\n",
                 "Skills:\n",
                 "  /skills             List installed skills\n",
@@ -795,9 +808,9 @@ impl Agent {
 
             "tools" => {
                 let tools = self.tools().list().await;
-                Ok(SubmissionResult::response(format!(
-                    "Available tools: {}",
-                    tools.join(", ")
+                Ok(SubmissionResult::response(format_vertical_list(
+                    "Available tools",
+                    &tools,
                 )))
             }
 
@@ -1144,5 +1157,24 @@ impl Agent {
         {
             tracing::warn!("Model persistence task failed: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_vertical_list;
+
+    #[test]
+    fn format_vertical_list_renders_one_item_per_line() {
+        let formatted = format_vertical_list(
+            "Available tools",
+            &[
+                "time".to_string(),
+                "shell".to_string(),
+                "github".to_string(),
+            ],
+        );
+
+        assert_eq!(formatted, "Available tools:\n  time\n  shell\n  github");
     }
 }

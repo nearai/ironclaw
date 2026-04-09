@@ -23,6 +23,10 @@ use ironclaw::{
     llm::create_session_manager,
     orchestrator::{ReaperConfig, SandboxReaper},
     pairing::PairingStore,
+    standby::{
+        ConfigureCommand, ConfigureFailure, StandbyControl, apply_runtime_config,
+        prewarm_runtime_dependencies, resolve_standby_gateway_config, write_persona_files,
+    },
     tracing_fmt::{init_cli_tracing, init_worker_tracing},
     webhooks::{self, ToolWebhookState},
 };
@@ -291,6 +295,21 @@ async fn async_main() -> anyhow::Result<()> {
     };
 
     let startup_start = std::time::Instant::now();
+    let log_broadcaster = Arc::new(LogBroadcaster::new());
+
+    if cli.standby {
+        let log_level_handle = ironclaw::channels::web::log_layer::init_tracing(
+            Arc::clone(&log_broadcaster),
+            false,
+        );
+        return run_standby(
+            &cli,
+            startup_start,
+            Arc::clone(&log_broadcaster),
+            Arc::clone(&log_level_handle),
+        )
+        .await;
+    }
 
     // ── Agent startup ──────────────────────────────────────────────────
 
@@ -315,6 +334,7 @@ async fn async_main() -> anyhow::Result<()> {
     if cli.auto_approve {
         ironclaw::config::set_runtime_env("AGENT_AUTO_APPROVE_TOOLS", "true");
     }
+    apply_no_db_config_overrides(&cli);
 
     // Load initial config from env + disk + optional TOML (before DB is available).
     // Credentials may be missing at this point — that's fine. LlmConfig::resolve()
@@ -333,25 +353,244 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Err(e) => return Err(e.into()),
     };
-
-    // Initialize session manager before channel setup
-    let session = create_session_manager(config.llm.session.clone()).await;
-
-    // Create log broadcaster before tracing init so the WebLogLayer can capture all events.
-    let log_broadcaster = Arc::new(LogBroadcaster::new());
-
     // Initialize tracing with a reloadable EnvFilter so the gateway can switch
     // log levels at runtime without restarting.
-    let log_level_handle =
-        ironclaw::channels::web::log_layer::init_tracing(Arc::clone(&log_broadcaster));
+    let suppress_stderr =
+        config.channels.tui.is_some() && cli.message.is_none() && cfg!(feature = "tui");
+    let log_level_handle = ironclaw::channels::web::log_layer::init_tracing(
+        Arc::clone(&log_broadcaster),
+        suppress_stderr,
+    );
 
     tracing::debug!("Starting IronClaw...");
     tracing::debug!("Loaded configuration for agent: {}", config.agent.name);
     tracing::debug!("LLM backend: {}", config.llm.backend);
 
+    run_agent_with_config(
+        &cli,
+        startup_start,
+        config,
+        toml_path,
+        log_broadcaster,
+        log_level_handle,
+        None,
+        false,
+    )
+    .await
+}
+
+fn apply_no_db_config_overrides(cli: &Cli) {
+    if !cli.no_db {
+        return;
+    }
+
+    ironclaw::config::set_runtime_env("DATABASE_BACKEND", "libsql");
+    if std::env::var("DATABASE_URL")
+        .ok()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        ironclaw::config::set_runtime_env("DATABASE_URL", "unused://libsql");
+    }
+}
+
+async fn run_standby(
+    cli: &Cli,
+    startup_start: std::time::Instant,
+    log_broadcaster: Arc<LogBroadcaster>,
+    log_level_handle: Arc<ironclaw::channels::web::log_layer::LogLevelHandle>,
+) -> anyhow::Result<()> {
+    let toml_path = cli.config.as_deref();
+    let (owner_id, gateway_config) =
+        resolve_standby_gateway_config(toml_path).map_err(anyhow::Error::msg)?;
+    let (request_tx, mut request_rx) = tokio::sync::mpsc::channel::<ConfigureCommand>(1);
+
+    let mut gateway = GatewayChannel::new(gateway_config.clone(), owner_id);
+    let standby_control = StandbyControl::new(gateway.auth_token(), request_tx);
+    gateway = gateway.with_standby_control(Arc::clone(&standby_control));
+    let bound = gateway.start_server_only().await?;
+    standby_control
+        .mark_startup_stage("standby.prewarm.start")
+        .await;
+    let prewarm_start = std::time::Instant::now();
+    prewarm_runtime_dependencies(toml_path, cli.no_db)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    ironclaw::bootstrap::log_startup_timing(
+        "standby.prewarm_runtime_dependencies",
+        prewarm_start.elapsed(),
+    );
+    standby_control
+        .mark_configure_ready("standby.waiting_for_configure")
+        .await;
+
+    tracing::info!(
+        addr = %bound,
+        "Gateway standby mode is ready; waiting for /api/configure"
+    );
+
+    let command = request_rx
+        .recv()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("standby configure channel closed unexpectedly"))?;
+    standby_control
+        .mark_startup_stage("configure.received")
+        .await;
+
+    if let Err(message) = apply_runtime_config(&command.request).await {
+        standby_control
+            .mark_startup_stage("runtime_config.apply_failed")
+            .await;
+        let _ = command.response_tx.send(Err(ConfigureFailure {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            message: message.clone(),
+        }));
+        anyhow::bail!("{message}");
+    }
+    standby_control
+        .mark_startup_stage("runtime_config.applied")
+        .await;
+
+    standby_control
+        .mark_startup_stage("config.reload.start")
+        .await;
+    let config_reload_start = std::time::Instant::now();
+    let config = match Config::from_env_with_toml(toml_path).await {
+        Ok(config) => config,
+        Err(error) => {
+            ironclaw::bootstrap::log_startup_timing(
+                "standby.config_reload",
+                config_reload_start.elapsed(),
+            );
+            standby_control
+                .mark_startup_stage("config.reload.failed")
+                .await;
+            let message = error.to_string();
+            let _ = command.response_tx.send(Err(ConfigureFailure {
+                status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                message: message.clone(),
+            }));
+            anyhow::bail!("{message}");
+        }
+    };
+    ironclaw::bootstrap::log_startup_timing("standby.config_reload", config_reload_start.elapsed());
+    standby_control
+        .mark_startup_stage("config.reload.ready")
+        .await;
+    tracing::info!(
+        agent_id = %command.request.agent_id,
+        llm_backend = %config.llm.backend,
+        "Standby configure accepted; completing full startup"
+    );
+
+    let gateway_state = Arc::clone(gateway.state());
+    let persona = command.request.persona.clone();
+    standby_control
+        .mark_startup_stage("agent.bootstrap.start")
+        .await;
+    let mut agent_future = std::pin::pin!(run_agent_with_config(
+        cli,
+        startup_start,
+        config,
+        toml_path,
+        log_broadcaster,
+        log_level_handle,
+        Some((gateway, persona)),
+        true,
+    ));
+    let mut runtime_ready = std::pin::pin!(standby_control.wait_for_runtime_started());
+
+    let startup_result = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            tokio::select! {
+                () = runtime_ready.as_mut() => return Ok(()),
+                joined = agent_future.as_mut() => return joined,
+            }
+        }
+    })
+    .await;
+
+    match startup_result {
+        Ok(Ok(())) => {
+            let _ = command.response_tx.send(Ok(()));
+        }
+        Ok(Err(error)) => {
+            standby_control
+                .mark_startup_stage("agent.bootstrap.failed")
+                .await;
+            let _ = command.response_tx.send(Err(ConfigureFailure {
+                status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                message: error.to_string(),
+            }));
+            return Err(error);
+        }
+        Err(_) => {
+            standby_control
+                .mark_startup_stage("agent.bootstrap.timeout")
+                .await;
+            let snapshot = standby_control.startup_snapshot().await;
+            let diagnostic = serde_json::json!({
+                "lastStage": snapshot.last_stage,
+                "runtimeStarted": snapshot.runtime_started,
+                "serverStarted": gateway_state.server_started.load(std::sync::atomic::Ordering::Relaxed),
+                "hasMsgTx": gateway_state.msg_tx.read().await.is_some(),
+                "hasSessionManager": gateway_state.session_manager().is_some(),
+                "hasLlmProvider": gateway_state.llm_provider().is_some(),
+                "hasWorkspace": gateway_state.workspace().is_some(),
+                "activeConfig": gateway_state.active_config_snapshot(),
+            });
+            tracing::error!(diagnostic = %diagnostic, "standby startup timed out");
+            let _ = command.response_tx.send(Err(ConfigureFailure {
+                status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                message: format!(
+                    "timed out waiting for configured gateway startup (last stage: {})",
+                    snapshot.last_stage
+                ),
+            }));
+            anyhow::bail!(
+                "timed out waiting for configured gateway startup (last stage: {})",
+                snapshot.last_stage
+            );
+        }
+    }
+
+    agent_future.as_mut().await
+}
+
+async fn run_agent_with_config(
+    cli: &Cli,
+    startup_start: std::time::Instant,
+    config: Config,
+    toml_path: Option<&std::path::Path>,
+    log_broadcaster: Arc<LogBroadcaster>,
+    log_level_handle: Arc<ironclaw::channels::web::log_layer::LogLevelHandle>,
+    mut prestarted_gateway: Option<(GatewayChannel, ironclaw::standby::TidePoolConfigurePersona)>,
+    standby_db_prewarmed: bool,
+) -> anyhow::Result<()> {
+    let standby_control = prestarted_gateway
+        .as_ref()
+        .and_then(|(gateway, _)| gateway.state().standby_control.clone());
+
+    if let Some(control) = standby_control.as_ref() {
+        control
+            .mark_startup_stage("agent.session_manager.start")
+            .await;
+    }
+    // Initialize session manager before channel setup
+    let session = create_session_manager(config.llm.session.clone()).await;
+    if let Some(control) = standby_control.as_ref() {
+        control
+            .mark_startup_stage("agent.session_manager.ready")
+            .await;
+        control.mark_startup_stage("app_builder.start").await;
+    }
+
     // ── Phase 1-5: Build all core components via AppBuilder ────────────
 
-    let flags = AppBuilderFlags { no_db: cli.no_db };
+    let flags = AppBuilderFlags {
+        no_db: cli.no_db,
+        skip_db_migrations: standby_db_prewarmed,
+    };
     let components = AppBuilder::new(
         config,
         flags,
@@ -364,6 +603,39 @@ async fn async_main() -> anyhow::Result<()> {
 
     let config = components.config;
 
+    if let Some((_, ref persona)) = prestarted_gateway
+        && let Some(ref workspace) = components.workspace
+    {
+        write_persona_files(workspace, persona)
+            .await
+            .map_err(anyhow::Error::msg)?;
+    }
+
+    if let Some(ref workspace) = components.workspace {
+        match workspace.system_prompt().await {
+            Ok(prompt) if !prompt.is_empty() => {
+                tracing::info!(
+                    user_id = %workspace.user_id(),
+                    prompt_len = prompt.len(),
+                    prompt_fingerprint = %ironclaw::workspace::prompt_fingerprint(&prompt),
+                    "Workspace system prompt snapshot ready after startup configuration"
+                );
+            }
+            Ok(_) => {
+                tracing::debug!(
+                    user_id = %workspace.user_id(),
+                    "Workspace system prompt absent after startup configuration"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    user_id = %workspace.user_id(),
+                    "Failed to load workspace system prompt after startup configuration: {}",
+                    error
+                );
+            }
+        }
+    }
     // ── Tunnel setup ───────────────────────────────────────────────────
 
     let (config, active_tunnel) = ironclaw::tunnel::start_managed_tunnel(config).await;
@@ -409,13 +681,128 @@ async fn async_main() -> anyhow::Result<()> {
         Arc<WasmChannelRouter>,
     )> = None;
 
-    // Create CLI channel
+    // Create CLI channel (REPL or TUI — mutually exclusive, both claim stdin)
+    let tui_mode = config.channels.tui.is_some();
+
+    #[cfg(feature = "tui")]
+    if tui_mode && cli.message.is_none() {
+        let tool_names = components.tools.list().await;
+        let tool_categories = ironclaw::channels::tui::group_tools_by_prefix(tool_names);
+
+        let skill_categories = if let Some(ref registry) = components.skill_registry {
+            let registry = registry.read().unwrap_or_else(|e| e.into_inner());
+            let skill_data: Vec<(String, Vec<String>)> = registry
+                .skills()
+                .iter()
+                .map(|s| (s.manifest.name.clone(), s.manifest.activation.tags.clone()))
+                .collect();
+            ironclaw::channels::tui::group_skills_by_tag(&skill_data)
+        } else {
+            Vec::new()
+        };
+
+        let workspace_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::new());
+        let workspace_path = workspace_root.display().to_string();
+        let layout = if let Some(ref tui_config) = config.channels.tui {
+            ironclaw::channels::tui::resolve_tui_layout(tui_config, &workspace_root)
+        } else {
+            ironclaw_tui::TuiLayout::default()
+        };
+
+        let (memory_count, identity_files) = if let Some(ref ws) = components.workspace {
+            let count = ws.list_all().await.map(|docs| docs.len()).unwrap_or(0);
+            let identity_names = ["AGENTS.md", "SOUL.md", "USER.md", "IDENTITY.md"];
+            let mut found = Vec::new();
+            for name in &identity_names {
+                if ws.read(name).await.is_ok() {
+                    found.push((*name).to_string());
+                }
+            }
+            (count, found)
+        } else {
+            (0, Vec::new())
+        };
+
+        let current_model = components.llm.model_name().to_string();
+        let context_window =
+            match tokio::time::timeout(Duration::from_secs(5), components.llm.model_metadata())
+                .await
+            {
+                Ok(Ok(metadata)) => metadata.context_length.map(u64::from),
+                Ok(Err(e)) => {
+                    tracing::debug!(
+                        "TUI context metadata unavailable: could not fetch model metadata: {}",
+                        e
+                    );
+                    None
+                }
+                Err(_) => {
+                    tracing::debug!("TUI context metadata unavailable: model metadata timed out");
+                    None
+                }
+            };
+        let available_models = match tokio::time::timeout(
+            Duration::from_secs(5),
+            components.llm.list_models(),
+        )
+        .await
+        {
+            Ok(Ok(mut models)) if !models.is_empty() => {
+                if let Some(pos) = models.iter().position(|m| m == &current_model) {
+                    if pos != 0 {
+                        let current = models.remove(pos);
+                        models.insert(0, current);
+                    }
+                } else {
+                    models.insert(0, current_model.clone());
+                }
+                models
+            }
+            Ok(Ok(_)) => Vec::new(),
+            Ok(Err(e)) => {
+                tracing::debug!("TUI model picker unavailable: could not list models: {}", e);
+                Vec::new()
+            }
+            Err(_) => {
+                tracing::debug!("TUI model picker unavailable: model discovery timed out");
+                Vec::new()
+            }
+        };
+
+        let tui_channel = ironclaw::channels::TuiChannel::new(
+            config.owner_id.clone(),
+            env!("CARGO_PKG_VERSION"),
+            current_model,
+        )
+        .with_context_window(context_window.unwrap_or(128_000))
+        .with_layout(layout)
+        .with_log_broadcaster(Arc::clone(&log_broadcaster))
+        .with_tools(tool_categories)
+        .with_skills(skill_categories)
+        .with_workspace_path(workspace_path)
+        .with_memory_count(memory_count)
+        .with_identity_files(identity_files)
+        .with_available_models(available_models);
+
+        channels.add(Box::new(tui_channel)).await;
+        channel_names.push("tui".to_string());
+        tracing::debug!("TUI mode enabled");
+    }
+
+    #[cfg(not(feature = "tui"))]
+    if tui_mode {
+        tracing::warn!(
+            "CLI_MODE=tui requested but the 'tui' feature is not enabled. Falling back to REPL."
+        );
+    }
+
+    let use_repl = !tui_mode || cfg!(not(feature = "tui"));
     let repl_channel = if let Some(ref msg) = cli.message {
         Some(ReplChannel::with_message_for_user(
             config.owner_id.clone(),
             msg.clone(),
         ))
-    } else if config.channels.cli.enabled {
+    } else if use_repl && config.channels.cli.enabled {
         let repl = ReplChannel::with_user_id(config.owner_id.clone());
         repl.suppress_banner();
         Some(repl)

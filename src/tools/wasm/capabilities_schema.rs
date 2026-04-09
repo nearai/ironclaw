@@ -738,9 +738,6 @@ pub struct ToolFieldSetupSchema {
     /// `selected_model`.
     #[serde(default)]
     pub setting_path: Option<String>,
-    /// Whether changing this field requires a restart to fully apply.
-    #[serde(default)]
-    pub restart_required: bool,
 }
 
 /// Input widget type for a setup field.
@@ -1259,8 +1256,7 @@ mod tests {
                     {
                         "name": "llm_backend",
                         "prompt": "LLM Provider",
-                        "setting_path": "llm_backend",
-                        "restart_required": true
+                        "setting_path": "llm_backend"
                     },
                     {
                         "name": "selected_model",
@@ -1286,7 +1282,6 @@ mod tests {
             setup.required_fields[0].setting_path.as_deref(),
             Some("llm_backend")
         );
-        assert!(setup.required_fields[0].restart_required);
         assert_eq!(
             setup.required_fields[0].input_type,
             crate::tools::wasm::capabilities_schema::ToolSetupFieldInputType::Text

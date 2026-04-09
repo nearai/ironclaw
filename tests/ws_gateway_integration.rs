@@ -53,6 +53,7 @@ async fn start_test_server() -> (
         scheduler: None,
         owner_id: "test-user".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
+        server_started: std::sync::atomic::AtomicBool::new(false),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
         skill_registry: None,
@@ -76,6 +77,8 @@ async fn start_test_server() -> (
         near_rpc_url: None,
         near_network: None,
         oauth_sweep_shutdown: None,
+        standby_control: None,
+        runtime_overrides: Default::default(),
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(
@@ -327,6 +330,7 @@ async fn test_ws_multiple_events_in_sequence() {
     });
     state.sse.broadcast(AppEvent::ToolStarted {
         name: "shell".to_string(),
+        detail: None,
         thread_id: None,
     });
     state.sse.broadcast(AppEvent::ToolCompleted {

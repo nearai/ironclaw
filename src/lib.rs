@@ -73,6 +73,7 @@ pub mod service;
 pub mod settings;
 pub mod setup;
 pub mod skills;
+pub mod standby;
 pub mod tenant;
 pub mod timezone;
 pub mod tools;

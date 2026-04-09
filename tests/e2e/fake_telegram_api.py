@@ -19,22 +19,30 @@ class FakeTelegramState:
     """Shared mutable state for the fake Telegram API."""
 
     def __init__(self):
+        self._update_event = asyncio.Event()
+        self._next_update_id = 1
         self.reset()
 
     def reset(self):
+        next_update_id = self._next_update_id
         self.sent_messages: list[dict] = []
         self.chat_actions: list[dict] = []
         self.api_calls: list[dict] = []
         self._update_queue: list[dict] = []
-        self._next_update_id = 1
-        self._update_event = asyncio.Event()
+        self._next_update_id = next_update_id
+        self._update_event.clear()
         self.reject_markdown = False
         self.rate_limit_count = 0
         self.fail_downloads = False
 
     def queue_update(self, update: dict) -> int:
-        update_id = self._next_update_id
-        self._next_update_id += 1
+        explicit_update_id = update.get("update_id")
+        if isinstance(explicit_update_id, int) and explicit_update_id > 0:
+            update_id = explicit_update_id
+            self._next_update_id = max(self._next_update_id, update_id + 1)
+        else:
+            update_id = self._next_update_id
+            self._next_update_id += 1
         update["update_id"] = update_id
         self._update_queue.append(update)
         self._update_event.set()

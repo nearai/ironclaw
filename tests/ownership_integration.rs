@@ -333,19 +333,101 @@ mod tests {
     }
 
     #[test]
-    fn test_can_act_on_own_resource() {
-        use ironclaw::ownership::can_act_on;
-        let actor = Identity::new(OwnerId::from("alice"), UserRole::Member);
-        assert!(can_act_on(&actor, &OwnerId::from("alice")));
-        assert!(!can_act_on(&actor, &OwnerId::from("bob")));
+    fn test_owned_trait_is_owned_by() {
+        use ironclaw::ownership::Owned;
+
+        struct TestResource {
+            user_id: String,
+        }
+        impl Owned for TestResource {
+            fn owner_user_id(&self) -> &str {
+                &self.user_id
+            }
+        }
+
+        let r = TestResource {
+            user_id: "alice".to_string(),
+        };
+        assert!(r.is_owned_by("alice"));
+        assert!(!r.is_owned_by("bob"));
     }
 
     #[test]
-    fn test_admin_role_does_not_bypass_ownership() {
-        use ironclaw::ownership::can_act_on;
-        // Admin role has no special bypass in can_act_on
-        let admin = Identity::new(OwnerId::from("admin-user"), UserRole::Admin);
-        assert!(!can_act_on(&admin, &OwnerId::from("bob")));
-        assert!(can_act_on(&admin, &OwnerId::from("admin-user")));
+    fn test_owned_sandbox_job_record() {
+        use ironclaw::history::SandboxJobRecord;
+        use ironclaw::ownership::Owned;
+
+        let job = SandboxJobRecord {
+            id: uuid::Uuid::new_v4(),
+            task: "test".to_string(),
+            status: "running".to_string(),
+            user_id: "alice".to_string(),
+            project_dir: "/tmp/test".to_string(),
+            success: None,
+            failure_reason: None,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            credential_grants_json: "[]".to_string(),
+        };
+        assert_eq!(job.owner_user_id(), "alice");
+        assert!(job.is_owned_by("alice"));
+        assert!(!job.is_owned_by("bob"));
+    }
+
+    #[test]
+    fn test_owned_agent_job_record() {
+        use ironclaw::history::AgentJobRecord;
+        use ironclaw::ownership::Owned;
+
+        let job = AgentJobRecord {
+            id: uuid::Uuid::new_v4(),
+            title: "test job".to_string(),
+            status: "pending".to_string(),
+            user_id: "henry".to_string(),
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            failure_reason: None,
+        };
+        assert_eq!(job.owner_user_id(), "henry");
+        assert!(job.is_owned_by("henry"));
+        assert!(!job.is_owned_by("alice"));
+    }
+
+    #[test]
+    fn test_owned_routine() {
+        use ironclaw::agent::routine::{
+            NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger,
+        };
+        use ironclaw::ownership::Owned;
+
+        let routine = Routine {
+            id: uuid::Uuid::new_v4(),
+            name: "test-routine".to_string(),
+            description: String::new(),
+            user_id: "bob".to_string(),
+            enabled: true,
+            trigger: Trigger::Manual,
+            action: RoutineAction::Lightweight {
+                prompt: "test prompt".to_string(),
+                context_paths: Vec::new(),
+                max_tokens: 4096,
+                use_tools: false,
+                max_tool_rounds: 3,
+            },
+            guardrails: RoutineGuardrails::default(),
+            notify: NotifyConfig::default(),
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::json!({}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        assert_eq!(routine.owner_user_id(), "bob");
+        assert!(routine.is_owned_by("bob"));
+        assert!(!routine.is_owned_by("alice"));
     }
 }

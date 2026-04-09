@@ -1058,7 +1058,7 @@ pub async fn get_response_handler(
     let (_response_uuid, thread_uuid) = decode_response_id(&id)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
 
-    let store = state.store.as_ref().ok_or_else(|| {
+    let store = state.store().ok_or_else(|| {
         api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "Database not configured",
@@ -1361,6 +1361,7 @@ mod tests {
         let mut acc = ResponseAccumulator::new("resp_test".to_string(), "m".to_string());
         assert!(!acc.process(AppEvent::ToolStarted {
             name: "memory_search".to_string(),
+            detail: None,
             thread_id: Some("t".to_string()),
         }));
         assert!(!acc.process(AppEvent::ToolResult {

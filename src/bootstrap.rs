@@ -8,11 +8,35 @@
 
 use std::path::PathBuf;
 use std::sync::LazyLock;
+use std::time::Duration;
 
 const IRONCLAW_BASE_DIR_ENV: &str = "IRONCLAW_BASE_DIR";
+const IRONCLAW_STARTUP_TIMING_ENV: &str = "IRONCLAW_STARTUP_TIMING";
 
 /// Lazily computed IronClaw base directory, cached for the lifetime of the process.
 static IRONCLAW_BASE_DIR: LazyLock<PathBuf> = LazyLock::new(compute_ironclaw_base_dir);
+
+pub fn startup_timing_enabled() -> bool {
+    std::env::var(IRONCLAW_STARTUP_TIMING_ENV)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+pub fn log_startup_timing(phase: &str, elapsed: Duration) {
+    if startup_timing_enabled() {
+        tracing::info!(
+            phase,
+            elapsed_ms = elapsed.as_millis() as u64,
+            "startup timing"
+        );
+    }
+}
 
 /// Compute the IronClaw base directory from environment.
 ///

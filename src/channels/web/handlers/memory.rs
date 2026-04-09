@@ -26,10 +26,10 @@ pub(crate) async fn resolve_workspace(
     state: &GatewayState,
     user: &UserIdentity,
 ) -> Result<Arc<Workspace>, (StatusCode, String)> {
-    if let Some(ref pool) = state.workspace_pool {
+    if let Some(pool) = state.workspace_pool() {
         return Ok(pool.get_or_create(user).await);
     }
-    state.workspace.as_ref().cloned().ok_or((
+    state.workspace().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Workspace not available".to_string(),
     ))

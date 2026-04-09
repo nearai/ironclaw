@@ -121,6 +121,24 @@ impl Agent {
             None
         };
 
+        if let Some(prompt) = system_prompt.as_ref() {
+            tracing::info!(
+                user_id = %message.user_id,
+                channel = %message.channel,
+                is_group_chat,
+                prompt_len = prompt.len(),
+                prompt_fingerprint = %crate::workspace::prompt_fingerprint(prompt),
+                "Workspace system prompt loaded for chat turn"
+            );
+        } else {
+            tracing::debug!(
+                user_id = %message.user_id,
+                channel = %message.channel,
+                is_group_chat,
+                "Workspace system prompt absent for chat turn"
+            );
+        }
+
         // Select active skills. Explicit /skill-name mentions are force-activated
         // and replaced with the skill's description in the rewritten message.
         let (active_skills, rewritten_content) = self.select_active_skills(&message.content);
@@ -971,9 +989,11 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     .channels
                     .send_status(
                         &self.message.channel,
-                        StatusUpdate::ToolStarted {
-                            name: tc.name.clone(),
-                        },
+                        StatusUpdate::tool_started_with_id(
+                            tc.name.clone(),
+                            &tc.arguments,
+                            Some(tc.id.clone()),
+                        ),
                         &self.message.metadata,
                     )
                     .await;
@@ -991,6 +1011,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         &self.message.channel,
                         StatusUpdate::tool_completed(
                             tc.name.clone(),
+                            Some(tc.id.clone()),
                             &result,
                             &tc.arguments,
                             disp_tool.as_deref(),
@@ -1018,9 +1039,11 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     let _ = channels
                         .send_status(
                             &channel,
-                            StatusUpdate::ToolStarted {
-                                name: tc.name.clone(),
-                            },
+                            StatusUpdate::tool_started_with_id(
+                                tc.name.clone(),
+                                &tc.arguments,
+                                Some(tc.id.clone()),
+                            ),
                             &metadata,
                         )
                         .await;
@@ -1040,6 +1063,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                             &channel,
                             StatusUpdate::tool_completed(
                                 tc.name.clone(),
+                                Some(tc.id.clone()),
                                 &result,
                                 &tc.arguments,
                                 par_tool.as_deref(),
@@ -1167,6 +1191,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                                 StatusUpdate::ToolResult {
                                     name: tc.name.clone(),
                                     preview: output.clone(),
+                                    call_id: Some(tc.id.clone()),
                                 },
                                 &self.message.metadata,
                             )

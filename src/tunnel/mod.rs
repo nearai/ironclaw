@@ -411,6 +411,7 @@ mod tests {
             gateway: None,
             signal: None,
             dingtalk: None,
+            tui: None,
             wasm_channels_dir: std::env::temp_dir().join("ironclaw-test-channels"),
             wasm_channels_enabled: false,
             wasm_channel_owner_ids: std::collections::HashMap::new(),
