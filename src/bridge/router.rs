@@ -51,7 +51,41 @@ fn gate_display_parameters(pending: &PendingGate) -> serde_json::Value {
         .unwrap_or_else(|| pending.parameters.clone())
 }
 
-async fn send_pending_gate_status(agent: &Agent, message: &IncomingMessage, pending: &PendingGate) {
+/// Resolve the user-facing name to use when surfacing an authentication
+/// gate to a channel. The engine's `ResumeKind::Authentication` only
+/// carries `credential_name` (e.g. `google_oauth_token`), which is
+/// opaque to the user and also fails when fed back into
+/// `submit_auth_token` for WASM-tool-backed credentials. We prefer the
+/// owning extension name (e.g. `google-drive-tool`) when the failing
+/// action belongs to one. For built-in tools, HTTP, and skill
+/// credentials there's no provider extension, so we fall back to the
+/// credential name (which IS the right thing to display in those
+/// cases).
+async fn resolve_auth_gate_display_name(
+    tools: &crate::tools::ToolRegistry,
+    pending: &PendingGate,
+) -> String {
+    if let ironclaw_engine::ResumeKind::Authentication {
+        credential_name, ..
+    } = &pending.resume_kind
+    {
+        tools
+            .provider_extension_for_tool(&pending.action_name)
+            .await
+            .unwrap_or_else(|| credential_name.clone())
+    } else {
+        // Non-authentication gates don't use this string; return
+        // something innocuous.
+        pending.action_name.clone()
+    }
+}
+
+async fn send_pending_gate_status(
+    agent: &Agent,
+    message: &IncomingMessage,
+    pending: &PendingGate,
+    auth_display_name: &str,
+) {
     let display_parameters = gate_display_parameters(pending);
 
     match &pending.resume_kind {
@@ -72,16 +106,16 @@ async fn send_pending_gate_status(agent: &Agent, message: &IncomingMessage, pend
                 .await;
         }
         ironclaw_engine::ResumeKind::Authentication {
-            credential_name,
             instructions,
             auth_url,
+            ..
         } => {
             let _ = agent
                 .channels
                 .send_status(
                     &message.channel,
                     StatusUpdate::AuthRequired {
-                        extension_name: credential_name.clone(),
+                        extension_name: auth_display_name.to_string(),
                         instructions: Some(instructions.clone()),
                         auth_url: auth_url.clone(),
                         setup_url: None,
@@ -94,17 +128,15 @@ async fn send_pending_gate_status(agent: &Agent, message: &IncomingMessage, pend
     }
 }
 
-fn pending_gate_prompt_message(pending: &PendingGate) -> Option<String> {
+fn pending_gate_prompt_message(pending: &PendingGate, auth_display_name: &str) -> Option<String> {
     match &pending.resume_kind {
         ironclaw_engine::ResumeKind::Approval { .. } => Some(format!(
             "Tool '{}' requires approval. Reply 'yes' to approve, 'no' to deny.",
             pending.action_name
         )),
-        ironclaw_engine::ResumeKind::Authentication {
-            credential_name, ..
-        } => Some(format!(
+        ironclaw_engine::ResumeKind::Authentication { .. } => Some(format!(
             "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
-            credential_name
+            auth_display_name
         )),
         ironclaw_engine::ResumeKind::External { .. } => Some(format!(
             "Waiting for external confirmation (gate: {})...",
@@ -244,10 +276,12 @@ fn parse_credential_name(text: &str) -> Option<String> {
 async fn notify_pending_gate(
     agent: &Agent,
     sse: Option<Arc<SseManager>>,
+    tools: &crate::tools::ToolRegistry,
     message: &IncomingMessage,
     pending: &PendingGate,
 ) -> Result<Option<String>, Error> {
     let display_parameters = gate_display_parameters(pending);
+    let auth_display_name = resolve_auth_gate_display_name(tools, pending).await;
 
     if let Some(sse) = sse {
         sse.broadcast_for_user(
@@ -276,8 +310,8 @@ async fn notify_pending_gate(
         );
     }
 
-    send_pending_gate_status(agent, message, pending).await;
-    Ok(pending_gate_prompt_message(pending))
+    send_pending_gate_status(agent, message, pending, &auth_display_name).await;
+    Ok(pending_gate_prompt_message(pending, &auth_display_name))
 }
 
 async fn insert_and_notify_pending_gate(
@@ -292,7 +326,14 @@ async fn insert_and_notify_pending_gate(
         .await
         .map_err(|e| engine_err("pending gate insert", e))?;
 
-    notify_pending_gate(agent, state.sse.clone(), message, &pending).await
+    notify_pending_gate(
+        agent,
+        state.sse.clone(),
+        state.effect_adapter.tools(),
+        message,
+        &pending,
+    )
+    .await
 }
 
 async fn execute_pending_gate_action(
@@ -1566,6 +1607,33 @@ pub async fn resolve_gate(
                 ..
             } = pending.resume_kind
             {
+                // `submit_auth_token` expects an *extension name* as
+                // its first argument and uses `configure_token` to walk
+                // the extension's capabilities file for the actual
+                // secret name. The engine's `ResumeKind::Authentication`
+                // only carries `credential_name` (e.g.
+                // `google_oauth_token`), which is NOT an extension
+                // name. Passing it directly fails closed because
+                // neither `configure_token("google_oauth_token", ...)`
+                // nor `get_credential_spec("google_oauth_token")`
+                // match anything for a WASM tool — and the agent gets
+                // back the user-confusing "Extension not installed:
+                // google_oauth_token" message.
+                //
+                // Resolve the actual extension via the action that
+                // triggered the gate. For built-in tools, HTTP, and
+                // skill credentials there's no provider extension and
+                // we fall back to the credential name (the existing
+                // pre-fix behaviour for those callers — `submit_auth_token`
+                // then routes through the skill registry).
+                let submit_target = state
+                    .effect_adapter
+                    .tools()
+                    .provider_extension_for_tool(&pending.action_name)
+                    .await
+                    .unwrap_or_else(|| credential_name.clone());
+                let display_name = submit_target.clone();
+
                 if let Some(ref sse) = state.sse {
                     sse.broadcast_for_user(
                         &message.user_id,
@@ -1584,7 +1652,7 @@ pub async fn resolve_gate(
                 }
                 if let Some(ref auth_manager) = state.auth_manager {
                     match auth_manager
-                        .submit_auth_token(credential_name, &token, &message.user_id)
+                        .submit_auth_token(&submit_target, &token, &message.user_id)
                         .await
                     {
                         Ok(result) if result.activated => {
@@ -1593,7 +1661,7 @@ pub async fn resolve_gate(
                                 .send_status(
                                     &message.channel,
                                     StatusUpdate::AuthCompleted {
-                                        extension_name: credential_name.clone(),
+                                        extension_name: display_name.clone(),
                                         success: true,
                                         message: format!("{}. Resuming...", result.message),
                                     },
@@ -1607,7 +1675,7 @@ pub async fn resolve_gate(
                                 .send_status(
                                     &message.channel,
                                     StatusUpdate::AuthRequired {
-                                        extension_name: credential_name.clone(),
+                                        extension_name: display_name.clone(),
                                         instructions: Some(result.message.clone()),
                                         auth_url: result.auth_url.clone(),
                                         setup_url: None,
@@ -1623,7 +1691,7 @@ pub async fn resolve_gate(
                                 .send_status(
                                     &message.channel,
                                     StatusUpdate::AuthRequired {
-                                        extension_name: credential_name.clone(),
+                                        extension_name: display_name.clone(),
                                         instructions: Some(msg.clone()),
                                         auth_url: None,
                                         setup_url: None,
@@ -1640,7 +1708,7 @@ pub async fn resolve_gate(
                                 .send_status(
                                     &message.channel,
                                     StatusUpdate::AuthCompleted {
-                                        extension_name: credential_name.clone(),
+                                        extension_name: display_name.clone(),
                                         success: false,
                                         message: msg.clone(),
                                     },
@@ -2226,14 +2294,19 @@ async fn handle_with_engine_inner(
             ) =>
         {
             let pending = gate.clone();
-            // Clone the SSE arc out of state, then drop the engine read
-            // guard before awaiting on broadcast + channel I/O. The auth
-            // branch above does the same, and `notify_pending_gate` is
-            // signed to accept an owned Option<Arc<SseManager>> precisely
-            // so this terminal-return branch can release the lock.
+            // Clone the SSE arc and the tools registry out of state,
+            // then drop the engine read guard before awaiting on
+            // broadcast + channel I/O. The auth branch above does the
+            // same, and `notify_pending_gate` is signed to accept an
+            // owned Option<Arc<SseManager>> precisely so this
+            // terminal-return branch can release the lock. The tools
+            // registry handle is needed by `notify_pending_gate` to
+            // resolve the auth-gate display name without holding the
+            // engine state lock.
             let sse = state.sse.clone();
+            let tools = Arc::clone(state.effect_adapter.tools());
             drop(guard);
-            return notify_pending_gate(agent, sse, message, &pending).await;
+            return notify_pending_gate(agent, sse, tools.as_ref(), message, &pending).await;
         }
         PendingGateResolution::Ambiguous => {
             return Ok(Some(
@@ -2715,12 +2788,44 @@ async fn await_thread_outcome(
                     instructions,
                     auth_url,
                 } => {
+                    // The engine's `ResumeKind::Authentication` only
+                    // carries `credential_name` (e.g. "google_oauth_token"),
+                    // not the owning extension. For UI display and the
+                    // resume-time `submit_auth_token` call, we want the
+                    // actual extension name (e.g. "google-drive-tool")
+                    // because:
+                    //   * the channel UIs render `extension_name` as
+                    //     "Authentication required for 'X'", and a
+                    //     credential name like `google_oauth_token` is
+                    //     opaque to the user, while `google-drive-tool`
+                    //     is the integration they recognise.
+                    //   * `submit_auth_token` routes the *extension name*
+                    //     through `configure_token`, which loads the
+                    //     extension's capabilities file to find the
+                    //     correct secret name. Passing the credential
+                    //     name there fails closed with
+                    //     "Extension not installed: google_oauth_token".
+                    //
+                    // We derive the extension name from the action that
+                    // triggered the gate (`pending.action_name`) by
+                    // asking the tool registry which provider extension
+                    // owns it. For built-in tools, HTTP, and skill
+                    // credentials there's no owning extension and we
+                    // fall back to the credential name (the existing
+                    // pre-fix behaviour for those callers).
+                    let extension_for_display = state
+                        .effect_adapter
+                        .tools()
+                        .provider_extension_for_tool(&action_name)
+                        .await
+                        .unwrap_or_else(|| credential_name.clone());
+
                     let _ = agent
                         .channels
                         .send_status(
                             &message.channel,
                             StatusUpdate::AuthRequired {
-                                extension_name: credential_name.clone(),
+                                extension_name: extension_for_display.clone(),
                                 instructions: Some(instructions.clone()),
                                 auth_url: auth_url.clone(),
                                 setup_url: None,
@@ -2731,7 +2836,7 @@ async fn await_thread_outcome(
 
                     Ok(Some(format!(
                         "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
-                        credential_name
+                        extension_for_display
                     )))
                 }
                 ironclaw_engine::ResumeKind::External { callback_id } => {

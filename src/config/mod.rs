@@ -176,7 +176,20 @@ impl Config {
                 enabled: false,
                 ..WasmConfig::default()
             },
-            secrets: SecretsConfig::default(),
+            // Test config gets a deterministic master key so the
+            // secrets store is wired up out of the box. Without this,
+            // every replay-mode test that touches credentials would
+            // have to either build its own SecretsStore or skip the
+            // secrets path entirely. The key is hex-encoded 32 bytes
+            // (64 hex chars) so it satisfies the AES-256-GCM length
+            // check in `SecretsConfig::resolve`.
+            secrets: SecretsConfig {
+                master_key: Some(secrecy::SecretString::from(
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+                )),
+                enabled: true,
+                source: crate::settings::KeySource::Env,
+            },
             builder: BuilderModeConfig {
                 enabled: false,
                 ..BuilderModeConfig::default()

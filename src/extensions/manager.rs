@@ -2454,8 +2454,11 @@ impl ExtensionManager {
             }
         };
 
-        // Read current WIT version from capabilities
-        let cap_path = cap_dir.join(format!("{}.capabilities.json", name));
+        // Read current WIT version from capabilities. Use the
+        // alias-aware helper so an extension installed under the
+        // legacy hyphen form is still recognised as already installed
+        // by the upgrader.
+        let cap_path = Self::existing_extension_file_path(cap_dir, name, ".capabilities.json");
         let declared_wit = if cap_path.exists() {
             match tokio::fs::read(&cap_path).await {
                 Ok(bytes) => {
@@ -2517,8 +2520,10 @@ impl ExtensionManager {
             };
         };
 
-        // Delete old .wasm file (keep secrets intact)
-        let wasm_path = cap_dir.join(format!("{}.wasm", name));
+        // Delete old .wasm file (keep secrets intact). Use the
+        // alias-aware helper so the legacy hyphen filename is also
+        // removed when present.
+        let wasm_path = Self::existing_extension_file_path(cap_dir, name, ".wasm");
         if wasm_path.exists()
             && let Err(e) = tokio::fs::remove_file(&wasm_path).await
         {
@@ -3730,21 +3735,19 @@ impl ExtensionManager {
         name: &str,
         user_id: &str,
     ) -> Result<AuthResult, ExtensionError> {
-        // Read the capabilities file to get auth config
-        let cap_path = self
-            .wasm_tools_dir
-            .join(format!("{}.capabilities.json", name));
-
-        if !cap_path.exists() {
-            return Ok(AuthResult::no_auth_required(name, ExtensionKind::WasmTool));
-        }
-
-        let cap_bytes = tokio::fs::read(&cap_path)
-            .await
-            .map_err(|e| ExtensionError::Other(e.to_string()))?;
-
-        let cap_file = crate::tools::wasm::CapabilitiesFile::from_bytes(&cap_bytes)
-            .map_err(|e| ExtensionError::Other(e.to_string()))?;
+        // Read the capabilities file to get auth config. Goes through
+        // `load_tool_capabilities` so the legacy-hyphen alias is also
+        // tried — without this, a tool whose `.capabilities.json` is
+        // saved under the pre-v0.23 hyphen form (e.g.
+        // `google-drive-tool.capabilities.json`) would silently report
+        // `no_auth_required` even though the file declares OAuth, which
+        // is the bug behind the v2 Drive trace's missing auth gate.
+        let cap_file = match self.load_tool_capabilities(name).await {
+            Some(f) => f,
+            None => {
+                return Ok(AuthResult::no_auth_required(name, ExtensionKind::WasmTool));
+            }
+        };
 
         let auth = match cap_file.auth {
             Some(auth) => auth,
@@ -5285,7 +5288,17 @@ impl ExtensionManager {
             ExtensionError::ActivationFailed("WASM runtime not available".to_string())
         })?;
 
-        let wasm_path = self.wasm_tools_dir.join(format!("{}.wasm", name));
+        // Use the alias-aware helper so a tool installed under the
+        // legacy hyphen filename (`google-drive-tool.wasm`) is found
+        // when looked up via the canonical underscore name
+        // (`google_drive_tool`). Without this, `determine_installed_kind`
+        // happily reports the extension as installed via its own alias
+        // check, but `activate_wasm_tool` then fails with `NotInstalled`
+        // here — and the upstream readiness probe falls back to
+        // "treat as ready", so the agent ends up calling a tool that
+        // can't be activated, hits a 401/403, and confuses itself.
+        // Pinned by `test_activate_wasm_tool_finds_legacy_hyphen_alias`.
+        let wasm_path = Self::existing_extension_file_path(&self.wasm_tools_dir, name, ".wasm");
         if !wasm_path.exists() {
             return Err(ExtensionError::NotInstalled(format!(
                 "WASM tool '{}' not found at {}",
@@ -5294,9 +5307,8 @@ impl ExtensionManager {
             )));
         }
 
-        let cap_path = self
-            .wasm_tools_dir
-            .join(format!("{}.capabilities.json", name));
+        let cap_path =
+            Self::existing_extension_file_path(&self.wasm_tools_dir, name, ".capabilities.json");
         let cap_path_option = if cap_path.exists() {
             Some(cap_path.as_path())
         } else {
@@ -5684,14 +5696,11 @@ impl ExtensionManager {
             }
         };
 
-        // Load capabilities file once to extract all secret names
-        let cap_path = self
-            .wasm_channels_dir
-            .join(format!("{}.capabilities.json", name));
-        let capabilities_file = match tokio::fs::read(&cap_path).await {
-            Ok(bytes) => crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes).ok(),
-            Err(_) => None,
-        };
+        // Load capabilities file once to extract all secret names. Use
+        // the alias-aware helper so a channel installed under the
+        // legacy hyphen form (e.g. `my-channel.capabilities.json`) is
+        // still resolvable when its canonical name uses underscores.
+        let capabilities_file = self.load_channel_capabilities(name).await;
 
         // Extract all secret names from the capabilities file
         let webhook_secret_name = capabilities_file
@@ -6378,21 +6387,18 @@ impl ExtensionManager {
         let kind = self.determine_installed_kind(name, user_id).await?;
         match kind {
             ExtensionKind::WasmChannel => {
-                let cap_path = self
-                    .wasm_channels_dir
-                    .join(format!("{}.capabilities.json", name));
-                if !cap_path.exists() {
-                    return Ok(ExtensionSetupSchema {
-                        secrets: Vec::new(),
-                        fields: Vec::new(),
-                    });
-                }
-                let cap_bytes = tokio::fs::read(&cap_path)
-                    .await
-                    .map_err(|e| ExtensionError::Other(e.to_string()))?;
-                let cap_file =
-                    crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
-                        .map_err(|e| ExtensionError::Other(e.to_string()))?;
+                // Use the alias-aware helper so a channel installed
+                // under the legacy hyphen form (e.g.
+                // `my-channel.capabilities.json`) is still resolvable.
+                let cap_file = match self.load_channel_capabilities(name).await {
+                    Some(f) => f,
+                    None => {
+                        return Ok(ExtensionSetupSchema {
+                            secrets: Vec::new(),
+                            fields: Vec::new(),
+                        });
+                    }
+                };
 
                 let mut secrets = Vec::new();
                 for secret in &cap_file.setup.required_secrets {
@@ -6848,21 +6854,11 @@ impl ExtensionManager {
             Vec<crate::tools::wasm::ToolFieldSetupSchema>,
         ) = match kind {
             ExtensionKind::WasmChannel => {
-                let cap_path = self
-                    .wasm_channels_dir
-                    .join(format!("{}.capabilities.json", name));
-                if !cap_path.exists() {
-                    return Err(ExtensionError::Other(format!(
-                        "Capabilities file not found for '{}'",
-                        name
-                    )));
-                }
-                let cap_bytes = tokio::fs::read(&cap_path)
-                    .await
-                    .map_err(|e| ExtensionError::Other(e.to_string()))?;
-                let cap_file =
-                    crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
-                        .map_err(|e| ExtensionError::Other(e.to_string()))?;
+                // Use the alias-aware helper so a channel installed
+                // under the legacy hyphen form is still resolvable.
+                let cap_file = self.load_channel_capabilities(&name).await.ok_or_else(|| {
+                    ExtensionError::Other(format!("Capabilities file not found for '{}'", name))
+                })?;
                 let names = cap_file
                     .setup
                     .required_secrets
@@ -7132,12 +7128,31 @@ impl ExtensionManager {
         if kind == ExtensionKind::WasmTool {
             match self.activate_wasm_tool(&name, user_id).await {
                 Ok(result) => {
-                    // Delete existing OAuth token so auth() starts a fresh flow.
-                    // Done AFTER activation succeeds to avoid losing tokens on failure.
-                    // This covers Reconfigure: user wants to re-auth (switch account, update creds).
+                    // OAuth reconfigure: if the caller is starting a fresh
+                    // OAuth flow (e.g. the user clicked "Reconfigure" to
+                    // switch accounts), wipe the existing access/scopes/refresh
+                    // records so the `auth()` call below kicks off a new
+                    // OAuth handshake instead of reporting `Authenticated`.
+                    //
+                    // We MUST NOT do this when the caller is providing a new
+                    // credential via the `secrets` map (the manual-paste /
+                    // `submit_auth_token` path), because deleting the
+                    // credential we *just wrote* leaves the user authenticated
+                    // against nothing — the resume runs, the wrapper sees no
+                    // token, the gate re-fires, the user is asked for the
+                    // same token they just typed in, the cycle repeats.
+                    //
+                    // The signal is whether the auth secret_name appears in
+                    // the submitted `secrets` map. If yes, the caller knows
+                    // what they're doing and we leave it alone. If no, the
+                    // caller wants a fresh OAuth flow.
+                    //
+                    // Done AFTER activation succeeds so a failed activation
+                    // doesn't lose the user's previous tokens.
                     if let Some(cap) = self.load_tool_capabilities(&name).await
                         && let Some(ref auth_cfg) = cap.auth
                         && auth_cfg.oauth.is_some()
+                        && !secrets.contains_key(&auth_cfg.secret_name)
                     {
                         let _ = self.secrets.delete(user_id, &auth_cfg.secret_name).await;
                         let _ = self
@@ -7307,15 +7322,11 @@ impl ExtensionManager {
         let kind = self.determine_installed_kind(name, user_id).await?;
         let secret_name = match kind {
             ExtensionKind::WasmChannel => {
-                let cap_path = self
-                    .wasm_channels_dir
-                    .join(format!("{}.capabilities.json", name));
-                let cap_bytes = tokio::fs::read(&cap_path)
-                    .await
-                    .map_err(|e| ExtensionError::Other(e.to_string()))?;
-                let cap_file =
-                    crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
-                        .map_err(|e| ExtensionError::Other(e.to_string()))?;
+                // Use the alias-aware helper so a channel installed
+                // under the legacy hyphen form is still resolvable.
+                let cap_file = self.load_channel_capabilities(name).await.ok_or_else(|| {
+                    ExtensionError::Other(format!("Capabilities not found for '{}'", name))
+                })?;
                 // Pick the first *missing* non-optional secret so re-configure
                 // of a second secret works for multi-secret channels.
                 let mut target = None;
@@ -8946,6 +8957,155 @@ mod tests {
                 || msg.contains("Not installed"),
             "Should fail on missing file, got: {msg}"
         );
+    }
+
+    /// Regression: a tool installed under the legacy hyphenated form
+    /// (e.g. `google-drive-tool.wasm`) must be findable by
+    /// `activate_wasm_tool` when looked up via the canonical underscore
+    /// form (`google_drive_tool`). Before consolidating the file lookup
+    /// helpers, `determine_installed_kind` correctly resolved the alias
+    /// (so the extension reported as "installed") but `activate_wasm_tool`
+    /// hard-coded `dir.join("{name}.wasm")` and missed it. The disagreement
+    /// surfaced as an `Extension not installed: WASM tool 'google_drive_tool'
+    /// not found at <path>` error in the readiness probe, which the upstream
+    /// wrapper then swallowed as `ToolReadiness::Ready`, sending the agent
+    /// off to call a tool that couldn't activate.
+    ///
+    /// This test asserts that activation gets *past* the file-existence
+    /// check for a hyphen-named file. It will still fail later (the bytes
+    /// aren't a real WASM module), but the failure must be a load error,
+    /// NOT an `Extension not installed` error from line 5294.
+    #[tokio::test]
+    async fn test_activate_wasm_tool_finds_legacy_hyphen_alias() {
+        // Two tools, one each with a legacy hyphen and a canonical-underscore
+        // file name on disk. We then try to activate them by their canonical
+        // names — both should resolve to a real path on disk.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).expect("tools dir");
+        // Hyphenated file → canonical lookup name has underscores.
+        std::fs::write(tools_dir.join("google-drive-tool.wasm"), b"not-a-real-wasm")
+            .expect("hyphen file");
+        // Canonical file → no alias needed.
+        std::fs::write(tools_dir.join("gmail.wasm"), b"not-a-real-wasm").expect("canonical file");
+
+        let config = crate::tools::wasm::WasmRuntimeConfig::for_testing();
+        let runtime = Arc::new(crate::tools::wasm::WasmToolRuntime::new(config).expect("runtime"));
+        let mgr = make_test_manager(Some(runtime), tools_dir);
+
+        // Hyphen → canonical lookup. Must NOT return NotInstalled / not found.
+        let err = mgr
+            .activate("google_drive_tool", "test")
+            .await
+            .expect_err("byte stream is not real WASM");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("not found")
+                && !msg.contains("not installed")
+                && !msg.contains("Not installed"),
+            "activate_wasm_tool must find google-drive-tool.wasm via legacy alias \
+             when looked up as `google_drive_tool`; got: {msg}"
+        );
+
+        // Canonical name with no alias still works.
+        let err = mgr
+            .activate("gmail", "test")
+            .await
+            .expect_err("byte stream is not real WASM");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("not found") && !msg.contains("not installed"),
+            "canonical name lookup must still work; got: {msg}"
+        );
+    }
+
+    /// Mirror of the above for `activate_wasm_channel` — the same bug
+    /// existed in the channel activation path.
+    #[tokio::test]
+    async fn test_activate_wasm_channel_finds_legacy_hyphen_alias() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).expect("channels dir");
+        std::fs::write(channels_dir.join("my-channel.wasm"), b"not-a-real-wasm")
+            .expect("hyphen file");
+        // Capabilities file under the same hyphen alias.
+        std::fs::write(channels_dir.join("my-channel.capabilities.json"), b"{}")
+            .expect("hyphen caps");
+
+        let mgr = make_test_manager_with_dirs(
+            None, // no WASM tool runtime needed for the channel path
+            dir.path().join("tools"),
+            channels_dir,
+            None,
+        );
+
+        let err = mgr
+            .activate("my_channel", "test")
+            .await
+            .expect_err("activation will fail later");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("not found") && !msg.contains("not installed"),
+            "activate_wasm_channel must find my-channel.wasm via legacy alias \
+             when looked up as `my_channel`; got: {msg}"
+        );
+    }
+
+    /// Regression test for the v2 Drive trace: `auth_wasm_tool` used to
+    /// open `wasm_tools_dir.join("{canonical}.capabilities.json")`
+    /// directly without trying the legacy hyphen alias. A tool installed
+    /// as `google-drive-tool.capabilities.json` (the pre-v0.23 layout)
+    /// would silently report `no_auth_required` even though the file on
+    /// disk declared OAuth, which broke both the pre-flight readiness
+    /// gate and the post-flight auth detector. Now the function delegates
+    /// to `load_tool_capabilities`, which goes through
+    /// `existing_extension_file_path` like every other lookup.
+    #[tokio::test]
+    async fn test_auth_wasm_tool_finds_legacy_hyphen_alias() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).expect("tools dir");
+
+        // Write the wasm + capabilities under the LEGACY hyphen names.
+        // The capabilities file declares an OAuth secret so a missed
+        // alias would mistakenly report `NoAuthRequired` instead of
+        // `AwaitingAuthorization`.
+        std::fs::write(tools_dir.join("google-drive-tool.wasm"), b"not-a-real-wasm")
+            .expect("hyphen wasm file");
+        let caps_json = r#"{
+            "name": "google-drive-tool",
+            "version": "0.1.0",
+            "description": "test",
+            "auth": {
+                "secret_name": "google_oauth_token",
+                "display_name": "Google",
+                "instructions": "Please provide your Google API token."
+            }
+        }"#;
+        std::fs::write(
+            tools_dir.join("google-drive-tool.capabilities.json"),
+            caps_json,
+        )
+        .expect("hyphen caps file");
+
+        let mgr = make_test_manager(None, tools_dir);
+
+        // Look up by the canonical underscore name. Before the fix this
+        // returned `NoAuthRequired` because `auth_wasm_tool` joined
+        // `google_drive_tool.capabilities.json` directly and that file
+        // doesn't exist on disk.
+        let result = mgr
+            .auth("google_drive_tool", "test")
+            .await
+            .expect("auth lookup must succeed");
+        match result.status {
+            crate::extensions::AuthStatus::AwaitingToken { .. } => {}
+            other => panic!(
+                "expected AwaitingToken (legacy-hyphen capabilities file should be found \
+                 and parsed); got {:?}",
+                other
+            ),
+        }
     }
 
     #[tokio::test]
@@ -11085,6 +11245,243 @@ mod tests {
                 .await
                 .unwrap_or(false),
             "configure_token should have stored SECRET_B (the first missing secret)"
+        );
+    }
+
+    /// Regression for the silent OAuth-token-deletion bug in `configure()`:
+    /// when the user pasted a token via the auth gate, `configure()` wrote
+    /// it to the secrets store, then immediately deleted it (along with
+    /// the `_scopes` and `_refresh_token` siblings) on the post-activation
+    /// "Reconfigure" cleanup path. The user's token was wiped within
+    /// milliseconds of being stored, the resume hit `auth_wasm_tool` with
+    /// `token_exists=false`, and the auth gate re-fired in a loop —
+    /// every manual paste of an OAuth token landed in this trap.
+    ///
+    /// The fix gates the deletion on whether the caller is *also* providing
+    /// a fresh OAuth secret in the same `configure()` call. If yes (the
+    /// `submit_auth_token` path), keep the credential we just wrote. If no
+    /// (the explicit Reconfigure flow that wants a brand-new OAuth dance),
+    /// the deletion still runs.
+    ///
+    /// We exercise the production `configure()` flow on an OAuth-backed
+    /// tool. activate_wasm_tool short-circuits to `Ok` when the tool is
+    /// already in the registry, so the test pre-registers a stub tool to
+    /// reach the post-activation deletion code without a real WASM
+    /// runtime.
+    #[tokio::test]
+    async fn test_configure_preserves_oauth_token_when_caller_provides_it() {
+        use crate::tools::{Tool, ToolError, ToolOutput};
+        use async_trait::async_trait;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).expect("tools dir");
+
+        // Capabilities file with an OAuth section so the deletion path
+        // is reachable. The actual `oauth.token_url` etc. don't matter
+        // — we never call them; we just need `auth.oauth.is_some()`.
+        std::fs::write(tools_dir.join("oauth-tool.wasm"), b"not-a-real-wasm")
+            .expect("wasm placeholder");
+        let caps = serde_json::json!({
+            "name": "oauth-tool",
+            "version": "0.1.0",
+            "description": "test",
+            "auth": {
+                "secret_name": "oauth_tool_token",
+                "display_name": "Test OAuth",
+                "oauth": {
+                    "authorization_url": "https://example.com/authz",
+                    "token_url": "https://example.com/token",
+                    "scopes": ["read"]
+                }
+            }
+        });
+        std::fs::write(
+            tools_dir.join("oauth-tool.capabilities.json"),
+            serde_json::to_string(&caps).expect("ser caps"),
+        )
+        .expect("caps file");
+
+        let mgr = make_test_manager(None, tools_dir);
+
+        // Stub Tool that just exists in the registry under the
+        // canonicalised name. activate_wasm_tool sees `tool_registry.has`
+        // returns true and returns Ok without touching the runtime.
+        struct StubTool;
+        #[async_trait]
+        impl Tool for StubTool {
+            fn name(&self) -> &str {
+                "oauth_tool"
+            }
+            fn description(&self) -> &str {
+                "stub"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Err(ToolError::ExecutionFailed("stub".into()))
+            }
+        }
+        // Register the stub under the canonical (snake) name so
+        // `is_extension_active("oauth_tool", WasmTool)` returns true.
+        mgr.tool_registry.register(Arc::new(StubTool)).await;
+
+        // Caller provides the OAuth token in the same configure() call.
+        // Without the fix, configure() writes it then immediately deletes it.
+        let mut secrets = std::collections::HashMap::new();
+        secrets.insert(
+            "oauth_tool_token".to_string(),
+            "fresh-token-value".to_string(),
+        );
+        let fields = std::collections::HashMap::new();
+
+        // Run configure(). It will write the token, hit the
+        // already-active short-circuit in activate_wasm_tool, then
+        // reach the deletion guard. With the fix, the guard skips
+        // because `secrets.contains_key("oauth_tool_token")` is true.
+        let result = mgr.configure("oauth-tool", &secrets, &fields, "test").await;
+        assert!(
+            result.is_ok(),
+            "configure() should succeed: {:?}",
+            result.err()
+        );
+
+        // The CRITICAL assertion: the OAuth token must still be in the
+        // store. Pre-fix, this returns false because `configure()`
+        // deleted it. Post-fix, this returns true because the deletion
+        // is gated on the caller NOT providing the secret themselves.
+        let token_present = mgr
+            .secrets
+            .exists("test", "oauth_tool_token")
+            .await
+            .unwrap_or(false);
+        assert!(
+            token_present,
+            "configure() must preserve the OAuth token when the caller \
+             provides it via the secrets map. The post-activation Reconfigure \
+             cleanup must only run when the caller is starting a fresh OAuth \
+             flow (no token in the secrets map)."
+        );
+    }
+
+    /// Mirror of the above for the explicit Reconfigure flow: when the
+    /// caller does NOT provide a token, `configure()` SHOULD delete the
+    /// existing OAuth records so that `auth()` kicks off a fresh OAuth
+    /// dance. This is the original-intended behaviour the fix preserves.
+    #[tokio::test]
+    async fn test_configure_clears_oauth_token_for_reconfigure_flow() {
+        use crate::tools::{Tool, ToolError, ToolOutput};
+        use async_trait::async_trait;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).expect("tools dir");
+
+        std::fs::write(tools_dir.join("oauth-reconfig.wasm"), b"not-a-real-wasm")
+            .expect("wasm placeholder");
+        let caps = serde_json::json!({
+            "name": "oauth-reconfig",
+            "version": "0.1.0",
+            "description": "test",
+            "auth": {
+                "secret_name": "oauth_reconfig_token",
+                "display_name": "Test OAuth",
+                "oauth": {
+                    "authorization_url": "https://example.com/authz",
+                    "token_url": "https://example.com/token",
+                    "scopes": ["read"]
+                }
+            }
+        });
+        std::fs::write(
+            tools_dir.join("oauth-reconfig.capabilities.json"),
+            serde_json::to_string(&caps).expect("ser caps"),
+        )
+        .expect("caps file");
+
+        let mgr = make_test_manager(None, tools_dir);
+
+        struct StubTool;
+        #[async_trait]
+        impl Tool for StubTool {
+            fn name(&self) -> &str {
+                "oauth_reconfig"
+            }
+            fn description(&self) -> &str {
+                "stub"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Err(ToolError::ExecutionFailed("stub".into()))
+            }
+        }
+        mgr.tool_registry.register(Arc::new(StubTool)).await;
+
+        // Pre-store an OAuth token (and a refresh sibling) to simulate
+        // a user who already authenticated previously.
+        mgr.secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new("oauth_reconfig_token", "old-token"),
+            )
+            .await
+            .expect("seed token");
+        mgr.secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new(
+                    "oauth_reconfig_token_refresh_token",
+                    "old-refresh",
+                ),
+            )
+            .await
+            .expect("seed refresh");
+
+        // Caller invokes configure with EMPTY secrets — this is the
+        // explicit Reconfigure path. The post-activation cleanup
+        // should run and wipe the existing OAuth records.
+        let secrets = std::collections::HashMap::new();
+        let fields = std::collections::HashMap::new();
+        let result = mgr
+            .configure("oauth-reconfig", &secrets, &fields, "test")
+            .await;
+        assert!(
+            result.is_ok(),
+            "configure() should succeed: {:?}",
+            result.err()
+        );
+
+        // Both records should now be gone — the Reconfigure cleanup ran.
+        let token_present = mgr
+            .secrets
+            .exists("test", "oauth_reconfig_token")
+            .await
+            .unwrap_or(false);
+        let refresh_present = mgr
+            .secrets
+            .exists("test", "oauth_reconfig_token_refresh_token")
+            .await
+            .unwrap_or(false);
+        assert!(
+            !token_present,
+            "Reconfigure flow (empty secrets map) must wipe the existing OAuth \
+             access token so `auth()` triggers a fresh handshake."
+        );
+        assert!(
+            !refresh_present,
+            "Reconfigure flow must also wipe the refresh token sibling for \
+             symmetric cleanup."
         );
     }
 
