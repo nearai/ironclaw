@@ -407,6 +407,7 @@ mod tests {
     fn base_channels() -> crate::config::ChannelsConfig {
         crate::config::ChannelsConfig {
             cli: crate::config::CliConfig { enabled: false },
+            cli_mode: None,
             http: None,
             gateway: None,
             signal: None,

@@ -14,6 +14,8 @@ use secrecy::SecretString;
 #[derive(Debug, Clone)]
 pub struct ChannelsConfig {
     pub cli: CliConfig,
+    /// CLI mode: "tui" for rich terminal UI, empty for simple REPL.
+    pub cli_mode: Option<String>,
     pub http: Option<HttpConfig>,
     pub gateway: Option<GatewayConfig>,
     pub signal: Option<SignalConfig>,
@@ -349,10 +351,13 @@ impl ChannelsConfig {
 
         let cli_enabled = db_first_bool(cs.cli_enabled, defaults.cli_enabled, "CLI_ENABLED")?;
 
+        let cli_mode = db_first_optional_string(&cs.cli_mode, "CLI_MODE")?;
+
         Ok(Self {
             cli: CliConfig {
                 enabled: cli_enabled,
             },
+            cli_mode,
             http,
             gateway,
             signal,
@@ -517,6 +522,7 @@ mod tests {
     fn channels_config_fields() {
         let cfg = ChannelsConfig {
             cli: CliConfig { enabled: true },
+            cli_mode: None,
             http: None,
             gateway: None,
             signal: None,
@@ -541,6 +547,7 @@ mod tests {
 
         let cfg = ChannelsConfig {
             cli: CliConfig { enabled: false },
+            cli_mode: None,
             http: None,
             gateway: None,
             signal: None,
