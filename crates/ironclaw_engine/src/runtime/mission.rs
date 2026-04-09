@@ -241,6 +241,12 @@ impl MissionManager {
             // mission with an unschedulable cron (Ok(None) — e.g. a year-locked
             // expression in the past) or an invalid expression (Err) is at
             // least observable in the logs instead of silently staying stuck.
+            //
+            // Lenient `next_cron_fire` (not `_required`): startup backfill must
+            // never block — a single corrupt persisted expression cannot fail
+            // bootstrap, since the rest of the active missions still need to
+            // register. See `next_cron_fire_required` for the strict variant
+            // used at lifecycle entry points.
             if let MissionCadence::Cron {
                 ref expression,
                 ref timezone,
@@ -386,6 +392,14 @@ impl MissionManager {
             // value can't trigger an unrelated cron path. Reject cron schedules
             // that are valid but have no future fire time so we don't persist
             // an Active mission that can never run.
+            //
+            // Strict `next_cron_fire_required`: an `Err` here returns from
+            // `update_mission` BEFORE the `save_mission` call below, leaving
+            // the persisted record on its previous (valid) cadence. The
+            // `mission` local is dropped without ever being persisted —
+            // `save_mission` is the only persistence boundary in this
+            // function, so failing before it leaves the store untouched.
+            // Verified by `update_mission_rejects_switch_to_unschedulable_cron`.
             mission.next_fire_at = match &mission.cadence {
                 MissionCadence::Cron {
                     expression,
@@ -685,12 +699,25 @@ impl MissionManager {
             )
             .await?;
 
+        // Capture the fire instant once and use it for both the persisted
+        // `last_fire_at` and the in-memory `last_fire_attempt` map. The two
+        // writes MUST share the same value: tick's stale-state detection
+        // compares them as equal-or-not to decide whether the cooldown
+        // applies, and using two separate `Utc::now()` calls would produce
+        // microsecond drift that breaks the equality check on the success
+        // path.
+        let fire_instant = chrono::Utc::now();
+
         // Install the outcome watcher *before* persisting the mission update.
         // The watcher only depends on `thread_id` (it joins via ThreadManager
         // and reloads the mission record itself), so installing it first
         // ensures a transient `save_mission` failure below cannot orphan the
-        // running thread by skipping the watcher install.
-        self.spawn_mission_outcome_watcher(id, thread_id);
+        // running thread by skipping the watcher install. Pass `fire_instant`
+        // through so the outcome processor can reconcile `last_fire_at`
+        // back to the original moment if the save below fails — without
+        // this the reconciled value would be the *outcome* time, which can
+        // be many seconds-to-hours later for long-running mission threads.
+        self.spawn_mission_outcome_watcher(id, thread_id, fire_instant);
 
         // Record the thread + trigger payload in mission history
         let mut updated = mission;
@@ -698,7 +725,7 @@ impl MissionManager {
         updated.record_thread(thread_id);
         updated.threads_today += 1;
         updated.last_trigger_payload = trigger_payload;
-        updated.last_fire_at = Some(chrono::Utc::now());
+        updated.last_fire_at = Some(fire_instant);
         // Advance next_fire_at for cron missions so the ticker schedules the
         // next cycle. Computed from `now()`, not from the previous fire time:
         // if a tick was delayed (process down, busy loop) and several windows
@@ -706,11 +733,12 @@ impl MissionManager {
         // backfilling each missed slot. This is the catch-up semantics we want
         // for long-running missions.
         //
-        // A parse error here is unlikely (the expression validated at create
-        // time) but possible if persisted data is corrupt. We log and preserve
-        // the existing `next_fire_at` rather than aborting fire — the thread
-        // is already running and the watcher is already installed, and at
-        // worst the schedule is delayed by one cycle until the next tick.
+        // Lenient `next_cron_fire` (not `_required`): a parse error here is
+        // unlikely (the expression validated at create time) but possible if
+        // persisted data is corrupt. We log and preserve the existing
+        // `next_fire_at` rather than aborting fire — the thread is already
+        // running and the watcher is already installed, and at worst the
+        // schedule is delayed by one cycle until the next tick.
         if let MissionCadence::Cron {
             ref expression,
             ref timezone,
@@ -732,8 +760,8 @@ impl MissionManager {
         // cadences — leave next_fire_at un-advanced, causing the next tick to
         // re-fire the same mission in a runaway loop. Log and continue. The
         // caller still gets Ok(Some(thread_id)) so the spawned thread is visible.
-        // The in-memory `last_fire_attempt` cooldown below prevents a runaway
-        // re-fire loop until the store recovers and `next_fire_at` advances.
+        // The in-memory `last_fire_attempt` cooldown below catches runaway re-fires
+        // by comparing in-memory vs persisted `last_fire_at` (see tick).
         if let Err(e) = self.store.save_mission(&updated).await {
             debug!(
                 mission_id = %id,
@@ -743,14 +771,17 @@ impl MissionManager {
             );
         }
 
-        // Record the fire attempt unconditionally — both successful saves and
-        // failed ones must arm the cooldown so a save failure doesn't re-fire
-        // on every subsequent tick. Held briefly under the write lock; the
-        // map is keyed by mission ID and only mutated here and in tick().
+        // Record the fire instant unconditionally. On the success path the
+        // persisted `last_fire_at` matches this value and tick treats the
+        // cooldown as transparent. On the failure path the persisted record
+        // still holds the OLD `last_fire_at` (or None), so tick sees a
+        // mismatch and arms the cooldown until the outcome processor
+        // reconciles. Held briefly under the write lock; the map is keyed
+        // by mission ID and only mutated here and in tick().
         self.last_fire_attempt
             .write()
             .await
-            .insert(id, chrono::Utc::now());
+            .insert(id, fire_instant);
 
         // Now that the spawn + persist have succeeded, consume a slot in
         // the per-user rate window. Doing this here (rather than at the
@@ -791,7 +822,11 @@ impl MissionManager {
                 self.thread_manager
                     .resume_thread(thread_id, user_id.to_string(), None, None, None)
                     .await?;
-                self.spawn_mission_outcome_watcher(mission_id, thread_id);
+                // Resumed threads are already in `thread_history` from the
+                // original fire, so the outcome processor will see
+                // `needs_reconcile = false` and never read this value. Pass
+                // `now` as a safe placeholder; nothing depends on it.
+                self.spawn_mission_outcome_watcher(mission_id, thread_id, chrono::Utc::now());
                 resumed.push(thread_id);
             }
         }
@@ -1553,24 +1588,6 @@ impl MissionManager {
         }
 
         for mid in active_ids {
-            // In-memory cooldown: if `fire_mission` ran for this mission very
-            // recently, suppress this tick's fire even if the persisted
-            // `next_fire_at` still points at the past. This guards against a
-            // runaway loop when `save_mission` failed to advance the schedule
-            // after a successful spawn — without it, every tick would re-fire
-            // until the store recovers, spawning duplicate threads up to the
-            // daily budget.
-            let on_cooldown = self
-                .last_fire_attempt
-                .read()
-                .await
-                .get(&mid)
-                .is_some_and(|last| now.signed_duration_since(*last) < cooldown);
-            if on_cooldown {
-                debug!(mission_id = %mid, "tick: mission within fire cooldown; skipping");
-                continue;
-            }
-
             // Per-mission error isolation: a transient store/load error or a
             // single fire failure must not abort the entire tick — the other
             // active missions still need their chance to fire on this cycle.
@@ -1595,6 +1612,37 @@ impl MissionManager {
             };
 
             if !should_fire {
+                continue;
+            }
+
+            // In-memory cooldown — only armed when we can prove
+            // `fire_mission`'s post-spawn `save_mission` failed. The
+            // detection: `fire_mission` writes the **same** instant to
+            // both `last_fire_attempt[mid]` (always) and the persisted
+            // `Mission.last_fire_at` (only if save_mission succeeded). On
+            // a successful save the two values match; on a failed save
+            // the persisted value still holds the OLD `last_fire_at`
+            // (or `None`). The mismatch is the failure signal — and it
+            // is *only* armed in that failure window, so a normally-firing
+            // every-minute cron passes through the check transparently
+            // regardless of how short the schedule is. Once the outcome
+            // processor reconciles `last_fire_at` back to the in-memory
+            // instant the mismatch resolves itself even before the 90 s
+            // window elapses.
+            let on_cooldown =
+                self.last_fire_attempt
+                    .read()
+                    .await
+                    .get(&mid)
+                    .is_some_and(|in_mem_last| {
+                        now.signed_duration_since(*in_mem_last) < cooldown
+                            && mission.last_fire_at != Some(*in_mem_last)
+                    });
+            if on_cooldown {
+                debug!(
+                    mission_id = %mid,
+                    "tick: detected stale persisted last_fire_at after fire; suppressing re-fire until reconcile"
+                );
                 continue;
             }
 
@@ -1763,7 +1811,12 @@ impl MissionManager {
         }
     }
 
-    fn spawn_mission_outcome_watcher(&self, mission_id: MissionId, thread_id: ThreadId) {
+    fn spawn_mission_outcome_watcher(
+        &self,
+        mission_id: MissionId,
+        thread_id: ThreadId,
+        original_fire_at: chrono::DateTime<chrono::Utc>,
+    ) {
         let tm = Arc::clone(&self.thread_manager);
         let store = Arc::clone(&self.store);
         let notification_tx = self.notification_tx.clone();
@@ -1776,6 +1829,7 @@ impl MissionManager {
                         thread_id,
                         &outcome,
                         &notification_tx,
+                        Some(original_fire_at),
                     )
                     .await
                     {
@@ -1933,8 +1987,15 @@ async fn process_mission_outcome(
     outcome: &ThreadOutcome,
 ) -> Result<(), EngineError> {
     let (notification_tx, _) = tokio::sync::broadcast::channel(1);
-    process_mission_outcome_and_notify(store, mission_id, thread_id, outcome, &notification_tx)
-        .await
+    process_mission_outcome_and_notify(
+        store,
+        mission_id,
+        thread_id,
+        outcome,
+        &notification_tx,
+        None,
+    )
+    .await
 }
 
 async fn process_mission_outcome_and_notify(
@@ -1943,6 +2004,7 @@ async fn process_mission_outcome_and_notify(
     thread_id: ThreadId,
     outcome: &ThreadOutcome,
     notification_tx: &tokio::sync::broadcast::Sender<MissionNotification>,
+    original_fire_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<(), EngineError> {
     let mut mission = match store.load_mission(mission_id).await? {
         Some(m) => m,
@@ -1970,14 +2032,18 @@ async fn process_mission_outcome_and_notify(
             thread_id = %thread_id,
             "outcome processor: reconciling fire-accounting fields missing from persisted mission (fire_mission save likely failed)"
         );
-        mission.thread_history.push(thread_id);
+        // `record_thread` also bumps `updated_at`; matches the fire_mission
+        // path so the two routes don't diverge on field-mutation patterns.
+        mission.record_thread(thread_id);
         mission.threads_today = mission.threads_today.saturating_add(1);
-        // `last_fire_at` is stamped at fire time on the in-memory copy in
-        // `fire_mission`; if it never landed in the store, treat the
-        // outcome time as a conservative approximation. We don't have the
-        // exact original instant any more, but "later than the previous
-        // recorded fire" is sufficient for cooldown enforcement.
-        mission.last_fire_at = Some(chrono::Utc::now());
+        // Reconcile `last_fire_at` back to the **original** fire instant
+        // when we know it (passed through from fire_mission via the
+        // outcome watcher). Otherwise fall back to `now` as a conservative
+        // approximation. Using the original instant matters for users with
+        // a configured `cooldown_secs`: if the thread ran for N seconds,
+        // a `now`-based reconcile would extend the user's cooldown window
+        // by N, gradually drifting the schedule.
+        mission.last_fire_at = Some(original_fire_at.unwrap_or_else(chrono::Utc::now));
         // For cron missions, advance `next_fire_at` so the ticker doesn't
         // immediately re-fire against the stale schedule. Use the lenient
         // `next_cron_fire` (not `_required`) — a corrupt expression here
@@ -4922,6 +4988,7 @@ mod tests {
                 error: "container exited 137".into(),
             },
             mgr.notification_tx_for_test(),
+            None,
         )
         .await
         .unwrap();
@@ -4947,6 +5014,7 @@ mod tests {
             synthetic_thread_id,
             &ThreadOutcome::MaxIterations,
             mgr.notification_tx_for_test(),
+            None,
         )
         .await
         .unwrap();
@@ -5000,6 +5068,11 @@ mod tests {
         // mission has never seen — exactly the state a failed `save_mission`
         // would leave us in.
         let orphan_thread_id = crate::types::thread::ThreadId::new();
+        // Pass an explicit `original_fire_at` so the test exercises the
+        // production-equivalent path where fire_mission's instant flows
+        // through the watcher into reconcile (instead of falling back to
+        // `now`).
+        let original_fire_at = chrono::Utc::now() - chrono::Duration::seconds(30);
         process_mission_outcome_and_notify(
             &(Arc::clone(&store) as Arc<dyn Store>),
             id,
@@ -5008,6 +5081,7 @@ mod tests {
                 response: Some("done".into()),
             },
             mgr.notification_tx_for_test(),
+            Some(original_fire_at),
         )
         .await
         .unwrap();
@@ -5021,9 +5095,10 @@ mod tests {
             reloaded.threads_today, 1,
             "threads_today must catch up after reconcile"
         );
-        assert!(
-            reloaded.last_fire_at.is_some(),
-            "last_fire_at must be stamped after reconcile"
+        assert_eq!(
+            reloaded.last_fire_at,
+            Some(original_fire_at),
+            "last_fire_at must be reconciled to the original fire instant, not `now`"
         );
         assert!(
             reloaded
@@ -5043,6 +5118,7 @@ mod tests {
                 response: Some("done".into()),
             },
             mgr.notification_tx_for_test(),
+            Some(original_fire_at),
         )
         .await
         .unwrap();
@@ -6338,10 +6414,13 @@ mod tests {
     #[tokio::test]
     async fn tick_cooldown_suppresses_re_fire_on_save_failure() {
         // Regression for the runaway-re-fire concern: when save_mission fails
-        // after a successful spawn, the persisted next_fire_at stays in the
-        // past. Without the in-memory cooldown, every subsequent tick would
-        // re-fire the same mission and spawn duplicate threads up to the
-        // daily budget. The cooldown must suppress that re-fire.
+        // after a successful spawn, the persisted `next_fire_at` AND
+        // `last_fire_at` stay at their pre-fire values, but the in-memory
+        // `last_fire_attempt[mid]` is set to the new fire instant. The
+        // mismatch between in-memory and persisted `last_fire_at` is what
+        // tells tick to arm the cooldown — without that signal every
+        // subsequent tick would re-fire the same mission and spawn
+        // duplicate threads up to the daily budget.
         let store = Arc::new(TestStore::new());
         let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
         let project_id = ProjectId::new();
@@ -6361,26 +6440,92 @@ mod tests {
             .await
             .unwrap();
 
-        // First fire arms the cooldown.
+        // First fire arms the in-memory `last_fire_attempt` map.
         let first = mgr.fire_mission(id, "alice", None).await.unwrap();
         assert!(first.is_some(), "first fire should spawn a thread");
 
-        // Simulate the post-save-failure state: rewind next_fire_at into the
-        // past so the cron's `should_fire` check would otherwise fire again,
-        // and reset threads_today so the budget can't be what's blocking.
+        // Simulate the post-save-failure state explicitly: rewind
+        // `next_fire_at` into the past, reset `threads_today` so the budget
+        // can't be what's blocking, AND clobber `last_fire_at` so it no
+        // longer matches the in-memory `last_fire_attempt[mid]` instant.
+        // Together these mimic exactly the state a failed `save_mission`
+        // call would leave: in-memory recorded the fire, the store didn't.
         {
             let mut missions = store.missions.write().await;
             let mission = missions.get_mut(&id).unwrap();
             mission.next_fire_at = Some(chrono::Utc::now() - chrono::Duration::seconds(120));
             mission.threads_today = 0;
+            mission.last_fire_at = None;
         }
 
-        // tick must suppress the second fire because the in-memory cooldown
-        // is still armed from the first fire_mission call.
+        // tick must suppress the second fire — it can prove the persisted
+        // record is stale because in-memory last_fire_attempt holds an
+        // instant the persisted `last_fire_at` doesn't.
         let spawned = mgr.tick("alice").await.unwrap();
         assert!(
             spawned.is_empty(),
-            "tick must skip mission within fire cooldown, got: {spawned:?}"
+            "tick must skip mission whose persisted last_fire_at is stale, got: {spawned:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_does_not_throttle_high_frequency_cron_after_successful_fire() {
+        // Regression for the inverse failure mode: the cooldown must NOT
+        // throttle a normally-firing high-frequency cron. An earlier
+        // implementation armed the cooldown unconditionally on every
+        // successful fire, which silently dropped roughly half of the
+        // events for `* * * * *` (every-minute) crons because the 60 s
+        // tick interval fell inside the 90 s cooldown window. The fix:
+        // only arm the cooldown when the persisted `last_fire_at` does
+        // NOT match the in-memory `last_fire_attempt` value — i.e. only
+        // in the failed-save regime.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "high-freq",
+                "g",
+                MissionCadence::Cron {
+                    expression: "* * * * *".into(),
+                    timezone: None,
+                },
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        // First fire records the in-memory cooldown entry AND persists
+        // `last_fire_at = fire_instant`. The two values are the same
+        // (`fire_mission` uses a single `Utc::now()` for both writes).
+        let first = mgr.fire_mission(id, "alice", None).await.unwrap();
+        assert!(first.is_some(), "first fire should spawn a thread");
+
+        // Mimic "tick runs ~1 minute later, schedule advanced normally":
+        // rewind `next_fire_at` to a moment in the past that is STRICTLY
+        // LATER than the fire instant. Crucially, leave `last_fire_at`
+        // alone — it still equals `last_fire_attempt[mid]`, so the
+        // cooldown's mismatch detector says "save succeeded, do not
+        // throttle." Reset `threads_today` so the daily budget isn't
+        // what's blocking.
+        {
+            let mut missions = store.missions.write().await;
+            let mission = missions.get_mut(&id).unwrap();
+            // 1 ms earlier than now, but still later than the original
+            // fire instant since fire_mission ran microseconds ago.
+            mission.next_fire_at = Some(chrono::Utc::now() - chrono::Duration::milliseconds(1));
+            mission.threads_today = 0;
+        }
+
+        let spawned = mgr.tick("alice").await.unwrap();
+        assert_eq!(
+            spawned.len(),
+            1,
+            "tick must fire a high-frequency cron after a successful fire — \
+             cooldown must not throttle the success path, got spawned={spawned:?}"
         );
     }
 }
