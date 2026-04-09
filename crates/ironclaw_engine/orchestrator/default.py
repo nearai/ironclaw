@@ -185,6 +185,14 @@ def format_docs(docs):
     return "\n".join(parts)
 
 
+# Conservative fallback heuristic matching the old Rust-side estimator.
+# These MUST be defined before `estimate_context_tokens` (and therefore
+# before the `FINAL(result)` entry-point call below). Moving them after the
+# entry point is a latent NameError every time `compact_if_needed` runs.
+CHARS_PER_TOKEN = 4
+MESSAGE_OVERHEAD_CHARS = 4
+
+
 def estimate_context_tokens(messages):
     """Estimate token count for a transcript using a rough chars/token heuristic."""
     total_chars = 0
@@ -842,6 +850,3 @@ def run_loop(context, goal, actions, state, config):
 # Entry point: call run_loop with injected context variables
 result = run_loop(context, goal, actions, state, config)
 FINAL(result)
-# Conservative fallback heuristic matching the old Rust-side estimator.
-CHARS_PER_TOKEN = 4
-MESSAGE_OVERHEAD_CHARS = 4

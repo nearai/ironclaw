@@ -968,10 +968,39 @@ async fn handle_execute_action(
         }
     }
 
-    // 3. Consume a lease use
-    if let Err(e) = leases.consume_use(lease.id).await {
-        debug!(error = %e, "lease consumption failed (non-fatal)");
-    }
+    // 3. Atomically re-find + consume a lease use under a single write
+    // lock. This closes the TOCTOU window between the read-only
+    // `find_lease_for_action` (used above for the policy check) and the
+    // consume — without it, two concurrent calls could both observe a
+    // lease with one remaining use and both proceed to execute. Mirrors
+    // `structured.rs::execute_action_batch_with_results`.
+    let lease = match leases.find_and_consume(thread.id, &name).await {
+        Ok(l) => l,
+        Err(e) => {
+            debug!(error = %e, "atomic lease find_and_consume failed");
+            let error = format!("lease consumption failed for action '{name}': {e}");
+            let output = serde_json::json!({"error": &error});
+            emit_and_record(
+                thread,
+                event_tx,
+                EventKind::ActionFailed {
+                    step_id: exec_ctx.step_id,
+                    action_name: name.clone(),
+                    call_id: call_id.clone(),
+                    error,
+                    params_summary: None,
+                },
+                &call_id,
+                &name,
+                &output,
+            );
+            let result = serde_json::json!({
+                "output": output,
+                "is_error": true,
+            });
+            return ExtFunctionResult::Return(json_to_monty(&result));
+        }
+    };
 
     // 4. Execute
     let ps = summarize_params(&name, &params);
@@ -1291,10 +1320,35 @@ async fn handle_execute_actions_parallel(
             }
         }
 
-        // Consume lease
-        if let Err(e) = leases.consume_use(lease.id).await {
-            debug!(error = %e, "lease consumption failed (non-fatal)");
-        }
+        // Atomically re-find + consume a lease use under a single write
+        // lock, closing the TOCTOU window between the read-only
+        // `find_lease_for_action` above and the consume. Mirrors
+        // `structured.rs::execute_action_batch_with_results`.
+        let lease = match leases.find_and_consume(thread.id, &pc.name).await {
+            Ok(l) => l,
+            Err(e) => {
+                debug!(error = %e, "atomic lease find_and_consume failed");
+                let error = format!("lease consumption failed for action '{}': {e}", pc.name);
+                let output = serde_json::json!({"error": &error});
+                let result_json = serde_json::json!({
+                    "output": &output,
+                    "is_error": true,
+                });
+                let event = EventKind::ActionFailed {
+                    step_id,
+                    action_name: pc.name.clone(),
+                    call_id: pc.call_id.clone(),
+                    error,
+                    params_summary: None,
+                };
+                preflight.push(Some(PfOutcome::Error {
+                    result_json,
+                    event,
+                    output,
+                }));
+                continue;
+            }
+        };
 
         preflight.push(Some(PfOutcome::Runnable { lease }));
     }
