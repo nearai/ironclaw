@@ -87,6 +87,13 @@ impl OAuthRefreshConfig {
 /// Built before each WASM execution by decrypting secrets from the store.
 /// Applied per-request by matching the URL host against `host_patterns`.
 /// WASM tools never see the raw secret values.
+///
+/// **No `derive(Debug)`.** This struct holds decrypted secret material —
+/// header values, query-parameter values, and the raw `secret_value` are
+/// all sensitive. The hand-rolled `Debug` impl below redacts every
+/// secret-bearing field so an accidental `{:?}` in a future log line, a
+/// panic message, or a `dbg!()` cannot leak credentials. Do NOT add
+/// `#[derive(Debug)]` here without revisiting the redaction.
 struct ResolvedHostCredential {
     /// Host patterns this credential applies to (e.g., "www.googleapis.com").
     host_patterns: Vec<String>,
@@ -96,6 +103,23 @@ struct ResolvedHostCredential {
     query_params: HashMap<String, String>,
     /// Raw secret value for redaction in error messages.
     secret_value: String,
+}
+
+impl std::fmt::Debug for ResolvedHostCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Print the structural information that's useful for debugging
+        // (which hosts the credential applies to, which header / query
+        // names get injected) while redacting every value that could
+        // contain decrypted secret material.
+        let header_keys: Vec<&String> = self.headers.keys().collect();
+        let query_keys: Vec<&String> = self.query_params.keys().collect();
+        f.debug_struct("ResolvedHostCredential")
+            .field("host_patterns", &self.host_patterns)
+            .field("header_names", &header_keys)
+            .field("query_param_names", &query_keys)
+            .field("secret_value", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Store data for WASM tool execution.
@@ -3665,5 +3689,53 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("content-length".to_string(), "0".to_string());
         assert!(!super::needs_content_length_zero("POST", &headers));
+    }
+
+    #[test]
+    fn resolved_host_credential_debug_redacts_secret_material() {
+        // Defense-in-depth: a future log line / dbg!() / panic message that
+        // accidentally formats a `ResolvedHostCredential` with `{:?}` must
+        // never spill the decrypted secret. The hand-rolled Debug impl
+        // prints structural info (host patterns + header / query NAMES)
+        // and replaces every value with `[REDACTED]`.
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Authorization".to_string(),
+            "Bearer super-secret-token-do-not-leak".to_string(),
+        );
+        let mut query_params = HashMap::new();
+        query_params.insert(
+            "api_key".to_string(),
+            "another-secret-value-also-do-not-leak".to_string(),
+        );
+        let cred = super::ResolvedHostCredential {
+            host_patterns: vec!["www.googleapis.com".to_string()],
+            headers,
+            query_params,
+            secret_value: "raw-secret-bytes".to_string(),
+        };
+
+        let debug_output = format!("{cred:?}");
+
+        // Structural info that's safe to log MUST be present.
+        assert!(debug_output.contains("ResolvedHostCredential"));
+        assert!(debug_output.contains("www.googleapis.com"));
+        assert!(debug_output.contains("Authorization"));
+        assert!(debug_output.contains("api_key"));
+        assert!(debug_output.contains("[REDACTED]"));
+
+        // Every secret-bearing value MUST be absent.
+        assert!(
+            !debug_output.contains("super-secret-token-do-not-leak"),
+            "header value leaked: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains("another-secret-value-also-do-not-leak"),
+            "query param value leaked: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains("raw-secret-bytes"),
+            "secret_value leaked: {debug_output}"
+        );
     }
 }

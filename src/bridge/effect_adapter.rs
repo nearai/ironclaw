@@ -254,6 +254,16 @@ impl EffectBridgeAdapter {
                         // context_paths, notify_user, cooldown, max_concurrent,
                         // dedup_window) via update_mission. Mission_create's
                         // signature doesn't take these directly.
+                        //
+                        // We don't have a `delete_mission` to roll back on
+                        // partial failure, so the next-best contract is to
+                        // surface the failure clearly: status flips to
+                        // `created_with_warnings` and the warning text goes
+                        // into a `warnings` array. The LLM (or downstream
+                        // code) sees the partial-success signal and can
+                        // call `update_mission` directly to retry, instead
+                        // of believing the routine was fully configured.
+                        let mut warnings: Vec<String> = Vec::new();
                         if let Some(updates) = post_create_update.clone()
                             && let Err(e) = mgr.update_mission(id, &context.user_id, updates).await
                         {
@@ -262,12 +272,26 @@ impl EffectBridgeAdapter {
                                 error = %e,
                                 "routine alias: failed to apply post-create updates"
                             );
+                            warnings.push(format!(
+                                "post-create update failed: {e}. The mission was created but \
+                                 the cadence/context_paths/cooldown/notify fields from the \
+                                 routine schema were NOT applied. Call update_mission to retry."
+                            ));
                         }
-                        Ok(serde_json::json!({
-                            "mission_id": id.to_string(),
-                            "name": name,
-                            "status": "created"
-                        }))
+                        if warnings.is_empty() {
+                            Ok(serde_json::json!({
+                                "mission_id": id.to_string(),
+                                "name": name,
+                                "status": "created"
+                            }))
+                        } else {
+                            Ok(serde_json::json!({
+                                "mission_id": id.to_string(),
+                                "name": name,
+                                "status": "created_with_warnings",
+                                "warnings": warnings
+                            }))
+                        }
                     }
                     Err(e) => Err(e),
                 }

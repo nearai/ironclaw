@@ -22,7 +22,7 @@ async fn is_last_admin(store: &dyn Database, user_id: &str) -> Result<bool, Stri
         .list_users(Some("active"))
         .await
         .map_err(|e| e.to_string())?;
-    let active_admins: Vec<_> = users.iter().filter(|u| u.role == "admin").collect();
+    let active_admins: Vec<_> = users.iter().filter(|u| u.is_admin()).collect();
     Ok(active_admins.len() == 1 && active_admins[0].id == user_id)
 }
 
@@ -252,7 +252,7 @@ pub async fn users_update_handler(
         }
         if role != existing.role {
             // Prevent demoting the last admin.
-            if existing.role == "admin"
+            if existing.is_admin()
                 && role == "member"
                 && is_last_admin(store.as_ref(), &id)
                     .await

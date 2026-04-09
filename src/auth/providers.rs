@@ -7,7 +7,26 @@ pub struct OAuthCredentials {
 }
 
 /// Google OAuth "Desktop App" credentials, shared across all Google tools.
-/// Compile-time env vars override the hardcoded defaults below.
+///
+/// **Why these are embedded in source.** Google explicitly classifies the
+/// `client_secret` for the *Installed App / Desktop App* OAuth flow as
+/// non-confidential — see
+/// <https://developers.google.com/identity/protocols/oauth2/native-app>:
+/// "The process of embedding a client secret in a desktop application
+/// isn't straightforward... the client_secret is not actually treated as
+/// a secret." The security model for the Desktop App flow relies on PKCE
+/// and the user's consent screen, not on the secrecy of `client_secret`.
+///
+/// CI / hosted builds that want to use a different OAuth client (e.g. a
+/// platform client owned by a vendor that DOES have a confidential secret
+/// behind a proxy) can override both values at *build time* via the
+/// `IRONCLAW_GOOGLE_CLIENT_ID` and `IRONCLAW_GOOGLE_CLIENT_SECRET` env
+/// vars consumed by `option_env!`. When that override is present and the
+/// hosted-OAuth proxy is configured, `hosted_proxy_client_secret` below
+/// strips the baked-in secret so the proxy injects the real one.
+///
+/// Tracking "move defaults to runtime-only injection without source
+/// fallback" as a separate hardening item — out of scope for this PR.
 const GOOGLE_CLIENT_ID: &str = match option_env!("IRONCLAW_GOOGLE_CLIENT_ID") {
     Some(v) => v,
     None => "564604149681-efo25d43rs85v0tibdepsmdv5dsrhhr0.apps.googleusercontent.com",

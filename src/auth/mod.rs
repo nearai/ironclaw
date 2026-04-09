@@ -402,7 +402,7 @@ pub async fn can_use_default_credential_fallback(
     }
 
     match role_lookup.get_user(user_id).await {
-        Ok(Some(user)) => user.role == "admin",
+        Ok(Some(user)) => user.is_admin(),
         Ok(None) => false,
         Err(error) => {
             tracing::warn!(
@@ -447,11 +447,18 @@ async fn persist_refreshed_oauth_tokens(
     }
     if let Some(expires_in) = token_response.expires_in {
         // Saturating cast: an `expires_in` value above `i64::MAX` would
-        // silently wrap to a negative duration and immediately invalidate the
-        // freshly-stored token. Real OAuth providers cap this at minutes/days,
-        // but defend against the corner case anyway.
+        // silently wrap to a negative duration and immediately invalidate
+        // the freshly-stored token. Real OAuth providers cap this at
+        // minutes/days, but defend against the corner case anyway. We
+        // also use `try_seconds` (which is fallible on overflow inside
+        // `chrono`'s internal millisecond representation) and saturate to
+        // `Duration::max_value()` so a hostile / buggy provider returning
+        // `u64::MAX` cannot panic the process — earlier `chrono` versions
+        // panicked on `Duration::seconds(i64::MAX)`.
         let expires_secs = i64::try_from(expires_in).unwrap_or(i64::MAX);
-        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_secs);
+        let expires_delta =
+            chrono::Duration::try_seconds(expires_secs).unwrap_or(chrono::TimeDelta::MAX);
+        let expires_at = chrono::Utc::now() + expires_delta;
         access_params = access_params.with_expiry(expires_at);
     }
 
@@ -461,13 +468,28 @@ async fn persist_refreshed_oauth_tokens(
     }
 
     if let Some(refresh_token) = token_response.refresh_token {
-        let mut refresh_params = CreateSecretParams::new(refresh_name, refresh_token);
-        if let Some(ref provider) = config.provider {
-            refresh_params = refresh_params.with_provider(provider);
-        }
-        if let Err(e) = store.create(user_id, refresh_params).await {
-            tracing::warn!(error = %e, "Failed to store rotated refresh token");
-            return false;
+        // Some OAuth providers occasionally echo an empty `refresh_token`
+        // field instead of omitting it. Storing an empty string under the
+        // refresh-token secret name would silently break the next refresh
+        // (the token endpoint rejects an empty value with a generic 400)
+        // and look like a credentials problem to the user. Skip the write
+        // and warn instead — the existing refresh token (if any) stays in
+        // place and the next refresh attempt re-uses it.
+        if refresh_token.is_empty() {
+            tracing::warn!(
+                user_id = %user_id,
+                refresh_name = %refresh_name,
+                "OAuth token endpoint returned an empty refresh_token; not overwriting stored value"
+            );
+        } else {
+            let mut refresh_params = CreateSecretParams::new(refresh_name, refresh_token);
+            if let Some(ref provider) = config.provider {
+                refresh_params = refresh_params.with_provider(provider);
+            }
+            if let Err(e) = store.create(user_id, refresh_params).await {
+                tracing::warn!(error = %e, "Failed to store rotated refresh token");
+                return false;
+            }
         }
     }
 
@@ -484,14 +506,21 @@ pub enum DefaultFallback {
 ///
 /// Wraps [`validate_and_resolve_http_target`] but optionally allows loopback
 /// targets when `IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK=1` is set in the
-/// environment. This escape hatch exists so unit tests that stand up a mock
-/// proxy on `127.0.0.1` can still exercise the refresh path. Production
-/// deployments must NEVER set this flag; the variable is intentionally
-/// undocumented in `.env.example` to keep it test-only.
+/// environment. The escape hatch exists so unit tests that stand up a mock
+/// proxy on `127.0.0.1` can still exercise the refresh path.
+///
+/// **The env-var check is gated to `cfg(any(test, debug_assertions))`** so a
+/// production binary ignores the variable entirely. Setting it on a release
+/// deployment is a no-op — the SSRF guard refuses loopback unconditionally
+/// regardless of what the variable says.
 async fn validate_oauth_proxy_url(proxy_url: &str) -> Result<(), String> {
-    let allow_loopback = std::env::var("IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE"))
-        .unwrap_or(false);
+    let allow_loopback = if cfg!(any(test, debug_assertions)) {
+        std::env::var("IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE"))
+            .unwrap_or(false)
+    } else {
+        false
+    };
 
     match validate_and_resolve_http_target(proxy_url).await {
         Ok(_) => Ok(()),
