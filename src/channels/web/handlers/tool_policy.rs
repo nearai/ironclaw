@@ -27,14 +27,16 @@ pub async fn tool_policy_get_handler(
     State(state): State<Arc<GatewayState>>,
     AdminUser(_admin): AdminUser,
 ) -> Result<Json<AdminToolPolicy>, (StatusCode, String)> {
-    if state.workspace_pool.is_none() {
+    let pool = state.workspace_pool.as_ref(); // dispatch-exempt: gateway-mode probe, not a state mutation
+    if pool.is_none() {
         return Err((
             StatusCode::NOT_FOUND,
             "Admin tool policy is only available in multi-tenant mode".to_string(),
         ));
     }
 
-    let store = state.store.as_ref().ok_or(( // dispatch-exempt: admin-only read of cross-tenant policy scope
+    let store = state.store.as_ref(); // dispatch-exempt: admin-only read of cross-tenant policy scope
+    let store = store.ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
@@ -72,7 +74,8 @@ pub async fn tool_policy_put_handler(
     AdminUser(_admin): AdminUser,
     Json(policy): Json<AdminToolPolicy>,
 ) -> Result<Json<AdminToolPolicy>, (StatusCode, String)> {
-    if state.workspace_pool.is_none() {
+    let pool = state.workspace_pool.as_ref(); // dispatch-exempt: gateway-mode probe, not a state mutation
+    if pool.is_none() {
         return Err((
             StatusCode::NOT_FOUND,
             "Admin tool policy is only available in multi-tenant mode".to_string(),
@@ -81,7 +84,8 @@ pub async fn tool_policy_put_handler(
 
     validate_admin_tool_policy(&policy).map_err(|error| (StatusCode::BAD_REQUEST, error))?;
 
-    let store = state.store.as_ref().ok_or(( // dispatch-exempt: admin-only write to cross-tenant policy scope
+    let store = state.store.as_ref(); // dispatch-exempt: admin-only write to cross-tenant policy scope
+    let store = store.ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
