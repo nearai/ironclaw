@@ -84,8 +84,13 @@ RUN set -eux; \
       # Telegram is embedded in the binary at build time; skip it
       [ "$ext_name" = "telegram" ] && continue; \
       echo "=== Building $ext_name from $source_dir ==="; \
-      CARGO_TARGET_DIR=/app/target cargo build --release --target wasm32-wasip2 \
-        --manifest-path "$source_dir/Cargo.toml" || { echo "WARN: build failed for $ext_name"; continue; }; \
+      if [ -f "$source_dir/Cargo.lock" ]; then \
+        CARGO_TARGET_DIR=/app/target cargo build --locked --release --target wasm32-wasip2 \
+          --manifest-path "$source_dir/Cargo.toml" || { echo "WARN: build failed for $ext_name"; continue; }; \
+      else \
+        CARGO_TARGET_DIR=/app/target cargo build --release --target wasm32-wasip2 \
+          --manifest-path "$source_dir/Cargo.toml" || { echo "WARN: build failed for $ext_name"; continue; }; \
+      fi; \
       wasm_artifact=$(echo "${crate_name}" | tr '-' '_'); \
       raw_wasm="/app/target/wasm32-wasip2/release/${wasm_artifact}.wasm"; \
       [ -f "$raw_wasm" ] || continue; \
@@ -126,13 +131,12 @@ ENV RUST_LOG=ironclaw=info
 
 ENTRYPOINT ["ironclaw"]
 
-# Stage 5b: Production runtime (no pre-bundled extensions)
-FROM runtime-base AS runtime
+# Stage 5b: Staging runtime (with pre-built WASM extensions)
+FROM runtime-base AS runtime-staging
+COPY --from=wasm-builder --chown=ironclaw:ironclaw /app/wasm-bundles/tools/ /home/ironclaw/.ironclaw/tools/
+COPY --from=wasm-builder --chown=ironclaw:ironclaw /app/wasm-bundles/channels/ /home/ironclaw/.ironclaw/channels/
 USER ironclaw
 
-# Stage 5c: Staging runtime (with pre-built WASM extensions)
-FROM runtime-base AS runtime-staging
-COPY --from=wasm-builder /app/wasm-bundles/tools/ /home/ironclaw/.ironclaw/tools/
-COPY --from=wasm-builder /app/wasm-bundles/channels/ /home/ironclaw/.ironclaw/channels/
-RUN chown -R ironclaw:ironclaw /home/ironclaw/.ironclaw/tools /home/ironclaw/.ironclaw/channels
+# Stage 5c: Production runtime (default — no pre-bundled extensions)
+FROM runtime-base AS runtime
 USER ironclaw
