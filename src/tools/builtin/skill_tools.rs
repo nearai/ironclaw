@@ -1547,6 +1547,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_chain_install_round_trip_picks_up_pending_deps() {
+        // Regression test for PR #1736 review (serrrfirat, 3058525543):
+        // verify that the `install_dependencies=false` → `install_dependencies=true`
+        // two-step flow actually picks up the pending deps on the second
+        // call.
+        //
+        // Setup: a bundle skill `bundle` declaring two companions `dep-a`
+        // and `dep-b`. We install `bundle` itself into the registry first
+        // (simulating the outcome of the first `skill_install` call with
+        // `install_dependencies=false`, where the tool would record
+        // `pending_dependency_install=[dep-a, dep-b]`). We then call
+        // `install_missing_skill_dependencies` with that pending list — the
+        // same code path the second `skill_install(install_dependencies=true)`
+        // would take — and assert the deps are now installed.
+        let registry = test_registry();
+        let registry_url = "https://clawhub.example";
+
+        let (bundle_name, bundle_loaded) = {
+            let content = skill_content("bundle", &["dep-a", "dep-b"]);
+            let dir = registry.read().unwrap().install_target_dir().to_path_buf();
+            SkillRegistry::prepare_install_to_disk(&dir, "bundle", &content)
+                .await
+                .unwrap()
+        };
+        registry
+            .write()
+            .unwrap()
+            .commit_install(&bundle_name, bundle_loaded)
+            .unwrap();
+
+        // After the first "install" the bundle is present but the companions are not.
+        {
+            let guard = registry.read().unwrap();
+            assert!(guard.has("bundle"));
+            assert!(!guard.has("dep-a"));
+            assert!(!guard.has("dep-b"));
+        }
+
+        // Second "install": re-drive with the pending list via the helper
+        // that `SkillInstallTool::execute` uses when `install_dependencies=true`.
+        let dep_a_url = ironclaw_skills::catalog::skill_download_url(registry_url, "dep-a");
+        let dep_b_url = ironclaw_skills::catalog::skill_download_url(registry_url, "dep-b");
+        let responses = Arc::new(HashMap::from([
+            (dep_a_url, skill_content("dep-a", &[])),
+            (dep_b_url, skill_content("dep-b", &[])),
+        ]));
+
+        let report = install_missing_skill_dependencies(
+            &registry,
+            registry_url,
+            vec!["dep-a".to_string(), "dep-b".to_string()],
+            {
+                let responses = Arc::clone(&responses);
+                move |url| {
+                    let responses = Arc::clone(&responses);
+                    async move {
+                        responses
+                            .get(&url)
+                            .cloned()
+                            .ok_or_else(|| SkillFetchError::from_http_status(404, &url))
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            report.installed,
+            vec!["dep-a".to_string(), "dep-b".to_string()]
+        );
+        assert!(report.failed.is_empty());
+        assert!(report.missing.is_empty());
+        assert!(report.skipped.is_empty());
+        assert!(report.pending_explicit_install.is_empty());
+
+        let guard = registry.read().unwrap();
+        assert!(guard.has("bundle"));
+        assert!(guard.has("dep-a"));
+        assert!(guard.has("dep-b"));
+    }
+
+    #[tokio::test]
     async fn test_chain_install_treats_http_404_as_missing_dependency() {
         let registry = test_registry();
         let report = install_missing_skill_dependencies(

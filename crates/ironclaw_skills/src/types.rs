@@ -18,6 +18,11 @@ const MAX_PATTERNS_PER_SKILL: usize = 5;
 /// Maximum number of tags allowed per skill to prevent scoring manipulation.
 const MAX_TAGS_PER_SKILL: usize = 10;
 
+/// Maximum number of companion skill declarations in `requires.skills`.
+/// Mirrors `MAX_CHAIN_DEPS` in the host crate's skill_install tool to keep
+/// the chain installer's queue size bounded from hostile manifests.
+pub const MAX_REQUIRED_SKILLS_PER_MANIFEST: usize = 10;
+
 /// Minimum length for keywords and tags. Short tokens like "a" or "is"
 /// match too broadly and can be used to game the scoring system.
 const MIN_KEYWORD_TAG_LENGTH: usize = 3;
@@ -153,8 +158,24 @@ pub struct GatingRequirements {
     /// bundle/setup skills to declare which sub-skills they are intended to be
     /// used with (e.g., a `ceo-assistant` bundle references
     /// `commitment-triage`, `commitment-digest`, `decision-capture`, etc.).
+    ///
+    /// Capped at `MAX_REQUIRED_SKILLS_PER_MANIFEST` during parsing via
+    /// [`GatingRequirements::enforce_limits`] to keep the chain installer's
+    /// queue size bounded from hostile manifests.
     #[serde(default)]
     pub skills: Vec<String>,
+}
+
+impl GatingRequirements {
+    /// Enforce per-manifest limits on `requires.skills`.
+    ///
+    /// Called from the parser so hostile or buggy manifests with hundreds of
+    /// companion-skill declarations can't cause unbounded queue growth in
+    /// the chain installer before the downstream `MAX_CHAIN_DEPS` cap kicks
+    /// in.
+    pub fn enforce_limits(&mut self) {
+        self.skills.truncate(MAX_REQUIRED_SKILLS_PER_MANIFEST);
+    }
 }
 
 /// Where to inject a credential in HTTP requests.

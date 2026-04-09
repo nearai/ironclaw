@@ -149,6 +149,10 @@ fn parse_skill_md_impl(content: &str, validate_name: bool) -> Result<ParsedSkill
     // Enforce activation criteria limits
     manifest.activation.enforce_limits();
 
+    // Enforce gating requirement limits (currently only `requires.skills`
+    // is capped to keep the chain installer's queue bounded).
+    manifest.requires.enforce_limits();
+
     // Extract prompt content (everything after the closing `---` line)
     let after_yaml = &after_first_line[yaml_end..];
     // Skip the `---` line itself
@@ -338,6 +342,26 @@ Legacy prompt.
         assert!(result.manifest.requires.bins.is_empty());
         assert!(result.manifest.requires.env.is_empty());
         assert!(result.manifest.requires.skills.is_empty());
+    }
+
+    #[test]
+    fn test_requires_skills_is_capped_at_parse_time() {
+        // Regression test for PR #1736 review (serrrfirat, 3058525130):
+        // a malicious/buggy manifest can't cause unbounded chain-installer
+        // queue growth by declaring hundreds of companion skills. The parser
+        // must truncate `requires.skills` to `MAX_REQUIRED_SKILLS_PER_MANIFEST`
+        // before the installer ever sees it.
+        let mut yaml = String::from("---\nname: overbudget-bundle\nrequires:\n  skills:\n");
+        for i in 0..50 {
+            yaml.push_str(&format!("    - companion-{}\n", i));
+        }
+        yaml.push_str("---\n\nPrompt body.\n");
+        let result = parse_skill_md(&yaml).expect("manifest parses");
+        assert_eq!(
+            result.manifest.requires.skills.len(),
+            crate::types::MAX_REQUIRED_SKILLS_PER_MANIFEST,
+            "requires.skills should be truncated at MAX_REQUIRED_SKILLS_PER_MANIFEST"
+        );
     }
 
     #[test]

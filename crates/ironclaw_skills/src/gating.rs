@@ -17,7 +17,22 @@ pub struct GatingResult {
 /// Async wrapper around [`check_requirements_sync`] that offloads blocking
 /// subprocess calls (`which`/`where`) to a blocking thread pool via
 /// `tokio::task::spawn_blocking`.
+///
+/// Fast path: if the requirements contain no bins, env vars, or config
+/// paths to check, return `passed: true` immediately without spawning a
+/// blocking task. Companion `skills` entries are advisory-only and do not
+/// affect gating, so they don't block the fast path. This avoids a
+/// `which` subprocess call per skill load for skills with no
+/// subprocess-checkable requirements (the common case).
 pub async fn check_requirements(requirements: &GatingRequirements) -> GatingResult {
+    if requirements.bins.is_empty() && requirements.env.is_empty() && requirements.config.is_empty()
+    {
+        return GatingResult {
+            passed: true,
+            failures: Vec::new(),
+        };
+    }
+
     let requirements = requirements.clone();
     tokio::task::spawn_blocking(move || check_requirements_sync(&requirements))
         .await
