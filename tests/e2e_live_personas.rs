@@ -1,7 +1,7 @@
 //! Live/replay tests for commitment-system persona bundles.
 //!
-//! Each test exercises a persona bundle (`ceo-assistant`,
-//! `content-creator-assistant`, `trader-assistant`, `developer-assistant`)
+//! Each test exercises a persona bundle (`ceo-setup`,
+//! `content-creator-setup`, `trader-setup`, `developer-setup`)
 //! over a multi-turn conversation that goes beyond setup. The flow per
 //! persona is:
 //!
@@ -1012,11 +1012,11 @@ mod persona_tests {
     async fn ceo_full_workflow() {
         run_multi_turn_workflow(
             "ceo_full_workflow",
-            "ceo-assistant",
+            "ceo-setup",
             "ceo",
             CEO_WORKFLOW_TURNS,
             &[
-                "ceo-assistant",
+                "ceo-setup",
                 "commitment-digest",
                 "decision-capture",
                 "delegation-tracker",
@@ -1035,11 +1035,11 @@ mod persona_tests {
     async fn content_creator_full_workflow() {
         run_multi_turn_workflow(
             "content_creator_full_workflow",
-            "content-creator-assistant",
+            "content-creator-setup",
             "creator",
             CONTENT_CREATOR_WORKFLOW_TURNS,
             &[
-                "content-creator-assistant",
+                "content-creator-setup",
                 "commitment-digest",
                 "decision-capture",
                 "idea-parking",
@@ -1057,11 +1057,11 @@ mod persona_tests {
     async fn trader_full_workflow() {
         run_multi_turn_workflow(
             "trader_full_workflow",
-            "trader-assistant",
+            "trader-setup",
             "trader",
             TRADER_WORKFLOW_TURNS,
             &[
-                "trader-assistant",
+                "trader-setup",
                 "commitment-digest",
                 "decision-capture",
                 "delegation-tracker",
@@ -1077,11 +1077,11 @@ mod persona_tests {
         if should_run_test("developer_full_workflow") {
             run_multi_turn_workflow(
                 "developer_full_workflow",
-                "developer-assistant",
+                "developer-setup",
                 "developer",
                 DEVELOPER_WORKFLOW_TURNS,
                 &[
-                    "developer-assistant",
+                    "developer-setup",
                     "commitment-digest",
                     "decision-capture",
                     "delegation-tracker",

@@ -1,7 +1,7 @@
 //! Live integration test for the GitHub developer workflow.
 //!
 //! This is a **fully real** end-to-end test that exercises the
-//! `developer-assistant` + `github-workflow` skills against the real
+//! `developer-setup` + `github-workflow` skills against the real
 //! `nearai/ironclaw` GitHub repo. The intent (per project owner) is to
 //! validate the workflow by doing useful work on the real repo and
 //! recording every interaction so we can debug what doesn't work and
@@ -389,13 +389,24 @@ mod github_dev_workflow_test {
         let mut transcript: Vec<SessionTurn> = Vec::new();
 
         // Pull the github token back out of the rig's secrets store so
-        // we can issue direct REST calls. The harness already seeded it
-        // via with_secrets(["github_token"]) during build.
-        let github_token = harness
-            .rig()
-            .get_secret("github_token")
-            .await
-            .expect("github_token must be present in ~/.ironclaw/ironclaw.db");
+        // we can issue direct REST calls. The harness already attempted
+        // to seed it via with_secrets(["github_token"]) during build.
+        //
+        // This test is **inherently live-only** for the GitHub side: it
+        // creates real issues, polls real comments, and closes real
+        // issues regardless of whether the LLM is replayed from a
+        // fixture. If the token is missing we skip gracefully — there
+        // is no useful pure-replay mode for a test whose verification
+        // step is "did a real comment appear on a real GitHub issue".
+        let Some(github_token) = harness.rig().get_secret("github_token").await else {
+            eprintln!(
+                "[{test_name}] github_token not found in ~/.ironclaw/ironclaw.db; \
+                 skipping. This test makes real GitHub API calls and cannot run \
+                 in pure replay mode. To enable: configure a github_token secret \
+                 in your local ironclaw setup and rerun with IRONCLAW_LIVE_TEST=1."
+            );
+            return;
+        };
 
         // ── Turn 1: Setup workflow ───────────────────────────────────
         // The agent installs the wf-* mission set for nearai/ironclaw.
@@ -433,7 +444,7 @@ mod github_dev_workflow_test {
         let issue_title = format!("[live-test {timestamp}] Add /metrics Prometheus endpoint");
         let issue_body = "**This is an automated live integration test issue.** It was opened by \
             `tests/e2e_github_dev_workflow.rs::github_dev_workflow_full_loop` to exercise the \
-            `developer-assistant` + `github-workflow` skills end-to-end against a real \
+            `developer-setup` + `github-workflow` skills end-to-end against a real \
             repository.\n\n\
             ## Feature request\n\n\
             Expose Prometheus-style metrics for IronClaw at `/metrics`. Should include:\n\n\

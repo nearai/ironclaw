@@ -34,7 +34,15 @@ impl Default for SkillsConfig {
             local_dir: default_skills_dir(),
             installed_dir: default_installed_skills_dir(),
             max_active_skills: 3,
-            max_context_tokens: 4000,
+            // 6000 tokens accommodates one large persona setup (~3000)
+            // alongside its companion operational skills (e.g.
+            // github-workflow 2000 + github 2000). The previous default
+            // of 4000 was tight enough that a setup skill would evict
+            // the operational ones. Now that *-setup skills have
+            // setup_marker exclusion (they don't compete after their
+            // first run), the freed budget goes to reactive skills
+            // like commitment-triage, decision-capture, etc.
+            max_context_tokens: 6000,
             max_scan_depth: 3,
         }
     }

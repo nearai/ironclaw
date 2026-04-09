@@ -37,11 +37,23 @@ pub struct ScoredSkill<'a> {
 ///
 /// Returns skills sorted by score (highest first), limited by `max_candidates`
 /// and total context budget. No LLM is involved in this selection.
+///
+/// `satisfied_setup_markers` is the set of workspace paths that already
+/// exist for one-time setup skills. Any skill whose
+/// `activation.setup_marker` is in this set is excluded from candidates
+/// regardless of score — its setup has already been completed and there's
+/// nothing for it to do. The caller (`agent_loop::select_active_skills`)
+/// is responsible for computing this set by checking the workspace for
+/// each distinct marker referenced by loaded skills.
+///
+/// Pass an empty set to disable marker filtering (the legacy behavior
+/// where every skill competes regardless of workspace state).
 pub fn prefilter_skills<'a>(
     message: &str,
     available_skills: &'a [LoadedSkill],
     max_candidates: usize,
     max_context_tokens: usize,
+    satisfied_setup_markers: &std::collections::HashSet<String>,
 ) -> Vec<&'a LoadedSkill> {
     if available_skills.is_empty() || message.is_empty() {
         return vec![];
@@ -52,6 +64,14 @@ pub fn prefilter_skills<'a>(
     let mut scored: Vec<ScoredSkill<'a>> = available_skills
         .iter()
         .filter_map(|skill| {
+            // Setup-marker exclusion: a one-time setup skill whose
+            // marker file already exists in the workspace has finished
+            // its job. Skip scoring entirely so it can't burn budget.
+            if let Some(marker) = &skill.manifest.activation.setup_marker
+                && satisfied_setup_markers.contains(marker)
+            {
+                return None;
+            }
             let score = score_skill(skill, &message_lower, message);
             if score > 0 {
                 Some(ScoredSkill { skill, score })
@@ -252,7 +272,28 @@ mod tests {
     use crate::types::{
         ActivationCriteria, GatingRequirements, LoadedSkill, SkillManifest, SkillSource, SkillTrust,
     };
+    use std::collections::HashSet;
     use std::path::PathBuf;
+
+    /// Test wrapper around `prefilter_skills` that defaults the
+    /// satisfied-marker set to empty (legacy behavior — no setup-marker
+    /// filtering). Most existing tests don't care about marker
+    /// semantics; the dedicated marker tests below construct their own
+    /// HashSet.
+    fn prefilter_no_markers<'a>(
+        message: &str,
+        available: &'a [LoadedSkill],
+        max_candidates: usize,
+        max_context_tokens: usize,
+    ) -> Vec<&'a LoadedSkill> {
+        super::prefilter_skills(
+            message,
+            available,
+            max_candidates,
+            max_context_tokens,
+            &HashSet::new(),
+        )
+    }
 
     fn make_skill(name: &str, keywords: &[&str], tags: &[&str], patterns: &[&str]) -> LoadedSkill {
         let pattern_strings: Vec<String> = patterns.iter().map(|s| s.to_string()).collect();
@@ -272,6 +313,7 @@ mod tests {
                     patterns: pattern_strings,
                     tags: tag_vec,
                     max_context_tokens: 1000,
+                    setup_marker: None,
                 },
                 credentials: vec![],
                 requires: GatingRequirements::default(),
@@ -290,14 +332,14 @@ mod tests {
     #[test]
     fn test_empty_message_returns_nothing() {
         let skills = vec![make_skill("test", &["write"], &[], &[])];
-        let result = prefilter_skills("", &skills, 3, MAX_SKILL_CONTEXT_TOKENS);
+        let result = prefilter_no_markers("", &skills, 3, MAX_SKILL_CONTEXT_TOKENS);
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_no_matching_skills() {
         let skills = vec![make_skill("cooking", &["recipe", "cook", "bake"], &[], &[])];
-        let result = prefilter_skills(
+        let result = prefilter_no_markers(
             "Help me write an email",
             &skills,
             3,
@@ -309,7 +351,7 @@ mod tests {
     #[test]
     fn test_keyword_exact_match() {
         let skills = vec![make_skill("writing", &["write", "edit"], &[], &[])];
-        let result = prefilter_skills(
+        let result = prefilter_no_markers(
             "Please write an email",
             &skills,
             3,
@@ -322,7 +364,7 @@ mod tests {
     #[test]
     fn test_keyword_substring_match() {
         let skills = vec![make_skill("writing", &["writing"], &[], &[])];
-        let result = prefilter_skills(
+        let result = prefilter_no_markers(
             "I need help with rewriting this text",
             &skills,
             3,
@@ -334,7 +376,7 @@ mod tests {
     #[test]
     fn test_tag_match() {
         let skills = vec![make_skill("writing", &[], &["prose", "email"], &[])];
-        let result = prefilter_skills(
+        let result = prefilter_no_markers(
             "Draft an email for me",
             &skills,
             3,
@@ -351,7 +393,7 @@ mod tests {
             &[],
             &[r"(?i)\b(write|draft)\b.*\b(email|letter)\b"],
         )];
-        let result = prefilter_skills(
+        let result = prefilter_no_markers(
             "Please draft an email to my boss",
             &skills,
             3,
@@ -371,7 +413,7 @@ mod tests {
                 &[r"(?i)\b(write|draft)\b.*\bemail\b"],
             ),
         ];
-        let result = prefilter_skills(
+        let result = prefilter_no_markers(
             "Write and draft an email",
             &skills,
             3,
@@ -388,7 +430,7 @@ mod tests {
             make_skill("b", &["test"], &[], &[]),
             make_skill("c", &["test"], &[], &[]),
         ];
-        let result = prefilter_skills("test", &skills, 2, MAX_SKILL_CONTEXT_TOKENS);
+        let result = prefilter_no_markers("test", &skills, 2, MAX_SKILL_CONTEXT_TOKENS);
         assert_eq!(result.len(), 2);
     }
 
@@ -400,14 +442,14 @@ mod tests {
         skill2.manifest.activation.max_context_tokens = 3000;
 
         let skills = vec![skill, skill2];
-        let result = prefilter_skills("test", &skills, 5, 4000);
+        let result = prefilter_no_markers("test", &skills, 5, 4000);
         assert_eq!(result.len(), 1);
     }
 
     #[test]
     fn test_invalid_regex_handled_gracefully() {
         let skills = vec![make_skill("bad", &["test"], &[], &["[invalid regex"])];
-        let result = prefilter_skills("test", &skills, 3, MAX_SKILL_CONTEXT_TOKENS);
+        let result = prefilter_no_markers("test", &skills, 3, MAX_SKILL_CONTEXT_TOKENS);
         assert_eq!(result.len(), 1);
     }
 
@@ -418,7 +460,7 @@ mod tests {
         ];
         let skill = make_skill("spammer", &many_keywords, &[], &[]);
         let skills = vec![skill];
-        let result = prefilter_skills(
+        let result = prefilter_no_markers(
             "a b c d e f g h i j k l m n o p",
             &skills,
             3,
@@ -434,7 +476,7 @@ mod tests {
         ];
         let skill = make_skill("tag-spammer", &[], &many_tags, &[]);
         let skills = vec![skill];
-        let result = prefilter_skills(
+        let result = prefilter_no_markers(
             "alpha bravo charlie delta echo foxtrot golf hotel",
             &skills,
             3,
@@ -458,7 +500,7 @@ mod tests {
             ],
         );
         let skills = vec![skill];
-        let result = prefilter_skills(
+        let result = prefilter_no_markers(
             "write draft edit compose author",
             &skills,
             3,
@@ -477,7 +519,7 @@ mod tests {
         skill2.prompt_content = String::new();
 
         let skills = vec![skill, skill2];
-        let result = prefilter_skills("test", &skills, 5, 1);
+        let result = prefilter_no_markers("test", &skills, 5, 1);
         assert_eq!(result.len(), 1);
     }
 
@@ -504,7 +546,7 @@ mod tests {
             &[],
             &[],
         )];
-        let result = prefilter_skills(
+        let result = prefilter_no_markers(
             "route this write request to another agent",
             &skills,
             3,
@@ -525,7 +567,7 @@ mod tests {
             &[],
             &[],
         )];
-        let result = prefilter_skills(
+        let result = prefilter_no_markers(
             "help me write an email",
             &skills,
             3,
@@ -547,7 +589,7 @@ mod tests {
             &[],
             &[],
         )];
-        let result = prefilter_skills(
+        let result = prefilter_no_markers(
             "write and draft and compose — but redirect this somewhere else",
             &skills,
             3,
@@ -568,7 +610,7 @@ mod tests {
             &[],
             &[],
         )];
-        let result = prefilter_skills(
+        let result = prefilter_no_markers(
             "please ROUTE this write request",
             &skills,
             3,
@@ -711,5 +753,96 @@ mod tests {
         // The /github.com won't match because '.' breaks the name pattern
         assert!(matched.is_empty());
         assert_eq!(rewritten, "open https://github.com/repo");
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // setup_marker filtering — one-time setup skills excluded after run
+    // ───────────────────────────────────────────────────────────────────
+
+    fn make_setup_skill(name: &str, marker: &str) -> LoadedSkill {
+        let mut skill = make_skill(name, &["setup"], &[], &[]);
+        skill.manifest.activation.setup_marker = Some(marker.to_string());
+        skill
+    }
+
+    #[test]
+    fn test_setup_marker_excludes_skill_when_marker_present() {
+        let skills = vec![
+            make_setup_skill("developer-setup", "commitments/README.md"),
+            make_skill("github-workflow", &["workflow"], &[], &[]),
+        ];
+        let mut markers = HashSet::new();
+        markers.insert("commitments/README.md".to_string());
+
+        let result = prefilter_skills(
+            "setup the workflow",
+            &skills,
+            5,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &markers,
+        );
+        // developer-setup should be filtered out — its marker exists.
+        // github-workflow has no marker so it's still selected.
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name(), "github-workflow");
+    }
+
+    #[test]
+    fn test_setup_marker_includes_skill_when_marker_absent() {
+        let skills = vec![
+            make_setup_skill("developer-setup", "commitments/README.md"),
+            make_skill("github-workflow", &["workflow"], &[], &[]),
+        ];
+        // Marker is NOT in the satisfied set — setup hasn't run yet.
+        let result = prefilter_skills(
+            "setup the workflow",
+            &skills,
+            5,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &HashSet::new(),
+        );
+        // Both should be selected — both match keywords and neither
+        // has a satisfied marker.
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_setup_marker_other_marker_does_not_exclude() {
+        // Sanity check: a satisfied marker for a DIFFERENT path must not
+        // exclude this skill. Marker matching is exact-string.
+        let skills = vec![make_setup_skill(
+            "developer-setup",
+            "commitments/README.md",
+        )];
+        let mut markers = HashSet::new();
+        markers.insert("projects/foo/project.md".to_string());
+        markers.insert("commitments/calibration.md".to_string());
+
+        let result = prefilter_skills(
+            "setup",
+            &skills,
+            5,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &markers,
+        );
+        assert_eq!(result.len(), 1, "marker mismatch should not exclude");
+    }
+
+    #[test]
+    fn test_setup_marker_skill_with_no_marker_unaffected() {
+        // Skills WITHOUT a setup_marker must not be filtered regardless
+        // of what's in the satisfied set.
+        let skills = vec![make_skill("reactive", &["test"], &[], &[])];
+        let mut markers = HashSet::new();
+        markers.insert("anything".to_string());
+
+        let result = prefilter_skills(
+            "test",
+            &skills,
+            5,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &markers,
+        );
+        assert_eq!(result.len(), 1);
     }
 }
