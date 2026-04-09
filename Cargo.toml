@@ -221,7 +221,7 @@ tempfile = "3"
 insta = "1.46.3"
 
 [features]
-default = ["postgres", "libsql", "html-to-markdown"]
+default = ["postgres", "libsql", "html-to-markdown", "tui"]
 postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",

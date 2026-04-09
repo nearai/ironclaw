@@ -9,9 +9,6 @@ license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 
-[package.metadata.dist]
-dist = false
-
 [dependencies]
 ratatui = { version = "0.29", features = ["crossterm"] }
 tui-textarea = { version = "0.7", features = ["crossterm"] }
