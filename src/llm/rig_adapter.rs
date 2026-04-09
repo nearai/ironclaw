@@ -184,9 +184,26 @@ pub(crate) fn normalize_schema_strict(schema: &JsonValue, description: &mut Stri
     schema
 }
 
+/// JSON Schema keywords that OpenAI's tool API rejects at the top level of
+/// a tool's `parameters`. Listed in priority order so that, when more than
+/// one is present, we report the most semantically meaningful one in the
+/// description hint.
+const FORBIDDEN_TOP_LEVEL: &[&str] = &["oneOf", "anyOf", "allOf", "enum", "not"];
+
+/// Detect which forbidden top-level keyword (if any) `schema` has, returning
+/// the keyword name so the caller can pick a precise hint string. Returns
+/// `None` for an object schema with none of the forbidden constructs (the
+/// caller may still want to flatten if `type` isn't `"object"`).
+fn detect_forbidden_top_level(schema: &JsonValue) -> Option<&'static str> {
+    let map = schema.as_object()?;
+    FORBIDDEN_TOP_LEVEL
+        .iter()
+        .find(|keyword| map.contains_key(**keyword))
+        .copied()
+}
+
 /// True if `schema`'s top level would be rejected by OpenAI's tool API.
 fn needs_top_level_flatten(schema: &JsonValue) -> bool {
-    const FORBIDDEN_TOP_LEVEL: &[&str] = &["oneOf", "anyOf", "allOf", "enum", "not"];
     match schema {
         JsonValue::Object(map) => {
             let has_forbidden = FORBIDDEN_TOP_LEVEL.iter().any(|k| map.contains_key(*k));
@@ -198,16 +215,59 @@ fn needs_top_level_flatten(schema: &JsonValue) -> bool {
     }
 }
 
+/// Pick a description hint that matches the actual JSON Schema construct
+/// that triggered the flatten. The previous one-size-fits-all hint
+/// ("pick one variant and pass its fields") was correct for `oneOf` /
+/// `anyOf` but actively misleading for `allOf` (where the LLM should pass
+/// fields from ALL variants), `enum` (one of the literal values), and `not`
+/// (any object that doesn't match a constraint).
+fn schema_flatten_hint_intro(detected: Option<&'static str>) -> &'static str {
+    match detected {
+        Some("oneOf") | Some("anyOf") => {
+            "\n\nUpstream JSON schema (advisory; the actual top-level union has been \
+             flattened so the OpenAI tool API will accept the tool — pick ONE variant \
+             and pass its fields as a flat object):\n"
+        }
+        Some("allOf") => {
+            "\n\nUpstream JSON schema (advisory; the actual top-level intersection has \
+             been flattened so the OpenAI tool API will accept the tool — pass fields \
+             from ALL variants combined as a flat object):\n"
+        }
+        Some("enum") => {
+            "\n\nUpstream JSON schema (advisory; the actual top-level was an enum, \
+             which OpenAI's tool API doesn't allow at the top level — pass one of \
+             the listed values as the parameters object):\n"
+        }
+        Some("not") => {
+            "\n\nUpstream JSON schema (advisory; the actual top-level was a `not` \
+             constraint, which OpenAI's tool API doesn't allow at the top level — \
+             pass any object that does NOT match the constraint):\n"
+        }
+        // Fallback: schema wasn't an object, or had some unrecognized
+        // shape that we still flattened defensively. The MCP server will
+        // validate the actual call shape on its end, so the LLM just has
+        // to send something the upstream accepts.
+        _ => {
+            "\n\nUpstream JSON schema (advisory; the original was not a top-level \
+             object schema, so we flattened to a free-form object — see below for \
+             the actual constraints the upstream server will enforce):\n"
+        }
+    }
+}
+
 /// Replace `parameters` with a permissive object envelope and append the
 /// original schema to `description` as advisory text. Truncates the hint on a
 /// char boundary if the original schema is too large to fit in a reasonable
-/// description budget.
+/// description budget. The hint introduction is keyword-aware so the LLM
+/// gets the right shape guidance for `oneOf`/`anyOf`/`allOf`/`enum`/`not`.
 fn flatten_top_level(parameters: &mut JsonValue, description: &mut String) {
     // OpenAI has no documented hard limit on tool description length, but
     // long descriptions waste prompt budget on every turn. 1500 bytes fits a
     // typical MCP dispatcher schema and still leaves room for the original
     // tool description above it.
     const SCHEMA_HINT_MAX_BYTES: usize = 1500;
+
+    let detected = detect_forbidden_top_level(parameters);
 
     if let Ok(original_text) = serde_json::to_string(parameters)
         && !original_text.is_empty()
@@ -224,11 +284,7 @@ fn flatten_top_level(parameters: &mut JsonValue, description: &mut String) {
         } else {
             original_text
         };
-        description.push_str(
-            "\n\nUpstream JSON schema (advisory; the actual top-level union has been \
-             flattened so the OpenAI tool API will accept the tool — pick one variant \
-             and pass its fields as a flat object):\n",
-        );
+        description.push_str(schema_flatten_hint_intro(detected));
         description.push_str(&hint);
     }
 
@@ -1045,6 +1101,35 @@ mod tests {
             );
             assert_eq!(result["type"], "object");
             assert_eq!(result["additionalProperties"], true);
+        }
+    }
+
+    #[test]
+    fn test_normalize_schema_strict_hint_is_keyword_aware() {
+        // The flatten hint must match the construct that triggered it. The
+        // previous one-size-fits-all "pick one variant" hint was correct
+        // for oneOf/anyOf but actively misleading for allOf (where the LLM
+        // should pass fields from ALL variants), enum (one of the listed
+        // values), and not (any object that doesn't match).
+        let cases = [
+            ("oneOf", "pick ONE variant"),
+            ("anyOf", "pick ONE variant"),
+            ("allOf", "pass fields from ALL variants"),
+            ("enum", "pass one of the listed values"),
+            ("not", "does NOT match the constraint"),
+        ];
+        for (keyword, expected_phrase) in cases {
+            let input = serde_json::json!({
+                "type": "object",
+                keyword: ["whatever"]
+            });
+            let mut description = "tool".to_string();
+            let _ = normalize_schema_strict(&input, &mut description);
+            assert!(
+                description.contains(expected_phrase),
+                "hint for top-level {keyword} must contain `{expected_phrase}`, \
+                 got: {description}"
+            );
         }
     }
 
