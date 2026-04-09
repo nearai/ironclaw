@@ -213,7 +213,31 @@ fn normalize_cron_expression(expression: &str) -> Result<String, EngineError> {
     let fields: Vec<&str> = trimmed.split_whitespace().collect();
     match fields.len() {
         5 => Ok(format!("0 {} *", fields.join(" "))),
-        6 => Ok(format!("{} *", fields.join(" "))),
+        6 => {
+            // Disambiguate the Quartz-style 6-field form. A user (or LLM)
+            // typing `"0 9 * * * 2027"` almost certainly means
+            // "at 09:00 every day in 2027" (Quartz: `min hr dom mon dow year`),
+            // not "at second 0 of minute 9, every hour, every day, dow=2027".
+            // The cron crate would treat the year-shaped final field as a
+            // (nonsensical) day-of-week and silently produce a wrong schedule.
+            // Reject early with a message that points at the explicit
+            // 7-field form so the caller can fix it instead of debugging a
+            // schedule that never fires.
+            if let Some(last) = fields.last()
+                && is_year_field(last)
+            {
+                return Err(EngineError::InvalidCadence {
+                    reason: format!(
+                        "ambiguous 6-field cron expression '{expression}': the trailing '{last}' \
+                         looks like a year. The 6-field form is `sec min hr dom mon dow`, NOT the \
+                         Quartz `min hr dom mon dow year`. Use the explicit 7-field form \
+                         `0 {} {} {} {} {} {last}` to mean 'at the given time in {last}'.",
+                        fields[0], fields[1], fields[2], fields[3], fields[4]
+                    ),
+                });
+            }
+            Ok(format!("{} *", fields.join(" ")))
+        }
         7 => Ok(trimmed.to_string()),
         n => Err(EngineError::InvalidCadence {
             reason: format!(
@@ -221,6 +245,21 @@ fn normalize_cron_expression(expression: &str) -> Result<String, EngineError> {
             ),
         }),
     }
+}
+
+/// True if `field` is a literal 4-digit year in the plausible cron range.
+///
+/// Used to detect the Quartz-style `min hr dom mon dow year` mistake in
+/// 6-field input. Range chosen to cover the cron crate's accepted year span
+/// without firing on field values that happen to be 4 digits but mean
+/// something else (none of the standard cron field ranges produce 4-digit
+/// literals).
+fn is_year_field(field: &str) -> bool {
+    field.len() == 4
+        && field.bytes().all(|b| b.is_ascii_digit())
+        && field
+            .parse::<u32>()
+            .is_ok_and(|y| (1970..=2099).contains(&y))
 }
 
 /// Parse a cron expression and compute the next fire time from now.
@@ -358,6 +397,50 @@ mod tests {
         // 7-field (sec min hr dom mon dow year) should pass through.
         let next = next_cron_fire("0 0 9 * * * 2027", None).unwrap();
         assert!(next.is_some());
+    }
+
+    #[test]
+    fn six_field_cron_with_year_shaped_last_field_is_rejected() {
+        // A user (or LLM) typing the Quartz-style `min hr dom mon dow year`
+        // form gets a clear error pointing at the explicit 7-field form,
+        // rather than a silently misparsed schedule. The 6-field form is
+        // `sec min hr dom mon dow`, so `2027` would otherwise be interpreted
+        // as a (nonsensical) day-of-week.
+        let err = next_cron_fire("0 9 * * * 2027", None).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            matches!(err, EngineError::InvalidCadence { .. }),
+            "expected InvalidCadence, got: {err:?}"
+        );
+        assert!(
+            msg.contains("looks like a year") && msg.contains("0 0 9 * * * 2027"),
+            "error should explain Quartz ambiguity and suggest 7-field form, got: {msg}"
+        );
+
+        // Cover all year boundaries.
+        for year in ["1970", "1999", "2000", "2026", "2099"] {
+            let expr = format!("0 0 * * * {year}");
+            assert!(
+                matches!(
+                    next_cron_fire(&expr, None),
+                    Err(EngineError::InvalidCadence { .. })
+                ),
+                "year {year} should be rejected as Quartz-style ambiguity"
+            );
+        }
+
+        // Out-of-range 4-digit values are NOT treated as years and fall
+        // through to the regular 6-field interpretation (which the cron
+        // crate may then reject for its own reasons).
+        let normalized = normalize_cron_expression("0 0 9 * * 1969");
+        assert!(
+            normalized.is_ok(),
+            "1969 (out of year range) should not trigger the Quartz heuristic"
+        );
+
+        // 5-field cron with a literal day-of-week numeric value must still
+        // work — the year heuristic only applies to 6-field input.
+        assert!(next_cron_fire("0 9 * * 3", None).unwrap().is_some());
     }
 
     #[test]

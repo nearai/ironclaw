@@ -315,6 +315,10 @@ impl MissionManager {
             .update_mission_status(id, MissionStatus::Paused)
             .await?;
         self.active.write().await.retain(|mid| *mid != id);
+        // Drop the in-memory cooldown entry — a paused mission can't fire,
+        // so the cooldown is dead state and would otherwise leak until the
+        // process restarts.
+        self.last_fire_attempt.write().await.remove(&id);
         debug!(mission_id = %id, "mission paused");
         Ok(())
     }
@@ -373,6 +377,9 @@ impl MissionManager {
             .update_mission_status(id, MissionStatus::Completed)
             .await?;
         self.active.write().await.retain(|mid| *mid != id);
+        // Terminal state — drop the cooldown entry so the in-memory map
+        // doesn't accumulate an entry per mission ever fired.
+        self.last_fire_attempt.write().await.remove(&id);
         debug!(mission_id = %id, "mission completed");
         Ok(())
     }
@@ -1146,6 +1153,16 @@ impl MissionManager {
         let now = chrono::Utc::now();
         let cooldown =
             chrono::Duration::from_std(FIRE_COOLDOWN).unwrap_or(chrono::Duration::zero());
+
+        // Opportunistic prune of `last_fire_attempt`: drop entries whose
+        // cooldown window has already elapsed. This catches stragglers from
+        // missions that were removed without going through the graceful
+        // pause/complete paths (e.g. crash recovery, direct store edits) so
+        // the map can never grow unbounded over a long-lived process.
+        {
+            let mut map = self.last_fire_attempt.write().await;
+            map.retain(|_, last| now.signed_duration_since(*last) < cooldown);
+        }
 
         for mid in active_ids {
             // In-memory cooldown: if `fire_mission` ran for this mission very
@@ -4609,6 +4626,62 @@ mod tests {
         // Mission must remain paused — resume failed before any state change.
         let reloaded = mgr.get_mission(id).await.unwrap().unwrap();
         assert_eq!(reloaded.status, MissionStatus::Paused);
+    }
+
+    #[tokio::test]
+    async fn pause_and_complete_drop_cooldown_entry() {
+        // Regression: `last_fire_attempt` was previously only ever inserted,
+        // never pruned. Pausing or completing a mission must drop its
+        // cooldown entry so the in-memory map can't grow unbounded.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Mission A — paused after a fire.
+        let id_a = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "pause-cleanup",
+                "g",
+                MissionCadence::Cron {
+                    expression: "* * * * *".into(),
+                    timezone: None,
+                },
+                vec![],
+            )
+            .await
+            .unwrap();
+        mgr.fire_mission(id_a, "alice", None).await.unwrap();
+        assert!(mgr.last_fire_attempt.read().await.contains_key(&id_a));
+        mgr.pause_mission(id_a, "alice").await.unwrap();
+        assert!(
+            !mgr.last_fire_attempt.read().await.contains_key(&id_a),
+            "pause_mission must drop the cooldown entry"
+        );
+
+        // Mission B — completed after a fire.
+        let id_b = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "complete-cleanup",
+                "g",
+                MissionCadence::Cron {
+                    expression: "* * * * *".into(),
+                    timezone: None,
+                },
+                vec![],
+            )
+            .await
+            .unwrap();
+        mgr.fire_mission(id_b, "alice", None).await.unwrap();
+        assert!(mgr.last_fire_attempt.read().await.contains_key(&id_b));
+        mgr.complete_mission(id_b).await.unwrap();
+        assert!(
+            !mgr.last_fire_attempt.read().await.contains_key(&id_b),
+            "complete_mission must drop the cooldown entry"
+        );
     }
 
     #[tokio::test]
