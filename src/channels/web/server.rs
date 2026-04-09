@@ -865,7 +865,11 @@ pub async fn start_server(
     // WebhookServer still runs for tunnel-based setups.
     let mut app = app;
     for route in additional_routes {
-        app = app.merge(route);
+        app = app.merge(
+            route
+                .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
+                .layer(tower_http::catch_panic::CatchPanicLayer::new()),
+        );
     }
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();

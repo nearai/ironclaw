@@ -807,7 +807,7 @@ async fn async_main() -> anyhow::Result<()> {
         // Merge gateway-safe webhook routes so they are reachable on the same
         // port (needed for single-port deployments like Railway).  Uses the
         // collision-free subset that excludes /oauth/callback etc.
-        gw = gw.with_webhook_routes(gateway_webhook_routes.clone());
+        gw = gw.with_webhook_routes(gateway_webhook_routes);
 
         // Capture SSE sender and routine engine slot before moving gw into channels.
         // IMPORTANT: This must come after all `with_*` calls since `rebuild_state`
