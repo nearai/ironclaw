@@ -40,6 +40,15 @@ jobs:
           ref: ${{ github.event_name == 'schedule' && 'staging' || '' }}
           persist-credentials: false
 
+      - name: Create releases-manager app token
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ secrets.GH_RELEASES_MANAGER_APP_ID }}
+          private-key: ${{ secrets.GH_RELEASES_MANAGER_APP_PRIVATE_KEY }}
+          owner: nearai
+          repositories: ironclaw-dind
+
       - name: Extract version from Cargo.toml
         id: version
         run: |
@@ -114,15 +123,6 @@ jobs:
           platforms: linux/amd64
           cache-from: type=gha,scope=worker
           cache-to: type=gha,mode=max,scope=worker
-
-      - name: Create releases-manager app token
-        id: app-token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
-        with:
-          app-id: ${{ secrets.GH_RELEASES_MANAGER_APP_ID }}
-          private-key: ${{ secrets.GH_RELEASES_MANAGER_APP_PRIVATE_KEY }}
-          owner: nearai
-          repositories: ironclaw-dind
 
       - name: Trigger ironclaw-dind Build & Push
         env:
