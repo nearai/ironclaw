@@ -46,6 +46,7 @@
                 "icon": "cubes",
                 "pages": [
                   "capabilities/overview",
+                  "capabilities/llm-providers",
                   {
                     "group": "Core Capabilities",
                     "pages": [
@@ -130,8 +131,9 @@
                 "icon": "graduation-cap",
                 "pages": [
                   "extensions/building-a-tool",
+                  "channels/building-a-channel",
                   {
-                    "group": "Host IronClaw on...",
+                    "group": "How to host IronClaw on...",
                     "pages": [
                       "infrastructure/droplet"
                     ]

@@ -5,3 +5,5 @@
 # Draft content
 drafts/
 *.draft.mdx
+plans/
+internal/

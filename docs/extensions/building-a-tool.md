@@ -1,5 +1,5 @@
 ---
-title: Build a Tool from Scratch
+title: How to build a tool
 description: "Build a weather tool from scratch with Rust"
 ---
 
