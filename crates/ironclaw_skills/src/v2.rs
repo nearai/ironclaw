@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::types::{ActivationCriteria, SkillTrust};
+use crate::types::{ActivationCriteria, GatingRequirements, SkillTrust};
 
 /// How a v2 skill was created.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +153,17 @@ pub struct V2SkillMetadata {
     /// Trust level.
     #[serde(default = "default_trust")]
     pub trust: SkillTrust,
+    /// Advisory companion skills — declared in the original SKILL.md
+    /// `requires.skills` block. Preserved through v1→v2 migration so
+    /// the Python orchestrator's `select_skills` chain-loading pass
+    /// can pull companions in alongside their parent.
+    ///
+    /// This mirrors `SkillManifest.requires` but is flattened to just
+    /// the companion list since binary/env/config gating happens at
+    /// load time (v1) and is not re-evaluated in v2. Legacy metadata
+    /// without this field deserializes with an empty `requires`.
+    #[serde(default)]
+    pub requires: GatingRequirements,
     /// Executable Python code snippets for CodeAct injection.
     #[serde(default)]
     pub code_snippets: Vec<CodeSnippet>,
@@ -233,6 +244,7 @@ mod tests {
             },
             source: V2SkillSource::Extracted,
             trust: SkillTrust::Trusted,
+            requires: Default::default(),
             code_snippets: vec![CodeSnippet {
                 name: "do_thing".to_string(),
                 code: "def do_thing(): pass".to_string(),

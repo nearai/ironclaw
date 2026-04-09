@@ -107,6 +107,12 @@ fn v1_skill_to_memory_doc(skill: &LoadedSkill, project_id: ProjectId) -> MemoryD
         activation: skill.manifest.activation.clone(),
         source: v2_source,
         trust: skill.trust,
+        // Preserve companion list so the v2 orchestrator's chain-loading
+        // pass can see which operational skills each persona bundle
+        // expects to pull in. Without this, `requires.skills` was
+        // silently dropped at migration time and chain-loading in v2
+        // was dead code.
+        requires: skill.manifest.requires.clone(),
         code_snippets: vec![], // v1 skills are prompt-only
         metrics: SkillMetrics::default(),
         parent_version: None,
