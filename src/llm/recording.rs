@@ -24,7 +24,7 @@ use tokio::sync::Mutex;
 use crate::llm::error::LlmError;
 use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, Role,
-    ToolCompletionRequest, ToolCompletionResponse,
+    StreamingChunkSender, ToolCompletionRequest, ToolCompletionResponse,
 };
 
 // ── Trace format types ─────────────────────────────────────────────
@@ -487,6 +487,72 @@ impl LlmProvider for RecordingLlm {
             expected_tool_results: tool_results,
         });
 
+        Ok(response)
+    }
+
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        chunk_tx: StreamingChunkSender,
+    ) -> Result<CompletionResponse, LlmError> {
+        let (hint, tool_results) = self.capture_new_messages(&request.messages).await;
+        let response = self.inner.complete_streaming(request, chunk_tx).await?;
+
+        self.steps.lock().await.push(TraceStep {
+            request_hint: hint,
+            response: TraceResponse::Text {
+                content: response.content.clone(),
+                input_tokens: response.input_tokens,
+                output_tokens: response.output_tokens,
+            },
+            expected_tool_results: tool_results,
+        });
+
+        Ok(response)
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        chunk_tx: StreamingChunkSender,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let (hint, tool_results) = self.capture_new_messages(&request.messages).await;
+        let response = self
+            .inner
+            .complete_with_tools_streaming(request, chunk_tx)
+            .await?;
+
+        let step = if response.tool_calls.is_empty() {
+            TraceStep {
+                request_hint: hint,
+                response: TraceResponse::Text {
+                    content: response.content.clone().unwrap_or_default(),
+                    input_tokens: response.input_tokens,
+                    output_tokens: response.output_tokens,
+                },
+                expected_tool_results: tool_results,
+            }
+        } else {
+            TraceStep {
+                request_hint: hint,
+                response: TraceResponse::ToolCalls {
+                    tool_calls: response
+                        .tool_calls
+                        .iter()
+                        .map(|tc| TraceToolCall {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            arguments: tc.arguments.clone(),
+                        })
+                        .collect(),
+                    input_tokens: response.input_tokens,
+                    output_tokens: response.output_tokens,
+                },
+                expected_tool_results: tool_results,
+            }
+        };
+
+        self.steps.lock().await.push(step);
         Ok(response)
     }
 
@@ -956,5 +1022,38 @@ mod tests {
         assert!(trace.memory_snapshot.is_empty());
         assert!(trace.http_exchanges.is_empty());
         assert!(trace.steps[0].expected_tool_results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn streaming_captures_aggregate_in_trace() {
+        let stub = Arc::new(StubLlm::new("streamed response"));
+        let recorder = make_recorder(stub);
+
+        let request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        recorder.complete_streaming(request, tx).await.unwrap();
+
+        let steps = recorder.steps.lock().await;
+        // user_input + text (same structure as non-streaming)
+        assert_eq!(steps.len(), 2);
+        match &steps[1].response {
+            TraceResponse::Text { content, .. } => {
+                assert_eq!(content, "streamed response");
+            }
+            _ => panic!("Expected Text response in trace"),
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_tools_captures_aggregate_in_trace() {
+        let stub = Arc::new(StubLlm::new("tool response"));
+        let recorder = make_recorder(stub);
+
+        let request = ToolCompletionRequest::new(vec![ChatMessage::user("use tool")], vec![]);
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        recorder.complete_with_tools_streaming(request, tx).await.unwrap();
+
+        let steps = recorder.steps.lock().await;
+        assert_eq!(steps.len(), 2);
     }
 }

@@ -1234,6 +1234,7 @@ impl SetupWizard {
                 || current == "gemini_oauth"
                 || current == "gemini-oauth"
                 || current == "openai_codex"
+                || current == "openai_compatible_streaming"
                 || registry.is_known(&current);
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
@@ -1247,6 +1248,10 @@ impl SetupWizard {
                 }
                 if current == "openai_codex" {
                     print_info("Keeping existing OpenAI Codex configuration.");
+                    return Ok(());
+                }
+                if current == "openai_compatible_streaming" {
+                    print_info("Keeping existing OpenAI-compatible streaming configuration.");
                     return Ok(());
                 }
                 return self.run_provider_setup(&current, &registry).await;
@@ -3486,6 +3491,7 @@ impl SetupWizard {
             Some("openai") => "OpenAI".to_string(),
             Some("ollama") => "Ollama".to_string(),
             Some("openai_compatible") => "OpenAI-compatible".to_string(),
+            Some("openai_compatible_streaming") => "OpenAI-compatible (streaming)".to_string(),
             Some("bedrock") => "AWS Bedrock".to_string(),
             Some("openai_codex") => "OpenAI Codex".to_string(),
             Some("gemini_oauth") => "Gemini CLI".to_string(),

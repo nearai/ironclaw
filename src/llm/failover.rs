@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -19,8 +19,8 @@ use rust_decimal::Decimal;
 
 use crate::llm::error::LlmError;
 use crate::llm::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamingChunkSender,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 use crate::llm::retry::is_retryable;
@@ -284,6 +284,117 @@ impl FailoverProvider {
             reason: "Invariant violated in FailoverProvider: providers were exhausted but no last_error was recorded (this branch should be unreachable; possible causes: no provider attempts were made or `available` was unexpectedly empty).".to_string(),
         }))
     }
+
+    /// Streaming-aware version of `try_providers`.
+    ///
+    /// Uses a per-attempt sub-channel to detect whether any chunk has been
+    /// forwarded to the consumer. Once chunks have been forwarded, failover
+    /// to the next provider is disabled — the consumer has already seen
+    /// partial output from the current provider.
+    async fn try_providers_streaming<T, F, Fut>(
+        &self,
+        mut call: F,
+        chunk_tx: &StreamingChunkSender,
+    ) -> Result<(usize, T), LlmError>
+    where
+        F: FnMut(Arc<dyn LlmProvider>, StreamingChunkSender) -> Fut,
+        Fut: Future<Output = Result<T, LlmError>>,
+    {
+        let now_nanos = self.now_nanos();
+        let cooldown_nanos = self.cooldown_config.cooldown_duration.as_nanos() as u64;
+
+        let (mut available, cooled_down): (Vec<usize>, Vec<usize>) = (0..self.providers.len())
+            .partition(|&i| !self.cooldowns[i].is_in_cooldown(now_nanos, cooldown_nanos));
+
+        for &i in &cooled_down {
+            tracing::info!(
+                provider = %self.providers[i].model_name(),
+                "Skipping provider (in cooldown, streaming)"
+            );
+        }
+
+        if available.is_empty() {
+            let oldest = (0..self.providers.len())
+                .min_by_key(|&i| {
+                    self.cooldowns[i]
+                        .cooldown_activated_nanos
+                        .load(Ordering::Relaxed)
+                })
+                .ok_or_else(|| LlmError::RequestFailed {
+                    provider: "failover".to_string(),
+                    reason: "FailoverProvider requires at least one provider".to_string(),
+                })?;
+            available.push(oldest);
+        }
+
+        let mut last_error: Option<LlmError> = None;
+
+        for (pos, &i) in available.iter().enumerate() {
+            let provider = &self.providers[i];
+
+            // Per-attempt sub-channel for chunk forwarding
+            let (sub_tx, mut sub_rx) = tokio::sync::mpsc::channel::<String>(256);
+            let any_forwarded = Arc::new(AtomicBool::new(false));
+            let flag = any_forwarded.clone();
+            let fwd_tx = chunk_tx.clone();
+
+            let fwd_task = tokio::spawn(async move {
+                while let Some(chunk) = sub_rx.recv().await {
+                    flag.store(true, Ordering::Relaxed);
+                    if fwd_tx.send(chunk).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            let result = call(Arc::clone(provider), sub_tx).await;
+            let _ = fwd_task.await;
+
+            match result {
+                Ok(response) => {
+                    self.last_used.store(i, Ordering::Relaxed);
+                    self.cooldowns[i].reset();
+                    return Ok((i, response));
+                }
+                Err(err) => {
+                    // If chunks were already forwarded, cannot failover
+                    if any_forwarded.load(Ordering::Relaxed) {
+                        tracing::warn!(
+                            provider = %provider.model_name(),
+                            error = %err,
+                            "Streaming error after chunks forwarded, cannot failover"
+                        );
+                        return Err(err);
+                    }
+
+                    if !is_retryable(&err) {
+                        return Err(err);
+                    }
+
+                    if self.cooldowns[i].record_failure(self.cooldown_config.failure_threshold) {
+                        let nanos = self.now_nanos();
+                        self.cooldowns[i].activate_cooldown(nanos);
+                    }
+
+                    if pos + 1 < available.len() {
+                        let next_i = available[pos + 1];
+                        tracing::warn!(
+                            provider = %provider.model_name(),
+                            error = %err,
+                            next_provider = %self.providers[next_i].model_name(),
+                            "Streaming provider failed, trying next provider"
+                        );
+                    }
+                    last_error = Some(err);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| LlmError::RequestFailed {
+            provider: "failover".to_string(),
+            reason: "streaming failover: all providers exhausted".to_string(),
+        }))
+    }
 }
 
 #[async_trait]
@@ -324,6 +435,42 @@ impl LlmProvider for FailoverProvider {
                 let req = request.clone();
                 async move { provider.complete_with_tools(req).await }
             })
+            .await?;
+        self.bind_provider_to_current_task(provider_idx);
+        Ok(response)
+    }
+
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        chunk_tx: StreamingChunkSender,
+    ) -> Result<CompletionResponse, LlmError> {
+        let (provider_idx, response) = self
+            .try_providers_streaming(
+                |provider, sub_tx| {
+                    let req = request.clone();
+                    async move { provider.complete_streaming(req, sub_tx).await }
+                },
+                &chunk_tx,
+            )
+            .await?;
+        self.bind_provider_to_current_task(provider_idx);
+        Ok(response)
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        chunk_tx: StreamingChunkSender,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let (provider_idx, response) = self
+            .try_providers_streaming(
+                |provider, sub_tx| {
+                    let req = request.clone();
+                    async move { provider.complete_with_tools_streaming(req, sub_tx).await }
+                },
+                &chunk_tx,
+            )
             .await?;
         self.bind_provider_to_current_task(provider_idx);
         Ok(response)
@@ -1335,5 +1482,58 @@ mod tests {
         let result = failover2.complete(make_request()).await;
         assert!(result.is_err());
         assert_eq!(solo2.call_count(), 3);
+    }
+
+    // -- Streaming failover tests --
+
+    #[tokio::test]
+    async fn streaming_single_provider_passthrough() {
+        let primary = Arc::new(MockProvider::succeeding("primary", "ok"));
+        let failover = FailoverProvider::new(vec![primary]).unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let resp = failover.complete_streaming(make_request(), tx).await;
+        assert!(resp.is_ok());
+        assert_eq!(resp.unwrap().content, "ok");
+        // No chunks should have been duplicated (StubLlm default drops sender)
+        assert!(rx.try_recv().is_err(), "no chunk duplication");
+    }
+
+    #[tokio::test]
+    async fn streaming_tools_passthrough() {
+        let primary = Arc::new(MockProvider::succeeding("primary", "ok"));
+        let failover = FailoverProvider::new(vec![primary]).unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let resp = failover
+            .complete_with_tools_streaming(make_tool_request(), tx)
+            .await;
+        assert!(resp.is_ok());
+    }
+
+    #[tokio::test]
+    async fn streaming_failover_to_second_provider() {
+        let primary = Arc::new(MockProvider::failing_retryable("primary"));
+        let fallback = Arc::new(MockProvider::succeeding("fallback", "fallback ok"));
+        let failover = FailoverProvider::new(vec![primary, fallback]).unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let resp = failover.complete_streaming(make_request(), tx).await;
+        assert!(resp.is_ok());
+        assert_eq!(resp.unwrap().content, "fallback ok");
+    }
+
+    #[tokio::test]
+    async fn streaming_non_retryable_fails_immediately() {
+        let primary = Arc::new(MockProvider::failing_non_retryable("primary"));
+        let fallback = Arc::new(MockProvider::succeeding("fallback", "fallback ok"));
+        let failover = FailoverProvider::new(vec![primary, fallback]).unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let err = failover
+            .complete_streaming(make_request(), tx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LlmError::AuthFailed { .. }));
     }
 }

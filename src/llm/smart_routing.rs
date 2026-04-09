@@ -26,8 +26,8 @@ use rust_decimal::Decimal;
 
 use crate::llm::error::LlmError;
 use crate::llm::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, Role, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, Role,
+    StreamingChunkSender, ToolCompletionRequest, ToolCompletionResponse,
 };
 
 // ---------------------------------------------------------------------------
@@ -939,6 +939,73 @@ impl LlmProvider for SmartRoutingProvider {
         self.primary.complete_with_tools(request).await
     }
 
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        chunk_tx: StreamingChunkSender,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
+
+        let complexity = self.classify(&request);
+
+        match complexity {
+            TaskComplexity::Simple => {
+                tracing::trace!(
+                    model = %self.cheap.model_name(),
+                    "Smart routing (streaming): Simple task -> cheap model"
+                );
+                self.stats.cheap_requests.fetch_add(1, Ordering::Relaxed);
+                self.cheap.complete_streaming(request, chunk_tx).await
+            }
+            TaskComplexity::Complex => {
+                tracing::trace!(
+                    model = %self.primary.model_name(),
+                    "Smart routing (streaming): Complex task -> primary model"
+                );
+                self.stats.primary_requests.fetch_add(1, Ordering::Relaxed);
+                self.primary.complete_streaming(request, chunk_tx).await
+            }
+            TaskComplexity::Moderate => {
+                // Cascade is not viable for streaming — the cheap model's
+                // response would have already been streamed to the consumer
+                // before we can check for uncertainty. Route directly based
+                // on cascade_enabled preference.
+                if self.config.cascade_enabled {
+                    tracing::trace!(
+                        model = %self.primary.model_name(),
+                        "Smart routing (streaming): Moderate task -> primary model (cascade not viable for streaming)"
+                    );
+                    self.stats.primary_requests.fetch_add(1, Ordering::Relaxed);
+                    self.primary.complete_streaming(request, chunk_tx).await
+                } else {
+                    tracing::trace!(
+                        model = %self.cheap.model_name(),
+                        "Smart routing (streaming): Moderate task -> cheap model (cascade disabled)"
+                    );
+                    self.stats.cheap_requests.fetch_add(1, Ordering::Relaxed);
+                    self.cheap.complete_streaming(request, chunk_tx).await
+                }
+            }
+        }
+    }
+
+    /// Streaming tool use always goes to the primary model.
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        chunk_tx: StreamingChunkSender,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
+        self.stats.primary_requests.fetch_add(1, Ordering::Relaxed);
+        tracing::trace!(
+            model = %self.primary.model_name(),
+            "Smart routing (streaming): Tool use -> primary model (always)"
+        );
+        self.primary
+            .complete_with_tools_streaming(request, chunk_tx)
+            .await
+    }
+
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
         self.primary.list_models().await
     }
@@ -1746,5 +1813,70 @@ mod tests {
         // Should match greeting override → Flash → Simple → cheap model
         assert_eq!(cheap.calls(), 1);
         assert_eq!(primary.calls(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Streaming delegation tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn streaming_simple_routes_to_cheap() {
+        let primary = Arc::new(StubLlm::new("primary-response").with_model_name("primary"));
+        let cheap = Arc::new(StubLlm::new("cheap-response").with_model_name("cheap"));
+
+        let router = SmartRoutingProvider::new(
+            primary.clone(),
+            cheap.clone(),
+            SmartRoutingConfig {
+                cascade_enabled: false,
+                ..default_config()
+            },
+        );
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let resp = router
+            .complete_streaming(make_request("hello"), tx)
+            .await
+            .unwrap();
+        assert_eq!(resp.content, "cheap-response");
+        assert_eq!(cheap.calls(), 1);
+        assert_eq!(primary.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn streaming_complex_routes_to_primary() {
+        let primary = Arc::new(StubLlm::new("primary-response").with_model_name("primary"));
+        let cheap = Arc::new(StubLlm::new("cheap-response").with_model_name("cheap"));
+
+        let router = SmartRoutingProvider::new(primary.clone(), cheap.clone(), default_config());
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let resp = router
+            .complete_streaming(
+                make_request("Please do a security audit of this smart contract"),
+                tx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.content, "primary-response");
+        assert_eq!(primary.calls(), 1);
+        assert_eq!(cheap.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn streaming_tools_always_routes_to_primary() {
+        let primary = Arc::new(StubLlm::new("primary-response").with_model_name("primary"));
+        let cheap = Arc::new(StubLlm::new("cheap-response").with_model_name("cheap"));
+
+        let router = SmartRoutingProvider::new(primary.clone(), cheap.clone(), default_config());
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let resp = router
+            .complete_with_tools_streaming(make_tool_request(), tx)
+            .await
+            .unwrap();
+        assert_eq!(resp.content, Some("primary-response".to_string()));
+        assert_eq!(primary.calls(), 1);
+        assert_eq!(cheap.calls(), 0);
     }
 }

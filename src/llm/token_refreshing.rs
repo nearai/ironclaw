@@ -16,8 +16,8 @@ use crate::error::LlmError;
 use crate::llm::openai_codex_provider::OpenAiCodexProvider;
 use crate::llm::openai_codex_session::OpenAiCodexSessionManager;
 use crate::llm::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamingChunkSender,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// Decorator that refreshes OAuth tokens before API calls and reports zero cost.
@@ -109,6 +109,52 @@ impl LlmProvider for TokenRefreshingProvider {
         }
     }
 
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        chunk_tx: StreamingChunkSender,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.ensure_fresh_token().await;
+
+        match self.inner.complete_streaming(request.clone(), chunk_tx.clone()).await {
+            Err(LlmError::AuthFailed { .. } | LlmError::SessionExpired { .. }) => {
+                tracing::info!(
+                    "Auth failure during complete_streaming(), refreshing and retrying once"
+                );
+                self.session.handle_auth_failure().await?;
+                self.update_inner_token().await?;
+                self.inner.complete_streaming(request, chunk_tx).await
+            }
+            other => other,
+        }
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        chunk_tx: StreamingChunkSender,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.ensure_fresh_token().await;
+
+        match self
+            .inner
+            .complete_with_tools_streaming(request.clone(), chunk_tx.clone())
+            .await
+        {
+            Err(LlmError::AuthFailed { .. } | LlmError::SessionExpired { .. }) => {
+                tracing::info!(
+                    "Auth failure during complete_with_tools_streaming(), refreshing and retrying once"
+                );
+                self.session.handle_auth_failure().await?;
+                self.update_inner_token().await?;
+                self.inner
+                    .complete_with_tools_streaming(request, chunk_tx)
+                    .await
+            }
+            other => other,
+        }
+    }
+
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
         self.ensure_fresh_token().await;
         self.inner.list_models().await
@@ -187,5 +233,12 @@ mod tests {
     fn test_active_model_name_delegates() {
         let (provider, _dir) = make_provider_and_session();
         assert_eq!(provider.active_model_name(), "gpt-5.3-codex");
+    }
+
+    #[test]
+    fn test_streaming_delegates_model_name() {
+        let (provider, _dir) = make_provider_and_session();
+        // Streaming methods delegate to same inner provider
+        assert_eq!(provider.model_name(), "gpt-5.3-codex");
     }
 }

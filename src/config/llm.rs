@@ -316,9 +316,12 @@ impl LlmConfig {
                 "gemini_oauth".to_string()
             } else if is_openai_codex {
                 "openai_codex".to_string()
-            } else if let Some(ref p) = provider {
-                p.provider_id.clone()
             } else {
+                // Preserve the original backend name so that mod.rs can
+                // dispatch on it (e.g. "openai_compatible_streaming").
+                // The registry fallback sets provider_id to the canonical
+                // ID ("openai_compatible"), but the caller needs the
+                // user-specified backend to choose the right factory.
                 backend_lower
             },
             session,
@@ -511,7 +514,7 @@ impl LlmConfig {
                 // DB settings: legacy settings fields
                 match backend {
                     "ollama" => settings.ollama_base_url.clone(),
-                    "openai_compatible" | "openrouter" => {
+                    "openai_compatible" | "openai_compatible_streaming" | "openrouter" => {
                         settings.openai_compatible_base_url.clone()
                     }
                     _ => None,
@@ -981,7 +984,7 @@ mod tests {
         };
 
         let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
-        assert_eq!(cfg.backend, "zai");
+        assert_eq!(cfg.backend, "bigmodel");
         let provider = cfg.provider.expect("provider config should be present");
         assert_eq!(provider.provider_id, "zai");
         assert_eq!(provider.model, "glm-5");
@@ -1005,7 +1008,7 @@ mod tests {
         let settings = Settings::default();
 
         let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
-        assert_eq!(cfg.backend, "github_copilot");
+        assert_eq!(cfg.backend, "github-copilot");
         let provider = cfg.provider.expect("provider config should be present");
         assert_eq!(provider.provider_id, "github_copilot");
         assert_eq!(provider.base_url, "https://api.githubcopilot.com");
@@ -1064,8 +1067,8 @@ mod tests {
         let settings = Settings::default();
         let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(
-            cfg.backend, "openai",
-            "alias 'open_ai' should be normalized to canonical 'openai'"
+            cfg.backend, "open_ai",
+            "backend preserves the user-specified name (lowercased)"
         );
         let provider = cfg.provider.expect("should have provider config");
         assert_eq!(provider.provider_id, "openai");
@@ -1089,7 +1092,7 @@ mod tests {
 
         let settings = Settings::default();
         let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
-        assert_eq!(cfg.backend, "openai_compatible");
+        assert_eq!(cfg.backend, "some_custom_provider");
         let provider = cfg.provider.expect("should have provider config");
         assert_eq!(provider.provider_id, "openai_compatible");
         assert_eq!(provider.base_url, "http://localhost:8080/v1");

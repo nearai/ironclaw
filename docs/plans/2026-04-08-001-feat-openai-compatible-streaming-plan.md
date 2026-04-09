@@ -533,7 +533,7 @@ behaviorally unchanged.
 
 ---
 
-- [ ] **Unit 2: Make all 7 decorator wrappers streaming-aware**
+- [x] **Unit 2: Make all 7 decorator wrappers streaming-aware**
 
 **Goal:** Add explicit streaming-aware delegation in `RetryProvider`,
 `CircuitBreakerProvider`, `SmartRoutingProvider`, `FailoverProvider`,
@@ -633,7 +633,7 @@ the H1 bug class.
 
 ### Phase 2 — New provider and dispatcher wiring
 
-- [ ] **Unit 3: Add `async-openai` dependency and new
+- [x] **Unit 3: Add `async-openai` dependency and new
   `OpenAiCompatibleStreamingProvider`**
 
 **Goal:** Add `async-openai` to `Cargo.toml`, create
@@ -748,7 +748,7 @@ factory in `src/llm/mod.rs`.
 
 ---
 
-- [ ] **Unit 4: Plumb chunk channel from dispatcher through
+- [x] **Unit 4: Plumb chunk channel from dispatcher through
   `Reasoning::respond_with_tools_streaming`**
 
 **Goal:** Add a parallel `respond_with_tools_streaming(ctx,
@@ -842,7 +842,7 @@ on completion.
 
 ---
 
-- [ ] **Unit 5: Web channel ordering verification + SSE serialization
+- [x] **Unit 5: Web channel ordering verification + SSE serialization
   check**
 
 **Goal:** Verify that `StatusUpdate::StreamChunk` reaches the SSE
@@ -905,7 +905,7 @@ streaming).
 
 ### Phase 3 — Lobsterpool integration and end-to-end verification
 
-- [ ] **Unit 6: Switch lobsterpool runtime adapter to provision the
+- [x] **Unit 6: Switch lobsterpool runtime adapter to provision the
   new backend**
 
 **Goal:** Update the lobsterpool IronClaw runtime adapter to set

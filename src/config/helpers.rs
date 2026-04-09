@@ -220,21 +220,28 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
 
     // For HTTP (non-TLS), only allow localhost — remote HTTP endpoints
     // risk credential leakage (e.g. NEAR AI bearer tokens sent over plaintext).
+    // Exception: IRONCLAW_ALLOW_INSECURE_HTTP=true skips this check for
+    // trusted container-internal networks (e.g. Docker Compose service mesh).
     if scheme == "http" {
-        let is_localhost = host_lower == "localhost"
-            || host_lower == "127.0.0.1"
-            || host_lower == "::1"
-            || host_lower == "[::1]"
-            || host_lower.ends_with(".localhost");
-        if !is_localhost {
-            return Err(ConfigError::InvalidValue {
-                key: field_name.to_string(),
-                message: format!(
-                    "HTTP (non-TLS) is only allowed for localhost, got '{}'. \
-                     Use HTTPS for remote endpoints.",
-                    host
-                ),
-            });
+        let allow_insecure = std::env::var("IRONCLAW_ALLOW_INSECURE_HTTP")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if !allow_insecure {
+            let is_localhost = host_lower == "localhost"
+                || host_lower == "127.0.0.1"
+                || host_lower == "::1"
+                || host_lower == "[::1]"
+                || host_lower.ends_with(".localhost");
+            if !is_localhost {
+                return Err(ConfigError::InvalidValue {
+                    key: field_name.to_string(),
+                    message: format!(
+                        "HTTP (non-TLS) is only allowed for localhost, got '{}'. \
+                         Use HTTPS for remote endpoints.",
+                        host
+                    ),
+                });
+            }
         }
         return Ok(());
     }

@@ -156,6 +156,7 @@ subtle = "2"  # Constant-time comparisons for token validation
 
 # Multi-provider LLM support
 rig-core = { version = "0.30", default-features = false, features = ["reqwest-rustls"] }
+async-openai = { version = "0.34", default-features = false, features = ["chat-completion"] }
 
 # AWS Bedrock (native Converse API, opt-in via --features bedrock)
 aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
