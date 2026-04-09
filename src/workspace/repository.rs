@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::error::WorkspaceError;
 
 use crate::workspace::document::{
-    DocumentVersion, MemoryChunk, MemoryDocument, VersionSummary, WorkspaceEntry,
+    ChunkWrite, DocumentVersion, MemoryChunk, MemoryDocument, VersionSummary, WorkspaceEntry,
 };
 use crate::workspace::search::{RankedResult, SearchConfig, SearchResult, fuse_results};
 
@@ -327,6 +327,63 @@ impl Repository {
         })?;
 
         Ok(id)
+    }
+
+    /// Atomically replace all chunks for a document.
+    ///
+    /// Runs `DELETE` + N `INSERT`s inside a single transaction so two
+    /// concurrent reindexers for the same document cannot race each other
+    /// into a `UNIQUE (document_id, chunk_index)` violation. Passing an
+    /// empty slice is equivalent to `delete_chunks(document_id)`.
+    pub async fn replace_chunks(
+        &self,
+        document_id: Uuid,
+        chunks: &[ChunkWrite],
+    ) -> Result<(), WorkspaceError> {
+        let mut conn = self.conn().await?;
+
+        let tx = conn
+            .transaction()
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: format!("Begin transaction failed: {e}"),
+            })?;
+
+        tx.execute(
+            "DELETE FROM memory_chunks WHERE document_id = $1",
+            &[&document_id],
+        )
+        .await
+        .map_err(|e| WorkspaceError::ChunkingFailed {
+            reason: format!("Delete failed: {}", e),
+        })?;
+
+        for (index, chunk) in chunks.iter().enumerate() {
+            let id = Uuid::new_v4();
+            let chunk_index = index as i32;
+            let embedding_vec = chunk.embedding.as_ref().map(|e| Vector::from(e.clone()));
+            let content = chunk.content.as_str();
+
+            tx.execute(
+                r#"
+                INSERT INTO memory_chunks (id, document_id, chunk_index, content, embedding)
+                VALUES ($1, $2, $3, $4, $5)
+                "#,
+                &[&id, &document_id, &chunk_index, &content, &embedding_vec],
+            )
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: format!("Insert failed: {}", e),
+            })?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: format!("Commit failed: {e}"),
+            })?;
+
+        Ok(())
     }
 
     /// Update a chunk's embedding.

@@ -58,7 +58,7 @@ pub mod settings_schemas;
 
 pub use chunker::{ChunkConfig, chunk_document};
 pub use document::{
-    ADMIN_SCOPE, CONFIG_FILE_NAME, DocumentMetadata, DocumentVersion, HygieneMetadata,
+    ADMIN_SCOPE, CONFIG_FILE_NAME, ChunkWrite, DocumentMetadata, DocumentVersion, HygieneMetadata,
     IDENTITY_PATHS, MemoryChunk, MemoryDocument, PatchResult, VersionSummary, WorkspaceEntry,
     content_sha256, is_config_path, is_identity_path, is_reserved_scope, merge_workspace_entries,
     paths,
@@ -295,23 +295,15 @@ impl WorkspaceStorage {
         }
     }
 
-    async fn insert_chunk(
+    async fn replace_chunks(
         &self,
         document_id: Uuid,
-        chunk_index: i32,
-        content: &str,
-        embedding: Option<&[f32]>,
-    ) -> Result<Uuid, WorkspaceError> {
+        chunks: &[ChunkWrite],
+    ) -> Result<(), WorkspaceError> {
         match self {
             #[cfg(feature = "postgres")]
-            Self::Repo(repo) => {
-                repo.insert_chunk(document_id, chunk_index, content, embedding)
-                    .await
-            }
-            Self::Db(db) => {
-                db.insert_chunk(document_id, chunk_index, content, embedding)
-                    .await
-            }
+            Self::Repo(repo) => repo.replace_chunks(document_id, chunks).await,
+            Self::Db(db) => db.replace_chunks(document_id, chunks).await,
         }
     }
 
@@ -2166,15 +2158,12 @@ impl Workspace {
             return Ok(());
         }
 
-        // Chunk the content
-        let chunks = chunk_document(&doc.content, ChunkConfig::default());
-
-        // Delete old chunks
-        self.storage.delete_chunks(document_id).await?;
-
-        // Insert new chunks
-        for (index, content) in chunks.into_iter().enumerate() {
-            // Generate embedding if provider available
+        // Chunk the content and (optionally) embed each chunk before touching
+        // the DB, so the delete+insert happens in one transaction with no
+        // async points in the middle that could race a concurrent reindex.
+        let chunk_texts = chunk_document(&doc.content, ChunkConfig::default());
+        let mut writes: Vec<ChunkWrite> = Vec::with_capacity(chunk_texts.len());
+        for content in chunk_texts {
             let embedding = if let Some(ref provider) = self.embeddings {
                 match provider.embed(&content).await {
                     Ok(emb) => Some(emb),
@@ -2186,11 +2175,13 @@ impl Workspace {
             } else {
                 None
             };
-
-            self.storage
-                .insert_chunk(document_id, index as i32, &content, embedding.as_deref())
-                .await?;
+            writes.push(ChunkWrite { content, embedding });
         }
+
+        // One transaction: DELETE + N INSERTs. Closes the TOCTOU race where
+        // two concurrent reindexers for the same document could both delete,
+        // then both re-insert chunk_index 0 and hit the UNIQUE constraint.
+        self.storage.replace_chunks(document_id, &writes).await?;
 
         Ok(())
     }
@@ -3142,6 +3133,77 @@ mod versioning_tests {
             versions.len(),
             0,
             "runtime path writes must not accumulate version rows, got: {versions:?}"
+        );
+    }
+
+    // Regression: concurrent reindex of the same document used to hit
+    // `UNIQUE constraint failed: memory_chunks.document_id, memory_chunks.chunk_index`
+    // because delete_chunks + insert_chunk ran as separate libsql
+    // transactions — two writers could both delete, then both try to insert
+    // chunk_index 0. replace_chunks wraps the whole thing in one transaction,
+    // so concurrent writers serialize safely and last-writer-wins.
+    //
+    // Concurrency stays at 4 to keep every writer under libsql's 5 s busy
+    // timeout. The original race was provoked by any N >= 2 interleave;
+    // we only need enough writers to exercise the "one commits between the
+    // other's delete and insert" scheduling.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_writes_to_same_doc_do_not_collide_on_chunk_index() {
+        let (ws, _dir) = create_test_workspace().await;
+        let ws = Arc::new(ws);
+
+        // Prime the doc so get_or_create returns the same row for every
+        // concurrent writer.
+        ws.write("notes/hot.md", "seed").await.unwrap();
+
+        // Content that chunk_document splits into multiple chunks — widens
+        // the interleave window the old code used to race in.
+        let big_content: String =
+            std::iter::repeat_n("lorem ipsum dolor sit amet ", 500).collect::<String>();
+
+        // Fire off N concurrent writes. Every one of them must succeed;
+        // none may surface a ChunkingFailed UNIQUE conflict.
+        let mut joins = Vec::new();
+        for i in 0..4 {
+            let ws = Arc::clone(&ws);
+            let content = format!("{big_content}\nwriter-{i}");
+            joins.push(tokio::spawn(async move {
+                ws.write("notes/hot.md", &content).await
+            }));
+        }
+        for j in joins {
+            j.await
+                .expect("join")
+                .expect("write must not surface a ChunkingFailed error");
+        }
+
+        // Final state: the chunk rows must be a contiguous 0..N_CHUNKS
+        // prefix — no holes, no duplicates — matching exactly what
+        // chunk_document() would produce for whichever writer committed
+        // last. The document content is one of the writer strings.
+        let doc = ws
+            .storage
+            .get_document_by_path("test_version", None, "notes/hot.md")
+            .await
+            .unwrap();
+        let expected_chunks = chunk_document(&doc.content, ChunkConfig::default()).len();
+
+        let got_chunks = ws
+            .storage
+            .get_chunks_without_embeddings("test_version", None, 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            got_chunks.len(),
+            expected_chunks,
+            "chunk count after concurrent writes must match chunk_document(final content)"
+        );
+        let mut indexes: Vec<i32> = got_chunks.iter().map(|c| c.chunk_index).collect();
+        indexes.sort_unstable();
+        let expected: Vec<i32> = (0..expected_chunks as i32).collect();
+        assert_eq!(
+            indexes, expected,
+            "chunk_index set must be a contiguous 0..N after concurrent reindex"
         );
     }
 }
