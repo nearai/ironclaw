@@ -108,7 +108,7 @@ impl RegistryCatalog {
         // Try relative to current directory (for dev usage)
         if let Ok(cwd) = std::env::current_dir() {
             let candidate = cwd.join("registry");
-            if candidate.is_dir() {
+            if Self::is_registry(&candidate) {
                 return Some(candidate);
             }
         }
@@ -122,7 +122,7 @@ impl RegistryCatalog {
             for _ in 0..3 {
                 if let Some(d) = dir {
                     let candidate = d.join("registry");
-                    if candidate.is_dir() {
+                    if Self::is_registry(&candidate) {
                         return Some(candidate);
                     }
                     dir = d.parent();
@@ -133,15 +133,29 @@ impl RegistryCatalog {
         // Try CARGO_MANIFEST_DIR (compile-time, works in dev builds)
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let candidate = manifest_dir.join("registry");
-        if candidate.is_dir() {
+        if Self::is_registry(&candidate) {
             return Some(candidate);
         }
 
         None
     }
 
-    /// Try to load from disk; if `registry/` cannot be found, fall back to
-    /// manifests embedded into the binary at compile time.
+    /// Return `true` only if `dir` is a registry directory —
+    /// i.e. it contains `_bundles.json` or at least one of the known subdirectories
+    /// (`tools/`, `channels/`, `mcp-servers/`). This prevents accidentally matching
+    /// unrelated directories named "registry" such as `~/.cargo/registry/`.
+    fn is_registry(dir: &Path) -> bool {
+        if !dir.is_dir() {
+            return false;
+        }
+        dir.join("_bundles.json").is_file()
+            || dir.join("tools").is_dir()
+            || dir.join("channels").is_dir()
+            || dir.join("mcp-servers").is_dir()
+    }
+
+    /// Try to load from disk; if a valid `registry` cannot be found,
+    // fall back to manifests embedded into the binary at compile time.
     pub fn load_or_embedded() -> Result<Self, RegistryError> {
         if let Some(dir) = Self::find_dir() {
             return Self::load(&dir);
@@ -739,6 +753,24 @@ mod tests {
         let catalog = RegistryCatalog::load_or_embedded().unwrap();
         // At minimum, the embedded catalog from the repo should have entries
         assert!(!catalog.all().is_empty() || !catalog.bundle_names().is_empty());
+    }
+
+    #[test]
+    fn test_is_registry_accepts_tools_only_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry_dir = tmp.path().join("registry");
+        fs::create_dir_all(registry_dir.join("tools")).unwrap();
+
+        assert!(RegistryCatalog::is_registry(&registry_dir));
+    }
+
+    #[test]
+    fn test_is_registry_rejects_unrelated_registry_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry_dir = tmp.path().join("registry");
+        fs::create_dir_all(registry_dir.join("cache")).unwrap();
+
+        assert!(!RegistryCatalog::is_registry(&registry_dir));
     }
 
     #[test]
