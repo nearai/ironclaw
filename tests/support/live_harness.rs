@@ -457,6 +457,7 @@ pub struct LiveTestHarnessBuilder {
     skills_dir: Option<PathBuf>,
     channel_name: Option<String>,
     seeded_secret_names: Vec<String>,
+    pre_seed_secrets: Vec<(String, String)>,
 }
 
 impl LiveTestHarnessBuilder {
@@ -482,6 +483,7 @@ impl LiveTestHarnessBuilder {
             skills_dir: None,
             channel_name: None,
             seeded_secret_names: Vec::new(),
+            pre_seed_secrets: Vec::new(),
         }
     }
 
@@ -499,6 +501,22 @@ impl LiveTestHarnessBuilder {
     /// skipping the credential.
     pub fn with_secrets(mut self, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.seeded_secret_names = names.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Pre-seed a secret in the test rig's `SecretsStore` before the
+    /// agent starts. Required for live tests where a skill with a
+    /// credential spec activates and the kernel pre-flight auth gate
+    /// would otherwise block the conversation. The value is opaque to
+    /// the test framework — pass any non-empty string. The test should
+    /// not actually call the credentialed API; this just keeps the auth
+    /// gate satisfied so the agent can complete its other tool calls.
+    pub fn with_secret(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.pre_seed_secrets.push((name.into(), value.into()));
         self
     }
 
@@ -698,6 +716,9 @@ impl LiveTestHarnessBuilder {
                 self.seeded_secret_names.clone(),
             );
         }
+        for (name, value) in &self.pre_seed_secrets {
+            rig_builder = rig_builder.with_secret(name.clone(), value.clone());
+        }
         let rig = rig_builder.build().await;
 
         // Use cheap LLM for judge if available.
@@ -743,6 +764,9 @@ impl LiveTestHarnessBuilder {
         }
         if let Some(ref name) = self.channel_name {
             rig_builder = rig_builder.with_channel_name(name.clone());
+        }
+        for (name, value) in &self.pre_seed_secrets {
+            rig_builder = rig_builder.with_secret(name.clone(), value.clone());
         }
         let rig = rig_builder.build().await;
 

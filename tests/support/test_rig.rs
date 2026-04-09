@@ -628,6 +628,11 @@ pub struct TestRigBuilder {
     engine_v2: bool,
     channel_name_override: Option<String>,
     seeded_secrets: Option<SeededSecretsConfig>,
+    /// Pre-seed the SecretsStore with `(name, value)` pairs before the
+    /// agent starts. Used by live tests that need a credential to *exist*
+    /// (so the kernel pre-flight auth gate stays out of the way) but
+    /// don't actually call the credentialed API.
+    pre_seed_secrets: Vec<(String, String)>,
 }
 
 impl TestRigBuilder {
@@ -651,7 +656,25 @@ impl TestRigBuilder {
             engine_v2: false,
             channel_name_override: None,
             seeded_secrets: None,
+            pre_seed_secrets: Vec::new(),
         }
+    }
+
+    /// Pre-seed a secret in the SecretsStore before the agent starts.
+    ///
+    /// This is for tests that need a credential to *exist* so the
+    /// kernel-level pre-flight auth gate (which fires when a skill with
+    /// a credential spec activates) doesn't block the conversation. The
+    /// value can be any non-empty string — the test isn't actually
+    /// hitting the credentialed API, the credential just needs to be
+    /// present in the store under the test's owner_id.
+    ///
+    /// Note: only takes effect when the rig has a working `SecretsStore`
+    /// (i.e., the libSQL backend with `with_database_and_handles()`,
+    /// which is the standard rig setup).
+    pub fn with_secret(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.pre_seed_secrets.push((name.into(), value.into()));
+        self
     }
 
     /// Override the test channel name (default: "test", or "gateway" when
@@ -854,6 +877,7 @@ impl TestRigBuilder {
             engine_v2,
             channel_name_override,
             seeded_secrets,
+            pre_seed_secrets,
         } = self;
 
         // 1. Create temp dir + fresh libSQL database + run migrations.
@@ -1201,6 +1225,39 @@ impl TestRigBuilder {
         let ext_mgr_ref = components.extension_manager.clone();
         let skill_registry_ref = components.skill_registry.clone();
         let session_manager_ref = Arc::new(ironclaw::agent::SessionManager::new());
+
+        // Pre-seed credentials BEFORE the agent starts. This lets live
+        // tests inject a fake `github_token` (or similar) so the kernel
+        // pre-flight auth gate doesn't block the conversation when a
+        // skill with a credential spec activates. The value is opaque —
+        // tests aren't actually hitting the credentialed API, the secret
+        // just needs to exist under the test's owner_id.
+        if !pre_seed_secrets.is_empty() {
+            if let Some(ref secrets_store) = components.secrets_store {
+                use ironclaw::secrets::CreateSecretParams;
+                let owner_id = components.config.owner_id.clone();
+                for (name, value) in &pre_seed_secrets {
+                    let params = CreateSecretParams::new(name.clone(), value.clone());
+                    if let Err(e) = secrets_store.create(&owner_id, params).await {
+                        // Already-exists is fine — the seeded DB may
+                        // already have the secret. Anything else is a
+                        // setup error worth surfacing.
+                        let msg = e.to_string();
+                        if !msg.contains("already exists") && !msg.contains("UNIQUE") {
+                            eprintln!(
+                                "[TestRig] WARNING: failed to pre-seed secret '{name}' for \
+                                 user '{owner_id}': {msg}"
+                            );
+                        }
+                    }
+                }
+            } else {
+                eprintln!(
+                    "[TestRig] WARNING: pre_seed_secrets requested but no SecretsStore is \
+                     wired (need libsql backend with handles)"
+                );
+            }
+        }
 
         // 7. Construct AgentDeps from AppComponents (mirrors main.rs).
         let deps = AgentDeps {
