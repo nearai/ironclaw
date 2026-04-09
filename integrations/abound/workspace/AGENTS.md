@@ -111,7 +111,7 @@ When the user needs to choose from options (payment reasons, recipients, amounts
 <brief intro text>
 
 [[choice_set]]
-{"type":"choice_set","id":"UNIQUE-ID","title":"QUESTION","subtitle":"HELPER","layout":"carousel","items":[{"id":"OPTION-ID","title":"SHORT LABEL","subtitle":"ONE LINE","description":"DETAIL","cta_label":"BUTTON TEXT","prompt":"FULL INSTRUCTION WHEN SELECTED"}]}
+{"type":"choice_set","id":"UNIQUE-ID","title":"QUESTION","subtitle":"HELPER","layout":"carousel","items":[{"id":"OPTION-ID","title":"SHORT LABEL","subtitle":"ONE LINE","description":"DETAIL","image_url":"https://images.unsplash.com/photo-RELEVANT-IMAGE?w=400","cta_label":"BUTTON TEXT","prompt":"FULL INSTRUCTION WHEN SELECTED"}]}
 [[/choice_set]]
 ```
 
@@ -121,12 +121,13 @@ When the user needs to choose from options (payment reasons, recipients, amounts
 Here are the available payment reasons for your transfer:
 
 [[choice_set]]
-{"type":"choice_set","id":"payment-reason","title":"What's the purpose of this transfer?","subtitle":"Required for compliance","layout":"carousel","items":[{"id":"family","title":"Family Maintenance","subtitle":"Supporting family","description":"Regular support for family members in India","cta_label":"Select","prompt":"The payment reason is Family Maintenance"},{"id":"education","title":"Education Support","subtitle":"Tuition & fees","description":"Supporting education expenses in India","cta_label":"Select","prompt":"The payment reason is Education Support"},{"id":"medical","title":"Medical Treatment","subtitle":"Healthcare costs","description":"Supporting medical expenses in India","cta_label":"Select","prompt":"The payment reason is Medical Treatment"},{"id":"own-account","title":"Own Account","subtitle":"Self transfer","description":"Transfer to your own account in India","cta_label":"Select","prompt":"The payment reason is Transfer to own account"}]}
+{"type":"choice_set","id":"payment-reason","title":"What's the purpose of this transfer?","subtitle":"Required for compliance","layout":"carousel","items":[{"id":"family","title":"Family Maintenance","subtitle":"Supporting family","description":"Regular support for family members in India","image_url":"https://images.unsplash.com/photo-1511895426328-dc8714191300?w=400","cta_label":"Select","prompt":"The payment reason is Family Maintenance"},{"id":"education","title":"Education Support","subtitle":"Tuition & fees","description":"Supporting education expenses in India","image_url":"https://images.unsplash.com/photo-1523050854058-8df90110c476?w=400","cta_label":"Select","prompt":"The payment reason is Education Support"},{"id":"medical","title":"Medical Treatment","subtitle":"Healthcare costs","description":"Supporting medical expenses in India","image_url":"https://images.unsplash.com/photo-1538108149393-fbbd81895907?w=400","cta_label":"Select","prompt":"The payment reason is Medical Treatment"},{"id":"own-account","title":"Own Account","subtitle":"Self transfer","description":"Transfer to your own account in India","image_url":"https://images.unsplash.com/photo-1554224155-6726b3ff858f?w=400","cta_label":"Select","prompt":"The payment reason is Transfer to own account"}]}
 [[/choice_set]]
 ```
 
 **RULES:**
 - The `[[choice_set]]` and `[[/choice_set]]` markers MUST appear literally in your output — they are parsed by the frontend
+- Every item MUST include an `image_url` field with a relevant Unsplash image URL (append `?w=400`)
 - Pick the top 4-5 most relevant options, not all 20+
 - Include a one-line intro before the block
 - The `prompt` field is what gets sent as the user's next message when they tap the card
