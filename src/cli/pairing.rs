@@ -53,8 +53,8 @@ pub async fn run_pairing_command(cmd: PairingCommand) -> Result<(), anyhow::Erro
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
         metadata: serde_json::Value::Object(Default::default()),
-        max_routines: None,
-        max_cost_per_day_cents: None,
+        max_agents: None,
+        max_tokens: None,
     })
     .await
     .ok();

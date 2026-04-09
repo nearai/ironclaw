@@ -283,8 +283,8 @@ mod tests {
             last_login_at: None,
             created_by: None,
             metadata: serde_json::json!({}),
-            max_routines: None,
-            max_cost_per_day_cents: None,
+            max_agents: None,
+            max_tokens: None,
         };
         db.create_user(&user).await.unwrap();
 
@@ -349,8 +349,8 @@ mod tests {
             last_login_at: None,
             created_by: None,
             metadata: serde_json::json!({}),
-            max_routines: None,
-            max_cost_per_day_cents: None,
+            max_agents: None,
+            max_tokens: None,
         };
         db.create_user(&user).await.unwrap();
 
@@ -392,8 +392,8 @@ mod tests {
             last_login_at: None,
             created_by: None,
             metadata: serde_json::json!({}),
-            max_routines: None,
-            max_cost_per_day_cents: None,
+            max_agents: None,
+            max_tokens: None,
         };
         let identity = UserIdentityRecord {
             id: Uuid::new_v4(),

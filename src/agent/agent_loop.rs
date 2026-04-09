@@ -502,12 +502,12 @@ impl Agent {
             if let Some(db) = self.deps.store.as_ref() {
                 match db.get_user(user_id).await {
                     Ok(Some(record)) => {
-                        if record.max_routines.is_some()
-                            || record.max_cost_per_day_cents.is_some()
+                        if record.max_agents.is_some()
+                            || record.max_tokens.is_some()
                         {
                             Some(crate::tenant::UserQuota {
-                                max_routines: record.max_routines,
-                                max_cost_per_day_cents: record.max_cost_per_day_cents,
+                                max_agents: record.max_agents,
+                                max_tokens: record.max_tokens,
                             })
                         } else {
                             None // No quota assigned → fail-closed

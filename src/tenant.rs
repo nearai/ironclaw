@@ -955,16 +955,16 @@ impl TenantRateRegistry {
 /// Under fail-closed semantics, a non-admin user with no quota is denied.
 #[derive(Debug, Clone)]
 pub struct UserQuota {
-    /// Maximum number of routines (agents) this user can create.
-    pub max_routines: Option<i32>,
-    /// Maximum daily LLM spend in cents (e.g. 10000 = $100/day).
-    pub max_cost_per_day_cents: Option<i64>,
+    /// Maximum number of agents this user can create.
+    pub max_agents: Option<i32>,
+    /// Total cumulative token quota. When exhausted, user can't chat until admin increases it.
+    pub max_tokens: Option<i64>,
 }
 
 impl UserQuota {
     /// Returns `true` if at least one quota dimension is set.
     pub fn has_any_limit(&self) -> bool {
-        self.max_routines.is_some() || self.max_cost_per_day_cents.is_some()
+        self.max_agents.is_some() || self.max_tokens.is_some()
     }
 }
 
@@ -1072,8 +1072,9 @@ impl TenantCtx {
             }
         };
 
-        // Check per-user daily cost limit from DB.
-        if let Some(limit_cents) = quota.max_cost_per_day_cents {
+        // Check per-user token quota from DB.
+        // TODO: replace with cumulative token tracking — currently uses daily spend as a proxy.
+        if let Some(limit_cents) = quota.max_tokens {
             let limit_cents_u64 = limit_cents.max(0) as u64;
             let spent = self
                 .cost_guard
