@@ -518,6 +518,16 @@ impl JobStore for LibSqlBackend {
         // filter for "started but not yet completed" don't pick these up as
         // never-started rows.
         //
+        // ⚠️ System job timestamps do NOT reflect tool execution time.
+        // The row is INSERTed *before* the dispatched tool runs. This is
+        // intentional: the audit row must be durable even if the dispatcher
+        // panics mid-tool, and an updating second write would double the
+        // per-dispatch DB cost. Consumers that need execution duration must
+        // read `job_actions.duration_ms` for the associated action rows —
+        // they wrap the actual `tool.execute()` boundary and carry the real
+        // start/end measurements. (Same caveat applies to the PostgreSQL
+        // backend in `src/history/store.rs::create_system_job`.)
+        //
         // ⚠️ Row growth: every ToolDispatcher::dispatch() call (gateway
         // handlers, CLI commands, routine ticks) creates one system job row.
         // `agent_jobs` is the durable audit anchor, not ephemeral LLM data,

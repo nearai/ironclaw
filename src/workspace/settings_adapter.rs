@@ -16,7 +16,7 @@ use tokio::sync::OnceCell;
 use tracing::debug;
 
 use crate::db::{Database, SettingsStore};
-use crate::error::DatabaseError;
+use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::SettingRow;
 use crate::workspace::Workspace;
 use crate::workspace::settings_schemas::{schema_for_key, settings_path, validate_settings_key};
@@ -145,6 +145,17 @@ impl WorkspaceSettingsAdapter {
                     .map_err(|e| {
                         DatabaseError::Query(format!("workspace metadata repair failed: {e}"))
                     })?;
+                // Also rewrite the human-readable content so it stays in sync
+                // with the metadata. The metadata column is the inheritance
+                // source of truth, but having the doc's content silently
+                // diverge confuses anyone reading the doc directly to
+                // understand which inherited flags are active.
+                self.workspace
+                    .write(config_path, &expected.to_string())
+                    .await
+                    .map_err(|e| {
+                        DatabaseError::Query(format!("workspace content repair failed: {e}"))
+                    })?;
             }
             return Ok(());
         }
@@ -196,18 +207,29 @@ impl WorkspaceSettingsAdapter {
         // `skip_indexing` / hygiene flags are in place. Cheap after the
         // first call (atomic OnceCell load).
         self.ensure_system_config_lazy().await?;
-        validate_settings_key(key)
-            .map_err(|e| DatabaseError::Query(format!("invalid settings key '{key}': {e}")))?;
+        validate_settings_key(key).map_err(|e| match e {
+            WorkspaceError::InvalidPath { reason, .. } => {
+                DatabaseError::Query(format!("invalid settings key '{key}': {reason}"))
+            }
+            other => DatabaseError::Query(format!("invalid settings key '{key}': {other}")),
+        })?;
         let path = settings_path(key);
         let content = serde_json::to_string_pretty(value)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+
+        // Resolve the registered schema once and reuse for both pre-write
+        // validation and post-write metadata persistence. Calling
+        // `schema_for_key` twice would do duplicate work and (in the unlikely
+        // event the registry ever became non-deterministic) could let the
+        // validated schema diverge from the persisted one.
+        let schema = schema_for_key(key);
 
         // Validate against the known schema BEFORE the first write so the
         // initial document creation cannot bypass schema enforcement. Once
         // metadata is set below, subsequent writes are validated by the
         // workspace itself via the resolved metadata chain.
-        if let Some(schema) = schema_for_key(key) {
-            crate::workspace::schema::validate_content_against_schema(&path, &content, &schema)
+        if let Some(schema) = schema.as_ref() {
+            crate::workspace::schema::validate_content_against_schema(&path, &content, schema)
                 .map_err(|e| DatabaseError::Query(format!("schema validation failed: {e}")))?;
         }
 
@@ -221,7 +243,7 @@ impl WorkspaceSettingsAdapter {
         // Persist the schema in metadata so future writes are validated
         // automatically by the workspace write path. Propagate errors so a
         // metadata-update failure doesn't silently leave the doc un-typed.
-        if let Some(schema) = schema_for_key(key) {
+        if let Some(schema) = schema {
             self.workspace
                 .update_metadata(
                     doc.id,

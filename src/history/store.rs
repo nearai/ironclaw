@@ -206,6 +206,15 @@ impl Store {
     /// NULL, and dashboards filtering for "started but not yet completed"
     /// don't misclassify these as never-started rows.
     ///
+    /// ⚠️ **System job timestamps do NOT reflect tool execution time.**
+    /// The row is INSERTed *before* the tool runs, with all three timestamps
+    /// pinned to "now". This is intentional: the audit row must be durable
+    /// even if the dispatcher panics mid-tool, and an updating second write
+    /// would double the per-dispatch DB cost. Consumers that need execution
+    /// duration must read from the associated `job_actions` rows
+    /// (`job_actions.duration_ms`) — they wrap the actual `tool.execute()`
+    /// boundary and carry the real start/end measurements.
+    ///
     /// ⚠️ Row growth: every `ToolDispatcher::dispatch()` call (gateway
     /// handlers, CLI commands, routine ticks) creates one system job row.
     /// `agent_jobs` is the durable audit anchor, not ephemeral LLM data,

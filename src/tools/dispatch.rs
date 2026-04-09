@@ -87,13 +87,25 @@ impl ToolDispatcher {
     /// Pipeline (mirrors `Worker::execute_tool`):
     /// 1. Resolve the tool from the registry
     /// 2. Normalize parameters via `prepare_tool_params`
-    /// 3. Validate parameters via `SafetyLayer::validator()`
-    /// 4. Redact sensitive parameters for logging and audit
-    /// 5. Create a fresh system job for FK integrity
-    /// 6. Execute with the tool's per-tool timeout
-    /// 7. Sanitize the result via `SafetyLayer::sanitize_tool_output`
-    /// 8. Persist an `ActionRecord` with redacted params and sanitized output
-    /// 9. Return the original `ToolOutput`
+    /// 3. Validate parameters against injection patterns via `SafetyLayer::validator()`
+    /// 4. Validate parameters against the tool's `parameters_schema()` (JSON Schema)
+    /// 5. Redact sensitive parameters for logging and audit
+    /// 6. Create a fresh system job for FK integrity
+    /// 7. Execute with the tool's per-tool timeout
+    /// 8. Sanitize the result via `SafetyLayer::sanitize_tool_output` for the
+    ///    persisted `ActionRecord` ONLY
+    /// 9. Persist an `ActionRecord` with redacted params and sanitized output
+    /// 10. Return the **original (un-sanitized)** `ToolOutput` to the caller
+    ///
+    /// **Sanitization scope.** `sanitize_tool_output` runs only against the
+    /// audit-row payload, not against the value returned to the caller. This
+    /// mirrors `Worker::execute_tool` (the agent loop also receives the raw
+    /// output so its reasoning can be reproduced from history). Channels that
+    /// forward dispatcher output to end users (gateway responses, webhook
+    /// replies, etc.) MUST run their own boundary sanitization — typically
+    /// the same `SafetyLayer::sanitize_tool_output` call — at the channel
+    /// edge. Doing it inside `dispatch()` would silently lossy-encode tool
+    /// results for callers (CLI, routine engine) that need the raw bytes.
     ///
     /// Approval checks are skipped — channel-initiated operations are
     /// user-confirmed by definition. Audit-trail persistence failures are
@@ -116,7 +128,9 @@ impl ToolDispatcher {
         // 1. Normalize parameters (coerce types, fill defaults).
         let normalized_params = prepare_tool_params(tool.as_ref(), &params);
 
-        // 2. Schema validation.
+        // 2a. Injection-pattern validation (SafetyLayer). Checks free-form
+        //     fields against the prompt-injection / leak-pattern detector.
+        //     This is *content* validation, not *shape* validation.
         let validation = self
             .safety
             .validator()
@@ -130,6 +144,26 @@ impl ToolDispatcher {
                 .join("; ");
             return Err(ToolError::InvalidParameters(format!(
                 "Invalid tool parameters: {details}"
+            )));
+        }
+
+        // 2b. JSON-Schema (shape) validation against the tool's declared
+        //     `parameters_schema()`. The LLM function-calling layer enforces
+        //     the schema for agent-initiated calls, but channel/CLI/routine
+        //     dispatches construct the JSON by hand and historically
+        //     bypassed schema enforcement entirely. Skip if the tool reports
+        //     a permissive empty schema (`{}`) so tools that haven't yet
+        //     declared a schema aren't penalised.
+        let tool_schema = tool.parameters_schema();
+        let schema_is_permissive = tool_schema
+            .as_object()
+            .map(|m| m.is_empty())
+            .unwrap_or(true);
+        if !schema_is_permissive
+            && let Err(e) = jsonschema::validate(&tool_schema, &normalized_params)
+        {
+            return Err(ToolError::InvalidParameters(format!(
+                "Invalid tool parameters for '{resolved_name}': {e}"
             )));
         }
 
@@ -495,6 +529,45 @@ mod integration_tests {
         assert!(
             action.output_sanitized.is_some(),
             "output_sanitized should be populated on the audit row"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_rejects_params_violating_tool_schema() {
+        // Regression: prior to this test, the dispatcher only ran the
+        // SafetyLayer injection check on params and never validated against
+        // `tool.parameters_schema()`. Channel/CLI/routine callers could
+        // therefore pass arbitrary JSON shapes to tools and only discover
+        // the mismatch (or worse, silently malformed behavior) inside the
+        // tool itself. This asserts the schema gate is now load-bearing in
+        // the dispatch path.
+        let (dispatcher, _backend, _db, registry, _dir) = test_dispatcher().await;
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        registry
+            .register(Arc::new(RecordingTool {
+                captured: Arc::clone(&captured),
+            }))
+            .await;
+
+        // `RecordingTool` declares `required: ["message"]`, so dispatching
+        // without `message` must be rejected before the tool is invoked.
+        let result = dispatcher
+            .dispatch(
+                "recording_stub",
+                serde_json::json!({ "api_key": "irrelevant" }),
+                "tester",
+                DispatchSource::Channel("gateway".into()),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(ToolError::InvalidParameters(_))),
+            "expected InvalidParameters, got {result:?}"
+        );
+        // Tool itself must NOT have been invoked — the schema gate fires
+        // before execution.
+        assert!(
+            captured.lock().expect("captured lock").is_none(),
+            "tool must not be executed when its parameters_schema rejects the input"
         );
     }
 

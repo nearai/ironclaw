@@ -68,9 +68,9 @@ pub fn schema_for_key(key: &str) -> Option<Value> {
 /// or relative-path segments that could escape the prefix. Allowed: ASCII
 /// alphanumerics, `_`, `-`, and `.` (but not `..`).
 pub fn validate_settings_key(key: &str) -> Result<(), WorkspaceError> {
-    let reject = |reason: &str| WorkspaceError::SchemaValidation {
+    let reject = |reason: &str| WorkspaceError::InvalidPath {
         path: format!("{SETTINGS_PREFIX}{key}"),
-        errors: vec![format!("invalid settings key: {reason}")],
+        reason: reason.to_string(),
     };
 
     if key.is_empty() {
@@ -157,6 +157,19 @@ mod tests {
         assert!(validate_settings_key("").is_err());
         let long = "a".repeat(MAX_SETTINGS_KEY_LEN + 1);
         assert!(validate_settings_key(&long).is_err());
+    }
+
+    #[test]
+    fn validate_settings_key_returns_invalid_path_variant() {
+        // Regression: key/path validation must surface as `InvalidPath`,
+        // not `SchemaValidation` — callers and downstream UIs need to
+        // distinguish "your settings key has bad characters" from "your
+        // settings *value* failed JSON-Schema validation".
+        let err = validate_settings_key("foo/bar").unwrap_err();
+        assert!(
+            matches!(err, WorkspaceError::InvalidPath { .. }),
+            "expected InvalidPath, got {err:?}"
+        );
     }
 
     #[test]

@@ -202,6 +202,81 @@ mod tests {
     }
 
     #[test]
+    fn moderately_complex_schema_compiles_within_budget() {
+        // Baseline regression: schemas can today be set via document
+        // metadata (which the agent and trusted skills can write), and
+        // `validator_for` recompiles on every call. This test pins a
+        // moderately deep nested schema and asserts both compilation and
+        // validation complete within a sane wall-clock budget on
+        // commodity hardware. If a future change accidentally introduces
+        // catastrophic backtracking — or upgrades `jsonschema` to a
+        // version with worse compile-time behavior — this test will trip
+        // long before it would in production.
+        //
+        // The budget (500ms) is intentionally generous: we are guarding
+        // against a regression of multiple-orders-of-magnitude, not
+        // micro-benchmarking. Tighten only if it becomes load-bearing.
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "nested": {
+                    "type": "object",
+                    "properties": {
+                        "deeper": {
+                            "type": "object",
+                            "properties": {
+                                "deepest": {
+                                    "anyOf": [
+                                        { "type": "string", "minLength": 1, "maxLength": 64 },
+                                        { "type": "integer", "minimum": 0, "maximum": 1000 },
+                                        { "type": "array",
+                                          "items": { "type": "string" },
+                                          "minItems": 0,
+                                          "maxItems": 32 }
+                                    ]
+                                }
+                            },
+                            "required": ["deepest"]
+                        }
+                    },
+                    "required": ["deeper"]
+                },
+                "tags": {
+                    "type": "array",
+                    "items": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$" },
+                    "uniqueItems": true,
+                    "maxItems": 16
+                },
+                "metadata": {
+                    "type": "object",
+                    "additionalProperties": { "type": ["string", "number", "boolean"] }
+                }
+            },
+            "required": ["nested"],
+            "additionalProperties": false
+        });
+        let content = r#"{
+            "nested": { "deeper": { "deepest": "ok" } },
+            "tags": ["alpha", "beta_2"],
+            "metadata": { "owner": "tester", "count": 3, "active": true }
+        }"#;
+
+        let start = std::time::Instant::now();
+        let result = validate_content_against_schema("test.json", content, &schema);
+        let elapsed = start.elapsed();
+        assert!(
+            result.is_ok(),
+            "moderately complex schema must validate: {result:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "schema compile + validate took {elapsed:?}; budget is 500ms — \
+             investigate before bumping (likely a `jsonschema` regression \
+             or a pathological schema construction)"
+        );
+    }
+
+    #[test]
     fn null_schema_is_treated_as_no_op() {
         // Regression: a metadata field of `"schema": null` deserializes as
         // `Some(Value::Null)`, not `None`. Without an explicit null guard,
