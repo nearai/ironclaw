@@ -591,10 +591,9 @@ impl TraceLlm {
         key: &str,
         content: &str,
     ) {
-        let parsed: Option<serde_json::Value> =
-            serde_json::from_str(content).ok().or_else(|| {
-                coerce_python_repr_to_json(content).and_then(|s| serde_json::from_str(&s).ok())
-            });
+        let parsed: Option<serde_json::Value> = serde_json::from_str(content).ok().or_else(|| {
+            coerce_python_repr_to_json(content).and_then(|s| serde_json::from_str(&s).ok())
+        });
         let Some(json) = parsed else { return };
         let Some(obj) = json.as_object() else {
             return;

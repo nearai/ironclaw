@@ -206,8 +206,8 @@ async fn notify_pending_gate(
         );
     }
 
-    send_pending_gate_status(agent, message, &pending).await;
-    Ok(pending_gate_prompt_message(&pending))
+    send_pending_gate_status(agent, message, pending).await;
+    Ok(pending_gate_prompt_message(pending))
 }
 
 async fn insert_and_notify_pending_gate(

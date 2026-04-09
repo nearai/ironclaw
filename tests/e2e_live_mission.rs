@@ -154,10 +154,10 @@ mod live_mission_tests {
         // notification often races ahead, so we may have to wait a bit.
         let foreground_deadline = Instant::now() + Duration::from_secs(120);
         loop {
-            let captured = rig
-                .wait_for_responses(0, Duration::from_millis(0))
-                .await;
-            let has_foreground = captured.iter().any(|r| !r.content.contains(&mission_marker));
+            let captured = rig.wait_for_responses(0, Duration::from_millis(0)).await;
+            let has_foreground = captured
+                .iter()
+                .any(|r| !r.content.contains(&mission_marker));
             if has_foreground {
                 break;
             }
@@ -165,7 +165,10 @@ mod live_mission_tests {
                 panic!(
                     "foreground reply (response without `{mission_marker}` marker) did not \
                      arrive within 2 minutes. Captured so far: {:#?}",
-                    captured.iter().map(|r| r.content.clone()).collect::<Vec<_>>()
+                    captured
+                        .iter()
+                        .map(|r| r.content.clone())
+                        .collect::<Vec<_>>()
                 );
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -174,9 +177,7 @@ mod live_mission_tests {
         // Now grab everything captured during the setup turn and split it.
         // The mission notification carries the `**[name]**` marker; the
         // foreground reply does not.
-        let setup_responses = rig
-            .wait_for_responses(0, Duration::from_millis(0))
-            .await;
+        let setup_responses = rig.wait_for_responses(0, Duration::from_millis(0)).await;
         let foreground_setup_replies: Vec<String> = setup_responses
             .iter()
             .map(|r| r.content.clone())

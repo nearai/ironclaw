@@ -325,9 +325,7 @@ fn safe_truncate(content: &str, max_bytes: usize) -> String {
 /// indexed (string, number, bool). Nested objects and arrays are skipped —
 /// they're rarely useful as parameterization keys and would inflate the
 /// lookup with noise.
-fn build_prior_tool_lookup(
-    messages: &[ChatMessage],
-) -> HashMap<String, HashMap<String, String>> {
+fn build_prior_tool_lookup(messages: &[ChatMessage]) -> HashMap<String, HashMap<String, String>> {
     let mut lookup: HashMap<String, HashMap<String, String>> = HashMap::new();
     for msg in messages {
         // ── Shape 1: native Role::Tool with structured content. ──
@@ -478,12 +476,11 @@ fn parse_user_tool_result(content: &str) -> Option<(String, &str)> {
     // Required prefix: `[Tool ` (literal `[` then word `Tool ` with a space).
     let rest = content.strip_prefix("[Tool ")?;
     // Optional opening backtick around the name.
-    let (name_start, after_name_quote) =
-        if let Some(stripped) = rest.strip_prefix('`') {
-            (stripped, true)
-        } else {
-            (rest, false)
-        };
+    let (name_start, after_name_quote) = if let Some(stripped) = rest.strip_prefix('`') {
+        (stripped, true)
+    } else {
+        (rest, false)
+    };
     // Find the closing of the name. With a backtick, look for the closing
     // backtick; without, look for the next space.
     let (name, after_name) = if after_name_quote {
