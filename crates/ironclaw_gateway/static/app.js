@@ -790,6 +790,16 @@ function connectSSE(lastEventIdOverride) {
   // Wraps addEventListener to intercept every named event and dispatch
   // to widget subscribers before the built-in handler runs.
   // Must run before any addTrackedEventListener calls so the wrapper is in place.
+  //
+  // NOTE: Only NAMED events (those dispatched via `addEventListener('foo', …)`
+  // by the gateway, see `SseEvent` in `src/channels/web/types.rs`) are
+  // forwarded. The generic `eventSource.onmessage` handler is intentionally
+  // NOT wrapped because the IronClaw gateway never emits SSE frames without
+  // an `event:` field — every frame carries a typed name (`response`,
+  // `tool_started`, `gate_required`, etc.). Widget authors should subscribe
+  // to those typed events via `IronClaw.api.on('<event_type>', handler)`
+  // rather than relying on the generic message channel; if a widget needs
+  // an untyped stream it must open its own `EventSource`.
   var _origAddEventListener = eventSource.addEventListener.bind(eventSource);
   eventSource.addEventListener = function(type, listener, opts) {
     _origAddEventListener(type, function(e) {
@@ -1611,9 +1621,15 @@ function _findJsonCandidates(html) {
     }
 
     var raw = html.substring(i, end);
-    // Normalize Python-style single quotes to double quotes. This is a
-    // best-effort convenience; quoted apostrophes may get mangled.
-    var normalized = raw.replace(/'/g, '"');
+    // Normalize Python-style single quotes to double quotes so input like
+    // `{'k': 'v'}` parses as JSON. The naive `raw.replace(/'/g, '"')`
+    // mangled apostrophes inside already-double-quoted string values
+    // (e.g., `{"name": "it's"}` → `{"name": "it"s"}` → parse failure).
+    // Walk the candidate with the same string-state tracking as
+    // `_findBalancedEnd` and only rewrite single quotes that appear OUTSIDE
+    // a double-quoted string. This preserves apostrophes inside `"it's"`
+    // while still upgrading single-quoted JSON-like input.
+    var normalized = _normalizeJsonQuotes(raw);
     try {
       var obj = JSON.parse(normalized);
       if (typeof obj === 'object' && obj !== null && !Array.isArray(obj)) {
@@ -1627,6 +1643,53 @@ function _findJsonCandidates(html) {
   }
 
   return results;
+}
+
+/**
+ * Rewrite single quotes that act as string delimiters to double quotes,
+ * leaving single quotes that appear inside an already-double-quoted string
+ * untouched. Mirrors the string-state tracking in `_findBalancedEnd` so the
+ * upgrade is consistent with how the candidate was extracted.
+ *
+ * `{'k': 'v'}` → `{"k": "v"}`
+ * `{"name": "it's"}` → `{"name": "it's"}` (apostrophe preserved)
+ * `{'msg': "she said \"hi\""}` → `{"msg": "she said \"hi\""}`
+ * @private
+ */
+function _normalizeJsonQuotes(raw) {
+  var out = '';
+  var inString = null; // '"' | "'" | null
+  for (var k = 0; k < raw.length; k++) {
+    var c = raw[k];
+    if (inString) {
+      // Inside a string literal — copy verbatim, including any single
+      // quotes that happen to be apostrophes. Honor backslash escapes so
+      // `"\""` doesn't terminate the literal early.
+      if (c === '\\' && k + 1 < raw.length) {
+        out += c + raw[k + 1];
+        k++;
+        continue;
+      }
+      if (c === inString) {
+        // Closing quote: emit as `"` regardless of which quote opened the
+        // string, so a single-quoted literal becomes a double-quoted one.
+        out += '"';
+        inString = null;
+        continue;
+      }
+      out += c;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      // Opening quote: normalize to `"` and remember which character
+      // closes this literal so apostrophes inside `"it's"` are preserved.
+      inString = c;
+      out += '"';
+      continue;
+    }
+    out += c;
+  }
+  return out;
 }
 
 /**
