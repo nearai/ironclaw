@@ -26,7 +26,6 @@ fn row_to_user(row: &libsql::Row) -> Result<UserRecord, DatabaseError> {
         metadata,
         max_agents: get_opt_i64(row, 10).map(|v| v as i32),
         max_tokens: get_opt_i64(row, 11),
-        tokens_used: get_opt_i64(row, 12).unwrap_or(0),
     })
 }
 
@@ -111,7 +110,7 @@ impl UserStore for LibSqlBackend {
             .query(
                 r#"
                 SELECT id, email, display_name, status, role, created_at, updated_at,
-                       last_login_at, created_by, metadata, max_agents, max_tokens, tokens_used
+                       last_login_at, created_by, metadata, max_agents, max_tokens
                 FROM users WHERE id = ?1
                 "#,
                 params![id],
@@ -135,7 +134,7 @@ impl UserStore for LibSqlBackend {
             .query(
                 r#"
                 SELECT id, email, display_name, status, role, created_at, updated_at,
-                       last_login_at, created_by, metadata, max_agents, max_tokens, tokens_used
+                       last_login_at, created_by, metadata, max_agents, max_tokens
                 FROM users WHERE LOWER(email) = LOWER(?1)
                 "#,
                 params![email],
@@ -161,7 +160,7 @@ impl UserStore for LibSqlBackend {
             conn.query(
                 r#"
                 SELECT id, email, display_name, status, role, created_at, updated_at,
-                       last_login_at, created_by, metadata, max_agents, max_tokens, tokens_used
+                       last_login_at, created_by, metadata, max_agents, max_tokens
                 FROM users WHERE status = ?1
                 ORDER BY created_at DESC
                 "#,
@@ -173,7 +172,7 @@ impl UserStore for LibSqlBackend {
             conn.query(
                 r#"
                 SELECT id, email, display_name, status, role, created_at, updated_at,
-                       last_login_at, created_by, metadata, max_agents, max_tokens, tokens_used
+                       last_login_at, created_by, metadata, max_agents, max_tokens
                 FROM users
                 ORDER BY created_at DESC
                 "#,
@@ -369,7 +368,7 @@ impl UserStore for LibSqlBackend {
                     t.last_used_at, t.created_at, t.revoked_at,
                     u.id, u.email, u.display_name, u.status, u.role, u.created_at,
                     u.updated_at, u.last_login_at, u.created_by, u.metadata,
-                    u.max_agents, u.max_tokens, u.tokens_used
+                    u.max_agents, u.max_tokens
                 FROM api_tokens t
                 JOIN users u ON u.id = t.user_id
                 WHERE t.token_hash = ?1
@@ -420,7 +419,6 @@ impl UserStore for LibSqlBackend {
                     metadata,
                     max_agents: get_opt_i64(&row, 18).map(|v| v as i32),
                     max_tokens: get_opt_i64(&row, 19),
-                    tokens_used: get_opt_i64(&row, 20).unwrap_or(0),
                 };
 
                 Ok(Some((token, user)))
@@ -751,17 +749,6 @@ impl UserStore for LibSqlBackend {
         }
         Ok(stats)
     }
-
-    async fn increment_user_tokens(&self, user_id: &str, tokens: i64) -> Result<(), DatabaseError> {
-        let conn = self.connect().await?;
-        conn.execute(
-            "UPDATE users SET tokens_used = tokens_used + ?1 WHERE id = ?2",
-            params![tokens, user_id],
-        )
-        .await
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -799,7 +786,6 @@ mod tests {
             metadata: serde_json::json!({}),
             max_agents: None,
             max_tokens: None,
-            tokens_used: 0,
         }
     }
 

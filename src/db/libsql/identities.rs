@@ -285,7 +285,6 @@ mod tests {
             metadata: serde_json::json!({}),
             max_agents: None,
             max_tokens: None,
-            tokens_used: 0,
         };
         db.create_user(&user).await.unwrap();
 
@@ -352,7 +351,6 @@ mod tests {
             metadata: serde_json::json!({}),
             max_agents: None,
             max_tokens: None,
-            tokens_used: 0,
         };
         db.create_user(&user).await.unwrap();
 
@@ -396,7 +394,6 @@ mod tests {
             metadata: serde_json::json!({}),
             max_agents: None,
             max_tokens: None,
-            tokens_used: 0,
         };
         let identity = UserIdentityRecord {
             id: Uuid::new_v4(),

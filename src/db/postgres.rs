@@ -1079,10 +1079,6 @@ impl UserStore for PgBackend {
         self.store.user_summary_stats(user_id).await
     }
 
-    async fn increment_user_tokens(&self, user_id: &str, tokens: i64) -> Result<(), DatabaseError> {
-        self.store.increment_user_tokens(user_id, tokens).await
-    }
-
     async fn create_user_with_token(
         &self,
         user: &UserRecord,

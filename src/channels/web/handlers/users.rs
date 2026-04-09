@@ -91,7 +91,6 @@ pub async fn users_create_handler(
         metadata: serde_json::json!({}),
         max_agents,
         max_tokens,
-        tokens_used: 0,
     };
 
     // Generate a first API token so the new user can authenticate immediately.
@@ -131,7 +130,6 @@ pub async fn users_create_handler(
         "created_by": user_record.created_by,
         "max_agents": user_record.max_agents,
         "max_tokens": user_record.max_tokens,
-        "tokens_used": user_record.tokens_used,
     })))
 }
 
@@ -184,7 +182,6 @@ pub async fn users_list_handler(
             "last_active_at": last_active.map(|dt| dt.to_rfc3339()),
             "max_agents": u.max_agents,
             "max_tokens": u.max_tokens,
-            "tokens_used": u.tokens_used,
         }));
     }
 
@@ -221,7 +218,6 @@ pub async fn users_detail_handler(
         "metadata": user_record.metadata,
         "max_agents": user_record.max_agents,
         "max_tokens": user_record.max_tokens,
-        "tokens_used": user_record.tokens_used,
     })))
 }
 
@@ -342,7 +338,6 @@ pub async fn users_update_handler(
         "metadata": updated.metadata,
         "max_agents": updated.max_agents,
         "max_tokens": updated.max_tokens,
-        "tokens_used": updated.tokens_used,
     })))
 }
 

@@ -508,7 +508,6 @@ impl Agent {
                             Some(crate::tenant::UserQuota {
                                 max_agents: record.max_agents,
                                 max_tokens: record.max_tokens,
-                                tokens_used: record.tokens_used,
                             })
                         } else {
                             None // No quota assigned → fail-closed

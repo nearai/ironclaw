@@ -90,15 +90,7 @@ I18n.register('zh-CN', {
   'users.columns.cost': '费用',
   'users.columns.lastActive': '最近活跃',
   'users.columns.created': '创建时间',
-  'users.columns.quota': '配额',
   'users.columns.actions': '操作',
-  'users.quotaAgents': '最多 {n} 个智能体',
-  'users.editQuota': '配额',
-  'users.maxAgentsPlaceholder': '最大智能体数（可选）',
-  'users.maxTokensPlaceholder': '最大Token数（可选）',
-  'users.promptMaxAgents': '设置 {name} 的最大智能体数（留空=无配额）：',
-  'users.promptMaxTokens': '设置 {name} 的最大Token数（留空=无配额）：',
-  'users.failedQuotaUpdate': '更新配额失败',
 
   // 状态
   'status.connected': '已连接',

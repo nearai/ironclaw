@@ -367,7 +367,6 @@ mod tests {
             metadata: serde_json::Value::Null,
             max_agents: None,
             max_tokens: None,
-            tokens_used: 0,
         })
         .await
         .unwrap();
@@ -662,7 +661,6 @@ mod tests {
                 metadata: serde_json::Value::Null,
                 max_agents: None,
                 max_tokens: None,
-                tokens_used: 0,
             })
             .await
             .unwrap();

@@ -754,7 +754,6 @@ async fn resolve_user(
         metadata: serde_json::json!({}),
         max_agents: None,
         max_tokens: None,
-        tokens_used: 0,
     };
 
     let identity = build_identity_record(&user_id, provider, profile);

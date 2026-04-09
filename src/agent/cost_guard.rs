@@ -41,12 +41,6 @@ pub enum CostLimitExceeded {
     },
     /// No quota assigned to this user (fail-closed).
     NoQuotaAssigned { user_id: String },
-    /// User's cumulative token quota exhausted.
-    TokenQuotaExhausted {
-        user_id: String,
-        tokens_used: i64,
-        max_tokens: i64,
-    },
 }
 
 impl std::fmt::Display for CostLimitExceeded {
@@ -81,15 +75,6 @@ impl std::fmt::Display for CostLimitExceeded {
                 f,
                 "No quota assigned to user '{}'. Contact an administrator to set usage limits.",
                 user_id
-            ),
-            Self::TokenQuotaExhausted {
-                user_id,
-                tokens_used,
-                max_tokens,
-            } => write!(
-                f,
-                "Token quota exhausted for user '{}': used {} of {} tokens allowed",
-                user_id, tokens_used, max_tokens
             ),
         }
     }

@@ -249,13 +249,6 @@ impl TenantScope {
         self.inner.record_llm_call(record).await
     }
 
-    /// Atomically increment cumulative token usage for this tenant's user.
-    pub async fn increment_user_tokens(&self, tokens: i64) -> Result<(), DatabaseError> {
-        self.inner
-            .increment_user_tokens(self.identity.owner_id.as_str(), tokens)
-            .await
-    }
-
     // === Settings ===
 
     pub async fn get_setting(&self, key: &str) -> Result<Option<serde_json::Value>, DatabaseError> {
@@ -966,8 +959,6 @@ pub struct UserQuota {
     pub max_agents: Option<i32>,
     /// Total cumulative token quota. When exhausted, user can't chat until admin increases it.
     pub max_tokens: Option<i64>,
-    /// Cumulative tokens consumed so far (loaded from DB at request time).
-    pub tokens_used: i64,
 }
 
 impl UserQuota {
@@ -1081,13 +1072,23 @@ impl TenantCtx {
             }
         };
 
-        // Check cumulative token quota.
-        if let Some(max) = quota.max_tokens {
-            if quota.tokens_used >= max {
-                return Err(CostLimitExceeded::TokenQuotaExhausted {
+        // Check per-user token quota from DB.
+        // TODO: replace with cumulative token tracking — currently uses daily spend as a proxy.
+        if let Some(limit_cents) = quota.max_tokens {
+            let limit_cents_u64 = limit_cents.max(0) as u64;
+            let spent = self
+                .cost_guard
+                .daily_spend_for_user(self.identity.owner_id.as_str())
+                .await;
+            let spent_cents = {
+                let c = (spent * rust_decimal_macros::dec!(100)).trunc();
+                c.to_string().parse::<u64>().unwrap_or(0)
+            };
+            if spent_cents >= limit_cents_u64 {
+                return Err(CostLimitExceeded::UserDailyBudget {
                     user_id: self.identity.owner_id.as_str().to_string(),
-                    tokens_used: quota.tokens_used,
-                    max_tokens: max,
+                    spent_cents,
+                    limit_cents: limit_cents_u64,
                 });
             }
         }
