@@ -442,8 +442,10 @@ mod tests {
             "tz-aware and tz-naive schedules should differ"
         );
 
-        // Sanity: result is a real future date, not the epoch.
-        assert!(in_ny.year() >= 2026);
+        // Sanity: result is a real future date, not the epoch. Compare
+        // against `Utc::now()` so the assertion stays stable across calendar
+        // years rather than being pinned to a hard-coded threshold.
+        assert!(in_ny > Utc::now(), "next cron fire must be in the future");
     }
 
     #[test]

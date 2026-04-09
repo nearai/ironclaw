@@ -5269,7 +5269,13 @@ mod tests {
                 "cron edit",
                 "goal",
                 MissionCadence::Cron {
-                    expression: "0 0 1 1 *".into(), // once a year
+                    // Year-locked to 2099 so the next fire is deterministically
+                    // far in the future regardless of the calendar date the
+                    // test runs on. The original `0 0 1 1 *` ("once a year on
+                    // Jan 1") was racy around New Year's, when the yearly
+                    // schedule's next fire could land within seconds and
+                    // invert the `after < before` ordering below.
+                    expression: "0 0 0 1 1 * 2099".into(),
                     timezone: None,
                 },
                 Vec::new(),

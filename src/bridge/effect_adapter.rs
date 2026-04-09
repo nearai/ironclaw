@@ -1093,15 +1093,12 @@ fn parse_cadence(
 ) -> ironclaw_engine::types::mission::MissionCadence {
     use ironclaw_engine::types::mission::MissionCadence;
     let trimmed = s.trim().to_lowercase();
+    // Check explicit prefixes BEFORE the cron heuristic. Otherwise an input
+    // like `event: a b c d e` matches `split_whitespace().count() >= 5` and
+    // is silently misclassified as a cron expression — the user said
+    // "event:..." and gets a Cron cadence with a parse error downstream.
     if trimmed == "manual" {
         MissionCadence::Manual
-    } else if trimmed.split_whitespace().count() >= 5 {
-        // Looks like a cron expression (5+ fields). `split_whitespace` handles
-        // tabs and newlines, not just spaces.
-        MissionCadence::Cron {
-            expression: s.trim().to_string(),
-            timezone,
-        }
     } else if trimmed.starts_with("event:") {
         MissionCadence::OnEvent {
             event_pattern: trimmed
@@ -1119,6 +1116,13 @@ fn parse_cadence(
                 .trim()
                 .to_string(),
             secret: None,
+        }
+    } else if trimmed.split_whitespace().count() >= 5 {
+        // Looks like a cron expression (5+ fields). `split_whitespace` handles
+        // tabs and newlines, not just spaces.
+        MissionCadence::Cron {
+            expression: s.trim().to_string(),
+            timezone,
         }
     } else {
         // Default to manual if unrecognized
@@ -2016,6 +2020,35 @@ mod tests {
             }
             other => panic!("expected Webhook cadence, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parse_cadence_event_prefix_with_multi_token_pattern() {
+        // Regression: `parse_cadence` previously checked the cron heuristic
+        // (`split_whitespace().count() >= 5`) BEFORE the explicit prefixes,
+        // so an `event:`-prefixed pattern containing 5+ tokens was silently
+        // misclassified as a Cron cadence with a parse error downstream.
+        let cadence = parse_cadence("event: a b c d e", None);
+        match cadence {
+            ironclaw_engine::types::mission::MissionCadence::OnEvent { event_pattern, .. } => {
+                assert_eq!(event_pattern, "a b c d e");
+            }
+            other => panic!("expected OnEvent, got {other:?}"),
+        }
+
+        // Same hazard for `webhook:` — verify the prefix wins.
+        let cadence = parse_cadence("webhook: a b c d e", None);
+        assert!(matches!(
+            cadence,
+            ironclaw_engine::types::mission::MissionCadence::Webhook { .. }
+        ));
+
+        // Sanity: a real cron expression still parses as cron.
+        let cadence = parse_cadence("0 9 * * *", None);
+        assert!(matches!(
+            cadence,
+            ironclaw_engine::types::mission::MissionCadence::Cron { .. }
+        ));
     }
 
     #[test]
