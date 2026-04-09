@@ -39,13 +39,16 @@ pub use types::provenance::Provenance;
 pub use types::step::{
     ActionCall, ActionResult, ExecutionTier, LlmResponse, Step, StepId, StepStatus, TokenUsage,
 };
-pub use types::thread::{Thread, ThreadConfig, ThreadId, ThreadState, ThreadType};
+pub use types::thread::{
+    ActiveSkillProvenance, Thread, ThreadConfig, ThreadId, ThreadState, ThreadType,
+};
 
 // ── Re-exports: traits ──────────────────────────────────────
 
 pub use traits::effect::{EffectExecutor, ThreadExecutionContext};
 pub use traits::llm::{LlmBackend, LlmCallConfig, LlmOutput};
 pub use traits::store::Store;
+pub use traits::workspace::WorkspaceReader;
 
 // ── Re-exports: capability ────────────────────────────────────
 
@@ -69,7 +72,9 @@ pub use executor::prompt::PlatformInfo;
 pub use runtime::conversation::ConversationManager;
 pub use runtime::manager::ThreadManager;
 pub use runtime::messaging::ThreadOutcome;
-pub use runtime::mission::{MissionManager, MissionNotification, MissionUpdate};
+pub use runtime::mission::{
+    BudgetGate, FireRateLimit, MissionManager, MissionNotification, MissionUpdate,
+};
 pub use runtime::tree::ThreadTree;
 
 pub use types::conversation::{

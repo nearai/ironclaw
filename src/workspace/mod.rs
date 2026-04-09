@@ -44,18 +44,24 @@ mod chunker;
 mod document;
 mod embedding_cache;
 mod embeddings;
+pub mod extension_state;
 pub mod hygiene;
 pub mod layer;
 pub mod privacy;
 #[cfg(feature = "postgres")]
 mod repository;
+pub mod schema;
 mod search;
+pub mod settings_adapter;
+pub use settings_adapter::WorkspaceSettingsAdapter;
+pub mod settings_schemas;
 
 pub use chunker::{ChunkConfig, chunk_document};
 pub use document::{
-    CONFIG_FILE_NAME, DocumentMetadata, DocumentVersion, HygieneMetadata, IDENTITY_PATHS,
-    MemoryChunk, MemoryDocument, PatchResult, VersionSummary, WorkspaceEntry, content_sha256,
-    is_config_path, is_identity_path, merge_workspace_entries, paths,
+    ADMIN_SCOPE, CONFIG_FILE_NAME, DocumentMetadata, DocumentVersion, HygieneMetadata,
+    IDENTITY_PATHS, MemoryChunk, MemoryDocument, PatchResult, VersionSummary, WorkspaceEntry,
+    content_sha256, is_config_path, is_identity_path, is_reserved_scope, merge_workspace_entries,
+    paths,
 };
 pub use embedding_cache::{CachedEmbeddingProvider, EmbeddingCacheConfig};
 #[cfg(feature = "bedrock")]
@@ -97,6 +103,7 @@ const SYSTEM_PROMPT_FILES: &[&str] = &[
     paths::AGENTS,
     paths::USER,
     paths::IDENTITY,
+    paths::SYSTEM,
     paths::MEMORY,
     paths::TOOLS,
     paths::HEARTBEAT,
@@ -110,6 +117,38 @@ fn is_system_prompt_file(path: &str) -> bool {
     SYSTEM_PROMPT_FILES
         .iter()
         .any(|p| path.eq_ignore_ascii_case(p))
+}
+
+/// Returns `true` for engine runtime state paths that should never be chunked
+/// or indexed for FTS/vector search.
+///
+/// Covered prefixes / paths (all machine-generated blobs, not semantic docs):
+/// - `engine/.runtime/` — execution-state blobs (threads, steps, events, leases,
+///   conversations, compacted summaries) written by the bridge on every turn.
+/// - `engine/projects/` — project and mission JSON files serialised on every
+///   state mutation (e.g. `engine/projects/{slug}/project.json`,
+///   `engine/projects/{slug}/missions/{slug}/mission.json`).
+/// - `engine/orchestrator/failures.json` — orchestrator failure-tracker blob,
+///   updated at engine-turn frequency.
+///
+/// Semantic content that is intentionally KEPT indexed:
+/// - `engine/knowledge/` — summaries, lessons, plans, specs, notes.
+/// - `engine/orchestrator/v{N}.py` — versioned orchestrator code.
+/// - `engine/orchestrator/*.md` — prompt overlays.
+///
+/// Indexing the excluded paths floods the DB connection pool under
+/// multi-tenant load.
+fn is_engine_runtime_path(path: &str) -> bool {
+    // normalize_path() does not resolve '..' segments — this guard is
+    // load-bearing. Without it, `engine/.runtime/../knowledge/foo.md`
+    // would pass the starts_with check but refer to a semantic document.
+    !path.contains("..")
+        && (path.starts_with("engine/.runtime/")
+            || path.starts_with("engine/projects/")
+            || path == "engine/orchestrator/failures.json"
+            // Auto-generated per-workspace README — regenerated at engine-turn
+            // frequency; should not accumulate version rows.
+            || path == "engine/README.md")
 }
 
 /// Shared sanitizer instance — avoids rebuilding Aho-Corasick + regexes on every write.
@@ -473,6 +512,9 @@ const HEARTBEAT_SEED: &str = include_str!("seeds/HEARTBEAT.md");
 /// Default template seeded into TOOLS.md on first access.
 const TOOLS_SEED: &str = include_str!("seeds/TOOLS.md");
 
+/// Initial assistant-thread greeting, persisted once when a user is provisioned.
+pub const GREETING_SEED: &str = include_str!("seeds/GREETING.md");
+
 /// First-run ritual seeded into BOOTSTRAP.md on initial workspace setup.
 ///
 /// The agent reads this file at the start of every session when it exists.
@@ -518,6 +560,13 @@ pub struct Workspace {
     /// Optional privacy classifier for shared layer writes.
     /// When None, writes go exactly where requested — no silent redirect.
     privacy_classifier: Option<Arc<dyn crate::workspace::privacy::PrivacyClassifier>>,
+    /// When true, the system prompt includes admin-defined instructions from
+    /// the `__admin__` scope. Set by `WorkspacePool` in multi-tenant mode.
+    admin_prompt_enabled: bool,
+    /// Shared cache for the admin system prompt. When `Some`, the workspace
+    /// reads from this cache instead of hitting the database on every turn.
+    /// Populated by `WorkspacePool` in multi-tenant mode.
+    admin_prompt_cache: Option<Arc<tokio::sync::RwLock<Option<String>>>>,
 }
 
 impl Workspace {
@@ -537,6 +586,8 @@ impl Workspace {
             search_defaults: SearchConfig::default(),
             memory_layers,
             privacy_classifier: None,
+            admin_prompt_enabled: false,
+            admin_prompt_cache: None,
         }
     }
 
@@ -557,6 +608,8 @@ impl Workspace {
             search_defaults: SearchConfig::default(),
             memory_layers,
             privacy_classifier: None,
+            admin_prompt_enabled: false,
+            admin_prompt_cache: None,
         }
     }
 
@@ -655,6 +708,25 @@ impl Workspace {
         self
     }
 
+    /// Enable admin system prompt reading from the `__admin__` scope.
+    ///
+    /// When enabled, `system_prompt_for_context_inner()` reads `SYSTEM.md`
+    /// from the `__admin__` scope and injects it before identity files.
+    /// Only set in multi-tenant mode (via `WorkspacePool`).
+    pub fn with_admin_prompt(mut self) -> Self {
+        self.admin_prompt_enabled = true;
+        self
+    }
+
+    /// Set the shared admin prompt cache (from `WorkspacePool`).
+    pub fn with_admin_prompt_cache(
+        mut self,
+        cache: Arc<tokio::sync::RwLock<Option<String>>>,
+    ) -> Self {
+        self.admin_prompt_cache = Some(cache);
+        self
+    }
+
     /// Get the configured memory layers.
     pub fn memory_layers(&self) -> &[crate::workspace::layer::MemoryLayer] {
         &self.memory_layers
@@ -727,6 +799,8 @@ impl Workspace {
             search_defaults: self.search_defaults.clone(),
             memory_layers,
             privacy_classifier: self.privacy_classifier.clone(),
+            admin_prompt_enabled: self.admin_prompt_enabled,
+            admin_prompt_cache: self.admin_prompt_cache.clone(),
         }
     }
 
@@ -835,7 +909,7 @@ impl Workspace {
             .await
     }
 
-    /// Resolve effective metadata for a document path.
+    /// Resolve effective metadata for a document path in the primary scope.
     ///
     /// Resolution chain: document's own metadata → nearest ancestor `.config` → defaults.
     ///
@@ -843,20 +917,32 @@ impl Workspace {
     /// then finds the nearest ancestor in-memory — O(1) DB queries instead of
     /// O(depth) serial queries walking up the directory tree.
     pub async fn resolve_metadata(&self, path: &str) -> DocumentMetadata {
+        self.resolve_metadata_in_scope(&self.user_id, path).await
+    }
+
+    /// Resolve effective metadata for a document path within a specific scope.
+    ///
+    /// Used by layer-aware writes (`write_to_layer`, `append_to_layer`) so
+    /// that schema validation, indexing, versioning, and hygiene flags are
+    /// taken from the **target** layer's `.config` chain — not the primary
+    /// user_id's. Without this, writes to non-primary layers would apply
+    /// metadata from the wrong scope and could silently use the wrong
+    /// schema or skip flags.
+    pub async fn resolve_metadata_in_scope(&self, scope: &str, path: &str) -> DocumentMetadata {
         let path = normalize_path(path);
 
-        // 1. Document's own metadata
+        // 1. Document's own metadata in the target scope.
         let doc_meta = self
             .storage
-            .get_document_by_path(&self.user_id, self.agent_id, &path)
+            .get_document_by_path(scope, self.agent_id, &path)
             .await
             .ok()
             .map(|d| d.metadata);
 
-        // 2. Find nearest ancestor .config using a single query + in-memory match
+        // 2. Find nearest ancestor .config in the target scope.
         let config_meta = self
             .storage
-            .find_config_documents(&self.user_id, self.agent_id)
+            .find_config_documents(scope, self.agent_id)
             .await
             .ok()
             .and_then(|configs| find_nearest_config(&path, &configs));
@@ -975,8 +1061,13 @@ impl Workspace {
             reject_if_injected(&path, &new_content)?;
         }
 
-        // Resolve metadata once — shared by versioning and indexing.
+        // Resolve metadata once — shared by schema validation, versioning, and indexing.
         let metadata = self.resolve_metadata(&path).await;
+
+        // Schema validation: validate the resulting content after replacement.
+        if let Some(schema) = &metadata.schema {
+            schema::validate_content_against_schema(&path, &new_content, schema)?;
+        }
 
         // Auto-version before updating.
         // Fail-open: versioning failures must not block writes.
@@ -1016,6 +1107,33 @@ impl Workspace {
             .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)
             .await?;
 
+        // Engine runtime state files are execution-state blobs, not semantic
+        // documents.  Skip the resolve_metadata DB query and all
+        // chunking/embedding work for them entirely.
+        if is_engine_runtime_path(&path) {
+            // One-time cleanup: delete any chunks that were created before this
+            // guard existed. This is a no-op once the document has no chunks,
+            // and prevents stale chunks from polluting search results or
+            // consuming storage indefinitely.
+            // Fail-open: chunk deletion failure must not block state writes.
+            let _ = self.storage.delete_chunks(doc.id).await;
+
+            if doc.content == content {
+                return Ok(doc);
+            }
+            let skip_meta = DocumentMetadata {
+                skip_indexing: Some(true),
+                skip_versioning: Some(true),
+                ..Default::default()
+            };
+            // Fail-open: versioning failures must not block state writes.
+            let _ = self
+                .maybe_save_version(doc.id, &doc.content, &skip_meta, Some(&self.user_id))
+                .await;
+            self.storage.update_document(doc.id, content).await?;
+            return self.storage.get_document_by_id(doc.id).await;
+        }
+
         // Short-circuit when content is unchanged: skip versioning and update,
         // but still reindex so metadata-driven flags (e.g. skip_indexing toggled
         // via the memory_write metadata param) take effect immediately.
@@ -1027,8 +1145,13 @@ impl Workspace {
             return Ok(doc);
         }
 
-        // Resolve metadata once — shared by versioning and indexing.
+        // Resolve metadata once — shared by schema validation, versioning, and indexing.
         let metadata = self.resolve_metadata(&path).await;
+
+        // Schema validation: if metadata carries a JSON Schema, validate content.
+        if let Some(schema) = &metadata.schema {
+            schema::validate_content_against_schema(&path, content, schema)?;
+        }
 
         // Auto-version previous content before overwriting.
         // Fail-open: versioning failures must not block writes.
@@ -1076,8 +1199,13 @@ impl Workspace {
             reject_if_injected(&path, &new_content)?;
         }
 
-        // Resolve metadata once — shared by versioning and indexing.
+        // Resolve metadata once — shared by schema validation, versioning, and indexing.
         let metadata = self.resolve_metadata(&path).await;
+
+        // Schema validation: validate the combined content (not just the appended chunk).
+        if let Some(schema) = &metadata.schema {
+            schema::validate_content_against_schema(&path, &new_content, schema)?;
+        }
 
         // Auto-version previous content before appending.
         // Fail-open: versioning failures must not block writes.
@@ -1173,8 +1301,20 @@ impl Workspace {
             .get_or_create_document_by_path(&scope, self.agent_id, &path)
             .await?;
 
-        // Resolve metadata once — shared by versioning and indexing.
-        let metadata = self.resolve_metadata(&path).await;
+        // Resolve metadata in the *target layer's scope* — not the primary
+        // user_id — so the layer's own `.config` chain governs schema,
+        // indexing, and versioning for this write.
+        let metadata = self.resolve_metadata_in_scope(&scope, &path).await;
+
+        // Schema validation: if metadata carries a JSON Schema, validate content.
+        if let Some(ref schema) = metadata.schema {
+            schema::validate_content_against_schema(&path, content, schema)?;
+        }
+
+        // `changed_by` is the actor identity (the user performing the write),
+        // not the layer scope. Metadata is resolved in the target layer's
+        // scope above so the layer's `.config` chain governs schema/indexing/
+        // versioning, but version attribution must record who wrote it.
         let _ = self
             .maybe_save_version(doc.id, &doc.content, &metadata, Some(&self.user_id))
             .await;
@@ -1225,8 +1365,17 @@ impl Workspace {
             format!("{}\n\n{}", doc.content, content)
         };
 
-        // Resolve metadata once — shared by versioning and indexing.
-        let metadata = self.resolve_metadata(&path).await;
+        // Resolve metadata in the *target layer's scope* so the layer's own
+        // `.config` chain governs schema, indexing, and versioning.
+        let metadata = self.resolve_metadata_in_scope(&scope, &path).await;
+
+        // Schema validation: validate the combined content after append.
+        if let Some(ref schema) = metadata.schema {
+            schema::validate_content_against_schema(&path, &new_content, schema)?;
+        }
+
+        // `changed_by` is the actor identity, not the layer scope — see the
+        // matching comment in `write_to_layer`.
         let _ = self
             .maybe_save_version(doc.id, &doc.content, &metadata, Some(&self.user_id))
             .await;
@@ -1514,6 +1663,48 @@ impl Workspace {
     }
 
     /// Inner implementation for system prompt building.
+    /// Read the admin system prompt, using the shared cache if available.
+    ///
+    /// Returns `None` if no admin prompt has been set, the document is empty,
+    /// or a non-recoverable error occurred. Only `DocumentNotFound` is silent;
+    /// other errors are logged at `debug!`.
+    async fn read_admin_prompt(&self) -> Option<String> {
+        // Fast path: check shared cache.
+        if let Some(ref cache) = self.admin_prompt_cache {
+            let guard = cache.read().await;
+            if let Some(ref content) = *guard {
+                return if content.is_empty() {
+                    None
+                } else {
+                    Some(content.clone())
+                };
+            }
+        }
+
+        // Slow path: DB read.
+        let result = match self
+            .storage
+            .get_document_by_path(ADMIN_SCOPE, None, paths::SYSTEM)
+            .await
+        {
+            Ok(doc) if !doc.content.is_empty() => Some(doc.content),
+            Ok(_) => None,
+            Err(WorkspaceError::DocumentNotFound { .. }) => None,
+            Err(e) => {
+                tracing::debug!("Failed to read admin system prompt: {}", e);
+                return None; // Don't cache errors
+            }
+        };
+
+        // Populate cache.
+        if let Some(ref cache) = self.admin_prompt_cache {
+            let mut guard = cache.write().await;
+            *guard = Some(result.clone().unwrap_or_default());
+        }
+
+        result
+    }
+
     async fn system_prompt_for_context_inner(
         &self,
         is_group_chat: bool,
@@ -1559,6 +1750,15 @@ impl Workspace {
         } else {
             false
         };
+
+        // Admin system prompt: shared instructions set by an admin.
+        // Only read in multi-tenant mode (admin_prompt_enabled is set by WorkspacePool).
+        // Uses read_admin_prompt() which checks the shared cache first.
+        if self.admin_prompt_enabled
+            && let Some(content) = self.read_admin_prompt().await
+        {
+            parts.push(format!("## System Instructions\n\n{}", content));
+        }
 
         // Load identity files in order of importance.
         // These MUST use read_primary() — see comment above.
@@ -2411,12 +2611,25 @@ mod tests {
     // ── Injection scanning tests ─────────────────────────────────────
 
     #[test]
+    fn test_system_md_is_system_prompt_file_but_not_identity() {
+        assert!(
+            is_system_prompt_file(paths::SYSTEM),
+            "SYSTEM.md should be scanned for injection"
+        );
+        assert!(
+            !is_identity_path(paths::SYSTEM),
+            "SYSTEM.md must NOT be an identity path — it is shared, not per-user"
+        );
+    }
+
+    #[test]
     fn test_system_prompt_file_matching() {
         let cases = vec![
             ("SOUL.md", true),
             ("AGENTS.md", true),
             ("USER.md", true),
             ("IDENTITY.md", true),
+            ("SYSTEM.md", true),
             ("MEMORY.md", true),
             ("HEARTBEAT.md", true),
             ("TOOLS.md", true),
@@ -2859,5 +3072,314 @@ mod versioning_tests {
         let result = ws.patch("test.md", " cruel", "", false).await.unwrap();
 
         assert_eq!(result.document.content, "hello world");
+    }
+
+    // T2: engine/projects/ paths skip FTS/vector indexing; engine/knowledge/ paths do not.
+    #[tokio::test]
+    async fn engine_projects_path_skips_indexing_but_knowledge_does_not() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Write to an engine/projects/ path — should skip chunking entirely.
+        ws.write(
+            "engine/projects/test-proj--abc12345/project.json",
+            r#"{"id":"abc12345","name":"test-proj"}"#,
+        )
+        .await
+        .unwrap();
+
+        // No chunks should exist for this document.
+        let chunks = ws
+            .storage
+            .get_chunks_without_embeddings("test_version", None, 100)
+            .await
+            .unwrap();
+        assert!(
+            chunks.is_empty(),
+            "engine/projects/ write must not produce any chunks, got: {chunks:?}"
+        );
+
+        // Write to an engine/knowledge/ path — should be indexed normally.
+        ws.write(
+            "engine/knowledge/lessons/lesson-one--abc12345.md",
+            "This is a lesson learned from the last run.",
+        )
+        .await
+        .unwrap();
+
+        // At least one chunk should now exist for the knowledge document.
+        let chunks = ws
+            .storage
+            .get_chunks_without_embeddings("test_version", None, 100)
+            .await
+            .unwrap();
+        assert!(
+            !chunks.is_empty(),
+            "engine/knowledge/ write must produce chunks for FTS/vector indexing"
+        );
+    }
+
+    // T3: writes to engine/.runtime/ paths produce zero version rows.
+    #[tokio::test]
+    async fn runtime_path_writes_produce_no_versions() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        let path = "engine/.runtime/threads/test-thread.json";
+        let doc = ws.write(path, "v1").await.unwrap();
+        ws.write(path, "v2").await.unwrap();
+
+        let versions = ws.list_versions(doc.id, 50).await.unwrap();
+        assert_eq!(
+            versions.len(),
+            0,
+            "runtime path writes must not accumulate version rows, got: {versions:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod schema_validation_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    async fn create_test_workspace() -> (Workspace, tempfile::TempDir) {
+        use crate::db::libsql::LibSqlBackend;
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("schema_test.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("LibSqlBackend");
+        <LibSqlBackend as crate::db::Database>::run_migrations(&backend)
+            .await
+            .expect("migrations");
+        let db: Arc<dyn crate::db::Database> = Arc::new(backend);
+        let ws = Workspace::new_with_db("test_schema", db);
+        (ws, temp_dir)
+    }
+
+    #[tokio::test]
+    async fn write_valid_json_with_schema_passes() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Create document and set schema in metadata
+        let doc = ws.write("config.json", "{}").await.unwrap();
+        ws.update_metadata(
+            doc.id,
+            &serde_json::json!({
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    },
+                    "required": ["name"]
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Valid write should succeed
+        let result = ws.write("config.json", r#"{"name": "Alice"}"#).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn write_invalid_json_with_schema_fails() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Create document and set schema
+        let doc = ws.write("config.json", "{}").await.unwrap();
+        ws.update_metadata(
+            doc.id,
+            &serde_json::json!({
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    },
+                    "required": ["name"]
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Missing required field should fail
+        let result = ws.write("config.json", r#"{"age": 30}"#).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            WorkspaceError::SchemaValidation { path, errors } => {
+                assert_eq!(path, "config.json");
+                assert!(!errors.is_empty());
+            }
+            other => panic!("expected SchemaValidation, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn write_non_json_with_schema_fails() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        let doc = ws.write("config.json", "{}").await.unwrap();
+        ws.update_metadata(
+            doc.id,
+            &serde_json::json!({
+                "schema": { "type": "object" }
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Non-JSON content should fail when schema is set
+        let result = ws.write("config.json", "this is not json").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            WorkspaceError::SchemaValidation { errors, .. } => {
+                assert!(errors[0].contains("not valid JSON"));
+            }
+            other => panic!("expected SchemaValidation, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn write_without_schema_allows_anything() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // No schema — any content is accepted (backward-compatible)
+        let result = ws.write("notes.md", "free form text").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn schema_inherited_from_folder_config() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Set schema on folder .config
+        let config_doc = ws.write("settings/.config", "").await.unwrap();
+        ws.update_metadata(
+            config_doc.id,
+            &serde_json::json!({
+                "skip_indexing": true,
+                "schema": {
+                    "type": "string",
+                    "enum": ["anthropic", "openai", "ollama"]
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Child document inherits schema — valid value
+        let result = ws.write("settings/backend.json", r#""anthropic""#).await;
+        assert!(result.is_ok());
+
+        // Child document inherits schema — invalid value
+        let result = ws.write("settings/backend.json", r#""unknown""#).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            WorkspaceError::SchemaValidation { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn document_schema_overrides_folder_schema() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Folder schema: string enum
+        let config_doc = ws.write("settings/.config", "").await.unwrap();
+        ws.update_metadata(
+            config_doc.id,
+            &serde_json::json!({
+                "schema": { "type": "string" }
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Document overrides with permissive object schema
+        let doc = ws
+            .write("settings/special.json", r#""temp""#)
+            .await
+            .unwrap();
+        ws.update_metadata(
+            doc.id,
+            &serde_json::json!({
+                "schema": { "type": "object" }
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Now the document-level schema (object) should apply, not the folder (string)
+        let result = ws
+            .write("settings/special.json", r#"{"key": "value"}"#)
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn patch_validates_resulting_content() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Create doc with schema that requires "name" field
+        let doc = ws
+            .write("config.json", r#"{"name": "Alice", "role": "admin"}"#)
+            .await
+            .unwrap();
+        ws.update_metadata(
+            doc.id,
+            &serde_json::json!({
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "role": { "type": "string" }
+                    },
+                    "required": ["name"]
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Patch that keeps the document valid should succeed
+        let result = ws
+            .patch("config.json", "\"admin\"", "\"user\"", false)
+            .await;
+        assert!(result.is_ok());
+
+        // Patch that makes the document invalid (removes name value, breaks JSON)
+        // We can't easily make a patch that removes required fields without
+        // breaking JSON structure, so test with a type violation instead
+        let result = ws.patch("config.json", "\"user\"", "42", false).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            WorkspaceError::SchemaValidation { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn append_validates_combined_content() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Create doc with array schema
+        let doc = ws.write("list.json", r#"["item1"]"#).await.unwrap();
+        ws.update_metadata(
+            doc.id,
+            &serde_json::json!({
+                "schema": { "type": "array", "items": { "type": "string" } }
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Append breaks JSON structure (array + newline + text = invalid JSON)
+        let result = ws.append("list.json", "not json").await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            WorkspaceError::SchemaValidation { .. }
+        ));
     }
 }

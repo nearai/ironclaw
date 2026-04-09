@@ -925,9 +925,11 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     .channels
                     .send_status(
                         &self.message.channel,
-                        StatusUpdate::ToolStarted {
-                            name: tc.name.clone(),
-                        },
+                        StatusUpdate::tool_started_with_id(
+                            tc.name.clone(),
+                            &tc.arguments,
+                            Some(tc.id.clone()),
+                        ),
                         &self.message.metadata,
                     )
                     .await;
@@ -945,6 +947,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         &self.message.channel,
                         StatusUpdate::tool_completed(
                             tc.name.clone(),
+                            Some(tc.id.clone()),
                             &result,
                             &tc.arguments,
                             disp_tool.as_deref(),
@@ -972,9 +975,11 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     let _ = channels
                         .send_status(
                             &channel,
-                            StatusUpdate::ToolStarted {
-                                name: tc.name.clone(),
-                            },
+                            StatusUpdate::tool_started_with_id(
+                                tc.name.clone(),
+                                &tc.arguments,
+                                Some(tc.id.clone()),
+                            ),
                             &metadata,
                         )
                         .await;
@@ -994,6 +999,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                             &channel,
                             StatusUpdate::tool_completed(
                                 tc.name.clone(),
+                                Some(tc.id.clone()),
                                 &result,
                                 &tc.arguments,
                                 par_tool.as_deref(),
@@ -1121,6 +1127,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                                 StatusUpdate::ToolResult {
                                     name: tc.name.clone(),
                                     preview: output.clone(),
+                                    call_id: Some(tc.id.clone()),
                                 },
                                 &self.message.metadata,
                             )
@@ -1611,6 +1618,7 @@ mod tests {
             skill_catalog: None,
             skills_config: SkillsConfig::default(),
             hooks: Arc::new(HookRegistry::new()),
+            auth_manager: None,
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_tx: None,
             http_interceptor: None,
@@ -2508,6 +2516,7 @@ mod tests {
             skill_catalog: None,
             skills_config: SkillsConfig::default(),
             hooks: Arc::new(HookRegistry::new()),
+            auth_manager: None,
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_tx: None,
             http_interceptor: None,
@@ -2637,6 +2646,7 @@ mod tests {
                 skill_catalog: None,
                 skills_config: SkillsConfig::default(),
                 hooks: Arc::new(HookRegistry::new()),
+                auth_manager: None,
                 cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
                 sse_tx: None,
                 http_interceptor: None,

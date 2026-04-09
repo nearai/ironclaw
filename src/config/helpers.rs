@@ -186,6 +186,37 @@ pub(crate) fn parse_string_env(
     Ok(optional_env(key)?.unwrap_or_else(|| default.into()))
 }
 
+/// Setting keys that influence LLM/embeddings provider base URLs.
+///
+/// These keys are validated with the operator policy (which allows
+/// private/loopback endpoints), so they must only be writable and
+/// resolvable for admin users. The settings HTTP handlers reject
+/// non-admin writes/imports of these keys; `strip_admin_only_llm_keys`
+/// is the matching defense for the read/resolve path so a non-admin
+/// user (or pre-existing legacy DB row) cannot reactivate a private
+/// endpoint after this restriction landed.
+pub(crate) const ADMIN_ONLY_LLM_SETTING_KEYS: &[&str] = &[
+    "llm_builtin_overrides",
+    "llm_custom_providers",
+    "ollama_base_url",
+    "openai_compatible_base_url",
+];
+
+/// Remove admin-only LLM setting keys from a flat DB settings map.
+///
+/// Used by config resolution paths that load per-user DB settings for a
+/// non-operator user, to ensure they cannot inject private/loopback
+/// provider endpoints into the active LLM/embeddings configuration.
+pub(crate) fn strip_admin_only_llm_keys(map: &mut HashMap<String, serde_json::Value>) {
+    map.retain(|key, _| !ADMIN_ONLY_LLM_SETTING_KEYS.contains(&key.as_str()));
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BaseUrlPolicy {
+    StrictSsrf,
+    AllowPrivateNetwork,
+}
+
 /// Validate a user-configurable base URL to prevent SSRF attacks (#1103).
 ///
 /// Rejects:
@@ -196,7 +227,62 @@ pub(crate) fn parse_string_env(
 /// This is intended for config-time validation of base URLs like
 /// `OLLAMA_BASE_URL`, `EMBEDDING_BASE_URL`, `NEARAI_BASE_URL`, etc.
 pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), ConfigError> {
+    validate_base_url_with_policy(url, field_name, BaseUrlPolicy::StrictSsrf)
+}
+
+/// Validate an operator-configured model endpoint.
+///
+/// Unlike generic SSRF validation, this allows private/loopback LLM endpoints
+/// over both HTTP and HTTPS because they are explicitly configured by the
+/// operator. Public HTTP endpoints remain blocked to avoid sending credentials
+/// over plaintext transport.
+pub(crate) fn validate_operator_base_url(url: &str, field_name: &str) -> Result<(), ConfigError> {
+    validate_base_url_with_policy(url, field_name, BaseUrlPolicy::AllowPrivateNetwork)
+}
+
+fn classify_ip(ip: &std::net::IpAddr) -> IpClass {
     use std::net::{IpAddr, Ipv4Addr};
+
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_link_local()
+                || *v4 == Ipv4Addr::new(169, 254, 169, 254)
+            {
+                IpClass::AlwaysBlocked
+            } else if v4.is_private()
+                || v4.is_loopback()
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
+            {
+                IpClass::PrivateOrLoopback
+            } else {
+                IpClass::Public
+            }
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                classify_ip(&IpAddr::V4(v4))
+            } else if v6.is_unspecified()
+                || v6.octets()[0] == 0xff
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+            {
+                IpClass::AlwaysBlocked
+            } else if v6.is_loopback() || (v6.octets()[0] & 0xfe) == 0xfc {
+                IpClass::PrivateOrLoopback
+            } else {
+                IpClass::Public
+            }
+        }
+    }
+}
+
+fn validate_base_url_with_policy(
+    url: &str,
+    field_name: &str,
+    policy: BaseUrlPolicy,
+) -> Result<(), ConfigError> {
+    use std::net::{IpAddr, ToSocketAddrs};
 
     let parsed = reqwest::Url::parse(url).map_err(|e| ConfigError::InvalidValue {
         key: field_name.to_string(),
@@ -217,125 +303,138 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
     })?;
 
     let host_lower = host.to_lowercase();
+    let normalized_host = host.trim_start_matches('[').trim_end_matches(']');
 
-    // For HTTP (non-TLS), only allow localhost — remote HTTP endpoints
-    // risk credential leakage (e.g. NEAR AI bearer tokens sent over plaintext).
-    if scheme == "http" {
-        let is_localhost = host_lower == "localhost"
+    let is_localhost_name = || {
+        host_lower == "localhost"
             || host_lower == "127.0.0.1"
-            || host_lower == "::1"
-            || host_lower == "[::1]"
-            || host_lower.ends_with(".localhost");
-        if !is_localhost {
-            return Err(ConfigError::InvalidValue {
-                key: field_name.to_string(),
-                message: format!(
+            || normalized_host == "::1"
+            || host_lower.ends_with(".localhost")
+    };
+
+    if scheme == "http" && policy == BaseUrlPolicy::StrictSsrf && !is_localhost_name() {
+        return Err(ConfigError::InvalidValue {
+            key: field_name.to_string(),
+            message: format!(
+                "HTTP (non-TLS) is only allowed for localhost, got '{}'. \
+                 Use HTTPS for remote endpoints.",
+                host
+            ),
+        });
+    }
+
+    let resolved_ips = if let Ok(ip) = normalized_host.parse::<IpAddr>() {
+        vec![ip]
+    } else {
+        let port = parsed
+            .port()
+            .unwrap_or(if scheme == "http" { 80 } else { 443 });
+        // `to_socket_addrs` performs blocking DNS resolution. This helper is
+        // also called from async request handlers (e.g. the LLM utility
+        // routes), so wrap the lookup in `block_in_place` when running on a
+        // multi-threaded tokio worker to avoid stalling other tasks. The
+        // `try_current()` check keeps sync callers (config bootstrap, CLI)
+        // working unchanged.
+        let resolve = || -> std::io::Result<Vec<IpAddr>> {
+            Ok((host, port)
+                .to_socket_addrs()?
+                .map(|addr| addr.ip())
+                .collect())
+        };
+        let lookup = match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(resolve)
+            }
+            _ => resolve(),
+        };
+        lookup.map_err(|e| ConfigError::InvalidValue {
+            key: field_name.to_string(),
+            message: format!(
+                "failed to resolve hostname '{}': {}. \
+                 Base URLs must be resolvable at config time.",
+                host, e
+            ),
+        })?
+    };
+
+    if scheme == "http" {
+        if is_localhost_name() {
+            return Ok(());
+        }
+
+        let all_private = !resolved_ips.is_empty()
+            && resolved_ips
+                .iter()
+                .all(|ip| matches!(classify_ip(ip), IpClass::PrivateOrLoopback));
+        let any_blocked = resolved_ips
+            .iter()
+            .any(|ip| matches!(classify_ip(ip), IpClass::AlwaysBlocked));
+
+        if policy == BaseUrlPolicy::AllowPrivateNetwork && all_private && !any_blocked {
+            return Ok(());
+        }
+
+        return Err(ConfigError::InvalidValue {
+            key: field_name.to_string(),
+            message: if policy == BaseUrlPolicy::AllowPrivateNetwork {
+                format!(
+                    "HTTP (non-TLS) is only allowed for localhost or private/internal endpoints, got '{}'. \
+                     Use HTTPS for public endpoints.",
+                    host
+                )
+            } else {
+                format!(
                     "HTTP (non-TLS) is only allowed for localhost, got '{}'. \
                      Use HTTPS for remote endpoints.",
                     host
-                ),
-            });
-        }
-        return Ok(());
+                )
+            },
+        });
     }
 
-    // Check whether an IP is in a blocked range (private, loopback,
-    // link-local, multicast, metadata, CGN, ULA).
-    let is_dangerous_ip = |ip: &IpAddr| -> bool {
-        match ip {
-            IpAddr::V4(v4) => {
-                v4.is_private()
-                    || v4.is_loopback()
-                    || v4.is_link_local()
-                    || v4.is_multicast()
-                    || v4.is_unspecified()
-                    || *v4 == Ipv4Addr::new(169, 254, 169, 254)
-                    || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64) // CGN
-            }
-            IpAddr::V6(v6) => {
-                if let Some(v4) = v6.to_ipv4_mapped() {
-                    v4.is_private()
-                        || v4.is_loopback()
-                        || v4.is_link_local()
-                        || v4.is_multicast()
-                        || v4.is_unspecified()
-                        || v4 == Ipv4Addr::new(169, 254, 169, 254)
-                        || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64) // CGN
-                } else {
-                    v6.is_loopback()
-                        || v6.is_unspecified()
-                        || (v6.octets()[0] & 0xfe) == 0xfc // ULA (fc00::/7)
-                        || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local (fe80::/10)
-                        || v6.octets()[0] == 0xff // multicast (ff00::/8)
-                }
-            }
-        }
-    };
-
-    // For HTTPS, reject private/loopback/link-local/metadata IPs.
-    // Check both IP literals and resolved hostnames to prevent DNS-based SSRF.
-    //
-    // `Url::host_str()` returns IPv6 literals WITH the surrounding brackets
-    // (e.g. "[::1]"), but `IpAddr::parse` does not accept brackets — it wants
-    // bare "::1". Strip them so we recognize IPv6 literals before falling
-    // through to the DNS-resolution branch (which on some systems with DNS
-    // hijacking can produce a non-private IP and bypass this check).
-    let host_for_parse = host.trim_matches(|c| c == '[' || c == ']');
-    if let Ok(ip) = host_for_parse.parse::<IpAddr>() {
-        if is_dangerous_ip(&ip) {
-            return Err(ConfigError::InvalidValue {
-                key: field_name.to_string(),
-                message: format!(
-                    "URL points to a private/internal IP '{}'. \
-                     This is blocked to prevent SSRF attacks.",
-                    ip
-                ),
-            });
-        }
-    } else {
-        // Hostname — resolve and check all resulting IPs as defense-in-depth.
-        // NOTE: This does NOT fully prevent DNS rebinding attacks (the hostname
-        // could resolve to a different IP at request time). Full protection
-        // would require pinning the resolved IP in the HTTP client's connector.
-        // This validation catches the common case of misconfigured or malicious URLs.
-        //
-        // NOTE: `to_socket_addrs()` performs blocking DNS resolution. This is
-        // acceptable because `validate_base_url` runs at config-load time only,
-        // before the async runtime is fully driving I/O. If this ever moves to
-        // a hot path, wrap in `tokio::task::spawn_blocking` or use
-        // `tokio::net::lookup_host`.
-        use std::net::ToSocketAddrs;
-        let port = parsed.port().unwrap_or(443);
-        match (host, port).to_socket_addrs() {
-            Ok(addrs) => {
-                for addr in addrs {
-                    if is_dangerous_ip(&addr.ip()) {
-                        return Err(ConfigError::InvalidValue {
-                            key: field_name.to_string(),
-                            message: format!(
-                                "hostname '{}' resolves to private/internal IP '{}'. \
-                                 This is blocked to prevent SSRF attacks.",
-                                host,
-                                addr.ip()
-                            ),
-                        });
-                    }
-                }
-            }
-            Err(e) => {
+    for ip in resolved_ips {
+        match classify_ip(&ip) {
+            IpClass::AlwaysBlocked => {
                 return Err(ConfigError::InvalidValue {
                     key: field_name.to_string(),
                     message: format!(
-                        "failed to resolve hostname '{}': {}. \
-                         Base URLs must be resolvable at config time.",
-                        host, e
+                        "URL points to a blocked IP '{}'. \
+                         This is blocked to prevent SSRF attacks.",
+                        ip
                     ),
                 });
             }
+            IpClass::PrivateOrLoopback if policy == BaseUrlPolicy::StrictSsrf => {
+                let message = if normalized_host.parse::<IpAddr>().is_ok() {
+                    format!(
+                        "URL points to a private/internal IP '{}'. \
+                         This is blocked to prevent SSRF attacks.",
+                        ip
+                    )
+                } else {
+                    format!(
+                        "hostname '{}' resolves to private/internal IP '{}'. \
+                         This is blocked to prevent SSRF attacks.",
+                        host, ip
+                    )
+                };
+                return Err(ConfigError::InvalidValue {
+                    key: field_name.to_string(),
+                    message,
+                });
+            }
+            _ => {}
         }
     }
 
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IpClass {
+    Public,
+    PrivateOrLoopback,
+    AlwaysBlocked,
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +624,20 @@ mod tests {
     }
 
     #[test]
+    fn validate_base_url_rejects_http_remote_without_dns_resolution() {
+        let result = validate_base_url("http://ssrf-test.invalid", "TEST");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("only allowed for localhost"),
+            "strict HTTP validation should short-circuit before DNS lookup: {err}"
+        );
+        assert!(
+            !err.contains("failed to resolve"),
+            "strict HTTP validation should not require DNS resolution: {err}"
+        );
+    }
+
+    #[test]
     fn validate_base_url_rejects_non_http_schemes() {
         assert!(validate_base_url("file:///etc/passwd", "TEST").is_err());
         assert!(validate_base_url("ftp://evil.com", "TEST").is_err());
@@ -637,6 +750,31 @@ mod tests {
             err.contains("failed to resolve"),
             "Expected DNS resolution failure, got: {err}"
         );
+    }
+
+    #[test]
+    fn validate_operator_base_url_allows_https_private_ips() {
+        assert!(validate_operator_base_url("https://100.64.0.1/v1", "TEST").is_ok());
+        assert!(validate_operator_base_url("https://127.0.0.1/v1", "TEST").is_ok());
+        assert!(validate_operator_base_url("https://[::1]/v1", "TEST").is_ok());
+    }
+
+    #[test]
+    fn validate_operator_base_url_allows_http_private_ips() {
+        assert!(validate_operator_base_url("http://100.64.0.1:8000/v1", "TEST").is_ok());
+        assert!(validate_operator_base_url("http://192.168.1.50:8000/v1", "TEST").is_ok());
+    }
+
+    #[test]
+    fn validate_operator_base_url_still_rejects_public_http_and_metadata() {
+        assert!(validate_operator_base_url("http://8.8.8.8/v1", "TEST").is_err());
+        assert!(validate_operator_base_url("https://169.254.169.254/v1", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_operator_base_url_rejects_link_local_ips() {
+        assert!(validate_operator_base_url("http://169.254.1.10:8000/v1", "TEST").is_err());
+        assert!(validate_operator_base_url("https://[fe80::1]/v1", "TEST").is_err());
     }
 
     // --- db_first_* helper tests ---
@@ -777,5 +915,88 @@ mod tests {
         assert_eq!(result, Some(99));
 
         unsafe { std::env::remove_var(key) };
+    }
+
+    // --- admin-only LLM key stripping (defense-in-depth for #1955) ---
+
+    #[test]
+    fn strip_admin_only_llm_keys_removes_all_known_keys() {
+        let mut map = HashMap::new();
+        map.insert(
+            "llm_builtin_overrides".to_string(),
+            serde_json::json!({"openai": {"base_url": "http://10.0.0.5"}}),
+        );
+        map.insert(
+            "llm_custom_providers".to_string(),
+            serde_json::json!([{"id": "x"}]),
+        );
+        map.insert(
+            "ollama_base_url".to_string(),
+            serde_json::json!("http://192.168.1.20:11434"),
+        );
+        map.insert(
+            "openai_compatible_base_url".to_string(),
+            serde_json::json!("http://100.64.0.1"),
+        );
+        map.insert("selected_model".to_string(), serde_json::json!("gpt-4o"));
+        map.insert("agent.name".to_string(), serde_json::json!("Iron"));
+
+        strip_admin_only_llm_keys(&mut map);
+
+        assert!(!map.contains_key("llm_builtin_overrides"));
+        assert!(!map.contains_key("llm_custom_providers"));
+        assert!(!map.contains_key("ollama_base_url"));
+        assert!(!map.contains_key("openai_compatible_base_url"));
+        // Non-admin keys must survive.
+        assert_eq!(
+            map.get("selected_model"),
+            Some(&serde_json::json!("gpt-4o"))
+        );
+        assert_eq!(map.get("agent.name"), Some(&serde_json::json!("Iron")));
+    }
+
+    #[test]
+    fn strip_admin_only_llm_keys_is_a_no_op_for_clean_map() {
+        let mut map = HashMap::new();
+        map.insert("selected_model".to_string(), serde_json::json!("gpt-4o"));
+        map.insert("llm_backend".to_string(), serde_json::json!("openai"));
+
+        strip_admin_only_llm_keys(&mut map);
+
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key("selected_model"));
+        assert!(map.contains_key("llm_backend"));
+    }
+
+    // --- async DNS regression (#1955: don't stall the tokio worker) ---
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn validate_base_url_safe_to_call_from_async_handler() {
+        // Regression test: validate_base_url_with_policy used to call the
+        // blocking `to_socket_addrs()` directly, which can stall a tokio
+        // worker thread when invoked from an async handler. The function
+        // now wraps the lookup in `block_in_place` on multi-threaded
+        // runtimes, so calling it from an async context must not panic
+        // and must produce a deterministic error.
+        let result = validate_base_url("http://ssrf-test.invalid", "TEST");
+        let err = result.expect_err("invalid host should fail validation");
+        let msg = err.to_string();
+        // Strict policy short-circuits before DNS, so we should get the
+        // localhost-only message rather than a DNS error.
+        assert!(
+            msg.contains("only allowed for localhost"),
+            "expected strict short-circuit, got: {msg}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn validate_operator_base_url_safe_to_call_from_async_handler() {
+        // The operator policy must also tolerate being called from async
+        // handlers (it is reachable from /api/llm/test_connection and
+        // /api/llm/list_models). Use IP literals so we don't depend on
+        // a working resolver.
+        assert!(validate_operator_base_url("http://127.0.0.1:11434", "TEST").is_ok());
+        assert!(validate_operator_base_url("http://192.168.1.10:11434", "TEST").is_ok());
+        assert!(validate_operator_base_url("http://169.254.169.254", "TEST").is_err());
     }
 }

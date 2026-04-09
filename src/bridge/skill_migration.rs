@@ -115,6 +115,8 @@ fn v1_skill_to_memory_doc(skill: &LoadedSkill, project_id: ProjectId, owner_id: 
         code_snippets: vec![], // v1 skills are prompt-only
         metrics: SkillMetrics::default(),
         parent_version: None,
+        revisions: vec![],
+        repairs: vec![],
         content_hash: skill.content_hash.clone(),
     };
 

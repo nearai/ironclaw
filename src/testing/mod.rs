@@ -557,6 +557,7 @@ impl TestHarnessBuilder {
             skill_catalog: None,
             skills_config: SkillsConfig::default(),
             hooks,
+            auth_manager: None,
             cost_guard,
             sse_tx: None,
             http_interceptor: None,
@@ -824,6 +825,48 @@ mod tests {
         assert_eq!(
             after, before,
             "foreign ensure_conversation should not mutate last_activity"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_ensure_conversation_backfills_legacy_source_channel() {
+        let harness = TestHarnessBuilder::new().build().await;
+        let db = &harness.db;
+
+        let conv_id = uuid::Uuid::new_v4();
+
+        assert!(
+            db.ensure_conversation(conv_id, "gateway", "carol", None, None)
+                .await
+                .expect("ensure legacy conversation"),
+            "legacy ensure should create the row"
+        );
+
+        let source_before = db
+            .get_conversation_source_channel(conv_id)
+            .await
+            .expect("read source channel before backfill");
+        assert!(
+            source_before.is_none(),
+            "legacy conversation should start with NULL source_channel"
+        );
+
+        assert!(
+            db.ensure_conversation(conv_id, "gateway", "carol", None, Some("gateway"))
+                .await
+                .expect("ensure backfill conversation"),
+            "owned ensure should backfill the legacy row"
+        );
+
+        let source_after = db
+            .get_conversation_source_channel(conv_id)
+            .await
+            .expect("read source channel after backfill");
+        assert_eq!(
+            source_after.as_deref(),
+            Some("gateway"),
+            "ensure_conversation should backfill a legacy NULL source_channel"
         );
     }
 
@@ -1406,6 +1449,8 @@ mod tests {
             started_at: None,
             completed_at: None,
             credential_grants_json: "[]".to_string(),
+            mcp_servers: None,
+            max_iterations: None,
         };
 
         // Create
@@ -1501,6 +1546,8 @@ mod tests {
             started_at: None,
             completed_at: None,
             credential_grants_json: "[]".to_string(),
+            mcp_servers: None,
+            max_iterations: None,
         };
         db.save_sandbox_job(&job).await.expect("save");
 
@@ -1543,6 +1590,8 @@ mod tests {
             started_at: Some(chrono::Utc::now()),
             completed_at: None,
             credential_grants_json: "[]".to_string(),
+            mcp_servers: None,
+            max_iterations: None,
         };
         db.save_sandbox_job(&job).await.expect("save job");
 

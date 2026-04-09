@@ -165,7 +165,10 @@ impl SubmissionParser {
             }
         }
 
-        // /resume <uuid> - resume from checkpoint
+        // /resume - show thread picker; /resume <uuid> - resume from checkpoint
+        if lower == "/resume" {
+            return Submission::ListThreads;
+        }
         if let Some(rest) = lower.strip_prefix("/resume ")
             && let Ok(id) = Uuid::parse_str(rest.trim())
         {
@@ -175,7 +178,10 @@ impl SubmissionParser {
         // Try structured JSON approval (from web gateway's /api/chat/approval endpoint)
         if trimmed.starts_with('{')
             && let Ok(submission) = serde_json::from_str::<Submission>(trimmed)
-            && matches!(submission, Submission::ExecApproval { .. })
+            && matches!(
+                submission,
+                Submission::ExecApproval { .. } | Submission::ExternalCallback { .. }
+            )
         {
             return submission;
         }
@@ -290,6 +296,12 @@ pub enum Submission {
         always: bool,
     },
 
+    /// External system resolved a pending gate (for example an OAuth callback).
+    ExternalCallback {
+        /// ID of the pending gate request being resolved.
+        request_id: Uuid,
+    },
+
     /// Simple approval response (yes/no/always) for the current pending approval.
     ApprovalResponse {
         /// Whether the execution was approved.
@@ -327,6 +339,9 @@ pub enum Submission {
 
     /// Create a new thread.
     NewThread,
+
+    /// List threads for the interactive resume picker.
+    ListThreads,
 
     /// Trigger a manual heartbeat check.
     Heartbeat,

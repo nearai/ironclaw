@@ -54,6 +54,12 @@ pub struct Routine {
     pub updated_at: DateTime<Utc>,
 }
 
+impl crate::ownership::Owned for Routine {
+    fn owner_user_id(&self) -> &str {
+        &self.user_id
+    }
+}
+
 const ROUTINE_VERIFICATION_STATE_KEY: &str = "_verification";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

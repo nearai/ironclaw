@@ -2,6 +2,15 @@
 //!
 //! Encapsulates the logic for loading WASM channels, registering their
 //! webhook routes, and injecting credentials from the secrets store.
+//!
+//! # Ownership model
+//!
+//! Boot-time secret lookups use `config.owner_id` because channels are
+//! **instance-level resources** — they run as the instance operator, not as
+//! individual users. This is intentional and distinct from tool-level
+//! credential resolution, which is scoped to the calling user's `user_id`.
+//!
+//! See `docs/superpowers/specs/2026-04-01-ownership-model-design.md`.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -16,6 +25,27 @@ use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::pairing::PairingStore;
 use crate::secrets::SecretsStore;
+
+pub(crate) fn reserved_wasm_channel_names() -> Vec<&'static str> {
+    use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
+
+    let mut reserved: Vec<&str> = vec![
+        "cli",
+        "repl",
+        "http",
+        "signal",
+        "slack-relay",
+        "secret_save",
+    ];
+    reserved.extend(TRUSTED_APPROVAL_CHANNELS);
+    reserved.push(BOOTSTRAP_SOURCE_CHANNEL);
+    reserved
+}
+
+pub(crate) fn is_reserved_wasm_channel_name(name: &str) -> bool {
+    let name_lower = name.to_ascii_lowercase();
+    reserved_wasm_channel_names().contains(&name_lower.as_str())
+}
 
 /// Result of WASM channel setup.
 pub struct WasmChannelSetup {
@@ -83,26 +113,12 @@ pub async fn setup_wasm_channels(
     // channel and bypass cross-channel authorization checks.
     //
     // This list includes:
-    // - All built-in channel names (prevent impersonation)
+    // - All native/built-in channel names (prevent impersonation)
     // - Trusted approval channels from session::TRUSTED_APPROVAL_CHANNELS
     // - The bootstrap sentinel (universal approval wildcard)
-    use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
-
-    let mut reserved: Vec<&str> = vec![
-        "cli",
-        "repl",
-        "http",
-        "signal",
-        "telegram",
-        "slack-relay",
-        "secret_save",
-    ];
-    reserved.extend(TRUSTED_APPROVAL_CHANNELS);
-    reserved.push(BOOTSTRAP_SOURCE_CHANNEL);
-
     for loaded in results.loaded {
         let name_lower = loaded.name().to_ascii_lowercase();
-        if reserved.contains(&name_lower.as_str()) {
+        if is_reserved_wasm_channel_name(&name_lower) {
             tracing::warn!(
                 channel = %loaded.name(),
                 "Rejected WASM channel with reserved name"
@@ -179,6 +195,7 @@ async fn register_channel(
     let sig_key_secret_name = loaded.signature_key_secret_name();
     let hmac_secret_name = loaded.hmac_secret_name();
 
+    // Channel-level secrets: owner_id is correct — channels are instance resources.
     let webhook_secret = if let Some(secrets) = secrets_store {
         secrets
             .get_decrypted(&config.owner_id, &secret_name)
@@ -510,22 +527,18 @@ async fn inject_channel_secrets_into_config(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use super::reserved_wasm_channel_names;
     use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
+    use crate::secrets::{CreateSecretParams, InMemorySecretsStore, SecretsCrypto, SecretsStore};
+    use crate::testing::credentials::TEST_CRYPTO_KEY;
+    use secrecy::SecretString;
 
     /// Build the same reserved-name list that `setup_wasm_channels` uses.
     fn reserved_names() -> Vec<&'static str> {
-        let mut reserved: Vec<&str> = vec![
-            "cli",
-            "repl",
-            "http",
-            "signal",
-            "telegram",
-            "slack-relay",
-            "secret_save",
-        ];
-        reserved.extend(TRUSTED_APPROVAL_CHANNELS);
-        reserved.push(BOOTSTRAP_SOURCE_CHANNEL);
-        reserved
+        reserved_wasm_channel_names()
     }
 
     #[test]
@@ -569,7 +582,7 @@ mod tests {
     #[test]
     fn non_reserved_names_allowed() {
         let reserved = reserved_names();
-        let allowed = ["discord", "my-custom-channel", "slack-bot"];
+        let allowed = ["discord", "telegram", "my-custom-channel", "slack-bot"];
         for name in allowed {
             assert!(
                 !reserved.contains(&name),
@@ -577,5 +590,67 @@ mod tests {
                 name
             );
         }
+    }
+
+    #[tokio::test]
+    async fn inject_channel_secrets_uses_owner_scope() {
+        let crypto =
+            Arc::new(SecretsCrypto::new(SecretString::from(TEST_CRYPTO_KEY.to_string())).unwrap());
+        let secrets: Arc<dyn SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+        secrets
+            .create(
+                "owner-123",
+                CreateSecretParams {
+                    name: "feishu_app_id".to_string(),
+                    value: SecretString::from("owner-app-id".to_string()),
+                    provider: None,
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+        secrets
+            .create(
+                "owner-123",
+                CreateSecretParams {
+                    name: "feishu_app_secret".to_string(),
+                    value: SecretString::from("owner-app-secret".to_string()),
+                    provider: None,
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+        secrets
+            .create(
+                "default",
+                CreateSecretParams {
+                    name: "feishu_app_id".to_string(),
+                    value: SecretString::from("default-app-id".to_string()),
+                    provider: None,
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut config_updates = HashMap::new();
+        super::inject_channel_secrets_into_config(
+            "feishu",
+            "owner-123",
+            &Some(Arc::clone(&secrets)),
+            &mut config_updates,
+        )
+        .await;
+
+        assert_eq!(
+            config_updates.get("app_id"),
+            Some(&serde_json::json!("owner-app-id"))
+        );
+        assert_eq!(
+            config_updates.get("app_secret"),
+            Some(&serde_json::json!("owner-app-secret"))
+        );
     }
 }

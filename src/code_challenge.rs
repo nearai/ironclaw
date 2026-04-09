@@ -1,7 +1,7 @@
 //! Shared helpers for one-time code verification flows.
 //!
-//! This module centralizes the common pieces used by transport-specific
-//! flows such as Telegram owner verification and DM pairing:
+//! This module centralizes the common pieces used by code-based flows such as
+//! DM pairing and any future manual verification flows:
 //! - one-time code generation
 //! - challenge presentation
 //! - submission normalization

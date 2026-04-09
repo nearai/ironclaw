@@ -310,8 +310,7 @@ struct TelegramMessageMetadata {
 /// Channel configuration injected by host.
 ///
 /// The host injects runtime values like tunnel_url and webhook_secret.
-/// The channel doesn't need to know about polling vs webhook mode - it just
-/// checks if tunnel_url is set to determine behavior.
+/// Telegram defaults to polling; webhook mode must be enabled explicitly.
 #[derive(Debug, Deserialize)]
 struct TelegramConfig {
     /// Bot username (without @) for mention detection in groups.
@@ -336,7 +335,6 @@ struct TelegramConfig {
     respond_to_all_group_messages: bool,
 
     /// Public tunnel URL for webhook mode (injected by host from global settings).
-    /// When set, webhook mode is enabled and polling is disabled.
     #[serde(default)]
     tunnel_url: Option<String>,
 
@@ -345,9 +343,21 @@ struct TelegramConfig {
     #[serde(default)]
     webhook_secret: Option<String>,
 
+    /// When true, use webhook mode if tunnel_url is available.
+    #[serde(default)]
+    webhook_enabled: bool,
+
     /// When true, use polling mode even if tunnel_url is available.
     #[serde(default)]
     polling_enabled: bool,
+
+    /// Poll interval in milliseconds (default 30000).
+    #[serde(default)]
+    poll_interval_ms: Option<u32>,
+}
+
+fn webhook_mode(config: &TelegramConfig) -> bool {
+    config.webhook_enabled && config.tunnel_url.is_some() && !config.polling_enabled
 }
 
 // ============================================================================
@@ -526,8 +536,11 @@ impl Guest for TelegramChannel {
             // Clear any stale owner_id from a previous config
             let _ = channel_host::workspace_write(OWNER_ID_PATH, "");
             channel_host::log(
-                channel_host::LogLevel::Warn,
-                "No owner_id configured, bot is open to all users",
+                channel_host::LogLevel::Debug,
+                &format!(
+                    "No owner_id configured; dm_policy={}",
+                    config.dm_policy.as_deref().unwrap_or("pairing")
+                ),
             );
         }
 
@@ -535,27 +548,26 @@ impl Guest for TelegramChannel {
         let dm_policy = config.dm_policy.as_deref().unwrap_or("pairing").to_string();
         let _ = channel_host::workspace_write(DM_POLICY_PATH, &dm_policy);
 
-        let allow_from_json = serde_json::to_string(&config.allow_from.unwrap_or_default())
+        let allow_from_json = serde_json::to_string(&config.allow_from.clone().unwrap_or_default())
             .unwrap_or_else(|_| "[]".to_string());
         let _ = channel_host::workspace_write(ALLOW_FROM_PATH, &allow_from_json);
 
         // Persist bot_username and respond_to_all_group_messages for group handling
         let _ = channel_host::workspace_write(
             BOT_USERNAME_PATH,
-            &config.bot_username.unwrap_or_default(),
+            &config.bot_username.clone().unwrap_or_default(),
         );
         let _ = channel_host::workspace_write(
             RESPOND_TO_ALL_GROUP_PATH,
             &config.respond_to_all_group_messages.to_string(),
         );
 
-        // Mode: use polling if explicitly enabled, otherwise use webhooks when tunnel available.
-        let webhook_mode = config.tunnel_url.is_some() && !config.polling_enabled;
+        let webhook_mode = webhook_mode(&config);
 
         if webhook_mode {
             channel_host::log(
                 channel_host::LogLevel::Info,
-                "Webhook mode enabled (tunnel configured)",
+                "Webhook mode enabled (explicitly configured)",
             );
 
             // Register webhook with Telegram API — propagate errors so a bad token
@@ -575,7 +587,7 @@ impl Guest for TelegramChannel {
         } else {
             channel_host::log(
                 channel_host::LogLevel::Info,
-                "Polling mode enabled (no tunnel configured)",
+                "Polling mode enabled",
             );
 
             // Delete any existing webhook before polling. Telegram returns success
@@ -586,7 +598,7 @@ impl Guest for TelegramChannel {
         // Configure polling only if not in webhook mode
         let poll = if !webhook_mode {
             Some(PollConfig {
-                interval_ms: 30000, // 30 seconds minimum
+                interval_ms: config.poll_interval_ms.unwrap_or(30000),
                 enabled: true,
             })
         } else {
@@ -2054,9 +2066,7 @@ fn handle_message(message: TelegramMessage) {
                                     from.id, message.chat.id, result.code
                                 ),
                             );
-                            if result.created {
-                                let _ = send_pairing_reply(message.chat.id, &result.code);
-                            }
+                            let _ = send_pairing_reply(message.chat.id, &result.code);
                         }
                         Err(e) => {
                             channel_host::log(
@@ -2705,6 +2715,33 @@ mod tests {
                 "Authentication completed for weather.".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn test_webhook_mode_requires_explicit_enable() {
+        let config: TelegramConfig = serde_json::from_str(
+            r#"{
+                "tunnel_url": "https://example.ngrok.app",
+                "polling_enabled": false
+            }"#,
+        )
+        .unwrap();
+
+        assert!(!webhook_mode(&config));
+    }
+
+    #[test]
+    fn test_webhook_mode_enabled_with_tunnel() {
+        let config: TelegramConfig = serde_json::from_str(
+            r#"{
+                "tunnel_url": "https://example.ngrok.app",
+                "webhook_enabled": true,
+                "polling_enabled": false
+            }"#,
+        )
+        .unwrap();
+
+        assert!(webhook_mode(&config));
     }
 
     #[test]

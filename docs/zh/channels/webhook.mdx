@@ -1,0 +1,188 @@
+---
+title: HTTP Webhook
+sidebarTitle: Webhook
+description: 用于外部集成的 REST API
+icon: globe
+---
+
+HTTP Webhook 频道提供 REST API，用于将外部服务与 IronClaw 集成。
+
+<Note>
+如果您还没有设置智能体，请先查看我们的[快速开始指南](../quickstart)
+</Note>
+
+---
+
+## 启用 Webhook
+
+```bash
+export HTTP_ENABLED=true
+export HTTP_HOST=0.0.0.0
+export HTTP_PORT=8080
+export HTTP_WEBHOOK_SECRET=your-secret
+```
+
+或在引导过程中：
+```
+Step 6: Channel Configuration
+→ Select "HTTP Webhook"
+→ Port: 8080
+```
+
+---
+
+## 安全
+
+<Warning>
+HTTP webhook 默认绑定到 `0.0.0.0:8080`。如果不需要外部 webhook 传递，请设置 `HTTP_HOST=127.0.0.1`。
+</Warning>
+
+### 共享密钥验证
+
+配置 webhook 密钥以验证请求：
+
+```bash
+export HTTP_WEBHOOK_SECRET="your-secret-here"
+```
+
+密钥通过 `X-Webhook-Secret` 请求头发送。
+
+### 速率限制
+
+- **请求体大小**：最大 64 KB
+- **速率**：每个 IP 每分钟 60 个请求
+
+---
+
+## 发送消息
+
+### 请求格式
+
+```bash
+curl -X POST http://localhost:8080/webhook \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-secret" \
+  -d '{
+    "user_id": "default",
+    "message": "Hello, IronClaw!"
+  }'
+```
+
+### 响应格式
+
+```json
+{
+  "job_id": "uuid",
+  "status": "queued"
+}
+```
+
+---
+
+## 请求字段
+
+| 字段 | 类型 | 必填 | 描述 |
+|-------|------|----------|-------------|
+| `user_id` | string | 是 | 用户标识符 |
+| `message` | string | 是 | 消息内容 |
+| `conversation_id` | string | 否 | 继续现有对话 |
+| `metadata` | object | 否 | 任意元数据 |
+
+## 响应字段
+
+| 字段 | 类型 | 描述 |
+|-------|------|-------------|
+| `job_id` | string | 用于状态检查的任务 UUID |
+| `status` | string | `queued`、`running`、`completed` |
+| `response` | string | 智能体响应（完成时） |
+
+---
+
+## 检查状态
+
+```bash
+curl http://localhost:8080/jobs/{job_id} -H "X-Webhook-Secret: your-secret"
+```
+
+响应：
+```json
+{
+  "id": "uuid",
+  "status": "completed",
+  "response": "Hello! How can I help?",
+  "created_at": "2024-01-15T10:30:00Z",
+  "completed_at": "2024-01-15T10:30:05Z"
+}
+```
+
+---
+
+## 错误响应
+
+| 状态码 | 含义 |
+|--------|---------|
+| `400` | 无效的请求体 |
+| `401` | 缺少或无效的密钥 |
+| `429` | 超出速率限制 |
+| `500` | 服务器错误 |
+
+---
+
+## 集成示例
+
+### GitHub Webhook
+
+配置 GitHub 将事件发送到您的 IronClaw webhook URL：
+
+```bash
+# GitHub webhook URL
+https://your-server:8080/webhook
+
+# Secret: 您配置的 HTTP_WEBHOOK_SECRET
+```
+
+### Zapier
+
+使用 Zapier 的 Webhook 操作将事件发送到 IronClaw。
+
+### 自定义脚本
+
+```python
+import requests
+
+response = requests.post(
+    "http://localhost:8080/webhook",
+    headers={"X-Webhook-Secret": "your-secret"},
+    json={"user_id": "automation", "message": "Process this data"}
+)
+
+print(response.json()["job_id"])
+```
+
+---
+
+## 故障排除
+
+<AccordionGroup>
+  <Accordion title="连接被拒绝" icon="x-circle">
+    - 检查 IronClaw 是否在运行
+    - 验证 `HTTP_PORT` 正确
+    - 检查防火墙：`sudo ufw allow 8080`
+  </Accordion>
+
+  <Accordion title="401 未授权" icon="key">
+    - 包含 `X-Webhook-Secret` 请求头
+    - 验证密钥与配置匹配
+  </Accordion>
+
+  <Accordion title="429 请求过多" icon="clock">
+    - 速率限制：每分钟 60 个请求
+    - 实现指数退避
+  </Accordion>
+
+  <Accordion title="消息未处理" icon="message-circle">
+    - 检查日志：`RUST_LOG=ironclaw=debug ironclaw run`
+    - 验证 JSON 格式
+    - 检查 `user_id` 有效
+  </Accordion>
+</AccordionGroup>

@@ -17,18 +17,18 @@ jobs:
     steps:
       - &checkout
         name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
           persist-credentials: false
       - &install-rust
         name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # Generating a GitHub token, so that PRs and tags created by
       # the release-plz-action can trigger actions workflows.
       - name: Generate GitHub token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         id: generate-token
         with:
           # GitHub App ID secret name
@@ -36,7 +36,7 @@ jobs:
           # GitHub App private key secret name
           private-key: ${{ secrets.GH_RELEASES_MANAGER_APP_PRIVATE_KEY }}
       - name: Run release-plz
-        uses: release-plz/action@v0.5
+        uses: release-plz/action@1528104d2ca23787631a1c1f022abb64b34c1e11 # v0.5
         with:
           command: release
         env:
@@ -57,15 +57,15 @@ jobs:
     steps:
       - *checkout
       - *install-rust
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Generate GitHub token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         id: generate-token
         with:
           app-id: ${{ secrets.GH_RELEASES_MANAGER_APP_ID }}
           private-key: ${{ secrets.GH_RELEASES_MANAGER_APP_PRIVATE_KEY }}
       - name: Run release-plz
-        uses: release-plz/action@v0.5
+        uses: release-plz/action@1528104d2ca23787631a1c1f022abb64b34c1e11 # v0.5
         with:
           command: release-pr
         env:
