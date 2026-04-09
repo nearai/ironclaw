@@ -677,10 +677,14 @@ def run_loop(context, goal, actions, state, config):
             final_call = None
             executable_calls = []
             for c in calls:
-                if c.get("name", "") == "FINAL" and final_call is None:
-                    final_call = c
-                else:
-                    executable_calls.append(c)
+                if c.get("name", "") == "FINAL":
+                    # First FINAL wins; any extras are dropped (not appended
+                    # to executable_calls) so they don't try to run as a
+                    # normal action and fail with a lease error.
+                    if final_call is None:
+                        final_call = c
+                    continue
+                executable_calls.append(c)
 
             # Append the assistant message with only the executable calls.
             # FINAL is filtered out of `action_calls` so the message history
