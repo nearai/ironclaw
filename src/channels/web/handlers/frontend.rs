@@ -140,15 +140,19 @@ pub(crate) async fn load_widget_manifests(workspace: &Workspace) -> Vec<WidgetMa
 /// Read and parse a single widget's `manifest.json`. Returns `None` (with a
 /// `warn!`) for parse failures and `None` silently when the file is missing.
 ///
-/// Validates the on-disk `directory_name` against [`is_safe_segment`] BEFORE
-/// touching the workspace. The widget loader feeds raw `Workspace::list`
-/// entry names through here, and any filesystem-backed `Workspace`
-/// implementation that doesn't normalize `.`/`..`/backslash/NUL components
-/// would otherwise allow a widget directory called `..` (or with embedded
-/// separators) to escape the `.system/gateway/widgets/` subtree via the
-/// composed `{WIDGETS_DIR}{directory_name}/...` paths. The validator is the
-/// same one the public `/api/frontend/widget/{id}/{*file}` endpoint already
-/// uses, so this brings widget *discovery* in line with widget *serving*.
+/// Validates the on-disk `directory_name` against [`is_safe_widget_id`]
+/// BEFORE touching the workspace. The discovery, serving, and runtime
+/// contracts all key off the same identifier — `manifest.id` must equal
+/// `directory_name` (enforced below), and `manifest.id` must itself pass
+/// `is_safe_widget_id` (also enforced below) — so accepting a wider charset
+/// at the discovery step than the loader/runtime contract allows would only
+/// surface widgets that can never resolve. Using the same validator
+/// everywhere keeps discovery, serving (`frontend_widget_file_handler`), and
+/// the layout-config gating in lock-step. It also forecloses path-shape
+/// payloads (`.`/`..`/backslash/NUL/quotes/whitespace/leading-dash) before
+/// they ever get composed into `{WIDGETS_DIR}{directory_name}/...`
+/// workspace reads — important for any filesystem-backed `Workspace`
+/// implementation that doesn't normalize separator/traversal components.
 ///
 /// Also enforces that `manifest.id` matches the on-disk directory name. The
 /// rest of the loader uses `directory_name` to compute file paths
@@ -162,11 +166,11 @@ async fn read_widget_manifest(
     workspace: &Workspace,
     directory_name: &str,
 ) -> Option<WidgetManifest> {
-    if !is_safe_segment(directory_name) {
+    if !is_safe_widget_id(directory_name) {
         tracing::warn!(
             directory = directory_name,
-            "skipping widget: directory name is not a safe path segment \
-             (contains separator, traversal component, backslash, or NUL)"
+            "skipping widget: directory name is not a safe widget identifier \
+             (alphanumeric + `._-`, first char alphanumeric, ≤64 chars)"
         );
         return None;
     }
@@ -281,10 +285,10 @@ pub async fn frontend_widget_file_handler(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     // The widget id must match the loader/runtime contract enforced by
     // `read_widget_manifest` (`is_safe_widget_id`: alphanumeric + `._-`,
-    // first char alphanumeric, ≤64 chars). `is_safe_segment` would also
-    // permit quotes, brackets, whitespace, newlines, etc. — none of which
-    // can ever resolve to a real widget (the loader would have rejected
-    // the manifest), but they would still produce surprising
+    // first char alphanumeric, ≤64 chars). A looser segment-only check
+    // would permit quotes, brackets, whitespace, newlines, etc. — none of
+    // which can ever resolve to a real widget (the loader would have
+    // rejected the manifest), but they would still produce surprising
     // `.system/gateway/widgets/<weird>/...` workspace paths and inject
     // arbitrary content into the `workspace_path` field of the warn! log
     // below. Lock the accepted charset to the same one the loader uses.
@@ -350,39 +354,9 @@ pub async fn frontend_widget_file_handler(
     ))
 }
 
-/// True if `s` is a safe single path segment: non-empty, no separators, and
-/// not a relative component (`.`/`..`). Also rejects backslash and NUL so
-/// platform-specific separators and C-string terminators cannot sneak past.
-fn is_safe_segment(s: &str) -> bool {
-    !s.is_empty()
-        && s != "."
-        && s != ".."
-        && !s.contains('/')
-        && !s.contains('\\')
-        && !s.contains('\0')
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn segment_allows_normal_names() {
-        assert!(is_safe_segment("widget-1"));
-        assert!(is_safe_segment("dashboard_v2"));
-        assert!(is_safe_segment("a.b.c"));
-        assert!(is_safe_segment("foo..bar")); // `..` embedded in a longer name is fine
-    }
-
-    #[test]
-    fn segment_rejects_traversal_and_separators() {
-        assert!(!is_safe_segment(""));
-        assert!(!is_safe_segment("."));
-        assert!(!is_safe_segment(".."));
-        assert!(!is_safe_segment("a/b"));
-        assert!(!is_safe_segment("a\\b"));
-        assert!(!is_safe_segment("nul\0byte"));
-    }
 
     /// The serving endpoint (`frontend_widget_file_handler`) validates the
     /// `id` and each `file` component with `is_safe_widget_id`. This pins
@@ -494,14 +468,19 @@ mod tests {
             );
         }
 
-        /// Regression: a directory name that fails `is_safe_segment` (e.g.
-        /// `..`, embedded `/`, embedded `\`, NUL) must be skipped before any
-        /// path is composed. The validator was already enforced on the
-        /// public `/api/frontend/widget/{id}/{*file}` serving endpoint;
-        /// this test pins that the *discovery* loader respects the same
-        /// constraint, so a filesystem-backed `Workspace` implementation
-        /// that didn't normalize entry names couldn't be tricked into
-        /// reading outside the widgets subtree.
+        /// Regression: a directory name that fails `is_safe_widget_id`
+        /// must be skipped before any path is composed. Covers the classic
+        /// path-shape payloads (`.`, `..`, embedded `/`, embedded `\`,
+        /// NUL) and the wider charset that the previous `is_safe_segment`
+        /// check used to permit but the loader/runtime contract has
+        /// always rejected: leading-dash, leading-dot, quotes, brackets,
+        /// whitespace, control chars. Pinning the discovery validator to
+        /// `is_safe_widget_id` keeps it in lock-step with
+        /// `frontend_widget_file_handler` and `manifest.id` validation,
+        /// so a filesystem-backed `Workspace` implementation that didn't
+        /// normalize entry names couldn't be tricked into reading
+        /// outside the widgets subtree, and the discovery layer never
+        /// surfaces a directory whose name can never become a valid id.
         #[tokio::test]
         async fn skips_widget_with_unsafe_directory_name() {
             let (ws, _dir) = make_workspace().await;
@@ -509,12 +488,35 @@ mod tests {
             // `read_widget_manifest` is the chokepoint both call sites
             // share, so directly probing it covers both
             // `load_widget_manifests` and `load_resolved_widgets`.
-            for unsafe_name in ["..", ".", "a/b", "a\\b", "evil\0name"] {
+            //
+            // First group: classic path-shape payloads — the previous
+            // `is_safe_segment` validator already rejected these.
+            // Second group: shapes the previous validator wrongly
+            // permitted (`-flag`, `.hidden`, `name with space`, etc.) —
+            // these can never resolve as widget ids per
+            // `is_safe_widget_id` and must now also be rejected at the
+            // discovery step rather than caught later by the
+            // `manifest.id` charset / mismatch check.
+            for unsafe_name in [
+                // path-shape payloads
+                "..",
+                ".",
+                "a/b",
+                "a\\b",
+                "evil\0name",
+                // wider charset that fails is_safe_widget_id
+                "-flag",
+                ".hidden",
+                "name with space",
+                "name\"quote",
+                "name[bracket",
+                "name\nnewline",
+            ] {
                 let manifest = read_widget_manifest(&ws, unsafe_name).await;
                 assert!(
                     manifest.is_none(),
                     "directory name {unsafe_name:?} must be rejected by \
-                     is_safe_segment"
+                     is_safe_widget_id"
                 );
             }
         }
@@ -522,7 +524,7 @@ mod tests {
         /// Regression for the paranoid review's P-W4 / P-H10 finding:
         /// a manifest whose `id` would inject CSS or HTML must be
         /// rejected at load time, even if the on-disk directory name
-        /// passes `is_safe_segment`. The id flows directly into
+        /// passes `is_safe_widget_id`. The id flows directly into
         /// `[data-widget="<id>"]` in `scope_css` (no escape pass) and
         /// into `data-widget="<id>"` HTML attributes — the
         /// type-level check `is_safe_widget_id` makes both vectors

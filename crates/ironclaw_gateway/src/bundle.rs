@@ -96,6 +96,18 @@ pub struct ResolvedWidget {
 
 /// Inject frontend customizations into the base HTML template.
 ///
+/// **Production callers must gate this on `layout_has_customizations()`**
+/// (see `src/channels/web/server.rs::build_frontend_html`). The gateway
+/// short-circuits to the embedded base HTML when the workspace contains no
+/// customizations, so this function only runs in production when there is
+/// at least one customization-bearing field set. The function itself is
+/// still safe to call with `FrontendBundle::default()` — it unconditionally
+/// emits `window.__IRONCLAW_LAYOUT__` so the browser-side IIFE can read it
+/// either way, and `test_assemble_index_no_customizations` pins that
+/// behavior — but in normal operation that branch is exercised only by the
+/// test suite. Don't be surprised that the assembler is more permissive
+/// than its production caller.
+///
 /// All injected `<script>` tags carry a `nonce` attribute set to
 /// [`NONCE_PLACEHOLDER`]. Callers (the gateway's `index_handler`) substitute
 /// the placeholder with a fresh per-response nonce and emit a matching

@@ -8834,7 +8834,26 @@ document.getElementById('provider-id').addEventListener('input', (e) => {
 // from their module script. The init() function receives a container DOM element
 // and the IronClaw.api object for authenticated fetch, event subscription, etc.
 
-window.IronClaw = window.IronClaw || {};
+// Define `window.IronClaw` as a non-writable, non-configurable property
+// rather than `window.IronClaw = window.IronClaw || {}`. The `|| {}` form
+// would honor any pre-existing value on `window.IronClaw`, which in
+// principle could be set by an inline script that ran before app.js — a
+// hostile pre-init could install a fake `registerWidget` trap and
+// intercept every widget registration. In practice the gateway HTML
+// loads app.js before any deferred `type="module"` widget script and
+// has no inline scripts that touch `window.IronClaw`, so this is
+// defense-in-depth against future template changes (or a stray browser
+// extension), not a fix for an exploitable bug. Using
+// `Object.defineProperty` with `writable: false` / `configurable: false`
+// also locks the binding so a hostile widget can't replace the entire
+// `IronClaw` object after the fact — its only path is to mutate properties
+// on the fixed object, which is the same authority every other widget has.
+Object.defineProperty(window, 'IronClaw', {
+  value: {},
+  writable: false,
+  configurable: false,
+  enumerable: true,
+});
 IronClaw.widgets = new Map();
 IronClaw._widgetInitQueue = [];
 IronClaw._chatRenderers = [];
