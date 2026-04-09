@@ -33,10 +33,91 @@ pub struct ScoredSkill<'a> {
     pub score: u32,
 }
 
+/// Estimate the token cost of loading a skill's prompt into the LLM
+/// context. Prefers the declared `max_context_tokens` but falls back
+/// to the actual length-based estimate (and warns) if the declaration
+/// is implausibly low relative to the prompt content. Enforces a
+/// minimum of 1 token so a `max_context_tokens: 0` declaration can't
+/// bypass budgeting.
+fn skill_token_cost(skill: &LoadedSkill) -> usize {
+    let declared_tokens = skill.manifest.activation.max_context_tokens;
+    // Rough token estimate: ~0.25 tokens per byte (~4 bytes per token for English prose)
+    let approx_tokens = (skill.prompt_content.len() as f64 * 0.25) as usize;
+    let raw_cost = if approx_tokens > declared_tokens * 2 {
+        tracing::warn!(
+            "Skill '{}' declares max_context_tokens={} but prompt is ~{} tokens; using actual estimate",
+            skill.name(),
+            declared_tokens,
+            approx_tokens,
+        );
+        approx_tokens
+    } else {
+        declared_tokens
+    };
+    raw_cost.max(1)
+}
+
+/// Try to add a skill to the selected set. Returns `true` if the skill
+/// was added, `false` if it was already present, excluded by marker,
+/// over the candidate limit, or didn't fit in the remaining budget.
+///
+/// Shared between the scored-selection loop and the chain-loading loop.
+fn try_select<'a>(
+    skill: &'a LoadedSkill,
+    result: &mut Vec<&'a LoadedSkill>,
+    selected_names: &mut std::collections::HashSet<&'a str>,
+    budget_remaining: &mut usize,
+    max_candidates: usize,
+    satisfied_setup_markers: &std::collections::HashSet<String>,
+) -> bool {
+    if result.len() >= max_candidates {
+        return false;
+    }
+    let name = skill.manifest.name.as_str();
+    if selected_names.contains(name) {
+        return false;
+    }
+    // Respect marker exclusion even for chain-loaded companions: if a
+    // companion's setup is already done, there's nothing for it to
+    // contribute to the current turn.
+    if let Some(marker) = &skill.manifest.activation.setup_marker
+        && satisfied_setup_markers.contains(marker)
+    {
+        return false;
+    }
+    let cost = skill_token_cost(skill);
+    if cost > *budget_remaining {
+        return false;
+    }
+    *budget_remaining -= cost;
+    selected_names.insert(name);
+    result.push(skill);
+    true
+}
+
 /// Select candidate skills for a given message using deterministic scoring.
 ///
 /// Returns skills sorted by score (highest first), limited by `max_candidates`
 /// and total context budget. No LLM is involved in this selection.
+///
+/// ## Chain-loading via `requires.skills`
+///
+/// When a skill is selected by score, its `requires.skills` companions
+/// are also pulled in (if available), **bypassing the scoring filter** —
+/// they ride on the parent's selection. This makes persona/bundle
+/// skills like `developer-setup` work as designed: the orchestrator
+/// declares which operational skills it delegates to, and selecting
+/// the orchestrator automatically loads them. Chain-loading is
+/// non-transitive (depth 1); a chain-loaded companion does not load
+/// its own companions, to keep the behavior predictable.
+///
+/// Chain-loaded companions still consume from the same budget and
+/// respect `max_candidates`. If the remaining budget can't fit a
+/// companion, it is silently skipped with a debug log — the parent is
+/// still selected. Companions with a satisfied `setup_marker` are
+/// also skipped (their work is already done).
+///
+/// ## Setup-marker exclusion
 ///
 /// `satisfied_setup_markers` is the set of workspace paths that already
 /// exist for one-time setup skills. Any skill whose
@@ -61,6 +142,12 @@ pub fn prefilter_skills<'a>(
 
     let message_lower = message.to_lowercase();
 
+    // Build name → skill lookup for chain-loading companion resolution.
+    let by_name: std::collections::HashMap<&str, &'a LoadedSkill> = available_skills
+        .iter()
+        .map(|s| (s.manifest.name.as_str(), s))
+        .collect();
+
     let mut scored: Vec<ScoredSkill<'a>> = available_skills
         .iter()
         .filter_map(|skill| {
@@ -84,33 +171,50 @@ pub fn prefilter_skills<'a>(
     // Sort by score descending
     scored.sort_by_key(|b| std::cmp::Reverse(b.score));
 
-    // Apply candidate limit and context budget
-    let mut result = Vec::new();
+    // Apply candidate limit and context budget.
+    let mut result: Vec<&'a LoadedSkill> = Vec::new();
+    let mut selected_names: std::collections::HashSet<&'a str> =
+        std::collections::HashSet::new();
     let mut budget_remaining = max_context_tokens;
 
     for entry in scored {
-        if result.len() >= max_candidates {
-            break;
+        // Try to select the parent first.
+        if !try_select(
+            entry.skill,
+            &mut result,
+            &mut selected_names,
+            &mut budget_remaining,
+            max_candidates,
+            satisfied_setup_markers,
+        ) {
+            // Parent didn't fit or was already selected — don't try to
+            // chain-load companions for a parent that isn't in the set.
+            continue;
         }
-        let declared_tokens = entry.skill.manifest.activation.max_context_tokens;
-        // Rough token estimate: ~0.25 tokens per byte (~4 bytes per token for English prose)
-        let approx_tokens = (entry.skill.prompt_content.len() as f64 * 0.25) as usize;
-        let raw_cost = if approx_tokens > declared_tokens * 2 {
-            tracing::warn!(
-                "Skill '{}' declares max_context_tokens={} but prompt is ~{} tokens; using actual estimate",
-                entry.skill.name(),
-                declared_tokens,
-                approx_tokens,
-            );
-            approx_tokens
-        } else {
-            declared_tokens
-        };
-        // Enforce a minimum token cost so max_context_tokens=0 can't bypass budgeting
-        let token_cost = raw_cost.max(1);
-        if token_cost <= budget_remaining {
-            budget_remaining -= token_cost;
-            result.push(entry.skill);
+
+        // Chain-load companions declared in requires.skills.
+        // Non-transitive: companions don't load their own companions.
+        for companion_name in &entry.skill.manifest.requires.skills {
+            let Some(companion) = by_name.get(companion_name.as_str()) else {
+                // Listed but not loaded — ignore silently. Persona
+                // bundles declare optional companions.
+                continue;
+            };
+            if !try_select(
+                companion,
+                &mut result,
+                &mut selected_names,
+                &mut budget_remaining,
+                max_candidates,
+                satisfied_setup_markers,
+            ) {
+                tracing::debug!(
+                    parent = %entry.skill.name(),
+                    companion = %companion_name,
+                    budget_remaining,
+                    "chain-load skipped (already selected, budget full, or marker satisfied)"
+                );
+            }
         }
     }
 
@@ -844,5 +948,249 @@ mod tests {
             &markers,
         );
         assert_eq!(result.len(), 1);
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Chain-loading via requires.skills — companions ride on parent
+    // selection, bypassing their own score filter.
+    // ───────────────────────────────────────────────────────────────────
+
+    fn make_skill_with_requires(
+        name: &str,
+        keywords: &[&str],
+        required: &[&str],
+    ) -> LoadedSkill {
+        let mut skill = make_skill(name, keywords, &[], &[]);
+        skill.manifest.requires.skills = required.iter().map(|s| s.to_string()).collect();
+        skill
+    }
+
+    #[test]
+    fn test_chain_load_pulls_in_required_companions() {
+        // Parent is scored normally; companions bypass scoring.
+        // The companion has NO matching keywords — it would score 0
+        // and be filtered out on its own. Chain-loading should still
+        // bring it in because it's in the parent's requires.skills.
+        let parent = make_skill_with_requires(
+            "developer-setup",
+            &["setup"],
+            &["commitment-triage", "tech-debt-tracker"],
+        );
+        let companion1 = make_skill(
+            "commitment-triage",
+            &["unrelated-keyword-that-wont-match"],
+            &[],
+            &[],
+        );
+        let companion2 = make_skill(
+            "tech-debt-tracker",
+            &["another-unrelated"],
+            &[],
+            &[],
+        );
+        let bystander = make_skill("unrelated-skill", &["nope"], &[], &[]);
+
+        let skills = vec![parent, companion1, companion2, bystander];
+
+        let result = prefilter_skills(
+            "setup my dev workflow",
+            &skills,
+            10,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &HashSet::new(),
+        );
+
+        let names: Vec<&str> = result.iter().map(|s| s.name()).collect();
+        assert!(
+            names.contains(&"developer-setup"),
+            "parent must be selected (it scored), got: {names:?}"
+        );
+        assert!(
+            names.contains(&"commitment-triage"),
+            "companion must be chain-loaded even though it scored 0, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"tech-debt-tracker"),
+            "second companion must also be chain-loaded, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"unrelated-skill"),
+            "unrelated skill must not be pulled in, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn test_chain_load_skipped_when_parent_not_selected() {
+        // Parent doesn't match the message, so it's not scored. Its
+        // companions should NOT be chain-loaded either.
+        let parent = make_skill_with_requires(
+            "developer-setup",
+            &["dev-onboarding-keyword"],
+            &["commitment-triage"],
+        );
+        let companion = make_skill("commitment-triage", &["random-kw"], &[], &[]);
+
+        let skills = vec![parent, companion];
+
+        let result = prefilter_skills(
+            "completely unrelated message",
+            &skills,
+            10,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &HashSet::new(),
+        );
+
+        assert!(
+            result.is_empty(),
+            "neither parent nor chain-loaded companion should activate \
+             on an unrelated message; got: {:?}",
+            result.iter().map(|s| s.name()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_chain_load_respects_budget() {
+        // Parent (3000 tok) plus companion (3000 tok) exceeds a 4000
+        // budget. Parent selected; companion skipped.
+        let mut parent = make_skill_with_requires(
+            "big-setup",
+            &["setup"],
+            &["heavy-companion"],
+        );
+        parent.manifest.activation.max_context_tokens = 3000;
+        let mut companion = make_skill("heavy-companion", &["x"], &[], &[]);
+        companion.manifest.activation.max_context_tokens = 3000;
+
+        let skills = vec![parent, companion];
+        let result = prefilter_skills(
+            "setup",
+            &skills,
+            10,
+            4000,
+            &HashSet::new(),
+        );
+        let names: Vec<&str> = result.iter().map(|s| s.name()).collect();
+        assert!(
+            names.contains(&"big-setup"),
+            "parent must still be selected"
+        );
+        assert!(
+            !names.contains(&"heavy-companion"),
+            "companion must be budget-skipped when it doesn't fit"
+        );
+    }
+
+    #[test]
+    fn test_chain_load_skips_companion_with_satisfied_marker() {
+        // Companion has a setup_marker that's in the satisfied set.
+        // Even though the parent requires it, chain-loading must
+        // respect the marker exclusion — nothing for it to do.
+        let parent = make_skill_with_requires(
+            "parent-setup",
+            &["setup"],
+            &["nested-setup"],
+        );
+        let mut companion = make_skill("nested-setup", &["nothing"], &[], &[]);
+        companion.manifest.activation.setup_marker =
+            Some("marker/already-done".to_string());
+
+        let skills = vec![parent, companion];
+        let mut markers = HashSet::new();
+        markers.insert("marker/already-done".to_string());
+
+        let result = prefilter_skills(
+            "setup",
+            &skills,
+            10,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &markers,
+        );
+        let names: Vec<&str> = result.iter().map(|s| s.name()).collect();
+        assert!(
+            names.contains(&"parent-setup"),
+            "parent must be selected"
+        );
+        assert!(
+            !names.contains(&"nested-setup"),
+            "companion with satisfied marker must be skipped even via chain-load"
+        );
+    }
+
+    #[test]
+    fn test_chain_load_is_non_transitive() {
+        // A -> B (B is in A's requires.skills)
+        // B -> C (C is in B's requires.skills)
+        // Selecting A should pull in B but NOT C. This keeps the
+        // behavior predictable — bundles don't transitively explode.
+        let a = make_skill_with_requires("top-setup", &["setup"], &["mid-companion"]);
+        let b = make_skill_with_requires("mid-companion", &["mid"], &["deep-companion"]);
+        let c = make_skill("deep-companion", &["deep"], &[], &[]);
+
+        let skills = vec![a, b, c];
+        let result = prefilter_skills(
+            "setup",
+            &skills,
+            10,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &HashSet::new(),
+        );
+        let names: Vec<&str> = result.iter().map(|s| s.name()).collect();
+        assert!(names.contains(&"top-setup"));
+        assert!(
+            names.contains(&"mid-companion"),
+            "direct companion (depth 1) must be chain-loaded, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"deep-companion"),
+            "transitive companion (depth 2) must NOT be chain-loaded, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn test_chain_load_missing_companion_is_silent() {
+        // Parent lists a required skill that isn't loaded in the
+        // registry. Should not error — just skip with a debug log.
+        let parent = make_skill_with_requires(
+            "parent",
+            &["setup"],
+            &["does-not-exist", "also-missing"],
+        );
+        let skills = vec![parent];
+
+        let result = prefilter_skills(
+            "setup",
+            &skills,
+            10,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &HashSet::new(),
+        );
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name(), "parent");
+    }
+
+    #[test]
+    fn test_chain_load_dedups_companion_shared_across_parents() {
+        // Both parents declare the same companion. It should appear
+        // only once in the result even though it's chain-loaded twice.
+        let p1 = make_skill_with_requires("parent-one", &["one"], &["shared"]);
+        let p2 = make_skill_with_requires("parent-two", &["two"], &["shared"]);
+        let shared = make_skill("shared", &["nomatch"], &[], &[]);
+
+        let skills = vec![p1, p2, shared];
+        let result = prefilter_skills(
+            "one two",
+            &skills,
+            10,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &HashSet::new(),
+        );
+        let names: Vec<&str> = result.iter().map(|s| s.name()).collect();
+        assert_eq!(
+            names.iter().filter(|n| **n == "shared").count(),
+            1,
+            "shared companion must appear only once, got: {names:?}"
+        );
+        assert!(names.contains(&"parent-one"));
+        assert!(names.contains(&"parent-two"));
     }
 }

@@ -341,12 +341,44 @@ def score_skill(skill, message_lower, message_original):
 
 
 def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
-    """Select relevant skills using deterministic scoring."""
+    """Select relevant skills using deterministic scoring.
+
+    Mirrors the v1 Rust `ironclaw_skills::selector::prefilter_skills`:
+
+    1. **Score** each skill against the message. Setup-marker exclusion
+       happens upstream in Rust `handle_list_skills`, so by the time
+       the skill list reaches this function, excluded skills are
+       already gone.
+    2. **Sort** by score descending.
+    3. **Select** scored skills greedily within the budget and the
+       `max_candidates` limit.
+    4. **Chain-load** companions from each selected parent's
+       `requires.skills`, bypassing the scoring filter. Companions
+       ride on the parent's selection so persona/bundle skills can
+       pull in their operational companions even when those
+       companions wouldn't score on their own.
+
+    Chain-loading is **non-transitive** (depth 1 only) to keep the
+    behavior predictable: a chain-loaded companion does not pull in
+    its own companions. Chain-loaded skills respect the same budget
+    and max_candidates caps as scored skills.
+    """
     if not skills or not goal:
         return []
 
     message_lower = goal.lower()
     message_original = goal
+
+    # Build name -> skill lookup for chain-loading companion resolution.
+    # The metadata "name" field is the canonical identifier referenced
+    # from requires.skills entries in other skills' manifests.
+    by_name = {}
+    for sk in skills:
+        meta = sk.get("metadata", {})
+        name = meta.get("name")
+        if name:
+            by_name[str(name)] = sk
+
     scored = []
     for skill in skills:
         s = score_skill(skill, message_lower, message_original)
@@ -355,18 +387,83 @@ def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
 
     scored.sort(key=lambda x: -x[0])
 
-    # Budget selection
+    # Greedy selection with chain-loading. `selected_names` tracks
+    # what's already in the result to dedup across multiple parents
+    # that share a companion.
     selected = []
+    selected_names = set()
     budget = max_tokens
-    for _, skill in scored:
+
+    def try_add(skill):
+        """Try to append a skill to the result set.
+
+        Returns True if added, False if skipped (already selected,
+        budget full, or candidate limit reached). Treats every
+        successful add as consuming the declared max_context_tokens.
+        """
         if len(selected) >= max_candidates:
-            break
+            return False
         meta = skill.get("metadata", {})
+        name = meta.get("name")
+        if name is None or str(name) in selected_names:
+            return False
         activation = meta.get("activation", {})
         cost = max(activation.get("max_context_tokens", 1000), 1)
-        if cost <= budget:
-            budget -= cost
-            selected.append(skill)
+        if cost > budget:
+            return False
+        selected.append(skill)
+        selected_names.add(str(name))
+        return True
+
+    # Note: budget is captured by try_add via closure. Python doesn't
+    # support `nonlocal` directly in Monty the same way as CPython, so
+    # we use a list as a mutable reference. Re-assign via budget[0] and
+    # read via budget[0] in try_add.
+    #
+    # Actually, for Monty compat we avoid closures modifying enclosing
+    # scope. Inline the try-add logic below instead.
+
+    for _, parent in scored:
+        # Inline try_add for the parent so we can mutate `budget` in
+        # this scope (Monty doesn't like closure-assigned outer vars).
+        if len(selected) >= max_candidates:
+            break
+        parent_meta = parent.get("metadata", {})
+        parent_name = parent_meta.get("name")
+        if parent_name is None or str(parent_name) in selected_names:
+            continue
+        parent_activation = parent_meta.get("activation", {})
+        parent_cost = max(parent_activation.get("max_context_tokens", 1000), 1)
+        if parent_cost > budget:
+            continue
+        selected.append(parent)
+        selected_names.add(str(parent_name))
+        budget -= parent_cost
+
+        # Chain-load companions (depth 1, non-transitive).
+        requires = parent_meta.get("requires", {})
+        companion_names = requires.get("skills", [])
+        for companion_name in companion_names:
+            cname = str(companion_name)
+            if len(selected) >= max_candidates:
+                break
+            if cname in selected_names:
+                continue
+            companion = by_name.get(cname)
+            if companion is None:
+                # Listed but not loaded — ignore silently, persona
+                # bundles often list optional companions.
+                continue
+            comp_meta = companion.get("metadata", {})
+            comp_activation = comp_meta.get("activation", {})
+            comp_cost = max(comp_activation.get("max_context_tokens", 1000), 1)
+            if comp_cost > budget:
+                # Budget exhausted for companions. Parent is still
+                # selected; the remaining companions are skipped.
+                continue
+            selected.append(companion)
+            selected_names.add(cname)
+            budget -= comp_cost
 
     return selected
 
