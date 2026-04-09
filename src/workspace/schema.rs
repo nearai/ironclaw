@@ -21,6 +21,16 @@ pub fn validate_content_against_schema(
     content: &str,
     schema: &serde_json::Value,
 ) -> Result<(), WorkspaceError> {
+    // Treat an explicit JSON `null` schema as "no schema". Serde deserializes
+    // `"schema": null` in metadata as `Some(Value::Null)` (not `None`), so the
+    // upstream `if let Some(schema) = &metadata.schema` check passes through to
+    // here. Without this guard, `validator_for(Value::Null)` errors out and
+    // every subsequent write to that document is permanently blocked — a
+    // latent DoS if a caller ever writes a null schema field by accident.
+    if schema.is_null() {
+        return Ok(());
+    }
+
     let instance: serde_json::Value =
         serde_json::from_str(content).map_err(|e| WorkspaceError::SchemaValidation {
             path: path.to_string(),
@@ -189,6 +199,23 @@ mod tests {
             }
             other => panic!("expected SchemaValidation, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn null_schema_is_treated_as_no_op() {
+        // Regression: a metadata field of `"schema": null` deserializes as
+        // `Some(Value::Null)`, not `None`. Without an explicit null guard,
+        // `jsonschema::validator_for(Value::Null)` errors out and every
+        // subsequent write to that document is blocked — latent DoS.
+        let schema = serde_json::Value::Null;
+
+        // Any content (including invalid JSON) should pass when the schema
+        // is null, because there's effectively nothing to validate against.
+        assert!(validate_content_against_schema("test.json", "{}", &schema).is_ok());
+        assert!(
+            validate_content_against_schema("test.json", "not even json", &schema).is_ok(),
+            "null schema must skip validation entirely, including the JSON parse step"
+        );
     }
 
     #[test]

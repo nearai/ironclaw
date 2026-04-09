@@ -449,14 +449,14 @@ mod integration_tests {
         );
 
         // Invariant 2: a system job was created + the ActionRecord persisted.
-        // `create_system_job` sets `title = source`, so locate our job by
-        // the display-form of our `DispatchSource`. Use the raw-SQL helper
-        // because `list_agent_jobs_for_user` filters out `category = 'system'`
-        // rows on purpose.
+        // `create_system_job` sets `title = format!("System: {source}")`, so
+        // locate our job by the display-form of our `DispatchSource`. Use the
+        // raw-SQL helper because `list_agent_jobs_for_user` filters out
+        // `category = 'system'` rows on purpose.
         let system_jobs = fetch_system_jobs_for_user(&backend, "tester").await;
         let (system_job_id, _) = system_jobs
             .iter()
-            .find(|(_, title)| title == "channel:gateway")
+            .find(|(_, title)| title == "System: channel:gateway")
             .cloned()
             .expect("system job for the channel:gateway dispatch");
         let actions = db
@@ -529,7 +529,7 @@ mod integration_tests {
         let system_jobs = fetch_system_jobs_for_user(&backend, "tester").await;
         let (system_job_id, _) = system_jobs
             .iter()
-            .find(|(_, title)| title == "system")
+            .find(|(_, title)| title == "System: system")
             .cloned()
             .expect("system job for the System-source dispatch");
         let actions = db

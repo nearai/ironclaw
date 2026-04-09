@@ -237,7 +237,7 @@ impl Store {
             "#,
             &[
                 &id,
-                &source,
+                &format!("System: {source}"),
                 &format!("System operation: {source}"),
                 &Some("system"),
                 &status,

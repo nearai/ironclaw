@@ -536,7 +536,7 @@ impl JobStore for LibSqlBackend {
             "#,
             params![
                 id.to_string(),
-                source,
+                format!("System: {source}"),
                 format!("System operation: {source}"),
                 "system",
                 status,
