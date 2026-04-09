@@ -212,6 +212,16 @@ pub struct TestRig {
     /// Session manager for direct session/thread access in tests.
     #[cfg(feature = "libsql")]
     session_manager: Arc<ironclaw::agent::SessionManager>,
+    /// Secrets store for tests that need to read pre-seeded credentials
+    /// (e.g. live tests that issue direct REST calls to the same backend
+    /// the agent is talking to). Pulled from `AppComponents.secrets_store`
+    /// during build.
+    #[cfg(feature = "libsql")]
+    secrets_store: Option<Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>>,
+    /// Owner ID used by the rig — needed by `get_secret` to look up
+    /// per-user secret rows.
+    #[cfg(feature = "libsql")]
+    owner_id: String,
     /// Temp directory guard -- keeps the libSQL database file alive.
     #[cfg(feature = "libsql")]
     _temp_dir: tempfile::TempDir,
@@ -252,6 +262,33 @@ impl TestRig {
     #[cfg(feature = "libsql")]
     pub fn session_manager(&self) -> &Arc<ironclaw::agent::SessionManager> {
         &self.session_manager
+    }
+
+    /// Read the decrypted value of a pre-seeded secret by name.
+    ///
+    /// Returns `None` if the rig has no SecretsStore wired (non-libsql
+    /// configurations) or if the secret doesn't exist for this rig's
+    /// owner_id. Used by live tests that need to issue direct REST
+    /// calls to the same backend the agent is talking to (e.g. setting
+    /// up a real GitHub issue before the agent runs against it).
+    ///
+    /// Note: this returns the secret in plaintext. Live tests should
+    /// only call this for credentials that were pre-seeded via
+    /// `with_secret` or `with_secrets`, never for arbitrary secrets the
+    /// rig may have inherited from a real DB.
+    #[cfg(feature = "libsql")]
+    pub async fn get_secret(&self, name: &str) -> Option<String> {
+        let store = self.secrets_store.as_ref()?;
+        match store.get_decrypted(&self.owner_id, name).await {
+            Ok(decrypted) => Some(decrypted.expose().to_string()),
+            Err(e) => {
+                eprintln!(
+                    "[TestRig] get_secret('{name}') for owner '{}' failed: {e}",
+                    self.owner_id
+                );
+                None
+            }
+        }
     }
 
     /// Wait until at least `n` non-bootstrap responses have been captured, or
@@ -1259,6 +1296,13 @@ impl TestRigBuilder {
             }
         }
 
+        // Capture handles tests need to read back state via the same
+        // SecretsStore the agent will use. Done before AgentDeps moves
+        // values out of `components`. The owner_id is required for any
+        // secret lookup since secret rows are keyed by user.
+        let secrets_store_ref = components.secrets_store.clone();
+        let owner_id_ref = components.config.owner_id.clone();
+
         // 7. Construct AgentDeps from AppComponents (mirrors main.rs).
         let deps = AgentDeps {
             owner_id: components.config.owner_id.clone(),
@@ -1377,6 +1421,8 @@ impl TestRigBuilder {
             extension_manager: ext_mgr_ref,
             skill_registry: skill_registry_ref,
             session_manager: session_manager_ref,
+            secrets_store: secrets_store_ref,
+            owner_id: owner_id_ref,
             _temp_dir: temp_dir,
             bootstrap_greetings_to_keep: if keep_bootstrap { 1 } else { 0 },
         }

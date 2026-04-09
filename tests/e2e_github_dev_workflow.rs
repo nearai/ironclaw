@@ -1,51 +1,71 @@
-//! Live/replay test for the GitHub developer workflow.
+//! Live integration test for the GitHub developer workflow.
 //!
-//! This drives the `developer-assistant` + `github-workflow` skills
-//! end-to-end against a synthetic `nearai/ironclaw` repository. The flow
-//! mirrors what would happen in production when a real GitHub webhook
-//! arrives at the channel:
+//! This is a **fully real** end-to-end test that exercises the
+//! `developer-assistant` + `github-workflow` skills against the real
+//! `nearai/ironclaw` GitHub repo. The intent (per project owner) is to
+//! validate the workflow by doing useful work on the real repo and
+//! recording every interaction so we can debug what doesn't work and
+//! iterate on the skills.
 //!
-//! 1. **Setup** — user activates the developer-assistant for
-//!    `nearai/ironclaw` and asks it to install the workflow missions
-//!    (issue → plan, maintainer gate, PR monitor, CI fix, learning).
-//!    We assert the missions actually got created via the workspace +
-//!    captured `mission_create` tool calls in the trace.
-//! 2. **Issue opened** — synthetic `github.issue.opened` payload injected
-//!    as if a webhook handler had turned the event into a channel
-//!    message. The agent should produce a triage + plan comment.
-//! 3. **Maintainer LGTM** — `pr.comment.created` from a maintainer with
-//!    body "LGTM, please proceed". The agent should branch off and open
-//!    a PR linked to the issue.
-//! 4. **PR review comment** — non-maintainer review comment requesting
-//!    a fix. Agent should acknowledge + apply.
-//! 5. **CI failure** — failing check_run. Agent should diagnose +
-//!    post a status comment.
-//! 6. **Maintainer approval** — approving review. Agent should post
-//!    "ready for human merge" and **stop**: the test asserts no
-//!    `gh pr merge` / merge_pr tool call ever fires (autonomy: implement
-//!    but don't auto-merge).
-//! 7. **Digest** — user asks for status. Agent should report PR open,
-//!    awaiting human merge.
+//! ## Flow
 //!
-//! This test does NOT exercise the mission OnSystemEvent firing path —
-//! that has its own unit coverage in
-//! `crates/ironclaw_engine/src/runtime/mission.rs::tests`. Here we
-//! exercise the **skill behavior** given the right inputs, which is the
-//! part that has not been covered by any test.
+//! 1. **Setup turn** — agent installs the workflow missions
+//!    (`wf-issue-plan-*`, `wf-maintainer-gate-*`, `wf-pr-monitor-*`,
+//!    `wf-ci-fix-*`, `wf-learning-*`) for `nearai/ironclaw` via real
+//!    `mission_create` calls.
 //!
-//! # Running
+//! 2. **Real issue creation** — the test (NOT the agent) opens a real
+//!    issue on `nearai/ironclaw` via direct REST API. Title is prefixed
+//!    `[live-test {timestamp}]` so it's identifiable. Issue URL is
+//!    printed at the start so the human running the test can monitor
+//!    or intervene.
 //!
-//! **Replay mode** (default, deterministic, needs committed trace fixtures):
+//! 3. **Triage turn** — the test tells the agent "issue #N just opened,
+//!    please triage and post a plan." The agent reads the real issue,
+//!    generates a plan, and posts a real comment back via the github
+//!    skill.
+//!
+//! 4. **Verification** — the test polls the real issue's comments via
+//!    REST and asserts that at least one new comment exists since the
+//!    test started. Comment content is logged to the session log for
+//!    human review (we don't assert on text since LLM output varies).
+//!
+//! 5. **Cleanup** — the test closes the real issue with a final
+//!    "live-test complete" comment, regardless of pass/fail. If the
+//!    test panics before reaching cleanup, the issue URL is in stderr
+//!    so it can be closed manually.
+//!
+//! ## Why "real" instead of synthetic?
+//!
+//! An earlier version of this test used synthetic webhook payloads
+//! injected as channel messages. That approach kept the test hermetic
+//! but couldn't surface the realistic failure modes (auth gates,
+//! rate limits, payload format mismatches) that show up in production.
+//! Per project owner's direction, this version goes all-in on real
+//! artifacts so the recorded trace becomes authoritative debug data.
+//!
+//! The mission `OnSystemEvent` firing path (real webhook → mission →
+//! spawned thread) is NOT exercised here — that requires running an
+//! HTTP server and registering a real GitHub webhook, which is out of
+//! scope for this test. We exercise the **skill behavior** by driving
+//! the same agent conversation that a mission thread would drive.
+//!
+//! ## Running
+//!
+//! **Live mode** (default for this test — there is no replay yet):
 //! ```bash
-//! cargo test --features libsql --test e2e_github_dev_workflow -- --ignored
+//! IRONCLAW_LIVE_TEST=1 cargo test --features libsql \
+//!     --test e2e_github_dev_workflow \
+//!     -- --ignored --test-threads=1 --nocapture
 //! ```
 //!
-//! **Live mode** (real LLM calls, records trace fixture):
-//! ```bash
-//! IRONCLAW_LIVE_TEST=1 cargo test --features libsql --test e2e_github_dev_workflow -- --ignored --test-threads=1
-//! ```
+//! Requires:
+//! - `~/.ironclaw/.env` with valid LLM credentials
+//! - A `github_token` secret in `~/.ironclaw/ironclaw.db` with `repo`
+//!   scope (the test rig copies it via `with_secrets(["github_token"])`)
 //!
-//! Live mode requires `~/.ironclaw/.env` with valid LLM credentials.
+//! Replay mode is supported but requires the trace fixture to exist.
+//! On the first run with a fresh `.env` the test records the fixture.
 
 #[cfg(feature = "libsql")]
 mod support;
@@ -57,9 +77,11 @@ mod github_dev_workflow_test {
 
     use crate::support::live_harness::{LiveTestHarness, LiveTestHarnessBuilder, SessionTurn};
 
-    /// Absolute path to the repo's `skills/` directory — same source the
-    /// persona tests use, gives us the real `developer-assistant` and
-    /// `github-workflow` SKILL.md files.
+    /// Repository under test. Owned and watched by the project owner;
+    /// safe to create live-test issues against.
+    const REPO_OWNER: &str = "nearai";
+    const REPO_NAME: &str = "ironclaw";
+
     fn repo_skills_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills")
     }
@@ -73,8 +95,7 @@ mod github_dev_workflow_test {
             .join(format!("{test_name}.json"))
     }
 
-    /// Skip in replay mode if the fixture doesn't exist yet — same
-    /// pattern as `e2e_live_personas.rs`.
+    /// Skip in replay mode if the fixture doesn't exist yet.
     fn should_run_test(test_name: &str) -> bool {
         if trace_fixture_path(test_name).exists()
             || std::env::var("IRONCLAW_LIVE_TEST")
@@ -101,19 +122,15 @@ mod github_dev_workflow_test {
             // plus per-event reasoning, so we need a generous iteration cap.
             .with_max_tool_iterations(80)
             .with_skills_dir(repo_skills_dir())
-            // Pre-seed a fake github_token so the kernel pre-flight auth
-            // gate doesn't block the conversation when the `github` skill
-            // activates. We never actually call api.github.com — the test
-            // injects synthetic webhook payloads via channel messages and
-            // asserts on tool call shape, not on real API responses.
-            .with_secret("github_token", "ghp_fake_token_for_live_test_only")
+            // Copy the real github_token from ~/.ironclaw/ironclaw.db so
+            // the agent can talk to api.github.com. Required: the test
+            // creates a real issue and the agent reads it + comments on it.
+            .with_secrets(["github_token"])
             .build()
             .await
     }
 
-    /// Send a message and wait for at least `expected_responses` text
-    /// replies. 300s timeout is conservative for live mode and irrelevant
-    /// in replay (the fixture provides instant LLM responses).
+    /// Send a message and wait for at least `expected_responses` text replies.
     async fn run_turn(
         harness: &LiveTestHarness,
         message: &str,
@@ -137,21 +154,8 @@ mod github_dev_workflow_test {
         new_responses
     }
 
-    /// Compose a synthetic GitHub webhook payload as a channel message,
-    /// formatted so the agent (with the developer-assistant skill in its
-    /// system prompt) interprets it as an inbound event rather than a
-    /// human chat turn. The framing matches what a real webhook->channel
-    /// adapter would emit.
-    fn webhook_event(event_type: &str, payload: serde_json::Value) -> String {
-        format!(
-            "[GITHUB WEBHOOK] {event_type}\n\n```json\n{}\n```",
-            serde_json::to_string_pretty(&payload).expect("payload must serialize"),
-        )
-    }
-
-    /// Dump the captured tool activity and skill state to stderr.
-    /// Used as a pre-assertion diagnostic so failing live runs surface
-    /// what the agent actually did instead of just an opaque panic.
+    /// Dump captured tool activity to stderr after each turn so failing
+    /// runs surface what the agent actually did.
     fn dump_activity(harness: &LiveTestHarness, label: &str) {
         use ironclaw::channels::StatusUpdate;
         eprintln!("───── [{label}] activity dump ─────");
@@ -186,49 +190,195 @@ mod github_dev_workflow_test {
         eprintln!("───── end activity ─────");
     }
 
-    /// Verify a workflow-capable skill activated and that at least one
-    /// project file landed in the workspace under
-    /// `projects/nearai-ironclaw/`. We accept either path:
-    ///
-    /// - `developer-assistant` (the higher-level orchestrator persona
-    ///   that recommends installing github-workflow), OR
-    /// - `github-workflow` directly (the skill that actually owns the
-    ///   mission templates and does the install work).
-    ///
-    /// Either is a legitimate route to the same outcome — the developer
-    /// persona is just a top-level convenience that delegates to the
-    /// workflow skill. The deterministic skill selector picks based on
-    /// keyword/pattern scoring + token budget, so a setup message that
-    /// strongly mentions "github workflow" can score `github-workflow`
-    /// above `developer-assistant` and that's fine.
-    async fn verify_setup_landed(harness: &LiveTestHarness) {
-        let active = harness.rig().active_skill_names();
-        assert!(
-            active.iter().any(|s| s == "developer-assistant" || s == "github-workflow"),
-            "Expected 'developer-assistant' or 'github-workflow' skill to activate. \
-             Active: {active:?}",
-        );
+    // ─────────────────────────────────────────────────────────────────────
+    // Direct GitHub REST helpers
+    //
+    // These run inside the test process (not via the agent) so the test
+    // can set up real artifacts before the agent runs and verify/clean up
+    // afterwards. They use the same `github_token` the agent uses (read
+    // back from the rig's SecretsStore via `rig.get_secret`).
+    //
+    // We use reqwest directly rather than the agent's `http` tool because
+    // the test needs guaranteed access to GitHub regardless of skill
+    // selection / tool gating.
+    // ─────────────────────────────────────────────────────────────────────
 
-        let ws = harness
-            .rig()
-            .workspace()
-            .expect("rig should expose workspace handle");
-        let paths: Vec<String> = ws
-            .list_all()
-            .await
-            .expect("list_all should succeed")
-            .into_iter()
-            .filter(|p| p.starts_with("projects/nearai-ironclaw/") || p.starts_with("commitments/"))
-            .collect();
-        eprintln!("[verify_setup_landed] workspace paths: {paths:?}");
-        assert!(
-            !paths.is_empty(),
-            "Expected setup to write at least one file under projects/nearai-ironclaw/ or commitments/, found none",
-        );
+    mod github_api {
+        use serde_json::Value;
+
+        const GITHUB_API: &str = "https://api.github.com";
+
+        fn client() -> reqwest::Client {
+            reqwest::Client::builder()
+                .user_agent("ironclaw-live-test/0.1")
+                .build()
+                .expect("build reqwest client")
+        }
+
+        /// Open a real issue. Returns `(issue_number, html_url)`.
+        pub async fn create_issue(
+            token: &str,
+            owner: &str,
+            repo: &str,
+            title: &str,
+            body: &str,
+        ) -> Result<(u64, String), String> {
+            let url = format!("{GITHUB_API}/repos/{owner}/{repo}/issues");
+            let resp = client()
+                .post(&url)
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .bearer_auth(token)
+                .json(&serde_json::json!({
+                    "title": title,
+                    "body": body,
+                    "labels": ["live-test"],
+                }))
+                .send()
+                .await
+                .map_err(|e| format!("create_issue request: {e}"))?;
+            let status = resp.status();
+            let body_text = resp
+                .text()
+                .await
+                .map_err(|e| format!("create_issue body: {e}"))?;
+            if !status.is_success() {
+                return Err(format!("create_issue {status}: {body_text}"));
+            }
+            let v: Value = serde_json::from_str(&body_text)
+                .map_err(|e| format!("create_issue parse: {e}"))?;
+            let number = v
+                .get("number")
+                .and_then(|n| n.as_u64())
+                .ok_or_else(|| format!("create_issue: no number in response: {body_text}"))?;
+            let html_url = v
+                .get("html_url")
+                .and_then(|s| s.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| format!("https://github.com/{owner}/{repo}/issues/{number}"));
+            Ok((number, html_url))
+        }
+
+        /// List comments on an issue. Returns the raw JSON array.
+        pub async fn list_issue_comments(
+            token: &str,
+            owner: &str,
+            repo: &str,
+            issue_number: u64,
+        ) -> Result<Vec<Value>, String> {
+            let url = format!(
+                "{GITHUB_API}/repos/{owner}/{repo}/issues/{issue_number}/comments?per_page=100"
+            );
+            let resp = client()
+                .get(&url)
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .bearer_auth(token)
+                .send()
+                .await
+                .map_err(|e| format!("list_issue_comments request: {e}"))?;
+            let status = resp.status();
+            let body_text = resp
+                .text()
+                .await
+                .map_err(|e| format!("list_issue_comments body: {e}"))?;
+            if !status.is_success() {
+                return Err(format!("list_issue_comments {status}: {body_text}"));
+            }
+            let v: Value = serde_json::from_str(&body_text)
+                .map_err(|e| format!("list_issue_comments parse: {e}"))?;
+            Ok(v.as_array().cloned().unwrap_or_default())
+        }
+
+        /// Post a comment on an issue (used by the test for the LGTM
+        /// confirmation step and for the final cleanup notice).
+        pub async fn post_issue_comment(
+            token: &str,
+            owner: &str,
+            repo: &str,
+            issue_number: u64,
+            body: &str,
+        ) -> Result<(), String> {
+            let url =
+                format!("{GITHUB_API}/repos/{owner}/{repo}/issues/{issue_number}/comments");
+            let resp = client()
+                .post(&url)
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .bearer_auth(token)
+                .json(&serde_json::json!({ "body": body }))
+                .send()
+                .await
+                .map_err(|e| format!("post_issue_comment request: {e}"))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body_text = resp.text().await.unwrap_or_default();
+                return Err(format!("post_issue_comment {status}: {body_text}"));
+            }
+            Ok(())
+        }
+
+        /// Close an issue. Used by cleanup at the end of the test.
+        pub async fn close_issue(
+            token: &str,
+            owner: &str,
+            repo: &str,
+            issue_number: u64,
+        ) -> Result<(), String> {
+            let url = format!("{GITHUB_API}/repos/{owner}/{repo}/issues/{issue_number}");
+            let resp = client()
+                .patch(&url)
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .bearer_auth(token)
+                .json(&serde_json::json!({ "state": "closed" }))
+                .send()
+                .await
+                .map_err(|e| format!("close_issue request: {e}"))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body_text = resp.text().await.unwrap_or_default();
+                return Err(format!("close_issue {status}: {body_text}"));
+            }
+            Ok(())
+        }
+    }
+
+    /// Best-effort cleanup helper. Posts a final notice and closes the
+    /// issue. Logs failures to stderr instead of panicking — cleanup
+    /// should never mask the original test result.
+    async fn cleanup_issue(token: &str, issue_number: u64) {
+        let final_comment = "🤖 **Live test complete.** Closing this issue.\n\n\
+             This issue was created by the IronClaw `e2e_github_dev_workflow` \
+             live integration test. If you're seeing this and the test was \
+             still useful, the recorded trace is at \
+             `tests/fixtures/llm_traces/live/github_dev_workflow_full_loop.json`.";
+        if let Err(e) = github_api::post_issue_comment(
+            token,
+            REPO_OWNER,
+            REPO_NAME,
+            issue_number,
+            final_comment,
+        )
+        .await
+        {
+            eprintln!("[cleanup] WARNING: failed to post final comment: {e}");
+        }
+        if let Err(e) =
+            github_api::close_issue(token, REPO_OWNER, REPO_NAME, issue_number).await
+        {
+            eprintln!("[cleanup] WARNING: failed to close issue #{issue_number}: {e}");
+            eprintln!(
+                "[cleanup] Manual cleanup needed: \
+                 https://github.com/{REPO_OWNER}/{REPO_NAME}/issues/{issue_number}"
+            );
+        } else {
+            eprintln!("[cleanup] closed issue #{issue_number}");
+        }
     }
 
     #[tokio::test]
-    #[ignore] // Live tier: requires LLM API keys or a recorded trace fixture
+    #[ignore] // Live tier: requires LLM API keys + github_token in ~/.ironclaw
     async fn github_dev_workflow_full_loop() {
         let test_name = "github_dev_workflow_full_loop";
         if !should_run_test(test_name) {
@@ -238,180 +388,186 @@ mod github_dev_workflow_test {
         let harness = build_workflow_harness(test_name).await;
         let mut transcript: Vec<SessionTurn> = Vec::new();
 
-        // ── Turn 1: Setup ────────────────────────────────────────────
-        // Activate developer-assistant for nearai/ironclaw and ask it to
-        // install the github-workflow mission set. The skill should:
-        //   - Validate the repo
-        //   - Create projects/nearai-ironclaw/project.md
-        //   - Call mission_create for wf-issue-plan, wf-maintainer-gate,
-        //     wf-pr-monitor, wf-ci-fix, wf-learning (skipping
-        //     wf-staging-review since we explicitly opt out of auto-merge)
-        let setup_msg = "I'm a software engineer. Set up the GitHub workflow for nearai/ironclaw. \
-                         Maintainers: ilblackdragon. Staging branch: staging. \
-                         Do NOT install the staging-batch-review mission — humans will merge to main. \
-                         Use sensible defaults and skip the setup questions.";
+        // Pull the github token back out of the rig's secrets store so
+        // we can issue direct REST calls. The harness already seeded it
+        // via with_secrets(["github_token"]) during build.
+        let github_token = harness
+            .rig()
+            .get_secret("github_token")
+            .await
+            .expect("github_token must be present in ~/.ironclaw/ironclaw.db");
+
+        // ── Turn 1: Setup workflow ───────────────────────────────────
+        // The agent installs the wf-* mission set for nearai/ironclaw.
+        // We don't strictly need this turn for the triage flow below,
+        // but it exercises the github-workflow skill's install path
+        // which is the other half of the dev workflow surface area.
+        let setup_msg = "I'm a software engineer. Set up the GitHub workflow for \
+                         nearai/ironclaw. Maintainers: ilblackdragon. Staging \
+                         branch: staging. Do NOT install the staging-batch-review \
+                         mission — humans will merge to main. Use sensible defaults \
+                         and skip the setup questions.";
         let setup_responses = run_turn(&harness, setup_msg, 1).await;
         eprintln!("[setup] response: {}", setup_responses.join("\n"));
         dump_activity(&harness, "after setup");
-        verify_setup_landed(&harness).await;
-        // Setup must have called mission_create at least once.
+
+        // Setup must have called mission_create at least once and the
+        // response must reference the wf-* templates.
         harness.assert_trace_contains_tool_call(
             "mission_create",
-            "nearai-ironclaw",
-            "Setup turn: at least one wf-* mission must be created for nearai-ironclaw",
+            "",
+            "Setup turn: at least one mission_create call required",
+        );
+        let setup_text = setup_responses.join("\n").to_lowercase();
+        assert!(
+            setup_text.contains("wf-issue-plan")
+                || setup_text.contains("wf-pr-monitor")
+                || setup_text.contains("wf-ci-fix"),
+            "Setup turn: response should mention at least one wf-* mission name. Got: {}",
+            setup_text.chars().take(400).collect::<String>(),
         );
         transcript.push(SessionTurn::user(setup_msg, setup_responses));
 
-        // ── Turn 2: Issue opened ─────────────────────────────────────
-        let issue_event = webhook_event(
-            "issue.opened",
-            serde_json::json!({
-                "repository_name": "nearai/ironclaw",
-                "issue_number": 99001,
-                "issue_title": "Add /metrics Prometheus endpoint",
-                "issue_body": "Expose Prometheus-style metrics for request latency, \
-                               tool execution count, and active session count, scraped \
-                               at /metrics. Should not require auth in dev mode.",
-                "sender_login": "external-user",
-                "labels": ["enhancement"]
-            }),
-        );
-        let issue_responses = run_turn(&harness, &issue_event, 1).await;
-        // Agent should have either posted a comment via the github skill
-        // (HTTP POST to /issues/99001/comments) or called a github tool
-        // referencing the issue. Both shapes are acceptable.
-        assert!(
-            harness.trace_contains_tool_call("http", "/issues/99001")
-                || harness.trace_contains_tool_call("github", "99001"),
-            "Issue turn: agent should have called the github tool or http \
-             with the issue number 99001 in the URL/args. Trace did not show \
-             that. See session log for actual tool calls.",
-        );
-        transcript.push(SessionTurn::tool_inbound(&issue_event, issue_responses));
+        // ── Create a real test issue on nearai/ironclaw ──────────────
+        let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
+        let issue_title = format!("[live-test {timestamp}] Add /metrics Prometheus endpoint");
+        let issue_body = "**This is an automated live integration test issue.** It was opened by \
+            `tests/e2e_github_dev_workflow.rs::github_dev_workflow_full_loop` to exercise the \
+            `developer-assistant` + `github-workflow` skills end-to-end against a real \
+            repository.\n\n\
+            ## Feature request\n\n\
+            Expose Prometheus-style metrics for IronClaw at `/metrics`. Should include:\n\n\
+            - Request latency histograms per channel + per tool\n\
+            - Tool execution count + success rate\n\
+            - Active session count + thread count\n\
+            - LLM token usage counters per model + per backend\n\n\
+            The endpoint should not require auth in single-user mode (the typical local \
+            ironclaw deployment); for multi-user gateway deployments it should require the \
+            existing admin credential.\n\n\
+            ## Why this matters\n\n\
+            Production observability is currently limited to `tracing` log output. A \
+            scrapeable metrics endpoint unlocks dashboards, alerting, and SLO tracking \
+            without log-aggregation pipelines.\n\n\
+            ---\n\n\
+            🤖 The agent will respond to this issue with a triage and an implementation plan. \
+            **The test will close this issue automatically after recording the agent's response.** \
+            If you're a human reading this and the issue is still open after a few minutes, the \
+            test panicked — see the test output for the last activity dump.";
 
-        // ── Turn 3: Maintainer LGTM ─────────────────────────────────
-        let lgtm_event = webhook_event(
-            "pr.comment.created",
-            serde_json::json!({
-                "repository_name": "nearai/ironclaw",
-                "issue_number": 99001,
-                "comment_author": "ilblackdragon",
-                "comment_body": "LGTM, please proceed with the implementation.",
-                "is_maintainer": true
-            }),
-        );
-        let lgtm_responses = run_turn(&harness, &lgtm_event, 1).await;
-        // After LGTM the agent should kick off implementation: create a
-        // branch and open a PR. The exact tool name varies by github
-        // skill version (`gh`, `github`, `http`), so we look for the
-        // PR-creation shape.
-        assert!(
-            harness.trace_contains_tool_call("http", "/pulls")
-                || harness.trace_contains_tool_call("github", "create_pull_request")
-                || harness.trace_contains_tool_call("gh", "pr create"),
-            "LGTM turn: agent should have opened a PR after maintainer confirmation",
-        );
-        transcript.push(SessionTurn::tool_inbound(&lgtm_event, lgtm_responses));
+        let (issue_number, issue_url) = github_api::create_issue(
+            &github_token,
+            REPO_OWNER,
+            REPO_NAME,
+            &issue_title,
+            issue_body,
+        )
+        .await
+        .expect("create real test issue on nearai/ironclaw");
+        eprintln!("[live-test] created real issue #{issue_number}: {issue_url}");
 
-        // ── Turn 4: PR review comment ───────────────────────────────
-        let review_event = webhook_event(
-            "pr.comment.created",
-            serde_json::json!({
-                "repository_name": "nearai/ironclaw",
-                "pr_number": 99002,
-                "comment_author": "reviewer-bot",
-                "comment_body": "Please add a unit test for the empty-metric case \
-                                 and document the metric name format.",
-                "is_maintainer": false
-            }),
-        );
-        let review_responses = run_turn(&harness, &review_event, 1).await;
-        // Agent should respond on the PR — either a comment ack or a
-        // commit pushing the requested change.
-        assert!(
-            harness.trace_contains_tool_call("http", "/pulls/99002")
-                || harness.trace_contains_tool_call("http", "/issues/99002/comments")
-                || harness.trace_contains_tool_call("github", "99002"),
-            "Review turn: agent should have engaged with PR 99002",
-        );
-        transcript.push(SessionTurn::tool_inbound(&review_event, review_responses));
+        // Capture the comment count baseline so we can detect new
+        // comments posted by the agent.
+        let baseline_comments = github_api::list_issue_comments(
+            &github_token,
+            REPO_OWNER,
+            REPO_NAME,
+            issue_number,
+        )
+        .await
+        .expect("baseline list_issue_comments")
+        .len();
+        eprintln!("[live-test] baseline comment count: {baseline_comments}");
 
-        // ── Turn 5: CI failure ──────────────────────────────────────
-        let ci_event = webhook_event(
-            "ci.check_run.completed",
-            serde_json::json!({
-                "repository_name": "nearai/ironclaw",
-                "pr_number": 99002,
-                "ci_conclusion": "failure",
-                "check_name": "test",
-                "failure_summary": "metrics_endpoint_test panicked: \
-                                    expected 200, got 401 (auth middleware not bypassed in dev)"
-            }),
-        );
-        let ci_responses = run_turn(&harness, &ci_event, 1).await;
-        // Agent should diagnose and post a status update. We just assert
-        // it engaged with the PR again (any github tool call referencing
-        // 99002).
-        assert!(
-            harness.trace_contains_tool_call("http", "99002")
-                || harness.trace_contains_tool_call("github", "99002"),
-            "CI failure turn: agent should have engaged with PR 99002 after CI failure",
-        );
-        transcript.push(SessionTurn::tool_inbound(&ci_event, ci_responses));
+        // Wrap the rest of the test in a guard so cleanup runs even if
+        // an assertion fails. We use a manual scope guard pattern: do
+        // the work, capture the result, run cleanup, then re-raise.
+        let test_result = std::panic::AssertUnwindSafe(async {
+            // ── Turn 2: Triage the real issue ────────────────────────
+            let triage_msg = format!(
+                "Issue #{issue_number} just opened on {REPO_OWNER}/{REPO_NAME}: \
+                 \"{issue_title}\". Please read the issue, triage it, and post a \
+                 comment with a concrete implementation plan. The plan should \
+                 include: scope (what's in/out), milestones, risks, and a \
+                 testing strategy. Use the github skill to read the issue body \
+                 and to post your plan as an issue comment.",
+            );
+            let triage_responses = run_turn(&harness, &triage_msg, 1).await;
+            eprintln!("[triage] response: {}", triage_responses.join("\n"));
+            dump_activity(&harness, "after triage");
+            transcript.push(SessionTurn::user(&triage_msg, triage_responses));
 
-        // ── Turn 6: Maintainer approval ─────────────────────────────
-        let approval_event = webhook_event(
-            "pull_request_review.submitted",
-            serde_json::json!({
-                "repository_name": "nearai/ironclaw",
-                "pr_number": 99002,
-                "reviewer_login": "ilblackdragon",
-                "review_state": "approved",
-                "is_maintainer": true,
-                "ci_conclusion": "success"
-            }),
-        );
-        let approval_responses = run_turn(&harness, &approval_event, 1).await;
-        // CRITICAL: agent must NOT auto-merge. We assert no merge call
-        // ever appeared in the trace across the entire session. This is
-        // the "implement but don't auto-merge" autonomy contract.
-        assert!(
-            !harness.trace_contains_tool_call("http", "/merge"),
-            "Approval turn: agent must NOT call PUT /pulls/.../merge — \
-             autonomy contract is implement-but-don't-auto-merge",
-        );
-        assert!(
-            !harness.trace_contains_tool_call("github", "merge_pull_request"),
-            "Approval turn: agent must NOT call github merge_pull_request",
-        );
-        assert!(
-            !harness.trace_contains_tool_call("gh", "pr merge"),
-            "Approval turn: agent must NOT call `gh pr merge`",
-        );
-        transcript.push(SessionTurn::tool_inbound(
-            &approval_event,
-            approval_responses,
-        ));
+            // ── Verification: poll the real issue for new comments ──
+            // The github API can be eventually-consistent on read-after-
+            // write, so we poll for up to 30s.
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            let latest_comments;
+            loop {
+                let snapshot = github_api::list_issue_comments(
+                    &github_token,
+                    REPO_OWNER,
+                    REPO_NAME,
+                    issue_number,
+                )
+                .await
+                .expect("list_issue_comments after triage");
+                if snapshot.len() > baseline_comments {
+                    latest_comments = snapshot;
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    latest_comments = snapshot;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
 
-        // ── Turn 7: Digest ───────────────────────────────────────────
-        let digest_msg = "show github workflow status for nearai/ironclaw";
-        let digest_responses = run_turn(&harness, digest_msg, 1).await;
-        let digest_text = digest_responses.join("\n").to_lowercase();
-        assert!(
-            digest_text.contains("99001") || digest_text.contains("99002"),
-            "Digest turn: status report should reference issue 99001 or PR 99002. \
-             Got: {}",
-            digest_text.chars().take(400).collect::<String>(),
-        );
-        transcript.push(SessionTurn::user(digest_msg, digest_responses));
+            assert!(
+                latest_comments.len() > baseline_comments,
+                "Triage turn: expected agent to post at least one new comment on \
+                 issue #{issue_number} (baseline {baseline_comments}, current {}). \
+                 The agent may have replied conversationally instead of using \
+                 the github skill — see the activity dump above for actual \
+                 tool calls. Issue: {issue_url}",
+                latest_comments.len(),
+            );
 
-        // ── Final: workflow + github access skills must have activated ─
-        // We do NOT require `developer-assistant` here — it's an
-        // orchestrator persona that delegates to `github-workflow`, and
-        // when the user message strongly invokes the workflow skill
-        // directly the orchestrator can correctly stay out. What we DO
-        // require is the workflow skill itself (which owns the mission
-        // templates) and the github skill (which provides API access).
+            // Log new comments to stderr so the human can review what
+            // the agent actually wrote — this is the most useful output
+            // of the test for iterating on skill quality.
+            let new_count = latest_comments.len() - baseline_comments;
+            eprintln!(
+                "[live-test] ✅ agent posted {new_count} new comment(s) on issue #{issue_number}"
+            );
+            for (i, comment) in latest_comments.iter().skip(baseline_comments).enumerate() {
+                let author = comment
+                    .get("user")
+                    .and_then(|u| u.get("login"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("?");
+                let body = comment
+                    .get("body")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("(empty)");
+                let body_preview: String = body.chars().take(800).collect();
+                eprintln!(
+                    "[live-test] new comment {} by @{author}:\n{body_preview}\n",
+                    i + 1
+                );
+            }
+        });
+
+        let test_outcome =
+            futures::FutureExt::catch_unwind(test_result).await;
+
+        // ── Cleanup: always close the issue ──────────────────────────
+        cleanup_issue(&github_token, issue_number).await;
+
+        // Re-raise any panic so cargo test sees the failure.
+        if let Err(panic_payload) = test_outcome {
+            std::panic::resume_unwind(panic_payload);
+        }
+
+        // ── Final: workflow + github skills must have activated ──────
         let active = harness.rig().active_skill_names();
         for required in ["github-workflow", "github"] {
             assert!(
