@@ -31,7 +31,7 @@ IronClaw operates across four trust boundaries:
 | Listener | Default Port | Default Bind | Auth Mechanism | Config Env Var | Source |
 |----------|-------------|-------------|----------------|----------------|--------|
 | Web Gateway | 3000 | `127.0.0.1` | Bearer token (constant-time) | `GATEWAY_HOST`, `GATEWAY_PORT`, `GATEWAY_AUTH_TOKEN` | `server.rs` — `start_server()` |
-| HTTP Webhook Server | 8080 | `0.0.0.0` | Shared secret (body field) | `HTTP_HOST`, `HTTP_PORT`, `HTTP_WEBHOOK_SECRET` | `webhook_server.rs` — `start()` |
+| HTTP Webhook Server | 8080 | `0.0.0.0` | Shared secret (body field) | `HTTP_HOST`, `HTTP_PORT`, `HTTP_WEBHOOK_SECRET`, `WEBHOOK_SERVER_HOST`, `WEBHOOK_SERVER_PORT` | `webhook_server.rs` — `start()` |
 | Orchestrator Internal API | 50051 | `127.0.0.1` (macOS/Win) / `0.0.0.0` (Linux) | Per-job bearer token (constant-time) | `ORCHESTRATOR_PORT` | `api.rs` — `OrchestratorApi::start()` |
 | OAuth Callback Listener | 9876 | `127.0.0.1` | None (ephemeral, 5-min timeout) | N/A (hardcoded) | `oauth_defaults.rs` — `bind_callback_listener()` |
 | Sandbox HTTP Proxy | OS-assigned (ephemeral) | `127.0.0.1` | None (loopback only) | N/A (auto-assigned) | `proxy/http.rs` — `SandboxProxy::start()` |
@@ -134,7 +134,9 @@ Shutdown is triggered via a `oneshot::Sender` stored in `GatewayState::shutdown_
 
 ### Bind Address
 
-Configurable via `HTTP_HOST` (default `127.0.0.1`) and `HTTP_PORT` (default `8080`).
+Configurable via `HTTP_HOST` (default `127.0.0.1`) and `HTTP_PORT` (default `8080`) when the HTTP channel is enabled.
+
+For local standby smoke and other cases where the unified webhook server must move off `8080` without enabling the HTTP channel, use `WEBHOOK_SERVER_HOST` / `WEBHOOK_SERVER_PORT`. Those env vars only override the bind address for the shared webhook listener; they do not require `HTTP_WEBHOOK_SECRET` and do not turn on the HTTP channel by themselves.
 
 By default the webhook server binds to loopback only. For external webhook providers, expose it intentionally via a tunnel or set `HTTP_HOST` explicitly.
 

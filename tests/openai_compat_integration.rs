@@ -206,6 +206,7 @@ async fn start_test_server_with_provider(
         scheduler: None,
         owner_id: "test-user".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
+        server_started: std::sync::atomic::AtomicBool::new(false),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: Some(llm_provider),
         skill_registry: None,
@@ -229,6 +230,8 @@ async fn start_test_server_with_provider(
         near_rpc_url: None,
         near_network: None,
         oauth_sweep_shutdown: None,
+        standby_control: None,
+        runtime_overrides: Default::default(),
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(
@@ -715,6 +718,7 @@ async fn test_no_llm_provider_returns_503() {
         scheduler: None,
         owner_id: "test-user".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
+        server_started: std::sync::atomic::AtomicBool::new(false),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None, // No LLM!
         skill_registry: None,
@@ -738,6 +742,8 @@ async fn test_no_llm_provider_returns_503() {
         near_rpc_url: None,
         near_network: None,
         oauth_sweep_shutdown: None,
+        standby_control: None,
+        runtime_overrides: Default::default(),
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(

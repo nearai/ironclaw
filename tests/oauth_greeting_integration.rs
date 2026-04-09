@@ -74,6 +74,7 @@ mod tests {
             scheduler: None,
             owner_id: "test-owner".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
+            server_started: std::sync::atomic::AtomicBool::new(false),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: None,
             skill_registry: None,
@@ -97,6 +98,8 @@ mod tests {
             near_rpc_url: None,
             near_network: None,
             oauth_sweep_shutdown: None,
+            standby_control: None,
+            runtime_overrides: Default::default(),
         });
 
         let addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
