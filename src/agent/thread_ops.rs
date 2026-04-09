@@ -56,18 +56,34 @@ fn history_messages_from_thread(thread: &crate::agent::session::Thread) -> Vec<H
     messages
 }
 
-fn approval_prompt_from_pending(pending: &PendingApproval) -> ChatApprovalPrompt {
-    let parameters = if pending.display_parameters.is_null() {
+/// Pick the right parameters value to surface in approval UI/SSE.
+///
+/// Prefers `display_parameters` (which has sensitive fields redacted) but
+/// falls back to the unredacted `parameters` when the display field is
+/// `Value::Null`. The null case fires for `PendingApproval` rows persisted
+/// before the `display_parameters` field existed: `#[serde(default)]`
+/// deserializes the missing field as `Value::Null`. Without this fallback
+/// the SSE/CLI approval prompt would show `null` parameters for legacy
+/// approvals that round-tripped through the DB or a checkpoint.
+///
+/// Both `approval_prompt_from_pending` and `pending_approval_status_update`
+/// must use this — they feed two parallel UI surfaces that show the same
+/// approval, and any inconsistency means one surface displays parameters
+/// and the other shows `null`.
+fn display_parameters_or_fallback(pending: &PendingApproval) -> serde_json::Value {
+    if pending.display_parameters.is_null() {
         pending.parameters.clone()
     } else {
         pending.display_parameters.clone()
-    };
+    }
+}
 
+fn approval_prompt_from_pending(pending: &PendingApproval) -> ChatApprovalPrompt {
     ChatApprovalPrompt {
         request_id: pending.request_id.to_string(),
         tool_name: pending.tool_name.clone(),
         description: pending.description.clone(),
-        parameters,
+        parameters: display_parameters_or_fallback(pending),
         allow_always: pending.allow_always,
     }
 }
@@ -107,7 +123,7 @@ fn pending_approval_status_update(pending: &PendingApproval) -> StatusUpdate {
         request_id: pending.request_id.to_string(),
         tool_name: pending.tool_name.clone(),
         description: pending.description.clone(),
-        parameters: pending.display_parameters.clone(),
+        parameters: display_parameters_or_fallback(pending),
         allow_always: pending.allow_always,
     }
 }
@@ -2478,6 +2494,73 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].role, crate::llm::Role::User);
         assert_eq!(result[1].role, crate::llm::Role::Assistant);
+    }
+
+    /// Regression: a `PendingApproval` deserialized from a row written
+    /// before the `display_parameters` field existed lands with
+    /// `display_parameters: Value::Null` (because the field is
+    /// `#[serde(default)]`). Both the SSE re-emit path
+    /// (`pending_approval_status_update`) and the snapshot path
+    /// (`approval_prompt_from_pending`) must fall back to the unredacted
+    /// `parameters` so the user sees actual arguments rather than `null`.
+    /// Without this fallback the SSE/CLI approval prompt for legacy
+    /// approvals shows `null` parameters.
+    #[test]
+    fn test_pending_approval_helpers_fall_back_when_display_parameters_is_null() {
+        use crate::agent::session::PendingApproval;
+
+        let original_params = serde_json::json!({"command": "echo hi"});
+        let pending = PendingApproval {
+            request_id: uuid::Uuid::new_v4(),
+            tool_name: "shell".to_string(),
+            parameters: original_params.clone(),
+            // Simulate a row that round-tripped through serde before the
+            // `display_parameters` field was added — defaults to Null.
+            display_parameters: serde_json::Value::Null,
+            description: "Execute: echo hi".to_string(),
+            tool_call_id: "call_legacy".to_string(),
+            context_messages: vec![],
+            deferred_tool_calls: vec![],
+            user_timezone: None,
+            allow_always: true,
+        };
+
+        // Both SSE status and snapshot helpers must use the same fallback.
+        let status = pending_approval_status_update(&pending);
+        match status {
+            StatusUpdate::ApprovalNeeded { parameters, .. } => {
+                assert_eq!(
+                    parameters, original_params,
+                    "pending_approval_status_update must fall back to pending.parameters \
+                     when display_parameters is Null (legacy serde-default rows)"
+                );
+            }
+            other => panic!("expected ApprovalNeeded, got {other:?}"),
+        }
+
+        let prompt = approval_prompt_from_pending(&pending);
+        assert_eq!(
+            prompt.parameters, original_params,
+            "approval_prompt_from_pending must fall back to pending.parameters \
+             when display_parameters is Null"
+        );
+
+        // Sanity check the non-null path: when display_parameters is set,
+        // both helpers must prefer it (the redacted form).
+        let redacted = serde_json::json!({"command": "[REDACTED]"});
+        let pending_with_redaction = PendingApproval {
+            display_parameters: redacted.clone(),
+            ..pending
+        };
+        let prompt = approval_prompt_from_pending(&pending_with_redaction);
+        assert_eq!(prompt.parameters, redacted);
+        let status = pending_approval_status_update(&pending_with_redaction);
+        match status {
+            StatusUpdate::ApprovalNeeded { parameters, .. } => {
+                assert_eq!(parameters, redacted);
+            }
+            other => panic!("expected ApprovalNeeded, got {other:?}"),
+        }
     }
 
     #[test]

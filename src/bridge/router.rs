@@ -229,15 +229,27 @@ fn parse_credential_name(text: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Notify all surfaces about a pending gate: SSE broadcast (if `sse` is
+/// some) plus the channel-level status event and the user-facing prompt.
+///
+/// Takes `sse` as an owned `Option<Arc<SseManager>>` rather than borrowing
+/// from `&EngineState` so callers can clone the Arc out of the engine
+/// state read-guard and `drop(guard)` *before* awaiting on broadcast +
+/// channel I/O. Holding the engine state guard across these awaits is
+/// fine in steady-state production (the outer lock is read-only after
+/// init) but breaks down for tests that tear the state down concurrently
+/// and is fragile for any future hot-reload path. The `handle_with_engine`
+/// terminal-return branches (auth + approval) both rely on this drop
+/// discipline to release the guard before talking to the user.
 async fn notify_pending_gate(
     agent: &Agent,
-    state: &EngineState,
+    sse: Option<Arc<SseManager>>,
     message: &IncomingMessage,
     pending: &PendingGate,
 ) -> Result<Option<String>, Error> {
     let display_parameters = gate_display_parameters(pending);
 
-    if let Some(ref sse) = state.sse {
+    if let Some(sse) = sse {
         sse.broadcast_for_user(
             &message.user_id,
             AppEvent::GateRequired {
@@ -280,7 +292,7 @@ async fn insert_and_notify_pending_gate(
         .await
         .map_err(|e| engine_err("pending gate insert", e))?;
 
-    notify_pending_gate(agent, state, message, &pending).await
+    notify_pending_gate(agent, state.sse.clone(), message, &pending).await
 }
 
 async fn execute_pending_gate_action(
@@ -2188,7 +2200,14 @@ async fn handle_with_engine_inner(
             ) =>
         {
             let pending = gate.clone();
-            return notify_pending_gate(agent, state, message, &pending).await;
+            // Clone the SSE arc out of state, then drop the engine read
+            // guard before awaiting on broadcast + channel I/O. The auth
+            // branch above does the same, and `notify_pending_gate` is
+            // signed to accept an owned Option<Arc<SseManager>> precisely
+            // so this terminal-return branch can release the lock.
+            let sse = state.sse.clone();
+            drop(guard);
+            return notify_pending_gate(agent, sse, message, &pending).await;
         }
         PendingGateResolution::Ambiguous => {
             return Ok(Some(
