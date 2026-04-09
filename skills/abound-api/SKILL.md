@@ -115,10 +115,11 @@ Credentials are injected automatically. If API calls fail with auth errors, say:
 ### Sending money:
 1. Call `abound_account_info` — know limits, recipients, funding sources
 2. Call `abound_exchange_rate` — get current and effective rates
-3. Present clearly — "$1,000 = ~₹93,470 at today's rate"
-4. Confirm with user before sending
-5. Call `abound_send_wire` to execute
-6. Call `abound_create_notification` after success
+3. **Call `analyze_transfer` with the amount** — REQUIRED before every send. Show the timing recommendation to the user.
+4. Present clearly — "$1,000 = ~₹93,470 at today's rate" plus the analysis verdict
+5. Confirm with user before sending
+6. Call `abound_send_wire` to execute
+7. Call `abound_create_notification` after success
 
 ### Checking rates:
 1. Call `abound_exchange_rate`

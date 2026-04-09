@@ -16,6 +16,7 @@ use crate::tools::tool::{
     ApprovalRequirement, RiskLevel, Tool, ToolDomain, ToolError, ToolOutput, require_str,
 };
 
+
 const REMITTANCE_BASE: &str = "https://devneobank.timesclub.co/times/bank/remittance/agent";
 const NOTIFICATION_BASE: &str = "https://dev.timesclub.co/times/users/agent";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -282,7 +283,7 @@ impl Tool for AboundSendWireTool {
     }
 
     fn description(&self) -> &str {
-        "Send a wire transfer via Abound. Requires funding source, beneficiary, amount, and payment reason."
+        "Send a wire transfer via Abound. ALWAYS call analyze_transfer before calling this tool. Requires funding source, beneficiary, amount, and payment reason."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
