@@ -6313,7 +6313,8 @@ function renderCatalogSkillCard(entry, installedNames) {
   actions.className = 'ext-actions';
 
   var slug = entry.slug || entry.name;
-  var isInstalled = installedNames[entry.name] || installedNames[slug];
+  var slugSuffix = slug.indexOf('/') >= 0 ? slug.split('/').pop() : slug;
+  var isInstalled = entry.installed || installedNames[entry.name] || installedNames[slug] || installedNames[slugSuffix];
 
   if (isInstalled) {
     var label = document.createElement('span');
@@ -6324,14 +6325,14 @@ function renderCatalogSkillCard(entry, installedNames) {
     var installBtn = document.createElement('button');
     installBtn.className = 'btn-ext install';
     installBtn.textContent = I18n.t('extensions.install');
-    installBtn.addEventListener('click', (function(s, btn) {
+    installBtn.addEventListener('click', (function(displayName, slugValue, btn) {
       return function() {
-        if (!confirm(I18n.t('skills.confirmInstallHub', { name: s }))) return;
+        if (!confirm(I18n.t('skills.confirmInstallHub', { name: displayName }))) return;
         btn.disabled = true;
         btn.textContent = I18n.t('extensions.installing');
-        installSkill(s, null, btn);
+        installSkill(displayName, null, btn, slugValue);
       };
-    })(slug, installBtn));
+    })(entry.name || slug, slug, installBtn));
     actions.appendChild(installBtn);
   }
 
@@ -6360,8 +6361,9 @@ function formatTimeAgo(epochMs) {
   return Math.floor(months / 12) + 'y ago';
 }
 
-function installSkill(nameOrSlug, url, btn) {
-  var body = { name: nameOrSlug, slug: nameOrSlug };
+function installSkill(name, url, btn, slug) {
+  var body = { name: name };
+  if (slug) body.slug = slug;
   if (url) body.url = url;
 
   apiFetch('/api/skills/install', {
@@ -6370,12 +6372,19 @@ function installSkill(nameOrSlug, url, btn) {
     body: body,
   }).then(function(res) {
     if (res.success) {
-      showToast(I18n.t('skills.installedSuccess', {name: nameOrSlug}), 'success');
+      showToast(I18n.t('skills.installedSuccess', {name: name}), 'success');
+      if (btn && btn.parentNode) {
+        var label = document.createElement('span');
+        label.className = 'ext-active-label';
+        label.textContent = I18n.t('status.installed');
+        btn.parentNode.innerHTML = '';
+        btn.parentNode.appendChild(label);
+      }
     } else {
       showToast(I18n.t('extensions.installFailed', { message: res.message || 'unknown error' }), 'error');
     }
     loadSkills();
-    if (btn) { btn.disabled = false; btn.textContent = I18n.t('extensions.install'); }
+    if (btn && !res.success) { btn.disabled = false; btn.textContent = I18n.t('extensions.install'); }
   }).catch(function(err) {
     showToast(I18n.t('extensions.installFailed', { message: err.message }), 'error');
     if (btn) { btn.disabled = false; btn.textContent = I18n.t('extensions.install'); }

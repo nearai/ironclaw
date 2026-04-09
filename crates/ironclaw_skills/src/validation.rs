@@ -13,6 +13,62 @@ pub fn validate_skill_name(name: &str) -> bool {
     SKILL_NAME_PATTERN.is_match(name)
 }
 
+/// Normalize an external identifier into a safe skill name when possible.
+///
+/// This is used for recovery paths where a published identifier or display name
+/// needs to be turned into a valid on-disk/internal skill name. Valid names are
+/// preserved; invalid identifiers are lowercased and non-alphanumeric runs are
+/// collapsed into `-`, `_`, or `.` separators as allowed by the skill-name
+/// grammar.
+///
+/// Non-ASCII characters (accented letters, CJK, emoji) are treated as separators
+/// and effectively dropped: e.g. `"café"` becomes `"caf"`, `"中文-skill"` becomes
+/// `"skill"`. Identifiers that normalize to an empty or otherwise invalid name
+/// return `None`.
+pub fn normalize_skill_identifier(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if validate_skill_name(trimmed) {
+        return Some(trimmed.to_string());
+    }
+
+    let mut sanitized = String::with_capacity(trimmed.len().min(64));
+    let mut last_was_separator = false;
+
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphanumeric() {
+            sanitized.push(ch.to_ascii_lowercase());
+            last_was_separator = false;
+            continue;
+        }
+
+        if matches!(ch, '.' | '_' | '-') {
+            if !sanitized.is_empty() && !last_was_separator {
+                sanitized.push(ch);
+                last_was_separator = true;
+            }
+            continue;
+        }
+
+        if !sanitized.is_empty() && !last_was_separator {
+            sanitized.push('-');
+            last_was_separator = true;
+        }
+    }
+
+    while sanitized.ends_with(['-', '_', '.']) {
+        sanitized.pop();
+    }
+
+    if sanitized.len() > 64 {
+        sanitized.truncate(64);
+        while sanitized.ends_with(['-', '_', '.']) {
+            sanitized.pop();
+        }
+    }
+
+    validate_skill_name(&sanitized).then_some(sanitized)
+}
+
 /// Escape a string for safe inclusion in XML attributes.
 /// Prevents attribute injection attacks via skill name/version fields.
 pub fn escape_xml_attr(s: &str) -> String {
@@ -160,6 +216,23 @@ mod tests {
         assert!(!validate_skill_name(
             "very-long-name-that-exceeds-the-sixty-four-character-limit-for-skill-names-wow"
         ));
+    }
+
+    #[test]
+    fn test_normalize_skill_identifier() {
+        assert_eq!(
+            normalize_skill_identifier("finance/mortgage-calculator").as_deref(),
+            Some("finance-mortgage-calculator")
+        );
+        assert_eq!(
+            normalize_skill_identifier("Mortgage Calculator").as_deref(),
+            Some("mortgage-calculator")
+        );
+        assert_eq!(
+            normalize_skill_identifier("already-valid_name").as_deref(),
+            Some("already-valid_name")
+        );
+        assert_eq!(normalize_skill_identifier("!!!"), None);
     }
 
     #[test]
