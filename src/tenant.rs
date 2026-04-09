@@ -946,14 +946,41 @@ impl TenantRateRegistry {
 }
 
 // ---------------------------------------------------------------------------
+// UserQuota — per-user quota from the database
+// ---------------------------------------------------------------------------
+
+/// Per-user quota loaded from the `users` table.
+///
+/// `None` fields mean no quota is assigned for that dimension.
+/// Under fail-closed semantics, a non-admin user with no quota is denied.
+#[derive(Debug, Clone)]
+pub struct UserQuota {
+    /// Maximum number of routines (agents) this user can create.
+    pub max_routines: Option<i32>,
+    /// Maximum daily LLM spend in cents (e.g. 10000 = $100/day).
+    pub max_cost_per_day_cents: Option<i64>,
+}
+
+impl UserQuota {
+    /// Returns `true` if at least one quota dimension is set.
+    pub fn has_any_limit(&self) -> bool {
+        self.max_routines.is_some() || self.max_cost_per_day_cents.is_some()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TenantCtx — per-request tenant execution context
 // ---------------------------------------------------------------------------
 
 /// Per-request tenant execution context.
 ///
 /// Bundles a [`TenantScope`] (scoped DB access), workspace, cost guard,
-/// and per-tenant rate limiting. Constructed once per request via
-/// [`AgentDeps::tenant_ctx()`](crate::agent::AgentDeps::tenant_ctx).
+/// per-tenant rate limiting, and per-user quota. Constructed once per
+/// request via [`AgentDeps::tenant_ctx()`](crate::agent::AgentDeps::tenant_ctx).
+///
+/// **Quota enforcement (fail-closed):** Non-admin users without an explicit
+/// quota assignment are denied LLM calls and routine creation. Admin users
+/// are always exempt from quota checks.
 ///
 /// `Clone + Send + Sync` — safe to store on `ChatDelegate` without lifetime issues.
 #[derive(Clone)]
@@ -963,6 +990,9 @@ pub struct TenantCtx {
     workspace: Option<Arc<Workspace>>,
     cost_guard: Arc<CostGuard>,
     rate: Arc<TenantRateState>,
+    /// Per-user quota from the DB. `None` = no quota assigned (fail-closed
+    /// for non-admin users).
+    user_quota: Option<UserQuota>,
 }
 
 impl TenantCtx {
@@ -979,7 +1009,14 @@ impl TenantCtx {
             workspace,
             cost_guard,
             rate,
+            user_quota: None,
         }
+    }
+
+    /// Construct with an explicit user quota (loaded from DB at request time).
+    pub fn with_quota(mut self, quota: Option<UserQuota>) -> Self {
+        self.user_quota = quota;
+        self
     }
 
     pub fn user_id(&self) -> &str {
@@ -1002,8 +1039,60 @@ impl TenantCtx {
         &self.cost_guard
     }
 
-    /// Check cost limits for this tenant (global + per-user).
+    /// Per-user quota, if loaded from DB.
+    pub fn user_quota(&self) -> Option<&UserQuota> {
+        self.user_quota.as_ref()
+    }
+
+    /// Returns `true` if this user is an admin (exempt from quota checks).
+    pub fn is_admin(&self) -> bool {
+        self.identity.role == crate::ownership::UserRole::Admin
+    }
+
+    /// Check cost limits for this tenant (fail-closed quota + global + per-user).
+    ///
+    /// Enforcement order:
+    /// 1. Admin users are always exempt.
+    /// 2. Non-admin users without any quota assignment are denied.
+    /// 3. Per-user DB quota is checked against daily spend.
+    /// 4. Global limits (`CostGuard`) are checked as a ceiling.
     pub async fn check_cost_allowed(&self) -> Result<(), CostLimitExceeded> {
+        // Admin users bypass all quota checks.
+        if self.is_admin() {
+            return Ok(());
+        }
+
+        // Fail-closed: non-admin without quota is denied.
+        let quota = match &self.user_quota {
+            Some(q) => q,
+            None => {
+                return Err(CostLimitExceeded::NoQuotaAssigned {
+                    user_id: self.identity.owner_id.as_str().to_string(),
+                });
+            }
+        };
+
+        // Check per-user daily cost limit from DB.
+        if let Some(limit_cents) = quota.max_cost_per_day_cents {
+            let limit_cents_u64 = limit_cents.max(0) as u64;
+            let spent = self
+                .cost_guard
+                .daily_spend_for_user(self.identity.owner_id.as_str())
+                .await;
+            let spent_cents = {
+                let c = (spent * rust_decimal_macros::dec!(100)).trunc();
+                c.to_string().parse::<u64>().unwrap_or(0)
+            };
+            if spent_cents >= limit_cents_u64 {
+                return Err(CostLimitExceeded::UserDailyBudget {
+                    user_id: self.identity.owner_id.as_str().to_string(),
+                    spent_cents,
+                    limit_cents: limit_cents_u64,
+                });
+            }
+        }
+
+        // Also check global limits (daily budget, hourly rate, global per-user).
         self.cost_guard
             .check_allowed_for_user(self.identity.owner_id.as_str())
             .await

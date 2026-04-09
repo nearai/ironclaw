@@ -1080,6 +1080,8 @@ async fn run_agent_with_config(
                     last_login_at: None,
                     created_by: None,
                     metadata: serde_json::json!({"source": "bootstrap"}),
+                    max_routines: None,
+                    max_cost_per_day_cents: None,
                 };
                 // Create admin user + bootstrap token atomically.
                 let auth_token = gw.auth_token();

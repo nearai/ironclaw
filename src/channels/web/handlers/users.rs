@@ -66,6 +66,15 @@ pub async fn users_create_handler(
         ));
     }
 
+    // Optional quota fields — admin can assign quotas at creation time.
+    let max_routines = body
+        .get("max_routines")
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32);
+    let max_cost_per_day_cents = body
+        .get("max_cost_per_day_cents")
+        .and_then(|v| v.as_i64());
+
     let user_id = Uuid::new_v4().to_string();
 
     let now = chrono::Utc::now();
@@ -80,6 +89,8 @@ pub async fn users_create_handler(
         last_login_at: None,
         created_by: Some(user.user_id.clone()),
         metadata: serde_json::json!({}),
+        max_routines,
+        max_cost_per_day_cents,
     };
 
     // Generate a first API token so the new user can authenticate immediately.
@@ -117,6 +128,8 @@ pub async fn users_create_handler(
         "token": plaintext_token,
         "created_at": user_record.created_at.to_rfc3339(),
         "created_by": user_record.created_by,
+        "max_routines": user_record.max_routines,
+        "max_cost_per_day_cents": user_record.max_cost_per_day_cents,
     })))
 }
 
@@ -167,6 +180,8 @@ pub async fn users_list_handler(
             "job_count": db_stats.map_or(0, |s| s.job_count),
             "total_cost": total_cost.to_string(),
             "last_active_at": last_active.map(|dt| dt.to_rfc3339()),
+            "max_routines": u.max_routines,
+            "max_cost_per_day_cents": u.max_cost_per_day_cents,
         }));
     }
 
@@ -201,6 +216,8 @@ pub async fn users_detail_handler(
         "last_login_at": user_record.last_login_at.map(|dt| dt.to_rfc3339()),
         "created_by": user_record.created_by,
         "metadata": user_record.metadata,
+        "max_routines": user_record.max_routines,
+        "max_cost_per_day_cents": user_record.max_cost_per_day_cents,
     })))
 }
 
@@ -274,6 +291,30 @@ pub async fn users_update_handler(
         }
     }
 
+    // Update quota fields if provided. Explicit null sets to None (removes quota).
+    // Missing key = no change.
+    let has_quota_update = body.get("max_routines").is_some()
+        || body.get("max_cost_per_day_cents").is_some();
+    if has_quota_update {
+        let max_routines = if body.get("max_routines").is_some() {
+            body.get("max_routines")
+                .and_then(|v| if v.is_null() { None } else { v.as_i64() })
+                .map(|v| v as i32)
+        } else {
+            existing.max_routines
+        };
+        let max_cost = if body.get("max_cost_per_day_cents").is_some() {
+            body.get("max_cost_per_day_cents")
+                .and_then(|v| if v.is_null() { None } else { v.as_i64() })
+        } else {
+            existing.max_cost_per_day_cents
+        };
+        store
+            .update_user_quota(&id, max_routines, max_cost)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
     store
         .update_user_profile(&id, display_name, metadata)
         .await
@@ -295,6 +336,8 @@ pub async fn users_update_handler(
         "created_at": updated.created_at.to_rfc3339(),
         "updated_at": updated.updated_at.to_rfc3339(),
         "metadata": updated.metadata,
+        "max_routines": updated.max_routines,
+        "max_cost_per_day_cents": updated.max_cost_per_day_cents,
     })))
 }
 
