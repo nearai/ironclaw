@@ -3068,7 +3068,8 @@ chatInput.addEventListener('blur', () => {
   setTimeout(hideSlashAutocomplete, 150);
 });
 
-// Infinite scroll: load older messages when scrolled near the top
+// Infinite scroll: load older messages when scrolled near the top.
+// Also toggles the scroll-to-bottom button when the user has scrolled up.
 document.getElementById('chat-messages').addEventListener('scroll', function () {
   if (this.scrollTop < 100 && hasMore && !loadingOlder) {
     loadingOlder = true;
@@ -3080,6 +3081,16 @@ document.getElementById('chat-messages').addEventListener('scroll', function () 
     this.insertBefore(spinner, this.firstChild);
     loadHistory(oldestTimestamp);
   }
+  const btn = document.getElementById('scroll-to-bottom-btn');
+  if (btn) {
+    const distanceFromBottom = this.scrollHeight - this.scrollTop - this.clientHeight;
+    btn.style.display = distanceFromBottom > 200 ? 'flex' : 'none';
+  }
+});
+
+document.getElementById('scroll-to-bottom-btn').addEventListener('click', () => {
+  const container = document.getElementById('chat-messages');
+  container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
 });
 
 function autoResizeTextarea(el) {
