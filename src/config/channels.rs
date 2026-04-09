@@ -28,6 +28,22 @@ pub struct ChannelsConfig {
     pub wasm_channel_owner_ids: HashMap<String, i64>,
 }
 
+/// Per-account credentials for multi-bot DingTalk binding (P2 feature).
+///
+/// Each additional account maps to a distinct DingTalk bot and can be routed
+/// to a different agent via `agent_id`. The `account_id` is derived from the
+/// env-var index (e.g. `"account_0"` for `DINGTALK_ACCOUNT_0_CLIENT_ID`).
+#[derive(Debug, Clone)]
+pub struct DingTalkAccountConfig {
+    /// Logical account identifier, e.g. `"account_0"`.
+    pub account_id: String,
+    pub client_id: String,
+    pub client_secret: SecretString,
+    pub robot_code: Option<String>,
+    /// Optional agent ID that handles messages for this bot.
+    pub agent_id: Option<String>,
+}
+
 /// DingTalk (钉钉) channel configuration.
 #[derive(Debug, Clone)]
 pub struct DingTalkConfig {
@@ -35,6 +51,70 @@ pub struct DingTalkConfig {
     pub client_id: String,
     pub client_secret: SecretString,
     pub robot_code: Option<String>,
+    /// AI card template ID (required for card streaming mode).
+    pub card_template_id: Option<String>,
+    /// Card streaming mode: off, answer (default), or all.
+    pub card_stream_mode: CardStreamMode,
+    /// Card streaming update interval in milliseconds (default 1000).
+    pub card_stream_interval_ms: u64,
+    /// Require @mention in group chats to process messages.
+    pub require_mention: bool,
+    /// DM access policy.
+    pub dm_policy: DmPolicy,
+    /// Group chat access policy.
+    pub group_policy: GroupPolicy,
+    /// Allowed user IDs for DM (when dm_policy is Allowlist). `*` = allow all.
+    pub allow_from: Vec<String>,
+    /// Allowed group conversation IDs (when group_policy is Allowlist). `*` = allow all.
+    pub group_allow_from: Vec<String>,
+    /// Maximum reconnect cycles before giving up.
+    pub max_reconnect_cycles: u32,
+    /// Reconnect deadline in milliseconds.
+    pub reconnect_deadline_ms: u64,
+    /// Additional bot accounts for multi-bot binding (P2 feature).
+    ///
+    /// Populated from indexed env vars `DINGTALK_ACCOUNT_N_CLIENT_ID` (N = 0, 1, 2, …).
+    /// Empty when no indexed accounts are configured.
+    pub additional_accounts: Vec<DingTalkAccountConfig>,
+}
+
+/// AI card streaming mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CardStreamMode {
+    /// No real-time answer streaming; thinking committed in batches.
+    Off,
+    /// Answer-only real-time streaming (default).
+    #[default]
+    Answer,
+    /// Both answer and thinking content streamed in real-time.
+    All,
+}
+
+impl CardStreamMode {
+    pub fn from_str_lossy(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "off" => Self::Off,
+            "all" => Self::All,
+            _ => Self::Answer,
+        }
+    }
+}
+
+/// DM access control policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DmPolicy {
+    #[default]
+    Open,
+    Allowlist,
+}
+
+/// Group chat access control policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GroupPolicy {
+    #[default]
+    Open,
+    Allowlist,
+    Disabled,
 }
 
 #[derive(Debug, Clone)]
@@ -385,6 +465,73 @@ impl ChannelsConfig {
                 client_id,
                 client_secret: SecretString::from(client_secret),
                 robot_code: optional_env("DINGTALK_ROBOT_CODE")?,
+                card_template_id: optional_env("DINGTALK_CARD_TEMPLATE_ID")?,
+                card_stream_mode: optional_env("DINGTALK_CARD_STREAM_MODE")?
+                    .map(|s| CardStreamMode::from_str_lossy(&s))
+                    .unwrap_or_default(),
+                card_stream_interval_ms: optional_env("DINGTALK_CARD_STREAM_INTERVAL")?
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1000),
+                require_mention: optional_env("DINGTALK_REQUIRE_MENTION")?
+                    .map(|s| s.to_ascii_lowercase() == "true")
+                    .unwrap_or(false),
+                dm_policy: match optional_env("DINGTALK_DM_POLICY")?.as_deref() {
+                    Some("allowlist") => DmPolicy::Allowlist,
+                    _ => DmPolicy::Open,
+                },
+                group_policy: match optional_env("DINGTALK_GROUP_POLICY")?.as_deref() {
+                    Some("allowlist") => GroupPolicy::Allowlist,
+                    Some("disabled") => GroupPolicy::Disabled,
+                    _ => GroupPolicy::Open,
+                },
+                allow_from: optional_env("DINGTALK_ALLOW_FROM")?
+                    .map(|s| s.split(',').map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).collect())
+                    .unwrap_or_default(),
+                group_allow_from: optional_env("DINGTALK_GROUP_ALLOW_FROM")?
+                    .map(|s| s.split(',').map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).collect())
+                    .unwrap_or_default(),
+                max_reconnect_cycles: optional_env("DINGTALK_MAX_RECONNECT_CYCLES")?
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(10),
+                reconnect_deadline_ms: optional_env("DINGTALK_RECONNECT_DEADLINE_MS")?
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(50000),
+                additional_accounts: {
+                    let mut accounts = Vec::new();
+                    let mut idx: u32 = 0;
+                    loop {
+                        let id_key = format!("DINGTALK_ACCOUNT_{idx}_CLIENT_ID");
+                        match optional_env(&id_key)? {
+                            None => break,
+                            Some(acc_client_id) => {
+                                let secret_key =
+                                    format!("DINGTALK_ACCOUNT_{idx}_CLIENT_SECRET");
+                                let acc_client_secret =
+                                    optional_env(&secret_key)?.ok_or_else(|| {
+                                        ConfigError::InvalidValue {
+                                            key: secret_key.clone(),
+                                            message: format!(
+                                                "required when {id_key} is set"
+                                            ),
+                                        }
+                                    })?;
+                                let robot_code_key =
+                                    format!("DINGTALK_ACCOUNT_{idx}_ROBOT_CODE");
+                                let agent_id_key =
+                                    format!("DINGTALK_ACCOUNT_{idx}_AGENT_ID");
+                                accounts.push(DingTalkAccountConfig {
+                                    account_id: format!("account_{idx}"),
+                                    client_id: acc_client_id,
+                                    client_secret: SecretString::from(acc_client_secret),
+                                    robot_code: optional_env(&robot_code_key)?,
+                                    agent_id: optional_env(&agent_id_key)?,
+                                });
+                                idx += 1;
+                            }
+                        }
+                    }
+                    accounts
+                },
             })
         } else {
             None

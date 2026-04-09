@@ -49,6 +49,16 @@ pub struct BotCallbackPayload {
     pub session_webhook: Option<String>,
     /// Session webhook expiry timestamp (ms)
     pub session_webhook_expired_time: Option<u64>,
+    /// General content blob for non-text message types (audio, video, file, picture, etc.)
+    /// DingTalk encodes this as a nested JSON string or object depending on msgtype.
+    #[serde(default)]
+    pub content: Option<serde_json::Value>,
+    /// Whether this message is a reply/quote to another message.
+    #[serde(default, rename = "isReplyMsg")]
+    pub is_reply_msg: Option<bool>,
+    /// The quoted/replied-to message payload (present when `is_reply_msg` is true).
+    #[serde(default, rename = "repliedMsg")]
+    pub replied_msg: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -68,6 +78,52 @@ pub struct DingTalkMetadata {
     pub sender_nick: String,
     pub msg_id: String,
     pub robot_code: Option<String>,
+    /// Session webhook URL for direct reply (faster, no auth needed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_webhook: Option<String>,
+    /// Session webhook expiry timestamp in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_webhook_expired_time: Option<u64>,
+}
+
+// ─── AI Card State ─────────────────────────────────────────────────────────
+
+/// Phase of an AI streaming card lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardPhase {
+    /// Card created, no content sent yet.
+    Processing,
+    /// Streaming content in progress.
+    Inputing,
+    /// Streaming completed successfully.
+    Finished,
+    /// Streaming failed.
+    Failed,
+}
+
+impl CardPhase {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Finished | Self::Failed)
+    }
+}
+
+/// State of an active AI streaming card for a single message.
+#[derive(Debug, Clone)]
+pub struct CardState {
+    /// DingTalk card instance ID returned by createAndDeliver.
+    pub instance_id: String,
+    /// Accumulated content buffer for the card.
+    pub content_buffer: String,
+    /// Accumulated thinking/reasoning buffer (for `all` mode).
+    pub thinking_buffer: String,
+    /// Last time the card was updated via API.
+    pub last_update: std::time::Instant,
+    /// Current phase of the card.
+    pub phase: CardPhase,
+    /// Conversation ID for this card.
+    pub conversation_id: String,
+    /// Conversation type ("1" = DM, "2" = group).
+    pub conversation_type: String,
 }
 
 // ─── DingTalk API Types ─────────────────────────────────────────────────────
