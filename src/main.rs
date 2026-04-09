@@ -1012,12 +1012,38 @@ async fn async_main() -> anyhow::Result<()> {
             {
                 continue;
             }
-            match ext_mgr.activate(name, &ext_user_id).await {
-                Ok(result) => {
+            match ext_mgr
+                .ensure_extension_ready(
+                    name,
+                    &ext_user_id,
+                    ironclaw::extensions::EnsureReadyIntent::ExplicitActivate,
+                )
+                .await
+            {
+                Ok(ironclaw::extensions::EnsureReadyOutcome::Ready { activation, .. }) => {
+                    let message = activation
+                        .map(|result| result.message)
+                        .unwrap_or_else(|| format!("Channel '{}' already ready", name));
                     tracing::debug!(
                         channel = %name,
-                        message = %result.message,
+                        message = %message,
                         "Auto-activated persisted WASM channel"
+                    );
+                }
+                Ok(ironclaw::extensions::EnsureReadyOutcome::NeedsAuth { auth, .. }) => {
+                    tracing::warn!(
+                        channel = %name,
+                        instructions = ?auth.instructions(),
+                        "Persisted WASM channel still needs authentication"
+                    );
+                }
+                Ok(ironclaw::extensions::EnsureReadyOutcome::NeedsSetup {
+                    instructions, ..
+                }) => {
+                    tracing::warn!(
+                        channel = %name,
+                        instructions = %instructions,
+                        "Persisted WASM channel still needs setup"
                     );
                 }
                 Err(e) => {
@@ -1059,10 +1085,17 @@ async fn async_main() -> anyhow::Result<()> {
         recorder.snapshot_memory(ws).await;
     }
 
-    let http_interceptor = components
-        .recording_handle
-        .as_ref()
-        .map(|r| r.http_interceptor());
+    let http_interceptor = ironclaw::http_intercept::chain(
+        [
+            components.http_interceptor.clone(),
+            components
+                .recording_handle
+                .as_ref()
+                .map(|r| r.http_interceptor()),
+        ]
+        .into_iter()
+        .flatten(),
+    );
     // Clone context_manager for the reaper before it's moved into Agent::new()
     let reaper_context_manager = Arc::clone(&components.context_manager);
 
@@ -1072,6 +1105,15 @@ async fn async_main() -> anyhow::Result<()> {
         .db
         .as_ref()
         .map(|db| Arc::clone(db) as Arc<dyn ironclaw::db::SettingsStore>);
+
+    let auth_manager = components.tools.secrets_store().cloned().map(|secrets| {
+        Arc::new(ironclaw::bridge::auth_manager::AuthManager::new(
+            secrets,
+            components.skill_registry.clone(),
+            components.extension_manager.clone(),
+            Some(Arc::clone(&components.tools)),
+        ))
+    });
 
     let deps = AgentDeps {
         owner_id: config.owner_id.clone(),
@@ -1086,6 +1128,7 @@ async fn async_main() -> anyhow::Result<()> {
         skill_catalog: components.skill_catalog,
         skills_config: config.skills.clone(),
         hooks: components.hooks,
+        auth_manager,
         cost_guard: components.cost_guard,
         sse_tx: sse_manager,
         http_interceptor,

@@ -62,6 +62,30 @@ use self::server::GatewayState;
 use self::sse::SseManager;
 use self::types::AppEvent;
 
+fn build_gateway_auth_manager(
+    state: &GatewayState,
+) -> Option<Arc<crate::bridge::auth_manager::AuthManager>> {
+    state
+        .tool_registry
+        .as_ref()
+        .and_then(|tr| tr.secrets_store().cloned())
+        .or_else(|| state.secrets_store.clone())
+        .or_else(|| {
+            state
+                .extension_manager
+                .as_ref()
+                .map(|em| Arc::clone(em.secrets()))
+        })
+        .map(|secrets| {
+            Arc::new(crate::bridge::auth_manager::AuthManager::new(
+                secrets,
+                state.skill_registry.clone(),
+                state.extension_manager.clone(),
+                state.tool_registry.clone(),
+            ))
+        })
+}
+
 /// Web gateway channel implementing the Channel trait.
 pub struct GatewayChannel {
     config: GatewayConfig,
@@ -128,6 +152,7 @@ impl GatewayChannel {
             llm_provider: None,
             skill_registry: None,
             skill_catalog: None,
+            auth_manager: None,
             chat_rate_limiter: server::PerUserRateLimiter::new(30, 60),
             oauth_rate_limiter: server::PerUserRateLimiter::new(20, 60),
             webhook_rate_limiter: server::RateLimiter::new(10, 60),
@@ -182,6 +207,7 @@ impl GatewayChannel {
             llm_provider: self.state.llm_provider.clone(),
             skill_registry: self.state.skill_registry.clone(),
             skill_catalog: self.state.skill_catalog.clone(),
+            auth_manager: self.state.auth_manager.clone(),
             chat_rate_limiter: server::PerUserRateLimiter::new(30, 60),
             oauth_rate_limiter: server::PerUserRateLimiter::new(20, 60),
             webhook_rate_limiter: server::RateLimiter::new(10, 60),
@@ -203,6 +229,7 @@ impl GatewayChannel {
             oauth_sweep_shutdown: None, // sweep tasks are managed by with_oauth
         };
         mutate(&mut new_state);
+        new_state.auth_manager = build_gateway_auth_manager(&new_state);
         self.state = Arc::new(new_state);
     }
 

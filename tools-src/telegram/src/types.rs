@@ -1,9 +1,14 @@
 //! Types for the Telegram user-mode tool (MTProto direct).
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Input parameters for the Telegram tool.
-#[derive(Debug, Deserialize)]
+///
+/// `JsonSchema` is derived so the advertised tool schema mirrors the
+/// serde-enforced contract: each variant becomes a `oneOf` entry with
+/// its own `required` array.
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum TelegramAction {
     /// Start login: generate auth key + send verification code.

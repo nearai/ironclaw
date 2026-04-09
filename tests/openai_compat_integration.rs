@@ -210,6 +210,7 @@ async fn start_test_server_with_provider(
         llm_provider: Some(llm_provider),
         skill_registry: None,
         skill_catalog: None,
+        auth_manager: None,
         chat_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(30, 60),
         oauth_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(20, 60),
         webhook_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),
@@ -719,6 +720,7 @@ async fn test_no_llm_provider_returns_503() {
         llm_provider: None, // No LLM!
         skill_registry: None,
         skill_catalog: None,
+        auth_manager: None,
         chat_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(30, 60),
         oauth_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(20, 60),
         webhook_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),

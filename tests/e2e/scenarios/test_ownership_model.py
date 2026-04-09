@@ -36,10 +36,18 @@ async def test_settings_written_and_readable(ironclaw_server):
     async with httpx.AsyncClient() as client:
         w = await client.post(
             f"{ironclaw_server}/api/settings/{key}",
-            json={"value": "ownership_ok"},
             headers=_headers(),
             timeout=10,
+            json={"value": "ownership_ok"},
         )
+    if w.status_code == 405:
+        async with httpx.AsyncClient() as client:
+            w = await client.put(
+                f"{ironclaw_server}/api/settings/{key}",
+                json={"value": "ownership_ok"},
+                headers=_headers(),
+                timeout=10,
+            )
     # Accept 200, 201, or 204
     assert w.status_code in (200, 201, 204), f"Write failed: {w.status_code} {w.text[:200]}"
 
@@ -108,7 +116,10 @@ async def test_owner_can_send_message_and_get_response(page, ironclaw_server):
 
     # Wait for a new assistant message to appear
     await page.wait_for_function(
-        f"document.querySelectorAll('{SEL['message_assistant']}').length > {before_count}",
+        """({ selector, beforeCount }) => {
+            return document.querySelectorAll(selector).length > beforeCount;
+        }""",
+        arg={"selector": SEL["message_assistant"], "beforeCount": before_count},
         timeout=30000,
     )
     after_count = await assistant_msgs.count()

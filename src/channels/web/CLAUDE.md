@@ -81,6 +81,10 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | POST | `/api/extensions/{name}/remove` | Remove extension |
 | GET/POST | `/api/extensions/{name}/setup` | Extension setup wizard |
 
+Extension lifecycle note:
+- Web install, activate, and OAuth callback flows should route through `ExtensionManager::ensure_extension_ready(...)` rather than sequencing `auth()` and `activate()` independently in handlers.
+- Preserve the existing `ActionResponse` wire shape, but derive it from `EnsureReadyOutcome` so browser UX stays stable while lifecycle control remains kernel-owned.
+
 ### Routines
 | Method | Path | Description |
 |--------|------|-------------|
