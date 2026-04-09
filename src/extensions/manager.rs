@@ -33,7 +33,7 @@ use crate::tools::mcp::auth::{
     authorize_mcp_server, canonical_resource_uri, discover_full_oauth_metadata,
     find_available_port, is_authenticated, register_client,
 };
-use crate::tools::mcp::config::McpServerConfig;
+use crate::tools::mcp::config::{McpServerConfig, NEARAI_MCP_SERVER_NAME};
 use crate::tools::mcp::session::McpSessionManager;
 use crate::tools::wasm::{WasmToolLoader, WasmToolRuntime, discover_tools};
 
@@ -2055,6 +2055,10 @@ impl ExtensionManager {
     ) -> Result<InstallResult, ExtensionError> {
         match entry.kind {
             ExtensionKind::McpServer => {
+                if entry.name == NEARAI_MCP_SERVER_NAME {
+                    return self.install_nearai_mcp_from_env(user_id).await;
+                }
+
                 let url = match source {
                     ExtensionSource::McpUrl { url } => url.clone(),
                     ExtensionSource::Discovered { url } => url.clone(),
@@ -2145,6 +2149,41 @@ impl ExtensionManager {
                 "ACP agents are configured via 'ironclaw acp add', not the registry".to_string(),
             )),
         }
+    }
+
+    async fn install_nearai_mcp_from_env(
+        &self,
+        user_id: &str,
+    ) -> Result<InstallResult, ExtensionError> {
+        if self
+            .get_mcp_server(NEARAI_MCP_SERVER_NAME, user_id)
+            .await
+            .is_ok()
+        {
+            return Err(ExtensionError::AlreadyInstalled(
+                NEARAI_MCP_SERVER_NAME.to_string(),
+            ));
+        }
+
+        let config = crate::tools::mcp::config::nearai_mcp_server_from_env().ok_or_else(|| {
+            ExtensionError::InstallFailed(
+                "NEAR AI MCP requires NEARAI_BASE_URL and NEARAI_API_KEY to be set.".to_string(),
+            )
+        })?;
+
+        let server_name = config.name.clone();
+        self.add_mcp_server(config, user_id)
+            .await
+            .map_err(|e| ExtensionError::Config(e.to_string()))?;
+
+        Ok(InstallResult {
+            name: server_name.clone(),
+            kind: ExtensionKind::McpServer,
+            message: format!(
+                "MCP server '{}' installed. Run activate to connect.",
+                server_name
+            ),
+        })
     }
 
     async fn install_mcp_from_url(

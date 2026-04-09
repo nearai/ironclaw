@@ -419,7 +419,7 @@ fn derive_nearai_mcp_url(base_url: &str) -> String {
     format!("{}/mcp", base)
 }
 
-fn nearai_mcp_server_from_env() -> Option<McpServerConfig> {
+pub(crate) fn nearai_mcp_server_from_env() -> Option<McpServerConfig> {
     let base_url = crate::config::helpers::env_or_override("NEARAI_BASE_URL")?;
     let api_key = crate::config::helpers::env_or_override("NEARAI_API_KEY")?;
 
