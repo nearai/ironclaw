@@ -20,6 +20,7 @@ use ironclaw_engine::{
 };
 
 use crate::bridge::auth_manager::{AuthCheckResult, AuthManager};
+use crate::bridge::router::synthetic_action_call_id;
 use crate::context::JobContext;
 use crate::hooks::{HookEvent, HookOutcome, HookRegistry};
 use crate::tools::permissions::{PermissionState, effective_permission};
@@ -441,16 +442,26 @@ impl EffectBridgeAdapter {
             _ => return None, // Not a mission/routine call
         };
 
+        // Use the live call_id from the executing thread context, falling
+        // back to a synthetic id when none is available. An empty `call_id`
+        // on an `ActionResult` corrupts the engine's call/result pairing
+        // and causes the assistant to drop the response (see the doc on
+        // `crate::bridge::router::resolved_call_id_for_pending_action`).
+        let call_id = context
+            .current_call_id
+            .clone()
+            .unwrap_or_else(|| synthetic_action_call_id(action_name));
+
         Some(match result {
             Ok(output) => Ok(ActionResult {
-                call_id: String::new(),
+                call_id: call_id.clone(),
                 action_name: action_name.to_string(),
                 output,
                 is_error: false,
                 duration: std::time::Duration::ZERO,
             }),
             Err(e) => Ok(ActionResult {
-                call_id: String::new(),
+                call_id,
                 action_name: action_name.to_string(),
                 output: serde_json::json!({"error": e.to_string()}),
                 is_error: true,
@@ -557,7 +568,10 @@ impl EffectBridgeAdapter {
                     available_actions,
                 }) => {
                     return Ok(ActionResult {
-                        call_id: String::new(),
+                        call_id: context
+                            .current_call_id
+                            .clone()
+                            .unwrap_or_else(|| synthetic_action_call_id(action_name)),
                         action_name: action_name.to_string(),
                         output: serde_json::json!({
                             "provider_extension": provider_extension,
@@ -893,7 +907,10 @@ impl EffectBridgeAdapter {
                                 );
                             }
                             return Ok(ActionResult {
-                                call_id: String::new(),
+                                call_id: context
+                                    .current_call_id
+                                    .clone()
+                                    .unwrap_or_else(|| synthetic_action_call_id(action_name)),
                                 action_name: action_name.to_string(),
                                 output: enriched,
                                 is_error: false,
@@ -910,7 +927,10 @@ impl EffectBridgeAdapter {
                 }
 
                 Ok(ActionResult {
-                    call_id: String::new(),
+                    call_id: context
+                        .current_call_id
+                        .clone()
+                        .unwrap_or_else(|| synthetic_action_call_id(action_name)),
                     action_name: action_name.to_string(),
                     output: output_value,
                     is_error: false,
@@ -946,7 +966,10 @@ impl EffectBridgeAdapter {
                 let sanitized = self.safety.sanitize_tool_output(&lookup_name, &error_msg);
 
                 Ok(ActionResult {
-                    call_id: String::new(),
+                    call_id: context
+                        .current_call_id
+                        .clone()
+                        .unwrap_or_else(|| synthetic_action_call_id(action_name)),
                     action_name: action_name.to_string(),
                     output: serde_json::json!({"error": sanitized.content}),
                     is_error: true,

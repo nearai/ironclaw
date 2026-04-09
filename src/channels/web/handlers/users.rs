@@ -343,6 +343,12 @@ pub async fn users_suspend_handler(
         ps.evict_user(&id);
     }
 
+    // Drop the suspended user's auth-descriptor cache entry so any
+    // in-flight credential resolution falls back to the live store
+    // (which now sees the user as suspended) instead of serving stale
+    // metadata until the 60s TTL expires.
+    crate::auth::invalidate_auth_descriptor_cache(&id).await;
+
     Ok(Json(serde_json::json!({
         "id": id,
         "status": "suspended",
@@ -421,6 +427,12 @@ pub async fn users_delete_handler(
     if let Some(ref ps) = state.pairing_store {
         ps.evict_user(&id);
     }
+
+    // Drop the deleted user's auth-descriptor cache entry. The 60s TTL
+    // would otherwise let the in-process cache keep serving the deleted
+    // user's credential metadata until expiry, even though the underlying
+    // rows are gone.
+    crate::auth::invalidate_auth_descriptor_cache(&id).await;
 
     Ok(Json(serde_json::json!({
         "id": id,

@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::tools::wasm::{ssrf_safe_client_builder_for_target, validate_and_resolve_http_target};
+
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -29,6 +31,21 @@ pub use crate::llm::oauth_helpers::{
 };
 
 // ── Shared OAuth flow steps ─────────────────────────────────────────
+
+/// Truncate `body` to at most `max_bytes` UTF-8 bytes, walking back to the
+/// nearest char boundary so the result is always a valid `&str`. Appends
+/// `"..."` when truncation actually happens. Used to bound any
+/// upstream-controlled response text we interpolate into error strings.
+fn truncate_at_char_boundary(body: &str, max_bytes: usize) -> String {
+    if body.len() <= max_bytes {
+        return body.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &body[..end])
+}
 
 /// Response from the OAuth token exchange.
 pub struct OAuthTokenResponse {
@@ -149,6 +166,14 @@ pub async fn exchange_oauth_code(
 }
 
 /// Exchange an OAuth authorization code for tokens with generic extra form parameters.
+///
+/// **SSRF + redirect hardening.** `token_url` is supply-chain controlled (it
+/// originates in tool capabilities JSON), so the URL is validated through
+/// [`validate_and_resolve_http_target`] before the request, the client is
+/// pinned to the resolved address via [`ssrf_safe_client_builder_for_target`],
+/// and `redirect(Policy::none())` is set so an attacker cannot redirect the
+/// authorization code, PKCE verifier, or `client_secret` to a different host.
+/// Error responses have their bodies truncated before being interpolated.
 #[allow(clippy::too_many_arguments)]
 pub async fn exchange_oauth_code_with_params(
     token_url: &str,
@@ -160,7 +185,15 @@ pub async fn exchange_oauth_code_with_params(
     access_token_field: &str,
     extra_token_params: &HashMap<String, String>,
 ) -> Result<OAuthTokenResponse, OAuthCallbackError> {
-    let client = reqwest::Client::new();
+    let resolved_target = validate_and_resolve_http_target(token_url)
+        .await
+        .map_err(|e| OAuthCallbackError::Io(format!("Token URL rejected: {e}")))?;
+    let client = ssrf_safe_client_builder_for_target(&resolved_target)
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| OAuthCallbackError::Io(format!("build HTTP client: {e}")))?;
+
     let mut token_params = vec![
         ("grant_type", "authorization_code".to_string()),
         ("code", code.to_string()),
@@ -192,9 +225,14 @@ pub async fn exchange_oauth_code_with_params(
     if !token_response.status().is_success() {
         let status = token_response.status();
         let body = token_response.text().await.unwrap_or_default();
+        // Truncate the upstream body before bubbling it into our error
+        // string. OAuth error responses can echo partial token material,
+        // request details, or unbounded vendor messages — surfacing the
+        // raw body verbatim is both a leak risk and a log-bloat risk.
+        let truncated = truncate_at_char_boundary(&body, 500);
         return Err(OAuthCallbackError::Io(format!(
             "Token exchange failed: {} - {}",
-            status, body
+            status, truncated
         )));
     }
 
@@ -293,7 +331,17 @@ pub async fn store_oauth_tokens(
     }
 
     if let Some(secs) = expires_in {
-        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
+        // Saturate on overflow: a hostile / buggy provider returning
+        // `u64::MAX` for `expires_in` would either wrap to a negative
+        // i64 (immediately invalidating the token) or panic in older
+        // chrono versions. `try_seconds` returns `None` past chrono's
+        // internal millisecond limit; saturate to `TimeDelta::MAX` so
+        // the token simply lives "effectively forever" rather than
+        // poisoning storage. Mirrors the pattern in `auth/mod.rs`.
+        let expires_secs = i64::try_from(secs).unwrap_or(i64::MAX);
+        let expires_delta =
+            chrono::Duration::try_seconds(expires_secs).unwrap_or(chrono::TimeDelta::MAX);
+        let expires_at = chrono::Utc::now() + expires_delta;
         params = params.with_expiry(expires_at);
     }
 
@@ -332,12 +380,25 @@ pub async fn store_oauth_tokens(
 /// Sends a request to the configured endpoint with the token as a Bearer header.
 /// Returns `Ok(())` if the response status matches the expected success status,
 /// or an error with details if validation fails (wrong account, expired token, etc.).
+///
+/// **SSRF hardening.** `validation.url` is supply-chain controlled (it lives
+/// in the tool's capabilities JSON), so without validation a malicious tool
+/// author could redirect IronClaw to send the freshly-minted access token to
+/// an internal endpoint as `Authorization: Bearer <token>`. We resolve and
+/// validate the URL through [`validate_and_resolve_http_target`] and pin
+/// reqwest to the validated address via [`ssrf_safe_client_builder_for_target`],
+/// plus disable redirects so a 302 from a public-looking host cannot bounce
+/// the bearer-bearing request to an internal one.
 pub async fn validate_oauth_token(
     token: &str,
     validation: &crate::tools::wasm::ValidationEndpointSchema,
 ) -> Result<(), OAuthCallbackError> {
-    let client = reqwest::Client::builder()
+    let resolved_target = validate_and_resolve_http_target(&validation.url)
+        .await
+        .map_err(|e| OAuthCallbackError::Io(format!("Validation URL rejected: {e}")))?;
+    let client = ssrf_safe_client_builder_for_target(&resolved_target)
         .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| OAuthCallbackError::Io(format!("Failed to build HTTP client: {}", e)))?;
 
@@ -363,15 +424,7 @@ pub async fn validate_oauth_token(
     } else {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        let truncated: String = if body.len() > 200 {
-            let mut end = 200;
-            while end > 0 && !body.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!("{}...", &body[..end])
-        } else {
-            body
-        };
+        let truncated = truncate_at_char_boundary(&body, 200);
         Err(OAuthCallbackError::Io(format!(
             "Token validation failed: HTTP {} (expected {}): {}",
             status, validation.success_status, truncated

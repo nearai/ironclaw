@@ -549,6 +549,7 @@ impl UserStore for LibSqlBackend {
                 "routines",
                 "memory_documents",
                 "conversations",
+                "user_identities",
                 "api_tokens",
             ] {
                 conn.execute(

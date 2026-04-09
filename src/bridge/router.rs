@@ -167,7 +167,7 @@ fn resolved_call_id_for_pending_action(
 ///
 /// Used as a last-resort so the resumed `ActionResult` message still carries a
 /// non-empty correlator and the engine does not silently drop the reply.
-fn synthetic_action_call_id(action_name: &str) -> String {
+pub(super) fn synthetic_action_call_id(action_name: &str) -> String {
     format!("synthetic-{}-{}", action_name, uuid::Uuid::new_v4())
 }
 

@@ -2846,6 +2846,12 @@ impl Store {
             "routines",
             "memory_documents",
             "conversations",
+            // user_identities (added in V17): without this delete, the
+            // PostgreSQL FK rejects the `DELETE FROM users` below, and on
+            // libSQL the rows are silently orphaned — a future user with
+            // the same id could inherit the previous user's external
+            // identity rows, which is a tenant-isolation breach.
+            "user_identities",
         ] {
             tx.execute(&format!("DELETE FROM {table} WHERE user_id = $1"), &[&id])
                 .await

@@ -343,6 +343,9 @@ impl MissionManager {
     /// Resume a paused mission.
     ///
     /// Shared missions can only be managed by shared owners (system user).
+    /// Only `Paused` missions can be resumed — `Completed` and `Failed` are
+    /// terminal states and must not be resurrected by a stray resume call,
+    /// so anything else is rejected with a `Store` error.
     pub async fn resume_mission(&self, id: MissionId, user_id: &str) -> Result<(), EngineError> {
         let mission = self
             .store
@@ -360,6 +363,14 @@ impl MissionManager {
             return Err(EngineError::AccessDenied {
                 user_id: user_id.to_string(),
                 entity: format!("mission {id}"),
+            });
+        }
+        if mission.status != MissionStatus::Paused {
+            return Err(EngineError::Store {
+                reason: format!(
+                    "mission {id} is in state {:?}, only Paused missions can be resumed",
+                    mission.status
+                ),
             });
         }
         self.store
@@ -2850,6 +2861,53 @@ mod tests {
         mgr.resume_mission(id, "test-user").await.unwrap();
         let mission = mgr.get_mission(id).await.unwrap().unwrap();
         assert_eq!(mission.status, MissionStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn resume_mission_rejects_terminal_states() {
+        // Regression: resume_mission must not resurrect Completed/Failed
+        // missions. Only Paused → Active is permitted.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "terminal-state-test",
+                "goal",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        // Active → resume must fail (only Paused is resumable).
+        let err = mgr
+            .resume_mission(id, "alice")
+            .await
+            .expect_err("resume_mission must reject Active missions");
+        match err {
+            EngineError::Store { reason } => assert!(reason.contains("Active")),
+            other => panic!("expected Store error, got {other:?}"),
+        }
+
+        // Drive the mission into a terminal state via complete_mission and
+        // confirm resume is still rejected.
+        mgr.complete_mission(id).await.unwrap();
+        let err = mgr
+            .resume_mission(id, "alice")
+            .await
+            .expect_err("resume_mission must reject Completed missions");
+        match err {
+            EngineError::Store { reason } => assert!(reason.contains("Completed")),
+            other => panic!("expected Store error, got {other:?}"),
+        }
+
+        // Make sure the status didn't drift after the failed resume calls.
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(mission.status, MissionStatus::Completed);
     }
 
     #[tokio::test]

@@ -4223,36 +4223,38 @@ impl ExtensionManager {
         let tools = discover_tools(&self.wasm_tools_dir)
             .await
             .map_err(|e| format!("discover tools: {e}"))?;
-        for (tool_name, discovered_tool) in &tools {
-            let cap = self
-                .load_tool_capabilities(tool_name)
-                .await
-                .ok_or_else(|| {
-                    let path = discovered_tool
-                        .capabilities_path
-                        .as_ref()
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_else(|| format!("{} (missing)", tool_name));
-                    format!("load tool capabilities for {tool_name}: {path}")
-                })?;
+        for tool_name in tools.keys() {
+            // A bare WASM install without a `.capabilities.json` sidecar is a
+            // legitimate state — the tool simply has no declared secrets.
+            // Don't abort the entire scan on a missing sidecar; just skip
+            // that tool. Aborting the whole function would mean *no* secrets
+            // get cleaned up for *any* extension when even one sidecar is
+            // missing, which is the orphaned-secrets bug serrrfirat called
+            // out.
+            let Some(cap) = self.load_tool_capabilities(tool_name).await else {
+                tracing::debug!(
+                    tool = %tool_name,
+                    "no capabilities sidecar — no secrets referenced"
+                );
+                continue;
+            };
             referenced_secret_names.extend(Self::tool_secret_names(&cap));
         }
 
         let channels = crate::channels::wasm::discover_channels(&self.wasm_channels_dir)
             .await
             .map_err(|e| format!("discover channels: {e}"))?;
-        for (channel_name, discovered_channel) in &channels {
-            let cap = self
-                .load_channel_capabilities(channel_name)
-                .await
-                .ok_or_else(|| {
-                    let path = discovered_channel
-                        .capabilities_path
-                        .as_ref()
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_else(|| format!("{} (missing)", channel_name));
-                    format!("load channel capabilities for {channel_name}: {path}")
-                })?;
+        for channel_name in channels.keys() {
+            // Same rationale as the tool scan above: a missing channel
+            // capabilities sidecar means "no declared secrets", not "abort
+            // the whole secret-cleanup scan".
+            let Some(cap) = self.load_channel_capabilities(channel_name).await else {
+                tracing::debug!(
+                    channel = %channel_name,
+                    "no capabilities sidecar — no secrets referenced"
+                );
+                continue;
+            };
             referenced_secret_names.extend(Self::channel_secret_names(&cap));
         }
 
@@ -4929,7 +4931,15 @@ impl ExtensionManager {
             .await;
         }
 
-        let saved_fields = self.load_tool_setup_fields(name).await.unwrap_or_default();
+        // Multi-tenant scoping: every credential / setup-field check below
+        // must run against the *requesting* user (the `user_id` parameter),
+        // not against `self.user_id` (the manager's owner). The previous
+        // code mixed the two, so a non-owner user could see a tool reported
+        // as "setup-complete" because the owner had configured it.
+        let saved_fields = self
+            .load_tool_setup_fields_for(name, user_id)
+            .await
+            .unwrap_or_default();
         let setup_is_complete = if let Some(setup) = &cap_file.setup {
             let secrets_ready = futures::future::join_all(
                 setup
@@ -4937,7 +4947,7 @@ impl ExtensionManager {
                     .iter()
                     .filter(|s| !s.optional)
                     .filter(|s| !Self::is_auto_resolved_oauth_field(&s.name, &cap_file))
-                    .map(|s| self.secrets.exists(&self.user_id, &s.name)),
+                    .map(|s| self.secrets.exists(user_id, &s.name)),
             )
             .await
             .into_iter()
@@ -4952,7 +4962,7 @@ impl ExtensionManager {
                         continue;
                     }
                     if !self
-                        .is_tool_setup_field_provided(name, field, &saved_fields)
+                        .is_tool_setup_field_provided_for(name, user_id, field, &saved_fields)
                         .await
                     {
                         fields_ready = false;
@@ -6244,16 +6254,33 @@ impl ExtensionManager {
         }
     }
 
+    /// Owner-scoped wrapper around [`load_tool_setup_fields_for`]. Used by
+    /// the `configure()` write path which intentionally stores under the
+    /// manager owner regardless of the requesting user (the writes go to
+    /// `self.user_id`, so the matching reads from `configure()` also use
+    /// `self.user_id`).
     async fn load_tool_setup_fields(
         &self,
         name: &str,
+    ) -> Result<HashMap<String, String>, ExtensionError> {
+        let user_id = self.user_id.clone();
+        self.load_tool_setup_fields_for(name, &user_id).await
+    }
+
+    /// Per-user variant. Used by `check_tool_auth_status` and any other
+    /// caller that has a real requesting `user_id` so multi-tenant
+    /// deployments don't accidentally report another user's setup state.
+    async fn load_tool_setup_fields_for(
+        &self,
+        name: &str,
+        user_id: &str,
     ) -> Result<HashMap<String, String>, ExtensionError> {
         let Some(ref store) = self.store else {
             return Ok(HashMap::new());
         };
 
         let key = Self::setup_fields_setting_key(name);
-        match store.get_setting(&self.user_id, &key).await {
+        match store.get_setting(user_id, &key).await {
             Ok(Some(value)) => serde_json::from_value::<HashMap<String, String>>(value)
                 .map_err(|e| ExtensionError::Other(format!("Invalid setup fields JSON: {}", e))),
             Ok(None) => Ok(HashMap::new()),
@@ -6286,9 +6313,27 @@ impl ExtensionManager {
             })
     }
 
+    /// Owner-scoped wrapper around [`is_tool_setup_field_provided_for`]. Used
+    /// by the `configure()` post-write check that's already operating in
+    /// owner scope.
     async fn is_tool_setup_field_provided(
         &self,
         name: &str,
+        field: &crate::tools::wasm::ToolFieldSetupSchema,
+        saved_fields: &HashMap<String, String>,
+    ) -> bool {
+        let user_id = self.user_id.clone();
+        self.is_tool_setup_field_provided_for(name, &user_id, field, saved_fields)
+            .await
+    }
+
+    /// Per-user variant. Used by `check_tool_auth_status` so the field's
+    /// "provided" check reads settings under the requesting user instead
+    /// of the manager owner.
+    async fn is_tool_setup_field_provided_for(
+        &self,
+        name: &str,
+        user_id: &str,
         field: &crate::tools::wasm::ToolFieldSetupSchema,
         saved_fields: &HashMap<String, String>,
     ) -> bool {
@@ -6301,7 +6346,7 @@ impl ExtensionManager {
 
         if let (Some(store), Some(setting_path)) = (&self.store, &field.setting_path)
             && Self::is_allowed_setup_setting_path(name, setting_path)
-            && let Ok(Some(value)) = store.get_setting(&self.user_id, setting_path).await
+            && let Ok(Some(value)) = store.get_setting(user_id, setting_path).await
         {
             return Self::setting_value_is_present(&value);
         }
@@ -6382,7 +6427,14 @@ impl ExtensionManager {
                 let mut secrets = Vec::new();
                 let mut fields = Vec::new();
                 if let Some(setup) = &cap_file.setup {
-                    let saved_fields = self.load_tool_setup_fields(name).await.unwrap_or_default();
+                    // Per-user scope: this schema is rendered for the
+                    // *requesting* user, so the saved-fields read and the
+                    // field-provided check must use `user_id` rather than
+                    // the manager owner.
+                    let saved_fields = self
+                        .load_tool_setup_fields_for(name, user_id)
+                        .await
+                        .unwrap_or_default();
 
                     for secret in &setup.required_secrets {
                         if Self::is_auto_resolved_oauth_field(&secret.name, &cap_file) {
@@ -6404,7 +6456,7 @@ impl ExtensionManager {
 
                     for field in &setup.required_fields {
                         let provided = self
-                            .is_tool_setup_field_provided(name, field, &saved_fields)
+                            .is_tool_setup_field_provided_for(name, user_id, field, &saved_fields)
                             .await;
                         fields.push(crate::channels::web::types::SetupFieldInfo {
                             name: field.name.clone(),
@@ -10240,7 +10292,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_remove_wasm_tool_keeps_secrets_when_other_tool_capabilities_missing() {
+    async fn test_remove_wasm_tool_cleans_secrets_when_other_tool_has_no_capabilities() {
+        // Contract under the "skip missing caps" fix: a bare WASM file
+        // without a `.capabilities.json` sidecar contributes ZERO secret
+        // references to the cleanup scan (rather than aborting the scan
+        // and forcing every install to retain its secrets forever). When
+        // we remove `github`, the only declared reference to
+        // `shared_token` is gone, the broken.wasm tool declares nothing,
+        // and the cleanup proceeds.
+        //
+        // Previously the scan errored out on the missing caps file, the
+        // remove() caller logged a warning, and ALL secrets were
+        // retained — see serrrfirat's #2050 review: "no secrets are
+        // cleaned up for any extension when this happens. Orphaned
+        // secrets accumulate."
         let dir = tempfile::tempdir().expect("temp dir");
         let tools_dir = write_test_tool(
             dir.path(),
@@ -10267,11 +10332,13 @@ mod tests {
             "shared_token_scopes",
         ] {
             assert!(
-                mgr.secrets
+                !mgr.secrets
                     .exists("test", secret_name)
                     .await
                     .expect("exists query"),
-                "secret {secret_name} should be retained when reference detection is uncertain"
+                "secret {secret_name} should be cleaned up after removing the only \
+                 tool that referenced it; the bare broken.wasm has no capabilities \
+                 file so it contributes no references"
             );
         }
     }
