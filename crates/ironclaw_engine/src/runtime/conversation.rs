@@ -245,12 +245,21 @@ impl ConversationManager {
                 );
                 // Resume reloads the thread from the store, so writing fresh
                 // user_timezone to the persisted record before resume_thread
-                // means the resumed execution sees the up-to-date value. This
-                // is the only metadata refresh path for an existing thread.
-                if let Some(tz) = user_timezone {
-                    self.thread_manager
+                // means the resumed execution sees the up-to-date value — but
+                // only if this write actually lands. A store failure here
+                // would silently leave the resumed thread with the prior
+                // timezone, so log explicitly rather than swallowing.
+                if let Some(tz) = user_timezone
+                    && let Err(e) = self
+                        .thread_manager
                         .set_thread_metadata(thread_id, "user_timezone", tz)
-                        .await;
+                        .await
+                {
+                    debug!(
+                        thread_id = %thread_id,
+                        error = %e,
+                        "failed to refresh user_timezone on resume; thread will use previous value"
+                    );
                 }
                 self.thread_manager
                     .resume_thread(

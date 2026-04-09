@@ -4,8 +4,9 @@
 //! progress. The manager handles lifecycle (create, pause, resume, complete)
 //! and delegates thread spawning to [`ThreadManager`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Deserialize;
 use tokio::sync::RwLock;
@@ -21,7 +22,9 @@ use crate::runtime::messaging::ThreadOutcome;
 use crate::traits::store::Store;
 use crate::types::error::EngineError;
 use crate::types::memory::{DocId, DocType, MemoryDoc};
-use crate::types::mission::{Mission, MissionCadence, MissionId, MissionStatus, next_cron_fire};
+use crate::types::mission::{
+    Mission, MissionCadence, MissionId, MissionStatus, next_cron_fire, next_cron_fire_required,
+};
 use crate::types::project::ProjectId;
 use crate::types::shared_owner_id;
 use crate::types::thread::{ActiveSkillProvenance, Thread, ThreadConfig, ThreadId, ThreadType};
@@ -63,7 +66,24 @@ pub struct MissionManager {
     active: RwLock<Vec<MissionId>>,
     /// Broadcast channel for mission outcome notifications.
     notification_tx: tokio::sync::broadcast::Sender<MissionNotification>,
+    /// Per-mission in-memory cooldown timestamp, recorded after each
+    /// `fire_mission` attempt regardless of whether `save_mission` succeeded.
+    ///
+    /// `tick` consults this to suppress re-firing the same mission within
+    /// [`FIRE_COOLDOWN`] when a transient store failure has prevented
+    /// `next_fire_at` / `threads_today` from advancing in the persisted record.
+    /// Without this guard, a save failure after a successful fire would cause
+    /// the next 60 s tick (and every subsequent tick) to re-fire the same
+    /// mission until the store recovers, spawning duplicate threads up to the
+    /// daily budget.
+    last_fire_attempt: RwLock<HashMap<MissionId, chrono::DateTime<chrono::Utc>>>,
 }
+
+/// Minimum gap between successive `fire_mission` attempts for the same
+/// mission ID, enforced in-memory by `tick`. Chosen to comfortably exceed the
+/// 60 s tick interval so a single tick gap is always honored, while still
+/// allowing recovery within a few minutes if the store comes back.
+const FIRE_COOLDOWN: Duration = Duration::from_secs(90);
 
 impl MissionManager {
     pub fn new(store: Arc<dyn Store>, thread_manager: Arc<ThreadManager>) -> Self {
@@ -73,6 +93,7 @@ impl MissionManager {
             thread_manager,
             active: RwLock::new(Vec::new()),
             notification_tx,
+            last_fire_attempt: RwLock::new(HashMap::new()),
         }
     }
 
@@ -189,7 +210,9 @@ impl MissionManager {
             ref timezone,
         } = mission.cadence
         {
-            mission.next_fire_at = next_cron_fire(expression, timezone.as_ref())?;
+            // Reject Ok(None) at the create boundary — an Active cron mission
+            // with `next_fire_at = None` is the original #1944 failure mode.
+            mission.next_fire_at = Some(next_cron_fire_required(expression, timezone.as_ref())?);
         }
         mission.notify_channels = notify_channels;
         let id = mission.id;
@@ -239,12 +262,14 @@ impl MissionManager {
             // never picks the mission up; a Cron expression/timezone change
             // keeps firing on the old schedule until the mission is paused and
             // resumed. Clear next_fire_at for non-cron cadences so a stale
-            // value can't trigger an unrelated cron path.
+            // value can't trigger an unrelated cron path. Reject cron schedules
+            // that are valid but have no future fire time so we don't persist
+            // an Active mission that can never run.
             mission.next_fire_at = match &mission.cadence {
                 MissionCadence::Cron {
                     expression,
                     timezone,
-                } => next_cron_fire(expression, timezone.as_ref())?,
+                } => Some(next_cron_fire_required(expression, timezone.as_ref())?),
                 _ => None,
             };
         }
@@ -327,7 +352,10 @@ impl MissionManager {
             ref timezone,
         } = mission.cadence
         {
-            mission.next_fire_at = next_cron_fire(expression, timezone.as_ref())?;
+            // Reject Ok(None): resuming a cron mission whose schedule has no
+            // upcoming fire time would silently re-create the #1944 stuck
+            // state. Surface the error so the caller can fix the schedule.
+            mission.next_fire_at = Some(next_cron_fire_required(expression, timezone.as_ref())?);
         }
         mission.updated_at = chrono::Utc::now();
         self.store.save_mission(&mission).await?;
@@ -456,14 +484,25 @@ impl MissionManager {
         // cadences — leave next_fire_at un-advanced, causing the next tick to
         // re-fire the same mission in a runaway loop. Log and continue. The
         // caller still gets Ok(Some(thread_id)) so the spawned thread is visible.
+        // The in-memory `last_fire_attempt` cooldown below prevents a runaway
+        // re-fire loop until the store recovers and `next_fire_at` advances.
         if let Err(e) = self.store.save_mission(&updated).await {
             debug!(
                 mission_id = %id,
                 thread_id = %thread_id,
                 error = %e,
-                "failed to persist mission update after fire; thread is running and watched, schedule may re-fire on next tick"
+                "failed to persist mission update after fire; thread is running and watched, in-memory cooldown will suppress re-fire"
             );
         }
+
+        // Record the fire attempt unconditionally — both successful saves and
+        // failed ones must arm the cooldown so a save failure doesn't re-fire
+        // on every subsequent tick. Held briefly under the write lock; the
+        // map is keyed by mission ID and only mutated here and in tick().
+        self.last_fire_attempt
+            .write()
+            .await
+            .insert(id, chrono::Utc::now());
 
         debug!(mission_id = %id, thread_id = %thread_id, "mission fired");
 
@@ -882,7 +921,7 @@ impl MissionManager {
             ref timezone,
         } = mission.cadence
         {
-            mission.next_fire_at = next_cron_fire(expression, timezone.as_ref())?;
+            mission.next_fire_at = Some(next_cron_fire_required(expression, timezone.as_ref())?);
         }
 
         let id = mission.id;
@@ -1085,7 +1124,7 @@ impl MissionManager {
             ref timezone,
         } = mission.cadence
         {
-            mission.next_fire_at = next_cron_fire(expression, timezone.as_ref())?;
+            mission.next_fire_at = Some(next_cron_fire_required(expression, timezone.as_ref())?);
         }
 
         let id = mission.id;
@@ -1105,8 +1144,28 @@ impl MissionManager {
         let active_ids = self.active.read().await.clone();
         let mut spawned = Vec::new();
         let now = chrono::Utc::now();
+        let cooldown =
+            chrono::Duration::from_std(FIRE_COOLDOWN).unwrap_or(chrono::Duration::zero());
 
         for mid in active_ids {
+            // In-memory cooldown: if `fire_mission` ran for this mission very
+            // recently, suppress this tick's fire even if the persisted
+            // `next_fire_at` still points at the past. This guards against a
+            // runaway loop when `save_mission` failed to advance the schedule
+            // after a successful spawn — without it, every tick would re-fire
+            // until the store recovers, spawning duplicate threads up to the
+            // daily budget.
+            let on_cooldown = self
+                .last_fire_attempt
+                .read()
+                .await
+                .get(&mid)
+                .is_some_and(|last| now.signed_duration_since(*last) < cooldown);
+            if on_cooldown {
+                debug!(mission_id = %mid, "tick: mission within fire cooldown; skipping");
+                continue;
+            }
+
             // Per-mission error isolation: a transient store/load error or a
             // single fire failure must not abort the entire tick — the other
             // active missions still need their chance to fire on this cycle.
@@ -2087,7 +2146,6 @@ mod tests {
 
     use std::collections::HashMap;
     use std::sync::Mutex;
-    use std::time::Duration;
 
     use crate::capability::lease::LeaseManager;
     use crate::capability::policy::PolicyEngine;
@@ -4422,6 +4480,183 @@ mod tests {
         assert!(
             build_skill_gap_payload(&thread, &trace, &thread.active_skills()).is_none(),
             "read-only shell workflows should not trigger skill repair"
+        );
+    }
+
+    // ── next_cron_fire_required + cooldown regression tests ──────
+
+    /// A 7-field cron expression year-locked to a year that's already in the
+    /// past. `cron::Schedule` parses it cleanly but `upcoming(...).next()`
+    /// returns `None`, which is exactly the `Ok(None)` case the
+    /// `next_cron_fire_required` helper guards against.
+    const PAST_YEAR_CRON: &str = "0 0 0 1 1 * 2020";
+
+    #[tokio::test]
+    async fn create_mission_rejects_unschedulable_cron() {
+        // Regression: previously `create_mission` accepted Ok(None) and
+        // persisted an Active mission with `next_fire_at = None` — the
+        // exact failure mode of #1944. Now it must fail fast.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let err = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "unschedulable",
+                "g",
+                MissionCadence::Cron {
+                    expression: PAST_YEAR_CRON.into(),
+                    timezone: None,
+                },
+                vec![],
+            )
+            .await
+            .expect_err("create_mission must reject cron with no upcoming fire time");
+
+        assert!(
+            matches!(err, EngineError::InvalidCadence { .. }),
+            "expected InvalidCadence, got: {err:?}"
+        );
+
+        // No mission should be persisted, no entry in active.
+        assert!(store.missions.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_mission_rejects_switch_to_unschedulable_cron() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "manual-then-cron",
+                "g",
+                MissionCadence::Manual,
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        let err = mgr
+            .update_mission(
+                id,
+                "alice",
+                MissionUpdate {
+                    cadence: Some(MissionCadence::Cron {
+                        expression: PAST_YEAR_CRON.into(),
+                        timezone: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("update_mission must reject cron with no upcoming fire time");
+
+        assert!(matches!(err, EngineError::InvalidCadence { .. }));
+        // Original Manual cadence should be preserved on the persisted record.
+        let reloaded = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(matches!(reloaded.cadence, MissionCadence::Manual));
+    }
+
+    #[tokio::test]
+    async fn resume_mission_rejects_unschedulable_cron() {
+        // Build a paused cron mission whose schedule is fine, then mutate the
+        // persisted record to a year-locked expression and try to resume.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "resume-bad",
+                "g",
+                MissionCadence::Cron {
+                    expression: "0 9 * * *".into(),
+                    timezone: None,
+                },
+                vec![],
+            )
+            .await
+            .unwrap();
+        mgr.pause_mission(id, "alice").await.unwrap();
+
+        // Tamper with the persisted cadence to simulate a stored mission that
+        // can no longer fire (e.g. operator edited the database, or year-locked
+        // schedule rolled past).
+        {
+            let mut missions = store.missions.write().await;
+            if let Some(m) = missions.get_mut(&id) {
+                m.cadence = MissionCadence::Cron {
+                    expression: PAST_YEAR_CRON.into(),
+                    timezone: None,
+                };
+            }
+        }
+
+        let err = mgr
+            .resume_mission(id, "alice")
+            .await
+            .expect_err("resume_mission must reject cron with no upcoming fire time");
+        assert!(matches!(err, EngineError::InvalidCadence { .. }));
+
+        // Mission must remain paused — resume failed before any state change.
+        let reloaded = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(reloaded.status, MissionStatus::Paused);
+    }
+
+    #[tokio::test]
+    async fn tick_cooldown_suppresses_re_fire_on_save_failure() {
+        // Regression for the runaway-re-fire concern: when save_mission fails
+        // after a successful spawn, the persisted next_fire_at stays in the
+        // past. Without the in-memory cooldown, every subsequent tick would
+        // re-fire the same mission and spawn duplicate threads up to the
+        // daily budget. The cooldown must suppress that re-fire.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "cooldown",
+                "g",
+                MissionCadence::Cron {
+                    expression: "* * * * *".into(),
+                    timezone: None,
+                },
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        // First fire arms the cooldown.
+        let first = mgr.fire_mission(id, "alice", None).await.unwrap();
+        assert!(first.is_some(), "first fire should spawn a thread");
+
+        // Simulate the post-save-failure state: rewind next_fire_at into the
+        // past so the cron's `should_fire` check would otherwise fire again,
+        // and reset threads_today so the budget can't be what's blocking.
+        {
+            let mut missions = store.missions.write().await;
+            let mission = missions.get_mut(&id).unwrap();
+            mission.next_fire_at = Some(chrono::Utc::now() - chrono::Duration::seconds(120));
+            mission.threads_today = 0;
+        }
+
+        // tick must suppress the second fire because the in-memory cooldown
+        // is still armed from the first fire_mission call.
+        let spawned = mgr.tick("alice").await.unwrap();
+        assert!(
+            spawned.is_empty(),
+            "tick must skip mission within fire cooldown, got: {spawned:?}"
         );
     }
 }

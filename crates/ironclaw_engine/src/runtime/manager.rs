@@ -429,17 +429,40 @@ impl ThreadManager {
         }
     }
 
-    /// Set a metadata key on a thread (best-effort, for tagging).
-    pub async fn set_thread_metadata(&self, thread_id: ThreadId, key: &str, value: &str) {
-        if let Ok(Some(mut thread)) = self.store.load_thread(thread_id).await {
-            if let Some(obj) = thread.metadata.as_object_mut() {
-                obj.insert(
-                    key.to_string(),
-                    serde_json::Value::String(value.to_string()),
-                );
-            }
-            let _ = self.store.save_thread(&thread).await;
+    /// Set a metadata key on the persisted thread record.
+    ///
+    /// Note: this updates the **store**, not the in-memory `Thread` that an
+    /// already-running `ExecutionLoop` is reading from. Callers that need the
+    /// next executor step to observe the new value must apply this *before*
+    /// the executor task is spawned (initial-create path) or before
+    /// `resume_thread`, which reloads from the store.
+    pub async fn set_thread_metadata(
+        &self,
+        thread_id: ThreadId,
+        key: &str,
+        value: &str,
+    ) -> Result<(), EngineError> {
+        let mut thread = self
+            .store
+            .load_thread(thread_id)
+            .await
+            .map_err(|e| EngineError::Store {
+                reason: format!("set_thread_metadata: load failed: {e}"),
+            })?
+            .ok_or(EngineError::ThreadNotFound(thread_id))?;
+        if let Some(obj) = thread.metadata.as_object_mut() {
+            obj.insert(
+                key.to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
         }
+        self.store
+            .save_thread(&thread)
+            .await
+            .map_err(|e| EngineError::Store {
+                reason: format!("set_thread_metadata: save failed: {e}"),
+            })?;
+        Ok(())
     }
 
     /// Check if a thread is still running.

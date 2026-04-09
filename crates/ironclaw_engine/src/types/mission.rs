@@ -250,6 +250,31 @@ pub fn next_cron_fire(
     }
 }
 
+/// Like [`next_cron_fire`], but treats `Ok(None)` as a validation error.
+///
+/// `next_cron_fire` returns `Ok(None)` for cron expressions that are
+/// syntactically valid but will never fire again (e.g. `0 0 9 * * * 2020` —
+/// year-locked to a year that's already passed). At lifecycle entry points
+/// (`create_mission`, cadence updates, `resume_mission`) this is the same
+/// failure mode as the original #1944 bug: an Active mission with
+/// `next_fire_at = None` that the ticker can never pick up. Surface it as
+/// `InvalidCadence` so callers fail fast and the operator gets a clear error.
+///
+/// `fire_mission` and `bootstrap_project` intentionally tolerate `Ok(None)`
+/// (logged) and should keep using `next_cron_fire` directly — the thread is
+/// already running or the data is already persisted, and aborting would do
+/// more harm than logging.
+pub fn next_cron_fire_required(
+    expression: &str,
+    timezone: Option<&ValidTimezone>,
+) -> Result<DateTime<Utc>, EngineError> {
+    next_cron_fire(expression, timezone)?.ok_or_else(|| EngineError::InvalidCadence {
+        reason: format!(
+            "cron expression '{expression}' has no upcoming fire time (year-locked or otherwise unschedulable)"
+        ),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,7 +413,7 @@ mod tests {
         // on the next valid day at 02:30 (which is then EDT, UTC-4).
         let tz = ValidTimezone::parse("America/New_York").unwrap();
 
-        // Reference: 2027-03-13 22:00 UTC = 2027-03-13 18:00 EDT(?), well
+        // Reference: 2027-03-13 00:00 UTC = 2027-03-12 19:00 EST, well
         // before the spring-forward day. We just need a stable anchor.
         let after = Utc.with_ymd_and_hms(2027, 3, 13, 0, 0, 0).unwrap();
         let fire = schedule_after("30 2 * * *", &tz, after);
