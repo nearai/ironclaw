@@ -216,10 +216,25 @@ pub async fn filter_admin_disabled_tools(
         return tool_defs;
     }
 
+    let global_disabled: std::collections::HashSet<&str> = admin_policy
+        .disabled_tools
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let user_disabled: std::collections::HashSet<&str> = admin_policy
+        .user_disabled_tools
+        .get(user_id)
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .collect();
+
     tool_defs
         .into_iter()
         .filter(|def| {
-            if admin_policy.is_tool_disabled(&def.name, user_id) {
+            if global_disabled.contains(def.name.as_str())
+                || user_disabled.contains(def.name.as_str())
+            {
                 tracing::debug!(
                     tool = %def.name,
                     "Excluding tool disabled by admin policy"

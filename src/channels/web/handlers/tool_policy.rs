@@ -35,7 +35,10 @@ pub async fn tool_policy_get_handler(
         .get_setting(ADMIN_SETTINGS_USER_ID, ADMIN_TOOL_POLICY_KEY)
         .await
     {
-        Ok(Some(value)) => serde_json::from_value(value).unwrap_or_default(),
+        Ok(Some(value)) => serde_json::from_value(value).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Failed to parse admin tool policy");
+            AdminToolPolicy::default()
+        }),
         Ok(None) => AdminToolPolicy::default(),
         Err(e) => {
             return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
