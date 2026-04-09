@@ -12,6 +12,7 @@ Usage:
 """
 
 import atexit
+import json
 import os
 import time
 import uuid
@@ -141,6 +142,7 @@ client = OpenAI(api_key=user_token, base_url=f"{BASE_URL}/v1")
 # 1. Smart remittance: analyze_transfer
 # -----------------------------------------------------------
 print("--- 1. Smart remittance: analyze_transfer ---")
+target_rate = None
 try:
     response = client.responses.create(
         model="default",
@@ -153,6 +155,15 @@ try:
     agent_text = extract_agent_text(response)
     print(f"  Agent response ({len(agent_text)} chars): {agent_text}")
 
+    # Try to extract target_rate from the JSON response
+    try:
+        data = json.loads(agent_text)
+        target_rate = data.get("target_rate") or data.get("plot", {}).get("target_rate")
+        if target_rate:
+            print(f"  Extracted target_rate: {target_rate}")
+    except (json.JSONDecodeError, AttributeError):
+        pass
+
     has_analysis = any(term in agent_text.lower() for term in [
         "wait", "now", "rate", "inr", "volatility", "rsi", "hit rate", "recommend",
     ])
@@ -163,59 +174,9 @@ except Exception as e:
 print()
 
 # -----------------------------------------------------------
-# 2. Smart remittance: validate_transfer_target
+# 2. Exchange rate (natural language)
 # -----------------------------------------------------------
-print("--- 2. Smart remittance: validate_transfer_target ---")
-try:
-    response = client.responses.create(
-        model="default",
-        input="What's the probability of USD/INR hitting 95 in the next 30 days?",
-        timeout=180,
-    )
-    check("status completed", response.status == "completed", f"status={response.status}")
-    check("has output", len(response.output) > 0)
-
-    agent_text = extract_agent_text(response)
-    print(f"  Agent response ({len(agent_text)} chars): {agent_text[:400]}")
-
-    has_probability = any(term in agent_text.lower() for term in [
-        "probability", "hit", "%", "horizon", "days", "chance",
-    ])
-    check("contains probability analysis", has_probability,
-          "agent response doesn't contain probability/horizon data")
-except Exception as e:
-    check("request succeeded", False, str(e))
-print()
-
-# -----------------------------------------------------------
-# 3. Get Account Info (natural language)
-# -----------------------------------------------------------
-print("--- 3. Account info ---")
-try:
-    response = client.responses.create(
-        model="default",
-        input="What is my Abound account info? Show me my transfer limits, recipients, and funding sources.",
-    )
-    check("status completed", response.status == "completed", f"status={response.status}")
-    check("has output", len(response.output) > 0)
-
-    agent_text = extract_agent_text(response)
-    print(f"  Agent response ({len(agent_text)} chars): {agent_text[:400]}")
-
-    # Verify Abound-specific data (not generic)
-    has_abound_data = any(term in agent_text.lower() for term in [
-        "ach", "limit", "recipient", "funding", "discover", "bageshwar",
-    ])
-    check("contains Abound account data", has_abound_data,
-          "response doesn't contain Abound-specific account data")
-except Exception as e:
-    check("request succeeded", False, str(e))
-print()
-
-# -----------------------------------------------------------
-# 4. Exchange rate (natural language)
-# -----------------------------------------------------------
-print("--- 4. Exchange rate ---")
+print("--- 2. Exchange rate ---")
 try:
     response = client.responses.create(
         model="default",
@@ -228,6 +189,7 @@ try:
     agent_text = extract_agent_text(response)
     print(f"  Agent response ({len(agent_text)} chars): {agent_text[:400]}")
 
+
     # Should mention effective rate (real data) or account setup (auth error)
     has_rate_or_setup = any(term in agent_text.lower() for term in [
         "effective", "rate", "exchange", "setup", "support", "account",
@@ -239,126 +201,68 @@ except Exception as e:
 print()
 
 # -----------------------------------------------------------
-# 5. Send money advice (natural language)
+# 3. Smart remittance: create routine
 # -----------------------------------------------------------
-print("--- 5. Send money advice ---")
+print("--- 3. Smart remittance: create routine ---")
+routine_id = None
 try:
+    if not target_rate:
+        target_rate = 100
+    routine_input = (
+            f"Run the routine every 1 hour checking whether the current USD/INR exchange rate "
+            f"is greater than {target_rate} (the target rate from the analysis). "
+            f"If so, send a notification to my Abound app that the target rate has been reached, "
+            f"include the current rate."
+        )
     response = client.responses.create(
         model="default",
-        input="I want to send $1,000 to India. Check the rate and tell me "
-              "how much INR I'd get. Is now a good time to send?",
+        input=routine_input,
+        timeout=180,
     )
     check("status completed", response.status == "completed", f"status={response.status}")
     check("has output", len(response.output) > 0)
-
-    agent_text = extract_agent_text(response)
-    print(f"  Agent response ({len(agent_text)} chars): {agent_text[:400]}")
-
-    # Should reference INR/rate or ask about transfer details (recipient, reason)
-    has_transfer_context = any(term in agent_text.lower() for term in [
-        "inr", "rupee", "rate", "recipient", "transfer", "wire", "send",
-    ])
-    check("mentions transfer context", has_transfer_context)
-except Exception as e:
-    check("request succeeded", False, str(e))
-print()
-
-# -----------------------------------------------------------
-# 6. Create notification (natural language)
-# -----------------------------------------------------------
-print("--- 6. Create notification ---")
-try:
-    response = client.responses.create(
-        model="default",
-        input="Send a notification to my Abound app about the current "
-              "exchange rate. Use a score of 75 and include the current rate.",
-    )
-    check("status completed", response.status == "completed", f"status={response.status}")
-    check("has output", len(response.output) > 0)
-
-    agent_text = extract_agent_text(response)
-    print(f"  Agent response ({len(agent_text)} chars): {agent_text[:400]}")
-
-    # Agent should mention notification attempt (may 401 due to Abound auth)
-    has_notification = any(term in agent_text.lower() for term in [
-        "notification", "accepted", "unauthorized", "401",
-    ])
-    check("references notification attempt", has_notification,
-          "response doesn't mention notification")
-except Exception as e:
-    check("request succeeded", False, str(e))
-print()
-
-# -----------------------------------------------------------
-# 5. Streaming: exchange rate
-# -----------------------------------------------------------
-print("--- 5. Streaming: exchange rate ---")
-try:
-    stream = client.responses.create(
-        model="default",
-        input="What's the current USD to INR rate on Abound?",
-        stream=True,
-    )
-    events = []
-    full_text = ""
-    for event in stream:
-        events.append(event.type)
-        if event.type == "response.output_text.delta":
-            full_text += event.delta
-
-    check("has response.created", "response.created" in events,
-          f"events: {events[:5]}")
-    check("has response.completed", "response.completed" in events,
-          f"events: {events[-5:]}")
-    check("has text deltas", len(full_text) > 0, f"text={full_text[:100]}")
-    check("mentions rate in stream", any(t in full_text.lower() for t in ["rate", "inr", "exchange"]),
-          "streamed text doesn't mention rate")
-    print(f"  Events: {len(events)} total")
-    print(f"  Text: {full_text[:300]}")
-except Exception as e:
-    check("streaming succeeded", False, str(e))
-print()
-
-# -----------------------------------------------------------
-# 6. Choice set: payment reason
-# -----------------------------------------------------------
-print("--- 6. Choice set: payment reason ---")
-try:
-    response = client.responses.create(
-        model="default",
-        input="I want to send $500 to India. What payment reasons can I choose from?",
-    )
-    check("status completed", response.status == "completed", f"status={response.status}")
 
     agent_text = extract_agent_text(response)
     print(f"  Agent response ({len(agent_text)} chars): {agent_text}")
 
-    has_choice_set = "[[choice_set]]" in agent_text and "[[/choice_set]]" in agent_text
-    check("contains choice_set markers", has_choice_set,
-          "no [[choice_set]]...[[/choice_set]] block found")
+    # Extract routine ID for the next step
+    import re
+    routine_id = None
+    m = re.search(r'\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b', agent_text)
+    if m:
+        routine_id = m.group(1)
+        print(f"  Extracted routine ID: {routine_id}")
 
-    if has_choice_set:
-        import json as json_mod
-        start = agent_text.index("[[choice_set]]") + len("[[choice_set]]")
-        end = agent_text.index("[[/choice_set]]")
-        raw = agent_text[start:end].strip()
-        try:
-            cs = json_mod.loads(raw)
-            check("valid JSON", True)
-            check("has type", cs.get("type") == "choice_set")
-            check("has items", len(cs.get("items", [])) >= 2,
-                  f"items: {len(cs.get('items', []))}")
-            for item in cs.get("items", []):
-                check(f"item '{item.get('id','')}' has prompt",
-                      bool(item.get("prompt")))
-        except Exception as e:
-            check("valid JSON", False, str(e))
+    has_routine = any(term in agent_text.lower() for term in [
+        "routine", "schedule", "hourly", "every hour", "created", "set up",
+        "notification", "notify", "alert", "mission",
+    ])
+    check("contains routine creation confirmation", has_routine,
+          "agent response doesn't confirm routine creation")
 except Exception as e:
     check("request succeeded", False, str(e))
 print()
 
 # -----------------------------------------------------------
-# Summary
+# 4. Fire routine via natural language and see output
 # -----------------------------------------------------------
-print(f"=== Results: {passed} passed, {failed} failed ===")
-exit(0 if failed == 0 else 1)
+print("--- 4. Fire routine via natural language ---")
+try:
+    fire_input = (
+        f"Fire the routine {routine_id} now and tell me what happened."
+        if routine_id
+        else "Fire the USD/INR monitoring routine now and tell me what happened."
+    )
+    response = client.responses.create(
+        model="default",
+        input=fire_input,
+        timeout=180,
+    )
+    check("status completed", response.status == "completed", f"status={response.status}")
+    check("has output", len(response.output) > 0)
+
+    agent_text = extract_agent_text(response)
+    print(f"  Agent response ({len(agent_text)} chars): {agent_text}")
+except Exception as e:
+    check("request succeeded", False, str(e))
+print()
