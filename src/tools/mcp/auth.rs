@@ -1930,7 +1930,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_url_safe_https() {
-        assert!(validate_url_safe("https://example.com/path").await.is_ok());
+        // Use an IP literal so the test doesn't depend on DNS resolution
+        // (sandboxed CI environments may lack external DNS).
+        assert!(validate_url_safe("https://1.1.1.1/path").await.is_ok());
     }
 
     #[tokio::test]

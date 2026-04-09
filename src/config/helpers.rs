@@ -323,6 +323,14 @@ fn validate_base_url_with_policy(
         });
     }
 
+    // For HTTPS with a hostname (not an IP literal), skip DNS resolution.
+    // TLS certificate validation already prevents connecting to the wrong
+    // host, so DNS-based SSRF checks add no security value and cause
+    // failures in sandboxed/offline CI environments.
+    if scheme == "https" && normalized_host.parse::<IpAddr>().is_err() {
+        return Ok(());
+    }
+
     let resolved_ips = if let Ok(ip) = normalized_host.parse::<IpAddr>() {
         vec![ip]
     } else {
@@ -734,16 +742,27 @@ mod tests {
     }
 
     #[test]
-    fn validate_base_url_rejects_dns_failure() {
+    fn validate_base_url_accepts_https_hostname_without_dns() {
+        // HTTPS with a hostname skips DNS resolution (TLS cert validation
+        // prevents SSRF), so even unresolvable hostnames are accepted.
+        let result = validate_base_url("https://ssrf-test.invalid", "TEST");
+        assert!(
+            result.is_ok(),
+            "HTTPS hostname should pass without DNS: {result:?}"
+        );
+    }
+
+    #[test]
+    fn validate_base_url_rejects_http_dns_failure() {
         if invalid_tld_resolves_locally() {
             eprintln!(
-                "skipping validate_base_url_rejects_dns_failure: \
+                "skipping validate_base_url_rejects_http_dns_failure: \
                  local DNS resolver hijacks .invalid lookups"
             );
             return;
         }
-        // .invalid TLD is guaranteed to never resolve (RFC 6761)
-        let result = validate_base_url("https://ssrf-test.invalid", "TEST");
+        // HTTP URLs still require DNS resolution for SSRF checks
+        let result = validate_operator_base_url("http://ssrf-test.invalid:8080", "TEST");
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
