@@ -176,6 +176,72 @@ impl LiveTestHarness {
         errors
     }
 
+    /// Search the captured status stream for any `ToolStarted` or
+    /// `ToolResult` event matching `tool_name` whose detail (or output
+    /// preview) contains `needle`. Used by behavior tests to assert that
+    /// the agent invoked a particular tool with a particular shape of
+    /// arguments — e.g. an `http` POST whose detail mentions
+    /// `"/issues/123/comments"`.
+    ///
+    /// Both `tool_name` and `needle` are matched case-insensitively.
+    /// Returns `true` on the first match.
+    pub fn trace_contains_tool_call(&self, tool_name: &str, needle: &str) -> bool {
+        use ironclaw::channels::StatusUpdate;
+
+        let tool_lc = tool_name.to_ascii_lowercase();
+        let needle_lc = needle.to_ascii_lowercase();
+        for event in self.rig.captured_status_events() {
+            match event {
+                StatusUpdate::ToolStarted { name, detail, .. }
+                    if name.to_ascii_lowercase().contains(&tool_lc) =>
+                {
+                    if let Some(d) = detail
+                        && d.to_ascii_lowercase().contains(&needle_lc)
+                    {
+                        return true;
+                    }
+                }
+                StatusUpdate::ToolResult { name, preview, .. }
+                    if name.to_ascii_lowercase().contains(&tool_lc) =>
+                {
+                    if preview.to_ascii_lowercase().contains(&needle_lc) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Assertion wrapper around [`Self::trace_contains_tool_call`] that
+    /// panics with the captured tool-call activity rendered, so failing
+    /// tests show *what the agent actually called* instead of just "false
+    /// is not true".
+    pub fn assert_trace_contains_tool_call(&self, tool_name: &str, needle: &str, context: &str) {
+        if self.trace_contains_tool_call(tool_name, needle) {
+            return;
+        }
+        use ironclaw::channels::StatusUpdate;
+        let mut activity = String::new();
+        for event in self.rig.captured_status_events() {
+            match event {
+                StatusUpdate::ToolStarted { name, detail, .. } => {
+                    activity.push_str(&format!("  ● {name} {}\n", detail.unwrap_or_default()));
+                }
+                StatusUpdate::ToolResult { name, preview, .. } => {
+                    let short: String = preview.chars().take(120).collect();
+                    activity.push_str(&format!("    {name} → {short}\n"));
+                }
+                _ => {}
+            }
+        }
+        panic!(
+            "{context}: expected tool '{tool_name}' invocation containing '{needle}'.\n\
+             Captured tool activity:\n{activity}"
+        );
+    }
+
     /// Flush the recorded trace (if live mode), save a human-readable session
     /// log, and shut down the agent.
     ///

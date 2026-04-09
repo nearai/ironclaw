@@ -2343,178 +2343,17 @@ mod tests {
 
     use crate::agent::AgentDeps;
     use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
-    use crate::channels::{
-        Channel, ChannelManager, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
-    };
+    use crate::channels::{ChannelManager, IncomingMessage, StatusUpdate};
     use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
     use crate::context::ContextManager;
-    use crate::error::ChannelError;
     use crate::hooks::HookRegistry;
     use crate::testing::{StubChannel, StubLlm};
     use crate::tools::ToolRegistry;
     use chrono::TimeZone;
-    use futures::stream;
     use ironclaw_safety::SafetyLayer;
     use rust_decimal::Decimal;
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::sync::Mutex as TokioMutex;
-
-    #[derive(Clone)]
-    struct RecordingStatusChannel {
-        statuses: Arc<TokioMutex<Vec<StatusUpdate>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl Channel for RecordingStatusChannel {
-        fn name(&self) -> &str {
-            "test"
-        }
-
-        async fn start(&self) -> Result<MessageStream, ChannelError> {
-            Ok(Box::pin(stream::empty()))
-        }
-
-        async fn respond(
-            &self,
-            _msg: &IncomingMessage,
-            _response: OutgoingResponse,
-        ) -> Result<(), ChannelError> {
-            Ok(())
-        }
-
-        async fn send_status(
-            &self,
-            status: StatusUpdate,
-            _metadata: &serde_json::Value,
-        ) -> Result<(), ChannelError> {
-            self.statuses.lock().await.push(status);
-            Ok(())
-        }
-
-        async fn health_check(&self) -> Result<(), ChannelError> {
-            Ok(())
-        }
-    }
-
-    async fn make_thread_ops_test_agent() -> (Agent, Arc<TokioMutex<Vec<StatusUpdate>>>) {
-        struct StaticLlmProvider;
-
-        #[async_trait::async_trait]
-        impl crate::llm::LlmProvider for StaticLlmProvider {
-            fn model_name(&self) -> &str {
-                "static-mock"
-            }
-
-            fn cost_per_token(&self) -> (Decimal, Decimal) {
-                (Decimal::ZERO, Decimal::ZERO)
-            }
-
-            async fn complete(
-                &self,
-                _request: crate::llm::CompletionRequest,
-            ) -> Result<crate::llm::CompletionResponse, crate::error::LlmError> {
-                Ok(crate::llm::CompletionResponse {
-                    content: "ok".to_string(),
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    finish_reason: crate::llm::FinishReason::Stop,
-                    cache_read_input_tokens: 0,
-                    cache_creation_input_tokens: 0,
-                })
-            }
-
-            async fn complete_with_tools(
-                &self,
-                _request: crate::llm::ToolCompletionRequest,
-            ) -> Result<crate::llm::ToolCompletionResponse, crate::error::LlmError> {
-                Ok(crate::llm::ToolCompletionResponse {
-                    content: Some("ok".to_string()),
-                    tool_calls: Vec::new(),
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    finish_reason: crate::llm::FinishReason::Stop,
-                    cache_read_input_tokens: 0,
-                    cache_creation_input_tokens: 0,
-                })
-            }
-        }
-
-        let statuses = Arc::new(TokioMutex::new(Vec::new()));
-        let channels = Arc::new(crate::channels::ChannelManager::new());
-        channels
-            .add(Box::new(RecordingStatusChannel {
-                statuses: Arc::clone(&statuses),
-            }))
-            .await;
-
-        let deps = crate::agent::AgentDeps {
-            owner_id: "default".to_string(),
-            store: None,
-            llm: Arc::new(StaticLlmProvider),
-            cheap_llm: None,
-            safety: Arc::new(ironclaw_safety::SafetyLayer::new(
-                &ironclaw_safety::SafetyConfig {
-                    max_output_length: 100_000,
-                    injection_check_enabled: true,
-                },
-            )),
-            tools: Arc::new(crate::tools::ToolRegistry::new()),
-            workspace: None,
-            extension_manager: None,
-            skill_registry: None,
-            skill_catalog: None,
-            skills_config: crate::config::SkillsConfig::default(),
-            hooks: Arc::new(crate::hooks::HookRegistry::new()),
-            auth_manager: None,
-            cost_guard: Arc::new(crate::agent::cost_guard::CostGuard::new(
-                crate::agent::cost_guard::CostGuardConfig::default(),
-            )),
-            sse_tx: None,
-            http_interceptor: None,
-            transcription: None,
-            document_extraction: None,
-            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
-            builder: None,
-            llm_backend: "nearai".to_string(),
-            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
-        };
-
-        let agent = Agent::new(
-            crate::config::AgentConfig {
-                name: "thread-ops-test-agent".to_string(),
-                max_parallel_jobs: 1,
-                job_timeout: Duration::from_secs(60),
-                stuck_threshold: Duration::from_secs(60),
-                repair_check_interval: Duration::from_secs(30),
-                max_repair_attempts: 1,
-                use_planning: false,
-                session_idle_timeout: Duration::from_secs(300),
-                allow_local_tools: false,
-                max_cost_per_day_cents: None,
-                max_actions_per_hour: None,
-                max_cost_per_user_per_day_cents: None,
-                max_tool_iterations: 50,
-                auto_approve_tools: false,
-                default_timezone: "UTC".to_string(),
-                max_jobs_per_user: None,
-                max_tokens_per_job: 0,
-                multi_tenant: false,
-                max_llm_concurrent_per_user: None,
-                max_jobs_concurrent_per_user: None,
-                engine_v2: false,
-            },
-            deps,
-            channels,
-            None,
-            None,
-            None,
-            Some(Arc::new(crate::context::ContextManager::new(1))),
-            None,
-        );
-
-        (agent, statuses)
-    }
 
     #[test]
     fn thread_summaries_are_sorted_by_last_activity_descending() {
