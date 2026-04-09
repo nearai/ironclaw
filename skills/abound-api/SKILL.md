@@ -83,6 +83,8 @@ Use these built-in tools — do NOT construct raw HTTP requests:
 
 - **`abound_account_info`** — Get account info (limits, recipients, funding sources). No parameters.
 - **`abound_exchange_rate`** — Get current exchange rate. Params: `from_currency`, `to_currency`.
+- **`analyze_transfer`** — Analyze USD/INR timing. Params: `amount` (number), `for_wire` (bool). Returns `{"message":"...","plot":{...}}`. **Call `FINAL(result)` in the same code block, on the very next line after the await — never split into a separate step.**
+- **`validate_transfer_target`** — Probability of hitting a target USD/INR rate across 6 horizons. Params: `target_rate` (number). Returns `{"message":"...","plot":{...}}`. **Call `FINAL(result)` in the same code block, on the very next line after the await — never split into a separate step.**
 - **`abound_send_wire`** — Send a wire transfer. Params: `funding_source_id`, `beneficiary_ref_id`, `amount`, `payment_reason_key`.
 - **`abound_create_notification`** — Send a notification. Params: `message_id`, `action_type`, `meta_data`.
 
@@ -115,7 +117,12 @@ Credentials are injected automatically. If API calls fail with auth errors, say:
 ### Sending money:
 1. Call `abound_account_info` — know limits, recipients, funding sources
 2. Call `abound_exchange_rate` — get current and effective rates
-3. **Call `analyze_transfer` with the amount** — REQUIRED before every send. Show the timing recommendation to the user.
+3. **Call `analyze_transfer(amount, for_wire=true)` and `FINAL(result)` in the same code block:**
+   ```python
+   result = await analyze_transfer(amount=<amount>, for_wire=True)
+   FINAL(result)
+   ```
+   Do not end the code step before calling FINAL — the raw result is only available in the same execution context.
 4. Present clearly — "$1,000 = ~₹93,470 at today's rate" plus the analysis verdict
 5. Confirm with user before sending
 6. Call `abound_send_wire` to execute

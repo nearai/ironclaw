@@ -572,7 +572,7 @@ impl Tool for AnalyzeTransferTool {
     fn description(&self) -> &str {
         "Analyze whether to transfer USD to INR now or wait. Uses volatility regime, RSI(14), \
          and DXY momentum to compute a hit rate, target rate, and 3-day projection cone. \
-         USD/INR only."
+         Returns {\"message\": \"...\", \"plot\": {...}}. USD/INR only."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -581,7 +581,11 @@ impl Tool for AnalyzeTransferTool {
             "properties": {
                 "amount": {
                     "type": "number",
-                    "description": "Optional USD amount the user intends to send. Potential savings are returned in INR."
+                    "description": "Optional USD amount the user intends to send. Used to compute potential INR savings."
+                },
+                "for_wire": {
+                    "type": "boolean",
+                    "description": "Set to true when called as part of a wire transfer flow. The message will include an explicit send-or-wait approval prompt."
                 }
             },
             "required": []
@@ -595,6 +599,7 @@ impl Tool for AnalyzeTransferTool {
     ) -> Result<ToolOutput, ToolError> {
         let timer = Instant::now();
         let amount = params.get("amount").and_then(|v| v.as_f64());
+        let for_wire = params.get("for_wire").and_then(|v| v.as_bool()).unwrap_or(false);
 
         let now = chrono::Utc::now();
         let td = today_unix_day_from_chrono(&now);
@@ -674,12 +679,9 @@ impl Tool for AnalyzeTransferTool {
             .map(|b| json!({"date": b.date, "close": b.close}))
             .collect();
 
-        // Potential savings in INR if user waits
-        let could_save = if recommend == "wait" {
-            amount.map(|a| ((target_rate - current_rate) * a * 100.0).round() / 100.0)
-        } else {
-            None
-        };
+        // Potential savings in INR: always computed when amount is provided.
+        let could_save =
+            amount.map(|a| ((target_rate - current_rate) * a * 100.0).round() / 100.0);
 
         let action_verb = if recommend == "now" {
             "Transfer now"
@@ -696,12 +698,20 @@ impl Tool for AnalyzeTransferTool {
                 .unwrap_or_else(|| "N/A".into()),
             (hr * 10.0).round() / 10.0,
         );
-        if let Some(save) = could_save
-            && save > 0.0
-        {
-            message.push_str(&format!(
-                " If you wait, you could get ₹{save:.2} more on your transfer."
-            ));
+        if recommend == "wait" {
+            if let Some(save) = could_save
+                && save > 0.0
+            {
+                message.push_str(&format!(
+                    " If you wait, you could get ₹{save:.2} more on your transfer."
+                ));
+            }
+        }
+        if for_wire {
+            message.push_str(
+                " — Send now or wait? Reply **send now** to proceed with the transfer, \
+                 or **wait** to hold off for a better rate.",
+            );
         }
 
         let result = json!({
