@@ -117,7 +117,7 @@ jobs:
 
       - name: Create releases-manager app token
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
           app-id: ${{ secrets.GH_RELEASES_MANAGER_APP_ID }}
           private-key: ${{ secrets.GH_RELEASES_MANAGER_APP_PRIVATE_KEY }}
@@ -133,23 +133,12 @@ jobs:
           if [[ "${EVENT_NAME}" == "workflow_call" && -n "${VERSION}" ]]; then
             gh api repos/nearai/ironclaw-dind/dispatches \
               --method POST \
-              --input - <<EOF
-            {
-              "event_type": "ironclaw_release_tag",
-              "client_payload": {
-                "version": "${VERSION}"
-              }
-            }
-            EOF
+              -f event_type="ironclaw_image_published" \
+              -f client_payload[version]="${VERSION}"
           else
             gh api repos/nearai/ironclaw-dind/dispatches \
               --method POST \
-              --input - <<EOF
-            {
-              "event_type": "ironclaw_release_tag",
-              "client_payload": {}
-            }
-            EOF
+              -f event_type="ironclaw_image_published"
           fi
 
       - name: Summary
