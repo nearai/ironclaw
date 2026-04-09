@@ -27,7 +27,6 @@ mod logs;
 mod mcp;
 pub mod memory;
 mod models;
-pub mod oauth_defaults;
 mod pairing;
 mod registry;
 mod routines;

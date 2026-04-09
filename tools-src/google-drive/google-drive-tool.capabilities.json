@@ -46,7 +46,8 @@
       "extra_params": {
         "access_type": "offline",
         "prompt": "consent"
-      }
+      },
+      "pending_instructions": "If the provider blocks the shared OAuth app, configure your own Google OAuth Client ID and Client Secret in Setup or via GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET, then retry."
     },
     "env_var": "GOOGLE_OAUTH_TOKEN"
   },

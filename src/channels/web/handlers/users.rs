@@ -23,7 +23,7 @@ async fn is_last_admin(store: &dyn Database, user_id: &str) -> Result<bool, Stri
         .list_users(Some("active"))
         .await
         .map_err(|e| e.to_string())?;
-    let active_admins: Vec<_> = users.iter().filter(|u| u.role == "admin").collect();
+    let active_admins: Vec<_> = users.iter().filter(|u| u.is_admin()).collect();
     Ok(active_admins.len() == 1 && active_admins[0].id == user_id)
 }
 
@@ -259,7 +259,7 @@ pub async fn users_update_handler(
         }
         if role != existing.role {
             // Prevent demoting the last admin.
-            if existing.role == "admin"
+            if existing.is_admin()
                 && role == "member"
                 && is_last_admin(store.as_ref(), &id)
                     .await
@@ -350,6 +350,12 @@ pub async fn users_suspend_handler(
         ps.evict_user(&id);
     }
 
+    // Drop the suspended user's auth-descriptor cache entry so any
+    // in-flight credential resolution falls back to the live store
+    // (which now sees the user as suspended) instead of serving stale
+    // metadata until the 60s TTL expires.
+    crate::auth::invalidate_auth_descriptor_cache(&id).await;
+
     Ok(Json(serde_json::json!({
         "id": id,
         "status": "suspended",
@@ -428,6 +434,12 @@ pub async fn users_delete_handler(
     if let Some(ref ps) = state.pairing_store {
         ps.evict_user(&id);
     }
+
+    // Drop the deleted user's auth-descriptor cache entry. The 60s TTL
+    // would otherwise let the in-process cache keep serving the deleted
+    // user's credential metadata until expiry, even though the underlying
+    // rows are gone.
+    crate::auth::invalidate_auth_descriptor_cache(&id).await;
 
     Ok(Json(serde_json::json!({
         "id": id,

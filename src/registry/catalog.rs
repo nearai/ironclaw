@@ -475,6 +475,59 @@ impl RegistryCatalog {
     /// Check if a name refers to a bundle rather than an individual extension.
     pub fn is_bundle(&self, name: &str) -> bool {
         self.bundles.contains_key(name)
+            || self
+                .bundles
+                .values()
+                .any(|bundle| bundle.aliases.iter().any(|alias| alias == name))
+    }
+
+    fn get_bundle_by_name_or_alias(&self, name: &str) -> Option<(String, &BundleDefinition)> {
+        if let Some(bundle) = self.bundles.get(name) {
+            return Some((name.to_string(), bundle));
+        }
+
+        self.bundles.iter().find_map(|(bundle_name, bundle)| {
+            bundle
+                .aliases
+                .iter()
+                .any(|alias| alias == name)
+                .then(|| (bundle_name.clone(), bundle))
+        })
+    }
+
+    /// Build discovery entries with bundle aliases merged into member keywords.
+    pub fn discovery_entries(&self) -> Vec<crate::extensions::RegistryEntry> {
+        let mut alias_map: HashMap<&str, Vec<&str>> = HashMap::new();
+        for bundle in self.bundles.values() {
+            for extension_key in &bundle.extensions {
+                let aliases = alias_map.entry(extension_key.as_str()).or_default();
+                for alias in &bundle.aliases {
+                    if !aliases.contains(&alias.as_str()) {
+                        aliases.push(alias);
+                    }
+                }
+            }
+        }
+
+        self.all()
+            .into_iter()
+            .filter_map(|manifest| {
+                let mut entry = manifest.to_registry_entry()?;
+                let key = match manifest.kind {
+                    ManifestKind::Tool => format!("tools/{}", manifest.name),
+                    ManifestKind::Channel => format!("channels/{}", manifest.name),
+                    ManifestKind::McpServer => format!("mcp-servers/{}", manifest.name),
+                };
+                if let Some(aliases) = alias_map.get(key.as_str()) {
+                    for alias in aliases {
+                        if !entry.keywords.iter().any(|existing| existing == alias) {
+                            entry.keywords.push((*alias).to_string());
+                        }
+                    }
+                }
+                Some(entry)
+            })
+            .collect()
     }
 
     /// Resolve a name to either a single manifest or the manifests in a bundle.
@@ -484,12 +537,12 @@ impl RegistryCatalog {
         name: &str,
     ) -> Result<(Vec<&ExtensionManifest>, Option<&BundleDefinition>), RegistryError> {
         // Check bundle first
-        if let Some(bundle) = self.bundles.get(name) {
-            let (manifests, missing) = self.resolve_bundle(name)?;
+        if let Some((bundle_name, bundle)) = self.get_bundle_by_name_or_alias(name) {
+            let (manifests, missing) = self.resolve_bundle(&bundle_name)?;
             if !missing.is_empty() {
                 tracing::warn!(
                     "Bundle '{}' references missing extensions: {:?}",
-                    name,
+                    bundle_name,
                     missing
                 );
             }
@@ -600,6 +653,7 @@ mod tests {
                     },
                     "messaging": {
                         "display_name": "Messaging",
+                        "aliases": ["chat-suite"],
                         "extensions": ["tools/slack", "channels/telegram"],
                         "shared_auth": null
                     }
@@ -718,6 +772,17 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_bundle_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_test_registry(tmp.path());
+
+        let catalog = RegistryCatalog::load(tmp.path()).unwrap();
+        let (manifests, bundle) = catalog.resolve("chat-suite").unwrap();
+        assert_eq!(manifests.len(), 2);
+        assert_eq!(bundle.unwrap().display_name, "Messaging");
+    }
+
+    #[test]
     fn test_bundle_names() {
         let tmp = tempfile::tempdir().unwrap();
         create_test_registry(tmp.path());
@@ -725,6 +790,20 @@ mod tests {
         let catalog = RegistryCatalog::load(tmp.path()).unwrap();
         let names = catalog.bundle_names();
         assert_eq!(names, vec!["default", "messaging"]);
+    }
+
+    #[test]
+    fn test_discovery_entries_include_bundle_alias_keywords() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_test_registry(tmp.path());
+
+        let catalog = RegistryCatalog::load(tmp.path()).unwrap();
+        let entries = catalog.discovery_entries();
+        let slack = entries
+            .into_iter()
+            .find(|entry| entry.name == "slack")
+            .expect("slack entry");
+        assert!(slack.keywords.iter().any(|keyword| keyword == "chat-suite"));
     }
 
     #[test]
