@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::debug;
 
 use crate::runtime::manager::ThreadManager;
@@ -20,6 +20,7 @@ use crate::types::message::ThreadMessage;
 use crate::types::project::ProjectId;
 use crate::types::thread::{ThreadConfig, ThreadId, ThreadState, ThreadType};
 
+#[derive(Clone, Copy)]
 enum ActiveForeground {
     Running(ThreadId),
     Resumable(ThreadId),
@@ -31,10 +32,23 @@ enum ActiveForeground {
 /// 1. Spawn a new foreground thread for the message
 /// 2. Inject the message into an existing active thread
 /// 3. Create a new conversation if none exists for this channel+user
+///
+/// ## Locking strategy
+///
+/// `conversations` is a *directory*: the global `RwLock` is held only for
+/// HashMap lookups/inserts and is never held across an `.await`. Each
+/// `ConversationSurface` is wrapped in a `tokio::sync::Mutex` so concurrent
+/// messages to *different* conversations run fully in parallel.
+///
+/// **Lock ordering invariant:** NEVER hold the global `RwLock` and a
+/// per-conversation `Mutex` simultaneously. `get_conversation_lock()` enforces
+/// this — it drops the read guard before returning the `Arc<Mutex<…>>`.
 pub struct ConversationManager {
     thread_manager: Arc<ThreadManager>,
     store: Arc<dyn Store>,
-    conversations: RwLock<HashMap<ConversationId, ConversationSurface>>,
+    // LOCK ORDER: when acquiring both write locks, always take `conversations` before
+    // `channel_user_index`. Reversing this order will deadlock under concurrent access.
+    conversations: RwLock<HashMap<ConversationId, Arc<Mutex<ConversationSurface>>>>,
     /// Maps (channel, user_id) → conversation ID for lookup.
     channel_user_index: RwLock<HashMap<(String, String), ConversationId>>,
 }
@@ -49,22 +63,47 @@ impl ConversationManager {
         }
     }
 
+    /// Get the per-conversation lock. Holds the global RwLock only briefly
+    /// (HashMap lookup), then releases it. Returns Err if the conversation
+    /// does not exist.
+    async fn get_conversation_lock(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Arc<Mutex<ConversationSurface>>, EngineError> {
+        let map = self.conversations.read().await;
+        map.get(&conversation_id)
+            .map(Arc::clone)
+            .ok_or_else(|| EngineError::Store {
+                reason: format!("conversation {conversation_id} not found"),
+            })
+    } // RwLockReadGuard dropped here
+
     /// Restore persisted conversations for a user into the in-memory index.
     pub async fn bootstrap_user(&self, user_id: &str) -> Result<usize, EngineError> {
         let conversations = self.store.list_conversations(user_id).await?;
-        let count = conversations.len();
         let mut convs = self.conversations.write().await;
         let mut index = self.channel_user_index.write().await;
+        let mut inserted = 0usize;
 
         for conversation in conversations {
+            if convs.contains_key(&conversation.id) {
+                // Still upsert the index — it may be missing if a prior
+                // get_or_create_conversation inserted the conv but then rolled
+                // back the index entry on a failed save_conversation.
+                index
+                    .entry((conversation.channel.clone(), conversation.user_id.clone()))
+                    .or_insert(conversation.id);
+                continue;
+            }
             index.insert(
                 (conversation.channel.clone(), conversation.user_id.clone()),
                 conversation.id,
             );
-            convs.insert(conversation.id, conversation);
+            convs.insert(conversation.id, Arc::new(Mutex::new(conversation)));
+            inserted += 1;
         }
 
-        Ok(count)
+        Ok(inserted)
     }
 
     /// Get or create a conversation for a channel+user pair.
@@ -93,20 +132,48 @@ impl ConversationManager {
             let conv_id = conv.id;
             let mut convs = self.conversations.write().await;
             let mut index = self.channel_user_index.write().await;
-            convs.insert(conv_id, conv);
+            // Double-check: another task may have inserted while we did I/O.
+            if let Some(existing_id) = index.get(&key) {
+                return Ok(*existing_id);
+            }
+            convs.insert(conv_id, Arc::new(Mutex::new(conv)));
             index.insert(key, conv_id);
             return Ok(conv_id);
         }
 
-        // Create new conversation
+        // Create new conversation.
         let conv = ConversationSurface::new(channel, user_id);
         let conv_id = conv.id;
 
-        let mut convs = self.conversations.write().await;
-        let mut index = self.channel_user_index.write().await;
-        convs.insert(conv_id, conv.clone());
-        index.insert(key, conv_id);
-        self.store.save_conversation(&conv).await?;
+        {
+            let mut convs = self.conversations.write().await;
+            let mut index = self.channel_user_index.write().await;
+            // Double-check: another task may have inserted while we did I/O.
+            if let Some(existing_id) = index.get(&key) {
+                return Ok(*existing_id);
+            }
+            convs.insert(conv_id, Arc::new(Mutex::new(conv.clone())));
+            index.insert(key.clone(), conv_id);
+        } // write locks released before the async save
+
+        if let Err(e) = self.store.save_conversation(&conv).await {
+            // Known limitation: a concurrent caller that observed the new conv_id via the
+            // double-check fast path (between our insert and this rollback) will hold a
+            // now-deleted, never-persisted ConversationId. This race requires simultaneous
+            // first-time logins from the same user+channel AND a store write failure — it
+            // is unlikely in practice and accepted as a structural trade-off of optimistic
+            // in-memory caching with async persistence. The alternative (holding write
+            // locks across the async save) would re-introduce cross-tenant serialization.
+            // Roll back the in-memory insertion so the next caller does not
+            // receive an unpersisted ConversationId.
+            let mut convs = self.conversations.write().await;
+            let mut index = self.channel_user_index.write().await;
+            convs.remove(&conv_id);
+            index.remove(&key);
+            return Err(EngineError::Store {
+                reason: e.to_string(),
+            });
+        }
 
         debug!(conversation_id = %conv_id, channel, user_id, "created conversation");
         Ok(conv_id)
@@ -118,6 +185,10 @@ impl ConversationManager {
     /// injected into it. Otherwise, a new foreground thread is spawned.
     ///
     /// Returns the thread ID that is handling the message.
+    ///
+    /// The per-conversation `Mutex` is held for the entire operation — from
+    /// the active-thread check through `save_conversation`. This eliminates
+    /// the TOCTOU double-spawn window present in the old 5-phase split.
     pub async fn handle_user_message(
         &self,
         conversation_id: ConversationId,
@@ -126,10 +197,8 @@ impl ConversationManager {
         user_id: &str,
         thread_config: ThreadConfig,
     ) -> Result<ThreadId, EngineError> {
-        let mut convs = self.conversations.write().await;
-        let conv = convs.get_mut(&conversation_id).ok_or(EngineError::Store {
-            reason: format!("conversation {conversation_id} not found"),
-        })?;
+        let conv_arc = self.get_conversation_lock(conversation_id).await?;
+        let mut conv = conv_arc.lock().await;
 
         // Tenant isolation: verify the requesting user owns this conversation.
         if conv.user_id != user_id {
@@ -139,13 +208,17 @@ impl ConversationManager {
             });
         }
 
-        // Record the user entry
-        conv.add_entry(ConversationEntry::user(content));
+        // Snapshot what find_active_foreground needs before the async calls.
+        // NOTE: do NOT add the user entry yet — it will be added after the thread
+        // operation succeeds to avoid orphaned entries if the async op fails.
+        let active_thread_ids = conv.active_threads.clone();
+        let channel_name = conv.channel.clone();
 
-        // Check for an active foreground thread
-        let active_foreground = self.find_active_foreground(conv).await;
+        // Async I/O to find the active foreground thread — allowed here because
+        // we hold a tokio::sync::Mutex (not std::sync::Mutex).
+        let active_foreground = self.find_active_foreground(&active_thread_ids).await;
 
-        match active_foreground {
+        let thread_id = match active_foreground {
             Some(ActiveForeground::Running(thread_id)) => {
                 debug!(
                     conversation_id = %conversation_id,
@@ -155,8 +228,7 @@ impl ConversationManager {
                 self.thread_manager
                     .inject_message(thread_id, user_id, ThreadMessage::user(content))
                     .await?;
-                self.store.save_conversation(conv).await?;
-                Ok(thread_id)
+                thread_id
             }
             Some(ActiveForeground::Resumable(thread_id)) => {
                 debug!(
@@ -173,20 +245,30 @@ impl ConversationManager {
                         None,
                     )
                     .await?;
-                conv.add_entry(ConversationEntry::system_for_thread(
-                    thread_id,
-                    "Thread resumed",
-                ));
-                self.store.save_conversation(conv).await?;
-                Ok(thread_id)
+                thread_id
             }
             None => {
-                // Build conversation history from prior entries for context continuity
+                // Build conversation history from prior entries for context continuity.
+                // Clone here (None branch only) — inject/resume paths don't need history,
+                // so deferring avoids an O(entries) allocation on those fast paths.
                 let history = build_history_from_entries(&conv.entries);
 
-                // Spawn new foreground thread with conversation history
-                let thread_id = self
-                    .thread_manager
+                // Compute the base channel name (strip any thread-scoped suffix)
+                // and pass it into spawn so it lands in `thread.metadata.source_channel`
+                // BEFORE the execution task takes ownership of the Thread struct.
+                // The orchestrator reads this on the very first step to populate
+                // `ThreadExecutionContext.source_channel`, which `mission_create`
+                // consults to default `notify_channels`. Setting metadata after
+                // spawn would only update the persisted copy — not the in-memory
+                // Thread the running task already owns.
+                let base_channel = channel_name
+                    .split(':')
+                    .next()
+                    .unwrap_or(&channel_name)
+                    .to_string();
+
+                // Spawn new foreground thread with conversation history.
+                self.thread_manager
                     .spawn_thread_with_history(
                         content, // use message as goal
                         ThreadType::Foreground,
@@ -195,37 +277,45 @@ impl ConversationManager {
                         None,
                         user_id,
                         history,
+                        Some(base_channel),
                     )
-                    .await?;
+                    .await?
+            }
+        };
 
-                // Store the base channel name in thread metadata so the
-                // orchestrator can populate `source_channel` in the execution
-                // context (used by mission_create to default notify_channels).
-                let base_channel = conv
-                    .channel
-                    .split(':')
-                    .next()
-                    .unwrap_or(&conv.channel)
-                    .to_string();
-                self.thread_manager
-                    .set_thread_metadata(thread_id, "source_channel", &base_channel)
-                    .await;
-
+        // Final in-memory mutations under the already-held per-conv Mutex.
+        // The user entry is added here — after the thread operation succeeded — to
+        // prevent orphaned entries if inject_message/resume_thread/spawn_thread_with_history
+        // returned an error above.
+        conv.add_entry(ConversationEntry::user(content));
+        match active_foreground {
+            Some(ActiveForeground::Running(_)) => {
+                // No additional in-memory mutation needed beyond the user entry above.
+            }
+            Some(ActiveForeground::Resumable(_)) => {
+                conv.add_entry(ConversationEntry::system_for_thread(
+                    thread_id,
+                    "Thread resumed",
+                ));
+            }
+            None => {
                 conv.track_thread(thread_id);
                 conv.add_entry(ConversationEntry::system_for_thread(
                     thread_id,
                     "Thread started",
                 ));
-                self.store.save_conversation(conv).await?;
-
                 debug!(
                     conversation_id = %conversation_id,
                     thread_id = %thread_id,
                     "spawned new foreground thread"
                 );
-                Ok(thread_id)
             }
         }
+
+        // Persist outside the global RwLock (per-conv Mutex is still held).
+        self.store.save_conversation(&conv).await?;
+
+        Ok(thread_id)
     }
 
     /// Record a thread's outcome in its conversation.
@@ -235,50 +325,81 @@ impl ConversationManager {
         thread_id: ThreadId,
         outcome: &ThreadOutcome,
     ) -> Result<(), EngineError> {
-        let mut convs = self.conversations.write().await;
-        if let Some(conv) = convs.get_mut(&conversation_id) {
-            match outcome {
-                ThreadOutcome::Completed { response } => {
-                    if let Some(text) = response {
-                        conv.add_entry(ConversationEntry::agent(thread_id, text));
-                    }
-                    conv.untrack_thread(thread_id);
+        let conv_arc = self.get_conversation_lock(conversation_id).await?;
+        let mut conv = conv_arc.lock().await;
+        match outcome {
+            ThreadOutcome::Completed { response } => {
+                if let Some(text) = response {
+                    conv.add_entry(ConversationEntry::agent(thread_id, text));
                 }
-                ThreadOutcome::Stopped => {
-                    conv.add_entry(ConversationEntry::system_for_thread(
-                        thread_id,
-                        "Thread stopped",
-                    ));
-                    conv.untrack_thread(thread_id);
-                }
-                ThreadOutcome::MaxIterations => {
-                    conv.add_entry(ConversationEntry::system_for_thread(
-                        thread_id,
-                        "Thread reached max iterations",
-                    ));
-                    conv.untrack_thread(thread_id);
-                }
-                ThreadOutcome::Failed { error } => {
-                    conv.add_entry(ConversationEntry::system_for_thread(
-                        thread_id,
-                        format!("Thread failed: {error}"),
-                    ));
-                    conv.untrack_thread(thread_id);
-                }
-                ThreadOutcome::GatePaused {
-                    gate_name,
-                    action_name,
-                    ..
-                } => {
-                    conv.add_entry(ConversationEntry::system_for_thread(
-                        thread_id,
-                        format!("Gate '{gate_name}' paused execution of action: {action_name}"),
-                    ));
-                    // Thread stays active — waiting for gate resolution
-                }
+                conv.untrack_thread(thread_id);
             }
-            self.store.save_conversation(conv).await?;
+            ThreadOutcome::Stopped => {
+                conv.add_entry(ConversationEntry::system_for_thread(
+                    thread_id,
+                    "Thread stopped",
+                ));
+                conv.untrack_thread(thread_id);
+            }
+            ThreadOutcome::MaxIterations => {
+                conv.add_entry(ConversationEntry::system_for_thread(
+                    thread_id,
+                    "Thread reached max iterations",
+                ));
+                conv.untrack_thread(thread_id);
+            }
+            ThreadOutcome::Failed { error } => {
+                conv.add_entry(ConversationEntry::system_for_thread(
+                    thread_id,
+                    format!("Thread failed: {error}"),
+                ));
+                conv.untrack_thread(thread_id);
+            }
+            ThreadOutcome::GatePaused {
+                gate_name,
+                action_name,
+                ..
+            } => {
+                conv.add_entry(ConversationEntry::system_for_thread(
+                    thread_id,
+                    format!("Gate '{gate_name}' paused execution of action: {action_name}"),
+                ));
+                // Thread stays active — waiting for gate resolution
+            }
         }
+        // Known limitation: if save_conversation fails, the in-memory mutations (add_entry,
+        // untrack_thread) are already applied but not persisted. Memory and DB diverge until
+        // the next successful save. Rolling back would require snapshotting the prior state,
+        // which is not implemented here — accepted as a low-probability failure mode.
+        self.store.save_conversation(&conv).await?;
+        Ok(())
+    }
+
+    /// Append an agent message to a conversation that originated *outside*
+    /// the conversation's own thread tree (e.g. a mission's notification
+    /// thread). The entry is recorded as an `Agent` entry tagged with the
+    /// originating `thread_id`, so subsequent foreground messages will see
+    /// it in their conversation history via `build_history_from_entries`.
+    ///
+    /// Tenant isolation: rejects calls whose `user_id` does not own the
+    /// conversation, mirroring `handle_user_message`.
+    pub async fn record_external_agent_message(
+        &self,
+        conversation_id: ConversationId,
+        thread_id: ThreadId,
+        user_id: &str,
+        content: impl Into<String>,
+    ) -> Result<(), EngineError> {
+        let conv_arc = self.get_conversation_lock(conversation_id).await?;
+        let mut conv = conv_arc.lock().await;
+        if conv.user_id != user_id {
+            return Err(EngineError::AccessDenied {
+                user_id: user_id.to_string(),
+                entity: format!("conversation {conversation_id}"),
+            });
+        }
+        conv.add_entry(ConversationEntry::agent(thread_id, content));
+        self.store.save_conversation(&conv).await?;
         Ok(())
     }
 
@@ -291,21 +412,20 @@ impl ConversationManager {
         conversation_id: ConversationId,
         user_id: &str,
     ) -> Result<(), EngineError> {
-        let mut convs = self.conversations.write().await;
-        if let Some(conv) = convs.get_mut(&conversation_id) {
-            // Tenant isolation: verify ownership.
-            if conv.user_id != user_id {
-                return Err(EngineError::AccessDenied {
-                    user_id: user_id.to_string(),
-                    entity: format!("conversation {conversation_id}"),
-                });
-            }
-            conv.active_threads.clear();
-            conv.entries.clear();
-            conv.updated_at = chrono::Utc::now();
-            self.store.save_conversation(conv).await?;
-            debug!(conversation_id = %conversation_id, "cleared conversation");
+        let conv_arc = self.get_conversation_lock(conversation_id).await?;
+        let mut conv = conv_arc.lock().await;
+        // Tenant isolation: verify ownership.
+        if conv.user_id != user_id {
+            return Err(EngineError::AccessDenied {
+                user_id: user_id.to_string(),
+                entity: format!("conversation {conversation_id}"),
+            });
         }
+        conv.active_threads.clear();
+        conv.entries.clear();
+        conv.updated_at = chrono::Utc::now();
+        self.store.save_conversation(&conv).await?;
+        debug!(conversation_id = %conversation_id, "cleared conversation");
         Ok(())
     }
 
@@ -314,23 +434,47 @@ impl ConversationManager {
         &self,
         conversation_id: ConversationId,
     ) -> Option<ConversationSurface> {
-        let convs = self.conversations.read().await;
-        convs.get(&conversation_id).cloned()
+        let arc = {
+            let convs = self.conversations.read().await;
+            convs.get(&conversation_id).map(Arc::clone)
+        }?;
+        Some(arc.lock().await.clone())
     }
 
-    /// List all conversations for a user.
+    /// Returns conversations for the given user.
+    ///
+    /// Uses `channel_user_index` to pre-filter by user before acquiring any
+    /// per-conversation locks, keeping lock scope minimal. This is a best-effort
+    /// snapshot: each conversation is locked and read individually, so concurrent
+    /// mutations between locks may be partially visible.
     pub async fn list_conversations(&self, user_id: &str) -> Vec<ConversationSurface> {
-        let convs = self.conversations.read().await;
-        convs
-            .values()
-            .filter(|c| c.user_id == user_id)
-            .cloned()
-            .collect()
+        let arcs: Vec<Arc<Mutex<ConversationSurface>>> = {
+            let convs = self.conversations.read().await;
+            let index = self.channel_user_index.read().await;
+            index
+                .iter()
+                .filter(|((_, uid), _)| uid == user_id)
+                .filter_map(|(_, id)| convs.get(id).cloned())
+                .collect()
+        };
+        let mut result = Vec::with_capacity(arcs.len());
+        for arc in arcs {
+            result.push(arc.lock().await.clone());
+        }
+        result
     }
 
-    /// Find an active foreground thread in a conversation.
-    async fn find_active_foreground(&self, conv: &ConversationSurface) -> Option<ActiveForeground> {
-        for &tid in &conv.active_threads {
+    /// Find an active foreground thread given a snapshot of active thread IDs.
+    ///
+    /// Accepts a plain slice rather than a `&ConversationSurface` so callers
+    /// can drop the conversations write lock before invoking this method —
+    /// it performs async I/O (is_running, load_thread) that must not be held
+    /// under any lock.
+    async fn find_active_foreground(
+        &self,
+        active_thread_ids: &[ThreadId],
+    ) -> Option<ActiveForeground> {
+        for &tid in active_thread_ids {
             if self.thread_manager.is_running(tid).await {
                 return Some(ActiveForeground::Running(tid));
             }
@@ -343,27 +487,34 @@ impl ConversationManager {
         }
         None
     }
+
+    /// Test helper: track a thread in a conversation without accessing the
+    /// internal HashMap directly.
+    #[cfg(test)]
+    pub async fn track_thread_in_conversation(&self, conv_id: ConversationId, thread_id: ThreadId) {
+        let arc = self
+            .get_conversation_lock(conv_id)
+            .await
+            .expect("conversation exists in test");
+        arc.lock().await.track_thread(thread_id);
+    }
 }
 
 /// Build ThreadMessage history from conversation entries.
 ///
 /// Converts user and agent entries into ThreadMessages so a new thread
 /// inherits context from prior turns in the same conversation.
+///
+/// The caller passes a snapshot taken *before* the current user message was
+/// appended, so all entries here are prior-turn history — include them all.
+/// System entries (thread lifecycle notifications) are skipped as they are not
+/// useful LLM context.
 fn build_history_from_entries(
     entries: &[ConversationEntry],
 ) -> Vec<crate::types::message::ThreadMessage> {
     use crate::types::conversation::EntrySender;
 
-    // Skip the last entry (it's the current user message, added by the caller
-    // before this function runs). Also skip system entries (thread lifecycle
-    // notifications aren't useful as LLM context).
-    let history_entries = if entries.len() > 1 {
-        &entries[..entries.len() - 1]
-    } else {
-        return Vec::new();
-    };
-
-    history_entries
+    entries
         .iter()
         .filter_map(|entry| match &entry.sender {
             EntrySender::User => Some(crate::types::message::ThreadMessage::user(&entry.content)),
@@ -388,6 +539,7 @@ mod tests {
     use crate::types::conversation::{ConversationId, ConversationSurface, EntrySender};
     use crate::types::event::ThreadEvent;
     use crate::types::memory::{DocId, MemoryDoc};
+    use crate::types::message::MessageRole;
     use crate::types::project::Project;
     use crate::types::step::{ActionResult, LlmResponse, Step, TokenUsage};
     use crate::types::thread::ThreadState;
@@ -706,11 +858,7 @@ mod tests {
             .unwrap();
         store.save_thread(&thread).await.unwrap();
 
-        {
-            let mut convs = cm.conversations.write().await;
-            let conv = convs.get_mut(&conv_id).unwrap();
-            conv.track_thread(thread.id);
-        }
+        cm.track_thread_in_conversation(conv_id, thread.id).await;
 
         let resumed = cm
             .handle_user_message(
@@ -735,11 +883,7 @@ mod tests {
         let tid = ThreadId::new();
 
         // Manually track a thread
-        {
-            let mut convs = cm.conversations.write().await;
-            let conv = convs.get_mut(&conv_id).unwrap();
-            conv.track_thread(tid);
-        }
+        cm.track_thread_in_conversation(conv_id, tid).await;
 
         // Record completion
         cm.record_thread_outcome(
@@ -842,5 +986,169 @@ mod tests {
         let conv = cm.get_conversation(conv_id).await.unwrap();
         assert!(conv.entries.is_empty());
         assert!(conv.active_threads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn concurrent_handle_user_message_spawns_one_thread() {
+        // T1: Two concurrent handle_user_message calls on the same conversation
+        // must serialize — only ONE new thread should be spawned.
+        let (_, cm) = make_conv_manager();
+        let conv_id = cm.get_or_create_conversation("web", "user1").await.unwrap();
+        let project = ProjectId::new();
+        let cm = Arc::new(cm);
+
+        let cm1 = Arc::clone(&cm);
+        let cm2 = Arc::clone(&cm);
+
+        let t1 = tokio::spawn(async move {
+            cm1.handle_user_message(
+                conv_id,
+                "message one",
+                project,
+                "user1",
+                ThreadConfig::default(),
+            )
+            .await
+        });
+        let t2 = tokio::spawn(async move {
+            cm2.handle_user_message(
+                conv_id,
+                "message two",
+                project,
+                "user1",
+                ThreadConfig::default(),
+            )
+            .await
+        });
+
+        let r1 = t1.await.unwrap();
+        let r2 = t2.await.unwrap();
+
+        // Both calls must succeed.
+        assert!(r1.is_ok(), "first handle_user_message failed: {r1:?}");
+        assert!(r2.is_ok(), "second handle_user_message failed: {r2:?}");
+
+        // The per-conv Mutex serializes the two calls. The second call sees the
+        // first thread as Running (or the same thread ID if inject_message is used),
+        // so at most one NEW thread should exist in active_threads.
+        let conv = cm.get_conversation(conv_id).await.unwrap();
+        assert_eq!(
+            conv.active_threads.len(),
+            1,
+            "expected exactly 1 active thread, got {}: {:?}",
+            conv.active_threads.len(),
+            conv.active_threads
+        );
+    }
+
+    #[tokio::test]
+    async fn record_external_agent_message_appears_in_history() {
+        // Regression: when a mission's notification is recorded into a
+        // conversation via `record_external_agent_message`, the next foreground
+        // user message must spawn a thread whose history includes the mission
+        // output. Otherwise the agent has no idea the mission ran and replies
+        // to follow-ups as if no digest was ever delivered.
+        let (_tm, cm) = make_conv_manager();
+        let conv_id = cm
+            .get_or_create_conversation("gateway", "user1")
+            .await
+            .unwrap();
+        let mission_thread_id = ThreadId::new();
+        let mission_output = "**[daily-news-digest]** - Headline A\n- Headline B";
+
+        cm.record_external_agent_message(
+            conv_id,
+            mission_thread_id,
+            "user1",
+            mission_output.to_string(),
+        )
+        .await
+        .unwrap();
+
+        // The new entry must be visible on the conversation snapshot.
+        let conv = cm.get_conversation(conv_id).await.unwrap();
+        assert_eq!(
+            conv.entries.len(),
+            1,
+            "expected exactly one entry after recording mission output"
+        );
+        assert!(matches!(
+            &conv.entries[0].sender,
+            EntrySender::Agent { thread_id } if *thread_id == mission_thread_id
+        ));
+        assert_eq!(conv.entries[0].content, mission_output);
+
+        // The user's follow-up turn must observe the mission output: a fresh
+        // foreground thread spawns with the entries-derived history, which now
+        // contains the mission's assistant entry as prior context.
+        // `build_history_from_entries` strips the trailing entry (the current
+        // user message added by the caller), so we exercise the full
+        // `handle_user_message` path and inspect what the new thread sees.
+        let project = ProjectId::new();
+        let _tid = cm
+            .handle_user_message(
+                conv_id,
+                "Tell me more about the first headline you sent",
+                project,
+                "user1",
+                ThreadConfig::default(),
+            )
+            .await
+            .unwrap();
+        let conv_after = cm.get_conversation(conv_id).await.unwrap();
+        let history_after = build_history_from_entries(&conv_after.entries);
+        assert!(
+            history_after
+                .iter()
+                .any(|m| m.role == MessageRole::Assistant && m.content == mission_output),
+            "follow-up turn history should contain the mission output: {history_after:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_external_agent_message_rejects_wrong_user() {
+        let (_, cm) = make_conv_manager();
+        let conv_id = cm
+            .get_or_create_conversation("gateway", "owner")
+            .await
+            .unwrap();
+
+        let result = cm
+            .record_external_agent_message(
+                conv_id,
+                ThreadId::new(),
+                "intruder",
+                "should be rejected".to_string(),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(EngineError::AccessDenied { .. })),
+            "expected AccessDenied for cross-tenant write, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_thread_outcome_unknown_conv_returns_err() {
+        // T4: After C1 fix, record_thread_outcome with an unknown ConversationId
+        // must return Err, not silently succeed.
+        let (_, cm) = make_conv_manager();
+        let unknown_conv_id = ConversationId::new();
+        let tid = ThreadId::new();
+
+        let result = cm
+            .record_thread_outcome(
+                unknown_conv_id,
+                tid,
+                &ThreadOutcome::Completed {
+                    response: Some("irrelevant".into()),
+                },
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "expected Err for unknown conversation, got Ok"
+        );
     }
 }

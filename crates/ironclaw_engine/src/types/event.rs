@@ -67,7 +67,7 @@ fn truncate(s: &str, max: usize) -> String {
         while end > 0 && !s.is_char_boundary(end) {
             end -= 1;
         }
-        format!("{}...", &s[..end])
+        format!("{}...", &s[..end]) // safety: end is validated by is_char_boundary loop above
     }
 }
 use crate::types::step::{StepId, TokenUsage};

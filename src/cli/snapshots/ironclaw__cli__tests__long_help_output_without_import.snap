@@ -1,6 +1,6 @@
 ---
 source: src/cli/mod.rs
-assertion_line: 438
+assertion_line: 461
 expression: help
 ---
 IronClaw is a secure AI assistant. Use 'ironclaw <subcommand> --help' for details.

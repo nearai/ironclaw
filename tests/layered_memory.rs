@@ -155,6 +155,59 @@ async fn default_write_still_works() {
 }
 
 #[tokio::test]
+async fn layered_writes_record_actor_in_changed_by() {
+    // Regression: `write_to_layer` / `append_to_layer` previously passed the
+    // target layer's scope as `changed_by`, so version history attributed
+    // every layered edit to the layer name (e.g. "shared") instead of the
+    // user who actually wrote it. The fix passes `self.user_id` while still
+    // resolving metadata in the target layer's scope.
+    let (db, _dir) = setup().await;
+    let ws = Workspace::new_with_db("alice", db).with_memory_layers(test_layers());
+
+    // First write — creates the document and (per maybe_save_version) records
+    // a version of the prior empty content; subsequent writes record versions
+    // of the prior content. We do two writes so we definitely have a version
+    // row to inspect.
+    let first = ws
+        .write_to_layer("shared", "plans/v.md", "v1", false)
+        .await
+        .expect("first write");
+    ws.write_to_layer("shared", "plans/v.md", "v2", false)
+        .await
+        .expect("second write");
+
+    let versions = ws
+        .list_versions(first.document.id, 10)
+        .await
+        .expect("list versions");
+    assert!(!versions.is_empty(), "expected at least one version row");
+    for v in &versions {
+        assert_eq!(
+            v.changed_by.as_deref(),
+            Some("alice"),
+            "changed_by should be the actor (alice), not the layer scope"
+        );
+    }
+
+    // Same check for append_to_layer.
+    let appended = ws
+        .append_to_layer("shared", "plans/v.md", "v3", false)
+        .await
+        .expect("append");
+    let versions = ws
+        .list_versions(appended.document.id, 10)
+        .await
+        .expect("list versions after append");
+    for v in &versions {
+        assert_eq!(
+            v.changed_by.as_deref(),
+            Some("alice"),
+            "append_to_layer should also attribute changed_by to the actor"
+        );
+    }
+}
+
+#[tokio::test]
 async fn append_to_layer_works() {
     let (db, _dir) = setup().await;
     let ws = Workspace::new_with_db("alice", db).with_memory_layers(test_layers());

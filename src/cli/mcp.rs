@@ -249,6 +249,7 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
 
     // Validate
     config.validate()?;
+    let has_custom_auth_header = config.has_custom_auth_header();
 
     // Save (DB if available, else disk)
     let (db, owner_id) = connect_db().await;
@@ -277,7 +278,7 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
         }
     }
 
-    if requires_auth {
+    if requires_auth && !has_custom_auth_header {
         println!();
         println!("  Run 'ironclaw mcp auth {}' to authenticate.", name);
     }
@@ -418,6 +419,17 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("Server '{}' not found", name))?;
 
+    if server.has_custom_auth_header() {
+        println!();
+        println!(
+            "  Server '{}' is configured with an Authorization header, so 'ironclaw mcp auth' is not used for this configuration.",
+            name
+        );
+        println!("  Update or remove that header if you want to switch auth methods.");
+        println!();
+        return Ok(());
+    }
+
     // Initialize secrets store
     let secrets = get_secrets_store().await?;
 
@@ -504,6 +516,17 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
     let client = if has_tokens {
         // We have stored tokens, use authenticated client
         McpClient::new_authenticated(server.clone(), session_manager.clone(), secrets, user_id)
+    } else if server.has_custom_auth_header() {
+        let process_manager = Arc::new(McpProcessManager::new());
+        create_client_from_config(
+            server.clone(),
+            &session_manager,
+            &process_manager,
+            None,
+            &owner_id,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?
     } else if server.requires_auth() {
         // OAuth configured but no tokens - need to authenticate
         println!();
@@ -563,13 +586,19 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
         Err(e) => {
             let err_str = e.to_string();
             // Check if server requires auth but we don't have valid tokens
-            if err_str.contains("401") || err_str.contains("requires authentication") {
+            if crate::tools::mcp::is_auth_error_message(&err_str) {
                 if has_tokens {
                     // We had tokens but they failed - need to re-authenticate
                     println!(
                         "  ✗ Authentication failed (token may be expired). Try re-authenticating:"
                     );
                     println!("    ironclaw mcp auth {}", name);
+                } else if server.has_custom_auth_header() {
+                    println!("  ✗ Authentication failed.");
+                    println!();
+                    println!(
+                        "  Check the configured Authorization header or API key for this server."
+                    );
                 } else {
                     // No tokens - server requires auth
                     println!("  ✗ Server requires authentication.");
@@ -626,16 +655,12 @@ async fn connect_db() -> (Option<Arc<dyn Database>>, String) {
     (db, owner_id)
 }
 
-/// Load MCP servers (DB if available, else disk).
+/// Load MCP servers (DB if available, else disk), after NEAR AI MCP server env bootstrap when applicable.
 async fn load_servers(
     db: Option<&dyn Database>,
     owner_id: &str,
 ) -> Result<McpServersFile, config::ConfigError> {
-    if let Some(db) = db {
-        config::load_mcp_servers_from_db(db, owner_id).await
-    } else {
-        config::load_mcp_servers().await
-    }
+    config::load_mcp_servers_ready(db, owner_id).await
 }
 
 /// Save MCP servers (DB if available, else disk).

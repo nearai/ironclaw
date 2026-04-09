@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::agent::Agent;
 use crate::agent::session::{PendingApproval, PendingAuthPrompt, Session, ThreadState};
-use crate::channels::{IncomingMessage, StatusUpdate};
+use crate::channels::{ChannelManager, IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
 use async_trait::async_trait;
@@ -925,9 +925,11 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     .channels
                     .send_status(
                         &self.message.channel,
-                        StatusUpdate::ToolStarted {
-                            name: tc.name.clone(),
-                        },
+                        StatusUpdate::tool_started_with_id(
+                            tc.name.clone(),
+                            &tc.arguments,
+                            Some(tc.id.clone()),
+                        ),
                         &self.message.metadata,
                     )
                     .await;
@@ -945,6 +947,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         &self.message.channel,
                         StatusUpdate::tool_completed(
                             tc.name.clone(),
+                            Some(tc.id.clone()),
                             &result,
                             &tc.arguments,
                             disp_tool.as_deref(),
@@ -972,9 +975,11 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     let _ = channels
                         .send_status(
                             &channel,
-                            StatusUpdate::ToolStarted {
-                                name: tc.name.clone(),
-                            },
+                            StatusUpdate::tool_started_with_id(
+                                tc.name.clone(),
+                                &tc.arguments,
+                                Some(tc.id.clone()),
+                            ),
                             &metadata,
                         )
                         .await;
@@ -994,6 +999,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                             &channel,
                             StatusUpdate::tool_completed(
                                 tc.name.clone(),
+                                Some(tc.id.clone()),
                                 &result,
                                 &tc.arguments,
                                 par_tool.as_deref(),
@@ -1121,6 +1127,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                                 StatusUpdate::ToolResult {
                                     name: tc.name.clone(),
                                     preview: output.clone(),
+                                    call_id: Some(tc.id.clone()),
                                 },
                                 &self.message.metadata,
                             )
@@ -1175,20 +1182,15 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         // so the user sees the connect button alongside the approval card.
         if let Some((approval_idx, tc, tool, allow_always)) = approval_needed {
             if let Some((ref ext_name, ref auth_data)) = selected_auth_prompt {
-                let _ = self
-                    .agent
-                    .channels
-                    .send_status(
-                        &self.message.channel,
-                        StatusUpdate::AuthRequired {
-                            extension_name: ext_name.clone(),
-                            instructions: auth_data.instructions.clone(),
-                            auth_url: auth_data.auth_url.clone(),
-                            setup_url: auth_data.setup_url.clone(),
-                        },
-                        &self.message.metadata,
-                    )
-                    .await;
+                emit_auth_required_status(
+                    &self.agent.channels,
+                    self.message,
+                    ext_name.clone(),
+                    auth_data.instructions.clone(),
+                    auth_data.auth_url.clone(),
+                    auth_data.setup_url.clone(),
+                )
+                .await;
             }
 
             let display_params = redact_params(&tc.arguments, tool.sensitive_params());
@@ -1218,37 +1220,27 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         thread.enter_auth_mode(ext_name.clone());
                     }
                 }
-                let _ = self
-                    .agent
-                    .channels
-                    .send_status(
-                        &self.message.channel,
-                        StatusUpdate::AuthRequired {
-                            extension_name: ext_name,
-                            instructions: Some(instructions.clone()),
-                            auth_url: auth_data.auth_url,
-                            setup_url: auth_data.setup_url,
-                        },
-                        &self.message.metadata,
-                    )
-                    .await;
+                emit_auth_required_status(
+                    &self.agent.channels,
+                    self.message,
+                    ext_name,
+                    Some(instructions.clone()),
+                    auth_data.auth_url,
+                    auth_data.setup_url,
+                )
+                .await;
                 return Ok(Some(LoopOutcome::Response(instructions)));
             }
 
-            let _ = self
-                .agent
-                .channels
-                .send_status(
-                    &self.message.channel,
-                    StatusUpdate::AuthRequired {
-                        extension_name: ext_name,
-                        instructions: auth_data.instructions,
-                        auth_url: auth_data.auth_url,
-                        setup_url: auth_data.setup_url,
-                    },
-                    &self.message.metadata,
-                )
-                .await;
+            emit_auth_required_status(
+                &self.agent.channels,
+                self.message,
+                ext_name,
+                auth_data.instructions,
+                auth_data.auth_url,
+                auth_data.setup_url,
+            )
+            .await;
         }
 
         Ok(None)
@@ -1297,7 +1289,9 @@ fn normalize_extension_name(value: Option<&str>) -> Option<String> {
 }
 
 /// Only allow `https://` URLs for auth/setup links to prevent scheme injection
-/// (e.g. `javascript:`, `file://`).
+/// (e.g. `javascript:`, `file://`). Host validation is explicitly out of scope:
+/// the URL source is a trusted local extension tool result, and display-side
+/// rendering controls where the user is actually navigated.
 fn sanitize_auth_url(url: Option<&str>) -> Option<String> {
     url.map(str::trim)
         .filter(|u| u.starts_with("https://"))
@@ -1315,7 +1309,7 @@ pub(super) fn persist_selected_auth_prompt(
 ) -> Option<PendingAuthPrompt> {
     selected.and_then(|(extension_name, auth_data)| {
         PendingAuthPrompt::new(
-            extension_name.trim().to_owned(),
+            extension_name.clone(),
             auth_data.instructions.clone(),
             auth_data.auth_url.clone(),
             auth_data.setup_url.clone(),
@@ -1327,22 +1321,24 @@ pub(super) fn persist_selected_auth_prompt(
 pub(super) fn restore_selected_auth_prompt(
     pending: Option<PendingAuthPrompt>,
 ) -> Option<(String, ParsedAuthData)> {
-    let PendingAuthPrompt {
-        extension_name,
-        instructions,
-        auth_url,
-        setup_url,
-        awaiting_token,
-    } = pending?;
-    let extension_name = normalize_extension_name(Some(extension_name.as_str()))?;
+    // Re-validate via the constructor so deserialized rows go through the
+    // same trim/non-empty invariant as freshly constructed prompts.
+    let pending = pending?;
+    let validated = PendingAuthPrompt::new(
+        pending.extension_name,
+        pending.instructions,
+        pending.auth_url,
+        pending.setup_url,
+        pending.awaiting_token,
+    )?;
     Some((
-        extension_name.clone(),
+        validated.extension_name.clone(),
         ParsedAuthData {
-            extension_name: Some(extension_name),
-            instructions,
-            auth_url,
-            setup_url,
-            awaiting_token,
+            extension_name: Some(validated.extension_name),
+            instructions: validated.instructions,
+            auth_url: validated.auth_url,
+            setup_url: validated.setup_url,
+            awaiting_token: validated.awaiting_token,
         },
     ))
 }
@@ -1402,6 +1398,32 @@ pub(super) fn extract_auth_prompt(
     } else {
         None
     }
+}
+
+/// Emit a `StatusUpdate::AuthRequired` to the caller's channel.
+///
+/// Shared between the dispatcher chat loop and the approval-resume path in
+/// `thread_ops.rs` so both surfaces emit the auth card with identical fields.
+pub(super) async fn emit_auth_required_status(
+    channels: &ChannelManager,
+    message: &IncomingMessage,
+    extension_name: String,
+    instructions: Option<String>,
+    auth_url: Option<String>,
+    setup_url: Option<String>,
+) {
+    let _ = channels
+        .send_status(
+            &message.channel,
+            StatusUpdate::AuthRequired {
+                extension_name,
+                instructions,
+                auth_url,
+                setup_url,
+            },
+            &message.metadata,
+        )
+        .await;
 }
 
 /// Keep only the first actionable auth prompt seen in a turn.
@@ -1898,6 +1920,7 @@ mod tests {
             skill_catalog: None,
             skills_config: SkillsConfig::default(),
             hooks: Arc::new(HookRegistry::new()),
+            auth_manager: None,
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_tx: None,
             http_interceptor: None,
@@ -2206,6 +2229,7 @@ mod tests {
             skill_catalog: None,
             skills_config: SkillsConfig::default(),
             hooks: Arc::new(HookRegistry::new()),
+            auth_manager: None,
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_tx: None,
             http_interceptor: None,
@@ -3105,6 +3129,7 @@ mod tests {
             skill_catalog: None,
             skills_config: SkillsConfig::default(),
             hooks: Arc::new(HookRegistry::new()),
+            auth_manager: None,
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_tx: None,
             http_interceptor: None,
@@ -3234,6 +3259,7 @@ mod tests {
                 skill_catalog: None,
                 skills_config: SkillsConfig::default(),
                 hooks: Arc::new(HookRegistry::new()),
+                auth_manager: None,
                 cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
                 sse_tx: None,
                 http_interceptor: None,

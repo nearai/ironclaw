@@ -26,6 +26,7 @@ E2E tests: see `tests/e2e/CLAUDE.md`.
 - Comments for non-obvious logic only
 - **Prompt templates live in files, not Rust code**: Multi-line prompt strings (mission goals, system prompts, CodeAct preambles) go in `crates/ironclaw_engine/prompts/*.md` and are loaded via `include_str!()`. Never inline large prompt templates as Rust string constants — they're hard to read, review, and iterate on. Single-line format strings are fine inline.
 - **Logging levels matter for REPL/TUI**: `info!` and `warn!` output appears in the REPL and corrupts the terminal UI. Use `debug!` for internal diagnostics (trace analysis, reflection results, engine internals). Reserve `info!` for user-facing status that the REPL intentionally renders. Background tasks (reflection, trace analysis) must NEVER use `info!` — it breaks the interactive display.
+- **Test through the caller, not just the helper**: When a predicate/classifier/transform helper gates a side effect (HTTP, DB write, OAuth, UI mutation, tool execution) and has any wrapper or computed input between it and that side effect, a unit test on the helper alone is *not* sufficient regression coverage. Add a test that drives the call site — typically a `*_handler`, `factory::create_*`, or `manager::*` — at the integration tier (`cargo test --features integration`) or higher. The same applies to test mocks: if you mock a multi-arg runtime API like `window.open(url, target, features)`, the mock must capture every argument the production caller passes. See `.claude/rules/testing.md` ("Test Through the Caller, Not Just the Helper") for the full rule and the bug examples that motivated it.
 
 ## Architecture
 
@@ -202,8 +203,8 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 
 ```
 Pending -> InProgress -> Completed -> Submitted -> Accepted
-                     \-> Failed
-                     \-> Stuck -> InProgress (recovery)
+    \                \-> Failed
+     \-> Failed       \-> Stuck -> InProgress (recovery)
                               \-> Failed
 ```
 
@@ -225,6 +226,34 @@ See `.env.example` for all environment variables. LLM backends (`nearai`, `opena
 2. Implement the `Channel` trait
 3. Add config in `src/config/channels.rs`
 4. Wire up in `src/app.rs` channel setup section
+
+## Everything Goes Through Tools
+
+**Core principle**: all actions originating from gateway handlers, CLI
+commands, routine engine, WASM channels, or any other non-agent caller
+MUST go through `ToolDispatcher::dispatch()` — never directly through
+`state.store`, `workspace`, `extension_manager`, `skill_registry`, or
+`session_manager`.
+
+This gives every UI-initiated mutation the same audit trail
+(`ActionRecord`), safety pipeline (param validation, sensitive-param
+redaction, output sanitization), and channel-agnostic surface as
+agent-initiated tool calls. Channels are interchangeable extensions;
+routing through one dispatch function means new channels inherit the
+full pipeline for free.
+
+The pre-commit hook (`scripts/pre-commit-safety.sh`) flags newly-added
+lines in handler/CLI files that touch
+`state.{store,workspace,extension_manager,skill_registry,session_manager}.*`
+directly. Annotate intentional exceptions (rare — usually only read
+aggregation across multiple users) with a trailing
+`// dispatch-exempt: <reason>` comment on the same line. The check only
+sees added lines, so existing untouched code doesn't trip during
+incremental migration.
+
+See `.claude/rules/tools.md` for the full pattern, allowed exemptions,
+and migration status. The dispatcher itself lives in
+`src/tools/dispatch.rs`.
 
 ## Workspace & Memory
 
