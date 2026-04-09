@@ -231,7 +231,12 @@ impl AppBuilder {
                 // No secrets DB available, but we can still load tokens from
                 // OS credential stores (e.g., Anthropic OAuth via Claude Code's
                 // macOS Keychain / Linux ~/.claude/.credentials.json).
+                let inject_os_credentials_start = std::time::Instant::now();
                 crate::config::inject_os_credentials();
+                crate::bootstrap::log_startup_timing(
+                    "app_builder.init_secrets.inject_os_credentials",
+                    inject_os_credentials_start.elapsed(),
+                );
 
                 // Consume unused handles
                 self.handles.take();
@@ -241,6 +246,7 @@ impl AppBuilder {
                     self.db.as_ref().map(|db| db.as_ref() as _);
                 let toml_path = self.toml_path.as_deref();
                 let owner_id = self.config.owner_id.clone();
+                let re_resolve_start = std::time::Instant::now();
                 if let Err(e) = self
                     .config
                     .re_resolve_llm(store, &owner_id, toml_path)
@@ -250,11 +256,16 @@ impl AppBuilder {
                         "Failed to re-resolve LLM config after OS credential injection: {e}"
                     );
                 }
+                crate::bootstrap::log_startup_timing(
+                    "app_builder.init_secrets.re_resolve_llm",
+                    re_resolve_start.elapsed(),
+                );
 
                 return Ok(());
             }
         };
 
+        let create_store_start = std::time::Instant::now();
         let crypto = match crate::secrets::SecretsCrypto::new(master_key.clone()) {
             Ok(c) => Arc::new(c),
             Err(e) => {
@@ -269,27 +280,46 @@ impl AppBuilder {
         let empty_handles = crate::db::DatabaseHandles::default();
         let handles = self.handles.as_ref().unwrap_or(&empty_handles);
         let store = crate::secrets::create_secrets_store(crypto, handles);
+        crate::bootstrap::log_startup_timing(
+            "app_builder.init_secrets.create_store",
+            create_store_start.elapsed(),
+        );
 
         if let Some(ref secrets) = store {
             // Migrate any plaintext API keys from the settings table to the
             // encrypted secrets store. Idempotent — safe to run on every startup.
             if let Some(ref db) = self.db {
+                let migrate_plaintext_keys_start = std::time::Instant::now();
                 crate::config::migrate_plaintext_llm_keys(
                     db.as_ref(),
                     secrets.as_ref(),
                     &self.config.owner_id,
                 )
                 .await;
+                crate::bootstrap::log_startup_timing(
+                    "app_builder.init_secrets.migrate_plaintext_llm_keys",
+                    migrate_plaintext_keys_start.elapsed(),
+                );
 
                 // Migrate NEAR AI session token from plaintext settings to
                 // encrypted secrets. Idempotent — safe to run on every startup.
+                let migrate_session_credential_start = std::time::Instant::now();
                 migrate_session_credential(db.as_ref(), secrets.as_ref(), &self.config.owner_id)
                     .await;
+                crate::bootstrap::log_startup_timing(
+                    "app_builder.init_secrets.migrate_session_credential",
+                    migrate_session_credential_start.elapsed(),
+                );
             }
 
             // Inject LLM API keys from encrypted storage
+            let inject_llm_keys_start = std::time::Instant::now();
             crate::config::inject_llm_keys_from_secrets(secrets.as_ref(), &self.config.owner_id)
                 .await;
+            crate::bootstrap::log_startup_timing(
+                "app_builder.init_secrets.inject_llm_keys_from_secrets",
+                inject_llm_keys_start.elapsed(),
+            );
 
             // Re-resolve only the LLM config with newly available keys,
             // including keys hydrated from the secrets store.
@@ -297,6 +327,7 @@ impl AppBuilder {
                 self.db.as_ref().map(|db| db.as_ref() as _);
             let toml_path = self.toml_path.as_deref();
             let owner_id = self.config.owner_id.clone();
+            let re_resolve_start = std::time::Instant::now();
             // is_operator=true: owner_id is the operator/admin scope.
             if let Err(e) = self
                 .config
@@ -311,10 +342,19 @@ impl AppBuilder {
             {
                 tracing::warn!("Failed to re-resolve LLM config after secret injection: {e}");
             }
+            crate::bootstrap::log_startup_timing(
+                "app_builder.init_secrets.re_resolve_llm_with_secrets",
+                re_resolve_start.elapsed(),
+            );
 
             // Wire the secrets store into the session manager so future
             // token saves go to encrypted storage.
+            let attach_secrets_start = std::time::Instant::now();
             self.session.attach_secrets(Arc::clone(secrets)).await;
+            crate::bootstrap::log_startup_timing(
+                "app_builder.init_secrets.attach_secrets",
+                attach_secrets_start.elapsed(),
+            );
         }
 
         self.secrets_store = store;
@@ -954,11 +994,16 @@ impl AppBuilder {
         let workspace_seed_start = std::time::Instant::now();
         if let Some(ref ws) = workspace {
             let toml_path = crate::settings::Settings::default_toml_path();
+            let onboarding_flag_start = std::time::Instant::now();
             if let Ok(Some(settings)) = crate::settings::Settings::load_toml(&toml_path)
                 && settings.profile_onboarding_completed
             {
                 ws.mark_bootstrap_completed();
             }
+            crate::bootstrap::log_startup_timing(
+                "app_builder.workspace_seed.load_profile_onboarding_flag",
+                onboarding_flag_start.elapsed(),
+            );
         }
 
         // Seed workspace and backfill embeddings
@@ -973,6 +1018,7 @@ impl AppBuilder {
             // over generic seeds. seed_if_empty() then fills any remaining gaps.
             if let Ok(import_dir) = std::env::var("WORKSPACE_IMPORT_DIR") {
                 let import_path = std::path::Path::new(&import_dir);
+                let import_start = std::time::Instant::now();
                 match ws.import_from_directory(import_path).await {
                     Ok(count) if count > 0 => {
                         tracing::debug!("Imported {} workspace file(s) from {}", count, import_dir);
@@ -986,14 +1032,23 @@ impl AppBuilder {
                         );
                     }
                 }
+                crate::bootstrap::log_startup_timing(
+                    "app_builder.workspace_seed.import_from_directory",
+                    import_start.elapsed(),
+                );
             }
 
+            let seed_if_empty_start = std::time::Instant::now();
             match ws.seed_if_empty().await {
                 Ok(_) => {}
                 Err(e) => {
                     tracing::warn!("Failed to seed workspace: {}", e);
                 }
             }
+            crate::bootstrap::log_startup_timing(
+                "app_builder.workspace_seed.seed_if_empty",
+                seed_if_empty_start.elapsed(),
+            );
 
             if embeddings.is_some() {
                 let ws_bg = Arc::clone(ws);
