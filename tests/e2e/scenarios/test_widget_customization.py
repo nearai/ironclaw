@@ -52,9 +52,12 @@ async def _wipe_customizations(base_url: str) -> None:
     The session-scoped ``ironclaw_server`` fixture is shared across every
     test in the run, so anything we write into the workspace must be wiped
     before yielding back to the next test. ``memory_write`` accepts an empty
-    body for non-layer paths, and the gateway treats empty / unparseable
-    widget files as "skip silently", which is exactly the cleanup behavior
-    we want without needing a real DELETE endpoint.
+    body for non-layer paths, and the gateway's widget loader
+    (``read_widget_manifest``) treats empty / unparseable widget manifests
+    as "skip with a ``warn!`` log and continue" — no 500s, no index-page
+    breakage — which is exactly the cleanup behavior we want without
+    needing a real DELETE endpoint. The parse-failure warn lines are
+    expected noise in the server log for the duration of this suite.
     """
     async with httpx.AsyncClient(timeout=10) as client:
         for path in _CUSTOM_PATHS:

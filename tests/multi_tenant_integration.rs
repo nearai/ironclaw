@@ -572,7 +572,7 @@ fn gateway_state_has_multi_tenant_fields() {
         near_rpc_url: None,
         near_network: None,
         oauth_sweep_shutdown: None,
-frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
     };
 
@@ -660,7 +660,7 @@ async fn start_owner_scoped_sender_server() -> (
         near_rpc_url: None,
         near_network: None,
         oauth_sweep_shutdown: None,
-frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
     });
 
@@ -1058,7 +1058,7 @@ async fn start_multi_user_server_with_db() -> (
         near_rpc_url: None,
         near_network: None,
         oauth_sweep_shutdown: None,
-frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
     });
 

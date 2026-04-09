@@ -54,7 +54,23 @@ pub async fn read_layout_config(workspace: &Workspace) -> LayoutConfig {
                 LayoutConfig::default()
             }
         },
-        Err(_) => LayoutConfig::default(),
+        // A workspace with no `.system/gateway/layout.json` is the common
+        // case (no customizations) and must stay silent — every page load
+        // hits this path. Any OTHER error variant (IoError, SearchFailed,
+        // backend connectivity, etc.) is unexpected and would otherwise
+        // silently drop customizations without any operator signal; log
+        // it at warn! so backend problems surface even though the caller
+        // falls back to the default layout either way.
+        Err(crate::error::WorkspaceError::DocumentNotFound { .. }) => LayoutConfig::default(),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = LAYOUT_PATH,
+                "workspace read failed — falling back to default layout \
+                 (customizations may be silently skipped)"
+            );
+            LayoutConfig::default()
+        }
     }
 }
 
@@ -123,7 +139,24 @@ pub async fn frontend_widgets_handler(
 /// Discover every widget in `.system/gateway/widgets/` and return its parsed
 /// manifest. Malformed manifests are skipped with a `warn!` log.
 pub(crate) async fn load_widget_manifests(workspace: &Workspace) -> Vec<WidgetManifest> {
-    let entries = workspace.list(WIDGETS_DIR).await.unwrap_or_default();
+    // A missing / empty widgets directory is the common case and the
+    // workspace returns an empty `Vec` for it. An actual `Err` here means
+    // the backend listing call failed (IoError, connectivity, etc.); the
+    // caller (`/api/frontend/widgets`) would otherwise return `200 []`
+    // and hide the real problem. Log at warn! before the empty-list
+    // fallback so operators notice.
+    let entries = match workspace.list(WIDGETS_DIR).await {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = WIDGETS_DIR,
+                "workspace list failed — returning empty widget list \
+                 (installed widgets may be silently skipped)"
+            );
+            Vec::new()
+        }
+    };
 
     let mut manifests = Vec::new();
     for entry in entries {
@@ -232,7 +265,21 @@ pub(crate) async fn load_resolved_widgets(
     workspace: &Workspace,
     layout: &LayoutConfig,
 ) -> Vec<ResolvedWidget> {
-    let entries = workspace.list(WIDGETS_DIR).await.unwrap_or_default();
+    // Same rationale as `load_widget_manifests` above: an empty directory
+    // is a normal empty `Vec`, a real `Err` is a backend failure that we
+    // shouldn't hide behind an empty widget list on the index page.
+    let entries = match workspace.list(WIDGETS_DIR).await {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = WIDGETS_DIR,
+                "workspace list failed — rendering index with no widgets \
+                 (installed widgets may be silently skipped)"
+            );
+            Vec::new()
+        }
+    };
 
     let mut widgets = Vec::new();
     for entry in entries {
@@ -320,18 +367,47 @@ pub async fn frontend_widget_file_handler(
     // leaks the `.system/gateway/widgets/...` layout to anyone probing
     // the endpoint and gives an attacker a free oracle for "what
     // directories exist". Log the full path internally so debugging
-    // a 404 still works, then return a generic message to the client.
+    // still works, then return a generic message to the client.
+    //
+    // Distinguish 404 from 500: a genuine missing file
+    // (`DocumentNotFound`) deserves 404, but backend failures (IoError,
+    // SearchFailed, connectivity) used to also come out as 404, which
+    // turned every workspace outage into a silent stream of "not found"
+    // errors that masked the real issue. Map the not-found variant to
+    // 404 and route everything else to 500 so operational problems
+    // surface in status codes as well as logs. The client-facing body
+    // stays generic in both cases to preserve the path-enumeration
+    // hardening above.
     let doc = workspace.read(&path).await.map_err(|e| {
-        tracing::warn!(
-            workspace_path = %path,
-            error = %e,
-            "widget file not found"
-        );
-        (StatusCode::NOT_FOUND, "Widget file not found".to_string())
+        use crate::error::WorkspaceError;
+        match e {
+            WorkspaceError::DocumentNotFound { .. } => {
+                tracing::warn!(
+                    workspace_path = %path,
+                    "widget file not found"
+                );
+                (StatusCode::NOT_FOUND, "Widget file not found".to_string())
+            }
+            other => {
+                tracing::warn!(
+                    workspace_path = %path,
+                    error = %other,
+                    "widget file read failed (backend error)"
+                );
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to read widget file".to_string(),
+                )
+            }
+        }
     })?;
 
     // Determine MIME type from the file extension (case-insensitive — the
-    // browser doesn't care about `.JS` vs `.js`).
+    // browser doesn't care about `.JS` vs `.js`). Widgets legitimately
+    // ship assets beyond JS/CSS (icons, webfonts, source maps); falling
+    // back to `text/plain` broke SVG rendering and triggered
+    // content-sniffing for the font files. Cover the common widget asset
+    // types explicitly and keep `text/plain` as the last-resort fallback.
     let ext = file
         .rsplit('.')
         .next()
@@ -342,6 +418,16 @@ pub async fn frontend_widget_file_handler(
         "css" => "text/css",
         "json" => "application/json",
         "map" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
         _ => "text/plain",
     };
 
