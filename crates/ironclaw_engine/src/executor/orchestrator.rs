@@ -2154,9 +2154,29 @@ fn action_calls_to_python_json(calls: &[ActionCall]) -> Vec<serde_json::Value> {
 
 /// Deserialize an `action_calls` JSON array (in Python interchange shape)
 /// back into canonical `ActionCall`s.
+///
+/// Logs a warning on failure rather than swallowing silently. The whole
+/// commit that introduced this helper exists to undo a `.ok()` swallow that
+/// dropped action_calls without any signal — replacing it with another
+/// `.ok()?` would re-introduce the same trap, just one layer deeper. If the
+/// shape ever drifts again (Python orchestrator field rename, extra
+/// required field, partial migration), the warning is the operator-visible
+/// breadcrumb that explains why subsequent tool results suddenly look
+/// orphaned to `sanitize_tool_messages`.
 fn python_json_to_action_calls(value: &serde_json::Value) -> Option<Vec<ActionCall>> {
-    let parsed: Vec<PythonActionCall> = serde_json::from_value(value.clone()).ok()?;
-    Some(parsed.into_iter().map(ActionCall::from).collect())
+    match serde_json::from_value::<Vec<PythonActionCall>>(value.clone()) {
+        Ok(parsed) => Some(parsed.into_iter().map(ActionCall::from).collect()),
+        Err(e) => {
+            warn!(
+                error = %e,
+                value = %value,
+                "Failed to parse action_calls from Python orchestrator — \
+                 assistant message will lose tool_call linkage and downstream \
+                 tool results will be rewritten as user messages"
+            );
+            None
+        }
+    }
 }
 
 fn json_to_thread_messages(value: &serde_json::Value) -> Option<Vec<ThreadMessage>> {
