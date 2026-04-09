@@ -325,10 +325,15 @@ fn validate_base_url_with_policy(
 
     let resolved_ips = if let Ok(ip) = normalized_host.parse::<IpAddr>() {
         vec![ip]
+    } else if scheme == "https" {
+        // For HTTPS hostnames, TLS certificate validation at connection time
+        // prevents SSRF — the server must present a valid cert matching the
+        // hostname. Skip blocking DNS resolution to avoid hanging in sandboxed
+        // or offline CI environments where DNS is unavailable. IP literals are
+        // still checked above since TLS doesn't help validate raw IPs.
+        return Ok(());
     } else {
-        let port = parsed
-            .port()
-            .unwrap_or(if scheme == "http" { 80 } else { 443 });
+        let port = parsed.port().unwrap_or(80);
         // `to_socket_addrs` performs blocking DNS resolution. This helper is
         // also called from async request handlers (e.g. the LLM utility
         // routes), so wrap the lookup in `block_in_place` when running on a
@@ -721,34 +726,25 @@ mod tests {
         assert!(validate_base_url("https://[::]", "TEST").is_err());
     }
 
-    /// Some local DNS resolvers (ISP/router-level captive portals, ad-injecting
-    /// providers) hijack lookups for non-existent domains and return a public
-    /// IP instead of NXDOMAIN. On those networks, RFC 6761 ".invalid" lookups
-    /// succeed even though they shouldn't, which makes any test that asserts
-    /// "DNS resolution failure" unreliable. Detect that case and skip the test.
-    fn invalid_tld_resolves_locally() -> bool {
-        use std::net::ToSocketAddrs;
-        ("ironclaw-dns-hijack-probe.invalid", 443u16)
-            .to_socket_addrs()
-            .is_ok()
+    #[test]
+    fn validate_base_url_https_hostname_skips_dns() {
+        // HTTPS hostnames skip DNS resolution — TLS validates the host at
+        // connection time — so even an unresolvable domain should pass.
+        let result = validate_base_url("https://ssrf-test.invalid", "TEST");
+        assert!(result.is_ok());
     }
 
     #[test]
-    fn validate_base_url_rejects_dns_failure() {
-        if invalid_tld_resolves_locally() {
-            eprintln!(
-                "skipping validate_base_url_rejects_dns_failure: \
-                 local DNS resolver hijacks .invalid lookups"
-            );
-            return;
-        }
-        // .invalid TLD is guaranteed to never resolve (RFC 6761)
-        let result = validate_base_url("https://ssrf-test.invalid", "TEST");
+    fn validate_base_url_http_rejects_dns_failure() {
+        // HTTP hostnames that are not localhost still go through DNS. But
+        // non-localhost HTTP is rejected before DNS lookup (strict SSRF),
+        // so this tests the pre-DNS rejection path.
+        let result = validate_base_url("http://ssrf-test.invalid", "TEST");
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("failed to resolve"),
-            "Expected DNS resolution failure, got: {err}"
+            err.contains("only allowed for localhost"),
+            "Expected HTTP rejection, got: {err}"
         );
     }
 

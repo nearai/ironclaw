@@ -551,21 +551,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_returns_error_on_network_failure() {
-        // Use RFC 5737 TEST-NET-1 (192.0.2.0/24) for reliable failure even behind proxies.
-        // Short timeout so the test doesn't block for the full 10s REQUEST_TIMEOUT.
-        let catalog =
-            SkillCatalog::with_url_and_timeout("http://192.0.2.1:9999", Duration::from_secs(1));
+        // Bind and immediately close a port so it's guaranteed unreachable
+        // without depending on TEST-NET-1 (which proxies can intercept).
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+            listener.local_addr().expect("local addr").port()
+        };
+        let catalog = SkillCatalog::with_url_and_timeout(
+            &format!("http://127.0.0.1:{port}"),
+            Duration::from_secs(1),
+        );
         let outcome = catalog.search("test").await;
         assert!(outcome.results.is_empty());
         assert!(outcome.error.is_some());
         let error = outcome.error.unwrap();
         assert!(
-            error.contains("Registry unreachable")
-                || error.contains("connect")
-                || error.contains("502")
-                || error.contains("503")
-                || error.contains("504"),
-            "Expected connection or gateway error, got: {error}",
+            error.contains("Registry unreachable") || error.contains("connect"),
+            "Expected connection error, got: {error}",
         );
     }
 

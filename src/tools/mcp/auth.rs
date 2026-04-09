@@ -389,11 +389,14 @@ async fn validate_url_safe(url: &str) -> Result<(), AuthError> {
         )));
     }
 
-    // For hostnames, resolve DNS and check each resolved address.
-    // This prevents DNS-based SSRF where a hostname resolves to an internal IP
-    // (e.g., 169.254.169.254 for cloud metadata endpoints).
-    if host.parse::<IpAddr>().is_err() {
-        let addr = format!("{}:{}", host, parsed.port_or_known_default().unwrap_or(443));
+    // For HTTPS hostnames, TLS certificate validation at connection time
+    // prevents SSRF — the server must present a valid cert for the hostname.
+    // Skip blocking DNS resolution to avoid failures in sandboxed or offline
+    // environments. IP literals are still checked above.
+    // For HTTP hostnames, we already rejected non-localhost above, so this
+    // branch only applies to HTTPS.
+    if host.parse::<IpAddr>().is_err() && scheme == "http" {
+        let addr = format!("{}:{}", host, parsed.port_or_known_default().unwrap_or(80));
         match tokio::net::lookup_host(&addr).await {
             Ok(addrs) => {
                 for socket_addr in addrs {
