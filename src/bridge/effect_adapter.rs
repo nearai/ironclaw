@@ -16,11 +16,13 @@ use tokio::sync::RwLock;
 use tracing::debug;
 
 use ironclaw_engine::{
-    ActionDef, ActionResult, CapabilityLease, EffectExecutor, EngineError, ThreadExecutionContext,
+    ActionDef, ActionResult, CapabilityLease, EffectExecutor, EngineError, MountError,
+    ThreadExecutionContext, WorkspaceMounts,
 };
 
 use crate::bridge::auth_manager::{AuthCheckResult, AuthManager};
 use crate::bridge::router::synthetic_action_call_id;
+use crate::bridge::sandbox::{InterceptOutcome, maybe_intercept};
 use crate::context::JobContext;
 use crate::hooks::{HookEvent, HookOutcome, HookRegistry};
 use crate::tools::permissions::{PermissionState, effective_permission};
@@ -55,6 +57,12 @@ pub struct EffectBridgeAdapter {
     /// calls bypass the recorder entirely — recorded traces end up with zero
     /// `http_exchanges` and replay can't substitute responses.
     http_interceptor: RwLock<Option<Arc<dyn crate::llm::recording::HttpInterceptor>>>,
+    /// Optional per-project workspace mount table. When set and a sandbox-eligible
+    /// tool call carries a `/project/...` path, the call is dispatched through
+    /// the mount backend (passthrough host filesystem in Phase 1; containerized
+    /// in Phase 5+) instead of the host tool. When unset, all tool calls run
+    /// on the host as before.
+    workspace_mounts: RwLock<Option<Arc<WorkspaceMounts>>>,
 }
 
 impl EffectBridgeAdapter {
@@ -74,7 +82,19 @@ impl EffectBridgeAdapter {
             mission_manager: RwLock::new(None),
             auth_manager: RwLock::new(None),
             http_interceptor: RwLock::new(None),
+            workspace_mounts: RwLock::new(None),
         }
+    }
+
+    /// Install a per-project workspace mount table on this adapter. When set,
+    /// sandbox-eligible tool calls (`file_read`, `file_write`, `list_dir`,
+    /// `apply_patch`, `shell`) whose path argument resolves into a mount get
+    /// dispatched through the mount backend instead of the host tool.
+    ///
+    /// Pass `None` to remove the mount table and revert to direct host
+    /// execution for all tools.
+    pub async fn set_workspace_mounts(&self, mounts: Option<Arc<WorkspaceMounts>>) {
+        *self.workspace_mounts.write().await = mounts;
     }
 
     /// Install the trace HTTP interceptor on this adapter. Every JobContext
@@ -827,14 +847,61 @@ impl EffectBridgeAdapter {
             job_ctx.http_interceptor = Some(Arc::clone(interceptor));
         }
 
-        let result = crate::tools::execute::execute_tool_with_safety(
-            &self.tools,
-            &self.safety,
-            &lookup_name,
-            parameters.clone(),
-            &job_ctx,
-        )
-        .await;
+        // ── Sandbox interception (engine v2 Phase 8) ──
+        //
+        // For sandbox-eligible tools (`file_read`, `file_write`, `list_dir`,
+        // `apply_patch`, `shell`), check whether the call's path argument
+        // resolves into a workspace mount. If so, dispatch through the mount
+        // backend (filesystem passthrough today, containerized later) instead
+        // of running the host tool. This is the single decision point that
+        // routes between host and sandbox execution; everything outside this
+        // block runs unchanged.
+        let mounts_snapshot = self.workspace_mounts.read().await.as_ref().map(Arc::clone);
+        let sandbox_result = if let Some(mounts) = mounts_snapshot {
+            match maybe_intercept(&lookup_name, &parameters, context.project_id, &mounts).await {
+                Ok(InterceptOutcome::Handled(s)) => Some(Ok(s)),
+                Ok(InterceptOutcome::FellThrough) => None,
+                Err(MountError::NotFound { path }) => Some(Err(crate::error::Error::from(
+                    crate::error::ToolError::ExecutionFailed {
+                        name: lookup_name.clone(),
+                        reason: format!("sandbox: not found: {path}"),
+                    },
+                ))),
+                Err(MountError::PermissionDenied { path }) => Some(Err(crate::error::Error::from(
+                    crate::error::ToolError::ExecutionFailed {
+                        name: lookup_name.clone(),
+                        reason: format!("sandbox: permission denied: {path}"),
+                    },
+                ))),
+                Err(MountError::InvalidPath { path, reason }) => Some(Err(
+                    crate::error::Error::from(crate::error::ToolError::InvalidParameters {
+                        name: lookup_name.clone(),
+                        reason: format!("sandbox: invalid path '{path}': {reason}"),
+                    }),
+                )),
+                Err(e) => Some(Err(crate::error::Error::from(
+                    crate::error::ToolError::ExecutionFailed {
+                        name: lookup_name.clone(),
+                        reason: format!("sandbox: {e}"),
+                    },
+                ))),
+            }
+        } else {
+            None
+        };
+
+        let result = if let Some(intercepted) = sandbox_result {
+            intercepted
+        } else {
+            crate::tools::execute::execute_tool_with_safety(
+                &self.tools,
+                &self.safety,
+                &lookup_name,
+                parameters.clone(),
+                &job_ctx,
+            )
+            .await
+        };
 
         let duration = start.elapsed();
 

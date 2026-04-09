@@ -22,6 +22,7 @@ pub mod reliability;
 pub mod runtime;
 pub mod traits;
 pub mod types;
+pub mod workspace;
 
 // ── Re-exports: types ───────────────────────────────────────
 
@@ -93,6 +94,13 @@ pub use memory::RetrievalEngine;
 // ── Re-exports: reliability ──────────────────────────────────
 
 pub use reliability::ReliabilityTracker;
+
+// ── Re-exports: workspace mounts ─────────────────────────────
+
+pub use workspace::{
+    DirEntry, EntryKind, FilesystemBackend, MountBackend, MountError, ProjectMountFactory,
+    ProjectMounts, ShellOutput, WorkspaceMounts,
+};
 
 // ── Test utilities ──────────────────────────────────────────
 
