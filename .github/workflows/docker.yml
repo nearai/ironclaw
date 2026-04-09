@@ -117,6 +117,7 @@ jobs:
 
       - name: Create releases-manager app token
         id: app-token
+        continue-on-error: true
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
           app-id: ${{ secrets.GH_RELEASES_MANAGER_APP_ID }}
@@ -125,6 +126,8 @@ jobs:
           repositories: ironclaw-dind
 
       - name: Trigger ironclaw-dind Build & Push
+        if: steps.app-token.outcome == 'success'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           EVENT_NAME: ${{ github.event_name }}
