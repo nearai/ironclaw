@@ -41,6 +41,14 @@ pub struct AppComponents {
     pub tools: Arc<ToolRegistry>,
     pub embeddings: Option<Arc<dyn EmbeddingProvider>>,
     pub workspace: Option<Arc<Workspace>>,
+    /// Workspace-backed `SettingsStore` adapter that dual-writes settings to
+    /// both the legacy `settings` table and `.system/settings/**` workspace
+    /// documents. Populated when both `db` and `workspace` are available.
+    /// Consumers that only need a `SettingsStore` (permission tools, the
+    /// SIGHUP reload handler) should prefer this over the raw `db` so that
+    /// runtime settings writes flow through the workspace and pick up schema
+    /// validation.
+    pub settings_store: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
     pub mcp_session_manager: Arc<McpSessionManager>,
     pub mcp_process_manager: Arc<McpProcessManager>,
@@ -381,6 +389,7 @@ impl AppBuilder {
         let tools = Arc::new(registry);
         tools.register_builtin_tools();
         tools.register_tool_info();
+        tools.register_system_tools();
 
         if let Some(ref ss) = self.secrets_store {
             tools.register_secrets_tools(Arc::clone(ss));
@@ -532,6 +541,7 @@ impl AppBuilder {
         &self,
         tools: &Arc<ToolRegistry>,
         hooks: &Arc<HookRegistry>,
+        settings_store_override: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
     ) -> Result<
         (
             Arc<McpSessionManager>,
@@ -830,11 +840,16 @@ impl AppBuilder {
             tools.register_extension_tools(Arc::clone(&manager));
 
             // Register permission management tool and upgrade tool_list with
-            // builtin registry support.
+            // builtin registry support. Prefer the workspace-backed adapter
+            // when the caller provides one (production wiring) so settings
+            // writes flow through schema validation; fall back to the raw db
+            // for test harnesses that don't have a workspace.
             let settings_store_for_perms: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>> =
-                self.db
-                    .as_ref()
-                    .map(|db| Arc::clone(db) as Arc<dyn crate::db::SettingsStore + Send + Sync>);
+                settings_store_override.clone().or_else(|| {
+                    self.db
+                        .as_ref()
+                        .map(|db| Arc::clone(db) as Arc<dyn crate::db::SettingsStore + Send + Sync>)
+                });
             tools.register_permission_tools(settings_store_for_perms.clone());
             tools.upgrade_tool_list(Arc::clone(&manager), settings_store_for_perms);
 
@@ -929,6 +944,28 @@ impl AppBuilder {
         let agent_session_manager =
             Arc::new(AgentSessionManager::new().with_hooks(Arc::clone(&hooks)));
 
+        // Build the workspace-backed `SettingsStore` BEFORE init_extensions so
+        // tools registered there (`register_permission_tools`,
+        // `upgrade_tool_list`) can be wired with the adapter from the start.
+        // The same adapter instance is then exposed on `AppComponents.settings_store`
+        // and reused by main.rs (e.g. for the SIGHUP reload handler).
+        let settings_store: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>> =
+            match (&workspace, &self.db) {
+                (Some(ws), Some(db)) => {
+                    let adapter = Arc::new(crate::workspace::WorkspaceSettingsAdapter::new(
+                        Arc::clone(ws),
+                        Arc::clone(db),
+                    ));
+                    if let Err(e) = adapter.ensure_system_config().await {
+                        tracing::debug!(
+                            "WorkspaceSettingsAdapter eager seed failed (lazy seed will retry): {e}"
+                        );
+                    }
+                    Some(adapter as Arc<dyn crate::db::SettingsStore + Send + Sync>)
+                }
+                _ => None,
+            };
+
         let (
             mcp_session_manager,
             mcp_process_manager,
@@ -936,7 +973,9 @@ impl AppBuilder {
             extension_manager,
             catalog_entries,
             dev_loaded_tool_names,
-        ) = self.init_extensions(&tools, &hooks).await?;
+        ) = self
+            .init_extensions(&tools, &hooks, settings_store.clone())
+            .await?;
 
         // Load bootstrap-completed flag from settings so that existing users
         // who already completed onboarding don't re-get bootstrap injection.
@@ -1059,6 +1098,7 @@ impl AppBuilder {
             tools,
             embeddings,
             workspace,
+            settings_store,
             extension_manager,
             mcp_session_manager,
             mcp_process_manager,

@@ -34,7 +34,7 @@ async def test_settings_written_and_readable(ironclaw_server):
     key = f"e2e_ownership_{uuid.uuid4().hex[:8]}"
 
     async with httpx.AsyncClient() as client:
-        w = await client.post(
+        w = await client.put(
             f"{ironclaw_server}/api/settings/{key}",
             headers=_headers(),
             timeout=10,

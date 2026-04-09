@@ -230,6 +230,7 @@ async fn start_test_server_with_provider(
         near_rpc_url: None,
         near_network: None,
         oauth_sweep_shutdown: None,
+        tool_dispatcher: None,
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(
@@ -740,6 +741,7 @@ async fn test_no_llm_provider_returns_503() {
         near_rpc_url: None,
         near_network: None,
         oauth_sweep_shutdown: None,
+        tool_dispatcher: None,
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(

@@ -227,6 +227,34 @@ See `.env.example` for all environment variables. LLM backends (`nearai`, `opena
 3. Add config in `src/config/channels.rs`
 4. Wire up in `src/app.rs` channel setup section
 
+## Everything Goes Through Tools
+
+**Core principle**: all actions originating from gateway handlers, CLI
+commands, routine engine, WASM channels, or any other non-agent caller
+MUST go through `ToolDispatcher::dispatch()` — never directly through
+`state.store`, `workspace`, `extension_manager`, `skill_registry`, or
+`session_manager`.
+
+This gives every UI-initiated mutation the same audit trail
+(`ActionRecord`), safety pipeline (param validation, sensitive-param
+redaction, output sanitization), and channel-agnostic surface as
+agent-initiated tool calls. Channels are interchangeable extensions;
+routing through one dispatch function means new channels inherit the
+full pipeline for free.
+
+The pre-commit hook (`scripts/pre-commit-safety.sh`) flags newly-added
+lines in handler/CLI files that touch
+`state.{store,workspace,extension_manager,skill_registry,session_manager}.*`
+directly. Annotate intentional exceptions (rare — usually only read
+aggregation across multiple users) with a trailing
+`// dispatch-exempt: <reason>` comment on the same line. The check only
+sees added lines, so existing untouched code doesn't trip during
+incremental migration.
+
+See `.claude/rules/tools.md` for the full pattern, allowed exemptions,
+and migration status. The dispatcher itself lives in
+`src/tools/dispatch.rs`.
+
 ## Workspace & Memory
 
 Persistent memory with hybrid search (FTS + vector via RRF). Four tools: `memory_search`, `memory_write`, `memory_read`, `memory_tree`. Identity files (AGENTS.md, SOUL.md, USER.md, IDENTITY.md) injected into system prompt. Heartbeat system runs proactive periodic execution (default: 30 minutes), reading `HEARTBEAT.md` and notifying via channel if findings. See `src/workspace/README.md`.

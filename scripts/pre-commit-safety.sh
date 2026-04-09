@@ -11,11 +11,13 @@
 #   4. Tool parameters logged without redaction (secret leaks)
 #   5. Multi-step DB operations without transaction wrapping
 #   6. .unwrap(), .expect(), assert!() in production code (panics)
+#   7. Gateway/CLI handlers bypassing ToolDispatcher (must go through tools)
 #
 # Also runs check-i18n-parity.sh when src/channels/web/static/i18n/*.js
 # files are staged, to ensure every language pack has the same key set.
 #
 # Suppress individual lines with an inline "// safety: <reason>" comment.
+# For check #7, use "// dispatch-exempt: <reason>" instead.
 
 set -euo pipefail
 
@@ -274,9 +276,34 @@ if echo "$PROD_DIFF" | grep -nE '^\+' \
         | head -5 | sed 's/^/    /'
 fi
 
+# 7. Gateway/CLI handlers bypassing ToolDispatcher.
+#    Channel handlers and CLI commands must route mutations through
+#    `ToolDispatcher::dispatch()` so every UI/CLI-initiated action gets the
+#    same audit trail and safety pipeline as agent-initiated tool calls.
+#    See `.claude/rules/tools.md` "Everything Goes Through Tools".
+#
+#    The check looks at .rs files under src/channels/web/handlers/ and
+#    src/cli/ for newly-added lines that touch direct manager fields on the
+#    gateway state. Suppress with "// dispatch-exempt: <reason>".
+DISPATCH_DIFF=$(git diff --cached -U0 -- 'src/channels/web/handlers/*.rs' 'src/cli/*.rs' 2>/dev/null || true)
+if [ -z "$DISPATCH_DIFF" ]; then
+    DISPATCH_DIFF=$(git diff "$(resolve_base_ref)" -U0 -- 'src/channels/web/handlers/*.rs' 'src/cli/*.rs' 2>/dev/null || true)
+fi
+if [ -n "$DISPATCH_DIFF" ]; then
+    DISPATCH_HITS=$(echo "$DISPATCH_DIFF" | grep -nE '^\+' \
+        | grep -E 'state\.(store|workspace|workspace_pool|extension_manager|skill_registry|session_manager)\.' \
+        | grep -vE '// dispatch-exempt:|// safety:|^\+\+\+' \
+        | head -5 || true)
+    if [ -n "$DISPATCH_HITS" ]; then
+        warn "DISPATCH" "Handler directly touches state.{store,workspace,extension_manager,skill_registry,session_manager}. Route through ToolDispatcher::dispatch() instead. See .claude/rules/tools.md."
+        echo "$DISPATCH_HITS" | sed 's/^/    /'
+    fi
+fi
+
 if [ "$WARNINGS" -gt 0 ]; then
     echo ""
     echo "Found $WARNINGS potential issue(s). Fix them or add '// safety: <reason>' to suppress."
+    echo "(For DISPATCH warnings, use '// dispatch-exempt: <reason>' instead.)"
     echo ""
     exit 1
 fi

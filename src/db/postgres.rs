@@ -405,6 +405,10 @@ impl JobStore for PgBackend {
             .update_estimation_actuals(id, actual_cost, actual_time_secs, actual_value)
             .await
     }
+
+    async fn create_system_job(&self, user_id: &str, source: &str) -> Result<Uuid, DatabaseError> {
+        self.store.create_system_job(user_id, source).await
+    }
 }
 
 // ==================== SandboxStore ====================

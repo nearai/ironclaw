@@ -475,6 +475,9 @@ pub struct GatewayState {
     /// When this sender is dropped, the sweep loops exit gracefully.
     #[allow(dead_code)]
     pub oauth_sweep_shutdown: Option<tokio::sync::watch::Sender<()>>,
+    /// Channel-agnostic tool dispatcher for routing handler operations through
+    /// the tool pipeline with audit trail.
+    pub tool_dispatcher: Option<Arc<crate::tools::dispatch::ToolDispatcher>>,
 }
 
 /// Start the gateway HTTP server.
@@ -3140,7 +3143,16 @@ async fn extensions_setup_submit_handler(
             }
             Ok(Json(resp))
         }
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Err(e) => {
+            // Preserve the `activated` field on the failure path so clients
+            // (and regression tests) see an explicit `false` rather than
+            // `null`. `ActionResponse::fail` leaves `activated` as `None`,
+            // which serializes to `null` and makes "did activation fail?"
+            // ambiguous from the wire.
+            let mut resp = ActionResponse::fail(e.to_string());
+            resp.activated = Some(false);
+            Ok(Json(resp))
+        }
     }
 }
 
@@ -3578,6 +3590,7 @@ mod tests {
             near_rpc_url: None,
             near_network: None,
             oauth_sweep_shutdown: None,
+            tool_dispatcher: None,
         })
     }
 

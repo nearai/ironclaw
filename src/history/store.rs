@@ -201,6 +201,72 @@ impl Store {
         Ok(())
     }
 
+    /// Create a lightweight system job for audit trail purposes.
+    ///
+    /// System jobs represent synchronous channel/CLI-initiated dispatches
+    /// that begin and end in the same instant. `created_at`, `started_at`,
+    /// and `completed_at` are all set to the same timestamp so audit
+    /// queries computing duration (`completed_at - started_at`) see 0, not
+    /// NULL, and dashboards filtering for "started but not yet completed"
+    /// don't misclassify these as never-started rows.
+    ///
+    /// ⚠️ **System job timestamps do NOT reflect tool execution time.**
+    /// The row is INSERTed *before* the tool runs, with all three timestamps
+    /// pinned to "now". This is intentional: the audit row must be durable
+    /// even if the dispatcher panics mid-tool, and an updating second write
+    /// would double the per-dispatch DB cost. Consumers that need execution
+    /// duration must read from the associated `job_actions` rows
+    /// (`job_actions.duration_ms`) — they wrap the actual `tool.execute()`
+    /// boundary and carry the real start/end measurements.
+    ///
+    /// ⚠️ Row growth: every `ToolDispatcher::dispatch()` call (gateway
+    /// handlers, CLI commands, routine ticks) creates one system job row.
+    /// `agent_jobs` is the durable audit anchor, not ephemeral LLM data,
+    /// so these rows are intentionally retained forever. If row count
+    /// becomes a concern for agent-job listing queries, prefer adding a
+    /// partial index (`WHERE category != 'system'`) rather than deleting
+    /// rows — deletion would violate the "LLM data is never deleted" rule
+    /// (CLAUDE.md).
+    pub async fn create_system_job(
+        &self,
+        user_id: &str,
+        source: &str,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.conn().await?;
+        let id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let status = JobState::Completed.to_string();
+
+        conn.execute(
+            r#"
+            INSERT INTO agent_jobs (
+                id, title, description, category, status, source,
+                user_id, actual_cost, repair_attempts, max_tokens,
+                total_tokens_used, created_at, started_at, completed_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            "#,
+            &[
+                &id,
+                &format!("System: {source}"),
+                &format!("System operation: {source}"),
+                &Some("system"),
+                &status,
+                &"system",
+                &user_id,
+                &rust_decimal::Decimal::ZERO,
+                &0i32,
+                &0i64,
+                &0i64,
+                &now,
+                &Some(now), // started_at = created_at (instant start)
+                &Some(now), // completed_at = created_at (instant completion)
+            ],
+        )
+        .await?;
+
+        Ok(id)
+    }
+
     /// Get a job by ID.
     pub async fn get_job(&self, id: Uuid) -> Result<Option<JobContext>, DatabaseError> {
         let conn = self.conn().await?;

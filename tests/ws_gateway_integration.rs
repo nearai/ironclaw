@@ -77,6 +77,7 @@ async fn start_test_server() -> (
         near_rpc_url: None,
         near_network: None,
         oauth_sweep_shutdown: None,
+        tool_dispatcher: None,
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(
