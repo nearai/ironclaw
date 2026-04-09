@@ -21,6 +21,13 @@ use ironclaw_skills::registry::SkillRegistry;
 
 const MAX_CHAIN_DEPS: usize = 10;
 
+/// Hard cap on the chain-installer BFS queue to prevent unbounded growth
+/// from nested `requires.skills` fan-out. Even though we stop enqueueing
+/// once `attempted >= MAX_CHAIN_DEPS`, this is a defense-in-depth bound in
+/// case a future refactor (parallel fetching, retries) changes that
+/// invariant.
+const MAX_CHAIN_QUEUE: usize = MAX_CHAIN_DEPS * 10;
+
 #[derive(Debug, Clone, Error)]
 #[error("{message}")]
 pub(crate) struct SkillFetchError {
@@ -168,6 +175,30 @@ where
                 .await
                 {
                     Ok((name, skill)) => {
+                        // Dependency-confusion guard: the `name` returned
+                        // by `prepare_install_to_disk` comes from the
+                        // downloaded manifest, not from the `dep_name` we
+                        // requested. A hostile catalog entry could publish
+                        // a skill whose manifest declares a DIFFERENT name
+                        // (e.g., we asked for "dep-a" but the manifest says
+                        // `name: evil-skill`). Reject and clean up the
+                        // on-disk write — callers rely on the requested
+                        // dep name matching what gets installed.
+                        if name != dep_name {
+                            let orphan_dir = user_dir.join(&name);
+                            if let Err(cleanup_err) = tokio::fs::remove_dir_all(&orphan_dir).await {
+                                tracing::debug!(
+                                    "chain install: failed to clean up mismatched-name dir {}: {}",
+                                    orphan_dir.display(),
+                                    cleanup_err
+                                );
+                            }
+                            report.failed.push(format!(
+                                "{}: manifest declares name '{}' (dependency-confusion guard)",
+                                dep_name, name
+                            ));
+                            continue;
+                        }
                         let nested_required = skill.manifest.requires.skills.clone();
                         // Take the write lock in a tightly scoped block so the
                         // (non-Send) RwLockWriteGuard is dropped before any
@@ -191,9 +222,24 @@ where
                         match outcome {
                             CommitOutcome::Installed => {
                                 report.installed.push(name);
-                                for nested_dep in nested_required {
-                                    if queued_or_seen.insert(nested_dep.clone()) {
-                                        queue.push_back(nested_dep);
+                                // Only enqueue nested deps if we still have
+                                // attempt budget left — otherwise we grow the
+                                // queue for items we'll never fetch, which a
+                                // malicious manifest could exploit to blow
+                                // out memory on `queued_or_seen`. Belt and
+                                // braces: also enforce MAX_CHAIN_QUEUE.
+                                if attempted < MAX_CHAIN_DEPS {
+                                    for nested_dep in nested_required {
+                                        if queue.len() >= MAX_CHAIN_QUEUE {
+                                            tracing::warn!(
+                                                "chain install: queue hit MAX_CHAIN_QUEUE={}; dropping further nested deps",
+                                                MAX_CHAIN_QUEUE
+                                            );
+                                            break;
+                                        }
+                                        if queued_or_seen.insert(nested_dep.clone()) {
+                                            queue.push_back(nested_dep);
+                                        }
                                     }
                                 }
                             }
@@ -721,17 +767,57 @@ impl Tool for SkillInstallTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
-        // Commit the in-memory addition under a brief write lock.
-        let (installed_name, required_skills) = {
-            let mut guard = self
-                .registry
-                .write()
-                .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
-            let reqs = loaded_skill.manifest.requires.clone();
-            guard
-                .commit_install(&skill_name, loaded_skill)
-                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
-            (skill_name, reqs.skills)
+        // Commit the in-memory addition under a brief write lock. The
+        // earlier `guard.has()` check was under a released read lock with
+        // async I/O (prepare_install_to_disk) in between, so we MUST
+        // re-check under the write lock to close the TOCTOU window — a
+        // concurrent `skill_install` for the same name can finish during
+        // the window and leave us double-committing.
+        enum CommitResult {
+            Installed(String, Vec<String>),
+            AlreadyInstalled,
+        }
+        let commit_result: CommitResult = {
+            let mut guard = registry_write(&self.registry);
+            if guard.has(&skill_name) {
+                CommitResult::AlreadyInstalled
+            } else {
+                let reqs = loaded_skill.manifest.requires.clone();
+                guard
+                    .commit_install(&skill_name, loaded_skill)
+                    .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+                CommitResult::Installed(skill_name, reqs.skills)
+            }
+        };
+
+        let (installed_name, required_skills) = match commit_result {
+            CommitResult::Installed(name, skills) => (name, skills),
+            CommitResult::AlreadyInstalled => {
+                // A concurrent install won the race. Clean up the on-disk
+                // copy we wrote during `prepare_install_to_disk` so it
+                // doesn't become an orphan, then return the idempotent
+                // response.
+                let orphan_dir = user_dir.join(&skill_name_from_parse);
+                if let Err(cleanup_err) = tokio::fs::remove_dir_all(&orphan_dir).await {
+                    tracing::debug!(
+                        "skill_install: failed to clean up orphan skill dir {}: {}",
+                        orphan_dir.display(),
+                        cleanup_err
+                    );
+                }
+                return Ok(ToolOutput::success(
+                    serde_json::json!({
+                        "name": skill_name_from_parse,
+                        "status": "already_installed",
+                        "trust": "installed",
+                        "message": format!(
+                            "Skill '{}' was already installed by a concurrent call — no install needed.",
+                            skill_name_from_parse
+                        ),
+                    }),
+                    start.elapsed(),
+                ));
+            }
         };
 
         let chain_report = if required_skills.is_empty() {
@@ -767,8 +853,24 @@ impl Tool for SkillInstallTool {
         Ok(ToolOutput::success(output, start.elapsed()))
     }
 
-    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
-        ApprovalRequirement::UnlessAutoApproved
+    fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
+        // Chain installs pull up to MAX_CHAIN_DEPS additional skills, each
+        // with its own prompt-injection surface. When the LLM sets
+        // `install_dependencies=true` we force a per-call approval prompt
+        // instead of honoring the auto-approve allowlist — the single
+        // `skill_install` approval the user previously granted covered one
+        // skill, not an unbounded companion set. Single-skill installs
+        // retain the normal `UnlessAutoApproved` behavior so routine flows
+        // don't regress.
+        let install_deps = params
+            .get("install_dependencies")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if install_deps {
+            ApprovalRequirement::Always
+        } else {
+            ApprovalRequirement::UnlessAutoApproved
+        }
     }
 }
 

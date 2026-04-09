@@ -1905,11 +1905,13 @@ async fn handle_record_skill_usage(
 /// the Python orchestrator (which itself receives them from skill manifests)
 /// and runs them on user-supplied text. Safety relies on the `regex` crate's
 /// linear-time matching guarantee (no backreferences, no lookaround) plus the
-/// 64 KiB compiled-size cap below. If the `regex` crate is ever swapped for
-/// `fancy-regex` (which supports backreferences and is NOT linear-time), this
-/// becomes a real ReDoS vector. The `compile_error!` block in
-/// `crates/ironclaw_engine/src/lib.rs` enforces that `fancy-regex` cannot be
-/// pulled in for this call site.
+/// 64 KiB compiled-size cap and DFA-size cap below. If the `regex` crate is
+/// ever swapped for `fancy-regex` (which supports backreferences and is NOT
+/// linear-time), this becomes a real ReDoS vector. This is enforced by
+/// convention and documentation only — see the top-of-crate comment in
+/// `crates/ironclaw_engine/src/lib.rs`. (A `#[cfg(feature = "fancy-regex")]
+/// compile_error!` tripwire was evaluated but conflicts with
+/// `cargo clippy --all-features` which is the standard CI command.)
 fn handle_regex_match(args: &[MontyObject]) -> ExtFunctionResult {
     let pattern = args.first().map(monty_to_string).unwrap_or_default();
     let text = args.get(1).map(monty_to_string).unwrap_or_default();
@@ -1917,10 +1919,14 @@ fn handle_regex_match(args: &[MontyObject]) -> ExtFunctionResult {
         return ExtFunctionResult::Return(MontyObject::Bool(false));
     }
     // Cap compiled regex size to prevent ReDoS (matches the 64 KiB limit used
-    // by `LoadedSkill::compile_patterns` in `ironclaw_skills`).
+    // by `LoadedSkill::compile_patterns` in `ironclaw_skills`). Also cap the
+    // lazy-DFA cache: the `regex` crate's DFA can grow beyond `size_limit`
+    // during matching, so `dfa_size_limit` is a separate defensive cap on
+    // memory allocation from a crafted pattern over untrusted skill manifests.
     const MAX_REGEX_SIZE: usize = 1 << 16;
     let matched = match regex::RegexBuilder::new(&pattern)
         .size_limit(MAX_REGEX_SIZE)
+        .dfa_size_limit(MAX_REGEX_SIZE)
         .build()
     {
         Ok(re) => re.is_match(&text),
@@ -2245,12 +2251,15 @@ mod tests {
                             other => panic!("FINAL() received non-bool: {other:?}"),
                         };
                     }
-                    // Unknown host function — return None and continue
+                    // Dispatch the real host functions the test exercises so
+                    // e.g. `__regex_match__` routes through the production
+                    // handler instead of being stubbed out to `None`.
+                    let ext_result = match call.function_name.as_str() {
+                        "__regex_match__" => handle_regex_match(&call.args),
+                        _ => ExtFunctionResult::Return(MontyObject::None),
+                    };
                     progress = call
-                        .resume(
-                            ExtFunctionResult::Return(MontyObject::None),
-                            PrintWriter::Collect(&mut stdout),
-                        )
+                        .resume(ext_result, PrintWriter::Collect(&mut stdout))
                         .expect("resume failed");
                 }
                 RunProgress::NameLookup(lookup) => {
@@ -2264,6 +2273,26 @@ mod tests {
                 _ => panic!("Unexpected RunProgress variant in test"),
             }
         }
+    }
+
+    // ── __regex_match__ host function reachability ───────────────
+
+    #[test]
+    fn regex_match_host_function_is_callable_from_monty() {
+        // Regression test for PR #1736 review (serrrfirat, 3059161877):
+        // verify that Monty's NameLookup + FunctionCall dispatch actually
+        // reaches `handle_regex_match` when default.py calls
+        // `__regex_match__(...)`. If Monty ever starts resolving the name
+        // before the call, this test will fail with a NameError.
+        assert!(eval_python_bool(
+            r#"bool(__regex_match__("abc", "xxabcxx"))"#
+        ));
+        assert!(!eval_python_bool(
+            r#"bool(__regex_match__("zzz", "xxabcxx"))"#
+        ));
+        // Invalid pattern should return false silently (the host function
+        // swallows the compile error).
+        assert!(!eval_python_bool(r#"bool(__regex_match__("[", "abc"))"#));
     }
 
     // ── True positives (should trigger nudge) ───────────────────
