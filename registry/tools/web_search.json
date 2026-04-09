@@ -1,5 +1,5 @@
 {
-  "name": "web-search",
+  "name": "web_search",
   "display_name": "Web Search",
   "kind": "tool",
   "version": "0.2.2",

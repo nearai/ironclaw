@@ -1115,10 +1115,8 @@ fn check_sender_permission(
                     channel_host::LogLevel::Info,
                     &format!("Pairing request for user {}: code {}", user_id, result.code),
                 );
-                if result.created {
-                    if let Some(ctx) = reply_ctx {
-                        let _ = send_pairing_reply(ctx, &result.code);
-                    }
+                if let Some(ctx) = reply_ctx {
+                    let _ = send_pairing_reply(ctx, &result.code);
                 }
             }
             Err(e) => {

@@ -49,6 +49,53 @@ pub fn legacy_extension_alias(name: &str) -> Option<String> {
     (alias != name).then_some(alias)
 }
 
+/// Filenames to look for when extracting a WASM archive for an extension.
+///
+/// Returns the canonical filenames (underscores) and, when the name contains
+/// underscores, the pre-v0.23 hyphenated variants so that older release
+/// artifacts remain installable.
+pub struct ArchiveFilenames {
+    pub wasm: String,
+    pub caps: String,
+    pub alias_wasm: Option<String>,
+    pub alias_caps: Option<String>,
+}
+
+impl ArchiveFilenames {
+    pub fn new(name: &str) -> Self {
+        let wasm = format!("{name}.wasm");
+        let caps = format!("{name}.capabilities.json");
+        let alias = legacy_extension_alias(name);
+        let alias_wasm = alias.as_ref().map(|a| format!("{a}.wasm"));
+        let alias_caps = alias.as_ref().map(|a| format!("{a}.capabilities.json"));
+        Self {
+            wasm,
+            caps,
+            alias_wasm,
+            alias_caps,
+        }
+    }
+
+    pub fn is_wasm(&self, filename: &str) -> bool {
+        filename == self.wasm || self.alias_wasm.as_deref().is_some_and(|a| filename == a)
+    }
+
+    pub fn is_caps(&self, filename: &str) -> bool {
+        filename == self.caps || self.alias_caps.as_deref().is_some_and(|a| filename == a)
+    }
+
+    /// Error message listing all filenames that were tried.
+    pub fn wasm_not_found_msg(&self) -> String {
+        match &self.alias_wasm {
+            Some(alias) => format!(
+                "tar.gz archive does not contain '{}' or '{}'",
+                self.wasm, alias
+            ),
+            None => format!("tar.gz archive does not contain '{}'", self.wasm),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,5 +121,40 @@ mod tests {
         assert!(canonicalize_extension_name("WebSearch").is_err());
         assert!(canonicalize_extension_name("bad__name").is_err());
         assert!(canonicalize_extension_name("../bad").is_err());
+    }
+
+    #[test]
+    fn archive_filenames_matches_canonical() {
+        let af = ArchiveFilenames::new("gmail");
+        assert!(af.is_wasm("gmail.wasm"));
+        assert!(af.is_caps("gmail.capabilities.json"));
+        assert!(!af.is_wasm("other.wasm"));
+        assert!(af.alias_wasm.is_none());
+    }
+
+    #[test]
+    fn archive_filenames_matches_hyphenated_alias() {
+        let af = ArchiveFilenames::new("google_calendar");
+        assert!(af.is_wasm("google_calendar.wasm"));
+        assert!(af.is_wasm("google-calendar.wasm"));
+        assert!(af.is_caps("google_calendar.capabilities.json"));
+        assert!(af.is_caps("google-calendar.capabilities.json"));
+        assert!(!af.is_wasm("other.wasm"));
+    }
+
+    #[test]
+    fn wasm_not_found_msg_includes_alias() {
+        let af = ArchiveFilenames::new("google_calendar");
+        let msg = af.wasm_not_found_msg();
+        assert!(msg.contains("google_calendar.wasm"));
+        assert!(msg.contains("google-calendar.wasm"));
+    }
+
+    #[test]
+    fn wasm_not_found_msg_no_alias() {
+        let af = ArchiveFilenames::new("gmail");
+        let msg = af.wasm_not_found_msg();
+        assert!(msg.contains("gmail.wasm"));
+        assert!(!msg.contains("or"));
     }
 }

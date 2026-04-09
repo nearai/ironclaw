@@ -1,5 +1,5 @@
 {
-  "name": "google-drive",
+  "name": "google_drive",
   "display_name": "Google Drive",
   "kind": "tool",
   "version": "0.2.1",
