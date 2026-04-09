@@ -86,6 +86,7 @@ use std::sync::Arc;
 use chrono::{NaiveDate, Utc};
 #[cfg(feature = "postgres")]
 use deadpool_postgres::Pool;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::error::WorkspaceError;
@@ -148,6 +149,14 @@ fn is_engine_runtime_path(path: &str) -> bool {
 
 /// Shared sanitizer instance — avoids rebuilding Aho-Corasick + regexes on every write.
 static SANITIZER: std::sync::LazyLock<Sanitizer> = std::sync::LazyLock::new(Sanitizer::new);
+
+/// Compute a stable fingerprint for an assembled system prompt without logging
+/// the prompt content itself.
+pub fn prompt_fingerprint(prompt: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(prompt.as_bytes());
+    hex::encode(hasher.finalize())
+}
 
 /// Scan content for prompt injection. Returns `Err` if high-severity patterns
 /// are detected, otherwise logs warnings and returns `Ok(())`.
@@ -3077,5 +3086,20 @@ mod versioning_tests {
             0,
             "runtime path writes must not accumulate version rows, got: {versions:?}"
         );
+    }
+
+    #[test]
+    fn prompt_fingerprint_is_stable() {
+        let first = super::prompt_fingerprint("## Agent Instructions\n\nBe helpful.");
+        let second = super::prompt_fingerprint("## Agent Instructions\n\nBe helpful.");
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
+    }
+
+    #[test]
+    fn prompt_fingerprint_changes_when_prompt_changes() {
+        let first = super::prompt_fingerprint("prompt a");
+        let second = super::prompt_fingerprint("prompt b");
+        assert_ne!(first, second);
     }
 }

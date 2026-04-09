@@ -344,6 +344,19 @@ impl HeartbeatRunner {
                 String::new()
             }
         };
+        if !system_prompt.is_empty() {
+            tracing::info!(
+                user_id = %self.workspace.user_id(),
+                prompt_len = system_prompt.len(),
+                prompt_fingerprint = %crate::workspace::prompt_fingerprint(&system_prompt),
+                "Workspace system prompt loaded for heartbeat run"
+            );
+        } else {
+            tracing::debug!(
+                user_id = %self.workspace.user_id(),
+                "Workspace system prompt absent for heartbeat run"
+            );
+        }
 
         // Run the agent turn
         let messages = if system_prompt.is_empty() {

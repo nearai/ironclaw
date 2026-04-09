@@ -603,6 +603,39 @@ async fn run_agent_with_config(
 
     let config = components.config;
 
+    if let Some((_, ref persona)) = prestarted_gateway
+        && let Some(ref workspace) = components.workspace
+    {
+        write_persona_files(workspace, persona)
+            .await
+            .map_err(anyhow::Error::msg)?;
+    }
+
+    if let Some(ref workspace) = components.workspace {
+        match workspace.system_prompt().await {
+            Ok(prompt) if !prompt.is_empty() => {
+                tracing::info!(
+                    user_id = %workspace.user_id(),
+                    prompt_len = prompt.len(),
+                    prompt_fingerprint = %ironclaw::workspace::prompt_fingerprint(&prompt),
+                    "Workspace system prompt snapshot ready after startup configuration"
+                );
+            }
+            Ok(_) => {
+                tracing::debug!(
+                    user_id = %workspace.user_id(),
+                    "Workspace system prompt absent after startup configuration"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    user_id = %workspace.user_id(),
+                    "Failed to load workspace system prompt after startup configuration: {}",
+                    error
+                );
+            }
+        }
+    }
     // ── Tunnel setup ───────────────────────────────────────────────────
 
     let (config, active_tunnel) = ironclaw::tunnel::start_managed_tunnel(config).await;

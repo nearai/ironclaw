@@ -7,12 +7,12 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use uuid::Uuid;
 
+use crate::Config;
 use crate::channels::web::auth::hash_token;
 use crate::channels::web::sse::DEFAULT_MAX_CONNECTIONS;
 use crate::config::{DEFAULT_GATEWAY_PORT, GatewayConfig, set_runtime_env};
 use crate::llm::ProviderRegistry;
 use crate::registry::embedded::load_embedded;
-use crate::Config;
 use crate::settings::Settings;
 use crate::tools::mcp::config::save_mcp_servers;
 use crate::tools::mcp::{McpServerConfig, McpServersFile};
@@ -104,12 +104,23 @@ struct StandbyStartupState {
     configure_ready: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StandbyStartupSnapshot {
+    pub phase: String,
     pub last_stage: String,
     pub runtime_started: bool,
     pub configure_ready: bool,
+}
+
+impl StandbyPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            StandbyPhase::Waiting => "waiting",
+            StandbyPhase::Configuring => "configuring",
+            StandbyPhase::Configured => "configured",
+        }
+    }
 }
 
 impl StandbyControl {
@@ -225,8 +236,10 @@ impl StandbyControl {
     }
 
     pub async fn startup_snapshot(&self) -> StandbyStartupSnapshot {
+        let phase = *self.phase.lock().await;
         let startup_state = self.startup_state.lock().await;
         StandbyStartupSnapshot {
+            phase: phase.as_str().to_string(),
             last_stage: startup_state.last_stage.to_string(),
             runtime_started: startup_state.runtime_started,
             configure_ready: startup_state.configure_ready,

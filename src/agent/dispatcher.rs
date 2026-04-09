@@ -121,6 +121,24 @@ impl Agent {
             None
         };
 
+        if let Some(prompt) = system_prompt.as_ref() {
+            tracing::info!(
+                user_id = %message.user_id,
+                channel = %message.channel,
+                is_group_chat,
+                prompt_len = prompt.len(),
+                prompt_fingerprint = %crate::workspace::prompt_fingerprint(prompt),
+                "Workspace system prompt loaded for chat turn"
+            );
+        } else {
+            tracing::debug!(
+                user_id = %message.user_id,
+                channel = %message.channel,
+                is_group_chat,
+                "Workspace system prompt absent for chat turn"
+            );
+        }
+
         // Select active skills. Explicit /skill-name mentions are force-activated
         // and replaced with the skill's description in the rewritten message.
         let (active_skills, rewritten_content) = self.select_active_skills(&message.content);

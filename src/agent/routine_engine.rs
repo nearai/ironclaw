@@ -1550,6 +1550,21 @@ async fn execute_lightweight(
             String::new()
         }
     };
+    if !system_prompt.is_empty() {
+        tracing::info!(
+            routine = %routine.name,
+            user_id = %routine.user_id,
+            prompt_len = system_prompt.len(),
+            prompt_fingerprint = %crate::workspace::prompt_fingerprint(&system_prompt),
+            "Workspace system prompt loaded for routine run"
+        );
+    } else {
+        tracing::debug!(
+            routine = %routine.name,
+            user_id = %routine.user_id,
+            "Workspace system prompt absent for routine run"
+        );
+    }
 
     // Determine max_tokens from model metadata with fallback
     let effective_max_tokens = match ctx.llm.model_metadata().await {
