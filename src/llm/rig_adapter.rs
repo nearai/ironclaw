@@ -783,6 +783,7 @@ where
             finish_reason: finish,
             cache_read_input_tokens: saturate_u32(response.usage.cached_input_tokens),
             cache_creation_input_tokens: extract_cache_creation(&response.raw_response),
+            provider_metadata: std::collections::HashMap::new(),
         };
 
         if resp.cache_read_input_tokens > 0 {
@@ -935,6 +936,7 @@ mod tests {
             tool_call_id: None,
             name: Some("search".to_string()),
             tool_calls: None,
+            provider_metadata: std::collections::HashMap::new(),
         }];
         let (_preamble, history) = convert_messages(&messages);
         match &history[0] {
@@ -1100,6 +1102,7 @@ mod tests {
             tool_call_id: None,
             name: Some("search".to_string()),
             tool_calls: None,
+            provider_metadata: std::collections::HashMap::new(),
         };
         let messages = vec![assistant_msg, tool_result_msg];
         let (_preamble, history) = convert_messages(&messages);
@@ -1499,6 +1502,7 @@ mod tests {
             tool_call_id: None,
             name: None,
             content_parts: vec![],
+            provider_metadata: std::collections::HashMap::new(),
         };
         let non_empty = ChatMessage::user("hi");
         let messages = vec![empty_asst, non_empty];
@@ -1519,6 +1523,7 @@ mod tests {
             tool_call_id: None,
             name: None,
             content_parts: vec![],
+            provider_metadata: std::collections::HashMap::new(),
         };
         let user2 = ChatMessage::user("");
         let asst = ChatMessage::assistant("response");

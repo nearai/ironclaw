@@ -1223,6 +1223,7 @@ impl<'a> JobDelegate<'a> {
             usage: crate::llm::TokenUsage::default(),
             finish_reason: crate::llm::FinishReason::Stop,
             metadata: ResponseMetadata::default(),
+            provider_metadata: std::collections::HashMap::new(),
         })
     }
 
@@ -1271,6 +1272,7 @@ impl<'a> JobDelegate<'a> {
             usage: crate::llm::TokenUsage::default(),
             finish_reason: crate::llm::FinishReason::Stop,
             metadata: ResponseMetadata::default(),
+            provider_metadata: std::collections::HashMap::new(),
         })
     }
 }
@@ -1411,6 +1413,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                     usage: crate::llm::TokenUsage::default(),
                     finish_reason: crate::llm::FinishReason::ToolUse,
                     metadata: ResponseMetadata::default(),
+                    provider_metadata: std::collections::HashMap::new(),
                 });
             }
             Ok(_) => {} // empty selections, fall through

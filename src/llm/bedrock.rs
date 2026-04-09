@@ -207,6 +207,7 @@ impl LlmProvider for BedrockProvider {
             finish_reason: map_stop_reason(response.stop_reason()),
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            provider_metadata: std::collections::HashMap::new(),
         })
     }
 
@@ -978,6 +979,7 @@ mod tests {
                 name: Some("echo".to_string()),
                 tool_calls: None,
                 content_parts: Vec::new(),
+                provider_metadata: std::collections::HashMap::new(),
             },
         ];
 

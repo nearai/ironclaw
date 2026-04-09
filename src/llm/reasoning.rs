@@ -345,6 +345,10 @@ pub enum ResponseAnomaly {
     EmptyToolCompletion,
     /// Text mode returned no usable content after cleaning/truncation.
     EmptyTextResponse,
+    /// Tool mode was requested, but the provider returned only `<think>` tag
+    /// content with no tool calls or visible text. A retry without tools
+    /// recovered usable content.
+    ThinkOnlyToolCompletion,
 }
 
 /// Metadata attached to `RespondOutput` so callers can react to malformed
@@ -377,6 +381,11 @@ pub struct RespondOutput {
     pub usage: TokenUsage,
     pub finish_reason: FinishReason,
     pub metadata: ResponseMetadata,
+    /// Provider-specific metadata to round-trip on subsequent turns.
+    /// Populated by the Copilot provider with `reasoning_opaque` /
+    /// `reasoning_text` for Claude multi-turn reasoning.
+    #[allow(dead_code)]
+    pub provider_metadata: std::collections::HashMap<String, String>,
 }
 
 /// Reasoning engine for the agent.
@@ -710,7 +719,7 @@ Respond in JSON format:
 
         // If we have tools, use tool completion mode
         if !effective_tools.is_empty() {
-            let mut request = ToolCompletionRequest::new(messages, effective_tools)
+            let mut request = ToolCompletionRequest::new(messages.clone(), effective_tools)
                 .with_max_tokens(4096)
                 .with_temperature(0.7)
                 .with_tool_choice("auto");
@@ -726,6 +735,9 @@ Respond in JSON format:
                 cache_read_input_tokens: response.cache_read_input_tokens,
                 cache_creation_input_tokens: response.cache_creation_input_tokens,
             };
+            // Capture provider metadata (e.g. Copilot reasoning_opaque) before
+            // the response is partially consumed below.
+            let resp_provider_metadata = response.provider_metadata.clone();
 
             // If there were tool calls, return them for execution
             if !response.tool_calls.is_empty() {
@@ -763,6 +775,7 @@ Respond in JSON format:
                     usage,
                     finish_reason: response.finish_reason,
                     metadata: ResponseMetadata::default(),
+                    provider_metadata: resp_provider_metadata,
                 });
             }
 
@@ -790,6 +803,7 @@ Respond in JSON format:
                     usage,
                     finish_reason: response.finish_reason,
                     metadata: ResponseMetadata::default(),
+                    provider_metadata: resp_provider_metadata,
                 });
             }
 
@@ -803,28 +817,135 @@ Respond in JSON format:
             // Pre-truncate at tool tags to preserve text before the tag.
             let pre_truncated = truncate_at_tool_tags(&content);
             let cleaned = clean_response(&pre_truncated);
-            let metadata = if cleaned.trim().is_empty() {
-                tracing::warn!(
-                    "LLM response was empty after cleaning (original len={}), using fallback",
-                    content.len()
-                );
-                ResponseMetadata {
-                    anomaly: Some(ResponseAnomaly::EmptyToolCompletion),
+            if cleaned.trim().is_empty() {
+                // Some providers (e.g. GitHub Copilot) wrap Claude responses
+                // entirely in <think> tags with no tool calls or visible output.
+                // The think content is internal reasoning (e.g. "I need to call
+                // the create_job tool"), not a user-facing answer. Retry with
+                // tools, feeding the think content back as context so the model
+                // can continue from its reasoning and produce actual tool calls.
+                let is_claude = self
+                    .model_name
+                    .as_deref()
+                    .is_some_and(|m| m.starts_with("claude"));
+                if is_claude && extract_think_content(&content).is_some() {
+                    tracing::info!(
+                        "Think-only response from Claude in tool mode (original len={}), retrying with tools",
+                        content.len()
+                    );
+                    let mut retry_messages = messages.clone();
+                    retry_messages.push(ChatMessage::assistant(&content));
+                    retry_messages.push(ChatMessage::user(
+                        "Your previous response contained only internal reasoning \
+                         and was not visible to the user. Please continue and \
+                         produce your actual response, including any tool calls \
+                         you planned to make."
+                    ));
+                    let retry_tools = context.available_tools.clone();
+                    let mut retry_req = ToolCompletionRequest::new(retry_messages, retry_tools)
+                        .with_max_tokens(4096)
+                        .with_temperature(0.7)
+                        .with_tool_choice("auto");
+                    retry_req.metadata = context.metadata.clone();
+                    if let Some(ref model) = context.model_override {
+                        retry_req.model = Some(model.clone());
+                    }
+                    match self.llm.complete_with_tools(retry_req).await {
+                        Ok(retry_resp) => {
+                            let retry_usage = TokenUsage {
+                                input_tokens: usage.input_tokens.saturating_add(retry_resp.input_tokens),
+                                output_tokens: usage.output_tokens.saturating_add(retry_resp.output_tokens),
+                                cache_read_input_tokens: usage.cache_read_input_tokens.saturating_add(retry_resp.cache_read_input_tokens),
+                                cache_creation_input_tokens: usage.cache_creation_input_tokens.saturating_add(retry_resp.cache_creation_input_tokens),
+                            };
+                            if !retry_resp.tool_calls.is_empty() {
+                                // Retry produced tool calls — use them
+                                let narrative = retry_resp.content.map(|c| {
+                                    let pre = truncate_at_tool_tags(&c);
+                                    clean_response(&pre)
+                                });
+                                let tool_calls: Vec<ToolCall> = retry_resp
+                                    .tool_calls
+                                    .into_iter()
+                                    .map(|mut tc| {
+                                        if tc.reasoning.as_ref().is_none_or(|r| r.trim().is_empty()) {
+                                            tc.reasoning = narrative.as_ref().filter(|n| !n.is_empty()).cloned();
+                                        }
+                                        tc
+                                    })
+                                    .collect();
+                                return Ok(RespondOutput {
+                                    result: RespondResult::ToolCalls {
+                                        tool_calls,
+                                        content: narrative,
+                                    },
+                                    usage: retry_usage,
+                                    finish_reason: retry_resp.finish_reason,
+                                    metadata: ResponseMetadata {
+                                        anomaly: Some(ResponseAnomaly::ThinkOnlyToolCompletion),
+                                    },
+                                    provider_metadata: std::collections::HashMap::new(),
+                                });
+                            }
+                            // Retry returned text, not tool calls
+                            let retry_text = retry_resp.content.unwrap_or_default();
+                            let retry_cleaned = clean_response(&retry_text);
+                            let text = if retry_cleaned.trim().is_empty() {
+                                extract_think_content(&retry_text)
+                                    .or_else(|| extract_think_content(&content))
+                                    .unwrap_or_else(|| "I'm not sure how to respond to that.".to_string())
+                            } else {
+                                retry_cleaned
+                            };
+                            Ok(RespondOutput {
+                                result: RespondResult::Text(text),
+                                usage: retry_usage,
+                                finish_reason: retry_resp.finish_reason,
+                                metadata: ResponseMetadata {
+                                    anomaly: Some(ResponseAnomaly::ThinkOnlyToolCompletion),
+                                },
+                                provider_metadata: std::collections::HashMap::new(),
+                            })
+                        }
+                        Err(e) => {
+                            tracing::warn!("Retry after think-only response failed: {e}");
+                            let think = extract_think_content(&content)
+                                .unwrap_or_else(|| "I'm not sure how to respond to that.".to_string());
+                            Ok(RespondOutput {
+                                result: RespondResult::Text(think),
+                                usage,
+                                finish_reason: response.finish_reason,
+                                metadata: ResponseMetadata {
+                                    anomaly: Some(ResponseAnomaly::ThinkOnlyToolCompletion),
+                                },
+                                provider_metadata: resp_provider_metadata.clone(),
+                            })
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        "LLM response was empty after cleaning (original len={}), using fallback",
+                        content.len()
+                    );
+                    Ok(RespondOutput {
+                        result: RespondResult::Text("I'm not sure how to respond to that.".to_string()),
+                        usage,
+                        finish_reason: response.finish_reason,
+                        metadata: ResponseMetadata {
+                            anomaly: Some(ResponseAnomaly::EmptyToolCompletion),
+                        },
+                        provider_metadata: resp_provider_metadata.clone(),
+                    })
                 }
             } else {
-                ResponseMetadata::default()
-            };
-            let final_text = if metadata.anomaly.is_some() {
-                "I'm not sure how to respond to that.".to_string()
-            } else {
-                cleaned
-            };
-            Ok(RespondOutput {
-                result: RespondResult::Text(final_text),
-                usage,
-                finish_reason: response.finish_reason,
-                metadata,
-            })
+                Ok(RespondOutput {
+                    result: RespondResult::Text(cleaned),
+                    usage,
+                    finish_reason: response.finish_reason,
+                    metadata: ResponseMetadata::default(),
+                    provider_metadata: resp_provider_metadata,
+                })
+            }
         } else {
             // No tools, use simple completion
             let mut request = CompletionRequest::new(messages)
@@ -838,21 +959,44 @@ Respond in JSON format:
             let response = self.llm.complete(request).await?;
             let pre_truncated = truncate_at_tool_tags(&response.content);
             let cleaned = clean_response(&pre_truncated);
-            let metadata = if cleaned.trim().is_empty() {
-                tracing::warn!(
-                    "LLM response was empty after cleaning (original len={}), using fallback",
-                    response.content.len()
-                );
-                ResponseMetadata {
-                    anomaly: Some(ResponseAnomaly::EmptyTextResponse),
+            let (final_text, metadata) = if cleaned.trim().is_empty() {
+                let is_claude = self
+                    .model_name
+                    .as_deref()
+                    .is_some_and(|m| m.starts_with("claude"));
+                if is_claude {
+                    if let Some(think_content) = extract_think_content(&response.content) {
+                        tracing::info!(
+                            "Recovered think-tag content for Claude model (original len={})",
+                            response.content.len()
+                        );
+                        (think_content, ResponseMetadata::default())
+                    } else {
+                        tracing::warn!(
+                            "LLM response was empty after cleaning (original len={}), using fallback",
+                            response.content.len()
+                        );
+                        (
+                            "I'm not sure how to respond to that.".to_string(),
+                            ResponseMetadata {
+                                anomaly: Some(ResponseAnomaly::EmptyTextResponse),
+                            },
+                        )
+                    }
+                } else {
+                    tracing::warn!(
+                        "LLM response was empty after cleaning (original len={}), using fallback",
+                        response.content.len()
+                    );
+                    (
+                        "I'm not sure how to respond to that.".to_string(),
+                        ResponseMetadata {
+                            anomaly: Some(ResponseAnomaly::EmptyTextResponse),
+                        },
+                    )
                 }
             } else {
-                ResponseMetadata::default()
-            };
-            let final_text = if metadata.anomaly.is_some() {
-                "I'm not sure how to respond to that.".to_string()
-            } else {
-                cleaned
+                (cleaned, ResponseMetadata::default())
             };
             Ok(RespondOutput {
                 result: RespondResult::Text(final_text),
@@ -864,6 +1008,7 @@ Respond in JSON format:
                 },
                 finish_reason: response.finish_reason,
                 metadata,
+                provider_metadata: std::collections::HashMap::new(),
             })
         }
     }
@@ -1772,6 +1917,45 @@ fn closing_tag_for(open_pattern: &str) -> Option<String> {
         Some(format!("</{name}>"))
     } else {
         None
+    }
+}
+
+/// Extract the text content inside `<think>` tags without stripping it.
+///
+/// Used as a fallback when the Copilot API wraps Claude responses entirely in
+/// think tags, leaving no visible output after normal cleaning. Returns `None`
+/// if no think tags are found or the extracted content is empty.
+fn extract_think_content(text: &str) -> Option<String> {
+    let mut result = String::new();
+    let mut remaining = text;
+    while let Some(open_start) = remaining.find("<think>") {
+        let content_start = open_start + "<think>".len();
+        let after_open = &remaining[content_start..];
+        if let Some(close_pos) = after_open.find("</think>") {
+            let inner = after_open[..close_pos].trim();
+            if !inner.is_empty() {
+                if !result.is_empty() {
+                    result.push('\n');
+                }
+                result.push_str(inner);
+            }
+            remaining = &after_open[close_pos + "</think>".len()..];
+        } else {
+            // Unclosed tag — take everything after <think>
+            let inner = after_open.trim();
+            if !inner.is_empty() {
+                if !result.is_empty() {
+                    result.push('\n');
+                }
+                result.push_str(inner);
+            }
+            break;
+        }
+    }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
     }
 }
 
@@ -3271,6 +3455,7 @@ That's my plan."#;
                     finish_reason: FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    provider_metadata: std::collections::HashMap::new(),
                 })
             }
         }
@@ -3620,6 +3805,7 @@ That's my plan."#;
                 finish_reason: self.finish_reason,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                provider_metadata: std::collections::HashMap::new(),
             })
         }
     }

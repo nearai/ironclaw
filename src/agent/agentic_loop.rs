@@ -256,11 +256,27 @@ pub async fn run_agentic_loop(
                 consecutive_tool_intent_nudges = 0;
                 truncation_count = 0;
 
+                // Capture provider metadata before output is consumed.
+                let pm = output.provider_metadata;
+
                 if let Some(outcome) = delegate
                     .execute_tool_calls(tool_calls, content, reason_ctx)
                     .await?
                 {
                     return Ok(outcome);
+                }
+
+                // Attach provider metadata (e.g. Copilot reasoning_opaque) to
+                // the assistant message that execute_tool_calls just pushed so
+                // it round-trips on the next LLM call.
+                if !pm.is_empty()
+                    && let Some(last_asst) = reason_ctx
+                        .messages
+                        .iter_mut()
+                        .rev()
+                        .find(|m| m.role == crate::llm::Role::Assistant)
+                {
+                    last_asst.provider_metadata = pm;
                 }
             }
         }
@@ -312,6 +328,7 @@ mod tests {
             usage: zero_usage(),
             finish_reason: FinishReason::Stop,
             metadata: ResponseMetadata::default(),
+            provider_metadata: std::collections::HashMap::new(),
         }
     }
 
@@ -324,6 +341,7 @@ mod tests {
             usage: zero_usage(),
             finish_reason: FinishReason::ToolUse,
             metadata: ResponseMetadata::default(),
+            provider_metadata: std::collections::HashMap::new(),
         }
     }
 
@@ -550,6 +568,7 @@ mod tests {
                     metadata: ResponseMetadata {
                         anomaly: Some(ResponseAnomaly::EmptyToolCompletion),
                     },
+                    provider_metadata: std::collections::HashMap::new(),
                 })
             }
 
@@ -757,6 +776,7 @@ mod tests {
             usage: zero_usage(),
             finish_reason: FinishReason::Length, // response was truncated
             metadata: ResponseMetadata::default(),
+            provider_metadata: std::collections::HashMap::new(),
         };
         let delegate = MockDelegate::new(vec![truncated_output, text_output("Summarized it.")]);
         let reasoning = stub_reasoning();
@@ -806,6 +826,7 @@ mod tests {
             usage: zero_usage(),
             finish_reason: FinishReason::Length,
             metadata: ResponseMetadata::default(),
+            provider_metadata: std::collections::HashMap::new(),
         };
         // Three truncated responses, then a text response
         let delegate = MockDelegate::new(vec![

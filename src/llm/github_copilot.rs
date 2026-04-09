@@ -129,12 +129,28 @@ impl GithubCopilotProvider {
             .client
             .post(&url)
             .bearer_auth(token.expose_secret())
-            .header("Content-Type", "application/json");
+            .header("Content-Type", "application/json")
+            .header("Openai-Intent", "conversation-edits")
+            .header("x-initiator", "user");
 
         // Inject Copilot identity headers
         for (key, value) in &self.extra_headers {
             request = request.header(key.as_str(), value.as_str());
         }
+
+        // Claude models require the anthropic-beta header for structured
+        // reasoning fields (reasoning_text/reasoning_opaque) instead of
+        // raw <think> tags in content.
+        let is_claude = self.model.to_lowercase().contains("claude");
+        if is_claude {
+            request =
+                request.header("anthropic-beta", "interleaved-thinking-2025-05-14");
+        }
+        tracing::debug!(
+            model = %self.model,
+            is_claude = is_claude,
+            "Copilot: sending request"
+        );
 
         let response = request.json(body).send().await.map_err(|e| {
             tracing::warn!(error = %e, "Copilot: HTTP request failed");
@@ -193,6 +209,12 @@ impl GithubCopilotProvider {
             reason: format!("Failed to read response body: {e}"),
         })?;
 
+        tracing::trace!(
+            body_len = response_text.len(),
+            body_preview = %crate::agent::truncate_for_preview(&response_text, 1024),
+            "Copilot: raw response body"
+        );
+
         serde_json::from_str(&response_text).map_err(|e| {
             let truncated = crate::agent::truncate_for_preview(&response_text, 512);
             tracing::warn!(
@@ -226,18 +248,15 @@ impl LlmProvider for GithubCopilotProvider {
         };
 
         let response: OpenAiResponse = self.send_request(&request).await?;
-        let choice =
-            response
-                .choices
-                .into_iter()
-                .next()
-                .ok_or_else(|| LlmError::EmptyResponse {
-                    provider: "github_copilot".to_string(),
-                })?;
+        if response.choices.is_empty() {
+            return Err(LlmError::EmptyResponse {
+                provider: "github_copilot".to_string(),
+            });
+        }
 
-        let (content, _tool_calls) = extract_choice_content(&choice);
+        let (content, _tool_calls, _provider_metadata) = merge_choices(&response.choices);
 
-        let finish_reason = match choice.finish_reason.as_deref() {
+        let finish_reason = match response.choices[0].finish_reason.as_deref() {
             Some("stop") => FinishReason::Stop,
             Some("length") => FinishReason::Length,
             Some("tool_calls") => FinishReason::ToolUse,
@@ -303,28 +322,25 @@ impl LlmProvider for GithubCopilotProvider {
         };
 
         let response: OpenAiResponse = self.send_request(&request).await?;
-        let choice =
-            response
-                .choices
-                .into_iter()
-                .next()
-                .ok_or_else(|| LlmError::EmptyResponse {
-                    provider: "github_copilot".to_string(),
-                })?;
+        if response.choices.is_empty() {
+            return Err(LlmError::EmptyResponse {
+                provider: "github_copilot".to_string(),
+            });
+        }
 
-        let (content, tool_calls) = extract_choice_content(&choice);
+        let (content, tool_calls, provider_metadata) = merge_choices(&response.choices);
 
-        let finish_reason = match choice.finish_reason.as_deref() {
-            Some("stop") => FinishReason::Stop,
-            Some("length") => FinishReason::Length,
-            Some("tool_calls") => FinishReason::ToolUse,
-            Some("content_filter") => FinishReason::ContentFilter,
-            _ => {
-                if !tool_calls.is_empty() {
-                    FinishReason::ToolUse
-                } else {
-                    FinishReason::Unknown
-                }
+        // Determine finish_reason from all choices — prefer tool_calls > stop
+        let finish_reason = if !tool_calls.is_empty() {
+            FinishReason::ToolUse
+        } else {
+            // Use the first choice's finish_reason as fallback
+            match response.choices[0].finish_reason.as_deref() {
+                Some("stop") => FinishReason::Stop,
+                Some("length") => FinishReason::Length,
+                Some("tool_calls") => FinishReason::ToolUse,
+                Some("content_filter") => FinishReason::ContentFilter,
+                _ => FinishReason::Unknown,
             }
         };
 
@@ -344,6 +360,7 @@ impl LlmProvider for GithubCopilotProvider {
                 .unwrap_or(0),
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            provider_metadata,
         })
     }
 
@@ -405,6 +422,13 @@ struct OpenAiMessage {
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
+    /// Copilot: reasoning text for multi-turn Claude conversations.
+    /// Only sent when `reasoning_opaque` is also present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_text: Option<String>,
+    /// Copilot: opaque reasoning blob for multi-turn continuity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_opaque: Option<String>,
 }
 
 /// OpenAI content can be a plain string or an array of parts (for multimodal).
@@ -477,6 +501,12 @@ struct OpenAiResponseMessage {
     content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<OpenAiResponseToolCall>>,
+    /// Copilot-specific: structured reasoning text from Claude models.
+    #[serde(default)]
+    reasoning_text: Option<String>,
+    /// Copilot-specific: opaque blob for multi-turn reasoning continuity.
+    #[serde(default)]
+    reasoning_opaque: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -510,6 +540,8 @@ fn convert_messages(messages: Vec<ChatMessage>) -> Vec<OpenAiMessage> {
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
+                reasoning_text: None,
+                reasoning_opaque: None,
             },
             Role::User => {
                 let content = if msg.content_parts.is_empty() {
@@ -539,6 +571,8 @@ fn convert_messages(messages: Vec<ChatMessage>) -> Vec<OpenAiMessage> {
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
+                    reasoning_text: None,
+                    reasoning_opaque: None,
                 }
             }
             Role::Assistant => {
@@ -560,12 +594,30 @@ fn convert_messages(messages: Vec<ChatMessage>) -> Vec<OpenAiMessage> {
                 } else {
                     Some(OpenAiContent::Text(msg.content))
                 };
+
+                // Round-trip reasoning fields from provider_metadata.
+                // Per Copilot API: only send reasoning_text when
+                // reasoning_opaque is also present.
+                let reasoning_opaque = msg
+                    .provider_metadata
+                    .get("reasoning_opaque")
+                    .cloned();
+                let reasoning_text = if reasoning_opaque.is_some() {
+                    msg.provider_metadata
+                        .get("reasoning_text")
+                        .cloned()
+                } else {
+                    None
+                };
+
                 OpenAiMessage {
                     role: "assistant".to_string(),
                     content,
                     tool_calls,
                     tool_call_id: None,
                     name: None,
+                    reasoning_text,
+                    reasoning_opaque,
                 }
             }
             Role::Tool => OpenAiMessage {
@@ -574,33 +626,99 @@ fn convert_messages(messages: Vec<ChatMessage>) -> Vec<OpenAiMessage> {
                 tool_calls: None,
                 tool_call_id: msg.tool_call_id,
                 name: msg.name,
+                reasoning_text: None,
+                reasoning_opaque: None,
             },
         })
         .collect()
 }
 
-/// Extract text and tool calls from an OpenAI response choice.
-fn extract_choice_content(choice: &OpenAiChoice) -> (Option<String>, Vec<ToolCall>) {
-    let content = choice.message.content.clone();
-    let tool_calls = choice
-        .message
-        .tool_calls
-        .as_ref()
-        .map(|calls| {
-            calls
-                .iter()
-                .map(|tc| ToolCall {
+/// Merge content, tool calls, and provider metadata from ALL response choices.
+///
+/// The Copilot API (especially for Claude models) sometimes splits responses
+/// across multiple choices: one with text/thinking content, another with tool
+/// calls. This function merges them all into a single result.
+///
+/// When the Copilot API returns `reasoning_text`/`reasoning_opaque` (Claude models),
+/// these are surfaced in the returned metadata map so they can be stored on
+/// `ChatMessage::provider_metadata` for round-tripping on subsequent turns.
+fn merge_choices(
+    choices: &[OpenAiChoice],
+) -> (Option<String>, Vec<ToolCall>, std::collections::HashMap<String, String>) {
+    let mut merged_content: Option<String> = None;
+    let mut merged_tool_calls: Vec<ToolCall> = Vec::new();
+    let mut provider_metadata = std::collections::HashMap::new();
+    // Track the best finish_reason across choices (tool_calls > stop > others)
+    let mut saw_tool_calls_finish = false;
+
+    for (idx, choice) in choices.iter().enumerate() {
+        // Merge content: concatenate non-empty content from all choices
+        if let Some(ref c) = choice.message.content
+            && !c.is_empty()
+        {
+            match &mut merged_content {
+                Some(existing) => {
+                    existing.push('\n');
+                    existing.push_str(c);
+                }
+                None => {
+                    merged_content = Some(c.clone());
+                }
+            }
+        }
+
+        // Merge tool calls from all choices
+        if let Some(ref calls) = choice.message.tool_calls {
+            let reasoning_for_tools = choice.message.reasoning_text.clone();
+            for tc in calls {
+                merged_tool_calls.push(ToolCall {
                     id: tc.id.clone(),
                     name: tc.function.name.clone(),
                     arguments: serde_json::from_str(&tc.function.arguments)
                         .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
-                    reasoning: None,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+                    reasoning: reasoning_for_tools.clone(),
+                });
+            }
+        }
 
-    (content, tool_calls)
+        // Capture provider metadata from any choice that has it
+        if let Some(ref rt) = choice.message.reasoning_text
+            && !rt.is_empty()
+        {
+            tracing::debug!(
+                reasoning_text_len = rt.len(),
+                choice_idx = idx,
+                "Copilot: received reasoning_text from model"
+            );
+            provider_metadata.insert("reasoning_text".to_string(), rt.clone());
+        }
+        if let Some(ref ro) = choice.message.reasoning_opaque
+            && !ro.is_empty()
+        {
+            tracing::debug!(
+                reasoning_opaque_len = ro.len(),
+                choice_idx = idx,
+                "Copilot: received reasoning_opaque from model"
+            );
+            provider_metadata.insert("reasoning_opaque".to_string(), ro.clone());
+        }
+
+        if choice.finish_reason.as_deref() == Some("tool_calls") {
+            saw_tool_calls_finish = true;
+        }
+    }
+
+    if choices.len() > 1 {
+        tracing::debug!(
+            num_choices = choices.len(),
+            merged_content_len = merged_content.as_ref().map(|c| c.len()).unwrap_or(0),
+            merged_tool_calls = merged_tool_calls.len(),
+            saw_tool_calls_finish,
+            "Copilot: merged multiple response choices"
+        );
+    }
+
+    (merged_content, merged_tool_calls, provider_metadata)
 }
 
 #[cfg(test)]
@@ -642,22 +760,24 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_choice_text_only() {
-        let choice = OpenAiChoice {
+    fn test_merge_choices_text_only() {
+        let choices = vec![OpenAiChoice {
             message: OpenAiResponseMessage {
                 content: Some("Hello!".to_string()),
                 tool_calls: None,
+                reasoning_text: None,
+                reasoning_opaque: None,
             },
             finish_reason: Some("stop".to_string()),
-        };
-        let (content, tool_calls) = extract_choice_content(&choice);
+        }];
+        let (content, tool_calls, _provider_metadata) = merge_choices(&choices);
         assert_eq!(content, Some("Hello!".to_string()));
         assert!(tool_calls.is_empty());
     }
 
     #[test]
-    fn test_extract_choice_with_tool_calls() {
-        let choice = OpenAiChoice {
+    fn test_merge_choices_with_tool_calls() {
+        let choices = vec![OpenAiChoice {
             message: OpenAiResponseMessage {
                 content: Some("Let me search.".to_string()),
                 tool_calls: Some(vec![OpenAiResponseToolCall {
@@ -667,13 +787,51 @@ mod tests {
                         arguments: r#"{"q":"test"}"#.to_string(),
                     },
                 }]),
+                reasoning_text: None,
+                reasoning_opaque: None,
             },
             finish_reason: Some("tool_calls".to_string()),
-        };
-        let (content, tool_calls) = extract_choice_content(&choice);
+        }];
+        let (content, tool_calls, _provider_metadata) = merge_choices(&choices);
         assert_eq!(content, Some("Let me search.".to_string()));
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].name, "search");
         assert_eq!(tool_calls[0].arguments["q"], "test");
+    }
+
+    #[test]
+    fn test_merge_choices_multi_choice_copilot_style() {
+        // Copilot API returns text/thinking in one choice, tool calls in another
+        let choices = vec![
+            OpenAiChoice {
+                message: OpenAiResponseMessage {
+                    content: Some("On it, spinning up a sandbox.".to_string()),
+                    tool_calls: None,
+                    reasoning_text: None,
+                    reasoning_opaque: None,
+                },
+                finish_reason: Some("tool_calls".to_string()),
+            },
+            OpenAiChoice {
+                message: OpenAiResponseMessage {
+                    content: None,
+                    tool_calls: Some(vec![OpenAiResponseToolCall {
+                        id: "call_abc".to_string(),
+                        function: OpenAiResponseFunction {
+                            name: "create_job".to_string(),
+                            arguments: r#"{"task":"hello world"}"#.to_string(),
+                        },
+                    }]),
+                    reasoning_text: None,
+                    reasoning_opaque: None,
+                },
+                finish_reason: Some("tool_calls".to_string()),
+            },
+        ];
+        let (content, tool_calls, _provider_metadata) = merge_choices(&choices);
+        assert_eq!(content, Some("On it, spinning up a sandbox.".to_string()));
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].name, "create_job");
+        assert_eq!(tool_calls[0].id, "call_abc");
     }
 }

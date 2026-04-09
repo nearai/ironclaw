@@ -58,6 +58,13 @@ pub struct ChatMessage {
     /// to appear on the assistant message preceding tool result messages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// Opaque provider-specific metadata to round-trip across turns.
+    ///
+    /// For the GitHub Copilot provider this carries `reasoning_opaque` (and
+    /// optionally `reasoning_text`) so multi-turn Claude reasoning chains
+    /// remain intact.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub provider_metadata: std::collections::HashMap<String, String>,
 }
 
 impl ChatMessage {
@@ -70,6 +77,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            provider_metadata: std::collections::HashMap::new(),
         }
     }
 
@@ -82,6 +90,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            provider_metadata: std::collections::HashMap::new(),
         }
     }
 
@@ -96,6 +105,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            provider_metadata: std::collections::HashMap::new(),
         }
     }
 
@@ -108,6 +118,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            provider_metadata: std::collections::HashMap::new(),
         }
     }
 
@@ -127,6 +138,7 @@ impl ChatMessage {
             } else {
                 Some(tool_calls)
             },
+            provider_metadata: std::collections::HashMap::new(),
         }
     }
 
@@ -143,6 +155,7 @@ impl ChatMessage {
             tool_call_id: Some(tool_call_id.into()),
             name: Some(name.into()),
             tool_calls: None,
+            provider_metadata: std::collections::HashMap::new(),
         }
     }
 }
@@ -348,6 +361,12 @@ pub struct ToolCompletionResponse {
     pub cache_read_input_tokens: u32,
     /// Tokens written to the provider's server-side prompt cache (Anthropic).
     pub cache_creation_input_tokens: u32,
+    /// Opaque provider-specific metadata from the response.
+    ///
+    /// The Copilot provider populates this with `reasoning_opaque` (and
+    /// `reasoning_text`) so callers can round-trip them on subsequent turns.
+    #[allow(dead_code)]
+    pub provider_metadata: std::collections::HashMap<String, String>,
 }
 
 /// Metadata about a model returned by the provider's API.

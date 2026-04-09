@@ -249,6 +249,7 @@ pub fn convert_messages(messages: &[OpenAiMessage]) -> Result<Vec<ChatMessage>, 
                     tool_call_id: None,
                     name: m.name.clone(),
                     tool_calls: None,
+                    provider_metadata: std::collections::HashMap::new(),
                 }),
             }
         })

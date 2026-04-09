@@ -554,6 +554,7 @@ impl LlmProvider for TraceLlm {
                 finish_reason: FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                provider_metadata: std::collections::HashMap::new(),
             }),
             TraceResponse::ToolCalls {
                 tool_calls,
@@ -577,6 +578,7 @@ impl LlmProvider for TraceLlm {
                     finish_reason: FinishReason::ToolUse,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    provider_metadata: std::collections::HashMap::new(),
                 })
             }
             TraceResponse::UserInput { .. } => Err(LlmError::RequestFailed {

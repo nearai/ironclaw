@@ -322,6 +322,7 @@ impl LlmProvider for OpenAiCodexProvider {
             finish_reason,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            provider_metadata: std::collections::HashMap::new(),
         })
     }
 

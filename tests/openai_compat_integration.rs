@@ -101,6 +101,7 @@ impl LlmProvider for MockLlmProvider {
                 finish_reason: FinishReason::ToolUse,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                provider_metadata: std::collections::HashMap::new(),
             })
         } else {
             Ok(ToolCompletionResponse {
@@ -111,6 +112,7 @@ impl LlmProvider for MockLlmProvider {
                 finish_reason: FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                provider_metadata: std::collections::HashMap::new(),
             })
         }
     }
@@ -166,6 +168,7 @@ impl LlmProvider for FixedModelProvider {
             finish_reason: FinishReason::Stop,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            provider_metadata: std::collections::HashMap::new(),
         })
     }
 
