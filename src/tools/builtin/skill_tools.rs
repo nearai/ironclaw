@@ -106,11 +106,9 @@ where
             continue;
         }
 
-        if attempted >= MAX_CHAIN_DEPS {
-            report.skipped.push(dep_name);
-            continue;
-        }
-
+        // Check whether the dep was satisfied by an earlier iteration (or
+        // another concurrent install) BEFORE applying the cap, so already-
+        // installed deps don't count toward `skipped_dependencies`.
         {
             let guard = registry
                 .read()
@@ -118,6 +116,11 @@ where
             if guard.has(&dep_name) {
                 continue;
             }
+        }
+
+        if attempted >= MAX_CHAIN_DEPS {
+            report.skipped.push(dep_name);
+            continue;
         }
 
         attempted += 1;
@@ -135,23 +138,55 @@ where
                 {
                     Ok((name, skill)) => {
                         let nested_required = skill.manifest.requires.skills.clone();
-                        let mut guard = registry.write().map_err(|e| {
-                            ToolError::ExecutionFailed(format!("Lock poisoned: {}", e))
-                        })?;
-                        if guard.has(&name) {
-                            continue;
+                        // Take the write lock in a tightly scoped block so the
+                        // (non-Send) RwLockWriteGuard is dropped before any
+                        // subsequent `.await`.
+                        enum CommitOutcome {
+                            Installed,
+                            Duplicate,
+                            Failed(String),
                         }
-                        match guard.commit_install(&name, skill) {
-                            Ok(()) => {
+                        let outcome: CommitOutcome = {
+                            let mut guard = registry.write().map_err(|e| {
+                                ToolError::ExecutionFailed(format!("Lock poisoned: {}", e))
+                            })?;
+                            if guard.has(&name) {
+                                CommitOutcome::Duplicate
+                            } else {
+                                match guard.commit_install(&name, skill) {
+                                    Ok(()) => CommitOutcome::Installed,
+                                    Err(e) => CommitOutcome::Failed(e.to_string()),
+                                }
+                            }
+                        };
+                        match outcome {
+                            CommitOutcome::Installed => {
                                 report.installed.push(name);
-                                drop(guard);
                                 for nested_dep in nested_required {
                                     if queued_or_seen.insert(nested_dep.clone()) {
                                         queue.push_back(nested_dep);
                                     }
                                 }
                             }
-                            Err(e) => report.failed.push(format!("{}: {}", dep_name, e)),
+                            CommitOutcome::Duplicate => {
+                                // Another concurrent install committed first.
+                                // Clean up the on-disk skill dir we just wrote
+                                // so it doesn't become an orphan that
+                                // drift-monitors will flag later.
+                                let orphan_dir = user_dir.join(&name);
+                                if let Err(cleanup_err) =
+                                    tokio::fs::remove_dir_all(&orphan_dir).await
+                                {
+                                    tracing::debug!(
+                                        "chain install: failed to clean up orphan skill dir {}: {}",
+                                        orphan_dir.display(),
+                                        cleanup_err
+                                    );
+                                }
+                            }
+                            CommitOutcome::Failed(e) => {
+                                report.failed.push(format!("{}: {}", dep_name, e))
+                            }
                         }
                     }
                     Err(e) => report.failed.push(format!("{}: {}", dep_name, e)),

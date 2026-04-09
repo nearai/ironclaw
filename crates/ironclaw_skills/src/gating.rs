@@ -12,9 +12,6 @@ pub struct GatingResult {
     pub passed: bool,
     /// Descriptions of failed requirements.
     pub failures: Vec<String>,
-    /// Descriptions of missing optional dependencies (e.g., companion skills).
-    /// These do not prevent loading but should be surfaced to the user.
-    pub warnings: Vec<String>,
 }
 
 /// Async wrapper around [`check_requirements_sync`] that offloads blocking
@@ -36,7 +33,6 @@ pub async fn check_requirements(requirements: &GatingRequirements) -> GatingResu
             GatingResult {
                 passed: false,
                 failures: vec![message],
-                warnings: Vec::new(),
             }
         })
 }
@@ -74,13 +70,11 @@ pub fn check_requirements_sync(requirements: &GatingRequirements) -> GatingResul
 
     // Companion skill dependencies (`requirements.skills`) are intentionally
     // not checked here — the gating module has no access to the skill
-    // registry. Missing-skill warnings are produced by the registry layer
-    // at load time, where the set of installed skills is known.
+    // registry. They are advisory metadata only.
 
     GatingResult {
         passed: failures.is_empty(),
         failures,
-        warnings: Vec::new(),
     }
 }
 
@@ -177,9 +171,9 @@ mod tests {
 
     #[test]
     fn test_skill_dependencies_are_ignored_by_gating() {
-        // Companion skill dependencies are not checked by gating — the
-        // registry layer handles missing-skill warnings. Gating should
-        // pass with no warnings even when `skills` is populated.
+        // Companion skill dependencies are advisory metadata only — gating
+        // does not check them. Gating should pass even when `skills` is
+        // populated.
         let req = GatingRequirements {
             skills: vec![
                 "commitment-triage".to_string(),
@@ -190,6 +184,5 @@ mod tests {
         let result = check_requirements_sync(&req);
         assert!(result.passed);
         assert!(result.failures.is_empty());
-        assert!(result.warnings.is_empty());
     }
 }

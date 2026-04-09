@@ -793,10 +793,13 @@ fn scan_preview_for_errors(preview: &str) -> Option<String> {
 ///
 /// Live tests use an isolated temp libSQL database, so the real ironclaw DB's
 /// encrypted secrets are invisible to the test provider chain. This helper
-/// opens the user's real libSQL DB (read-only for our purposes), resolves the
-/// master key from the OS keychain, decrypts known LLM API-key secrets, and
-/// exports them as env vars. `build_provider_chain` then picks them up via
-/// each provider's env-var fallback, skipping interactive auth.
+/// opens the user's real libSQL DB at `~/.ironclaw/ironclaw.db` (libsql does
+/// not expose a read-only open mode here, so the handle is technically
+/// writable, but this code path only ever calls `get_decrypted` and never
+/// writes), resolves the master key from the OS keychain, decrypts known
+/// LLM API-key secrets, and exports them as env vars. `build_provider_chain`
+/// then picks them up via each provider's env-var fallback, skipping
+/// interactive auth.
 ///
 /// This function is best-effort: any failure (no DB, locked keychain, secret
 /// missing) is logged and ignored so the provider can fall back to whatever

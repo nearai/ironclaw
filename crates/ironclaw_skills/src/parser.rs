@@ -133,6 +133,12 @@ fn parse_skill_md_impl(content: &str, validate_name: bool) -> Result<ParsedSkill
     let mut manifest: SkillManifest =
         serde_yml::from_str(yaml_str).map_err(|e| SkillParseError::InvalidYaml(e.to_string()))?;
 
+    // Detect the legacy `metadata.openclaw.requires` shape and warn loudly.
+    // The new flat `requires:` field replaces it; serde silently drops the
+    // legacy nested keys, so without this warning a skill author can think
+    // gating works while it's completely inert.
+    warn_on_legacy_requires(yaml_str, &manifest.name);
+
     // Validate skill name
     if validate_name && !validate_skill_name(&manifest.name) {
         return Err(SkillParseError::InvalidName {
@@ -162,6 +168,34 @@ fn parse_skill_md_impl(content: &str, validate_name: bool) -> Result<ParsedSkill
         manifest,
         prompt_content,
     })
+}
+
+/// Detect the legacy `metadata.openclaw.requires` SKILL.md frontmatter shape.
+/// Returns true when the legacy shape is present.
+///
+/// Serde silently drops these nested fields when deserializing into
+/// `SkillManifest`, so without this check a skill author can think their
+/// gating/dependency requirements are honored when they are completely inert.
+pub(crate) fn has_legacy_metadata_openclaw_requires(yaml_str: &str) -> bool {
+    let raw: serde_yml::Value = match serde_yml::from_str(yaml_str) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    raw.get("metadata")
+        .and_then(|m| m.get("openclaw"))
+        .and_then(|o| o.get("requires"))
+        .is_some()
+}
+
+fn warn_on_legacy_requires(yaml_str: &str, skill_name: &str) {
+    if has_legacy_metadata_openclaw_requires(yaml_str) {
+        tracing::warn!(
+            "Skill '{}' uses the legacy `metadata.openclaw.requires` frontmatter shape, which is ignored. \
+             Move the requirements to a top-level `requires:` block (with `bins`, `env`, `config`, `skills`) \
+             so gating and dependency declarations take effect.",
+            skill_name
+        );
+    }
 }
 
 /// Find the position of a closing `---` delimiter on its own line.
@@ -304,5 +338,36 @@ Legacy prompt.
         assert!(result.manifest.requires.bins.is_empty());
         assert!(result.manifest.requires.env.is_empty());
         assert!(result.manifest.requires.skills.is_empty());
+    }
+
+    #[test]
+    fn test_legacy_metadata_openclaw_requires_is_detected() {
+        // Regression test for PR #1736 review: ensure the parser detects the
+        // legacy `metadata.openclaw.requires` shape so it can warn the author
+        // (rather than silently dropping the gating/dep config via serde).
+        let legacy_yaml = r#"
+name: legacy-requires
+metadata:
+  openclaw:
+    requires:
+      bins: ["docker"]
+"#;
+        assert!(has_legacy_metadata_openclaw_requires(legacy_yaml));
+
+        // Modern flat shape should not trip the detection.
+        let modern_yaml = r#"
+name: modern-requires
+requires:
+  bins: ["docker"]
+"#;
+        assert!(!has_legacy_metadata_openclaw_requires(modern_yaml));
+
+        // A `metadata` block without `openclaw.requires` should also not trip.
+        let unrelated_metadata = r#"
+name: other-metadata
+metadata:
+  author: alice
+"#;
+        assert!(!has_legacy_metadata_openclaw_requires(unrelated_metadata));
     }
 }

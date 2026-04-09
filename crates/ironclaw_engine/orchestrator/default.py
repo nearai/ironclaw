@@ -667,12 +667,6 @@ def run_loop(context, goal, actions, state, config):
             # NOTE: consecutive_nudges is NOT reset here (V1 semantics).
             # Only non-intent text responses reset the counter.
             calls = response.get("calls", [])
-            append_message(
-                working_messages,
-                "Assistant",
-                response.get("content", "") or "",
-                action_calls=calls,
-            )
 
             # Handle FINAL emitted as a structured tool call. FINAL is a
             # CodeAct sentinel for completion — when the LLM tries to call
@@ -687,6 +681,17 @@ def run_loop(context, goal, actions, state, config):
                     final_call = c
                 else:
                     executable_calls.append(c)
+
+            # Append the assistant message with only the executable calls.
+            # FINAL is filtered out of `action_calls` so the message history
+            # does not record a FINAL action with no matching ActionResult,
+            # which would confuse context replay on resume.
+            append_message(
+                working_messages,
+                "Assistant",
+                response.get("content", "") or "",
+                action_calls=executable_calls,
+            )
 
             # Execute all tool calls in parallel via the batch host function.
             # Rust handles preflight (lease/policy), parallel execution via
@@ -767,15 +772,31 @@ def run_loop(context, goal, actions, state, config):
                     }
 
             if final_call is not None:
-                params = final_call.get("params", {}) or {}
-                answer = (
-                    params.get("answer")
-                    or params.get("result")
-                    or params.get("content")
-                    or params.get("text")
-                    or response.get("content", "")
-                    or ""
-                )
+                raw_params = final_call.get("params", {})
+                # Some LLMs pass FINAL with the answer as a positional string
+                # argument instead of a named param dict. Handle that case so
+                # the answer is not silently dropped.
+                if isinstance(raw_params, str):
+                    answer = raw_params
+                else:
+                    params = raw_params or {}
+                    answer = (
+                        params.get("answer")
+                        or params.get("result")
+                        or params.get("value")
+                        or params.get("content")
+                        or params.get("text")
+                    )
+                    if not answer:
+                        # Fall back to the assistant's content text. This may
+                        # contain the model's full explanation rather than the
+                        # intended terse answer — emit a trace event so the
+                        # ambiguity is visible.
+                        answer = response.get("content", "") or ""
+                        __emit_event__(
+                            "final_fallback",
+                            reason="no recognizable answer param on FINAL",
+                        )
                 __transition_to__("completed", "FINAL via tool_calls")
                 return complete_result(state, "completed", str(answer))
 
