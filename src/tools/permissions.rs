@@ -107,6 +107,15 @@ pub const ADMIN_TOOL_POLICY_KEY: &str = "admin_tool_policy";
 /// Maximum serialized size of the admin tool policy JSON payload.
 pub const ADMIN_TOOL_POLICY_MAX_BYTES: usize = 32 * 1024;
 
+/// Maximum number of entries in `disabled_tools`.
+pub const ADMIN_TOOL_POLICY_MAX_GLOBAL_ENTRIES: usize = 1_000;
+
+/// Maximum number of per-user override keys in `user_disabled_tools`.
+pub const ADMIN_TOOL_POLICY_MAX_USER_KEYS: usize = 1_000;
+
+/// Maximum number of disabled tools per user in `user_disabled_tools`.
+pub const ADMIN_TOOL_POLICY_MAX_PER_USER_ENTRIES: usize = 1_000;
+
 /// Maximum length of a tool name stored in the admin tool policy.
 pub const ADMIN_TOOL_NAME_MAX_LEN: usize = 128;
 
@@ -182,6 +191,22 @@ pub fn is_valid_admin_policy_user_key(user_id: &str) -> bool {
 
 /// Validate the full admin tool policy payload before persisting it.
 pub fn validate_admin_tool_policy(policy: &AdminToolPolicy) -> Result<(), String> {
+    if policy.disabled_tools.len() > ADMIN_TOOL_POLICY_MAX_GLOBAL_ENTRIES {
+        return Err(format!(
+            "disabled_tools has {} entries, maximum is {}",
+            policy.disabled_tools.len(),
+            ADMIN_TOOL_POLICY_MAX_GLOBAL_ENTRIES,
+        ));
+    }
+
+    if policy.user_disabled_tools.len() > ADMIN_TOOL_POLICY_MAX_USER_KEYS {
+        return Err(format!(
+            "user_disabled_tools has {} user keys, maximum is {}",
+            policy.user_disabled_tools.len(),
+            ADMIN_TOOL_POLICY_MAX_USER_KEYS,
+        ));
+    }
+
     for name in &policy.disabled_tools {
         if !is_valid_admin_tool_name(name) {
             return Err(format!("Invalid tool name: '{name}'"));
@@ -191,6 +216,14 @@ pub fn validate_admin_tool_policy(policy: &AdminToolPolicy) -> Result<(), String
     for (user_id, tools) in &policy.user_disabled_tools {
         if !is_valid_admin_policy_user_key(user_id) {
             return Err(format!("Invalid user_id: '{user_id}'"));
+        }
+
+        if tools.len() > ADMIN_TOOL_POLICY_MAX_PER_USER_ENTRIES {
+            return Err(format!(
+                "user '{user_id}' has {} disabled tools, maximum is {}",
+                tools.len(),
+                ADMIN_TOOL_POLICY_MAX_PER_USER_ENTRIES,
+            ));
         }
 
         for name in tools {

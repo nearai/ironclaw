@@ -68,7 +68,6 @@ pub async fn users_create_handler(
     }
 
     let user_id = Uuid::new_v4().to_string();
-    debug_assert_ne!(user_id, ADMIN_SETTINGS_USER_ID);
     if user_id == ADMIN_SETTINGS_USER_ID {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,

@@ -3,6 +3,11 @@
 //! Allows an admin to define which tools are disabled for all non-admin users
 //! or for specific users. The policy is stored in the settings table under the
 //! well-known `__admin__` scope.
+//!
+//! dispatch-exempt: These endpoints access `state.store` directly (not through
+//! the agentic tool pipeline) because they are admin-only infrastructure
+//! operations gated behind `AdminUser` auth, consistent with the other admin
+//! handlers in this module (users, secrets, tokens).
 
 use std::sync::Arc;
 
@@ -38,10 +43,12 @@ pub async fn tool_policy_get_handler(
         .get_setting(ADMIN_SETTINGS_USER_ID, ADMIN_TOOL_POLICY_KEY)
         .await
     {
-        Ok(Some(value)) => parse_admin_tool_policy(value, "http_get").unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "Returning default admin tool policy after parse failure");
-            AdminToolPolicy::default()
-        }),
+        Ok(Some(value)) => parse_admin_tool_policy(value, "http_get").map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Stored admin tool policy is corrupt: {e}"),
+            )
+        })?,
         Ok(None) => AdminToolPolicy::default(),
         Err(e) => {
             return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
