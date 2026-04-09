@@ -51,8 +51,8 @@ use crate::channels::web::handlers::llm::{
     llm_list_models_handler, llm_providers_handler, llm_test_connection_handler,
 };
 use crate::channels::web::handlers::memory::{
-    memory_list_handler, memory_read_handler, memory_search_handler, memory_tree_handler,
-    memory_write_handler,
+    memory_cards_handler, memory_list_handler, memory_read_handler, memory_search_handler,
+    memory_tree_handler, memory_write_handler,
 };
 use crate::channels::web::handlers::routines::{
     routines_delete_handler, routines_detail_handler, routines_list_handler,
@@ -558,6 +558,7 @@ pub async fn start_server(
         .route("/api/memory/read", get(memory_read_handler))
         .route("/api/memory/write", post(memory_write_handler))
         .route("/api/memory/search", post(memory_search_handler))
+        .route("/api/memory/cards", get(memory_cards_handler))
         // Jobs
         .route("/api/jobs", get(jobs_list_handler))
         .route("/api/jobs/summary", get(jobs_summary_handler))

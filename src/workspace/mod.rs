@@ -44,6 +44,7 @@ mod chunker;
 mod document;
 mod embedding_cache;
 mod embeddings;
+pub mod card_metadata;
 pub mod hygiene;
 pub mod layer;
 pub mod privacy;

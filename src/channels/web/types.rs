@@ -234,6 +234,33 @@ pub struct SearchHit {
     pub path: String,
     pub content: String,
     pub score: f64,
+    /// Card metadata fields (populated when available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub card_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub card_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub card_tags: Option<Vec<String>>,
+    /// Content excerpt around the search match (when match is in body, not summary).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_excerpt: Option<String>,
+}
+
+// --- Memory Cards ---
+
+#[derive(Debug, Serialize)]
+pub struct MemoryCardsResponse {
+    pub cards: Vec<CardEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CardEntry {
+    /// Internal document path (used for reading full content, not displayed in UI).
+    pub path: String,
+    pub title: String,
+    pub summary: String,
+    pub tags: Vec<String>,
+    pub updated_at: String,
 }
 
 // --- Jobs ---
