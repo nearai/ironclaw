@@ -20,8 +20,10 @@ use ironclaw_engine::{
 };
 
 use crate::bridge::auth_manager::{AuthCheckResult, AuthManager};
+use crate::bridge::router::synthetic_action_call_id;
 use crate::context::JobContext;
 use crate::hooks::{HookEvent, HookOutcome, HookRegistry};
+use crate::tools::permissions::{PermissionState, effective_permission};
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::{ApprovalRequirement, ToolRegistry};
 use ironclaw_safety::SafetyLayer;
@@ -46,6 +48,13 @@ pub struct EffectBridgeAdapter {
     mission_manager: RwLock<Option<Arc<ironclaw_engine::MissionManager>>>,
     /// Centralized auth manager for pre-flight credential checks.
     auth_manager: RwLock<Option<Arc<AuthManager>>>,
+    /// Optional HTTP interceptor for trace recording / replay. When set, every
+    /// tool call dispatched through this adapter gets it stamped onto its
+    /// `JobContext`, so the built-in `http`/`web_fetch`/etc. tools route their
+    /// outbound requests through the interceptor. Without this, engine v2 tool
+    /// calls bypass the recorder entirely — recorded traces end up with zero
+    /// `http_exchanges` and replay can't substitute responses.
+    http_interceptor: RwLock<Option<Arc<dyn crate::llm::recording::HttpInterceptor>>>,
 }
 
 impl EffectBridgeAdapter {
@@ -64,7 +73,18 @@ impl EffectBridgeAdapter {
             rate_limiter: RateLimiter::new(),
             mission_manager: RwLock::new(None),
             auth_manager: RwLock::new(None),
+            http_interceptor: RwLock::new(None),
         }
+    }
+
+    /// Install the trace HTTP interceptor on this adapter. Every JobContext
+    /// the adapter constructs for tool dispatch will carry a clone of this
+    /// interceptor, so http-aware tools will record/replay through it.
+    pub async fn set_http_interceptor(
+        &self,
+        interceptor: Arc<dyn crate::llm::recording::HttpInterceptor>,
+    ) {
+        *self.http_interceptor.write().await = Some(interceptor);
     }
 
     /// Mirror the v1 dispatcher behavior for globally auto-approved tools.
@@ -157,13 +177,36 @@ impl EffectBridgeAdapter {
         }
     }
 
-    /// Handle mission_* function calls. Returns None if not a mission call.
+    /// Handle mission_* and routine_* function calls. routine_* are aliases:
+    /// the routine schema is translated into mission_* parameters and
+    /// dispatched through the same mission manager. Returns None if the
+    /// action name is neither a mission nor routine call.
     async fn handle_mission_call(
         &self,
         action_name: &str,
         params: &serde_json::Value,
         context: &ThreadExecutionContext,
     ) -> Option<Result<ActionResult, EngineError>> {
+        // Translate routine_* aliases to mission_* before dispatching. The
+        // routine schema is richer (kind/schedule/pattern/source/event_type/
+        // filters/execution/delivery/advanced) than mission_*; the translator
+        // collapses it into mission fields plus a follow-up update for the
+        // non-execution guardrails (cooldown, max_concurrent, dedup_window,
+        // notify_user, context_paths, description).
+        let routine_alias = routine_to_mission_alias(action_name, params);
+        let (effective_action, effective_params, post_create_update) =
+            if let Some(alias) = routine_alias.as_ref() {
+                (
+                    alias.mission_action,
+                    std::borrow::Cow::Borrowed(&alias.mission_params),
+                    alias.post_create_update.clone(),
+                )
+            } else {
+                (action_name, std::borrow::Cow::Borrowed(params), None)
+            };
+        let action_name = effective_action;
+        let params = effective_params.as_ref();
+
         let mgr = self.mission_manager.read().await;
         let mgr = mgr.as_ref()?;
 
@@ -214,7 +257,49 @@ impl EffectBridgeAdapter {
                     .await
                 {
                     Ok(id) => {
-                        Ok(serde_json::json!({"mission_id": id.to_string(), "status": "created"}))
+                        // Routine alias post-create update: apply the
+                        // non-execution routine fields (description,
+                        // context_paths, notify_user, cooldown, max_concurrent,
+                        // dedup_window) via update_mission. Mission_create's
+                        // signature doesn't take these directly.
+                        //
+                        // We don't have a `delete_mission` to roll back on
+                        // partial failure, so the next-best contract is to
+                        // surface the failure clearly: status flips to
+                        // `created_with_warnings` and the warning text goes
+                        // into a `warnings` array. The LLM (or downstream
+                        // code) sees the partial-success signal and can
+                        // call `update_mission` directly to retry, instead
+                        // of believing the routine was fully configured.
+                        let mut warnings: Vec<String> = Vec::new();
+                        if let Some(updates) = post_create_update.clone()
+                            && let Err(e) = mgr.update_mission(id, &context.user_id, updates).await
+                        {
+                            tracing::warn!(
+                                mission_id = %id,
+                                error = %e,
+                                "routine alias: failed to apply post-create updates"
+                            );
+                            warnings.push(format!(
+                                "post-create update failed: {e}. The mission was created but \
+                                 the cadence/context_paths/cooldown/notify fields from the \
+                                 routine schema were NOT applied. Call update_mission to retry."
+                            ));
+                        }
+                        if warnings.is_empty() {
+                            Ok(serde_json::json!({
+                                "mission_id": id.to_string(),
+                                "name": name,
+                                "status": "created"
+                            }))
+                        } else {
+                            Ok(serde_json::json!({
+                                "mission_id": id.to_string(),
+                                "name": name,
+                                "status": "created_with_warnings",
+                                "warnings": warnings
+                            }))
+                        }
                     }
                     Err(e) => Err(e),
                 }
@@ -369,16 +454,26 @@ impl EffectBridgeAdapter {
             _ => return None, // Not a mission/routine call
         };
 
+        // Use the live call_id from the executing thread context, falling
+        // back to a synthetic id when none is available. An empty `call_id`
+        // on an `ActionResult` corrupts the engine's call/result pairing
+        // and causes the assistant to drop the response (see the doc on
+        // `crate::bridge::router::resolved_call_id_for_pending_action`).
+        let call_id = context
+            .current_call_id
+            .clone()
+            .unwrap_or_else(|| synthetic_action_call_id(action_name));
+
         Some(match result {
             Ok(output) => Ok(ActionResult {
-                call_id: String::new(),
+                call_id: call_id.clone(),
                 action_name: action_name.to_string(),
                 output,
                 is_error: false,
                 duration: std::time::Duration::ZERO,
             }),
             Err(e) => Ok(ActionResult {
-                call_id: String::new(),
+                call_id,
                 action_name: action_name.to_string(),
                 output: serde_json::json!({"error": e.to_string()}),
                 is_error: true,
@@ -422,7 +517,7 @@ impl EffectBridgeAdapter {
         let start = Instant::now();
 
         let resolved_name = self.tools.resolve_name(action_name).await;
-        let lookup_name = resolved_name.as_deref().unwrap_or(action_name);
+        let mut lookup_name = resolved_name.as_deref().unwrap_or(action_name).to_string();
 
         // ── Per-step call limit (prevent amplification loops) ──
         const MAX_CALLS_PER_STEP: u32 = 50;
@@ -448,58 +543,92 @@ impl EffectBridgeAdapter {
             });
         }
 
-        if let Some((_, tool)) = self.tools.get_resolved(action_name).await {
-            // Defense-in-depth: reject V1Only tools even if they somehow got
-            // a lease (e.g. via a stale capability registry or hallucination).
-            if tool.engine_compatibility() == crate::tools::EngineCompatibility::V1Only {
-                return Err(EngineError::Effect {
-                    reason: format!(
-                        "Tool '{}' is v1-only and not available in engine v2. \
-                         Use the equivalent v2 workflow (e.g. mission_create instead of \
-                         routine_create) or the appropriate slash command.",
-                        action_name
-                    ),
-                });
-            }
+        if is_v1_only_tool(&lookup_name) {
+            return Err(EngineError::Effect {
+                reason: format!(
+                    "Tool '{}' is not available in engine v2. \
+                     Tell the user to use the slash command instead (e.g. /routine, /job).",
+                    action_name
+                ),
+            });
+        }
 
-            let requirement = tool.requires_approval(&parameters);
-            match requirement {
-                ApprovalRequirement::Always => {
-                    return Err(EngineError::LeaseDenied {
-                        reason: format!(
-                            "Tool '{}' requires explicit approval for this operation. \
-                             This action cannot be auto-approved.",
-                            action_name
-                        ),
+        if is_v1_auth_tool(&lookup_name) {
+            return Err(EngineError::Effect {
+                reason: format!(
+                    "Tool '{}' is not available in engine v2. \
+                     Authentication is handled automatically by the kernel.",
+                    action_name
+                ),
+            });
+        }
+
+        if resolved_name.is_none()
+            && let Some(auth_mgr) = self.auth_manager.read().await.as_ref()
+            && let Some(latent_execution) = auth_mgr
+                .execute_latent_extension_action(action_name, &context.user_id)
+                .await
+        {
+            match latent_execution {
+                Ok(crate::bridge::auth_manager::LatentActionExecution::RetryRegisteredAction {
+                    resolved_action,
+                }) => {
+                    lookup_name = resolved_action;
+                }
+                Ok(crate::bridge::auth_manager::LatentActionExecution::ProviderReady {
+                    provider_extension,
+                    available_actions,
+                }) => {
+                    return Ok(ActionResult {
+                        call_id: context
+                            .current_call_id
+                            .clone()
+                            .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                        action_name: action_name.to_string(),
+                        output: serde_json::json!({
+                            "provider_extension": provider_extension,
+                            "available_actions": available_actions,
+                            "message": "Provider is ready. Use one of the available provider actions next."
+                        }),
+                        is_error: false,
+                        duration: start.elapsed(),
                     });
                 }
-                ApprovalRequirement::UnlessAutoApproved => {
-                    let is_approved = self.auto_approve_tools
-                        || self.auto_approved.read().await.contains(lookup_name);
-                    if !is_approved && !approval_already_granted {
-                        // Credential presence alone does NOT bypass approval.
-                        // Credentials indicate the call *can* be authenticated,
-                        // not that the user has authorized this specific request.
-                        return Err(Self::gate_paused(
-                            "approval",
-                            action_name,
-                            context.current_call_id.as_deref(),
-                            parameters,
-                            ironclaw_engine::ResumeKind::Approval { allow_always: true },
-                            None,
-                        ));
-                    }
+                Ok(crate::bridge::auth_manager::LatentActionExecution::NeedsAuth {
+                    credential_name,
+                    instructions,
+                    auth_url,
+                }) => {
+                    return Err(Self::gate_paused(
+                        "authentication",
+                        action_name,
+                        context.current_call_id.as_deref(),
+                        parameters,
+                        ironclaw_engine::ResumeKind::Authentication {
+                            credential_name,
+                            instructions,
+                            auth_url,
+                        },
+                        None,
+                    ));
                 }
-                ApprovalRequirement::Never => {}
+                Ok(crate::bridge::auth_manager::LatentActionExecution::NeedsSetup { message }) => {
+                    return Err(EngineError::Effect { reason: message });
+                }
+                Err(err) => {
+                    return Err(EngineError::Effect {
+                        reason: err.to_string(),
+                    });
+                }
             }
         }
 
-        if let Some(tool) = self.tools.get(lookup_name).await
+        if let Some(tool) = self.tools.get(&lookup_name).await
             && let Some(rl_config) = tool.rate_limit_config()
         {
             let result = self
                 .rate_limiter
-                .check_and_record(&context.user_id, lookup_name, &rl_config)
+                .check_and_record(&context.user_id, &lookup_name, &rl_config)
                 .await;
             if let crate::tools::rate_limiter::RateLimitResult::Limited { retry_after, .. } = result
             {
@@ -529,7 +658,7 @@ impl EffectBridgeAdapter {
             && let Some(registry) = self.tools.credential_registry()
         {
             match auth_mgr
-                .check_action_auth(lookup_name, &parameters, &context.user_id, registry)
+                .check_action_auth(&lookup_name, &parameters, &context.user_id, registry)
                 .await
             {
                 AuthCheckResult::MissingCredentials(missing) => {
@@ -562,7 +691,113 @@ impl EffectBridgeAdapter {
             }
         }
 
-        let redacted_params = if let Some(tool) = self.tools.get(lookup_name).await {
+        if let Some(provider_extension) = self.tools.provider_extension_for_tool(&lookup_name).await
+            && let Some(auth_mgr) = self.auth_manager.read().await.as_ref()
+        {
+            use crate::bridge::auth_manager::ToolReadiness;
+            match auth_mgr
+                .check_tool_readiness(&provider_extension, &context.user_id)
+                .await
+            {
+                ToolReadiness::NeedsAuth {
+                    credential_name,
+                    instructions,
+                    auth_url,
+                } => {
+                    debug!(
+                        provider_extension = %provider_extension,
+                        action = %lookup_name,
+                        credential = %credential_name,
+                        "Pre-flight extension readiness: authentication required"
+                    );
+                    return Err(Self::gate_paused(
+                        "authentication",
+                        action_name,
+                        context.current_call_id.as_deref(),
+                        parameters,
+                        ironclaw_engine::ResumeKind::Authentication {
+                            credential_name,
+                            instructions: instructions.unwrap_or_else(|| {
+                                format!("Authenticate '{}' to continue.", provider_extension)
+                            }),
+                            auth_url,
+                        },
+                        None,
+                    ));
+                }
+                ToolReadiness::NeedsSetup { message } => {
+                    return Err(EngineError::Effect {
+                        reason: format!(
+                            "Extension '{}' is not ready: {}",
+                            provider_extension, message
+                        ),
+                    });
+                }
+                ToolReadiness::Ready => {}
+            }
+        }
+
+        if let Some((_, tool)) = self.tools.get_resolved(&lookup_name).await {
+            let user_permission = if let Some(db) = self.tools.database() {
+                match db.get_all_settings(&context.user_id).await {
+                    Ok(db_map) => {
+                        let settings = crate::settings::Settings::from_db_map(&db_map);
+                        Some(effective_permission(
+                            &lookup_name,
+                            &settings.tool_permissions,
+                        ))
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            user_id = %context.user_id,
+                            tool = %lookup_name,
+                            error = %error,
+                            "Failed to load tool permission overrides for engine v2"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            if matches!(user_permission, Some(PermissionState::Disabled)) {
+                return Err(EngineError::LeaseDenied {
+                    reason: format!("Tool '{}' is disabled for this user.", action_name),
+                });
+            }
+
+            let requirement = tool.requires_approval(&parameters);
+            match requirement {
+                ApprovalRequirement::Always => {
+                    return Err(EngineError::LeaseDenied {
+                        reason: format!(
+                            "Tool '{}' requires explicit approval for this operation. \
+                             This action cannot be auto-approved.",
+                            action_name
+                        ),
+                    });
+                }
+                ApprovalRequirement::UnlessAutoApproved => {
+                    let is_approved = self.auto_approve_tools
+                        || self.auto_approved.read().await.contains(&lookup_name)
+                        || matches!(user_permission, Some(PermissionState::AlwaysAllow));
+                    if !is_approved && !approval_already_granted {
+                        return Err(Self::gate_paused(
+                            "approval",
+                            action_name,
+                            context.current_call_id.as_deref(),
+                            parameters,
+                            ironclaw_engine::ResumeKind::Approval { allow_always: true },
+                            None,
+                        ));
+                    }
+                }
+                ApprovalRequirement::Never => {}
+            }
+        }
+
+        let redacted_params = if let Some(tool) = self.tools.get(&lookup_name).await {
             crate::tools::redact_params(&parameters, tool.sensitive_params())
         } else {
             parameters.clone()
@@ -592,16 +827,22 @@ impl EffectBridgeAdapter {
             Ok(HookOutcome::Continue { .. }) => {}
         }
 
-        let job_ctx = JobContext::with_user(
+        let mut job_ctx = JobContext::with_user(
             &context.user_id,
             "engine_v2",
             format!("Thread {}", context.thread_id),
         );
+        // Stamp the trace HTTP interceptor onto the per-call JobContext so
+        // tools that respect it (http, web_fetch, etc.) route their outbound
+        // requests through the recorder/replayer.
+        if let Some(ref interceptor) = *self.http_interceptor.read().await {
+            job_ctx.http_interceptor = Some(Arc::clone(interceptor));
+        }
 
         let result = crate::tools::execute::execute_tool_with_safety(
             &self.tools,
             &self.safety,
-            lookup_name,
+            &lookup_name,
             parameters.clone(),
             &job_ctx,
         )
@@ -611,8 +852,8 @@ impl EffectBridgeAdapter {
 
         match result {
             Ok(output) => {
-                let sanitized = self.safety.sanitize_tool_output(lookup_name, &output);
-                let wrapped = self.safety.wrap_for_llm(lookup_name, &sanitized.content);
+                let sanitized = self.safety.sanitize_tool_output(&lookup_name, &output);
+                let wrapped = self.safety.wrap_for_llm(&lookup_name, &sanitized.content);
                 let output_value = serde_json::from_str::<serde_json::Value>(&output)
                     .unwrap_or(serde_json::Value::String(wrapped));
 
@@ -678,7 +919,10 @@ impl EffectBridgeAdapter {
                                 );
                             }
                             return Ok(ActionResult {
-                                call_id: String::new(),
+                                call_id: context
+                                    .current_call_id
+                                    .clone()
+                                    .unwrap_or_else(|| synthetic_action_call_id(action_name)),
                                 action_name: action_name.to_string(),
                                 output: enriched,
                                 is_error: false,
@@ -695,7 +939,10 @@ impl EffectBridgeAdapter {
                 }
 
                 Ok(ActionResult {
-                    call_id: String::new(),
+                    call_id: context
+                        .current_call_id
+                        .clone()
+                        .unwrap_or_else(|| synthetic_action_call_id(action_name)),
                     action_name: action_name.to_string(),
                     output: output_value,
                     is_error: false,
@@ -706,6 +953,7 @@ impl EffectBridgeAdapter {
                 let error_msg = format!("Tool '{}' failed: {}", lookup_name, e);
                 if error_msg.contains("authentication_required")
                     && let Some(cred_name) = extract_credential_name(&error_msg)
+                    && self.is_known_credential(&cred_name)
                 {
                     tracing::warn!(
                         credential = %cred_name,
@@ -727,16 +975,37 @@ impl EffectBridgeAdapter {
                     ));
                 }
 
-                let sanitized = self.safety.sanitize_tool_output(lookup_name, &error_msg);
+                let sanitized = self.safety.sanitize_tool_output(&lookup_name, &error_msg);
 
                 Ok(ActionResult {
-                    call_id: String::new(),
+                    call_id: context
+                        .current_call_id
+                        .clone()
+                        .unwrap_or_else(|| synthetic_action_call_id(action_name)),
                     action_name: action_name.to_string(),
                     output: serde_json::json!({"error": sanitized.content}),
                     is_error: true,
                     duration,
                 })
             }
+        }
+    }
+
+    /// Defense against credential-name injection: a tool can fabricate an
+    /// `authentication_required` error containing an attacker-chosen
+    /// `credential_name` to phish the user. We only honor the gate request
+    /// when the name corresponds to a credential the host has actually
+    /// registered.
+    ///
+    /// **Fail-closed:** when no credential registry is wired, we reject the
+    /// gate request rather than honoring it. A test/embed harness without a
+    /// registry has no source of truth for credential names, and trusting
+    /// the tool's claim in that mode would let any tool prompt the user for
+    /// any credential name.
+    fn is_known_credential(&self, credential_name: &str) -> bool {
+        match self.tools.credential_registry() {
+            Some(registry) => registry.has_secret(credential_name),
+            None => false,
         }
     }
 }
@@ -760,24 +1029,54 @@ impl EffectExecutor for EffectBridgeAdapter {
     ) -> Result<Vec<ActionDef>, EngineError> {
         let tool_defs = self.tools.tool_definitions().await;
 
-        let actions = tool_defs
-            .into_iter()
-            .map(|td| {
-                let python_name = td.name.replace('-', "_");
-                ActionDef {
-                    name: python_name,
-                    description: td.description,
-                    parameters_schema: td.parameters,
-                    effects: vec![],
-                    // Approval is enforced at execute-time inside this adapter so
-                    // thread-scoped one-shot approvals and auth-aware bypasses can
-                    // participate. Advertising approval here would cause the engine
-                    // policy preflight to interrupt before the adapter can apply
-                    // those runtime checks.
-                    requires_approval: false,
+        // Build action defs, excluding v1-only tools and v1 auth tools
+        let mut actions = Vec::with_capacity(tool_defs.len());
+        for td in tool_defs {
+            // Skip tools that can't work in engine v2
+            if is_v1_only_tool(&td.name) {
+                continue;
+            }
+
+            // Skip v1 auth management tools — auth is kernel-level in v2
+            if is_v1_auth_tool(&td.name) {
+                continue;
+            }
+
+            let python_name = td.name.replace('-', "_");
+
+            actions.push(ActionDef {
+                name: python_name,
+                description: td.description,
+                parameters_schema: td.parameters,
+                effects: vec![],
+                // Approval is enforced at execute-time inside this adapter so
+                // thread-scoped one-shot approvals and auth-aware bypasses can
+                // participate. Advertising approval here would cause the engine
+                // policy preflight to interrupt before the adapter can apply
+                // those runtime checks.
+                requires_approval: false,
+            });
+        }
+
+        if let Some(auth_mgr) = self.auth_manager.read().await.as_ref() {
+            for latent in auth_mgr.latent_extension_actions().await {
+                if actions
+                    .iter()
+                    .any(|action| action.name == latent.action_name)
+                {
+                    continue;
                 }
-            })
-            .collect();
+                actions.push(ActionDef {
+                    name: latent.action_name,
+                    description: latent.description,
+                    parameters_schema: latent.parameters_schema,
+                    effects: vec![],
+                    requires_approval: false,
+                });
+            }
+        }
+
+        actions.sort_by(|a, b| a.name.cmp(&b.name));
 
         Ok(actions)
     }
@@ -810,6 +1109,7 @@ fn parse_cadence(
                 .unwrap_or("")
                 .trim()
                 .to_string(),
+            channel: None,
         }
     } else if trimmed.starts_with("webhook:") {
         MissionCadence::Webhook {
@@ -823,6 +1123,366 @@ fn parse_cadence(
     } else {
         // Default to manual if unrecognized
         MissionCadence::Manual
+    }
+}
+
+/// Translation result from a `routine_*` call into mission_* dispatch.
+///
+/// `mission_action` is the canonical mission_* name to dispatch.
+/// `mission_params` is the rewritten parameter object that mission_* expects.
+/// `post_create_update`, when present and the action is `mission_create`, is
+/// applied via `MissionManager::update_mission` immediately after creation
+/// to set fields that mission_create's signature does not accept directly
+/// (description, context_paths, notify_user, cooldown_secs, max_concurrent,
+/// dedup_window_secs).
+#[derive(Debug, Clone)]
+struct RoutineMissionAlias {
+    mission_action: &'static str,
+    mission_params: serde_json::Value,
+    post_create_update: Option<ironclaw_engine::MissionUpdate>,
+}
+
+/// Translate a `routine_*` action call into mission_* parameters. Returns
+/// `None` if `action_name` is not a routine alias.
+fn routine_to_mission_alias(
+    action_name: &str,
+    params: &serde_json::Value,
+) -> Option<RoutineMissionAlias> {
+    match action_name {
+        "routine_create" => {
+            let name = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unnamed routine")
+                .to_string();
+            // Routines call the body field "prompt"; missions call it "goal".
+            let goal = params
+                .get("prompt")
+                .or_else(|| params.get("goal"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let description = params
+                .get("description")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+
+            // Translate the routine `request` block into a MissionCadence
+            // serialized as the cadence string parse_cadence understands. We
+            // serialize as a structured string when possible, otherwise we
+            // hand the cadence variant directly through metadata that
+            // mission_create can't read — so we instead build the cadence
+            // here and store it via the post_create_update path.
+            let cadence = parse_routine_request(params);
+            // We carry cadence + the new fields via the update path so we
+            // don't need to change mission_create's flat-args contract.
+            let mut updates = ironclaw_engine::MissionUpdate {
+                description: description.clone(),
+                ..Default::default()
+            };
+            updates.cadence = Some(cadence);
+
+            // execution.context_paths
+            if let Some(arr) = params
+                .get("execution")
+                .and_then(|e| e.get("context_paths"))
+                .and_then(|v| v.as_array())
+            {
+                updates.context_paths = Some(
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect(),
+                );
+            }
+
+            // delivery.user
+            if let Some(user) = params
+                .get("delivery")
+                .and_then(|d| d.get("user"))
+                .and_then(|v| v.as_str())
+            {
+                updates.notify_user = Some(user.to_string());
+            }
+
+            // delivery.channel — feeds notify_channels
+            let mut notify_channels: Vec<String> = Vec::new();
+            if let Some(ch) = params
+                .get("delivery")
+                .and_then(|d| d.get("channel"))
+                .and_then(|v| v.as_str())
+            {
+                notify_channels.push(ch.to_string());
+            }
+
+            // advanced.cooldown_secs (also accepts top-level cooldown_secs)
+            if let Some(secs) = params
+                .get("advanced")
+                .and_then(|a| a.get("cooldown_secs"))
+                .or_else(|| params.get("cooldown_secs"))
+                .and_then(|v| v.as_u64())
+            {
+                updates.cooldown_secs = Some(secs);
+            }
+            // guardrails.max_concurrent
+            if let Some(max) = params
+                .get("guardrails")
+                .and_then(|g| g.get("max_concurrent"))
+                .or_else(|| params.get("max_concurrent"))
+                .and_then(|v| v.as_u64())
+            {
+                updates.max_concurrent = Some(max as u32);
+            }
+            // guardrails.dedup_window_secs
+            if let Some(secs) = params
+                .get("guardrails")
+                .and_then(|g| g.get("dedup_window_secs"))
+                .or_else(|| params.get("dedup_window_secs"))
+                .and_then(|v| v.as_u64())
+            {
+                updates.dedup_window_secs = Some(secs);
+            }
+
+            // mission_create takes a `cadence` string as a flat param. We
+            // pass "manual" here as a placeholder — the real cadence is
+            // applied immediately afterward via update_mission. This keeps
+            // the mission_create signature unchanged.
+            let mut mission_params = serde_json::json!({
+                "name": name,
+                "goal": goal,
+                "cadence": "manual",
+            });
+            if !notify_channels.is_empty()
+                && let Some(obj) = mission_params.as_object_mut()
+            {
+                obj.insert(
+                    "notify_channels".to_string(),
+                    serde_json::json!(notify_channels),
+                );
+            }
+
+            Some(RoutineMissionAlias {
+                mission_action: "mission_create",
+                mission_params,
+                post_create_update: Some(updates),
+            })
+        }
+
+        "routine_list" => Some(RoutineMissionAlias {
+            mission_action: "mission_list",
+            mission_params: params.clone(),
+            post_create_update: None,
+        }),
+
+        "routine_fire" => Some(RoutineMissionAlias {
+            mission_action: "mission_fire",
+            mission_params: params.clone(),
+            post_create_update: None,
+        }),
+
+        "routine_pause" => Some(RoutineMissionAlias {
+            mission_action: "mission_pause",
+            mission_params: params.clone(),
+            post_create_update: None,
+        }),
+
+        "routine_resume" => Some(RoutineMissionAlias {
+            mission_action: "mission_resume",
+            mission_params: params.clone(),
+            post_create_update: None,
+        }),
+
+        "routine_delete" => Some(RoutineMissionAlias {
+            mission_action: "mission_delete",
+            mission_params: params.clone(),
+            post_create_update: None,
+        }),
+
+        "routine_update" => {
+            // Mission_update accepts the same flat fields the routine API
+            // already exposes (id, name, goal, cadence, notify_channels,
+            // success_criteria) plus the new ones. Translate routine
+            // execution/delivery/advanced/guardrails sub-objects into the
+            // flat mission_update keys the existing arm reads.
+            let mut translated = match params {
+                serde_json::Value::Object(map) => map.clone(),
+                _ => serde_json::Map::new(),
+            };
+            if let Some(prompt) = params.get("prompt").and_then(|v| v.as_str()) {
+                translated.insert(
+                    "goal".to_string(),
+                    serde_json::Value::String(prompt.to_string()),
+                );
+            }
+            if let Some(arr) = params
+                .get("execution")
+                .and_then(|e| e.get("context_paths"))
+                .cloned()
+            {
+                translated.insert("context_paths".to_string(), arr);
+            }
+            if let Some(user) = params.get("delivery").and_then(|d| d.get("user")).cloned() {
+                translated.insert("notify_user".to_string(), user);
+            }
+            if let Some(ch) = params
+                .get("delivery")
+                .and_then(|d| d.get("channel"))
+                .and_then(|v| v.as_str())
+            {
+                translated.insert(
+                    "notify_channels".to_string(),
+                    serde_json::json!([ch.to_string()]),
+                );
+            }
+            if let Some(secs) = params
+                .get("advanced")
+                .and_then(|a| a.get("cooldown_secs"))
+                .cloned()
+            {
+                translated.insert("cooldown_secs".to_string(), secs);
+            }
+            if let Some(secs) = params
+                .get("guardrails")
+                .and_then(|g| g.get("dedup_window_secs"))
+                .cloned()
+            {
+                translated.insert("dedup_window_secs".to_string(), secs);
+            }
+            if let Some(max) = params
+                .get("guardrails")
+                .and_then(|g| g.get("max_concurrent"))
+                .cloned()
+            {
+                translated.insert("max_concurrent".to_string(), max);
+            }
+            // Cadence: derive from the request block if present.
+            if params.get("request").is_some() {
+                let cadence = parse_routine_request(params);
+                // We can't pass a structured cadence through the
+                // mission_update arm, which only reads a "cadence" string.
+                // Encode it back into the cadence string the parser
+                // recognizes (cron expr / "event:..." / "webhook:..." /
+                // "manual"). Structured filters and channel filters that
+                // can't round-trip into a string fall back through the
+                // post-create update path on `routine_create`, but for
+                // `routine_update` we can't fully express them today —
+                // log a debug and drop the structured pieces.
+                let cadence_str = cadence_to_round_trip_string(&cadence);
+                translated.insert(
+                    "cadence".to_string(),
+                    serde_json::Value::String(cadence_str),
+                );
+            }
+
+            Some(RoutineMissionAlias {
+                mission_action: "mission_update",
+                mission_params: serde_json::Value::Object(translated),
+                post_create_update: None,
+            })
+        }
+
+        _ => None,
+    }
+}
+
+/// Parse the routine `request` sub-object into a `MissionCadence`.
+/// Falls back to `Manual` when the kind is missing or unrecognized.
+fn parse_routine_request(
+    params: &serde_json::Value,
+) -> ironclaw_engine::types::mission::MissionCadence {
+    use ironclaw_engine::types::mission::MissionCadence;
+
+    let request = params.get("request");
+    let kind = request
+        .and_then(|r| r.get("kind"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("manual");
+
+    match kind {
+        "cron" => MissionCadence::Cron {
+            expression: request
+                .and_then(|r| r.get("schedule"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("0 0 * * * *")
+                .to_string(),
+            // Validate the timezone string at the bridge boundary so an
+            // invalid value never enters the engine. An empty/invalid value
+            // is silently dropped (None) — the engine then resolves the
+            // schedule in UTC, matching the previous string-based behaviour
+            // for unknown zones.
+            timezone: request
+                .and_then(|r| r.get("timezone"))
+                .and_then(|v| v.as_str())
+                .and_then(ironclaw_common::ValidTimezone::parse),
+        },
+        "message_event" => MissionCadence::OnEvent {
+            event_pattern: request
+                .and_then(|r| r.get("pattern"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            channel: request
+                .and_then(|r| r.get("channel"))
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        },
+        "system_event" => {
+            let mut filters = std::collections::HashMap::new();
+            if let Some(map) = request
+                .and_then(|r| r.get("filters"))
+                .and_then(|v| v.as_object())
+            {
+                for (k, v) in map {
+                    filters.insert(k.clone(), v.clone());
+                }
+            }
+            MissionCadence::OnSystemEvent {
+                source: request
+                    .and_then(|r| r.get("source"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                event_type: request
+                    .and_then(|r| r.get("event_type"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                filters,
+            }
+        }
+        "webhook" => MissionCadence::Webhook {
+            path: request
+                .and_then(|r| r.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            secret: request
+                .and_then(|r| r.get("secret"))
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        },
+        _ => MissionCadence::Manual,
+    }
+}
+
+/// Encode a `MissionCadence` into a string that `parse_cadence` can round-trip.
+/// Structured features (channel filter, system event filters, webhook secret)
+/// are lossy through this path; callers that need full fidelity should use
+/// `update_mission` with a typed `MissionUpdate` instead.
+fn cadence_to_round_trip_string(
+    cadence: &ironclaw_engine::types::mission::MissionCadence,
+) -> String {
+    use ironclaw_engine::types::mission::MissionCadence;
+    match cadence {
+        MissionCadence::Cron { expression, .. } => expression.clone(),
+        MissionCadence::OnEvent { event_pattern, .. } => format!("event:{event_pattern}"),
+        MissionCadence::OnSystemEvent {
+            source, event_type, ..
+        } => {
+            format!("system_event:{source}/{event_type}")
+        }
+        MissionCadence::Webhook { path, .. } => format!("webhook:{path}"),
+        MissionCadence::Manual => "manual".to_string(),
     }
 }
 
@@ -842,6 +1502,31 @@ fn extract_credential_name(error_msg: &str) -> Option<String> {
             .map(String::from);
     }
     None
+}
+
+fn is_v1_only_tool(name: &str) -> bool {
+    // routine_* tools are surfaced in v2 too, but are intercepted by
+    // `handle_mission_call`'s routine alias path *before* this check fires —
+    // they get translated into mission_* dispatches via the existing
+    // mission manager rather than the v1 routine engine. The original v1
+    // routine tools remain registered for the v1 engine, but in v2 the
+    // alias path means the LLM-facing routine_create/list/update/etc.
+    // calls always go through missions.
+    matches!(
+        name,
+        "create_job"
+            | "create-job"
+            | "cancel_job"
+            | "cancel-job"
+            | "build_software"
+            | "build-software"
+    )
+}
+
+/// Auth management tools from v1 that are now kernel-internal in v2.
+/// The LLM should not see or call these — auth is handled automatically.
+fn is_v1_auth_tool(name: &str) -> bool {
+    matches!(name, "tool_auth" | "tool-auth")
 }
 
 #[cfg(test)]
@@ -1081,7 +1766,7 @@ mod tests {
         tools.register(Arc::new(ApprovalTestTool)).await;
 
         let adapter = EffectBridgeAdapter::new(
-            tools,
+            Arc::clone(&tools),
             Arc::new(SafetyLayer::new(&SafetyConfig {
                 max_output_length: 10_000,
                 injection_check_enabled: false,
@@ -1160,6 +1845,271 @@ mod tests {
         assert!(matches!(third, Err(EngineError::GatePaused { .. })));
     }
 
+    // ── routine→mission alias tests ────────────────────────────
+
+    #[test]
+    fn routine_create_alias_translates_cron_with_full_field_set() {
+        let params = serde_json::json!({
+            "name": "Daily PR digest",
+            "prompt": "Summarize open PRs needing review",
+            "description": "Morning developer briefing",
+            "request": {
+                "kind": "cron",
+                "schedule": "0 9 * * *",
+                "timezone": "America/New_York",
+            },
+            "execution": {
+                "context_paths": ["context/profile.json", "MEMORY.md"],
+            },
+            "delivery": {
+                "channel": "gateway",
+                "user": "alice",
+            },
+            "advanced": {
+                "cooldown_secs": 300,
+            },
+            "guardrails": {
+                "max_concurrent": 1,
+                "dedup_window_secs": 60,
+            },
+        });
+
+        let alias = routine_to_mission_alias("routine_create", &params)
+            .expect("routine_create should produce an alias");
+        assert_eq!(alias.mission_action, "mission_create");
+        assert_eq!(
+            alias.mission_params.get("name").and_then(|v| v.as_str()),
+            Some("Daily PR digest")
+        );
+        assert_eq!(
+            alias.mission_params.get("goal").and_then(|v| v.as_str()),
+            Some("Summarize open PRs needing review")
+        );
+        // mission_create receives a placeholder cadence; the real cadence is
+        // applied via the post_create_update.
+        assert_eq!(
+            alias.mission_params.get("cadence").and_then(|v| v.as_str()),
+            Some("manual")
+        );
+        assert_eq!(
+            alias
+                .mission_params
+                .get("notify_channels")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+            Some(vec!["gateway"])
+        );
+
+        let updates = alias
+            .post_create_update
+            .expect("routine_create should populate updates");
+        assert_eq!(
+            updates.description.as_deref(),
+            Some("Morning developer briefing")
+        );
+        assert_eq!(
+            updates.context_paths.as_deref(),
+            // safety: array-to-slice coercion, not a string byte slice
+            Some(&["context/profile.json".to_string(), "MEMORY.md".to_string()][..])
+        );
+        assert_eq!(updates.notify_user.as_deref(), Some("alice"));
+        assert_eq!(updates.cooldown_secs, Some(300));
+        assert_eq!(updates.max_concurrent, Some(1));
+        assert_eq!(updates.dedup_window_secs, Some(60));
+        match updates.cadence.as_ref().expect("cadence in updates") {
+            ironclaw_engine::types::mission::MissionCadence::Cron {
+                expression,
+                timezone,
+            } => {
+                assert_eq!(expression, "0 9 * * *");
+                assert_eq!(
+                    timezone.as_ref().map(|tz| tz.tz().name()),
+                    Some("America/New_York")
+                );
+            }
+            other => panic!("expected Cron cadence, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn routine_create_alias_translates_message_event_with_channel_filter() {
+        let params = serde_json::json!({
+            "name": "GitHub PR watcher",
+            "prompt": "React to PR review requests",
+            "request": {
+                "kind": "message_event",
+                "pattern": "review requested",
+                "channel": "github",
+            },
+        });
+        let alias =
+            routine_to_mission_alias("routine_create", &params).expect("alias for message_event");
+        let updates = alias.post_create_update.expect("updates");
+        match updates.cadence.as_ref().expect("cadence") {
+            ironclaw_engine::types::mission::MissionCadence::OnEvent {
+                event_pattern,
+                channel,
+            } => {
+                assert_eq!(event_pattern, "review requested");
+                assert_eq!(channel.as_deref(), Some("github"));
+            }
+            other => panic!("expected OnEvent cadence, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn routine_create_alias_translates_system_event_with_filters() {
+        let params = serde_json::json!({
+            "name": "Issue triage",
+            "prompt": "Triage opened issues",
+            "request": {
+                "kind": "system_event",
+                "source": "github",
+                "event_type": "issue.opened",
+                "filters": {
+                    "repository_name": "nearai/ironclaw",
+                    "sender_login": "ilblackdragon",
+                },
+            },
+        });
+        let alias = routine_to_mission_alias("routine_create", &params).expect("alias");
+        let updates = alias.post_create_update.expect("updates");
+        match updates.cadence.as_ref().expect("cadence") {
+            ironclaw_engine::types::mission::MissionCadence::OnSystemEvent {
+                source,
+                event_type,
+                filters,
+            } => {
+                assert_eq!(source, "github");
+                assert_eq!(event_type, "issue.opened");
+                assert_eq!(filters.len(), 2);
+                assert_eq!(
+                    filters.get("repository_name").and_then(|v| v.as_str()),
+                    Some("nearai/ironclaw")
+                );
+                assert_eq!(
+                    filters.get("sender_login").and_then(|v| v.as_str()),
+                    Some("ilblackdragon")
+                );
+            }
+            other => panic!("expected OnSystemEvent cadence, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn routine_create_alias_translates_webhook() {
+        let params = serde_json::json!({
+            "name": "GitHub webhook",
+            "prompt": "Handle inbound GitHub events",
+            "request": {
+                "kind": "webhook",
+                "path": "github",
+                "secret": "shh",
+            },
+        });
+        let alias = routine_to_mission_alias("routine_create", &params).expect("alias");
+        let updates = alias.post_create_update.expect("updates");
+        match updates.cadence.as_ref().expect("cadence") {
+            ironclaw_engine::types::mission::MissionCadence::Webhook { path, secret } => {
+                assert_eq!(path, "github");
+                assert_eq!(secret.as_deref(), Some("shh"));
+            }
+            other => panic!("expected Webhook cadence, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn routine_create_alias_defaults_to_manual_when_request_missing() {
+        let params = serde_json::json!({
+            "name": "Manual mission",
+            "prompt": "Run on demand",
+        });
+        let alias = routine_to_mission_alias("routine_create", &params).expect("alias");
+        let updates = alias.post_create_update.expect("updates");
+        match updates.cadence.as_ref().expect("cadence") {
+            ironclaw_engine::types::mission::MissionCadence::Manual => {}
+            other => panic!("expected Manual cadence, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn routine_simple_actions_alias_to_mission_counterparts() {
+        let params = serde_json::json!({"id": "00000000-0000-0000-0000-000000000000"});
+        for (routine, mission) in &[
+            ("routine_list", "mission_list"),
+            ("routine_fire", "mission_fire"),
+            ("routine_pause", "mission_pause"),
+            ("routine_resume", "mission_resume"),
+            ("routine_delete", "mission_delete"),
+        ] {
+            let alias = routine_to_mission_alias(routine, &params)
+                .unwrap_or_else(|| panic!("expected alias for {routine}"));
+            assert_eq!(alias.mission_action, *mission, "wrong target for {routine}");
+            assert!(alias.post_create_update.is_none());
+        }
+    }
+
+    #[test]
+    fn routine_update_alias_translates_nested_to_flat() {
+        let params = serde_json::json!({
+            "id": "11111111-1111-1111-1111-111111111111",
+            "prompt": "Updated goal",
+            "execution": {
+                "context_paths": ["NOTES.md"],
+            },
+            "delivery": {
+                "channel": "repl",
+                "user": "bob",
+            },
+            "advanced": {"cooldown_secs": 600},
+            "guardrails": {"dedup_window_secs": 120, "max_concurrent": 2},
+            "request": {
+                "kind": "cron",
+                "schedule": "0 12 * * *",
+            },
+        });
+        let alias = routine_to_mission_alias("routine_update", &params).expect("alias");
+        assert_eq!(alias.mission_action, "mission_update");
+        let mp = &alias.mission_params;
+        assert_eq!(
+            mp.get("goal").and_then(|v| v.as_str()),
+            Some("Updated goal")
+        );
+        assert_eq!(mp.get("notify_user").and_then(|v| v.as_str()), Some("bob"));
+        assert_eq!(
+            mp.get("notify_channels")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str()),
+            Some("repl")
+        );
+        assert_eq!(mp.get("cooldown_secs").and_then(|v| v.as_u64()), Some(600));
+        assert_eq!(
+            mp.get("dedup_window_secs").and_then(|v| v.as_u64()),
+            Some(120)
+        );
+        assert_eq!(mp.get("max_concurrent").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(
+            mp.get("context_paths")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str()),
+            Some("NOTES.md")
+        );
+        assert_eq!(
+            mp.get("cadence").and_then(|v| v.as_str()),
+            Some("0 12 * * *")
+        );
+    }
+
+    #[test]
+    fn routine_alias_returns_none_for_unrelated_action() {
+        let params = serde_json::json!({});
+        assert!(routine_to_mission_alias("http", &params).is_none());
+        assert!(routine_to_mission_alias("mission_create", &params).is_none());
+        assert!(routine_to_mission_alias("web_search", &params).is_none());
+    }
+
     // ── extract_credential_name tests ──────────────────────────
 
     #[test]
@@ -1192,6 +2142,58 @@ mod tests {
         assert_eq!(extract_credential_name(msg), None);
     }
 
+    // ── is_v1_only_tool tests ──────────────────────────────────
+
+    /// Routines are no longer classified as v1-only: in v2 they are
+    /// surfaced to the LLM and intercepted by the routine→mission alias
+    /// path in `handle_mission_call` *before* the v1-only check fires.
+    /// The original v1 routine tools remain registered for the v1 engine.
+    #[test]
+    fn routine_tools_are_not_v1_only() {
+        assert!(!is_v1_only_tool("routine_create"));
+        assert!(!is_v1_only_tool("routine_list"));
+        assert!(!is_v1_only_tool("routine_fire"));
+        assert!(!is_v1_only_tool("routine_delete"));
+        assert!(!is_v1_only_tool("routine_pause"));
+        assert!(!is_v1_only_tool("routine_resume"));
+        assert!(!is_v1_only_tool("routine_update"));
+    }
+
+    #[test]
+    fn job_and_build_tools_remain_v1_only() {
+        assert!(is_v1_only_tool("create_job"));
+        assert!(is_v1_only_tool("cancel_job"));
+        assert!(is_v1_only_tool("build_software"));
+    }
+
+    #[test]
+    fn mission_tools_are_not_v1_only() {
+        assert!(!is_v1_only_tool("mission_create"));
+        assert!(!is_v1_only_tool("mission_list"));
+        assert!(!is_v1_only_tool("mission_fire"));
+        assert!(!is_v1_only_tool("http"));
+        assert!(!is_v1_only_tool("web_search"));
+    }
+
+    // ── is_v1_auth_tool tests ─────────────────────────────────
+
+    #[test]
+    fn auth_tools_are_v1_auth() {
+        assert!(is_v1_auth_tool("tool_auth"));
+        assert!(is_v1_auth_tool("tool-auth"));
+        assert!(!is_v1_auth_tool("tool_activate"));
+        assert!(!is_v1_auth_tool("tool-activate"));
+    }
+
+    #[test]
+    fn non_auth_tools_are_not_v1_auth() {
+        assert!(!is_v1_auth_tool("tool_install"));
+        assert!(!is_v1_auth_tool("tool-install"));
+        assert!(!is_v1_auth_tool("http"));
+        assert!(!is_v1_auth_tool("tool_search"));
+        assert!(!is_v1_auth_tool("tool_list"));
+    }
+
     // ── Pre-flight auth gate integration test ─────────────────
 
     #[tokio::test]
@@ -1214,7 +2216,7 @@ mod tests {
 
         use ironclaw_safety::SafetyConfig;
         let adapter = EffectBridgeAdapter::new(
-            tools,
+            Arc::clone(&tools),
             Arc::new(SafetyLayer::new(&SafetyConfig {
                 max_output_length: 10_000,
                 injection_check_enabled: false,
@@ -1223,7 +2225,12 @@ mod tests {
         );
 
         // Set auth manager
-        let auth_mgr = Arc::new(AuthManager::new(secrets, None, None));
+        let auth_mgr = Arc::new(AuthManager::new(
+            secrets,
+            None,
+            None,
+            Some(Arc::clone(&tools)),
+        ));
         adapter.set_auth_manager(auth_mgr).await;
 
         // Verify adapter has both dependencies
@@ -1266,18 +2273,21 @@ mod tests {
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
 
-        // Approval runs before auth in the current adapter pipeline, so a
-        // missing-credential HTTP call that also needs approval pauses on the
-        // approval gate first.
+        // Auth preflight runs before the approval check in the adapter
+        // pipeline (see the order of `auth_manager.check_action_auth` vs
+        // `tool.requires_approval` in `execute_action`), so a missing-credential
+        // HTTP call surfaces an Authentication gate before any approval gate.
         match result {
             Err(EngineError::GatePaused { resume_kind, .. }) => match *resume_kind {
-                ironclaw_engine::ResumeKind::Approval { allow_always } => {
-                    assert!(allow_always);
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name, ..
+                } => {
+                    assert_eq!(credential_name, "github_token");
                 }
-                other => panic!("Expected Approval gate, got: {other:?}"),
+                other => panic!("Expected Authentication gate, got: {other:?}"),
             },
             other => {
-                panic!("Expected GatePaused for approval preflight, got: {other:?}");
+                panic!("Expected GatePaused for authentication preflight, got: {other:?}");
             }
         }
     }
@@ -1388,5 +2398,69 @@ mod tests {
             }
             other => panic!("expected auth gate pause, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn available_actions_include_latent_inactive_provider_actions() {
+        use crate::secrets::InMemorySecretsStore;
+        use crate::secrets::SecretsCrypto;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("tools")).expect("tools dir");
+        std::fs::write(
+            dir.path().join("tools").join("latent_tool.wasm"),
+            b"fake-wasm",
+        )
+        .expect("write wasm");
+        std::fs::write(
+            dir.path()
+                .join("tools")
+                .join("latent_tool.capabilities.json"),
+            r#"{"description":"latent adapter test"}"#,
+        )
+        .expect("write capabilities");
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let tools = Arc::new(ToolRegistry::new());
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tools),
+            None,
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            "test_user".to_string(),
+            None,
+            vec![],
+        ));
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        adapter
+            .set_auth_manager(Arc::new(AuthManager::new(
+                secrets,
+                None,
+                Some(ext_mgr),
+                Some(Arc::clone(&tools)),
+            )))
+            .await;
+
+        let actions = adapter.available_actions(&[]).await.expect("actions");
+        assert!(actions.iter().any(|action| action.name == "latent_tool"));
     }
 }

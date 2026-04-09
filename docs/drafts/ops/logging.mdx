@@ -1,0 +1,294 @@
+---
+title: Logging & Monitoring
+sidebarTitle: Logging
+description: RUST_LOG levels, structured logs, cost tracking, and SSE log streams
+---
+
+IronClaw uses the [tracing](https://docs.rs/tracing) crate for structured logging. Output goes to stdout/stderr and can be streamed in real time via the Web Gateway SSE endpoint.
+
+---
+
+## RUST_LOG Format
+
+Control log verbosity with the `RUST_LOG` environment variable. The format follows the `tracing_subscriber` filter syntax:
+
+```
+RUST_LOG=<crate>=<level>[,<crate2>=<level2>,...]
+```
+
+### Common Log Level Configurations
+
+| Configuration | Use Case |
+|---------------|----------|
+| `ironclaw=error` | Production: errors only |
+| `ironclaw=warn` | Production: errors and warnings |
+| `ironclaw=info` | Production: normal operational events (recommended) |
+| `ironclaw=debug` | Troubleshooting: detailed request/response flow |
+| `ironclaw=trace` | Deep debugging: all internal events including LLM token streams |
+| `ironclaw=info,tower_http=warn` | Reduce HTTP access log noise |
+| `ironclaw=debug,tower_http=debug` | Debug with HTTP request details |
+
+Set in your environment file or shell:
+
+```bash
+# In .env or /etc/ironclaw/ironclaw.env
+RUST_LOG=ironclaw=info,tower_http=warn
+
+# Or inline for a single run
+RUST_LOG=ironclaw=debug ironclaw run
+```
+
+---
+
+## Log Levels
+
+| Level | When to Use |
+|-------|-------------|
+| `error` | Unrecoverable failures: database connection lost, LLM provider unreachable, job crashed |
+| `warn` | Recoverable issues: retry attempt, rate limit hit, sandbox container restart, circuit breaker tripped |
+| `info` | Normal operations: job started/completed, routine triggered, heartbeat ran, extension activated |
+| `debug` | Request flow detail: LLM API calls, tool invocations with parameters, state transitions |
+| `trace` | Fine-grained internals: token-by-token stream chunks, SQL queries, WASM fuel consumption |
+
+---
+
+## Per-Module Filtering
+
+Target specific subsystems without flooding the output:
+
+```bash
+# Only agent and scheduler modules
+RUST_LOG=ironclaw::agent=debug,ironclaw::agent::scheduler=trace
+
+# LLM provider calls only
+RUST_LOG=ironclaw::llm=debug
+
+# Safety layer only
+RUST_LOG=ironclaw::safety=debug
+
+# Skills system only
+RUST_LOG=ironclaw::skills=debug
+
+# Sandbox and proxy
+RUST_LOG=ironclaw::sandbox=debug
+
+# Database queries
+RUST_LOG=ironclaw::db=trace
+
+# Everything + HTTP access log
+RUST_LOG=ironclaw=debug,tower_http=debug
+
+# Silence noisy dependencies
+RUST_LOG=ironclaw=info,hyper=warn,reqwest=warn,tower_http=warn
+```
+
+---
+
+## Log Output Format
+
+IronClaw emits structured logs in the following format:
+
+```
+2024-01-15T10:30:00.123456Z  INFO ironclaw::agent::worker: job started job_id="job_01j9abc" intent="summarize recent activity" session="default"
+2024-01-15T10:30:00.456789Z DEBUG ironclaw::llm::nearai_chat: sending request model="claude-3-5-sonnet-20241022" tokens=1024
+2024-01-15T10:30:02.891234Z  INFO ironclaw::agent::worker: tool call tool="memory_search" job_id="job_01j9abc"
+2024-01-15T10:30:03.234567Z  INFO ironclaw::agent::worker: job completed job_id="job_01j9abc" duration_ms=3111 tokens_used=1847
+```
+
+Fields included in log events:
+
+| Field | Description |
+|-------|-------------|
+| `timestamp` | ISO-8601 UTC timestamp |
+| `level` | Log level (ERROR/WARN/INFO/DEBUG/TRACE) |
+| `module` | Rust module path (e.g., `ironclaw::agent::worker`) |
+| `message` | Human-readable event description |
+| `job_id` | Associated job ID (when applicable) |
+| `session_id` | Conversation session (when applicable) |
+| `tool` | Tool name (for tool call events) |
+| `duration_ms` | Operation duration in milliseconds (on completion events) |
+| `tokens_used` | LLM token count (for LLM call events) |
+
+---
+
+## journalctl (systemd)
+
+When running under systemd, all output is captured by the journal:
+
+```bash
+# Follow live logs
+journalctl -u ironclaw -f
+
+# Last 200 lines
+journalctl -u ironclaw -n 200
+
+# Since a specific time
+journalctl -u ironclaw --since "2024-01-15 10:00:00"
+
+# Last hour only
+journalctl -u ironclaw --since "1 hour ago"
+
+# Last hour, error level and above
+journalctl -u ironclaw --since "1 hour ago" -p err
+
+# Filter by a specific string (grep equivalent)
+journalctl -u ironclaw -g "job_01j9abc"
+
+# Export to JSON for analysis
+journalctl -u ironclaw --since today -o json > ironclaw-today.json
+
+# Export to plain text file
+journalctl -u ironclaw --since today > ironclaw-today.log
+
+# Check disk usage of journal
+journalctl --disk-usage
+```
+
+---
+
+## LLM Cost Tracking
+
+IronClaw records every LLM API call in the `llm_calls` database table. Each record includes:
+
+| Column | Description |
+|--------|-------------|
+| `job_id` | Job that triggered the call |
+| `model` | Model name (e.g., `claude-3-5-sonnet-20241022`) |
+| `provider` | LLM backend (e.g., `nearai`, `anthropic`) |
+| `prompt_tokens` | Input tokens |
+| `completion_tokens` | Output tokens |
+| `total_tokens` | Sum of prompt + completion |
+| `cost_usd` | Estimated cost in USD (based on published rates) |
+| `latency_ms` | Time to first token in milliseconds |
+| `created_at` | Timestamp of the call |
+
+### Query via REST API
+
+```bash
+# Get cost summary
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3000/api/status | jq '.cost_summary'
+```
+
+### Query the Database Directly (libSQL)
+
+```bash
+# Connect to the libSQL database
+sqlite3 ~/.ironclaw/ironclaw.db
+
+# Total cost today
+SELECT
+  provider,
+  model,
+  SUM(total_tokens) AS tokens,
+  ROUND(SUM(cost_usd), 4) AS cost_usd
+FROM llm_calls
+WHERE date(created_at) = date('now')
+GROUP BY provider, model
+ORDER BY cost_usd DESC;
+
+# Top 10 most expensive jobs this week
+SELECT
+  job_id,
+  SUM(total_tokens) AS tokens,
+  ROUND(SUM(cost_usd), 4) AS cost_usd
+FROM llm_calls
+WHERE created_at >= datetime('now', '-7 days')
+GROUP BY job_id
+ORDER BY cost_usd DESC
+LIMIT 10;
+```
+
+### Query the Database Directly (PostgreSQL)
+
+```sql
+-- Total cost this month
+SELECT
+  provider,
+  model,
+  SUM(total_tokens) AS tokens,
+  ROUND(SUM(cost_usd)::numeric, 4) AS cost_usd
+FROM llm_calls
+WHERE created_at >= date_trunc('month', NOW())
+GROUP BY provider, model
+ORDER BY cost_usd DESC;
+```
+
+---
+
+## Live Log Streaming via Web Gateway
+
+The Web Gateway exposes a live SSE log stream at `/api/logs`. This lets you tail logs from a browser or monitoring system without SSH access.
+
+```bash
+# Stream logs with curl
+curl -N \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept: text/event-stream" \
+  http://localhost:3000/api/logs
+```
+
+Example output:
+
+```
+event: log
+data: {"level":"INFO","message":"job started","module":"ironclaw::agent::worker","job_id":"job_01j9abc","ts":"2024-01-15T10:30:00Z"}
+
+event: job_status
+data: {"job_id":"job_01j9abc","status":"completed","ts":"2024-01-15T10:30:03Z"}
+```
+
+See [WebSocket & SSE](/ops/websocket-sse) for JavaScript integration examples and the full event type reference.
+
+---
+
+## Reducing Log Noise
+
+Some dependencies are verbose at the default log level. Silence them while keeping IronClaw output at debug:
+
+```bash
+# Quiet HTTP infrastructure
+RUST_LOG=ironclaw=debug,hyper=warn,reqwest=warn,tower_http=warn,h2=warn
+
+# Quiet database layer
+RUST_LOG=ironclaw=info,ironclaw::db=warn
+
+# Maximum quiet (errors only everywhere)
+RUST_LOG=error
+
+# Recommended production setting
+RUST_LOG=ironclaw=info,tower_http=warn,hyper=warn
+```
+
+---
+
+## Disabling Specific Modules
+
+If a particular module is too noisy during an investigation, disable it completely:
+
+```bash
+# Suppress all sandbox logs
+RUST_LOG=ironclaw=debug,ironclaw::sandbox=off
+
+# Suppress all LLM call details
+RUST_LOG=ironclaw=debug,ironclaw::llm=info
+
+# Suppress routine engine tick logs
+RUST_LOG=ironclaw=info,ironclaw::agent::routine_engine=warn
+```
+
+---
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="REST API Reference" icon="code" href="/ops/api">
+    Query cost summaries and status via the REST API
+  </Card>
+  <Card title="WebSocket & SSE" icon="radio" href="/ops/websocket-sse">
+    Stream live logs to a browser or monitoring tool
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/help/troubleshooting">
+    Common error patterns and how to resolve them
+  </Card>
+</CardGroup>

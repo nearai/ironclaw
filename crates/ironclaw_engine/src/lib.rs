@@ -48,6 +48,7 @@ pub use types::thread::{
 pub use traits::effect::{EffectExecutor, ThreadExecutionContext};
 pub use traits::llm::{LlmBackend, LlmCallConfig, LlmOutput};
 pub use traits::store::Store;
+pub use traits::workspace::WorkspaceReader;
 
 // ── Re-exports: capability ────────────────────────────────────
 
@@ -71,7 +72,9 @@ pub use executor::prompt::PlatformInfo;
 pub use runtime::conversation::ConversationManager;
 pub use runtime::manager::ThreadManager;
 pub use runtime::messaging::ThreadOutcome;
-pub use runtime::mission::{MissionManager, MissionNotification, MissionUpdate};
+pub use runtime::mission::{
+    BudgetGate, FireRateLimit, MissionManager, MissionNotification, MissionUpdate,
+};
 pub use runtime::tree::ThreadTree;
 
 pub use types::conversation::{
