@@ -16,6 +16,8 @@ use crate::tools::tool::{
     ApprovalRequirement, RiskLevel, Tool, ToolDomain, ToolError, ToolOutput, require_str,
 };
 
+use super::validate_currency_code;
+
 
 const REMITTANCE_BASE: &str = "https://devneobank.timesclub.co/times/bank/remittance/agent";
 const NOTIFICATION_BASE: &str = "https://dev.timesclub.co/times/users/agent";
@@ -30,18 +32,6 @@ fn shared_client() -> Result<Client, ToolError> {
         .timeout(REQUEST_TIMEOUT)
         .build()
         .map_err(|e| ToolError::ExecutionFailed(format!("HTTP client error: {e}")))
-}
-
-/// Validate that a string is a 3-letter uppercase currency code (ISO 4217).
-fn validate_currency_code(s: &str) -> Result<String, ToolError> {
-    let upper = s.to_uppercase();
-    if upper.len() == 3 && upper.chars().all(|c| c.is_ascii_uppercase()) {
-        Ok(upper)
-    } else {
-        Err(ToolError::InvalidParameters(format!(
-            "Invalid currency code: {s}"
-        )))
-    }
 }
 
 async fn abound_credentials(

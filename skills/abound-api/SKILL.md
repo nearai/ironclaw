@@ -124,9 +124,10 @@ Credentials are injected automatically. If API calls fail with auth errors, say:
    ```
    Do not end the code step before calling FINAL — the raw result is only available in the same execution context.
 4. Present clearly — "$1,000 = ~₹93,470 at today's rate" plus the analysis verdict
-5. Confirm with user before sending
-6. Call `abound_send_wire` to execute
-7. Call `abound_create_notification` after success
+5. Present payment reasons as a `[[choice_set]]` block (use reasons from `abound_account_info`, not a hard-coded list)
+6. Confirm with user before sending
+7. Call `abound_send_wire` to execute
+8. Call `abound_create_notification` after success
 
 ### Checking rates:
 1. Call `abound_exchange_rate`
@@ -134,10 +135,8 @@ Credentials are injected automatically. If API calls fail with auth errors, say:
 3. Advise whether it's a good time
 
 ## Payment Reasons
-- Family Maintenance
-- Gift
-- Education Support
-- Medical Support
+
+When the user needs to choose a payment reason, **always** use `[[choice_set]]` — never list them as bullet points or plain text. Use the actual reasons returned by `abound_account_info`, not a hard-coded list.
 
 ## Presentation
 - Show amounts in both USD and INR: "$1,000 (~₹93,470 at today's rate)"

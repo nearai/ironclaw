@@ -388,7 +388,7 @@ impl ToolRegistry {
                 ($tool:expr) => {
                     match $tool {
                         Ok(t) => self.register_sync(Arc::new(t)),
-                        Err(e) => tracing::warn!("Failed to register tool: {e}"),
+                        Err(e) => tracing::debug!("Failed to register tool: {e}"),
                     }
                 };
             }

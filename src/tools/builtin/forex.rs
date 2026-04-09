@@ -8,13 +8,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use chrono::Datelike;
 use reqwest::Client;
 use serde_json::json;
 
 use crate::context::JobContext;
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{Tool, ToolDomain, ToolError, ToolOutput, require_str};
+
+use super::validate_currency_code;
 
 const MASSIVE_BASE: &str = "https://api.massive.com/v2/aggs/ticker";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -43,18 +44,6 @@ async fn massive_bearer(secrets: &dyn SecretsStore, user_id: &str) -> Result<Str
     Ok(secret.expose().to_owned())
 }
 
-/// Validate that a string is a 3-letter uppercase currency code (ISO 4217).
-fn validate_currency_code(s: &str) -> Result<String, ToolError> {
-    let upper = s.to_uppercase();
-    if upper.len() == 3 && upper.chars().all(|c| c.is_ascii_uppercase()) {
-        Ok(upper)
-    } else {
-        Err(ToolError::InvalidParameters(format!(
-            "Invalid currency code: {s}"
-        )))
-    }
-}
-
 /// Parse and validate a YYYY-MM-DD date string. Returns the validated string.
 fn validate_date(s: &str) -> Result<String, ToolError> {
     chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
@@ -65,42 +54,15 @@ fn validate_date(s: &str) -> Result<String, ToolError> {
 }
 
 // ---------------------------------------------------------------------------
-// Date arithmetic (pure, no std::time — mirrors the Python helpers)
+// Date helpers
 // ---------------------------------------------------------------------------
 
-fn unix_day_from_ymd(y: i32, m: i32, d: i32) -> i64 {
-    let (y2, m2) = if m <= 2 { (y - 1, m + 12) } else { (y, m) };
-    let a = y2 / 100;
-    let b = 2 - a + a / 4;
-    let jd = (365.25 * (y2 + 4716) as f64) as i64
-        + (30.6001 * (m2 + 1) as f64) as i64
-        + d as i64
-        + b as i64
-        - 1524;
-    jd - 2_440_588
-}
-
-fn format_unix_day(n: i64) -> String {
-    let z = n + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
-fn today_unix_day_from_chrono(now: &chrono::DateTime<chrono::Utc>) -> i64 {
-    let d = now.date_naive();
-    unix_day_from_ymd(d.year(), d.month() as i32, d.day() as i32)
-}
-
 fn ms_to_date_str(ms: i64) -> String {
-    format_unix_day(ms / 86_400_000)
+    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or_default();
+    epoch
+        .checked_add_signed(chrono::Duration::days(ms / 86_400_000))
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "1970-01-01".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -278,7 +240,7 @@ fn compute_cone(
     current_rate: f64,
     daily_vol: f64,
     vb: &str,
-    today_day: i64,
+    today: chrono::NaiveDate,
 ) -> (f64, Vec<serde_json::Value>) {
     const CONE_Z: f64 = 1.645;
     const HORIZON_DAYS: i64 = 3;
@@ -288,7 +250,7 @@ fn compute_cone(
 
     let mut projection = Vec::new();
     for t in 0..=HORIZON_DAYS {
-        let date_str = format_unix_day(today_day + t);
+        let date_str = (today + chrono::Duration::days(t)).format("%Y-%m-%d").to_string();
         let center = current_rate + (target_rate - current_rate) * t as f64 / HORIZON_DAYS as f64;
         let (upper, lower) = if t == 0 {
             (current_rate, current_rate)
@@ -602,9 +564,9 @@ impl Tool for AnalyzeTransferTool {
         let for_wire = params.get("for_wire").and_then(|v| v.as_bool()).unwrap_or(false);
 
         let now = chrono::Utc::now();
-        let td = today_unix_day_from_chrono(&now);
-        let start_str = format_unix_day(td - 220);
-        let end_str = now.format("%Y-%m-%d").to_string();
+        let today = now.date_naive();
+        let start_str = (today - chrono::Duration::days(220)).format("%Y-%m-%d").to_string();
+        let end_str = today.format("%Y-%m-%d").to_string();
 
         let massive_url = format!(
             "{MASSIVE_BASE}/C:USDINR/range/1/day/{start_str}/{end_str}?sort=asc&limit=5000"
@@ -671,7 +633,7 @@ impl Tool for AnalyzeTransferTool {
 
         let hr = hit_rate(vb, rb, dxy_dir);
         let current_rate = closes[closes.len() - 1];
-        let (target_rate, projection) = compute_cone(current_rate, daily_vol, vb, td);
+        let (target_rate, projection) = compute_cone(current_rate, daily_vol, vb, today);
         let recommend = if hr < 45.0 { "now" } else { "wait" };
 
         let historical: Vec<serde_json::Value> = bars[bars.len().saturating_sub(30)..]
@@ -769,7 +731,8 @@ impl Tool for ValidateTransferTargetTool {
 
     fn description(&self) -> &str {
         "Given a desired USD/INR rate, compute the probability of hitting it across \
-         6 time horizons (3d, 7d, 30d, 90d, 180d, 365d). USD/INR only."
+         6 time horizons (3d, 7d, 30d, 90d, 180d, 365d). \
+         Returns {\"message\": \"...\", \"plot\": {...}}. USD/INR only."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -797,9 +760,9 @@ impl Tool for ValidateTransferTargetTool {
             .ok_or_else(|| ToolError::InvalidParameters("target_rate must be a number".into()))?;
 
         let now = chrono::Utc::now();
-        let td = today_unix_day_from_chrono(&now);
-        let start_str = format_unix_day(td - 5);
-        let today_str = now.format("%Y-%m-%d").to_string();
+        let today = now.date_naive();
+        let start_str = (today - chrono::Duration::days(5)).format("%Y-%m-%d").to_string();
+        let today_str = today.format("%Y-%m-%d").to_string();
 
         let url = format!(
             "{MASSIVE_BASE}/C:USDINR/range/1/day/{start_str}/{today_str}?sort=asc&limit=10"
@@ -832,8 +795,11 @@ impl Tool for ValidateTransferTargetTool {
             ));
         }
 
-        // close is guaranteed > 0.0 by parse_massive_bars
-        let current_rate = bars.last().map(|b| b.close).unwrap_or(1.0);
+        // close is guaranteed > 0.0 by parse_massive_bars; is_empty() check above ensures last() is Some
+        let current_rate = bars
+            .last()
+            .ok_or_else(|| ToolError::ExternalService("Massive API returned no bars".into()))?
+            .close;
         let required_move = (target_rate_input / current_rate).ln();
 
         let mut horizons = Vec::new();
@@ -888,9 +854,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_unix_day_roundtrip() {
-        let day = unix_day_from_ymd(2026, 4, 8);
-        assert_eq!(format_unix_day(day), "2026-04-08");
+    fn test_ms_to_date_str() {
+        assert_eq!(ms_to_date_str(0), "1970-01-01");
+        assert_eq!(ms_to_date_str(86_400_000), "1970-01-02");
+        assert_eq!(ms_to_date_str(1_775_606_400_000), "2026-04-08");
     }
 
     #[test]
@@ -982,7 +949,8 @@ mod tests {
 
     #[test]
     fn test_compute_cone_day_zero() {
-        let (_, projection) = compute_cone(85.0, 0.002, "normal", 20000);
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 4, 8).unwrap();
+        let (_, projection) = compute_cone(85.0, 0.002, "normal", today);
         let day0 = &projection[0];
         assert!((day0["upper"].as_f64().unwrap() - 85.0).abs() < f64::EPSILON);
         assert!((day0["lower"].as_f64().unwrap() - 85.0).abs() < f64::EPSILON);

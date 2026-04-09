@@ -59,6 +59,18 @@ pub use image_analyze::ImageAnalyzeTool;
 pub use image_edit::ImageEditTool;
 pub use image_gen::ImageGenerateTool;
 
+/// Validate that a string is a 3-letter uppercase currency code (ISO 4217).
+pub(super) fn validate_currency_code(s: &str) -> Result<String, crate::tools::tool::ToolError> {
+    let upper = s.to_uppercase();
+    if upper.len() == 3 && upper.chars().all(|c| c.is_ascii_uppercase()) {
+        Ok(upper)
+    } else {
+        Err(crate::tools::tool::ToolError::InvalidParameters(format!(
+            "Invalid currency code: {s}"
+        )))
+    }
+}
+
 /// Detect image media type from file extension via `mime_guess`.
 /// Falls back to `image/jpeg` for unrecognized or non-image extensions.
 pub(crate) fn media_type_from_path(path: &str) -> String {
