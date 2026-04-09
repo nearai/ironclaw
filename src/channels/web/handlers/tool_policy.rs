@@ -34,7 +34,7 @@ pub async fn tool_policy_get_handler(
         ));
     }
 
-    let store = state.store.as_ref().ok_or((
+    let store = state.store.as_ref().ok_or(( // dispatch-exempt: admin-only read of cross-tenant policy scope
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
@@ -81,7 +81,7 @@ pub async fn tool_policy_put_handler(
 
     validate_admin_tool_policy(&policy).map_err(|error| (StatusCode::BAD_REQUEST, error))?;
 
-    let store = state.store.as_ref().ok_or((
+    let store = state.store.as_ref().ok_or(( // dispatch-exempt: admin-only write to cross-tenant policy scope
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;

@@ -2737,6 +2737,7 @@ mod tests {
             http_interceptor: None,
             transcription: None,
             document_extraction: None,
+            auth_manager: None,
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
             llm_backend: "nearai".to_string(),
