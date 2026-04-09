@@ -1,0 +1,148 @@
+---
+title: Installation
+sidebarTitle: Overview
+description: Choose how to install IronClaw
+---
+
+IronClaw can run in multiple environments — from your local machine to a cloud VPS. Choose the installation method that fits your needs.
+
+## Installation Methods
+
+<CardGroup cols={2}>
+  <Card title="Local Install" icon="monitor" href="/install/local">
+    Run IronClaw directly on your machine. Best for personal use.
+
+    - **Linux**: Shell script or package manager
+    - **macOS**: Homebrew or shell script
+    - **Windows**: Native or WSL2 (recommended)
+  </Card>
+
+  <Card title="Docker" icon="container" href="/install/docker">
+    Run IronClaw in a container. Good for consistent environments.
+
+    - Docker Compose available
+    - Volume persistence
+    - Docker-in-Docker support
+  </Card>
+
+  <Card title="VPS / Cloud" icon="cloud" href="/install/vps">
+    Deploy to a remote server. Best for always-on operation.
+
+    - Ubuntu/Debian recommended
+    - PostgreSQL + pgvector
+    - Reverse proxy for HTTPS
+  </Card>
+
+  <Card title="NEAR AI Cloud" icon="zap" href="/install/nearai-cloud">
+    Managed hosting by NEAR AI. Zero maintenance.
+
+    - Pre-configured environment
+    - Session token injection
+    - Web UI access
+  </Card>
+</CardGroup>
+
+## Quick Decision Guide
+
+| Scenario | Recommended Method | Database |
+|----------|-------------------|----------|
+| Personal laptop | [Local install](/install/local) | libSQL |
+| Always-on server | [VPS](/install/vps) | PostgreSQL |
+| Testing / experimenting | [Docker](/install/docker) | libSQL |
+| Zero maintenance | [NEAR AI Cloud](/install/nearai-cloud) | Managed |
+| Team deployment | [VPS](/install/vps) | PostgreSQL |
+
+## System Requirements
+
+<AccordionGroup>
+  <Accordion title="Minimum Requirements" icon="gauge">
+    - **OS**: Linux (glibc 2.31+), macOS 14+, Windows 10+ or WSL2
+    - **RAM**: 512 MB (1 GB recommended with LLM)
+    - **Disk**: 100 MB for binary + data
+    - **Network**: Internet access for LLM provider
+  </Accordion>
+
+  <Accordion title="Recommended for Production" icon="server">
+    - **OS**: Ubuntu 22.04 LTS, Debian 12, or macOS 14+
+    - **RAM**: 2 GB
+    - **Disk**: 1 GB+ for logs and data
+    - **Database**: PostgreSQL 15+ with pgvector
+    - **Docker**: 24.x+ (for sandbox jobs)
+  </Accordion>
+
+  <Accordion title="Optional: Docker" icon="box">
+    Docker is **optional** for running IronClaw itself, but required if you want to use:
+    - Sandboxed job execution (Docker isolation)
+    - Claude Code mode
+    - Automatic WASM tool compilation
+
+    Install Docker:
+    ```bash
+    # Ubuntu/Debian
+    curl -fsSL https://get.docker.com | sh
+
+    # macOS
+    brew install docker
+
+    # Or download from https://docker.com
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Default: libSQL for Local Installs
+
+For local installations, we recommend **libSQL** (embedded SQLite) as your database backend:
+
+- **Zero-dependency**: No separate database server to install
+- **Auto-created**: Database created automatically at `~/.ironclaw/ironclaw.db`
+- **Zero-config**: Works out of the box
+- **Turso option**: Can sync to Turso cloud for backup
+
+```bash
+# During wizard Step 1, select "libSQL"
+# Path: ~/.ironclaw/ironclaw.db (default)
+```
+
+**When to use PostgreSQL instead:**
+- Multi-user deployments
+- High-throughput scenarios
+- Existing PostgreSQL infrastructure
+- Need for advanced querying
+
+See [Database Backends](/setup/database) for full comparison.
+
+## Installation Checklist
+
+Before installing:
+
+- [ ] Choose your installation method
+- [ ] Decide on database backend (libSQL vs PostgreSQL)
+- [ ] Have your LLM provider credentials ready (API key or OAuth)
+- [ ] Decide which channels you want to enable
+
+After installation:
+
+- [ ] Run the onboarding wizard: `ironclaw onboard`
+- [ ] Start IronClaw: `ironclaw run`
+- [ ] Verify Web Gateway loads (if enabled)
+- [ ] Test sending a message
+
+## Getting Help
+
+- **Installation issues**: See [Troubleshooting](/help/troubleshooting)
+- **Configuration help**: See [Configuration Reference](/setup/configuration)
+- **Wizard questions**: See [Wizard Walkthrough](/start/wizard)
+
+## What's Next?
+
+<Steps>
+  <Step title="Install IronClaw" icon="download">
+    Follow the installation guide for your chosen method
+  </Step>
+  <Step title="Run the Wizard" icon="settings">
+    Configure your database, LLM, and channels
+  </Step>
+  <Step title="Start Using IronClaw" icon="message-square">
+    Open the Web Gateway or chat via Telegram
+  </Step>
+</Steps>

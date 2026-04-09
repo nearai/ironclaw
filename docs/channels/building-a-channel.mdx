@@ -1,15 +1,34 @@
-# Building WASM Channels
-
-This guide covers how to build WASM channel modules for IronClaw.
-
-## Overview
+---
+title: How to build a channel
+description: "Build a WASM messaging channel that plugs into IronClaw"
+---
 
 Channels are WASM components that handle communication with external messaging platforms (Telegram, WhatsApp, Slack, etc.). They run in a sandboxed environment and communicate with the host via the WIT (WebAssembly Interface Types) interface.
 
-## Directory Structure
+---
 
+## Prerequisites
+
+Install Rust and add the WASM target:
+
+```bash
+rustup target add wasm32-wasip2
 ```
-channels/                    # Or channels-src/
+
+Optional but useful for component conversion workflows:
+
+```bash
+cargo install wasm-tools
+```
+
+---
+
+## 1. Create the project structure
+
+Create a new crate under `channels-src/` (or another location) with this layout:
+
+```text
+channels-src/
 └── my-channel/
     ├── Cargo.toml
     ├── src/
@@ -18,15 +37,18 @@ channels/                    # Or channels-src/
 ```
 
 After building, deploy to:
-```
+
+```text
 ~/.ironclaw/channels/
 ├── my-channel.wasm
 └── my-channel.capabilities.json
 ```
 
-## Cargo.toml Template
+---
 
-```toml
+## 2. Configure Cargo.toml
+
+```toml Cargo.toml
 [package]
 name = "my-channel"
 version = "0.1.0"
@@ -48,7 +70,11 @@ strip = true
 codegen-units = 1
 ```
 
-## Channel Implementation
+---
+
+## 3. Implement the channel interface
+
+Now that the crate is ready, implement the channel guest interface exposed by `wit/channel.wit`, and implement the guest trait methods to handle incoming messages and send responses.
 
 ### Required Imports
 
@@ -114,6 +140,16 @@ impl Guest for MyChannel {
         // Call platform API to send message
     }
 
+    /// Send a proactive message without a prior inbound event.
+    fn on_broadcast(user_id: String, response: AgentResponse) -> Result<(), String> {
+      // Send a message to a known user or chat ID.
+    }
+
+    /// React to agent status changes such as thinking or tool activity.
+    fn on_status(update: StatusUpdate) {
+      // Show typing indicators or status messages when useful.
+    }
+
     /// Called when channel is shutting down.
     fn on_shutdown() {
         channel_host::log(channel_host::LogLevel::Info, "Channel shutting down");
@@ -124,7 +160,16 @@ impl Guest for MyChannel {
 export!(MyChannel);
 ```
 
-## Critical Pattern: Metadata Flow
+
+<Note>
+`on_start` configures how the host calls your channel. `on_http_request` and `on_poll` ingest external messages; `on_respond` delivers replies to an existing conversation; `on_broadcast` sends proactive messages; `on_status` lets channels surface thinking indicators and other progress updates.
+</Note>
+
+---
+
+## 4. Preserve routing metadata (critical)
+
+Once your channel can receive messages, keep enough metadata to send responses back to the right chat and sender.
 
 **The most important pattern**: Store routing info in message metadata so responses can be delivered.
 
@@ -161,9 +206,19 @@ fn on_respond(response: AgentResponse) -> Result<(), String> {
 }
 ```
 
-## Credential Injection
+<Note>
+`response.metadata_json` contains the metadata from the original inbound message. Treat it as the source of truth for reply routing.
+</Note>
 
-**Never hardcode credentials!** Use placeholders that the host replaces:
+---
+
+## 5. Add secure credential placeholders
+
+Now that the message path is set, configure API credentials using placeholders instead of hardcoded tokens.
+
+<Warning>
+**Never hardcode credentials!** Use placeholders that the host replaces
+</Warning>
 
 ### URL Placeholders (Telegram-style)
 
@@ -176,7 +231,6 @@ channel_host::http_request("POST", url, &headers_json, Some(&body));
 ### Header Placeholders (WhatsApp-style)
 
 ```rust
-// The host replaces {WHATSAPP_ACCESS_TOKEN} in headers too
 let headers = serde_json::json!({
     "Content-Type": "application/json",
     "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
@@ -186,11 +240,13 @@ channel_host::http_request("POST", &url, &headers.to_string(), Some(&body));
 
 The placeholder format is `{SECRET_NAME}` where `SECRET_NAME` matches the credential name in uppercase with underscores (e.g., `whatsapp_access_token` → `{WHATSAPP_ACCESS_TOKEN}`).
 
-## Capabilities File
+---
 
-Create `my-channel.capabilities.json`:
+## 6. Define capabilities
 
-```json
+The capabilities file declares setup prompts, allowlists, and rate limits.
+
+```json my-channel.capabilities.json
 {
   "type": "channel",
   "name": "my-channel",
@@ -244,107 +300,96 @@ Create `my-channel.capabilities.json`:
 }
 ```
 
-## Building and Deploying
+---
 
-### Supply Chain Security: No Committed Binaries
+## 7. Build and install
 
-**Do not commit compiled WASM binaries.** They are a supply chain risk — the binary in a PR may not match the source. IronClaw builds channels from source:
+With code and capabilities in place, build the channel and copy the two required artifacts.
 
-- `cargo build` automatically builds `telegram.wasm` via `build.rs`
-- The built binary is in `.gitignore` and is not committed
-- CI should run `cargo build` (or `./scripts/build-all.sh`) to produce releases
+### Generic channel build
 
-**Reproducible build:**
 ```bash
-cargo build --release
+cd channels-src/my-channel
+cargo build --release --target wasm32-wasip2
+
+# Convert the raw wasm module into a component and strip it
+wasm-tools component new target/wasm32-wasip2/release/my_channel.wasm -o my-channel.wasm \
+  2>/dev/null || cp target/wasm32-wasip2/release/my_channel.wasm my-channel.wasm
+wasm-tools strip my-channel.wasm -o my-channel.wasm
+
+mkdir -p ~/.ironclaw/channels
+cp my-channel.wasm ~/.ironclaw/channels/my-channel.wasm
+cp my-channel.capabilities.json ~/.ironclaw/channels/
 ```
 
-Prerequisites: `rustup target add wasm32-wasip2`, `cargo install wasm-tools` (optional; fallback copies raw WASM if unavailable).
+<Note>
+The channels shipped in `channels-src/` use small `build.sh` wrappers that do exactly this component-conversion step. If your channel lives in the repo, following that pattern is the safest option.
+</Note>
 
-### Telegram Channel (Manual Build)
+### Telegram channel example
 
 ```bash
-# Add WASM target if needed
 rustup target add wasm32-wasip2
-
-# Build Telegram channel
 ./channels-src/telegram/build.sh
 
-# Install (or use ironclaw onboard to install bundled channel)
 mkdir -p ~/.ironclaw/channels
 cp channels-src/telegram/telegram.wasm channels-src/telegram/telegram.capabilities.json ~/.ironclaw/channels/
 ```
 
-**Note**: The main IronClaw binary bundles `telegram.wasm` via `include_bytes!`. When modifying the Telegram channel source, run `./channels-src/telegram/build.sh` **before** building the main crate, so the updated WASM is included.
+<Danger>
+If you are contributing a channel to the public repository, **do not commit compiled WASM binaries.** They are a supply chain risk — the binary in a PR may not match the source. IronClaw builds channels from source.
+</Danger>
 
-### Other Channels
+---
 
-```bash
-# Build the WASM component
-cd channels-src/my-channel
-cargo build --release --target wasm32-wasip2
+## 8. Host functions you can call
 
-# Deploy to ~/.ironclaw/channels/
-cp target/wasm32-wasip2/release/my_channel.wasm ~/.ironclaw/channels/my-channel.wasm
-cp my-channel.capabilities.json ~/.ironclaw/channels/
-```
-
-## Host Functions Available
-
-The channel host provides these functions:
+Channel modules get a small host API for logging, storage, HTTP, and message emission:
 
 ```rust
-// Logging
-channel_host::log(LogLevel::Info, "Message");
+channel_host::log(channel_host::LogLevel::Info, "message");
 
-// Time
-let now = channel_host::now_millis();
+let _now = channel_host::now_millis();
 
-// Workspace (scoped to channel namespace)
-let data = channel_host::workspace_read("state/offset");
-channel_host::workspace_write("state/offset", "12345")?;
+let _ = channel_host::workspace_write("state/offset", "12345");
+let _ = channel_host::workspace_read("state/offset");
 
-// HTTP requests (credentials auto-injected)
-let response = channel_host::http_request("POST", &url, &headers, Some(&body))?;
+let _response = channel_host::http_request("POST", &url, &headers, Some(&body));
 
-// Emit message to agent
-channel_host::emit_message(&EmittedMessage { ... });
+channel_host::emit_message(&EmittedMessage { /* ... */ });
 ```
 
-## Common Patterns
-
-### Webhook Secret Validation
-
-The host validates webhook secrets automatically. Check `req.secret_validated`:
+Real channels also use a few additional host APIs:
 
 ```rust
-fn on_http_request(req: IncomingHttpRequest) -> OutgoingHttpResponse {
-    if !req.secret_validated {
-        channel_host::log(LogLevel::Warn, "Invalid webhook secret");
-        // Host should have already rejected, but defense in depth
-    }
-    // ...
-}
+let has_secret = channel_host::secret_exists("telegram_bot_token");
+
+let _ = channel_host::store_attachment_data("attachment-id", &bytes);
+
+let _ = channel_host::pairing_upsert_request("telegram", "123456", "{}")?;
+let _ = channel_host::pairing_resolve_identity("telegram", "123456")?;
+let _ = channel_host::pairing_read_allow_from("telegram")?;
 ```
 
-### Polling with Offset Tracking
+Use `store_attachment_data` when you download binary payloads such as voice notes or images during webhook or polling callbacks. Use the pairing APIs when your channel supports owner approval for unknown direct-message senders.
 
-For platforms that require polling (not webhook-based):
+---
+
+## 9. Common patterns
+
+### Polling with stored offsets
 
 ```rust
 const OFFSET_PATH: &str = "state/last_offset";
 
 fn on_poll() {
-    // Read last offset
     let offset = channel_host::workspace_read(OFFSET_PATH)
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(0);
 
-    // Fetch updates since offset
     let updates = fetch_updates(offset);
-
-    // Process and track new offset
     let mut new_offset = offset;
+
     for update in updates {
         if update.id >= new_offset {
             new_offset = update.id + 1;
@@ -352,37 +397,33 @@ fn on_poll() {
         emit_message(update);
     }
 
-    // Save new offset
     if new_offset != offset {
         let _ = channel_host::workspace_write(OFFSET_PATH, &new_offset.to_string());
     }
 }
 ```
 
-### Status Message Filtering
-
-Skip status updates to prevent loops:
+### Ignore status-only payloads
 
 ```rust
-// Skip status updates (delivered, read, etc.)
 if !payload.statuses.is_empty() && payload.messages.is_empty() {
-    return;  // Only status updates, no actual messages
+    return;
 }
 ```
 
-### Bot Message Filtering
-
-Skip bot messages to prevent infinite loops:
+### Ignore bot senders
 
 ```rust
 if sender.is_bot {
-    return;  // Don't respond to bots
+    return;
 }
 ```
 
-## Testing
+---
 
-Add tests in the same file:
+## 10. Testing and troubleshooting
+
+Add basic parsing and metadata round-trip tests:
 
 ```rust
 #[cfg(test)]
@@ -391,50 +432,21 @@ mod tests {
 
     #[test]
     fn test_parse_webhook() {
-        let json = r#"{ ... }"#;
-        let payload: WebhookPayload = serde_json::from_str(json).unwrap();
-        assert_eq!(payload.messages.len(), 1);
-    }
-
-    #[test]
-    fn test_metadata_roundtrip() {
-        let meta = MyMessageMetadata { ... };
-        let json = serde_json::to_string(&meta).unwrap();
-        let parsed: MyMessageMetadata = serde_json::from_str(&json).unwrap();
-        assert_eq!(meta.chat_id, parsed.chat_id);
+        let json = r#"{\"messages\":[]}"#;
+        let v: serde_json::Value = serde_json::from_str(json).expect("valid json in test");
+        assert!(v.get("messages").is_some());
     }
 }
 ```
 
-Run tests with:
-```bash
-cargo test
-```
-
-## Troubleshooting
-
-### "byte index N is not a char boundary"
-
-Never slice strings by byte index! Use character-aware truncation:
+If you see `byte index N is not a char boundary`, avoid byte slicing and truncate by characters:
 
 ```rust
-// BAD: panics on multi-byte UTF-8 (emoji, etc.)
-let preview = &content[..50];
-
-// GOOD: safe truncation
 let preview: String = content.chars().take(50).collect();
 ```
 
-### Credential placeholders not replaced
+If credential placeholders are not resolved:
 
-1. Check the secret name matches (lowercase with underscores)
-2. Verify the secret is in `allowed_names` in capabilities
-3. Check logs for "unresolved placeholders" warnings
-
-### Messages not routing to responses
-
-Ensure `on_respond` uses the ORIGINAL message's metadata, not response metadata:
-```rust
-// response.metadata_json comes from the ORIGINAL emit_message call
-let metadata: MyMetadata = serde_json::from_str(&response.metadata_json)?;
-```
+1. Verify secret names match the declared placeholders.
+2. Confirm the secret is permitted in `allowed_names`.
+3. Check runtime logs for unresolved placeholder warnings.

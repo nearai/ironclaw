@@ -552,6 +552,7 @@ fn gateway_state_has_multi_tenant_fields() {
         llm_provider: None,
         skill_registry: None,
         skill_catalog: None,
+        auth_manager: None,
         chat_rate_limiter: PerUserRateLimiter::new(30, 60), // Multi-tenant: per-user
         oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
         registry_entries: Vec::new(),
@@ -571,8 +572,8 @@ fn gateway_state_has_multi_tenant_fields() {
         near_rpc_url: None,
         near_network: None,
         oauth_sweep_shutdown: None,
-
-        frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        tool_dispatcher: None,
     };
 
     assert_eq!(state.owner_id, "fallback");
@@ -639,6 +640,7 @@ async fn start_owner_scoped_sender_server() -> (
         llm_provider: None,
         skill_registry: None,
         skill_catalog: None,
+        auth_manager: None,
         chat_rate_limiter: PerUserRateLimiter::new(30, 60),
         oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
         webhook_rate_limiter: RateLimiter::new(10, 60),
@@ -658,8 +660,8 @@ async fn start_owner_scoped_sender_server() -> (
         near_rpc_url: None,
         near_network: None,
         oauth_sweep_shutdown: None,
-
-        frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        tool_dispatcher: None,
     });
 
     let auth = MultiAuthState::multi(tokens).into();
@@ -1036,6 +1038,7 @@ async fn start_multi_user_server_with_db() -> (
         llm_provider: None,
         skill_registry: None,
         skill_catalog: None,
+        auth_manager: None,
         chat_rate_limiter: PerUserRateLimiter::new(30, 60),
         oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
         registry_entries: Vec::new(),
@@ -1055,8 +1058,8 @@ async fn start_multi_user_server_with_db() -> (
         near_rpc_url: None,
         near_network: None,
         oauth_sweep_shutdown: None,
-
-        frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        tool_dispatcher: None,
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

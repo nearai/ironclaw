@@ -57,6 +57,7 @@ async fn start_test_server() -> (
         llm_provider: None,
         skill_registry: None,
         skill_catalog: None,
+        auth_manager: None,
         chat_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(30, 60),
         oauth_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(20, 60),
         webhook_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),
@@ -76,8 +77,8 @@ async fn start_test_server() -> (
         near_rpc_url: None,
         near_network: None,
         oauth_sweep_shutdown: None,
-
-        frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        tool_dispatcher: None,
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(

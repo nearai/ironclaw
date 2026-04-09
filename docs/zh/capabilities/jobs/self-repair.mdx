@@ -1,0 +1,148 @@
+---
+title: 自修复与卡住任务
+sidebarTitle: 自修复
+description: 自动检测并恢复卡住的任务
+---
+
+IronClaw 会监控所有正在运行的任务，并自动恢复那些停止推进的任务，无需人工介入。
+
+---
+
+## 什么是卡住的任务？
+
+如果一个任务在配置的超时时间内一直处于 **InProgress** 状态，却没有产生任何输出、工具调用或状态更新，它就会被视为**卡住**。
+
+常见原因包括：
+- LLM 提供商超时或触发限流，且没有剩余重试预算
+- 工具调用卡在无响应的外部服务上
+- 容器资源耗尽（OOM、CPU 限速）
+- 智能体与沙箱 worker 之间的网络分区
+
+---
+
+## 配置
+
+```bash
+# 启用自修复（默认：true）
+SELF_REPAIR_ENABLED=true
+
+# 任务被视为卡住前等待多久（秒）
+SELF_REPAIR_TIMEOUT_SECS=300
+
+# 在标记为 Failed 之前最多恢复多少次
+SELF_REPAIR_MAX_RETRIES=3
+
+# 监控器扫描卡住任务的频率（秒）
+SELF_REPAIR_CHECK_INTERVAL_SECS=60
+```
+
+<Note>
+`SELF_REPAIR_TIMEOUT_SECS` 应该设置得低于 `SANDBOX_TIMEOUT_SECS`。后者是沙箱强制终止的硬超时，自修复则是在硬终止前触发的软恢复机制。
+</Note>
+
+---
+
+## 检测
+
+自修复系统作为调度器旁路运行的后台任务存在。它会周期性扫描所有处于 InProgress 的任务，并将最后活动时间与卡住阈值进行比较。
+
+```
+[Self-Repair Monitor]
+         ↓
+For each InProgress job:
+    last_activity > SELF_REPAIR_TIMEOUT?
+         ↓ yes
+    Transition: InProgress → Stuck
+         ↓
+    Log failure to tool_failures table
+         ↓
+    Attempt recovery
+```
+
+`tool_failures` 表会按任务和工具累计失败记录。这些数据用于判断是否还值得继续尝试恢复，还是应直接将任务标记为 **Failed**。
+
+---
+
+## 恢复流程
+
+一旦发现卡住任务，自修复系统就会尝试重启它：
+
+<Steps>
+  <Step title="切换到 Stuck">
+    任务状态会从 InProgress 变为 Stuck。系统会记录失败原因和时间戳。
+  </Step>
+
+  <Step title="检查失败历史">
+    系统会查询该任务在 `tool_failures` 表中的记录。如果已超过最大重试次数，就会直接进入 **Failed**，跳过恢复。
+  </Step>
+
+  <Step title="重新进入 InProgress">
+    如果还有重试次数，任务会重新回到 InProgress。新的 worker 会接手，并从上一次保存的检查点继续执行。
+  </Step>
+
+  <Step title="评估结果">
+    如果任务成功完成，失败记录会被清除；如果再次卡住，就会重复这一循环，直到达到重试上限并永久失败。
+  </Step>
+</Steps>
+
+---
+
+### 状态图
+
+```
+InProgress
+    ↓ (检测到超时)
+  Stuck ──────────────────────► Failed (达到重试上限)
+    ↓ (仍可重试)
+InProgress
+    ↓
+Completed (或再次回到 Stuck)
+```
+
+---
+
+## 工具失败追踪
+
+每当任务执行过程中某个工具失败时，系统都会记录对应事件：
+
+| 字段 | 描述 |
+|------|------|
+| `job_id` | 发生失败的任务 |
+| `tool_name` | 失败的工具名称 |
+| `error` | 错误消息或失败原因 |
+| `occurred_at` | 失败发生的时间戳 |
+
+这些历史记录会在重试时提供给 worker，帮助它避免重复执行同一个失败的工具调用，或者改用其他方案。
+
+---
+
+## 可观测性
+
+卡住与恢复的任务可以在以下位置看到：
+
+- **任务历史**：Web 网关中的任务列表会展示带时间戳的状态流转
+- **日志**：设置 `RUST_LOG=ironclaw::agent::self_repair=debug` 查看详细修复事件
+- **`list_jobs` 工具**：可查看当前状态，包括 Stuck 任务
+
+## 故障排查
+
+<AccordionGroup>
+  <Accordion title="任务反复卡住" icon="refresh-cw">
+    - 查看 `RUST_LOG=ironclaw::agent::self_repair=debug` 以确认失败原因
+    - 通过 `job_status` 工具检查工具失败记录
+    - 如果任务本身执行时间确实较长，可考虑增大 `SELF_REPAIR_TIMEOUT_SECS`
+    - 检查到 LLM 提供商和外部服务的网络连通性
+  </Accordion>
+
+  <Accordion title="任务恢复后立即失败" icon="x-circle">
+    - 工具失败历史可能会暴露持续失败的特定工具
+    - 检查该工具依赖的外部服务是否可用
+    - 如果任务运行在容器中，请检查沙箱日志（`SANDBOX_ENABLED=true`）
+  </Accordion>
+
+  <Accordion title="卡住任务没有被检测到" icon="search">
+    - 确认 `SELF_REPAIR_ENABLED=true`
+    - 检查 `SELF_REPAIR_TIMEOUT_SECS` 是否设置过高
+    - 确认自修复监控器确实在运行，可在启动日志中搜索 `self_repair`
+  </Accordion>
+</AccordionGroup>

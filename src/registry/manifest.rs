@@ -156,6 +156,10 @@ pub struct BundleDefinition {
     /// Shared auth secret across bundle members (if any).
     #[serde(default)]
     pub shared_auth: Option<String>,
+
+    /// Alternate names that should resolve to this bundle during discovery.
+    #[serde(default)]
+    pub aliases: Vec<String>,
 }
 
 /// Top-level structure of `_bundles.json`.
@@ -359,7 +363,8 @@ mod tests {
                     "display_name": "Google Suite",
                     "description": "All Google tools",
                     "extensions": ["tools/gmail", "tools/google-calendar"],
-                    "shared_auth": "google_oauth_token"
+                    "shared_auth": "google_oauth_token",
+                    "aliases": ["gws", "gsuite"]
                 },
                 "default": {
                     "display_name": "Recommended Set",
@@ -374,6 +379,7 @@ mod tests {
             bundles.bundles["google"].shared_auth.as_deref(),
             Some("google_oauth_token")
         );
+        assert_eq!(bundles.bundles["google"].aliases, vec!["gws", "gsuite"]);
         assert!(bundles.bundles["default"].shared_auth.is_none());
     }
 

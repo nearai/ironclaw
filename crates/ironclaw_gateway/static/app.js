@@ -2310,6 +2310,7 @@ function showJobCard(data) {
     browseBtn.className = 'job-card-browse';
     browseBtn.href = data.browse_url;
     browseBtn.target = '_blank';
+    browseBtn.rel = 'noopener noreferrer';
     browseBtn.textContent = I18n.t('jobs.browse');
     card.appendChild(browseBtn);
   }
@@ -2320,11 +2321,44 @@ function showJobCard(data) {
 
 // --- Auth card ---
 
-function handleAuthRequired(data) {
+async function handleAuthRequired(data) {
   if (data.thread_id && !isCurrentThread(data.thread_id)) {
     unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
     debouncedLoadThreads();
     return;
+  }
+  if (data.extension_name && getConfigureOverlay(data.extension_name)) {
+    return;
+  }
+  const existingCard = data.extension_name ? getAuthCard(data.extension_name) : getAuthCard();
+  if (existingCard && !data.request_id) {
+    const existingRequestId = existingCard.getAttribute('data-request-id');
+    const existingThreadId = existingCard.getAttribute('data-thread-id');
+    const incomingThreadId = data.thread_id || currentThreadId || null;
+    if (existingRequestId && (!existingThreadId || !incomingThreadId || existingThreadId === incomingThreadId)) {
+      return;
+    }
+  }
+  if (!data.request_id) {
+    const threadId = data.thread_id || currentThreadId || null;
+    if (threadId) {
+      try {
+        const history = await apiFetch('/api/chat/history?thread_id=' + encodeURIComponent(threadId));
+        const pendingGate = history && history.pending_gate;
+        if (pendingGate && pendingGate.request_id) {
+          const resumeKind = parseGateResumeKind(pendingGate.resume_kind);
+          if (resumeKind && resumeKind.type === 'authentication') {
+            handleGateRequired({
+              ...pendingGate,
+              thread_id: pendingGate.thread_id || threadId,
+            });
+            return;
+          }
+        }
+      } catch (_) {
+        // Fall through to the legacy card when pending-gate hydration fails.
+      }
+    }
   }
   setAuthFlowPending(true, data.instructions);
   if (data.auth_url) {
@@ -2382,8 +2416,12 @@ function handleGateResolved(data) {
     return;
   }
   document.querySelectorAll('.approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]').forEach((el) => el.remove());
-  if (data.resolution === 'credential_provided' || data.resolution === 'cancelled') {
-    removeAuthCard(data.tool_name);
+  if (
+    data.resolution === 'credential_provided'
+    || data.resolution === 'cancelled'
+    || data.resolution === 'external_callback'
+  ) {
+    removeAuthCard();
     enableChatInput();
   }
 }
@@ -2550,16 +2588,21 @@ function showSetupCard(data) {
     card.appendChild(instr);
   }
 
-  if (onboarding.setup_url && /^https?:\/\//i.test(onboarding.setup_url)) {
-    const links = document.createElement('div');
-    links.className = 'auth-links';
-    const setupLink = document.createElement('a');
-    setupLink.href = onboarding.setup_url;
-    setupLink.target = '_blank';
-    setupLink.rel = 'noopener noreferrer';
-    setupLink.textContent = I18n.t('authRequired.getToken');
-    links.appendChild(setupLink);
-    card.appendChild(links);
+  if (onboarding.setup_url) {
+    // Strict HTTPS validation via shared helper — defends against
+    // `javascript:`/`data:` URLs in extension/registry metadata.
+    const parsedSetupUrl = parseHttpsExternalUrl(onboarding.setup_url, 'setup');
+    if (parsedSetupUrl) {
+      const links = document.createElement('div');
+      links.className = 'auth-links';
+      const setupLink = document.createElement('a');
+      setupLink.href = parsedSetupUrl.href;
+      setupLink.target = '_blank';
+      setupLink.rel = 'noopener noreferrer';
+      setupLink.textContent = I18n.t('authRequired.getToken');
+      links.appendChild(setupLink);
+      card.appendChild(links);
+    }
   }
 
   const form = document.createElement('div');
@@ -2691,22 +2734,30 @@ function showAuthCard(data) {
   links.className = 'auth-links';
 
   if (data.auth_url) {
-    const oauthBtn = document.createElement('button');
-    oauthBtn.className = 'auth-oauth';
-    oauthBtn.textContent = I18n.t('authRequired.authenticateWith', {name: data.extension_name});
-    oauthBtn.addEventListener('click', () => {
-      openOAuthUrl(data.auth_url);
-    });
-    links.appendChild(oauthBtn);
+    const parsedAuthUrl = parseHttpsOAuthUrl(data.auth_url);
+    if (parsedAuthUrl) {
+      const oauthLink = document.createElement('a');
+      oauthLink.className = 'auth-oauth';
+      oauthLink.href = parsedAuthUrl.href;
+      oauthLink.target = '_blank';
+      // Match the other external links: include `noreferrer` so the
+      // OAuth provider does not see the in-app Referer header.
+      oauthLink.rel = 'noopener noreferrer';
+      oauthLink.textContent = I18n.t('authRequired.authenticateWith', {name: data.extension_name});
+      links.appendChild(oauthLink);
+    }
   }
 
-  if (data.setup_url && /^https?:\/\//i.test(data.setup_url)) {
-    const setupLink = document.createElement('a');
-    setupLink.href = data.setup_url;
-    setupLink.target = '_blank';
-    setupLink.rel = 'noopener noreferrer';
-    setupLink.textContent = I18n.t('authRequired.getToken');
-    links.appendChild(setupLink);
+  if (data.setup_url) {
+    const parsedSetupUrl = parseHttpsExternalUrl(data.setup_url, 'setup');
+    if (parsedSetupUrl) {
+      const setupLink = document.createElement('a');
+      setupLink.href = parsedSetupUrl.href;
+      setupLink.target = '_blank';
+      setupLink.rel = 'noopener noreferrer';
+      setupLink.textContent = I18n.t('authRequired.getToken');
+      links.appendChild(setupLink);
+    }
   }
 
   if (links.children.length > 0) {
@@ -4365,16 +4416,20 @@ function loadInlineChannelSetup(ext, container) {
         container.appendChild(text);
       }
 
-      if (onboarding.setup_url && /^https?:\/\//i.test(onboarding.setup_url)) {
-        const links = document.createElement('div');
-        links.className = 'auth-links';
-        const link = document.createElement('a');
-        link.href = onboarding.setup_url;
-        link.target = '_blank';
-        link.rel = 'noopener noreferrer';
-        link.textContent = I18n.t('authRequired.getToken');
-        links.appendChild(link);
-        container.appendChild(links);
+      if (onboarding.setup_url) {
+        // Strict HTTPS validation via shared helper.
+        const parsedSetupUrl2 = parseHttpsExternalUrl(onboarding.setup_url, 'setup');
+        if (parsedSetupUrl2) {
+          const links = document.createElement('div');
+          links.className = 'auth-links';
+          const link = document.createElement('a');
+          link.href = parsedSetupUrl2.href;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          link.textContent = I18n.t('authRequired.getToken');
+          links.appendChild(link);
+          container.appendChild(links);
+        }
       }
 
       const form = document.createElement('div');
@@ -4734,7 +4789,7 @@ function currentUserIsAdmin() {
 // Rejects javascript:, data:, and other non-HTTPS schemes to prevent URL-injection.
 // Uses the URL constructor to safely parse and validate the scheme, which also
 // handles non-string values (objects, null, etc.) that would throw on .startsWith().
-function openOAuthUrl(url) {
+function parseHttpsExternalUrl(url, label) {
   let parsed;
   try {
     parsed = new URL(url);
@@ -4742,11 +4797,38 @@ function openOAuthUrl(url) {
       throw new Error('non-HTTPS protocol: ' + parsed.protocol);
     }
   } catch (e) {
-    console.warn('Blocked invalid/non-HTTPS OAuth URL:', url, e.message);
+    console.warn(`Blocked invalid/non-HTTPS ${label} URL:`, url, e.message);
     showToast(I18n.t('extensions.invalidOAuthUrl'), 'error');
-    return;
+    return null;
   }
-  window.open(parsed.href, '_blank', 'width=600,height=700');
+  return parsed;
+}
+
+function parseHttpsOAuthUrl(url) {
+  return parseHttpsExternalUrl(url, 'OAuth');
+}
+
+function openOAuthUrl(url) {
+  const parsed = parseHttpsOAuthUrl(url);
+  if (!parsed) return;
+  // `noopener,noreferrer` defends against tabnabbing — without these the
+  // OAuth provider page can read `window.opener` and reach back into the
+  // app tab. `noreferrer` also strips the Referer header.
+  const opened = window.open(
+    parsed.href,
+    '_blank',
+    'width=600,height=700,noopener,noreferrer',
+  );
+  // Some browsers ignore the noopener feature flag in window.open's third
+  // argument when the window is non-null; explicitly null the opener as a
+  // belt-and-suspenders defense.
+  if (opened) {
+    try {
+      opened.opener = null;
+    } catch (_) {
+      /* opener may already be null in cross-origin contexts */
+    }
+  }
 }
 
 // --- Pairing ---
@@ -5172,7 +5254,7 @@ function renderJobDetail(job) {
     headerHtml += '<button class="btn-restart" data-action="restart-job" data-id="' + escapeHtml(job.id) + '">Retry</button>';
   }
   if (job.browse_url) {
-    headerHtml += '<a class="btn-browse" href="' + escapeHtml(job.browse_url) + '" target="_blank">Browse Files</a>';
+    headerHtml += '<a class="btn-browse" href="' + escapeHtml(job.browse_url) + '" target="_blank" rel="noopener noreferrer">Browse Files</a>';
   }
 
   header.innerHTML = headerHtml;
@@ -5857,7 +5939,7 @@ function renderMissionsList(missions) {
     return '<tr class="mission-row" data-action="open-mission" data-id="' + escapeHtml(m.id) + '">'
       + '<td>' + escapeHtml(m.name) + '</td>'
       + '<td class="truncate">' + escapeHtml(m.goal) + '</td>'
-      + '<td>' + escapeHtml(m.cadence_type) + '</td>'
+      + '<td>' + escapeHtml(m.cadence_description || m.cadence_type) + '</td>'
       + '<td>' + m.thread_count + '</td>'
       + '<td><span class="badge ' + statusClass + '">' + escapeHtml(m.status) + '</span></td>'
       + '<td>'
@@ -5907,7 +5989,7 @@ function renderMissionDetail(m) {
     + '<div class="job-description-body">' + renderMarkdown(m.goal) + '</div></div>';
 
   html += '<div class="job-meta-grid">'
-    + metaItem(I18n.t('missions.cadence'), m.cadence_type)
+    + metaItem(I18n.t('missions.cadence'), m.cadence_description || m.cadence_type)
     + metaItem(I18n.t('missions.status'), m.status)
     + metaItem(I18n.t('missions.threadsToday'), m.threads_today + ' / ' + (m.max_threads_per_day || '∞'))
     + metaItem(I18n.t('missions.totalThreads'), m.thread_count)
@@ -6637,7 +6719,7 @@ function renderCatalogSkillCard(entry, installedNames) {
   name.textContent = entry.name || entry.slug;
   name.href = 'https://clawhub.ai/skills/' + encodeURIComponent(entry.slug);
   name.target = '_blank';
-  name.rel = 'noopener';
+  name.rel = 'noopener noreferrer';
   name.style.textDecoration = 'none';
   name.style.color = 'inherit';
   name.title = I18n.t('skills.viewOnClawHub');
