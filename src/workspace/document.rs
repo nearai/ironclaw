@@ -32,6 +32,8 @@ pub mod paths {
     pub const TOOLS: &str = "TOOLS.md";
     /// First-run ritual file; self-deletes after onboarding completes.
     pub const BOOTSTRAP: &str = "BOOTSTRAP.md";
+    /// Admin-defined system instructions shared with all users.
+    pub const SYSTEM: &str = "SYSTEM.md";
     /// User psychographic profile (JSON).
     pub const PROFILE: &str = "context/profile.json";
     /// Assistant behavioral directives (derived from profile).
@@ -44,6 +46,31 @@ pub mod paths {
 /// as defaults to all documents in that directory (e.g., `skip_indexing`,
 /// `hygiene` settings). Individual document metadata overrides folder defaults.
 pub const CONFIG_FILE_NAME: &str = ".config";
+
+/// Well-known scope identifier for admin-defined content (e.g., system prompt).
+///
+/// Documents stored under this scope are readable by all workspaces when
+/// `admin_prompt_enabled` is set (multi-tenant mode). The double-underscore
+/// prefix prevents collision with real user IDs.
+pub const ADMIN_SCOPE: &str = "__admin__";
+
+/// Check if a scope identifier is reserved for system use.
+///
+/// Reserved scopes must never be assigned as a user ID. The check is
+/// case-insensitive and ignores leading/trailing whitespace, and the entire
+/// `__*__` namespace is reserved so future system scopes added alongside
+/// `__admin__` cannot be impersonated by hand-crafted user IDs.
+pub fn is_reserved_scope(scope: &str) -> bool {
+    let trimmed = scope.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.eq_ignore_ascii_case(ADMIN_SCOPE) {
+        return true;
+    }
+    // Reserve the whole `__*__` namespace for system scopes.
+    trimmed.starts_with("__") && trimmed.ends_with("__") && trimmed.len() >= 4
+}
 
 /// Typed overlay for the `metadata` JSON field on [`MemoryDocument`].
 ///
@@ -399,6 +426,24 @@ mod tests {
 
         doc.content = "Hello world, this is a test.".to_string();
         assert_eq!(doc.word_count(), 6);
+    }
+
+    #[test]
+    fn test_is_reserved_scope() {
+        assert!(is_reserved_scope("__admin__"));
+        assert!(!is_reserved_scope("alice"));
+        assert!(!is_reserved_scope(""));
+        assert!(!is_reserved_scope("admin"));
+        assert!(!is_reserved_scope("550e8400-e29b-41d4-a716-446655440000"));
+        // Case-insensitive and whitespace-tolerant.
+        assert!(is_reserved_scope("__Admin__"));
+        assert!(is_reserved_scope("  __admin__\n"));
+        // Whole `__*__` namespace is reserved.
+        assert!(is_reserved_scope("__system__"));
+        assert!(is_reserved_scope("__internal__"));
+        // Non-`__*__` strings remain unreserved.
+        assert!(!is_reserved_scope("__only_one_underscore"));
+        assert!(!is_reserved_scope("trailing_only__"));
     }
 
     #[test]
