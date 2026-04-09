@@ -729,6 +729,12 @@ pub async fn start_server(
             put(super::handlers::secrets::secrets_put_handler)
                 .delete(super::handlers::secrets::secrets_delete_handler),
         )
+        // Admin tool policy
+        .route(
+            "/api/admin/tool-policy",
+            get(super::handlers::tool_policy::tool_policy_get_handler)
+                .put(super::handlers::tool_policy::tool_policy_put_handler),
+        )
         // Admin system prompt — tighter body cap than the global 10 MB so an
         // oversized payload is rejected before being parsed into memory.
         .route(
