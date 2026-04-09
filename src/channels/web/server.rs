@@ -27,7 +27,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
 use crate::ownership::Owned;
-use crate::standby::{TidePoolConfigureRequest, bearer_token};
+use crate::standby::{TidePoolConfigureRequest, apply_runtime_config, bearer_token, write_persona_files};
 use axum::http::HeaderMap;
 
 use crate::agent::SessionManager;
@@ -644,6 +644,7 @@ pub async fn start_server(
         .route("/api/health", get(health_handler))
         .route("/api/standby/status", get(standby_status_handler))
         .route("/api/configure", post(configure_handler))
+        .route("/api/reconfigure", post(reconfigure_handler))
         .route("/oauth/callback", get(oauth_callback_handler))
         .route(
             "/oauth/slack/callback",
@@ -1942,6 +1943,50 @@ async fn standby_status_handler(
     }
 
     Ok(Json(control.startup_snapshot().await))
+}
+
+/// `POST /api/reconfigure`
+///
+/// Hot-reload agent config on a running IronClaw instance. Applies config changes
+/// in-place: updates env vars, rewrites mcp-servers.json, and updates persona
+/// workspace files (SOUL.md, AGENTS.md, IDENTITY.md).
+///
+/// Authenticated via the standby bearer token (same as /api/configure) or the
+/// gateway auth token.
+async fn reconfigure_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
+    Json(request): Json<TidePoolConfigureRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let token = bearer_token(&headers)
+        .ok_or((StatusCode::UNAUTHORIZED, "missing bearer token".to_string()))?;
+
+    // Authenticate: check standby token first, then fall back to gateway auth middleware token
+    let authed = state
+        .standby_control
+        .as_ref()
+        .map(|c| c.authenticate(token))
+        .unwrap_or(false);
+    if !authed {
+        return Err((StatusCode::UNAUTHORIZED, "invalid bearer token".to_string()));
+    }
+
+    // Apply runtime config (env vars, MCP file, channel env)
+    if let Err(message) = apply_runtime_config(&request).await {
+        tracing::warn!(error = %message, "reconfigure: apply_runtime_config failed");
+        return Err((StatusCode::BAD_REQUEST, message));
+    }
+
+    // Write persona files to workspace
+    if let Some(workspace) = state.workspace() {
+        if let Err(message) = write_persona_files(&workspace, &request.persona).await {
+            tracing::warn!(error = %message, "reconfigure: write_persona_files failed");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
+        }
+    }
+
+    tracing::info!(agent_id = %request.agent_id, "Agent reconfigured successfully");
+    Ok(StatusCode::OK)
 }
 
 async fn chat_approval_handler(
@@ -3806,6 +3851,9 @@ mod tests {
             near_rpc_url: None,
             near_network: None,
             oauth_sweep_shutdown: None,
+            standby_control: None,
+            server_started: std::sync::atomic::AtomicBool::new(false),
+            runtime_overrides: GatewayRuntimeOverrides::default(),
         })
     }
 

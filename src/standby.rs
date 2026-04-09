@@ -153,23 +153,38 @@ impl StandbyControl {
                 startup_state.runtime_started = false;
                 Ok(())
             }
+            StandbyPhase::Configured => {
+                // Reconfigure: allow re-entry from Configured state.
+                // Don't reset runtime_started — the agent is already running.
+                *phase = StandbyPhase::Configuring;
+                drop(phase);
+                self.mark_startup_stage("reconfigure.accepted").await;
+                Ok(())
+            }
             StandbyPhase::Configuring => Err("configuration is already in progress"),
-            StandbyPhase::Configured => Err("container is already configured"),
         }
     }
 
     pub async fn finish_configure(&self, success: bool) {
         let mut phase = self.phase.lock().await;
-        *phase = if success {
-            StandbyPhase::Configured
+        if success {
+            *phase = StandbyPhase::Configured;
         } else {
-            StandbyPhase::Waiting
-        };
+            // On failure: if the runtime was already started (reconfigure case),
+            // return to Configured so the agent keeps running with old config.
+            // Otherwise (initial configure failure), return to Waiting.
+            let startup_state = self.startup_state.lock().await;
+            *phase = if startup_state.runtime_started {
+                StandbyPhase::Configured
+            } else {
+                StandbyPhase::Waiting
+            };
+        }
         drop(phase);
         if success {
             self.mark_startup_stage("configure.completed").await;
         } else {
-            self.mark_startup_stage("configure.reset_waiting").await;
+            self.mark_startup_stage("configure.reset").await;
         }
     }
 
@@ -576,5 +591,60 @@ mod tests {
         };
         assert_eq!(failure.status, StatusCode::BAD_REQUEST);
         assert_eq!(failure.message, "bad payload");
+    }
+
+    #[tokio::test]
+    async fn reconfigure_from_configured_succeeds() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let control = StandbyControl::new("test-token", tx);
+
+        // Initial configure: Waiting → Configuring → Configured
+        assert!(control.begin_configure().await.is_ok());
+        control.finish_configure(true).await;
+        assert_eq!(control.startup_snapshot().await.phase, "configured");
+
+        // Reconfigure: Configured → Configuring → Configured
+        assert!(control.begin_configure().await.is_ok());
+        control.finish_configure(true).await;
+        assert_eq!(control.startup_snapshot().await.phase, "configured");
+    }
+
+    #[tokio::test]
+    async fn reconfigure_rejects_during_active_configure() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let control = StandbyControl::new("test-token", tx);
+
+        assert!(control.begin_configure().await.is_ok());
+        // Second call while still configuring should fail
+        let err = control.begin_configure().await.unwrap_err();
+        assert_eq!(err, "configuration is already in progress");
+    }
+
+    #[tokio::test]
+    async fn reconfigure_failure_returns_to_configured_when_runtime_started() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let control = StandbyControl::new("test-token", tx);
+
+        // Initial configure + mark runtime started
+        assert!(control.begin_configure().await.is_ok());
+        control.mark_runtime_started("test.runtime_ready").await;
+        control.finish_configure(true).await;
+        assert_eq!(control.startup_snapshot().await.phase, "configured");
+
+        // Reconfigure attempt that fails — should return to Configured, not Waiting
+        assert!(control.begin_configure().await.is_ok());
+        control.finish_configure(false).await;
+        assert_eq!(control.startup_snapshot().await.phase, "configured");
+    }
+
+    #[tokio::test]
+    async fn initial_configure_failure_returns_to_waiting() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let control = StandbyControl::new("test-token", tx);
+
+        // Initial configure that fails (runtime never started)
+        assert!(control.begin_configure().await.is_ok());
+        control.finish_configure(false).await;
+        assert_eq!(control.startup_snapshot().await.phase, "waiting");
     }
 }
