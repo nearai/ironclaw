@@ -13,9 +13,10 @@ use crate::agent::SessionManager as AgentSessionManager;
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::config::Config;
 use crate::context::ContextManager;
-use crate::db::Database;
+use crate::db::{Database, UserStore};
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
+use crate::llm::recording::HttpInterceptor;
 use crate::llm::{LlmProvider, RecordingLlm, SessionManager};
 use crate::secrets::SecretsStore;
 use crate::tools::ToolRegistry;
@@ -61,6 +62,7 @@ pub struct AppComponents {
     pub skill_catalog: Option<Arc<SkillCatalog>>,
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
     pub recording_handle: Option<Arc<RecordingLlm>>,
+    pub http_interceptor: Option<Arc<dyn HttpInterceptor>>,
     pub session: Arc<SessionManager>,
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
@@ -123,8 +125,31 @@ impl AppBuilder {
     }
 
     /// Inject a pre-created database, skipping `init_database()`.
+    ///
+    /// **Warning:** this leaves `self.handles` as `None`, which means
+    /// `init_secrets()` cannot construct a real `SecretsStore` (the store
+    /// needs a backend-specific handle, not the generic `Arc<dyn Database>`).
+    /// Tests that need credentials/OAuth/encrypted secrets must use
+    /// [`AppBuilder::with_database_and_handles`] instead so the secrets
+    /// path stays wired.
     pub fn with_database(&mut self, db: Arc<dyn Database>) {
         self.db = Some(db);
+    }
+
+    /// Inject a pre-created database **and** the matching backend-specific
+    /// handles, skipping `init_database()`.
+    ///
+    /// Use this whenever the test will exercise code paths that touch
+    /// `SecretsStore` (OAuth, encrypted credentials, secrets-backed WASM
+    /// tools). For libSQL backends the handles are constructed via
+    /// `LibSqlBackend::shared_db()`; for PostgreSQL via `PgBackend::pool()`.
+    pub fn with_database_and_handles(
+        &mut self,
+        db: Arc<dyn Database>,
+        handles: crate::db::DatabaseHandles,
+    ) {
+        self.db = Some(db);
+        self.handles = Some(handles);
     }
 
     /// Inject a pre-created LLM provider, skipping `init_llm()`.
@@ -329,6 +354,7 @@ impl AppBuilder {
             Option<Arc<Workspace>>,
             Option<Arc<dyn crate::tools::SoftwareBuilder>>,
             Arc<SharedCredentialRegistry>,
+            Option<Arc<dyn HttpInterceptor>>,
         ),
         anyhow::Error,
     > {
@@ -343,8 +369,22 @@ impl AppBuilder {
             crate::tools::EngineVersion::V1
         };
         let mut registry = ToolRegistry::new().with_engine_version(engine_version);
+        if let Some(ref db) = self.db {
+            registry = registry.with_database(Arc::clone(db));
+        }
         if let Some(ref ss) = self.secrets_store {
             registry = registry.with_credentials(Arc::clone(&credential_registry), Arc::clone(ss));
+        }
+        // Test-only HTTP host remapping. Gated to debug/test builds so a stray
+        // `IRONCLAW_TEST_HTTP_REMAP` env var on a release deployment cannot
+        // silently redirect outbound HTTP from production to a test endpoint.
+        let http_interceptor = if cfg!(any(test, debug_assertions)) {
+            crate::http_intercept::remap_from_env()
+        } else {
+            None
+        };
+        if let Some(ref interceptor) = http_interceptor {
+            registry = registry.with_http_interceptor(Arc::clone(interceptor));
         }
         let tools = Arc::new(registry);
         tools.register_builtin_tools();
@@ -492,6 +532,7 @@ impl AppBuilder {
             workspace,
             builder,
             credential_registry,
+            http_interceptor,
         ))
     }
 
@@ -535,6 +576,7 @@ impl AppBuilder {
             let secrets_store = self.secrets_store.clone();
             let tools = Arc::clone(tools);
             let wasm_config = self.config.wasm.clone();
+            let db = self.db.clone();
             async move {
                 let mut dev_loaded_tool_names: Vec<String> = Vec::new();
 
@@ -542,6 +584,10 @@ impl AppBuilder {
                     let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&tools));
                     if let Some(ref secrets) = secrets_store {
                         loader = loader.with_secrets_store(Arc::clone(secrets));
+                    }
+                    if let Some(ref db) = db {
+                        let role_lookup: Arc<dyn UserStore> = db.clone();
+                        loader = loader.with_role_lookup(role_lookup);
                     }
 
                     match loader.load_from_dir(&wasm_config.tools_dir).await {
@@ -740,11 +786,7 @@ impl AppBuilder {
         // Load registry catalog entries for extension discovery
         let mut catalog_entries = match crate::registry::RegistryCatalog::load_or_embedded() {
             Ok(catalog) => {
-                let entries: Vec<_> = catalog
-                    .all()
-                    .iter()
-                    .filter_map(|m| m.to_registry_entry())
-                    .collect();
+                let entries = catalog.discovery_entries();
                 tracing::debug!(
                     count = entries.len(),
                     "Loaded registry catalog entries for extension discovery"
@@ -894,7 +936,7 @@ impl AppBuilder {
         } else {
             self.init_llm().await?
         };
-        let (safety, tools, embeddings, workspace, builder, credential_registry) =
+        let (safety, tools, embeddings, workspace, builder, credential_registry, http_interceptor) =
             self.init_tools(&llm).await?;
 
         // Create hook registry early so runtime extension activation can register hooks.
@@ -1010,6 +1052,14 @@ impl AppBuilder {
             // Register credential mappings from skill frontmatter into the
             // shared registry so the HTTP tool can auto-inject credentials.
             crate::skills::register_skill_credentials(registry.skills(), &credential_registry);
+            if let Some(db) = self.db.as_ref() {
+                crate::skills::persist_skill_auth_descriptors(
+                    registry.skills(),
+                    Some(db.as_ref()),
+                    &self.config.owner_id,
+                )
+                .await;
+            }
 
             let registry = Arc::new(std::sync::RwLock::new(registry));
             let catalog = ironclaw_skills::catalog::shared_catalog();
@@ -1061,6 +1111,7 @@ impl AppBuilder {
             skill_catalog,
             cost_guard,
             recording_handle,
+            http_interceptor,
             session: self.session,
             catalog_entries,
             dev_loaded_tool_names,

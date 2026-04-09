@@ -512,6 +512,9 @@ const HEARTBEAT_SEED: &str = include_str!("seeds/HEARTBEAT.md");
 /// Default template seeded into TOOLS.md on first access.
 const TOOLS_SEED: &str = include_str!("seeds/TOOLS.md");
 
+/// Initial assistant-thread greeting, persisted once when a user is provisioned.
+pub const GREETING_SEED: &str = include_str!("seeds/GREETING.md");
+
 /// First-run ritual seeded into BOOTSTRAP.md on initial workspace setup.
 ///
 /// The agent reads this file at the start of every session when it exists.

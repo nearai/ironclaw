@@ -72,6 +72,7 @@ fn build_state(
         llm_provider: None,
         skill_registry: None,
         skill_catalog: None,
+        auth_manager: None,
         scheduler: None,
         chat_rate_limiter: PerUserRateLimiter::new(30, 60),
         oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
@@ -172,6 +173,8 @@ fn make_sandbox_job(user_id: &str, task: &str) -> crate::history::SandboxJobReco
         started_at: Some(now),
         completed_at: Some(now),
         credential_grants_json: "[]".to_string(),
+        mcp_servers: None,
+        max_iterations: None,
     }
 }
 

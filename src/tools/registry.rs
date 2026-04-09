@@ -6,8 +6,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::context::ContextManager;
-use crate::db::Database;
+use crate::db::{Database, UserStore};
 use crate::extensions::ExtensionManager;
+use crate::llm::recording::HttpInterceptor;
 use crate::llm::{LlmProvider, ToolDefinition};
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::secrets::SecretsStore;
@@ -125,8 +126,14 @@ pub struct ToolRegistry {
     credential_registry: Option<Arc<SharedCredentialRegistry>>,
     /// Secrets store for credential injection (shared with HTTP tool).
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    /// Narrow role lookup used by runtime credential fallback.
+    role_lookup: Option<Arc<dyn UserStore>>,
+    /// Database handle for user-role checks in multi-tenant credential fallback.
+    db: Option<Arc<dyn Database>>,
     /// Shared rate limiter for built-in tool invocations.
     rate_limiter: RateLimiter,
+    /// Optional HTTP interceptor propagated into registered WASM wrappers.
+    http_interceptor: Option<Arc<dyn HttpInterceptor>>,
     /// Reference to the message tool for setting context per-turn.
     message_tool: RwLock<Option<Arc<crate::tools::builtin::MessageTool>>>,
     /// Active engine version. Controls which tools are visible via
@@ -155,7 +162,10 @@ impl ToolRegistry {
             builtin_names: RwLock::new(std::collections::HashSet::new()),
             credential_registry: None,
             secrets_store: None,
+            role_lookup: None,
+            db: None,
             rate_limiter: RateLimiter::new(),
+            http_interceptor: None,
             message_tool: RwLock::new(None),
             engine_version: EngineVersion::V1,
         }
@@ -169,6 +179,24 @@ impl ToolRegistry {
     ) -> Self {
         self.credential_registry = Some(credential_registry);
         self.secrets_store = Some(secrets_store);
+        self
+    }
+
+    /// Attach a database handle for user-role aware tool behavior.
+    pub fn with_database(mut self, db: Arc<dyn Database>) -> Self {
+        let role_lookup: Arc<dyn UserStore> = db.clone();
+        self.role_lookup = Some(role_lookup);
+        self.db = Some(db);
+        self
+    }
+
+    pub fn with_role_lookup(mut self, role_lookup: Arc<dyn UserStore>) -> Self {
+        self.role_lookup = Some(role_lookup);
+        self
+    }
+
+    pub fn with_http_interceptor(mut self, interceptor: Arc<dyn HttpInterceptor>) -> Self {
+        self.http_interceptor = Some(interceptor);
         self
     }
 
@@ -196,6 +224,14 @@ impl ToolRegistry {
     /// Get the shared rate limiter for checking built-in tool limits.
     pub fn rate_limiter(&self) -> &RateLimiter {
         &self.rate_limiter
+    }
+
+    pub fn database(&self) -> Option<&Arc<dyn Database>> {
+        self.db.as_ref()
+    }
+
+    pub fn role_lookup(&self) -> Option<&Arc<dyn UserStore>> {
+        self.role_lookup.as_ref()
     }
 
     /// Register a tool. Rejects dynamic tools that try to shadow a protected built-in name.
@@ -270,6 +306,16 @@ impl ToolRegistry {
         let resolved = self.resolve_name(name).await?;
         let tool = self.get(&resolved).await?;
         Some((resolved, tool))
+    }
+
+    /// Resolve a tool/action name to its owning provider extension, when the
+    /// action is extension-backed.
+    pub async fn provider_extension_for_tool(&self, name: &str) -> Option<String> {
+        let resolved = self.resolve_name(name).await?;
+        let tools = self.tools.read().await;
+        tools
+            .get(&resolved)
+            .and_then(|tool| tool.provider_extension().map(ToOwned::to_owned))
     }
 
     /// Check if a tool exists.
@@ -368,6 +414,9 @@ impl ToolRegistry {
         let mut http = HttpTool::new();
         if let (Some(cr), Some(ss)) = (&self.credential_registry, &self.secrets_store) {
             http = http.with_credentials(Arc::clone(cr), Arc::clone(ss));
+        }
+        if let Some(role_lookup) = &self.role_lookup {
+            http = http.with_role_lookup(Arc::clone(role_lookup));
         }
         self.register_sync(Arc::new(http));
 
@@ -850,6 +899,7 @@ impl ToolRegistry {
             .as_ref()
             .map(|http| http.credentials.values().cloned().collect())
             .unwrap_or_default();
+        let oauth_refresh = reg.oauth_refresh.clone();
 
         // Create the wrapper
         let mut wrapper = WasmToolWrapper::new(Arc::clone(reg.runtime), prepared, reg.capabilities);
@@ -867,8 +917,14 @@ impl ToolRegistry {
         if let Some(store) = reg.secrets_store {
             wrapper = wrapper.with_secrets_store(store);
         }
-        if let Some(oauth) = reg.oauth_refresh {
+        if let Some(role_lookup) = reg.role_lookup {
+            wrapper = wrapper.with_role_lookup(role_lookup);
+        }
+        if let Some(oauth) = oauth_refresh.clone() {
             wrapper = wrapper.with_oauth_refresh(oauth);
+        }
+        if let Some(interceptor) = &self.http_interceptor {
+            wrapper = wrapper.with_http_interceptor(Arc::clone(interceptor));
         }
 
         // Register the tool
@@ -880,6 +936,9 @@ impl ToolRegistry {
         {
             let count = credential_mappings.len();
             cr.add_mappings(credential_mappings);
+            if let Some(oauth) = oauth_refresh {
+                cr.add_oauth_refresh_configs(std::iter::once((oauth.secret_name.clone(), oauth)));
+            }
             tracing::debug!(
                 name = reg.name,
                 credential_count = count,
@@ -940,6 +999,7 @@ impl ToolRegistry {
             schema: Some(tool_with_binary.tool.parameters_schema.clone()),
             discovery_summary: None,
             secrets_store: self.secrets_store.clone(),
+            role_lookup: self.role_lookup.clone(),
             oauth_refresh: None,
         })
         .await
@@ -986,6 +1046,8 @@ pub struct WasmToolRegistration<'a> {
     pub discovery_summary: Option<ToolDiscoverySummary>,
     /// Secrets store for credential injection at request time.
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    /// Narrow role lookup for user-role aware fallback decisions.
+    pub role_lookup: Option<Arc<dyn UserStore>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
     pub oauth_refresh: Option<OAuthRefreshConfig>,
 }
@@ -1072,6 +1134,46 @@ mod tests {
         assert_eq!(
             registry.resolve_name("web_search").await.as_deref(),
             Some("web-search")
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_extension_lookup_uses_tool_metadata() {
+        struct ProviderTool;
+
+        #[async_trait::async_trait]
+        impl Tool for ProviderTool {
+            fn name(&self) -> &str {
+                "notion_search"
+            }
+
+            fn description(&self) -> &str {
+                "provider tool"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+
+            fn provider_extension(&self) -> Option<&str> {
+                Some("notion")
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(ProviderTool)).await;
+
+        assert_eq!(
+            registry.provider_extension_for_tool("notion_search").await,
+            Some("notion".to_string())
         );
     }
 

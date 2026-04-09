@@ -3961,6 +3961,7 @@ dependencies = [
  "ironclaw_skills",
  "monty",
  "pretty_assertions",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

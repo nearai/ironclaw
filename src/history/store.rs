@@ -5,6 +5,8 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 #[cfg(feature = "postgres")]
+use deadpool_postgres::GenericClient;
+#[cfg(feature = "postgres")]
 use deadpool_postgres::{Config, Pool};
 use rust_decimal::Decimal;
 use uuid::Uuid;
@@ -15,6 +17,8 @@ use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 #[cfg(feature = "postgres")]
 use crate::error::DatabaseError;
+#[cfg(feature = "postgres")]
+use crate::workspace::GREETING_SEED;
 
 /// Record for an LLM call to be persisted.
 #[derive(Debug, Clone)]
@@ -559,6 +563,74 @@ pub struct SandboxJobRecord {
     /// Serialized JSON of `Vec<CredentialGrant>` for restart support.
     /// Stored in the `description` column of `agent_jobs` (unused for sandbox jobs).
     pub credential_grants_json: String,
+    /// Optional MCP server filter from the original `create_job` call. Mirrors
+    /// `JobCreationParams::mcp_servers`: `None` = mount the master config,
+    /// `Some([])` = no MCP, `Some(["name"])` = filtered. Persisted in the
+    /// `restart_params` column so a restarted job re-applies the same filter.
+    pub mcp_servers: Option<Vec<String>>,
+    /// Optional cap on worker agent loop iterations from the original
+    /// `create_job` call. Persisted in `restart_params` so a restart honors
+    /// the original cap instead of falling back to the worker default.
+    pub max_iterations: Option<u32>,
+}
+
+/// JSON shape stored in the `agent_jobs.restart_params` column. Both fields
+/// are optional; the column is NULL when neither was set on the original job.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SandboxRestartParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_servers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_iterations: Option<u32>,
+}
+
+impl SandboxRestartParams {
+    /// Build from the two `SandboxJobRecord` fields. Returns `None` when both
+    /// are `None` so the DB column stays NULL for jobs that didn't customize
+    /// either knob.
+    pub fn from_record(
+        mcp_servers: Option<&[String]>,
+        max_iterations: Option<u32>,
+    ) -> Option<Self> {
+        if mcp_servers.is_none() && max_iterations.is_none() {
+            return None;
+        }
+        Some(Self {
+            mcp_servers: mcp_servers.map(<[String]>::to_vec),
+            max_iterations,
+        })
+    }
+
+    /// Serialize for storage. Returns `None` for an empty struct so we store
+    /// SQL NULL rather than the literal `{}`.
+    pub fn to_json(&self) -> Option<String> {
+        if self.mcp_servers.is_none() && self.max_iterations.is_none() {
+            return None;
+        }
+        serde_json::to_string(self).ok()
+    }
+
+    /// Parse the column value. Logs and returns default on parse error so a
+    /// corrupt blob does not break job listing — the worst case is the
+    /// restart loses the filter, which matches pre-fix behaviour.
+    pub fn from_column(raw: Option<&str>) -> Self {
+        let Some(raw) = raw else {
+            return Self::default();
+        };
+        if raw.trim().is_empty() {
+            return Self::default();
+        }
+        match serde_json::from_str::<SandboxRestartParams>(raw) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to parse sandbox restart_params; ignoring"
+                );
+                Self::default()
+            }
+        }
+    }
 }
 
 impl crate::ownership::Owned for SandboxJobRecord {
@@ -628,18 +700,24 @@ impl Store {
     /// Insert a new sandbox job into `agent_jobs`.
     pub async fn save_sandbox_job(&self, job: &SandboxJobRecord) -> Result<(), DatabaseError> {
         let conn = self.conn().await?;
+        let restart_params_json =
+            SandboxRestartParams::from_record(job.mcp_servers.as_deref(), job.max_iterations)
+                .as_ref()
+                .and_then(SandboxRestartParams::to_json);
         conn.execute(
             r#"
             INSERT INTO agent_jobs (
                 id, title, description, status, source, user_id, project_dir,
-                success, failure_reason, created_at, started_at, completed_at
-            ) VALUES ($1, $2, $3, $4, 'sandbox', $5, $6, $7, $8, $9, $10, $11)
+                success, failure_reason, created_at, started_at, completed_at,
+                restart_params
+            ) VALUES ($1, $2, $3, $4, 'sandbox', $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (id) DO UPDATE SET
                 status = EXCLUDED.status,
                 success = EXCLUDED.success,
                 failure_reason = EXCLUDED.failure_reason,
                 started_at = EXCLUDED.started_at,
-                completed_at = EXCLUDED.completed_at
+                completed_at = EXCLUDED.completed_at,
+                restart_params = EXCLUDED.restart_params
             "#,
             &[
                 &job.id,
@@ -653,6 +731,7 @@ impl Store {
                 &job.created_at,
                 &job.started_at,
                 &job.completed_at,
+                &restart_params_json,
             ],
         )
         .await?;
@@ -669,48 +748,19 @@ impl Store {
             .query_opt(
                 r#"
                 SELECT id, title, description, status, user_id, project_dir,
-                       success, failure_reason, created_at, started_at, completed_at
+                       success, failure_reason, created_at, started_at, completed_at,
+                       restart_params
                 FROM agent_jobs WHERE id = $1 AND source = 'sandbox'
                 "#,
                 &[&id],
             )
             .await?;
 
-        Ok(row.map(|r| SandboxJobRecord {
-            id: r.get("id"),
-            task: r.get("title"),
-            status: r.get("status"),
-            user_id: r.get("user_id"),
-            project_dir: r
-                .get::<_, Option<String>>("project_dir")
-                .unwrap_or_default(),
-            success: r.get("success"),
-            failure_reason: r.get("failure_reason"),
-            created_at: r.get("created_at"),
-            started_at: r.get("started_at"),
-            completed_at: r.get("completed_at"),
-            credential_grants_json: r.get::<_, String>("description"),
-        }))
-    }
-
-    /// List all sandbox jobs, most recent first.
-    pub async fn list_sandbox_jobs(&self) -> Result<Vec<SandboxJobRecord>, DatabaseError> {
-        let conn = self.conn().await?;
-        let rows = conn
-            .query(
-                r#"
-                SELECT id, title, description, status, user_id, project_dir,
-                       success, failure_reason, created_at, started_at, completed_at
-                FROM agent_jobs WHERE source = 'sandbox'
-                ORDER BY created_at DESC
-                "#,
-                &[],
-            )
-            .await?;
-
-        Ok(rows
-            .iter()
-            .map(|r| SandboxJobRecord {
+        Ok(row.map(|r| {
+            let restart_params = SandboxRestartParams::from_column(
+                r.get::<_, Option<String>>("restart_params").as_deref(),
+            );
+            SandboxJobRecord {
                 id: r.get("id"),
                 task: r.get("title"),
                 status: r.get("status"),
@@ -724,6 +774,51 @@ impl Store {
                 started_at: r.get("started_at"),
                 completed_at: r.get("completed_at"),
                 credential_grants_json: r.get::<_, String>("description"),
+                mcp_servers: restart_params.mcp_servers,
+                max_iterations: restart_params.max_iterations,
+            }
+        }))
+    }
+
+    /// List all sandbox jobs, most recent first.
+    pub async fn list_sandbox_jobs(&self) -> Result<Vec<SandboxJobRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, title, description, status, user_id, project_dir,
+                       success, failure_reason, created_at, started_at, completed_at,
+                       restart_params
+                FROM agent_jobs WHERE source = 'sandbox'
+                ORDER BY created_at DESC
+                "#,
+                &[],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| {
+                let restart_params = SandboxRestartParams::from_column(
+                    r.get::<_, Option<String>>("restart_params").as_deref(),
+                );
+                SandboxJobRecord {
+                    id: r.get("id"),
+                    task: r.get("title"),
+                    status: r.get("status"),
+                    user_id: r.get("user_id"),
+                    project_dir: r
+                        .get::<_, Option<String>>("project_dir")
+                        .unwrap_or_default(),
+                    success: r.get("success"),
+                    failure_reason: r.get("failure_reason"),
+                    created_at: r.get("created_at"),
+                    started_at: r.get("started_at"),
+                    completed_at: r.get("completed_at"),
+                    credential_grants_json: r.get::<_, String>("description"),
+                    mcp_servers: restart_params.mcp_servers,
+                    max_iterations: restart_params.max_iterations,
+                }
             })
             .collect())
     }
@@ -738,7 +833,8 @@ impl Store {
             .query(
                 r#"
                 SELECT id, title, description, status, user_id, project_dir,
-                       success, failure_reason, created_at, started_at, completed_at
+                       success, failure_reason, created_at, started_at, completed_at,
+                       restart_params
                 FROM agent_jobs WHERE source = 'sandbox' AND user_id = $1
                 ORDER BY created_at DESC
                 "#,
@@ -748,20 +844,27 @@ impl Store {
 
         Ok(rows
             .iter()
-            .map(|r| SandboxJobRecord {
-                id: r.get("id"),
-                task: r.get("title"),
-                status: r.get("status"),
-                user_id: r.get("user_id"),
-                project_dir: r
-                    .get::<_, Option<String>>("project_dir")
-                    .unwrap_or_default(),
-                success: r.get("success"),
-                failure_reason: r.get("failure_reason"),
-                created_at: r.get("created_at"),
-                started_at: r.get("started_at"),
-                completed_at: r.get("completed_at"),
-                credential_grants_json: r.get::<_, String>("description"),
+            .map(|r| {
+                let restart_params = SandboxRestartParams::from_column(
+                    r.get::<_, Option<String>>("restart_params").as_deref(),
+                );
+                SandboxJobRecord {
+                    id: r.get("id"),
+                    task: r.get("title"),
+                    status: r.get("status"),
+                    user_id: r.get("user_id"),
+                    project_dir: r
+                        .get::<_, Option<String>>("project_dir")
+                        .unwrap_or_default(),
+                    success: r.get("success"),
+                    failure_reason: r.get("failure_reason"),
+                    created_at: r.get("created_at"),
+                    started_at: r.get("started_at"),
+                    completed_at: r.get("completed_at"),
+                    credential_grants_json: r.get::<_, String>("description"),
+                    mcp_servers: restart_params.mcp_servers,
+                    max_iterations: restart_params.max_iterations,
+                }
             })
             .collect())
     }
@@ -1669,7 +1772,8 @@ impl Store {
             INSERT INTO conversations (id, channel, user_id, thread_id, source_channel)
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (id) DO UPDATE
-            SET last_activity = NOW()
+            SET last_activity = NOW(),
+                source_channel = COALESCE(conversations.source_channel, EXCLUDED.source_channel)
             WHERE conversations.user_id = EXCLUDED.user_id
               AND conversations.channel = EXCLUDED.channel
             "#,
@@ -2415,10 +2519,43 @@ use crate::db::{ApiTokenRecord, UserRecord};
 
 #[cfg(feature = "postgres")]
 impl Store {
+    pub(crate) async fn seed_initial_assistant_thread(
+        client: &impl GenericClient,
+        user_id: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<(), DatabaseError> {
+        let conversation_id = Uuid::new_v4();
+        let message_id = Uuid::new_v4();
+        let metadata = serde_json::json!({
+            "thread_type": "assistant",
+            "title": "Assistant",
+        });
+        client
+            .execute(
+                r#"
+                INSERT INTO conversations (id, channel, user_id, metadata, source_channel, started_at, last_activity)
+                VALUES ($1, 'gateway', $2, $3, 'gateway', $4, $4)
+                "#,
+                &[&conversation_id, &user_id, &metadata, &created_at],
+            )
+            .await?;
+        client
+            .execute(
+                r#"
+                INSERT INTO conversation_messages (id, conversation_id, role, content, created_at)
+                VALUES ($1, $2, 'assistant', $3, $4)
+                "#,
+                &[&message_id, &conversation_id, &GREETING_SEED, &created_at],
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Create a new user record.
     pub async fn create_user(&self, user: &UserRecord) -> Result<(), DatabaseError> {
-        let conn = self.conn().await?;
-        conn.execute(
+        let mut conn = self.conn().await?;
+        let tx = conn.transaction().await?;
+        tx.execute(
             r#"
             INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -2437,6 +2574,8 @@ impl Store {
             ],
         )
         .await?;
+        Self::seed_initial_assistant_thread(&tx, &user.id, user.created_at).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -2620,6 +2759,8 @@ impl Store {
         )
         .await?;
 
+        Self::seed_initial_assistant_thread(&tx, &user.id, user.created_at).await?;
+
         tx.commit().await?;
 
         Ok(ApiTokenRecord {
@@ -2768,6 +2909,12 @@ impl Store {
             "routines",
             "memory_documents",
             "conversations",
+            // user_identities (added in V17): without this delete, the
+            // PostgreSQL FK rejects the `DELETE FROM users` below, and on
+            // libSQL the rows are silently orphaned — a future user with
+            // the same id could inherit the previous user's external
+            // identity rows, which is a tenant-isolation breach.
+            "user_identities",
         ] {
             tx.execute(&format!("DELETE FROM {table} WHERE user_id = $1"), &[&id])
                 .await
