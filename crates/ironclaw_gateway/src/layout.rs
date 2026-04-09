@@ -287,8 +287,17 @@ pub fn is_safe_widget_id(value: &str) -> bool {
 /// to refuse anything an attacker could weaponize against an unsuspecting
 /// future consumer.
 pub(crate) fn is_safe_url(value: &str) -> bool {
+    // Length check runs against the RAW input, not the trimmed view, so a
+    // pathological 4 KB value padded with leading/trailing whitespace can't
+    // sneak past the cap by collapsing to a short URL after trim. The cap
+    // is intentionally a guard against exfil-shaped payloads, not a guard
+    // against the resolved URL itself, so the right thing to count is what
+    // the caller actually wrote.
+    if value.len() > 2048 {
+        return false;
+    }
     let v = value.trim();
-    if v.is_empty() || v.len() > 2048 {
+    if v.is_empty() {
         return false;
     }
     // Reject HTML-attribute breakout vectors and any control character
@@ -636,6 +645,17 @@ mod tests {
         let at_limit = format!("https://example.com/{}", "a".repeat(2028));
         assert_eq!(at_limit.len(), 2048);
         assert!(is_safe_url(&at_limit));
+        // The length cap counts the RAW input, not the trimmed view, so a
+        // pathological short URL padded with leading/trailing whitespace
+        // up past the cap is still rejected. Without the raw-length check
+        // the trim() would collapse this to a 24-char URL and silently
+        // pass — defeating the exfil-shape guard the cap exists for.
+        let padded = format!("   https://example.com/x{}   ", " ".repeat(2030));
+        assert!(padded.len() > 2048);
+        assert!(
+            !is_safe_url(&padded),
+            "raw length must be checked before trim"
+        );
         // No scheme at all (not relative either).
         assert!(!is_safe_url("example.com/logo.png"));
         // Single `/` is technically a valid root path, but the
