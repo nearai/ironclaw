@@ -279,15 +279,30 @@ pub async fn frontend_widget_file_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Path((id, file)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    // The widget id is a single path segment; it must not contain any
-    // separator and must not be `.`, `..`, or empty.
-    if !is_safe_segment(&id) {
+    // The widget id must match the loader/runtime contract enforced by
+    // `read_widget_manifest` (`is_safe_widget_id`: alphanumeric + `._-`,
+    // first char alphanumeric, ≤64 chars). `is_safe_segment` would also
+    // permit quotes, brackets, whitespace, newlines, etc. — none of which
+    // can ever resolve to a real widget (the loader would have rejected
+    // the manifest), but they would still produce surprising
+    // `.system/gateway/widgets/<weird>/...` workspace paths and inject
+    // arbitrary content into the `workspace_path` field of the warn! log
+    // below. Lock the accepted charset to the same one the loader uses.
+    if !is_safe_widget_id(&id) {
         return Err((StatusCode::BAD_REQUEST, "Invalid widget id".to_string()));
     }
     // The file parameter is a nested path (`*file` wildcard). Validate every
-    // component independently so neither `a/../b` nor `a/./b` nor
-    // `a/\..\b` slips through.
-    if !is_safe_relative_path(&file) {
+    // `/`-separated component against the same strict charset so neither
+    // `a/../b` nor `a/./b` nor `a/\..\b` nor whitespace/quote/control-char
+    // payloads slip through. Each component must look like a normal
+    // filename (`index.js`, `assets`, `icon.svg`, …).
+    if file.is_empty() || file.starts_with('/') || file.contains('\0') {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid widget file path".to_string(),
+        ));
+    }
+    if !file.split('/').all(is_safe_widget_id) {
         return Err((
             StatusCode::BAD_REQUEST,
             "Invalid widget file path".to_string(),
@@ -347,16 +362,6 @@ fn is_safe_segment(s: &str) -> bool {
         && !s.contains('\0')
 }
 
-/// True if `s` is a safe relative path under the widget directory — every
-/// `/`-separated component must itself pass `is_safe_segment`. Leading or
-/// trailing slashes and empty components are rejected.
-fn is_safe_relative_path(s: &str) -> bool {
-    if s.is_empty() || s.starts_with('/') || s.contains('\0') {
-        return false;
-    }
-    s.split('/').all(is_safe_segment)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,21 +384,49 @@ mod tests {
         assert!(!is_safe_segment("nul\0byte"));
     }
 
+    /// The serving endpoint (`frontend_widget_file_handler`) validates the
+    /// `id` and each `file` component with `is_safe_widget_id`. This pins
+    /// the contract: well-formed widget asset paths are accepted, hostile
+    /// payloads (traversal, separators, quotes, brackets, whitespace,
+    /// control chars) are rejected. The check matches what the loader
+    /// (`read_widget_manifest`) enforces on `manifest.id`, so the serving
+    /// endpoint's accepted charset can never drift wider than the
+    /// loader/runtime contract. See PR #1725 review thread r3053351457.
     #[test]
-    fn relative_path_allows_multi_component() {
-        assert!(is_safe_relative_path("index.js"));
-        assert!(is_safe_relative_path("assets/icon.svg"));
-        assert!(is_safe_relative_path("i18n/en/strings.json"));
-    }
-
-    #[test]
-    fn relative_path_rejects_traversal() {
-        assert!(!is_safe_relative_path(""));
-        assert!(!is_safe_relative_path("/etc/passwd"));
-        assert!(!is_safe_relative_path("assets/../secrets"));
-        assert!(!is_safe_relative_path("./index.js"));
-        assert!(!is_safe_relative_path("assets//icon.svg"));
-        assert!(!is_safe_relative_path("assets\\..\\secrets"));
+    fn widget_file_path_components_use_strict_charset() {
+        // Accepted: normal asset paths a widget would actually ship.
+        for ok in [
+            "index.js",
+            "style.css",
+            "assets/icon.svg",
+            "i18n/en/strings.json",
+        ] {
+            let parts: Vec<&str> = ok.split('/').collect();
+            assert!(
+                parts.iter().all(|p| is_safe_widget_id(p)),
+                "expected {ok:?} to pass per-component is_safe_widget_id"
+            );
+        }
+        // Rejected: traversal and shape-of-path payloads.
+        for bad in [
+            "../etc/passwd",
+            "assets/../secrets",
+            "./index.js",
+            "assets\\..\\secrets",
+            "-flag.js", // first char must be alphanumeric
+            ".hidden",  // first char must be alphanumeric
+            "name with space",
+            "name\nnewline",
+            "name\"quote",
+            "name[bracket",
+            "name\0nul",
+        ] {
+            let parts: Vec<&str> = bad.split('/').collect();
+            assert!(
+                !parts.iter().all(|p| is_safe_widget_id(p)),
+                "expected {bad:?} to fail per-component is_safe_widget_id"
+            );
+        }
     }
 
     #[cfg(feature = "libsql")]
