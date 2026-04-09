@@ -807,6 +807,8 @@ mod tests {
             max_llm_concurrent_per_user: None,
             max_jobs_concurrent_per_user: None,
             engine_v2: false,
+            context_limit_tokens: 100_000,
+            compaction_threshold: 0.8,
         };
         let cm = Arc::new(ContextManager::new(5));
         let llm: Arc<dyn LlmProvider> = Arc::new(StubLlm);

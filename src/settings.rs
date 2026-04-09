@@ -552,6 +552,16 @@ pub struct AgentSettings {
     /// Maximum tokens per job (0 = unlimited).
     #[serde(default)]
     pub max_tokens_per_job: u64,
+
+    /// Context window token limit for compaction monitoring.
+    /// Increase for models with larger context windows (e.g. 200_000 for
+    /// Claude Opus/Sonnet, 1_000_000 for Gemini).
+    #[serde(default = "default_context_limit_tokens")]
+    pub context_limit_tokens: usize,
+
+    /// Compaction trigger threshold as a ratio of context_limit_tokens (0.5–0.95).
+    #[serde(default = "default_compaction_threshold")]
+    pub compaction_threshold: f64,
 }
 
 fn default_agent_name() -> String {
@@ -586,6 +596,14 @@ fn default_max_tool_iterations() -> usize {
     50
 }
 
+fn default_context_limit_tokens() -> usize {
+    100_000
+}
+
+fn default_compaction_threshold() -> f64 {
+    0.8
+}
+
 fn default_timezone() -> String {
     "UTC".to_string()
 }
@@ -609,6 +627,8 @@ impl Default for AgentSettings {
             auto_approve_tools: false,
             default_timezone: default_timezone(),
             max_tokens_per_job: 0,
+            context_limit_tokens: default_context_limit_tokens(),
+            compaction_threshold: default_compaction_threshold(),
         }
     }
 }

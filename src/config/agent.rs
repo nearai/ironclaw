@@ -47,6 +47,10 @@ pub struct AgentConfig {
     /// Enable engine v2 routing (Strategy C parallel deployment).
     /// Set via `ENGINE_V2=true` env var or programmatically in tests.
     pub engine_v2: bool,
+    /// Context window token limit for compaction monitoring.
+    pub context_limit_tokens: usize,
+    /// Compaction trigger threshold (ratio 0.5–0.95).
+    pub compaction_threshold: f64,
 }
 
 impl AgentConfig {
@@ -75,6 +79,8 @@ impl AgentConfig {
             max_llm_concurrent_per_user: None,
             max_jobs_concurrent_per_user: None,
             engine_v2: false,
+            context_limit_tokens: 100_000,
+            compaction_threshold: 0.8,
         }
     }
 
@@ -157,6 +163,34 @@ impl AgentConfig {
             max_llm_concurrent_per_user: parse_option_env("TENANT_MAX_LLM_CONCURRENT")?,
             max_jobs_concurrent_per_user: parse_option_env("TENANT_MAX_JOBS_CONCURRENT")?,
             engine_v2: parse_bool_env("ENGINE_V2", false)?,
+            context_limit_tokens: {
+                let val: usize = db_first_or_default(
+                    &settings.agent.context_limit_tokens,
+                    &defaults.context_limit_tokens,
+                    "AGENT_CONTEXT_LIMIT_TOKENS",
+                )?;
+                if val < 16_000 {
+                    return Err(ConfigError::InvalidValue {
+                        key: "AGENT_CONTEXT_LIMIT_TOKENS".into(),
+                        message: format!("must be at least 16000, got {val}"),
+                    });
+                }
+                val
+            },
+            compaction_threshold: {
+                let raw: f64 = db_first_or_default(
+                    &settings.agent.compaction_threshold,
+                    &defaults.compaction_threshold,
+                    "AGENT_COMPACTION_THRESHOLD",
+                )?;
+                if !(0.5..=0.95).contains(&raw) {
+                    return Err(ConfigError::InvalidValue {
+                        key: "AGENT_COMPACTION_THRESHOLD".into(),
+                        message: format!("must be between 0.5 and 0.95, got {raw}"),
+                    });
+                }
+                raw
+            },
         })
     }
 }
@@ -179,5 +213,49 @@ mod tests {
         let settings = Settings::default(); // default is "UTC"
         let config = AgentConfig::resolve(&settings).expect("resolve");
         assert_eq!(config.default_timezone, "UTC");
+    }
+
+    #[test]
+    fn test_context_limit_tokens_default() {
+        let settings = Settings::default();
+        let config = AgentConfig::resolve(&settings).expect("resolve");
+        assert_eq!(config.context_limit_tokens, 100_000);
+    }
+
+    #[test]
+    fn test_compaction_threshold_default() {
+        let settings = Settings::default();
+        let config = AgentConfig::resolve(&settings).expect("resolve");
+        assert!((config.compaction_threshold - 0.8).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_context_limit_tokens_rejects_below_minimum() {
+        let mut settings = Settings::default();
+        settings.agent.context_limit_tokens = 8_000;
+
+        let result = AgentConfig::resolve(&settings);
+        assert!(
+            result.is_err(),
+            "context_limit_tokens < 16000 should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_compaction_threshold_rejects_too_high() {
+        let mut settings = Settings::default();
+        settings.agent.compaction_threshold = 1.5;
+
+        let result = AgentConfig::resolve(&settings);
+        assert!(result.is_err(), "threshold > 0.95 should be rejected");
+    }
+
+    #[test]
+    fn test_compaction_threshold_rejects_too_low() {
+        let mut settings = Settings::default();
+        settings.agent.compaction_threshold = 0.3;
+
+        let result = AgentConfig::resolve(&settings);
+        assert!(result.is_err(), "threshold < 0.5 should be rejected");
     }
 }
