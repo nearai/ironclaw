@@ -1886,6 +1886,7 @@ async function handleAuthRequired(data) {
     return;
   }
   if (data.extension_name && getConfigureOverlay(data.extension_name)) {
+    setAuthFlowPending(true, data.instructions);
     return;
   }
   const existingCard = data.extension_name ? getAuthCard(data.extension_name) : getAuthCard();

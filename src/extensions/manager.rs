@@ -11519,6 +11519,14 @@ mod tests {
 
     #[test]
     fn test_telegram_token_colon_preserved_in_validation_url() {
+        // Hold ENV_MUTEX so a concurrent test cannot set
+        // IRONCLAW_TEST_TELEGRAM_API_BASE_URL while we read it.
+        let _guard = crate::config::helpers::lock_env();
+        // Ensure the test override is NOT set — we want the default base URL.
+        unsafe {
+            std::env::remove_var(TELEGRAM_TEST_API_BASE_ENV);
+        }
+
         // Regression: Telegram tokens (format: numeric_id:alphanumeric_string) must NOT
         // have their colon URL-encoded to %3A, as this breaks the validation endpoint.
         // Previously: form_urlencoded::byte_serialize encoded the token, causing 404s.
