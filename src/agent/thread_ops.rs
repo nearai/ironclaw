@@ -754,7 +754,10 @@ impl Agent {
                     allow_always,
                 })
             }
-            Ok(AgenticLoopResult::AuthPending { instructions, turn_usage }) => {
+            Ok(AgenticLoopResult::AuthPending {
+                instructions,
+                turn_usage,
+            }) => {
                 // Auth-required status already sent by the dispatcher.
                 // Persist the turn + instructions to DB (like a Response) but
                 // suppress the text SSE event by returning auth_pending.
@@ -1798,7 +1801,10 @@ impl Agent {
                         allow_always,
                     })
                 }
-                Ok(AgenticLoopResult::AuthPending { instructions, turn_usage }) => {
+                Ok(AgenticLoopResult::AuthPending {
+                    instructions,
+                    turn_usage,
+                }) => {
                     thread.complete_turn(&instructions);
                     let (turn_number, tool_calls, narrative) = thread
                         .turns

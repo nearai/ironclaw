@@ -318,7 +318,10 @@ impl Agent {
                 pending,
                 turn_usage,
             }),
-            Ok(LoopOutcome::AuthPending(instructions)) => Ok(AgenticLoopResult::AuthPending { instructions, turn_usage }),
+            Ok(LoopOutcome::AuthPending(instructions)) => Ok(AgenticLoopResult::AuthPending {
+                instructions,
+                turn_usage,
+            }),
             Err(error) => Ok(AgenticLoopResult::Failed { error, turn_usage }),
         }
     }
