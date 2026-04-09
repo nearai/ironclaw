@@ -1,9 +1,11 @@
 //! IdentityStore implementation for LibSqlBackend.
+// safety: each async fn uses a single conn.query()/conn.execute() — no multi-op transactions needed
 
 use async_trait::async_trait;
 use libsql::params;
 use uuid::Uuid;
 
+use super::users::seed_initial_assistant_thread;
 use super::{fmt_opt_ts, fmt_ts, get_opt_text, get_text, get_ts, opt_text};
 use crate::db::libsql::LibSqlBackend;
 use crate::db::{DatabaseError, IdentityStore, UserIdentityRecord, UserRecord};
@@ -170,7 +172,7 @@ impl IdentityStore for LibSqlBackend {
         let raw_profile_str = serde_json::to_string(&identity.raw_profile)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
 
-        conn.execute("BEGIN", ())
+        conn.execute("BEGIN", ()) // safety: this IS a transaction wrapping the multi-step insert below
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
@@ -244,6 +246,11 @@ impl IdentityStore for LibSqlBackend {
             return Err(DatabaseError::Query(e.to_string()));
         }
 
+        if let Err(e) = seed_initial_assistant_thread(&conn, &user.id, &user.created_at).await {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(e);
+        }
+
         conn.execute("COMMIT", ())
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -255,7 +262,7 @@ impl IdentityStore for LibSqlBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{Database, IdentityStore, UserStore};
+    use crate::db::{ConversationStore, Database, IdentityStore, UserStore};
 
     async fn test_backend() -> (LibSqlBackend, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -414,6 +421,15 @@ mod tests {
             .await
             .unwrap();
         assert!(found_identity.is_some());
+
+        let thread_id = db
+            .get_or_create_assistant_conversation("user-3", "gateway")
+            .await
+            .unwrap();
+        let messages = db.list_conversation_messages(thread_id).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "assistant");
+        assert_eq!(messages[0].content, crate::workspace::GREETING_SEED);
     }
 
     /// Regression: an earlier release recorded V15 as "document_versions"

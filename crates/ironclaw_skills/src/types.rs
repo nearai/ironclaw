@@ -209,6 +209,14 @@ pub struct SkillOAuthConfig {
     pub authorization_url: String,
     pub token_url: String,
     #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub client_id_env: Option<String>,
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    #[serde(default)]
+    pub client_secret_env: Option<String>,
+    #[serde(default)]
     pub scopes: Vec<String>,
     #[serde(default)]
     pub use_pkce: bool,
@@ -468,7 +476,7 @@ metadata:
             },
             prompt_content: "test prompt".to_string(),
             trust: SkillTrust::Trusted,
-            source: SkillSource::User(PathBuf::from("/tmp/test")),
+            source: SkillSource::User(PathBuf::from("/tmp/test")), // safety: dummy path in test, not used for I/O
             content_hash: "sha256:000".to_string(),
             compiled_patterns: vec![],
             lowercased_keywords: vec![],

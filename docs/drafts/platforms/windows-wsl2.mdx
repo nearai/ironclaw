@@ -1,0 +1,262 @@
+---
+title: Windows (WSL2)
+sidebarTitle: Windows (WSL2)
+description: Running IronClaw on Windows via WSL2 (recommended)
+---
+
+WSL2 (Windows Subsystem for Linux 2) is the recommended way to run IronClaw on Windows. It provides a full Linux environment with near-native performance and seamless port forwarding to Windows.
+
+<Note>
+WSL2 is preferred over native Windows for IronClaw. The Docker sandbox, shell tools, and keyring integrations all work without workarounds under WSL2. For a fully native Windows setup, see [Windows Native](/platforms/windows-native).
+</Note>
+
+---
+
+## Set Up WSL2
+
+### Install WSL2
+
+Open PowerShell as Administrator and run:
+
+```powershell
+wsl --install
+```
+
+This installs WSL2 with Ubuntu as the default distribution. Restart your machine when prompted.
+
+### Verify WSL2 is Active
+
+```powershell
+wsl --status
+# Should show: Default Version: 2
+
+wsl --list --verbose
+# NAME      STATE           VERSION
+# Ubuntu    Running         2
+```
+
+### Update Ubuntu
+
+Open Ubuntu from the Start menu and run:
+
+```bash
+sudo apt update && sudo apt upgrade -y
+```
+
+---
+
+## Install IronClaw in WSL2
+
+Once inside the WSL2 Ubuntu terminal, installation is identical to Linux:
+
+```bash
+curl -fsSL https://install.ironclaw.ai | bash
+```
+
+Add to PATH:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+Run the setup wizard:
+
+```bash
+ironclaw onboard
+```
+
+---
+
+## Accessing the Web Gateway from Windows
+
+IronClaw's Web Gateway binds to `127.0.0.1:3000` inside WSL2. Modern Windows 11 and recent Windows 10 versions automatically forward localhost ports from WSL2 to the Windows host.
+
+**From a Windows browser, navigate to:** `http://localhost:3000`
+
+### Manual Port Forwarding (Older Windows 10)
+
+If automatic forwarding does not work, find the WSL2 IP address and add a port proxy rule:
+
+```powershell
+# In PowerShell (run as Administrator)
+# Get WSL2 IP
+$wslIp = (wsl hostname -I).Trim()
+
+# Add port forward
+netsh interface portproxy add v4tov4 `
+  listenaddress=127.0.0.1 `
+  listenport=3000 `
+  connectaddress=$wslIp `
+  connectport=3000
+
+# Verify
+netsh interface portproxy show all
+```
+
+Remove the rule later:
+
+```powershell
+netsh interface portproxy delete v4tov4 listenaddress=127.0.0.1 listenport=3000
+```
+
+---
+
+## Secrets and Keyring
+
+Secrets inside WSL2 are stored in the Linux keyring (GNOME Keyring or the keyutils kernel keyring), **not** in Windows Credential Manager.
+
+### Install GNOME Keyring in WSL2
+
+```bash
+sudo apt install gnome-keyring
+
+# Start the keyring daemon in your shell session
+eval $(gnome-keyring-daemon --start --components=secrets)
+export GNOME_KEYRING_CONTROL
+```
+
+Add this to `~/.bashrc` to start it automatically:
+
+```bash
+if [ -z "$GNOME_KEYRING_CONTROL" ]; then
+  eval $(gnome-keyring-daemon --start --components=secrets 2>/dev/null)
+  export GNOME_KEYRING_CONTROL
+fi
+```
+
+### Alternative: Environment Variable
+
+On WSL2 without a desktop session, the keyring daemon may not start reliably. Use the environment variable fallback:
+
+```bash
+# Generate a key once and store it securely
+openssl rand -base64 32 > ~/.ironclaw/master.key
+chmod 600 ~/.ironclaw/master.key
+
+# Reference it in your .env
+IRONCLAW_MASTER_KEY=$(cat ~/.ironclaw/master.key)
+```
+
+<Warning>
+The master key file must be protected with restrictive permissions (600). Anyone who can read it can decrypt your stored secrets.
+</Warning>
+
+---
+
+## Docker Desktop with WSL2 Backend
+
+Docker Desktop integrates directly with WSL2 and is the recommended Docker setup on Windows.
+
+### Install Docker Desktop
+
+1. Download from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/)
+2. During installation, ensure **"Use the WSL 2 based engine"** is checked
+3. After installation, go to **Settings → Resources → WSL Integration**
+4. Enable integration with your Ubuntu distribution
+
+### Verify Docker Access Inside WSL2
+
+```bash
+# In WSL2 terminal
+docker run --rm hello-world
+```
+
+You should see the Docker hello-world message. IronClaw can now use Docker for sandbox execution without needing a separate Docker installation inside WSL2.
+
+<Note>
+Do not install Docker Engine directly inside WSL2 when using Docker Desktop. The Docker Desktop WSL2 integration exposes the Docker daemon to WSL2 automatically — installing a second Docker daemon causes conflicts.
+</Note>
+
+---
+
+## Windows Firewall Rules for WSL2
+
+Windows Firewall applies to WSL2 network traffic. If your firewall is set to block inbound connections to WSL2, the Web Gateway will be unreachable from Windows.
+
+### Allow Port 3000 (if needed)
+
+```powershell
+# PowerShell (run as Administrator)
+New-NetFirewallRule `
+  -DisplayName "IronClaw Web Gateway" `
+  -Direction Inbound `
+  -Protocol TCP `
+  -LocalPort 3000 `
+  -Action Allow `
+  -Profile Private
+```
+
+Block public network access (keep it local-only):
+
+```powershell
+New-NetFirewallRule `
+  -DisplayName "Block IronClaw Public" `
+  -Direction Inbound `
+  -Protocol TCP `
+  -LocalPort 3000 `
+  -Action Block `
+  -Profile Public
+```
+
+---
+
+## Windows Terminal (Recommended)
+
+[Windows Terminal](https://apps.microsoft.com/detail/9n0dx20hk701) provides the best experience for WSL2:
+
+- Multi-pane view (IronClaw logs + interactive shell side by side)
+- Proper font rendering and colors for the TUI interface
+- WSL2 profiles with custom colors and fonts
+
+Install from the Microsoft Store or:
+
+```powershell
+winget install Microsoft.WindowsTerminal
+```
+
+Set Ubuntu (WSL2) as the default profile in Settings.
+
+---
+
+## Running IronClaw as a WSL2 Background Service
+
+WSL2 supports systemd on Windows 11 22H2+ and recent Windows 10 builds. Check if it is enabled:
+
+```bash
+cat /etc/wsl.conf
+# Should contain:
+# [boot]
+# systemd=true
+```
+
+Enable systemd if not set:
+
+```bash
+sudo tee /etc/wsl.conf > /dev/null <<'EOF'
+[boot]
+systemd=true
+EOF
+
+# Restart WSL2 from PowerShell
+wsl --shutdown
+# Re-open Ubuntu
+```
+
+Then follow the [Linux systemd setup](/platforms/linux#systemd-service) to create a service unit.
+
+---
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Linux Platform" icon="terminal" href="/platforms/linux">
+    Full systemd, keyring, and UFW setup reference
+  </Card>
+  <Card title="Windows Native" icon="windows" href="/platforms/windows-native">
+    Running IronClaw natively without WSL2 (experimental)
+  </Card>
+  <Card title="VPS Hardening" icon="shield" href="/platforms/vps">
+    Securing a public-facing deployment
+  </Card>
+</CardGroup>

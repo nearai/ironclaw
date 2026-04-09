@@ -11,6 +11,7 @@ mod credential_detect;
 mod leak_detector;
 mod policy;
 mod sanitizer;
+pub mod sensitive_paths;
 mod validator;
 
 pub use credential_detect::params_contain_manual_credentials;
@@ -60,7 +61,7 @@ impl SafetyLayer {
                 while cut > 0 && !output.is_char_boundary(cut) {
                     cut -= 1;
                 }
-                let truncated = &output[..cut];
+                let truncated = &output[..cut]; // safety: cut is validated by is_char_boundary loop above
                 let notice = format!(
                     "\n\n[... truncated: showing {}/{} bytes. Use the json tool with \
                  source_tool_call_id to query the full output.]",

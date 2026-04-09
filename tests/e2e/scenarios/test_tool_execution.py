@@ -1,94 +1,110 @@
-"""Tool execution e2e tests.
+"""Tool execution E2E tests via the chat history API."""
 
-Tests the agent loop: user message -> mock LLM returns tool_calls -> tool
-executes -> result displayed in chat.  Requires the enhanced mock_llm.py
-with TOOL_CALL_PATTERNS support.
-"""
+import asyncio
 
-from helpers import SEL
+from helpers import api_get, api_post
 
 
-async def _send_and_get_response(
-    page,
-    message: str,
+async def _create_thread(base_url: str) -> str:
+    response = await api_post(base_url, "/api/chat/thread/new", timeout=15)
+    assert response.status_code == 200, response.text
+    return response.json()["id"]
+
+
+async def _send_chat_message(base_url: str, thread_id: str, content: str) -> None:
+    response = await api_post(
+        base_url,
+        "/api/chat/send",
+        json={"content": content, "thread_id": thread_id},
+        timeout=30,
+    )
+    assert response.status_code in (200, 202), response.text
+
+
+async def _wait_for_turn(
+    base_url: str,
+    thread_id: str,
     *,
-    expected_fragment: str,
-    timeout: int = 30000,
-) -> str:
-    """Send a message and return the text of the newest assistant response.
+    response_fragment: str | None = None,
+    tool_name: str | None = None,
+    result_fragment: str | None = None,
+    timeout: float = 30.0,
+) -> dict:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        response = await api_get(
+            base_url,
+            f"/api/chat/history?thread_id={thread_id}",
+            timeout=10,
+        )
+        assert response.status_code == 200, response.text
+        history = response.json()
+        turns = history.get("turns", [])
+        if turns:
+            turn = turns[-1]
+            response_ok = response_fragment is None or (
+                turn.get("response") and response_fragment.lower() in turn["response"].lower()
+            )
+            tool_ok = tool_name is None
+            if tool_name is not None:
+                for tool_call in turn.get("tool_calls", []):
+                    if tool_call.get("name") != tool_name:
+                        continue
+                    preview = (tool_call.get("result_preview") or "").lower()
+                    tool_ok = tool_call.get("has_result") is True and (
+                        result_fragment is None or result_fragment.lower() in preview
+                    )
+                    if tool_ok:
+                        break
+            if response_ok and tool_ok:
+                return turn
+        await asyncio.sleep(0.25)
 
-    Counts existing assistant messages before sending, then waits for a new
-    one to appear and contain the expected final text fragment. This avoids
-    reading partial streamed content before the assistant response is complete.
-    """
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.wait_for(state="visible", timeout=5000)
-
-    # Count existing assistant messages before sending
-    assistant_sel = SEL["message_assistant"]
-    before_count = await page.locator(assistant_sel).count()
-
-    await chat_input.fill(message)
-    await chat_input.press("Enter")
-
-    # Wait for the final assistant message to exist and include the expected
-    # text fragment rather than returning on the first streamed chunk.
-    expected = before_count + 1
-    await page.wait_for_function(
-        """({ assistantSelector, expectedCount, expectedFragment }) => {
-            const messages = document.querySelectorAll(assistantSelector);
-            if (messages.length < expectedCount) return false;
-            const text = (messages[messages.length - 1].innerText || '').trim().toLowerCase();
-            return text.includes(expectedFragment.toLowerCase());
-        }""",
-        arg={
-            "assistantSelector": assistant_sel,
-            "expectedCount": expected,
-            "expectedFragment": expected_fragment,
-        },
-        timeout=timeout,
-    )
-
-    return await page.locator(assistant_sel).last.inner_text()
-
-
-async def test_builtin_echo_tool(page):
-    """Send a message that triggers the echo tool via mock LLM function calling."""
-    text = await _send_and_get_response(
-        page,
-        "echo hello world",
-        expected_fragment="hello world",
-    )
-
-    # The mock LLM returns "The echo tool returned: <result>"
-    assert "echo" in text.lower() or "hello world" in text.lower(), (
-        f"Expected echo result in response, got: {text}"
+    raise AssertionError(
+        f"Timed out waiting for turn: response_fragment={response_fragment!r}, "
+        f"tool_name={tool_name!r}, result_fragment={result_fragment!r}"
     )
 
 
-async def test_builtin_time_tool(page):
-    """Send a message that triggers the time tool via mock LLM function calling."""
-    text = await _send_and_get_response(
-        page,
-        "what time is it",
-        expected_fragment="time",
+async def test_builtin_echo_tool(ironclaw_server):
+    """A chat request can execute the built-in echo tool and persist its result."""
+    thread_id = await _create_thread(ironclaw_server)
+    await _send_chat_message(ironclaw_server, thread_id, "echo hello world")
+
+    turn = await _wait_for_turn(
+        ironclaw_server,
+        thread_id,
+        tool_name="echo",
+        result_fragment="hello world",
     )
 
-    # The mock LLM returns "The time tool returned: <json with iso/unix>"
-    assert "time" in text.lower(), (
-        f"Expected time result in response, got: {text}"
-    )
+    assert any(tc.get("name") == "echo" for tc in turn.get("tool_calls", [])), turn
 
 
-async def test_non_tool_message_still_works(page):
-    """Messages that don't match tool patterns still get text responses."""
-    text = await _send_and_get_response(
-        page,
-        "What is 2+2?",
-        expected_fragment="4",
-        timeout=15000,
+async def test_builtin_time_tool(ironclaw_server):
+    """A chat request can execute the built-in time tool and persist its result."""
+    thread_id = await _create_thread(ironclaw_server)
+    await _send_chat_message(ironclaw_server, thread_id, "what time is it")
+
+    turn = await _wait_for_turn(
+        ironclaw_server,
+        thread_id,
+        tool_name="time",
     )
 
-    assert "4" in text, (
-        f"Expected '4' in response, got: {text}"
+    assert any(tc.get("name") == "time" for tc in turn.get("tool_calls", [])), turn
+
+
+async def test_non_tool_message_still_works(ironclaw_server):
+    """Messages that do not trigger tools still get a normal assistant response."""
+    thread_id = await _create_thread(ironclaw_server)
+    await _send_chat_message(ironclaw_server, thread_id, "What is 2+2?")
+
+    turn = await _wait_for_turn(
+        ironclaw_server,
+        thread_id,
+        response_fragment="4",
+        timeout=15.0,
     )
+
+    assert "4" in (turn.get("response") or ""), turn

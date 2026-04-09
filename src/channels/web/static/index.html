@@ -14,6 +14,7 @@
   <script src="/i18n/index.js"></script>
   <script src="/i18n/en.js"></script>
   <script src="/i18n/zh-CN.js"></script>
+  <script src="/i18n/ko.js"></script>
 
   <script
     src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.3/purify.min.js"
@@ -168,6 +169,7 @@
         <div class="language-menu" id="language-menu" style="display: none;">
           <button type="button" class="language-option" data-action="switch-language" data-lang="en">English</button>
           <button type="button" class="language-option" data-action="switch-language" data-lang="zh-CN">简体中文</button>
+          <button type="button" class="language-option" data-action="switch-language" data-lang="ko">한국어</button>
         </div>
       </div>
 
@@ -239,6 +241,10 @@
       </div>
       <div class="chat-container">
         <div class="chat-messages" id="chat-messages"></div>
+        <button class="scroll-to-bottom-btn" id="scroll-to-bottom-btn" style="display:none"
+          data-i18n="chat.scrollToBottom" data-i18n-attr="aria-label"
+          data-i18n-title="chat.scrollToBottom"
+          title="Scroll to bottom" aria-label="Scroll to bottom">&#x2304;</button>
         <div id="slash-autocomplete" class="slash-autocomplete" style="display:none"></div>
         <div id="suggestion-chips" class="suggestion-chips" style="display:none"></div>
         <div class="chat-input">

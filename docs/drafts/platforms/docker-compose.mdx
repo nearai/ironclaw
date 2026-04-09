@@ -1,0 +1,305 @@
+---
+title: Docker Compose
+sidebarTitle: Docker Compose
+description: Production Docker Compose deployment with PostgreSQL and volumes
+---
+
+This page covers a production Docker Compose setup for IronClaw with PostgreSQL, named volumes, and health checks. Use this when you want a fully containerized, self-contained deployment that is easy to back up and migrate.
+
+<Note>
+This is for running IronClaw itself inside Docker Compose alongside PostgreSQL. This is separate from IronClaw's Docker sandbox feature, which launches containers for job isolation. Both can coexist — see the Docker-in-Docker section below.
+</Note>
+
+---
+
+## docker-compose.yml
+
+Save this as `docker-compose.yml` in your deployment directory (e.g., `/opt/ironclaw/`):
+
+```yaml
+version: "3.9"
+
+services:
+  ironclaw:
+    image: nearai/ironclaw:latest
+    container_name: ironclaw
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Persistent IronClaw data (skills, installed extensions, workspace files)
+      - ironclaw_data:/home/ironclaw/.ironclaw
+      # OPTIONAL: Docker socket for sandbox job execution (Docker-in-Docker sibling containers).
+      # Enabling this grants the container control over the host Docker daemon; uncomment only if required.
+      # - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      # Web Gateway — bind to localhost only, expose via reverse proxy
+      - "127.0.0.1:3000:3000"
+      # HTTP Webhook channel
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - ironclaw_net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ironclaw-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ironclaw
+      POSTGRES_USER: ironclaw
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    expose:
+      # Only expose to internal network — never bind to host
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ironclaw -d ironclaw"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - ironclaw_net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+volumes:
+  ironclaw_data:
+    driver: local
+  postgres_data:
+    driver: local
+
+networks:
+  ironclaw_net:
+    driver: bridge
+    internal: false  # Set to true if you want to block all external network access from containers
+```
+
+---
+
+## .env File
+
+Create `.env` in the same directory as `docker-compose.yml`:
+
+```bash
+# ─── Database ─────────────────────────────────────────────────────────────────
+DATABASE_BACKEND=postgres
+DATABASE_URL=postgres://ironclaw:change_this_to_a_strong_password@postgres:5432/ironclaw
+POSTGRES_PASSWORD=change_this_to_a_strong_password  # Must match password in DATABASE_URL
+
+# ─── LLM Provider ─────────────────────────────────────────────────────────────
+LLM_BACKEND=nearai
+NEARAI_SESSION_TOKEN=sess_xxx
+NEARAI_MODEL=claude-3-5-sonnet-20241022
+# Or use Anthropic directly:
+# LLM_BACKEND=anthropic
+# ANTHROPIC_API_KEY=sk-ant-xxx
+
+# ─── Web Gateway ──────────────────────────────────────────────────────────────
+GATEWAY_ENABLED=true
+GATEWAY_HOST=0.0.0.0
+GATEWAY_PORT=3000
+GATEWAY_AUTH_TOKEN=change_this_to_a_random_64_char_secret
+
+# ─── HTTP Webhook ─────────────────────────────────────────────────────────────
+HTTP_ENABLED=false
+HTTP_PORT=8080
+HTTP_WEBHOOK_SECRET=change_this_too
+
+# ─── Embeddings ───────────────────────────────────────────────────────────────
+EMBEDDING_ENABLED=true
+OPENAI_API_KEY=sk-xxx
+EMBEDDING_MODEL=text-embedding-3-small
+
+# ─── Docker Sandbox ───────────────────────────────────────────────────────────
+SANDBOX_ENABLED=true
+SANDBOX_IMAGE=ironclaw-worker:latest
+SANDBOX_MEMORY_LIMIT_MB=512
+SANDBOX_TIMEOUT_SECS=1800
+SANDBOX_CPU_LIMIT=1.0
+SANDBOX_NETWORK_PROXY=true
+SANDBOX_PROXY_PORT=8081
+SANDBOX_DEFAULT_POLICY=workspace_write
+
+# ─── Skills ───────────────────────────────────────────────────────────────────
+SKILLS_ENABLED=true
+SKILLS_CATALOG_URL=https://clawhub.dev
+
+# ─── Routines ─────────────────────────────────────────────────────────────────
+ROUTINES_ENABLED=true
+ROUTINES_CRON_INTERVAL=60
+
+# ─── Heartbeat ────────────────────────────────────────────────────────────────
+HEARTBEAT_ENABLED=true
+HEARTBEAT_INTERVAL_SECS=1800
+HEARTBEAT_NOTIFY_CHANNEL=web
+
+# ─── Logging ──────────────────────────────────────────────────────────────────
+RUST_LOG=ironclaw=info,tower_http=warn
+```
+
+<Warning>
+Never commit `.env` to version control. Add `.env` to your `.gitignore`. Rotate `GATEWAY_AUTH_TOKEN` and `POSTGRES_PASSWORD` after deployment.
+</Warning>
+
+---
+
+## Deploy
+
+```bash
+# Start all services
+docker compose up -d
+
+# Check status
+docker compose ps
+
+# Expected output:
+# NAME                STATUS          PORTS
+# ironclaw            running         127.0.0.1:3000->3000/tcp
+# ironclaw-postgres   running (healthy)
+```
+
+---
+
+## Logs
+
+```bash
+# All services
+docker compose logs -f
+
+# IronClaw only
+docker compose logs -f ironclaw
+
+# Postgres only
+docker compose logs -f postgres
+
+# Last 100 lines
+docker compose logs --tail=100 ironclaw
+```
+
+---
+
+## Updates
+
+```bash
+# Pull latest images
+docker compose pull
+
+# Recreate containers with new images (zero-downtime for postgres; brief downtime for ironclaw)
+docker compose up -d --no-deps ironclaw
+
+# Or restart everything
+docker compose up -d
+```
+
+---
+
+## Backups
+
+### PostgreSQL Database Backup
+
+```bash
+# Dump to file
+docker compose exec postgres pg_dump \
+  -U ironclaw \
+  -d ironclaw \
+  --format=custom \
+  --compress=9 \
+  > backup-$(date +%Y%m%d-%H%M%S).dump
+
+# Restore from dump
+docker compose exec -T postgres pg_restore \
+  -U ironclaw \
+  -d ironclaw \
+  --clean \
+  --if-exists \
+  < backup-20240101-120000.dump
+```
+
+### Volume Backup
+
+```bash
+# Discover the ironclaw_data volume name (project prefix may vary)
+# This picks the first volume whose name contains "ironclaw_data"
+
+VOLUME_NAME=$(docker volume ls -q --filter name='ironclaw_data' | head -n 1)
+
+# Back up ironclaw_data volume (workspace, skills, config)
+docker run --rm \
+  -v "${VOLUME_NAME}":/source:ro \
+  -v "$(pwd)"/backups:/dest \
+  alpine tar czf /dest/ironclaw-data-$(date +%Y%m%d).tar.gz -C /source .
+  
+# Restore
+docker run --rm \
+  -v "${VOLUME_NAME}":/dest \
+  -v "$(pwd)"/backups:/source:ro \
+  alpine tar xzf /source/ironclaw-data-20240101.tar.gz -C /dest
+```
+
+---
+
+## Docker-in-Docker for Sandbox
+
+IronClaw can launch Docker sandbox containers even when running inside Docker itself. This works by mounting the host Docker socket (`/var/run/docker.sock`). The sandbox containers become siblings on the host, not children of the IronClaw container.
+
+To enable this, add the following mount to your `docker-compose.yml` (inside the IronClaw service):
+
+```yaml
+volumes:
+  - /var/run/docker.sock:/var/run/docker.sock
+```
+
+<Warning>
+Mounting the Docker socket gives IronClaw the ability to create and manage containers on the host. This is equivalent to root access on the host system. Only mount the socket if you trust the IronClaw process and have configured `SANDBOX_ENABLED=true` intentionally.
+</Warning>
+
+---
+
+## Stopping and Removing
+
+```bash
+# Stop containers (preserve volumes)
+docker compose down
+
+# Stop and remove volumes (destructive — deletes all data)
+docker compose down -v
+
+# Remove images
+docker compose down --rmi all
+```
+
+---
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="VPS Hardening" icon="shield" href="/platforms/vps">
+    Caddy, UFW, fail2ban, and SSH hardening
+  </Card>
+  <Card title="REST API Reference" icon="code" href="/ops/api">
+    Web Gateway endpoint reference
+  </Card>
+  <Card title="Configuration" icon="settings" href="/setup/configuration">
+    Full environment variable reference
+  </Card>
+</CardGroup>
