@@ -1210,56 +1210,6 @@ impl Tool for RoutineCreateTool {
             routine_verification_fingerprint(&routine),
         );
 
-        // Quota enforcement: check max_routines before creating.
-        // Admin users are exempt; non-admin users without quota are denied.
-        let is_admin = ctx
-            .metadata
-            .get("user_role")
-            .and_then(|v| v.as_str())
-            .map(|r| r == "admin")
-            .unwrap_or(false);
-        if !is_admin {
-            match self.store.get_user(&ctx.user_id).await {
-                Ok(Some(user)) => {
-                    let max = user.max_routines;
-                    if max.is_none() {
-                        return Err(ToolError::ExecutionFailed(
-                            "No routine quota assigned. Contact an administrator to set usage limits.".to_string(),
-                        ));
-                    }
-                    if let Some(limit) = max {
-                        let current = self
-                            .store
-                            .count_routines_for_user(&ctx.user_id)
-                            .await
-                            .map_err(|e| {
-                                ToolError::ExecutionFailed(format!(
-                                    "failed to count routines: {e}"
-                                ))
-                            })?;
-                        if current >= i64::from(limit) {
-                            return Err(ToolError::ExecutionFailed(format!(
-                                "Routine limit reached: {} of {} allowed. \
-                                 Contact an administrator to increase your quota.",
-                                current, limit
-                            )));
-                        }
-                    }
-                }
-                Ok(None) => {
-                    return Err(ToolError::ExecutionFailed(
-                        "No routine quota assigned. Contact an administrator to set usage limits.".to_string(),
-                    ));
-                }
-                Err(e) => {
-                    // Fail-closed: if we can't check quota, deny.
-                    return Err(ToolError::ExecutionFailed(format!(
-                        "Failed to verify quota: {e}"
-                    )));
-                }
-            }
-        }
-
         self.store
             .create_routine(&routine)
             .await

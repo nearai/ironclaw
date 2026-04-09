@@ -495,41 +495,6 @@ impl Agent {
             }
         };
 
-        // Load per-user quota from the database for fail-closed enforcement.
-        // Admin users are exempt from quota checks, so we skip the DB lookup
-        // for them (saves one query per admin request).
-        let user_quota = if identity.role != crate::ownership::UserRole::Admin {
-            if let Some(db) = self.deps.store.as_ref() {
-                match db.get_user(user_id).await {
-                    Ok(Some(record)) => {
-                        if record.max_routines.is_some()
-                            || record.max_cost_per_day_cents.is_some()
-                        {
-                            Some(crate::tenant::UserQuota {
-                                max_routines: record.max_routines,
-                                max_cost_per_day_cents: record.max_cost_per_day_cents,
-                            })
-                        } else {
-                            None // No quota assigned → fail-closed
-                        }
-                    }
-                    Ok(None) => None, // User not in DB → fail-closed
-                    Err(e) => {
-                        tracing::warn!(
-                            user_id = user_id,
-                            "Failed to load user quota, denying by default: {}",
-                            e
-                        );
-                        None // DB error → fail-closed (safe default)
-                    }
-                }
-            } else {
-                None // No DB → fail-closed for non-admin
-            }
-        } else {
-            None // Admin — quota field is irrelevant, admin bypasses all checks
-        };
-
         crate::tenant::TenantCtx::new(
             identity,
             store,
@@ -537,7 +502,6 @@ impl Agent {
             Arc::clone(&self.deps.cost_guard),
             rate,
         )
-        .with_quota(user_quota)
     }
 
     /// Get a system-scoped database accessor for cross-tenant operations.

@@ -595,9 +595,7 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     last_login_at TEXT,
     created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
-    metadata TEXT NOT NULL DEFAULT '{}',
-    max_routines INTEGER,
-    max_cost_per_day_cents INTEGER
+    metadata TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS api_tokens (
@@ -839,9 +837,7 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     last_login_at TEXT,
     created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
-    metadata TEXT NOT NULL DEFAULT '{}',
-    max_routines INTEGER,
-    max_cost_per_day_cents INTEGER
+    metadata TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS api_tokens (
@@ -961,14 +957,6 @@ CREATE TABLE IF NOT EXISTS pairing_requests (
 CREATE INDEX IF NOT EXISTS idx_pairing_requests_channel ON pairing_requests (channel, external_id);
 "#,
     ),
-    (
-        21,
-        "user_quotas",
-        r#"
-ALTER TABLE users ADD COLUMN max_routines INTEGER;
-ALTER TABLE users ADD COLUMN max_cost_per_day_cents INTEGER;
-"#,
-    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already
@@ -978,8 +966,6 @@ const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] = &[
     (15, "conversations", "source_channel"),
     (18, "wasm_tools", "scope"),
     (18, "dynamic_tools", "scope"),
-    (21, "users", "max_routines"),
-    (21, "users", "max_cost_per_day_cents"),
 ];
 
 /// Check whether `table` already contains `column` via `pragma_table_info`.

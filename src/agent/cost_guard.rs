@@ -39,8 +39,6 @@ pub enum CostLimitExceeded {
         spent_cents: u64,
         limit_cents: u64,
     },
-    /// No quota assigned to this user (fail-closed).
-    NoQuotaAssigned { user_id: String },
 }
 
 impl std::fmt::Display for CostLimitExceeded {
@@ -70,11 +68,6 @@ impl std::fmt::Display for CostLimitExceeded {
                 user_id,
                 *spent_cents as f64 / 100.0,
                 *limit_cents as f64 / 100.0
-            ),
-            Self::NoQuotaAssigned { user_id } => write!(
-                f,
-                "No quota assigned to user '{}'. Contact an administrator to set usage limits.",
-                user_id
             ),
         }
     }

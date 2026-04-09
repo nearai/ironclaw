@@ -34,8 +34,6 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             metadata: serde_json::Value::Null,
-            max_routines: None,
-            max_cost_per_day_cents: None,
         })
         .await
         .unwrap();

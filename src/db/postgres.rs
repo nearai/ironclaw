@@ -624,10 +624,6 @@ impl RoutineStore for PgBackend {
     async fn list_dispatched_routine_runs(&self) -> Result<Vec<RoutineRun>, DatabaseError> {
         self.store.list_dispatched_routine_runs().await
     }
-
-    async fn count_routines_for_user(&self, user_id: &str) -> Result<i64, DatabaseError> {
-        self.store.count_routines_for_user(user_id).await
-    }
 }
 
 // ==================== ToolFailureStore ====================
@@ -1006,17 +1002,6 @@ impl UserStore for PgBackend {
     ) -> Result<(), DatabaseError> {
         self.store
             .update_user_profile(id, display_name, metadata)
-            .await
-    }
-
-    async fn update_user_quota(
-        &self,
-        id: &str,
-        max_routines: Option<i32>,
-        max_cost_per_day_cents: Option<i64>,
-    ) -> Result<(), DatabaseError> {
-        self.store
-            .update_user_quota(id, max_routines, max_cost_per_day_cents)
             .await
     }
 

@@ -1514,17 +1514,6 @@ impl Store {
             .await?;
         rows.iter().map(row_to_routine_run).collect()
     }
-
-    pub async fn count_routines_for_user(&self, user_id: &str) -> Result<i64, DatabaseError> {
-        let conn = self.conn().await?;
-        let row = conn
-            .query_one(
-                "SELECT COUNT(*) FROM routines WHERE user_id = $1",
-                &[&user_id],
-            )
-            .await?;
-        Ok(row.get::<_, i64>(0))
-    }
 }
 
 #[cfg(feature = "postgres")]
@@ -2432,7 +2421,7 @@ impl Store {
     pub async fn get_user(&self, id: &str) -> Result<Option<UserRecord>, DatabaseError> {
         let conn = self.conn().await?;
         let row = conn
-            .query_opt("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata, max_routines, max_cost_per_day_cents FROM users WHERE id = $1", &[&id])
+            .query_opt("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata FROM users WHERE id = $1", &[&id])
             .await?;
         Ok(row.map(|r| row_to_user(&r)))
     }
@@ -2444,7 +2433,7 @@ impl Store {
     ) -> Result<Option<UserRecord>, DatabaseError> {
         let conn = self.conn().await?;
         let row = conn
-            .query_opt("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata, max_routines, max_cost_per_day_cents FROM users WHERE LOWER(email) = LOWER($1)", &[&email])
+            .query_opt("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata FROM users WHERE LOWER(email) = LOWER($1)", &[&email])
             .await?;
         Ok(row.map(|r| row_to_user(&r)))
     }
@@ -2455,13 +2444,13 @@ impl Store {
         let rows = match status {
             Some(s) => {
                 conn.query(
-                    "SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata, max_routines, max_cost_per_day_cents FROM users WHERE status = $1 ORDER BY created_at DESC",
+                    "SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata FROM users WHERE status = $1 ORDER BY created_at DESC",
                     &[&s],
                 )
                 .await?
             }
             None => {
-                conn.query("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata, max_routines, max_cost_per_day_cents FROM users ORDER BY created_at DESC", &[])
+                conn.query("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata FROM users ORDER BY created_at DESC", &[])
                     .await?
             }
         };
@@ -2501,21 +2490,6 @@ impl Store {
         conn.execute(
             "UPDATE users SET display_name = $1, metadata = $2, updated_at = NOW() WHERE id = $3",
             &[&display_name, metadata, &id],
-        )
-        .await?;
-        Ok(())
-    }
-
-    pub async fn update_user_quota(
-        &self,
-        id: &str,
-        max_routines: Option<i32>,
-        max_cost_per_day_cents: Option<i64>,
-    ) -> Result<(), DatabaseError> {
-        let conn = self.conn().await?;
-        conn.execute(
-            "UPDATE users SET max_routines = $1, max_cost_per_day_cents = $2, updated_at = NOW() WHERE id = $3",
-            &[&max_routines, &max_cost_per_day_cents, &id],
         )
         .await?;
         Ok(())
@@ -2684,8 +2658,7 @@ impl Store {
             .query_opt(
                 r#"
                 SELECT t.id, t.user_id, t.name, t.token_prefix, t.expires_at, t.last_used_at, t.created_at, t.revoked_at,
-                       u.id as u_id, u.email, u.display_name, u.status, u.role, u.created_at as u_created_at, u.updated_at, u.last_login_at, u.created_by, u.metadata,
-                       u.max_routines, u.max_cost_per_day_cents
+                       u.id as u_id, u.email, u.display_name, u.status, u.role, u.created_at as u_created_at, u.updated_at, u.last_login_at, u.created_by, u.metadata
                 FROM api_tokens t
                 JOIN users u ON t.user_id = u.id
                 WHERE t.token_hash = $1
@@ -2718,8 +2691,6 @@ impl Store {
                 last_login_at: r.get("last_login_at"),
                 created_by: r.get("created_by"),
                 metadata: r.get("metadata"),
-                max_routines: r.get("max_routines"),
-                max_cost_per_day_cents: r.get("max_cost_per_day_cents"),
             };
             (token, user)
         }))
@@ -2937,8 +2908,6 @@ fn row_to_user(row: &tokio_postgres::Row) -> UserRecord {
         last_login_at: row.get("last_login_at"),
         created_by: row.get("created_by"),
         metadata: row.get("metadata"),
-        max_routines: row.get("max_routines"),
-        max_cost_per_day_cents: row.get("max_cost_per_day_cents"),
     }
 }
 

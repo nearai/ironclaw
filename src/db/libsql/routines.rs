@@ -599,34 +599,6 @@ impl RoutineStore for LibSqlBackend {
         }
         Ok(runs)
     }
-
-    async fn count_routines_for_user(&self, user_id: &str) -> Result<i64, DatabaseError> {
-        let conn = self.connect().await?;
-        let mut rows = conn
-            .query(
-                "SELECT COUNT(*) FROM routines WHERE user_id = ?1",
-                params![user_id],
-            )
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-
-        if let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-        {
-            Ok(row
-                .get_value(0)
-                .ok()
-                .and_then(|v| match v {
-                    libsql::Value::Integer(n) => Some(n),
-                    _ => None,
-                })
-                .unwrap_or(0))
-        } else {
-            Ok(0)
-        }
-    }
 }
 
 #[cfg(test)]
