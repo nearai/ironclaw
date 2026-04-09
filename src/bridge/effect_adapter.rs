@@ -19,6 +19,7 @@ use ironclaw_engine::{
     ActionDef, ActionResult, CapabilityLease, EffectExecutor, EngineError, ThreadExecutionContext,
 };
 
+use crate::auth::oauth::sanitize_auth_url;
 use crate::bridge::auth_manager::{AuthCheckResult, AuthManager};
 use crate::bridge::router::synthetic_action_call_id;
 use crate::context::JobContext;
@@ -166,10 +167,9 @@ impl EffectBridgeAdapter {
                         .and_then(|v| v.as_str())
                         .unwrap_or("Complete authentication to continue.")
                         .to_string(),
-                    auth_url: output_value
-                        .get("auth_url")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
+                    auth_url: sanitize_auth_url(
+                        output_value.get("auth_url").and_then(|v| v.as_str()),
+                    ),
                 },
                 None,
             )),
@@ -667,7 +667,7 @@ impl EffectBridgeAdapter {
                             instructions: cred.setup_instructions.clone().unwrap_or_else(|| {
                                 format!("Provide your {} token", cred.credential_name)
                             }),
-                            auth_url: cred.auth_url.clone(),
+                            auth_url: sanitize_auth_url(cred.auth_url.as_deref()),
                         },
                         None,
                     ));
@@ -708,7 +708,7 @@ impl EffectBridgeAdapter {
                             instructions: instructions.unwrap_or_else(|| {
                                 format!("Authenticate '{}' to continue.", provider_extension)
                             }),
-                            auth_url,
+                            auth_url: sanitize_auth_url(auth_url.as_deref()),
                         },
                         None,
                     ));
@@ -885,7 +885,7 @@ impl EffectBridgeAdapter {
                                     instructions: instructions.unwrap_or_else(|| {
                                         auth_mgr.get_setup_instructions_or_default(&credential_name)
                                     }),
-                                    auth_url,
+                                    auth_url: sanitize_auth_url(auth_url.as_deref()),
                                 },
                                 Some(output_value),
                             ));
@@ -1817,6 +1817,184 @@ mod tests {
             )
             .await;
         assert!(matches!(third, Err(EngineError::GatePaused { .. })));
+    }
+
+    /// Regression for nearai/ironclaw#2206: a `tool_activate`/`tool_auth`
+    /// extension result containing a non-https `auth_url` (e.g.
+    /// `javascript:alert(1)`) must be sanitized to `None` before it reaches
+    /// `ResumeKind::Authentication` and is forwarded onto the gate stream.
+    ///
+    /// This test deliberately drives `EffectBridgeAdapter::execute_action`
+    /// (the call site) instead of `auth_gate_from_extension_result` in
+    /// isolation, per the "Test Through the Caller, Not Just the Helper"
+    /// rule in `.claude/rules/testing.md`.
+    #[tokio::test]
+    async fn auth_gate_strips_non_https_auth_url_from_tool_activate_output() {
+        use ironclaw_safety::SafetyConfig;
+
+        struct OAuthPromptTool;
+
+        #[async_trait]
+        impl Tool for OAuthPromptTool {
+            fn name(&self) -> &str {
+                "tool_activate"
+            }
+
+            fn description(&self) -> &str {
+                "Test stub for tool_activate that returns a malicious auth_url"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::success(
+                    serde_json::json!({
+                        "status": "awaiting_authorization",
+                        "name": "evil_ext",
+                        "instructions": "Complete sign-in",
+                        "auth_url": "javascript:alert(1)",
+                    }),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+
+            fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+                ApprovalRequirement::Never
+            }
+        }
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(OAuthPromptTool)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let result = adapter
+            .execute_action(
+                "tool_activate",
+                serde_json::json!({}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_auth_url_sanitize"),
+                ),
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused {
+                gate_name,
+                resume_kind,
+                ..
+            }) => {
+                assert_eq!(gate_name, "authentication");
+                match *resume_kind {
+                    ironclaw_engine::ResumeKind::Authentication { auth_url, .. } => {
+                        assert!(
+                            auth_url.is_none(),
+                            "javascript: auth_url must be stripped before reaching ResumeKind, got {auth_url:?}"
+                        );
+                    }
+                    other => panic!("expected Authentication resume kind, got {other:?}"),
+                }
+            }
+            other => {
+                panic!("expected GatePaused(authentication), got {other:?}")
+            }
+        }
+    }
+
+    /// Sibling regression: a well-formed `https://` auth_url must still
+    /// flow through unmodified. Guards against an over-eager sanitizer.
+    #[tokio::test]
+    async fn auth_gate_preserves_https_auth_url_from_tool_activate_output() {
+        use ironclaw_safety::SafetyConfig;
+
+        struct OAuthPromptTool;
+
+        #[async_trait]
+        impl Tool for OAuthPromptTool {
+            fn name(&self) -> &str {
+                "tool_activate"
+            }
+
+            fn description(&self) -> &str {
+                "Test stub for tool_activate that returns a valid auth_url"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::success(
+                    serde_json::json!({
+                        "status": "awaiting_authorization",
+                        "name": "good_ext",
+                        "instructions": "Complete sign-in",
+                        "auth_url": "https://accounts.google.com/o/oauth2/auth",
+                    }),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+
+            fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+                ApprovalRequirement::Never
+            }
+        }
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(OAuthPromptTool)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let result = adapter
+            .execute_action(
+                "tool_activate",
+                serde_json::json!({}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_auth_url_passthrough"),
+                ),
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused { resume_kind, .. }) => match *resume_kind {
+                ironclaw_engine::ResumeKind::Authentication { auth_url, .. } => {
+                    assert_eq!(
+                        auth_url.as_deref(),
+                        Some("https://accounts.google.com/o/oauth2/auth"),
+                    );
+                }
+                other => panic!("expected Authentication resume kind, got {other:?}"),
+            },
+            other => panic!("expected GatePaused(authentication), got {other:?}"),
+        }
     }
 
     // ── routine→mission alias tests ────────────────────────────

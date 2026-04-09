@@ -1306,15 +1306,7 @@ fn normalize_extension_name(value: Option<&str>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-/// Only allow `https://` URLs for auth/setup links to prevent scheme injection
-/// (e.g. `javascript:`, `file://`). Host validation is explicitly out of scope:
-/// the URL source is a trusted local extension tool result, and display-side
-/// rendering controls where the user is actually navigated.
-fn sanitize_auth_url(url: Option<&str>) -> Option<String> {
-    url.map(str::trim)
-        .filter(|u| u.starts_with("https://"))
-        .map(ToOwned::to_owned)
-}
+pub(super) use crate::auth::oauth::sanitize_auth_url;
 
 pub(super) fn auth_instructions_or_default(instructions: Option<&str>) -> String {
     instructions
@@ -1692,8 +1684,7 @@ mod tests {
 
     use super::{
         capture_auth_prompt, check_auth_required, extract_auth_prompt, parse_auth_result,
-        persist_selected_auth_prompt, restore_selected_auth_prompt, sanitize_auth_url,
-        selected_model_override,
+        persist_selected_auth_prompt, restore_selected_auth_prompt, selected_model_override,
     };
     use crate::agent::session::PendingAuthPrompt;
 
@@ -2413,23 +2404,9 @@ mod tests {
         assert!(extract_auth_prompt("tool_activate", &result).is_none());
     }
 
-    #[test]
-    fn test_sanitize_auth_url_rejects_non_https_schemes() {
-        assert!(sanitize_auth_url(Some("javascript:alert(1)")).is_none());
-        assert!(sanitize_auth_url(Some("file:///etc/passwd")).is_none());
-        assert!(sanitize_auth_url(Some("http://example.com")).is_none());
-        assert!(sanitize_auth_url(Some("data:text/html,<h1>")).is_none());
-        assert!(sanitize_auth_url(Some("")).is_none());
-        assert!(sanitize_auth_url(None).is_none());
-    }
-
-    #[test]
-    fn test_sanitize_auth_url_allows_https() {
-        assert_eq!(
-            sanitize_auth_url(Some("https://accounts.google.com/o/oauth2/auth")),
-            Some("https://accounts.google.com/o/oauth2/auth".to_string())
-        );
-    }
+    // Helper-level sanitize_auth_url tests live alongside the helper itself
+    // in `crate::auth::oauth`. The test below covers the parse_auth_result
+    // wiring (i.e. that the helper is actually applied at the call site).
 
     #[test]
     fn test_parse_auth_result_strips_non_https_urls() {
