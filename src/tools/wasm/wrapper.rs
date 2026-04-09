@@ -2343,6 +2343,7 @@ mod tests {
                 secret_name: "api_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: Vec::new(),
             },
         );
         let caps = Capabilities {
@@ -2379,6 +2380,7 @@ mod tests {
                     placeholder: "{api_key}".to_string(),
                 },
                 host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: Vec::new(),
             },
         );
         let caps = Capabilities {
@@ -2423,6 +2425,7 @@ mod tests {
                 secret_name: "my_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: Vec::new(),
             },
         );
         let caps = Capabilities {
@@ -2667,6 +2670,7 @@ mod tests {
                     placeholder: "{api_key}".to_string(),
                 },
                 host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: Vec::new(),
             },
         );
 
