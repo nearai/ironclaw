@@ -211,17 +211,17 @@ pub(crate) fn strip_admin_only_llm_keys(map: &mut HashMap<String, serde_json::Va
     map.retain(|key, _| !ADMIN_ONLY_LLM_SETTING_KEYS.contains(&key.as_str()));
 }
 
-/// Perform DNS resolution with a 10-second timeout.
+/// DNS resolution timeout applied to both sync and async paths.
+const DNS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Perform blocking DNS resolution with a timeout.
 ///
-/// Spawns the blocking `to_socket_addrs` call in a dedicated thread and waits
-/// via a channel.  If the resolver hangs beyond the timeout the calling thread
-/// unblocks with `TimedOut`, and the spawned thread will terminate once the OS
-/// resolver returns (the channel `tx` is dropped, so no resources leak beyond
-/// the OS-level DNS socket).
-fn dns_resolve_with_timeout(host: &str, port: u16) -> std::io::Result<Vec<std::net::IpAddr>> {
+/// Used only from sync callers (CLI bootstrap, tests).  Async callers use
+/// [`dns_resolve_async`] instead, which relies on tokio's non-blocking
+/// resolver and does not spawn extra threads.
+fn dns_resolve_sync(host: &str, port: u16) -> std::io::Result<Vec<std::net::IpAddr>> {
     use std::net::ToSocketAddrs;
     use std::sync::mpsc;
-    use std::time::Duration;
 
     let (tx, rx) = mpsc::channel();
     let h = host.to_string();
@@ -231,13 +231,29 @@ fn dns_resolve_with_timeout(host: &str, port: u16) -> std::io::Result<Vec<std::n
             .map(|addrs| addrs.map(|a| a.ip()).collect::<Vec<_>>());
         let _ = tx.send(result);
     });
-    rx.recv_timeout(Duration::from_secs(10))
-        .unwrap_or_else(|_| {
-            Err(std::io::Error::new(
+    rx.recv_timeout(DNS_TIMEOUT).unwrap_or_else(|_| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "DNS resolution timed out after 10s",
+        ))
+    })
+}
+
+/// Perform async DNS resolution with a timeout.
+///
+/// Uses tokio's non-blocking resolver — no extra threads are spawned, and
+/// cancellation is immediate on timeout (the lookup future is dropped).
+async fn dns_resolve_async(host: &str, port: u16) -> std::io::Result<Vec<std::net::IpAddr>> {
+    let addr = format!("{}:{}", host, port);
+    let addrs = tokio::time::timeout(DNS_TIMEOUT, tokio::net::lookup_host(addr))
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "DNS resolution timed out after 10s",
-            ))
-        })
+            )
+        })??;
+    Ok(addrs.map(|a| a.ip()).collect())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -411,20 +427,17 @@ fn validate_base_url_with_policy(
         let port = parsed
             .port()
             .unwrap_or(if scheme == "http" { 80 } else { 443 });
-        // `to_socket_addrs` performs blocking DNS resolution.  This helper
-        // is also called from async request handlers (e.g. the LLM utility
-        // routes), so wrap the lookup in `block_in_place` when running on a
-        // multi-threaded tokio worker to avoid stalling other tasks.  The
-        // `try_current()` check keeps sync callers (config bootstrap, CLI)
-        // working unchanged.
-        let host_owned = host.to_string();
-        let resolve =
-            move || -> std::io::Result<Vec<IpAddr>> { dns_resolve_with_timeout(&host_owned, port) };
+        // Async callers (request handlers) use tokio's non-blocking resolver
+        // via `dns_resolve_async` — no extra threads are spawned, and the
+        // lookup is cleanly cancelled on timeout.  Sync callers (CLI
+        // bootstrap, tests) fall back to `dns_resolve_sync` which spawns a
+        // short-lived thread.
         let lookup = match tokio::runtime::Handle::try_current() {
             Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-                tokio::task::block_in_place(resolve)
+                let h = host.to_string();
+                tokio::task::block_in_place(move || handle.block_on(dns_resolve_async(&h, port)))
             }
-            _ => resolve(),
+            _ => dns_resolve_sync(host, port),
         };
         lookup.map_err(|e| ConfigError::InvalidValue {
             key: field_name.to_string(),
@@ -806,10 +819,10 @@ mod tests {
     /// succeed even though they shouldn't, which makes any test that asserts
     /// "DNS resolution failure" unreliable. Detect that case and skip the test.
     fn invalid_tld_resolves_locally() -> bool {
-        // Uses the shared DNS timeout helper.  If the resolver hangs
+        // Uses the sync DNS timeout helper.  If the resolver hangs
         // (sandboxed environment) or returns results (hijacked DNS),
         // treat both as "skip the test".
-        dns_resolve_with_timeout("ironclaw-dns-hijack-probe.invalid", 443).is_ok()
+        dns_resolve_sync("ironclaw-dns-hijack-probe.invalid", 443).is_ok()
     }
 
     #[test]
@@ -821,7 +834,7 @@ mod tests {
             );
             return;
         }
-        // validate_base_url internally uses dns_resolve_with_timeout,
+        // validate_base_url internally uses dns_resolve_sync/dns_resolve_async,
         // so it will not hang even in sandboxed environments — it will
         // return a timeout error within 10s.
         let result = validate_base_url("https://ssrf-test.invalid", "TEST");
