@@ -460,9 +460,11 @@ impl MissionManager {
         // Per-user global rate limit. Independent of per-mission cooldown,
         // this is a sliding-window cap across *all* of the user's missions
         // so a user with many event-triggered missions can't collectively
-        // flood the LLM. The check is recorded only when it passes — a
-        // refusal does not consume a slot.
-        if !self.check_and_record_user_rate(&mission.user_id).await {
+        // flood the LLM. We only *check* here — recording is deferred until
+        // after the spawn succeeds so a downstream failure (store error,
+        // budget refusal, spawn error) doesn't consume a slot and slowly
+        // self-DoS the user.
+        if !self.check_user_rate(&mission.user_id).await {
             debug!(
                 mission_id = %id,
                 user_id = %mission.user_id,
@@ -533,11 +535,18 @@ impl MissionManager {
 
         // Record the thread + trigger payload in mission history
         let mut updated = mission;
+        let user_id_for_rate = updated.user_id.clone();
         updated.record_thread(thread_id);
         updated.threads_today += 1;
         updated.last_trigger_payload = trigger_payload;
         updated.last_fire_at = Some(chrono::Utc::now());
         self.store.save_mission(&updated).await?;
+
+        // Now that the spawn + persist have succeeded, consume a slot in
+        // the per-user rate window. Doing this here (rather than at the
+        // earlier check site) means store errors, budget refusals, and
+        // spawn failures all leave the user's window untouched.
+        self.record_user_rate(&user_id_for_rate).await;
 
         debug!(mission_id = %id, thread_id = %thread_id, "mission fired");
         self.spawn_mission_outcome_watcher(id, thread_id);
@@ -1353,8 +1362,13 @@ impl MissionManager {
 
     /// Returns `true` if `(mission_id, dedup_key)` was last seen within
     /// `window_secs`. Updates the table to record `now` for the next call.
-    /// Drops entries older than `window_secs` opportunistically to bound the
-    /// table size.
+    ///
+    /// Eviction is done **per entry** against this mission's own window —
+    /// never globally — because different missions can have different
+    /// `dedup_window_secs` values. A previous implementation called
+    /// `table.retain` with the current mission's window across the whole
+    /// table, which would silently drop fresh entries belonging to a
+    /// longer-window mission and cause duplicate firings.
     async fn dedup_event(&self, mission_id: MissionId, dedup_key: &str, window_secs: u64) -> bool {
         if window_secs == 0 {
             return false;
@@ -1362,18 +1376,21 @@ impl MissionManager {
         let now = chrono::Utc::now();
         let window = chrono::Duration::seconds(window_secs as i64);
         let mut table = self.dedup_table.write().await;
-        // Opportunistic cleanup: drop entries older than the window so the
-        // table doesn't grow without bound.
-        table.retain(|_, ts| now.signed_duration_since(*ts) < window);
-
         let key = (mission_id, dedup_key.to_string());
-        if let Some(last) = table.get(&key)
-            && now.signed_duration_since(*last) < window
-        {
-            return true;
+        match table.get(&key) {
+            Some(last) if now.signed_duration_since(*last) < window => {
+                // Within this mission's own window — duplicate.
+                true
+            }
+            _ => {
+                // Either no entry, or the entry has aged past this
+                // mission's window. Overwrite (or insert) and report
+                // first-seen. We deliberately do NOT touch entries for
+                // other missions.
+                table.insert(key, now);
+                false
+            }
         }
-        table.insert(key, now);
-        false
     }
 
     /// Test whether `text` matches `mission`'s OnEvent regex. Compiles the
@@ -1424,10 +1441,15 @@ impl MissionManager {
         self.event_regex_cache.write().await.remove(&mission_id);
     }
 
-    /// Per-user global rate limiter check. Sliding window of timestamps;
-    /// returns `true` if a new fire is allowed and records the timestamp.
-    /// Returns `false` if the window is full.
-    async fn check_and_record_user_rate(&self, user_id: &str) -> bool {
+    /// Per-user global rate limiter — read-only check. Sliding window of
+    /// timestamps; returns `true` if a new fire is currently allowed.
+    /// Evicts expired entries from the user's window as a side effect, but
+    /// does NOT record a new entry — call [`record_user_rate`] only after
+    /// the fire has actually succeeded so a failed spawn cannot consume a
+    /// slot (otherwise sustained store errors would self-DoS the user).
+    ///
+    /// [`record_user_rate`]: Self::record_user_rate
+    async fn check_user_rate(&self, user_id: &str) -> bool {
         let now = chrono::Utc::now();
         let window = chrono::Duration::from_std(self.rate_limit.window)
             .unwrap_or_else(|_| chrono::Duration::seconds(self.rate_limit.window.as_secs() as i64));
@@ -1435,15 +1457,22 @@ impl MissionManager {
 
         let mut log = self.user_fire_log.write().await;
         let entries = log.entry(user_id.to_string()).or_default();
-        // Evict expired entries from the front.
         while entries.front().is_some_and(|ts| *ts < cutoff) {
             entries.pop_front();
         }
-        if entries.len() as u32 >= self.rate_limit.max_fires {
-            return false;
-        }
+        (entries.len() as u32) < self.rate_limit.max_fires
+    }
+
+    /// Record a successful fire against the per-user rate window. Pair with
+    /// [`check_user_rate`] — call only after the spawn has actually
+    /// completed so failed fires don't consume a slot.
+    ///
+    /// [`check_user_rate`]: Self::check_user_rate
+    async fn record_user_rate(&self, user_id: &str) {
+        let now = chrono::Utc::now();
+        let mut log = self.user_fire_log.write().await;
+        let entries = log.entry(user_id.to_string()).or_default();
         entries.push_back(now);
-        true
     }
 
     /// Consult the budget gate (if attached). Returns `true` when the gate
@@ -4961,6 +4990,86 @@ mod tests {
         assert_eq!(unchanged.content, "Original skill content");
         assert_eq!(meta.version, 1);
         assert!(meta.repairs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dedup_event_does_not_evict_entries_from_other_missions() {
+        // Regression for the cross-mission dedup window collision: a
+        // mission with a *short* window must not be able to evict a fresh
+        // entry belonging to a mission with a *longer* window.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+
+        let mission_a = MissionId::new();
+        let mission_b = MissionId::new();
+
+        // Mission B (long window) gets a stale entry for key "y" — set it
+        // 120 seconds in the past so a 60s-window check would consider it
+        // expired but a 3600s-window check still considers it fresh.
+        {
+            let mut table = mgr.dedup_table.write().await;
+            table.insert(
+                (mission_b, "y".to_string()),
+                chrono::Utc::now() - chrono::Duration::seconds(120),
+            );
+        }
+
+        // Mission A (short 60s window) fires for an unrelated key.
+        let first = mgr.dedup_event(mission_a, "x", 60).await;
+        assert!(!first, "first sighting of (A, x) should not be flagged");
+
+        // Mission B's entry must survive — its own window is 3600s, and
+        // 120s < 3600s, so the next dedup call from B for "y" should still
+        // see it as a duplicate.
+        let b_again = mgr.dedup_event(mission_b, "y", 3600).await;
+        assert!(
+            b_again,
+            "(B, y) is 120s old with a 3600s window — must still register as duplicate after A's call"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_rate_slot_not_consumed_by_failed_fire() {
+        // Regression for the rate-limiter self-DoS: when fire_mission
+        // refuses (e.g. budget/concurrent gate) the per-user slot must
+        // remain available so sustained refusals don't lock the user out.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+
+        // Sanity: an empty window allows fires.
+        assert!(mgr.check_user_rate("alice").await);
+
+        // Drive a fire that's guaranteed to early-out before record_user_rate.
+        // The simplest deterministic refusal is `fire_mission` against a
+        // mission whose owner doesn't match — that returns AccessDenied
+        // before reaching the rate check, so it doesn't exercise the
+        // rate-limit path. Instead, drive `record_user_rate` and
+        // `check_user_rate` directly to pin the contract: a check that
+        // doesn't get followed by a record leaves the slot free.
+        let allowed_before = mgr.check_user_rate("alice").await;
+        assert!(allowed_before);
+
+        // Snapshot the queue size — must be unchanged after a check-only.
+        let snapshot_after_check = {
+            let log = mgr.user_fire_log.read().await;
+            log.get("alice").map(|q| q.len()).unwrap_or(0)
+        };
+        assert_eq!(
+            snapshot_after_check, 0,
+            "check_user_rate must not consume a slot on its own"
+        );
+
+        // After a successful fire would have called record_user_rate the
+        // queue grows by exactly one.
+        mgr.record_user_rate("alice").await;
+        let snapshot_after_record = {
+            let log = mgr.user_fire_log.read().await;
+            log.get("alice").map(|q| q.len()).unwrap_or(0)
+        };
+        assert_eq!(
+            snapshot_after_record, 1,
+            "record_user_rate must append exactly one entry"
+        );
     }
 
     #[test]

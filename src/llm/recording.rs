@@ -391,6 +391,16 @@ fn coerce_python_repr_to_json(content: &str) -> Option<String> {
     if content.is_empty() {
         return None;
     }
+    // ASCII-only fast path. The orchestrator's `str(output)` repr that this
+    // helper targets is structurally ASCII (UUIDs, names, statuses, ints).
+    // Multi-byte UTF-8 (CJK characters, emoji, etc.) would be corrupted by
+    // the byte-as-char casts below — each individual byte of a multi-byte
+    // sequence would be widened to a `char`, producing mojibake. Bail
+    // early instead and let the caller fall through to its raw-content
+    // path.
+    if !content.is_ascii() {
+        return None;
+    }
     let mut out = String::with_capacity(content.len());
     let bytes = content.as_bytes();
     // 0 = outside string, 1 = inside single-quoted string, 2 = inside double-quoted string
@@ -1270,5 +1280,28 @@ mod tests {
         assert!(trace.memory_snapshot.is_empty());
         assert!(trace.http_exchanges.is_empty());
         assert!(trace.steps[0].expected_tool_results.is_empty());
+    }
+
+    #[test]
+    fn coerce_python_repr_to_json_handles_ascii() {
+        let input = "{'name': 'alice', 'count': 3, 'active': True, 'note': None}";
+        let out = coerce_python_repr_to_json(input).expect("ascii input should coerce");
+        // Round-trip through serde to confirm it's now valid JSON.
+        let value: serde_json::Value = serde_json::from_str(&out).expect("must be valid JSON");
+        assert_eq!(value["name"], "alice");
+        assert_eq!(value["count"], 3);
+        assert_eq!(value["active"], true);
+        assert!(value["note"].is_null());
+    }
+
+    #[test]
+    fn coerce_python_repr_to_json_bails_on_non_ascii() {
+        // Multi-byte UTF-8 (CJK + emoji) must NOT be coerced — the byte-level
+        // walker would mojibake the input. Bailing is the correct outcome;
+        // the caller falls through to its raw-content path.
+        assert_eq!(coerce_python_repr_to_json("{'name': '日本語'}"), None);
+        assert_eq!(coerce_python_repr_to_json("{'flag': '🚀'}"), None);
+        // Sanity: an empty string still returns None for an unrelated reason.
+        assert_eq!(coerce_python_repr_to_json(""), None);
     }
 }

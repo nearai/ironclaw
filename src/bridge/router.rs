@@ -171,6 +171,64 @@ fn synthetic_action_call_id(action_name: &str) -> String {
     format!("synthetic-{}-{}", action_name, uuid::Uuid::new_v4())
 }
 
+/// Validate a credential identifier shape: non-empty, ≤64 chars, ASCII
+/// alphanumeric or underscore only. Used by the auth-fallback parser to
+/// reject anything that isn't structurally a credential name before it's
+/// checked against the registry.
+fn is_valid_credential_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Extract a credential name from a tool error / model response that
+/// contains an `authentication_required` signal.
+///
+/// Tries structured JSON first (the http tool emits a JSON object with a
+/// `credential_name` field), then falls back to a prose-shaped splitter for
+/// free-form errors. The result must additionally pass
+/// [`is_valid_credential_name`] before the caller may use it. The caller
+/// must still verify the name against the credential registry — this
+/// function only normalizes the parse, it does NOT establish trust.
+fn parse_credential_name(text: &str) -> Option<String> {
+    // Pass 1 — full-text JSON. Cheap and unambiguous when the producer is
+    // a tool that already serialized a structured error.
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text)
+        && let Some(name) = value.get("credential_name").and_then(|v| v.as_str())
+        && is_valid_credential_name(name)
+    {
+        return Some(name.to_string());
+    }
+
+    // Pass 2 — embedded JSON. Slice from the first `{` to the matching
+    // closing `}` and try again. We don't try to handle nested objects
+    // robustly; the http tool emits a flat shape.
+    if let Some(start) = text.find('{')
+        && let Some(end) = text[start..].rfind('}')
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(&text[start..=start + end])
+        && let Some(name) = value.get("credential_name").and_then(|v| v.as_str())
+        && is_valid_credential_name(name)
+    {
+        return Some(name.to_string());
+    }
+
+    // Pass 3 — prose splitter. Last-resort path for free-form text that
+    // mentions `credential_name` without proper JSON structure. Kept narrow
+    // and validated. nth(1) intentionally takes the FIRST occurrence of
+    // `credential_name`; if a tool emits multiple, only the first wins —
+    // and the registry check downstream still gates whether it's honored.
+    text.split("credential_name")
+        .nth(1)
+        .and_then(|s| {
+            // Slice on a char-array (not a string) is safe — no UTF-8
+            // boundary issues.
+            s.split(&['"', '\'', '`'][..])
+                .find(|seg| !seg.is_empty() && !seg.contains(':') && !seg.contains(' '))
+        })
+        .filter(|name| is_valid_credential_name(name))
+        .map(|s| s.to_string())
+}
+
 async fn notify_pending_gate(
     agent: &Agent,
     state: &EngineState,
@@ -2430,36 +2488,25 @@ async fn await_thread_outcome(
                     "text-based auth fallback triggered — pre-flight gate did not catch this"
                 );
 
-                // Extract credential name from the response text and validate
-                // it against the expected pattern (alphanumeric + underscores).
-                let parsed_cred_name = text
-                    .split("credential_name")
-                    .nth(1)
-                    .and_then(|s| {
-                        // Handle both JSON ("credential_name":"foo") and prose
-                        s.split(&['"', '\'', '`'][..]) // safety: slice of char array, not string byte slicing
-                            .find(|seg| !seg.is_empty() && !seg.contains(':') && !seg.contains(' '))
-                    })
-                    .filter(|name| {
-                        // Reject names that don't look like valid credential identifiers
-                        !name.is_empty()
-                            && name.len() <= 64
-                            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                    })
-                    .map(|s| s.to_string());
+                // Extract credential name. Try structured JSON first (which
+                // is what the http tool actually emits), then fall back to a
+                // string splitter for prose-shaped errors.
+                let parsed_cred_name = parse_credential_name(text);
 
                 // Defense against credential-name injection: only honor a
                 // fallback auth gate when the parsed name is actually a
                 // registered credential. A tool that fabricates an
                 // `authentication_required` message with a chosen credential
                 // name must not be able to coerce the user into providing an
-                // unrelated secret. Test/embed harnesses without a credential
-                // registry preserve existing behavior.
+                // unrelated secret. Without a credential registry there is
+                // no way to validate the name, so the gate must not fire —
+                // test/embed harnesses without a registry intentionally lose
+                // the fallback path rather than gain a prompt-injection vector.
                 let Some(cred_name) = parsed_cred_name.filter(|name| {
                     agent
                         .tools()
                         .credential_registry()
-                        .is_none_or(|reg| reg.has_secret(name))
+                        .is_some_and(|reg| reg.has_secret(name))
                 }) else {
                     tracing::warn!(
                         thread_id = %thread_id,
@@ -4901,5 +4948,54 @@ mod tests {
         let result = find_most_recent_thread(&state, &Some(conv), "alice").await;
         assert!(result.is_some(), "should find thread via entry fallback");
         assert_eq!(result.unwrap().id, tid);
+    }
+
+    #[test]
+    fn parse_credential_name_full_json() {
+        let text = r#"{"error":"authentication_required","credential_name":"github_pat"}"#;
+        assert_eq!(parse_credential_name(text), Some("github_pat".to_string()));
+    }
+
+    #[test]
+    fn parse_credential_name_embedded_json() {
+        let text = "Tool failed: {\"error\":\"authentication_required\",\"credential_name\":\"slack_token\"}";
+        assert_eq!(parse_credential_name(text), Some("slack_token".to_string()));
+    }
+
+    #[test]
+    fn parse_credential_name_prose_fallback() {
+        let text = "authentication_required: missing credential_name 'gmail_oauth' for request";
+        assert_eq!(parse_credential_name(text), Some("gmail_oauth".to_string()));
+    }
+
+    #[test]
+    fn parse_credential_name_rejects_invalid_chars() {
+        // hyphen is not in the allowed alphabet
+        let text = r#"{"credential_name":"foo-bar"}"#;
+        assert_eq!(parse_credential_name(text), None);
+        // spaces too
+        let text2 = r#"{"credential_name":"foo bar"}"#;
+        assert_eq!(parse_credential_name(text2), None);
+    }
+
+    #[test]
+    fn parse_credential_name_rejects_too_long() {
+        let long = "a".repeat(65);
+        let text = format!(r#"{{"credential_name":"{long}"}}"#);
+        assert_eq!(parse_credential_name(&text), None);
+    }
+
+    #[test]
+    fn parse_credential_name_first_match_wins_in_prose() {
+        // The first occurrence is chosen — registry check downstream is what
+        // gates whether it's actually honored.
+        let text = "credential_name 'first_one' then credential_name 'second_one'";
+        assert_eq!(parse_credential_name(text), Some("first_one".to_string()));
+    }
+
+    #[test]
+    fn parse_credential_name_none_for_missing_field() {
+        assert_eq!(parse_credential_name("nothing to see here"), None);
+        assert_eq!(parse_credential_name(r#"{"foo":"bar"}"#), None);
     }
 }

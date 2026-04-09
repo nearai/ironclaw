@@ -221,6 +221,7 @@ pub struct LiveTestHarnessBuilder {
     engine_v2: Option<bool>,
     auto_approve_tools: Option<bool>,
     channel_name: Option<String>,
+    seeded_secret_names: Vec<String>,
 }
 
 impl LiveTestHarnessBuilder {
@@ -228,6 +229,15 @@ impl LiveTestHarnessBuilder {
     ///
     /// The name determines the trace fixture filename:
     /// `tests/fixtures/llm_traces/live/{test_name}.json`
+    ///
+    /// **Live test contract:** the test rig starts from a *clean* libSQL
+    /// database. It does NOT clone the developer's `~/.ironclaw/ironclaw.db`.
+    /// Tests that need real credentials must declare them explicitly via
+    /// [`with_secrets`](Self::with_secrets); tests that need workspace
+    /// memory or conversation history must seed it themselves through
+    /// the rig's APIs. See `tests/support/LIVE_TESTING.md` for the
+    /// rationale and the PII scrub checklist that applies before
+    /// committing a recorded trace.
     pub fn new(test_name: impl Into<String>) -> Self {
         Self {
             test_name: test_name.into(),
@@ -235,7 +245,25 @@ impl LiveTestHarnessBuilder {
             engine_v2: None,
             auto_approve_tools: None,
             channel_name: None,
+            seeded_secret_names: Vec::new(),
         }
+    }
+
+    /// Declare secret names to copy from the developer's real
+    /// `~/.ironclaw/ironclaw.db` (or whatever `LIBSQL_PATH` resolves to)
+    /// into the test rig under the same owner_user_id. Only the named
+    /// rows are copied; nothing else (memory, history, other secrets)
+    /// crosses the boundary.
+    ///
+    /// Example: `.with_secrets(["google_oauth_token"])` for a Gmail flow.
+    ///
+    /// Names not present in the source DB are logged as warnings — the
+    /// test will then fail fast on its own missing-credential path,
+    /// surfacing the typo in the secret name rather than silently
+    /// skipping the credential.
+    pub fn with_secrets(mut self, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.seeded_secret_names = names.into_iter().map(Into::into).collect();
+        self
     }
 
     /// Override the test channel name. Useful when testing features that key
@@ -323,35 +351,56 @@ impl LiveTestHarnessBuilder {
             config.agent.engine_v2, config.agent.allow_local_tools, config.agent.auto_approve_tools,
         );
 
-        // If the resolved config points at a local libSQL file (the
-        // typical `~/.ironclaw/ironclaw.db` setup), clone it into the
-        // test rig's temp dir so live tests get real OAuth secrets,
-        // memory, and history without polluting the source. The clone
-        // happens inside `TestRigBuilder::build()`. Remote replicas
-        // (`libsql_url` set) are not cloneable from a file copy and
-        // are left to start from an empty test DB.
-        let seed_db_from = match config.database.backend {
-            ironclaw::config::DatabaseBackend::LibSql if config.database.libsql_url.is_none() => {
-                config
-                    .database
-                    .libsql_path
-                    .clone()
-                    .filter(|p| p.exists())
-                    .or_else(|| {
-                        let default = ironclaw::config::default_libsql_path();
-                        default.exists().then_some(default)
-                    })
+        // If the test asked for specific secrets via `with_secrets(...)`
+        // and the resolved config points at a local libSQL file (the
+        // typical `~/.ironclaw/ironclaw.db` setup), figure out the source
+        // path now. We do NOT clone the file. The test rig will copy
+        // *only* the named rows out of the source `secrets` table after
+        // its own migrations run. Memory, conversation history, and any
+        // unrequested secret stay in the source — tests that need that
+        // data must seed it themselves.
+        let secrets_source: Option<std::path::PathBuf> = if self.seeded_secret_names.is_empty() {
+            None
+        } else {
+            match config.database.backend {
+                ironclaw::config::DatabaseBackend::LibSql
+                    if config.database.libsql_url.is_none() =>
+                {
+                    config
+                        .database
+                        .libsql_path
+                        .clone()
+                        .filter(|p| p.exists())
+                        .or_else(|| {
+                            let default = ironclaw::config::default_libsql_path();
+                            default.exists().then_some(default)
+                        })
+                }
+                _ => None,
             }
-            _ => None,
         };
-        if let Some(ref src) = seed_db_from {
-            eprintln!("[LiveTest] Will clone libSQL DB from {}", src.display());
+        if !self.seeded_secret_names.is_empty() {
+            match &secrets_source {
+                Some(src) => eprintln!(
+                    "[LiveTest] Will seed {} secret(s) from {}: {:?}",
+                    self.seeded_secret_names.len(),
+                    src.display(),
+                    self.seeded_secret_names
+                ),
+                None => eprintln!(
+                    "[LiveTest] WARNING: with_secrets() requested {:?} but no local libSQL \
+                     source DB exists — the test will run with no seeded credentials and \
+                     will likely fail on its first auth-gated tool call",
+                    self.seeded_secret_names
+                ),
+            }
         } else {
             eprintln!(
-                "[LiveTest] No source libSQL DB found to clone — \
-                 test rig will start from an empty database (no real secrets)"
+                "[LiveTest] Starting with a clean DB. No secrets seeded; \
+                 declare them with `.with_secrets([...])` if your scenario needs credentials."
             );
         }
+        let source_user_id = config.owner_id.clone();
 
         let session = Arc::new(SessionManager::new(SessionConfig::default()));
         let (provider, cheap_llm, _) = ironclaw::llm::build_provider_chain(&config.llm, session)
@@ -377,8 +426,12 @@ impl LiveTestHarnessBuilder {
         if let Some(ref name) = self.channel_name {
             rig_builder = rig_builder.with_channel_name(name.clone());
         }
-        if let Some(src) = seed_db_from {
-            rig_builder = rig_builder.with_seed_db_from(src);
+        if let Some(src) = secrets_source {
+            rig_builder = rig_builder.with_seeded_secrets(
+                src,
+                source_user_id,
+                self.seeded_secret_names.clone(),
+            );
         }
         let rig = rig_builder.build().await;
 

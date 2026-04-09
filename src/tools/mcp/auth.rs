@@ -800,11 +800,16 @@ pub async fn authorize_mcp_server(
     };
 
     // Generate OAuth state parameter. While optional in OAuth 2.1 with PKCE,
-    // some MCP servers (e.g. Attio) require it.
+    // PKCE alone does not protect against login CSRF — an attacker can run a
+    // PKCE flow against their own account and trick the victim into linking
+    // attacker-controlled MCP credentials. We therefore both send `state` in
+    // the authorization URL and validate it on callback (see
+    // `wait_for_authorization_callback`). Some MCP servers (e.g. Attio) also
+    // require state to be present in the request.
     let mut state_bytes = [0u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut state_bytes);
     let state = URL_SAFE_NO_PAD.encode(state_bytes);
-    extra_params.insert("state".to_string(), state);
+    extra_params.insert("state".to_string(), state.clone());
 
     // Compute canonical resource URI for RFC 8707
     let resource = canonical_resource_uri(&server_config.url);
@@ -836,11 +841,12 @@ pub async fn authorize_mcp_server(
 
     println!("  Waiting for authorization...");
 
-    // Wait for callback. State is sent in the URL for servers that require it
-    // (e.g. Attio), but we don't enforce validation on the callback because MCP
-    // servers use PKCE which already binds the request to the token exchange,
-    // and some servers may not echo state back.
-    let code = wait_for_authorization_callback(listener, &server_config.name).await?;
+    // Wait for callback. We require the server to echo `state` back and
+    // validate it: PKCE alone does not protect against login CSRF (see
+    // comment where `state` is generated above). A non-compliant MCP server
+    // that drops `state` will surface as a `StateMismatch` error rather than
+    // silently allowing the flow to complete under an attacker's session.
+    let code = wait_for_authorization_callback(listener, &server_config.name, Some(&state)).await?;
 
     println!("  Exchanging code for token...");
 
@@ -932,11 +938,17 @@ pub fn build_authorization_url(
 }
 
 /// Wait for the authorization callback and extract the code.
+///
+/// `expected_state`, when supplied, is validated against the `state` query
+/// parameter on the callback. A missing or mismatched `state` returns
+/// `AuthError::Http("CSRF state mismatch ...")` rather than producing an
+/// authorization code.
 pub async fn wait_for_authorization_callback(
     listener: TcpListener,
     server_name: &str,
+    expected_state: Option<&str>,
 ) -> Result<String, AuthError> {
-    oauth::wait_for_callback(listener, "/callback", "code", server_name, None)
+    oauth::wait_for_callback(listener, "/callback", "code", server_name, expected_state)
         .await
         .map_err(|e| match e {
             oauth::OAuthCallbackError::Denied => AuthError::AuthorizationDenied,
