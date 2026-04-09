@@ -1,0 +1,35 @@
+# Released migration checksums (refinery SipHasher13 over name+version+sql).
+#
+# This file is the immutability guard for released migrations. The
+# `released_migrations_are_immutable` test in src/db/migration_fixup.rs
+# asserts every migration listed below still hashes to the pinned value
+# and that every migration on disk has a pinned value here.
+#
+# Modifying a released migration is forbidden — it desyncs every
+# production database from refinery's checksum validation. See issue
+# #1328 for the historical accident this guard prevents.
+#
+# When adding a new migration, append a new line in the same commit.
+# Regenerate locally with:
+#   cargo test -p ironclaw -- --ignored regenerate_migration_checksums_lockfile
+
+V1__initial = 13924994861355873385
+V2__wasm_secure_api = 7920426121433120191
+V3__tool_failures = 12003661105690258102
+V4__sandbox_columns = 4066773473211554372
+V5__claude_code = 879553427473911756
+V6__routines = 18049045188188232070
+V7__rename_events = 13503025792365661965
+V8__settings = 2960080429880963815
+V9__flexible_embedding_dimension = 8136426081104542386
+V10__wasm_versioning = 18212435829290780557
+V11__conversation_unique_indexes = 9262706107262242885
+V12__job_token_budget = 13685500183340941819
+V13__owner_scope_notify_targets = 2361305667196854503
+V14__users = 8534543610808829344
+V15__conversation_source_channel = 6931108907510923101
+V16__document_versions = 6496010415720970575
+V17__user_identities = 14415325645069692436
+V18__tool_scope = 3125684809935466111
+V19__channel_identities = 409356689302266680
+V20__pairing_requests = 17756233693090004940

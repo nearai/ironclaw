@@ -157,6 +157,20 @@ pub struct GateResolveRequest {
 
 pub use ironclaw_common::{AppEvent, ToolDecisionDto};
 
+// --- Admin System Prompt ---
+
+#[derive(Debug, Deserialize)]
+pub struct SystemPromptRequest {
+    pub content: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SystemPromptResponse {
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+
 // --- Memory ---
 
 #[derive(Debug, Serialize)]
