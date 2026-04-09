@@ -29,6 +29,7 @@ pub(crate) mod helpers;
 mod hygiene;
 pub(crate) mod llm;
 pub mod oauth;
+pub mod profile;
 pub mod relay;
 mod routines;
 mod safety;
@@ -241,8 +242,9 @@ impl Config {
         let _ = dotenvy::dotenv();
         crate::bootstrap::load_ironclaw_env();
 
-        // Start with TOML config as a base (lowest priority among the two).
+        // Start with defaults, apply deployment profile, then TOML overlay.
         let mut settings = Settings::default();
+        profile::apply_profile(&mut settings)?;
         Self::apply_toml_overlay(&mut settings, toml_path)?;
 
         // Overlay DB settings on top so DB values win over TOML.
@@ -352,8 +354,9 @@ impl Config {
         is_operator: bool,
     ) -> Result<(), ConfigError> {
         let mut settings = if let Some(store) = store {
-            // TOML as base, then DB on top (DB wins).
+            // Profile as base, then TOML, then DB on top (DB wins).
             let mut s = Settings::default();
+            profile::apply_profile(&mut s)?;
             Self::apply_toml_overlay(&mut s, toml_path)?;
             if let Ok(mut map) = store.get_all_settings(user_id).await {
                 if !is_operator {
@@ -364,7 +367,9 @@ impl Config {
             }
             s
         } else {
-            Settings::default()
+            let mut s = Settings::default();
+            profile::apply_profile(&mut s)?;
+            s
         };
 
         // Hydrate API keys from encrypted secrets store into the settings
@@ -429,6 +434,7 @@ pub(crate) fn load_bootstrap_settings(
     crate::bootstrap::load_ironclaw_env();
 
     let mut settings = Settings::load();
+    profile::apply_profile(&mut settings)?;
     Config::apply_toml_overlay(&mut settings, toml_path)?;
     Ok(settings)
 }
