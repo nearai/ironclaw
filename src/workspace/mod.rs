@@ -58,9 +58,10 @@ pub mod settings_schemas;
 
 pub use chunker::{ChunkConfig, chunk_document};
 pub use document::{
-    CONFIG_FILE_NAME, DocumentMetadata, DocumentVersion, HygieneMetadata, IDENTITY_PATHS,
-    MemoryChunk, MemoryDocument, PatchResult, VersionSummary, WorkspaceEntry, content_sha256,
-    is_config_path, is_identity_path, merge_workspace_entries, paths,
+    ADMIN_SCOPE, CONFIG_FILE_NAME, DocumentMetadata, DocumentVersion, HygieneMetadata,
+    IDENTITY_PATHS, MemoryChunk, MemoryDocument, PatchResult, VersionSummary, WorkspaceEntry,
+    content_sha256, is_config_path, is_identity_path, is_reserved_scope, merge_workspace_entries,
+    paths,
 };
 pub use embedding_cache::{CachedEmbeddingProvider, EmbeddingCacheConfig};
 #[cfg(feature = "bedrock")]
@@ -102,6 +103,7 @@ const SYSTEM_PROMPT_FILES: &[&str] = &[
     paths::AGENTS,
     paths::USER,
     paths::IDENTITY,
+    paths::SYSTEM,
     paths::MEMORY,
     paths::TOOLS,
     paths::HEARTBEAT,
@@ -555,6 +557,13 @@ pub struct Workspace {
     /// Optional privacy classifier for shared layer writes.
     /// When None, writes go exactly where requested — no silent redirect.
     privacy_classifier: Option<Arc<dyn crate::workspace::privacy::PrivacyClassifier>>,
+    /// When true, the system prompt includes admin-defined instructions from
+    /// the `__admin__` scope. Set by `WorkspacePool` in multi-tenant mode.
+    admin_prompt_enabled: bool,
+    /// Shared cache for the admin system prompt. When `Some`, the workspace
+    /// reads from this cache instead of hitting the database on every turn.
+    /// Populated by `WorkspacePool` in multi-tenant mode.
+    admin_prompt_cache: Option<Arc<tokio::sync::RwLock<Option<String>>>>,
 }
 
 impl Workspace {
@@ -574,6 +583,8 @@ impl Workspace {
             search_defaults: SearchConfig::default(),
             memory_layers,
             privacy_classifier: None,
+            admin_prompt_enabled: false,
+            admin_prompt_cache: None,
         }
     }
 
@@ -594,6 +605,8 @@ impl Workspace {
             search_defaults: SearchConfig::default(),
             memory_layers,
             privacy_classifier: None,
+            admin_prompt_enabled: false,
+            admin_prompt_cache: None,
         }
     }
 
@@ -692,6 +705,25 @@ impl Workspace {
         self
     }
 
+    /// Enable admin system prompt reading from the `__admin__` scope.
+    ///
+    /// When enabled, `system_prompt_for_context_inner()` reads `SYSTEM.md`
+    /// from the `__admin__` scope and injects it before identity files.
+    /// Only set in multi-tenant mode (via `WorkspacePool`).
+    pub fn with_admin_prompt(mut self) -> Self {
+        self.admin_prompt_enabled = true;
+        self
+    }
+
+    /// Set the shared admin prompt cache (from `WorkspacePool`).
+    pub fn with_admin_prompt_cache(
+        mut self,
+        cache: Arc<tokio::sync::RwLock<Option<String>>>,
+    ) -> Self {
+        self.admin_prompt_cache = Some(cache);
+        self
+    }
+
     /// Get the configured memory layers.
     pub fn memory_layers(&self) -> &[crate::workspace::layer::MemoryLayer] {
         &self.memory_layers
@@ -764,6 +796,8 @@ impl Workspace {
             search_defaults: self.search_defaults.clone(),
             memory_layers,
             privacy_classifier: self.privacy_classifier.clone(),
+            admin_prompt_enabled: self.admin_prompt_enabled,
+            admin_prompt_cache: self.admin_prompt_cache.clone(),
         }
     }
 
@@ -1626,6 +1660,48 @@ impl Workspace {
     }
 
     /// Inner implementation for system prompt building.
+    /// Read the admin system prompt, using the shared cache if available.
+    ///
+    /// Returns `None` if no admin prompt has been set, the document is empty,
+    /// or a non-recoverable error occurred. Only `DocumentNotFound` is silent;
+    /// other errors are logged at `debug!`.
+    async fn read_admin_prompt(&self) -> Option<String> {
+        // Fast path: check shared cache.
+        if let Some(ref cache) = self.admin_prompt_cache {
+            let guard = cache.read().await;
+            if let Some(ref content) = *guard {
+                return if content.is_empty() {
+                    None
+                } else {
+                    Some(content.clone())
+                };
+            }
+        }
+
+        // Slow path: DB read.
+        let result = match self
+            .storage
+            .get_document_by_path(ADMIN_SCOPE, None, paths::SYSTEM)
+            .await
+        {
+            Ok(doc) if !doc.content.is_empty() => Some(doc.content),
+            Ok(_) => None,
+            Err(WorkspaceError::DocumentNotFound { .. }) => None,
+            Err(e) => {
+                tracing::debug!("Failed to read admin system prompt: {}", e);
+                return None; // Don't cache errors
+            }
+        };
+
+        // Populate cache.
+        if let Some(ref cache) = self.admin_prompt_cache {
+            let mut guard = cache.write().await;
+            *guard = Some(result.clone().unwrap_or_default());
+        }
+
+        result
+    }
+
     async fn system_prompt_for_context_inner(
         &self,
         is_group_chat: bool,
@@ -1671,6 +1747,15 @@ impl Workspace {
         } else {
             false
         };
+
+        // Admin system prompt: shared instructions set by an admin.
+        // Only read in multi-tenant mode (admin_prompt_enabled is set by WorkspacePool).
+        // Uses read_admin_prompt() which checks the shared cache first.
+        if self.admin_prompt_enabled
+            && let Some(content) = self.read_admin_prompt().await
+        {
+            parts.push(format!("## System Instructions\n\n{}", content));
+        }
 
         // Load identity files in order of importance.
         // These MUST use read_primary() — see comment above.
@@ -2523,12 +2608,25 @@ mod tests {
     // ── Injection scanning tests ─────────────────────────────────────
 
     #[test]
+    fn test_system_md_is_system_prompt_file_but_not_identity() {
+        assert!(
+            is_system_prompt_file(paths::SYSTEM),
+            "SYSTEM.md should be scanned for injection"
+        );
+        assert!(
+            !is_identity_path(paths::SYSTEM),
+            "SYSTEM.md must NOT be an identity path — it is shared, not per-user"
+        );
+    }
+
+    #[test]
     fn test_system_prompt_file_matching() {
         let cases = vec![
             ("SOUL.md", true),
             ("AGENTS.md", true),
             ("USER.md", true),
             ("IDENTITY.md", true),
+            ("SYSTEM.md", true),
             ("MEMORY.md", true),
             ("HEARTBEAT.md", true),
             ("TOOLS.md", true),

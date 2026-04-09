@@ -135,13 +135,15 @@ For trace debugging set `IRONCLAW_RECORD_TRACE=1`. Engine v2 reuses the host cra
 
 ### Learning Missions (replaced Reflection)
 
-Instead of a separate reflection pipeline, knowledge extraction is handled by three event-driven **learning missions** that fire automatically after thread completion:
+Instead of a separate reflection pipeline, knowledge extraction is handled by four event-driven **learning missions** that fire automatically after thread completion:
 
 1. **Self-improvement** (`self-improvement`) — fires when a thread completes with trace issues (errors, tool-not-found, etc.). Diagnoses root cause, applies prompt overlays or orchestrator patches. Graduated risk: Level 1 (prompt) → Level 2 (config) → Level 3 (code, propose only).
 
-2. **Skill extraction** (`skill-extraction`) — fires when a thread succeeds with 5+ steps and 3+ distinct tool actions. Extracts reusable skills with structured metadata: activation keywords/patterns, CodeAct code snippets, domain tags. Output is a `DocType::Skill` MemoryDoc with `V2SkillMetadata` JSON.
+2. **Skill repair** (`skill-repair`) — fires when a completed thread used an active skill and the resulting trace suggests that the skill instructions were stale, incomplete, incorrectly ordered, or missing verification. The mission returns a structured repair, and the runtime applies it as a versioned update with rollback history.
 
-3. **Conversation insights** (`conversation-insights`) — fires every 5 completed threads in a project. Extracts user preferences, domain knowledge, workflow patterns, and corrections.
+3. **Skill extraction** (`skill-extraction`) — fires when a thread succeeds with 5+ steps and 3+ distinct tool actions. Extracts reusable skills with structured metadata: activation keywords/patterns, CodeAct code snippets, domain tags. Output is a `DocType::Skill` MemoryDoc with `V2SkillMetadata` JSON.
+
+4. **Conversation insights** (`conversation-insights`) — fires every 5 completed threads in a project. Extracts user preferences, domain knowledge, workflow patterns, and corrections.
 
 ### Context Injection
 
