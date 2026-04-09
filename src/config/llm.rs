@@ -5,7 +5,8 @@ use secrecy::SecretString;
 
 use crate::bootstrap::ironclaw_base_dir;
 use crate::config::helpers::{
-    optional_env, parse_optional_env, validate_base_url, validate_operator_base_url,
+    optional_env, parse_optional_env, validate_base_url, validate_base_url_no_dns,
+    validate_operator_base_url, validate_operator_base_url_no_dns,
 };
 use crate::error::ConfigError;
 use crate::llm::config::*;
@@ -139,12 +140,13 @@ impl LlmConfig {
         let nearai_auth_url = nearai_auth_url_explicit
             .clone()
             .unwrap_or_else(|| "https://private.near.ai".to_string());
-        // Only validate (DNS-resolve) the auth URL when it was explicitly
-        // configured.  Default/hardcoded URLs are known-good and don't need
-        // DNS-based SSRF validation — attempting it causes spurious failures
-        // in offline / sandboxed environments.
+        // Always validate URL structure / scheme.  For hardcoded defaults,
+        // skip DNS resolution (they are known-good and DNS fails in
+        // offline / sandboxed environments).
         if nearai_auth_url_explicit.is_some() {
             validate_base_url(&nearai_auth_url, "NEARAI_AUTH_URL")?;
+        } else {
+            validate_base_url_no_dns(&nearai_auth_url, "NEARAI_AUTH_URL")?;
         }
         let session = SessionConfig {
             auth_base_url: nearai_auth_url,
@@ -171,20 +173,24 @@ impl LlmConfig {
         } else {
             crate::llm::DEFAULT_MODEL.to_string()
         };
+        let nearai_base_url_from_env = optional_env("NEARAI_BASE_URL")?;
         let nearai_base_url_explicit = nearai_override
             .and_then(|o| o.base_url.clone())
-            .or_else(|| optional_env("NEARAI_BASE_URL").ok().flatten());
-        let nearai_base_url = if let Some(url) = nearai_override.and_then(|o| o.base_url.clone()) {
-            url
-        } else if let Some(url) = optional_env("NEARAI_BASE_URL")? {
+            .or(nearai_base_url_from_env.clone());
+        let nearai_base_url = if let Some(url) = nearai_base_url_explicit.clone() {
             url
         } else if nearai_api_key.is_some() {
             "https://cloud-api.near.ai".to_string()
         } else {
             "https://private.near.ai".to_string()
         };
+        // Always validate URL structure / scheme.  For hardcoded defaults,
+        // skip DNS resolution (they are known-good and DNS fails in
+        // offline / sandboxed environments).
         if nearai_base_url_explicit.is_some() {
             validate_base_url(&nearai_base_url, "NEARAI_BASE_URL")?;
+        } else {
+            validate_base_url_no_dns(&nearai_base_url, "NEARAI_BASE_URL")?;
         }
         let nearai = NearAiConfig {
             model: nearai_model,
@@ -280,6 +286,8 @@ impl LlmConfig {
                 .unwrap_or_else(|| "https://auth.openai.com".to_string());
             if auth_endpoint_explicit.is_some() {
                 validate_base_url(&auth_endpoint, "OPENAI_CODEX_AUTH_URL")?;
+            } else {
+                validate_base_url_no_dns(&auth_endpoint, "OPENAI_CODEX_AUTH_URL")?;
             }
             let api_base_url_explicit = optional_env("OPENAI_CODEX_API_URL")?;
             let api_base_url = api_base_url_explicit
@@ -287,6 +295,8 @@ impl LlmConfig {
                 .unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".to_string());
             if api_base_url_explicit.is_some() {
                 validate_base_url(&api_base_url, "OPENAI_CODEX_API_URL")?;
+            } else {
+                validate_base_url_no_dns(&api_base_url, "OPENAI_CODEX_API_URL")?;
             }
             let client_id = optional_env("OPENAI_CODEX_CLIENT_ID")?
                 .unwrap_or_else(|| "app_EMoamEEZ73f0CkXaXp7hrann".to_string());
@@ -559,13 +569,16 @@ impl LlmConfig {
             });
         }
 
-        // Only validate explicitly-configured URLs (from env vars or DB
-        // settings).  Registry-provided defaults are hardcoded known-good
-        // URLs that don't need DNS-based SSRF validation — validating them
-        // causes spurious failures in offline / sandboxed environments.
-        if explicit_base_url.is_some() && !base_url.is_empty() {
+        // Always validate URL structure and scheme.  For explicitly-configured
+        // URLs, also perform DNS resolution.  For registry defaults, skip DNS
+        // (they are known-good and DNS can fail in offline environments).
+        if !base_url.is_empty() {
             let field = base_url_env.unwrap_or("LLM_BASE_URL");
-            validate_operator_base_url(&base_url, field)?;
+            if explicit_base_url.is_some() {
+                validate_operator_base_url(&base_url, field)?;
+            } else {
+                validate_operator_base_url_no_dns(&base_url, field)?;
+            }
         }
 
         // Resolve model: selected_model (DB) > per-provider override (DB) > env var > registry default
@@ -737,8 +750,8 @@ mod tests {
 
         let settings = Settings {
             llm_backend: Some("openai_compatible".to_string()),
-            // Use localhost to avoid DNS resolution in test environments.
-            openai_compatible_base_url: Some("http://localhost:11434/api/v1".to_string()),
+            // Use localhost with a port unlikely to collide with real services.
+            openai_compatible_base_url: Some("http://localhost:19876/api/v1".to_string()),
             selected_model: Some("openai/gpt-5.1-codex".to_string()),
             ..Default::default()
         };
@@ -760,8 +773,8 @@ mod tests {
 
         let settings = Settings {
             llm_backend: Some("openai_compatible".to_string()),
-            // Use localhost to avoid DNS resolution in test environments.
-            openai_compatible_base_url: Some("http://localhost:11434/api/v1".to_string()),
+            // Use localhost with a port unlikely to collide with real services.
+            openai_compatible_base_url: Some("http://localhost:19876/api/v1".to_string()),
             selected_model: Some("openai/gpt-5.1-codex".to_string()),
             ..Default::default()
         };

@@ -211,10 +211,49 @@ pub(crate) fn strip_admin_only_llm_keys(map: &mut HashMap<String, serde_json::Va
     map.retain(|key, _| !ADMIN_ONLY_LLM_SETTING_KEYS.contains(&key.as_str()));
 }
 
+/// Perform DNS resolution with a 10-second timeout.
+///
+/// Spawns the blocking `to_socket_addrs` call in a dedicated thread and waits
+/// via a channel.  If the resolver hangs beyond the timeout the calling thread
+/// unblocks with `TimedOut`, and the spawned thread will terminate once the OS
+/// resolver returns (the channel `tx` is dropped, so no resources leak beyond
+/// the OS-level DNS socket).
+fn dns_resolve_with_timeout(host: &str, port: u16) -> std::io::Result<Vec<std::net::IpAddr>> {
+    use std::net::ToSocketAddrs;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (tx, rx) = mpsc::channel();
+    let h = host.to_string();
+    std::thread::spawn(move || {
+        let result = (h.as_str(), port)
+            .to_socket_addrs()
+            .map(|addrs| addrs.map(|a| a.ip()).collect::<Vec<_>>());
+        let _ = tx.send(result);
+    });
+    rx.recv_timeout(Duration::from_secs(10))
+        .unwrap_or_else(|_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "DNS resolution timed out after 10s",
+            ))
+        })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BaseUrlPolicy {
     StrictSsrf,
     AllowPrivateNetwork,
+}
+
+/// Whether to perform DNS resolution during URL validation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DnsPolicy {
+    /// Resolve hostnames and validate the resulting IPs.
+    Resolve,
+    /// Skip DNS resolution for non-IP hostnames.  IP-literal hosts are
+    /// still validated against the blocked-IP list.
+    SkipResolution,
 }
 
 /// Validate a user-configurable base URL to prevent SSRF attacks (#1103).
@@ -227,7 +266,12 @@ enum BaseUrlPolicy {
 /// This is intended for config-time validation of base URLs like
 /// `OLLAMA_BASE_URL`, `EMBEDDING_BASE_URL`, `NEARAI_BASE_URL`, etc.
 pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), ConfigError> {
-    validate_base_url_with_policy(url, field_name, BaseUrlPolicy::StrictSsrf)
+    validate_base_url_with_policy(
+        url,
+        field_name,
+        BaseUrlPolicy::StrictSsrf,
+        DnsPolicy::Resolve,
+    )
 }
 
 /// Validate an operator-configured model endpoint.
@@ -237,7 +281,39 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
 /// operator. Public HTTP endpoints remain blocked to avoid sending credentials
 /// over plaintext transport.
 pub(crate) fn validate_operator_base_url(url: &str, field_name: &str) -> Result<(), ConfigError> {
-    validate_base_url_with_policy(url, field_name, BaseUrlPolicy::AllowPrivateNetwork)
+    validate_base_url_with_policy(
+        url,
+        field_name,
+        BaseUrlPolicy::AllowPrivateNetwork,
+        DnsPolicy::Resolve,
+    )
+}
+
+/// Validate a URL without performing DNS resolution.
+///
+/// Checks scheme, URL structure, and IP-literal classification, but skips
+/// hostname DNS resolution.  Use this for hardcoded/registry-default URLs
+/// that are known-good but may fail DNS in offline environments.
+pub(crate) fn validate_base_url_no_dns(url: &str, field_name: &str) -> Result<(), ConfigError> {
+    validate_base_url_with_policy(
+        url,
+        field_name,
+        BaseUrlPolicy::StrictSsrf,
+        DnsPolicy::SkipResolution,
+    )
+}
+
+/// Like [`validate_operator_base_url`] but skips DNS resolution.
+pub(crate) fn validate_operator_base_url_no_dns(
+    url: &str,
+    field_name: &str,
+) -> Result<(), ConfigError> {
+    validate_base_url_with_policy(
+        url,
+        field_name,
+        BaseUrlPolicy::AllowPrivateNetwork,
+        DnsPolicy::SkipResolution,
+    )
 }
 
 fn classify_ip(ip: &std::net::IpAddr) -> IpClass {
@@ -281,8 +357,9 @@ fn validate_base_url_with_policy(
     url: &str,
     field_name: &str,
     policy: BaseUrlPolicy,
+    dns_policy: DnsPolicy,
 ) -> Result<(), ConfigError> {
-    use std::net::{IpAddr, ToSocketAddrs};
+    use std::net::IpAddr;
 
     let parsed = reqwest::Url::parse(url).map_err(|e| ConfigError::InvalidValue {
         key: field_name.to_string(),
@@ -324,7 +401,12 @@ fn validate_base_url_with_policy(
     }
 
     let resolved_ips = if let Ok(ip) = normalized_host.parse::<IpAddr>() {
+        // IP literals are always validated, regardless of DNS policy.
         vec![ip]
+    } else if dns_policy == DnsPolicy::SkipResolution {
+        // Non-IP hostname with DNS skipped — we validated the scheme and
+        // URL structure above; skip resolved-IP checks.
+        return Ok(());
     } else {
         let port = parsed
             .port()
@@ -335,30 +417,9 @@ fn validate_base_url_with_policy(
         // multi-threaded tokio worker to avoid stalling other tasks.  The
         // `try_current()` check keeps sync callers (config bootstrap, CLI)
         // working unchanged.
-        //
-        // A 10-second timeout prevents the entire process from hanging when
-        // the DNS resolver blocks indefinitely (e.g. sandboxed environments
-        // or broken resolvers).
         let host_owned = host.to_string();
-        let resolve = move || -> std::io::Result<Vec<IpAddr>> {
-            use std::sync::mpsc;
-            use std::time::Duration;
-            let (tx, rx) = mpsc::channel();
-            let h = host_owned.clone();
-            std::thread::spawn(move || {
-                let result = (h.as_str(), port)
-                    .to_socket_addrs()
-                    .map(|addrs| addrs.map(|a| a.ip()).collect::<Vec<_>>());
-                let _ = tx.send(result);
-            });
-            rx.recv_timeout(Duration::from_secs(10))
-                .unwrap_or_else(|_| {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "DNS resolution timed out after 10s",
-                    ))
-                })
-        };
+        let resolve =
+            move || -> std::io::Result<Vec<IpAddr>> { dns_resolve_with_timeout(&host_owned, port) };
         let lookup = match tokio::runtime::Handle::try_current() {
             Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
                 tokio::task::block_in_place(resolve)
@@ -745,23 +806,10 @@ mod tests {
     /// succeed even though they shouldn't, which makes any test that asserts
     /// "DNS resolution failure" unreliable. Detect that case and skip the test.
     fn invalid_tld_resolves_locally() -> bool {
-        use std::net::ToSocketAddrs;
-        use std::sync::mpsc;
-        use std::time::Duration;
-        // Spawn the DNS lookup in a thread with a channel timeout so
-        // that sandboxed / restricted-DNS environments (where the
-        // resolver may block indefinitely for .invalid TLDs) don't
-        // hang the entire test suite.
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let resolved = ("ironclaw-dns-hijack-probe.invalid", 443u16)
-                .to_socket_addrs()
-                .is_ok();
-            let _ = tx.send(resolved);
-        });
-        // If DNS doesn't respond within 5 seconds, treat it as
-        // "DNS is broken" and skip the test (same as hijacked DNS).
-        rx.recv_timeout(Duration::from_secs(5)).unwrap_or(true)
+        // Uses the shared DNS timeout helper.  If the resolver hangs
+        // (sandboxed environment) or returns results (hijacked DNS),
+        // treat both as "skip the test".
+        dns_resolve_with_timeout("ironclaw-dns-hijack-probe.invalid", 443).is_ok()
     }
 
     #[test]
@@ -773,33 +821,27 @@ mod tests {
             );
             return;
         }
-        // The validate_base_url call also performs DNS resolution which
-        // can hang in restricted-DNS environments, so run it in a
-        // thread with a timeout.
-        use std::sync::mpsc;
-        use std::time::Duration;
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            // .invalid TLD is guaranteed to never resolve (RFC 6761)
-            let result = validate_base_url("https://ssrf-test.invalid", "TEST");
-            let _ = tx.send(result);
-        });
-        let result = match rx.recv_timeout(Duration::from_secs(10)) {
-            Ok(r) => r,
-            Err(_) => {
+        // validate_base_url internally uses dns_resolve_with_timeout,
+        // so it will not hang even in sandboxed environments — it will
+        // return a timeout error within 10s.
+        let result = validate_base_url("https://ssrf-test.invalid", "TEST");
+        match result {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("failed to resolve") || msg.contains("timed out"),
+                    "Expected DNS resolution failure or timeout, got: {msg}"
+                );
+            }
+            Ok(()) => {
+                // DNS succeeded unexpectedly (hijacked resolver not caught
+                // by the probe).  Skip rather than fail.
                 eprintln!(
                     "skipping validate_base_url_rejects_dns_failure: \
-                     DNS resolution timed out"
+                     .invalid TLD resolved unexpectedly"
                 );
-                return;
             }
-        };
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("failed to resolve"),
-            "Expected DNS resolution failure, got: {err}"
-        );
+        }
     }
 
     #[test]

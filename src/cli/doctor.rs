@@ -767,11 +767,13 @@ mod tests {
             CheckResult::Skip(msg) => {
                 // In offline environments, LlmConfig::resolve() may fail
                 // with a DNS error before the backend check runs.  Accept
-                // either the normal "backend=anthropic" skip or a DNS-related
-                // config error skip.
+                // the normal "backend=anthropic" skip, a DNS resolution
+                // failure, or a DNS timeout.
                 assert!(
-                    msg.contains("backend=anthropic") || msg.contains("failed to resolve"),
-                    "expected backend name or DNS error in skip message, got: {msg}"
+                    msg.contains("backend=anthropic")
+                        || msg.contains("failed to resolve")
+                        || msg.contains("timed out"),
+                    "expected backend name, DNS error, or timeout in skip message, got: {msg}"
                 );
             }
             other => panic!(
@@ -899,7 +901,8 @@ mod tests {
             // NearAI auth URL may fail during config construction.  The
             // doctor correctly reports this as a Fail, so the test should
             // not panic — just verify the message is DNS-related.
-            CheckResult::Fail(msg) if msg.contains("failed to resolve") => {}
+            CheckResult::Fail(msg)
+                if msg.contains("failed to resolve") || msg.contains("timed out") => {}
             other => panic!(
                 "expected Pass for default LLM config, got: {}",
                 format_result(&other)

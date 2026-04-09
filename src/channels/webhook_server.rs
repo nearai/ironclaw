@@ -342,26 +342,16 @@ mod tests {
             .expect("Failed to send request");
         assert_eq!(response.status(), 200, "Server should be listening");
 
-        // Try to bind an address that should fail. Port 1 requires elevated
-        // privileges on most systems, but when running as root (containers, CI)
-        // the bind succeeds. Fall back to re-binding the already-occupied first
-        // port, which always fails regardless of privilege level.
+        // Verify that a failed bind does not disturb the running server.
+        // Bind the same port that `addr1` already occupies — this reliably
+        // fails on every platform regardless of privilege level.
         let app = server
             .merged_router_clone()
             .expect("Router should exist after start()");
-        let privileged: SocketAddr = "127.0.0.1:1".parse().unwrap();
-        let result = tokio::net::TcpListener::bind(privileged).await;
-        let result = if result.is_ok() {
-            // Running as root — port 1 bind succeeded. Drop it and try the
-            // already-occupied port instead, which must fail.
-            drop(result);
-            tokio::net::TcpListener::bind(addr1).await
-        } else {
-            result
-        };
+        let result = tokio::net::TcpListener::bind(addr1).await;
         assert!(
             result.is_err(),
-            "Bind should fail (privileged port or already in use)"
+            "Binding an already-occupied port should fail"
         );
         // `app` is dropped — server state unchanged (rollback by construction)
         drop(app);
