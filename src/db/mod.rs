@@ -10,6 +10,9 @@
 //! types become thin wrappers that delegate to `Arc<dyn Database>`.
 
 #[cfg(feature = "postgres")]
+pub mod migration_fixup;
+
+#[cfg(feature = "postgres")]
 pub mod postgres;
 
 #[cfg(feature = "postgres")]
