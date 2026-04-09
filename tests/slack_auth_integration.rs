@@ -867,3 +867,16 @@ async fn test_channel_message_without_mention_ignored() {
     assert_eq!(response.status, 200);
     expect_no_message(&mut stream, 500).await;
 }
+
+/// Regression: build script must target wasm32-wasip2 so binaries land at the
+/// path that `slack_wasm_path()` expects.  Without `--target wasm32-wasip2`
+/// cargo-component defaults to wasip1 and CI tests silently skip.
+#[test]
+fn build_script_targets_wasip2() {
+    let script = std::fs::read_to_string(find_project_file("scripts/build-wasm-extensions.sh"))
+        .expect("build script should exist");
+    assert!(
+        script.contains("--target wasm32-wasip2"),
+        "build-wasm-extensions.sh must pass --target wasm32-wasip2"
+    );
+}
