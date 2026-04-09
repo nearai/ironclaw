@@ -3,28 +3,27 @@ name: commitment-triage
 version: 0.2.0
 description: Recognize obligations in conversation, extract signals with immediacy and expiration, create and manage commitments in the workspace.
 activation:
+  # Limits enforced by `ironclaw_skills::types::ActivationCriteria::enforce_limits`:
+  # MAX_KEYWORDS_PER_SKILL=20, MAX_PATTERNS_PER_SKILL=5. The lists below are
+  # intentionally trimmed to those caps; entries past the cap are silently
+  # dropped at parse time.
   keywords:
     - need to
     - have to
     - must do
-    - promise
     - promised
     - committed to
     - deadline
     - by friday
     - by tomorrow
-    - by end of
     - follow up
     - get back to
     - remind me
     - track this
-    - track this request
     - mark done
-    - done with
     - commitment
     - obligation
     - overdue
-    - owe them
     - slack message from
     - asked me to review
     - can you review
@@ -34,13 +33,7 @@ activation:
     - "(?i)(remind me|don't let me forget|make sure I)"
     - "(?i)(by|before|until) (monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|tonight|end of)"
     - "(?i)(promised|committed|agreed) (to|that)"
-    - "(?i)(track|add|log) (this|that|a) (commitment|task|obligation)"
-    - "(?i).+ asked me to .+"
-    - "(?i)(team|slack|legal|finance|board|strategy|product|ops).+ asked me to .+"
     - "(?i)(slack|email|dm|text) message from .+: .+"
-    - "(?i)can you (review|reply|comment on|look at|send) .+"
-    - "(?i)i need to review .+"
-    - "(?i).+ this week$"
   exclude_keywords:
     - setup commitments
     - install commitments

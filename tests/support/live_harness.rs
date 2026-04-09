@@ -979,8 +979,18 @@ async fn hydrate_llm_secrets_into_env() {
 
     let store = LibSqlSecretsStore::new(raw_db, crypto);
 
-    // Single-user mode owner id (matches Config::default().owner_id).
-    let owner_id = "default";
+    // Owner id selection: a user with a non-default scope (e.g. via
+    // `IRONCLAW_OWNER_ID` or settings.json) stores secrets under that
+    // user_id, not "default". Try the env-resolved value first; if it's
+    // unset, fall back to the legacy "default" scope that single-user
+    // installs use. We don't reach into Config::from_env() here to avoid
+    // pulling in the full settings file resolution chain inside test
+    // hydration.
+    let env_owner = std::env::var("IRONCLAW_OWNER_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let owner_id_owned = env_owner.unwrap_or_else(|| "default".to_string());
+    let owner_id = owner_id_owned.as_str();
 
     for (secret_name, env_var) in SECRET_TO_ENV {
         if std::env::var(env_var)

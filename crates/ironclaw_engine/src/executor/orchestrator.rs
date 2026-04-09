@@ -751,7 +751,12 @@ async fn handle_execute_code_step(
                     EventKind::ActionFailed {
                         step_id: exec_ctx.step_id,
                         action_name: "__codeact__".to_string(),
-                        call_id: String::new(),
+                        // Synthetic call_id derived from the step id —
+                        // CodeAct snippet failures don't have an LLM-provided
+                        // call_id, but `loop_engine.rs:1277` asserts that
+                        // ActionFailed events carry a non-empty call_id for
+                        // trace correlation.
+                        call_id: format!("codeact-step-{}", exec_ctx.step_id.0),
                         error: error_msg,
                         params_summary: None,
                     },
