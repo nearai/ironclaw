@@ -1001,9 +1001,14 @@ function sendMessage() {
   if (!content && stagedImages.length === 0) return;
 
   // Intercept approval keywords when an unresolved approval card is pending.
-  // Find the most recent unresolved card (resolved cards linger 1.5s before removal).
+  // Find the most recent unresolved card for the current thread (resolved cards
+  // linger 1.5s before removal; cards from other threads must not be matched).
   const approvalCards = Array.from(document.querySelectorAll('.approval-card'));
-  const approvalCard = approvalCards.reverse().find(card => !card.querySelector('.approval-resolved'));
+  const approvalCard = approvalCards.reverse().find(card => {
+    if (card.querySelector('.approval-resolved')) return false;
+    const cardThreadId = card.getAttribute('data-thread-id');
+    return !cardThreadId || cardThreadId === currentThreadId;
+  });
   if (approvalCard && content) {
     const lower = content.toLowerCase();
     let action = null;
@@ -1678,6 +1683,10 @@ function showApproval(data) {
   const card = document.createElement('div');
   card.className = 'approval-card';
   card.setAttribute('data-request-id', data.request_id);
+  const cardThreadId = data.thread_id || currentThreadId;
+  if (cardThreadId) {
+    card.setAttribute('data-thread-id', cardThreadId);
+  }
 
   const header = document.createElement('div');
   header.className = 'approval-header';

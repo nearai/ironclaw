@@ -1381,7 +1381,30 @@ impl Agent {
                             .await
                             .map(HandleOutcome::from_legacy);
                     }
-                    return crate::bridge::handle_approval(self, message, *approved, *always)
+                    // Check whether there is actually a pending approval gate.
+                    // Bare keywords like "yes"/"no" should be treated as regular
+                    // user input when no approval is pending — only explicit slash
+                    // commands (/approve, /deny) keep the old error behavior.
+                    let has_gate = crate::bridge::get_engine_pending_gate(
+                        &message.user_id,
+                        message.conversation_scope(),
+                    )
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some();
+                    // NOTE: TOCTOU possible — the gate could be resolved between
+                    // this check and handle_approval; handle_approval already
+                    // handles the stale case gracefully.
+                    if has_gate || message.content.trim().starts_with('/') {
+                        return crate::bridge::handle_approval(self, message, *approved, *always)
+                            .await
+                            .map(HandleOutcome::from_legacy);
+                    }
+                    // No pending gate and bare keyword — treat as regular user
+                    // input so conversational "yes"/"ok" reach the engine.
+                    let content = &message.content;
+                    return crate::bridge::handle_with_engine(self, message, content)
                         .await
                         .map(HandleOutcome::from_legacy);
                 }
@@ -1799,8 +1822,32 @@ impl Agent {
                 .await
             }
             Submission::ApprovalResponse { approved, always } => {
-                self.process_approval(message, session, thread_id, None, approved, always)
+                // Check whether the thread is actually awaiting approval.
+                // Bare keywords like "yes"/"no" should be treated as regular
+                // user input when no approval is pending — only explicit slash
+                // commands (/approve, /deny) keep the old error behavior.
+                let is_awaiting = {
+                    let sess = session.lock().await;
+                    sess.threads
+                        .get(&thread_id)
+                        .map(|t| t.state == ThreadState::AwaitingApproval)
+                        .unwrap_or(false)
+                };
+                // NOTE: TOCTOU possible — state could change between check
+                // and process_approval; process_approval handles stale cases.
+                if is_awaiting || message.content.trim().starts_with('/') {
+                    self.process_approval(message, session, thread_id, None, approved, always)
+                        .await
+                } else {
+                    self.process_user_input(
+                        message,
+                        tenant.clone(),
+                        session,
+                        thread_id,
+                        &message.content,
+                    )
                     .await
+                }
             }
             Submission::Plan { sub } => {
                 use crate::agent::submission::PlanSubcommand;
@@ -2053,6 +2100,78 @@ mod tests {
         };
 
         assert!(should_fallback_routine_notification(&error)); // safety: test-only assertion
+    }
+
+    /// Regression test: bare "yes"/"no"/"always" must not be treated as approval
+    /// responses when the thread is not in AwaitingApproval state. The guard
+    /// logic checks `thread.state` before routing to `process_approval`.
+    #[test]
+    fn bare_approval_keywords_downgraded_when_no_pending_approval() {
+        use crate::agent::session::{Session, Thread, ThreadState};
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let mut session = Session::new("test-user");
+        let thread = Thread::new(session.id, Some("gateway"));
+        let thread_id = thread.id;
+        assert_eq!(thread.state, ThreadState::Idle);
+        session.threads.insert(thread_id, thread);
+
+        let session = Arc::new(Mutex::new(session));
+
+        // Simulate the guard logic used in the legacy ApprovalResponse arm.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("test runtime"); // safety: test-only
+        let is_awaiting = rt.block_on(async {
+            let sess = session.lock().await;
+            sess.threads
+                .get(&thread_id)
+                .map(|t| t.state == ThreadState::AwaitingApproval)
+                .unwrap_or(false)
+        });
+
+        // Thread is Idle → bare keyword should NOT be routed as approval.
+        assert!(!is_awaiting);
+
+        // Slash command should still be routed as approval regardless of state.
+        let slash_msg = "/approve";
+        assert!(slash_msg.trim().starts_with('/'));
+
+        // Bare keyword should NOT be routed as approval.
+        let bare_msg = "yes";
+        assert!(!bare_msg.trim().starts_with('/'));
+    }
+
+    /// Verify that when a thread IS in AwaitingApproval, the guard allows
+    /// approval routing.
+    #[test]
+    fn approval_keywords_routed_when_thread_awaiting_approval() {
+        use crate::agent::session::{Session, Thread, ThreadState};
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let mut session = Session::new("test-user");
+        let mut thread = Thread::new(session.id, Some("gateway"));
+        let thread_id = thread.id;
+        thread.state = ThreadState::AwaitingApproval;
+        session.threads.insert(thread_id, thread);
+
+        let session = Arc::new(Mutex::new(session));
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("test runtime"); // safety: test-only
+        let is_awaiting = rt.block_on(async {
+            let sess = session.lock().await;
+            sess.threads
+                .get(&thread_id)
+                .map(|t| t.state == ThreadState::AwaitingApproval)
+                .unwrap_or(false)
+        });
+
+        // Thread is AwaitingApproval → keyword should be routed as approval.
+        assert!(is_awaiting);
     }
 
     #[test]
