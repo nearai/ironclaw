@@ -529,18 +529,8 @@ pub struct AdminUserCreateResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminUserDetailResponse {
-    pub id: String,
-    pub email: Option<String>,
-    pub display_name: String,
-    pub status: String,
-    pub role: String,
-    pub created_at: String,
-    pub updated_at: String,
-    pub last_login_at: Option<String>,
-    pub created_by: Option<String>,
-    pub job_count: i64,
-    pub total_cost: String,
-    pub last_active_at: Option<String>,
+    #[serde(flatten)]
+    pub user: AdminUserInfo,
     pub metadata: serde_json::Value,
 }
 
@@ -587,10 +577,10 @@ pub struct AdminUsageStatsResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminUsageSummaryUsers {
-    pub total: usize,
-    pub active: usize,
-    pub suspended: usize,
-    pub admins: usize,
+    pub total: i64,
+    pub active: i64,
+    pub suspended: i64,
+    pub admins: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

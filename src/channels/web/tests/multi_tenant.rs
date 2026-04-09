@@ -943,7 +943,7 @@ mod admin_api_contracts {
     use super::*;
     use crate::channels::web::handlers::users::{
         usage_stats_handler, usage_summary_handler, users_create_handler, users_detail_handler,
-        users_list_handler,
+        users_list_handler, users_update_handler,
     };
     use crate::channels::web::types::{
         AdminUsageStatsResponse, AdminUsageSummaryResponse, AdminUserCreateResponse,
@@ -957,7 +957,10 @@ mod admin_api_contracts {
                 "/api/admin/users",
                 get(users_list_handler).post(users_create_handler),
             )
-            .route("/api/admin/users/{id}", get(users_detail_handler))
+            .route(
+                "/api/admin/users/{id}",
+                get(users_detail_handler).patch(users_update_handler),
+            )
             .route("/api/admin/usage", get(usage_stats_handler))
             .route("/api/admin/usage/summary", get(usage_summary_handler))
             .layer(middleware::from_fn_with_state(
@@ -996,6 +999,10 @@ mod admin_api_contracts {
             .await
             .unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    fn assert_rfc3339(ts: &str) {
+        chrono::DateTime::parse_from_rfc3339(ts).unwrap();
     }
 
     #[tokio::test]
@@ -1067,7 +1074,11 @@ mod admin_api_contracts {
         assert_eq!(user.email.as_deref(), Some("carol@example.com"));
         assert_eq!(user.job_count, 0);
         assert_eq!(user.total_cost, "0");
+        assert_rfc3339(&user.created_at);
+        assert_rfc3339(&user.updated_at);
+        assert_rfc3339(user.last_login_at.as_deref().unwrap());
         assert!(user.last_active_at.is_some());
+        assert_rfc3339(user.last_active_at.as_deref().unwrap());
     }
 
     #[tokio::test]
@@ -1095,12 +1106,16 @@ mod admin_api_contracts {
         let resp = app.oneshot(req).await.unwrap();
         let body: AdminUserDetailResponse = parse_json(resp).await;
 
-        assert_eq!(body.id, "carol");
-        assert_eq!(body.display_name, "Carol");
-        assert_eq!(body.job_count, 0);
-        assert_eq!(body.total_cost, "0");
+        assert_eq!(body.user.id, "carol");
+        assert_eq!(body.user.display_name, "Carol");
+        assert_eq!(body.user.job_count, 0);
+        assert_eq!(body.user.total_cost, "0");
         assert_eq!(body.metadata["team"], "ops");
-        assert!(body.last_active_at.is_some());
+        assert_rfc3339(&body.user.created_at);
+        assert_rfc3339(&body.user.updated_at);
+        assert_rfc3339(body.user.last_login_at.as_deref().unwrap());
+        assert!(body.user.last_active_at.is_some());
+        assert_rfc3339(body.user.last_active_at.as_deref().unwrap());
     }
 
     #[tokio::test]
@@ -1129,7 +1144,7 @@ mod admin_api_contracts {
         let body: AdminUsageStatsResponse = parse_json(resp).await;
 
         assert_eq!(body.period, "month");
-        assert!(body.since.contains('T'));
+        assert_rfc3339(&body.since);
         assert!(body.usage.is_empty());
     }
 
@@ -1175,6 +1190,39 @@ mod admin_api_contracts {
         assert_eq!(body.jobs.total, 0);
         assert_eq!(body.jobs.total_cost, "0");
         assert_eq!(body.usage_30d.llm_calls, 0);
+    }
+
+    #[tokio::test]
+    async fn test_admin_cannot_demote_last_active_admin() {
+        let (db, _dir) = test_db().await;
+        db.create_user(&test_user(
+            "alice",
+            "Alice",
+            Some("alice@example.com"),
+            "active",
+            "admin",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+
+        let state = build_state(Some(db.clone()), None);
+        let app = admin_router(state, two_user_auth());
+
+        let req = Request::builder()
+            .method(Method::PATCH)
+            .uri("/api/admin/users/alice")
+            .header("Authorization", "Bearer tok-alice")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::to_string(&serde_json::json!({"role":"member"})).unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        let user = db.get_user("alice").await.unwrap().unwrap();
+        assert_eq!(user.role, "admin");
     }
 }
 

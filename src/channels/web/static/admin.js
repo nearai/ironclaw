@@ -85,8 +85,15 @@
   // ---------------------------------------------------------------------------
 
   function apiFetch(path, options) {
-    var opts = options || {};
-    opts.headers = opts.headers || {};
+    var opts = {};
+    if (options) {
+      for (var k in options) {
+        if (Object.prototype.hasOwnProperty.call(options, k)) {
+          opts[k] = options[k];
+        }
+      }
+    }
+    opts.headers = Object.assign({}, opts.headers || {});
     if (token && !oidcProxyAuth) {
       opts.headers['Authorization'] = 'Bearer ' + token;
     }
@@ -158,17 +165,6 @@
   }
 
   function autoAuth() {
-    // Check URL param
-    var params = new URLSearchParams(window.location.search);
-    var urlToken = params.get('token');
-    if (urlToken) {
-      // Clean URL
-      var clean = window.location.pathname + window.location.hash;
-      window.history.replaceState(null, '', clean);
-      authenticate(urlToken).catch(function () { showAuth(); });
-      return;
-    }
-
     // Check sessionStorage
     var saved = sessionStorage.getItem('ironclaw_token');
     if (saved) {
@@ -176,26 +172,19 @@
       return;
     }
 
-    // Check OIDC proxy
-    fetch('/api/gateway/status').then(function (res) {
-      if (res.ok) {
-        oidcProxyAuth = true;
-        token = '';
-        return apiFetch('/api/profile').then(function (profile) {
-          currentProfile = profile;
-          if (profile.role !== 'admin') {
-            showAccessDenied();
-          } else {
-            showApp();
-            route();
-          }
-        }).catch(function () {
-          oidcProxyAuth = false;
-          showAuth();
-        });
+    // Check implicit auth (e.g. OIDC proxy cookie) by probing profile directly.
+    apiFetch('/api/profile').then(function (profile) {
+      oidcProxyAuth = true;
+      token = '';
+      currentProfile = profile;
+      if (profile.role !== 'admin') {
+        showAccessDenied();
+      } else {
+        showApp();
+        route();
       }
-      showAuth();
     }).catch(function () {
+      oidcProxyAuth = false;
       showAuth();
     });
   }
@@ -814,12 +803,11 @@
   function showTokenBanner(tokenValue) {
     var banner = document.getElementById('user-token-banner');
     if (!banner) return;
-    var loginUrl = window.location.origin + '/?token=' + encodeURIComponent(tokenValue);
     banner.innerHTML = '<div class="token-banner">' +
       '<p><strong>Token created!</strong> Copy this now — it will not be shown again.</p>' +
       '<div class="token-value"><code>' + escapeHtml(tokenValue) + '</code>' +
       '<button class="btn-small" data-action="copy-token" data-token="' + escapeHtml(tokenValue) + '">Copy</button></div>' +
-      '<p style="margin-top:var(--space-2);font-size:var(--text-xs);color:var(--text-muted)">Login URL: ' + escapeHtml(loginUrl) + '</p>' +
+      '<p style="margin-top:var(--space-2);font-size:var(--text-xs);color:var(--text-muted)">Use this token in the admin login field.</p>' +
       '</div>';
     banner.style.display = 'block';
   }

@@ -211,18 +211,7 @@ pub async fn users_detail_handler(
     let user_info = admin_user_info_from_record(&user_record, db_stats);
 
     Ok(Json(AdminUserDetailResponse {
-        id: user_info.id,
-        email: user_info.email,
-        display_name: user_info.display_name,
-        status: user_info.status,
-        role: user_info.role,
-        created_at: user_info.created_at,
-        updated_at: user_info.updated_at,
-        last_login_at: user_info.last_login_at,
-        created_by: user_info.created_by,
-        job_count: user_info.job_count,
-        total_cost: user_info.total_cost,
-        last_active_at: user_info.last_active_at,
+        user: user_info,
         metadata: user_record.metadata,
     }))
 }
@@ -611,30 +600,10 @@ pub async fn usage_summary_handler(
 
     Ok(Json(AdminUsageSummaryResponse {
         users: AdminUsageSummaryUsers {
-            total: usize::try_from(summary.total_users).map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "invalid total_users count".to_string(),
-                )
-            })?,
-            active: usize::try_from(summary.active_users).map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "invalid active_users count".to_string(),
-                )
-            })?,
-            suspended: usize::try_from(summary.suspended_users).map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "invalid suspended_users count".to_string(),
-                )
-            })?,
-            admins: usize::try_from(summary.admin_users).map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "invalid admin_users count".to_string(),
-                )
-            })?,
+            total: summary.total_users,
+            active: summary.active_users,
+            suspended: summary.suspended_users,
+            admins: summary.admin_users,
         },
         jobs: AdminUsageSummaryJobs {
             total: summary.total_jobs,
