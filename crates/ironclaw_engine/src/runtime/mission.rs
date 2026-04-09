@@ -1949,6 +1949,65 @@ async fn process_mission_outcome_and_notify(
         None => return Ok(()),
     };
 
+    // Reconcile fire-accounting fields that `fire_mission` failed to persist.
+    //
+    // `fire_mission` is best-effort about its post-spawn `save_mission`: a
+    // transient store error there leaves the persisted mission missing this
+    // thread's record (`thread_history`, `threads_today`, `last_fire_at`,
+    // and — for cron cadences — the advanced `next_fire_at`). The in-memory
+    // `last_fire_attempt` cooldown holds the runaway-re-fire path closed
+    // for ~90 s, but once the cooldown elapses tick would otherwise re-fire
+    // against the stale persisted state. The outcome processor is the
+    // natural reconciliation point: by the time we run, the thread has
+    // completed and we know exactly which `thread_id` should be present.
+    // Append idempotently — repeated invocations or replays are safe — and
+    // immediately overwrite our save below, achieving eventual consistency
+    // for transient store failures even after retries are exhausted.
+    let needs_reconcile = !mission.thread_history.contains(&thread_id);
+    if needs_reconcile {
+        debug!(
+            mission_id = %mission_id,
+            thread_id = %thread_id,
+            "outcome processor: reconciling fire-accounting fields missing from persisted mission (fire_mission save likely failed)"
+        );
+        mission.thread_history.push(thread_id);
+        mission.threads_today = mission.threads_today.saturating_add(1);
+        // `last_fire_at` is stamped at fire time on the in-memory copy in
+        // `fire_mission`; if it never landed in the store, treat the
+        // outcome time as a conservative approximation. We don't have the
+        // exact original instant any more, but "later than the previous
+        // recorded fire" is sufficient for cooldown enforcement.
+        mission.last_fire_at = Some(chrono::Utc::now());
+        // For cron missions, advance `next_fire_at` so the ticker doesn't
+        // immediately re-fire against the stale schedule. Use the lenient
+        // `next_cron_fire` (not `_required`) — a corrupt expression here
+        // should not block the outcome save.
+        if let MissionCadence::Cron {
+            ref expression,
+            ref timezone,
+        } = mission.cadence
+        {
+            let now = chrono::Utc::now();
+            let needs_advance = mission.next_fire_at.is_none_or(|next| next <= now);
+            if needs_advance {
+                match next_cron_fire(expression, timezone.as_ref()) {
+                    Ok(Some(next)) => mission.next_fire_at = Some(next),
+                    Ok(None) => debug!(
+                        mission_id = %mission_id,
+                        expression = %expression,
+                        "reconcile: cron has no upcoming fire time; leaving next_fire_at unset"
+                    ),
+                    Err(e) => debug!(
+                        mission_id = %mission_id,
+                        expression = %expression,
+                        error = %e,
+                        "reconcile: failed to recompute next_fire_at; leaving as-is"
+                    ),
+                }
+            }
+        }
+    }
+
     // Build notification fields while processing the outcome.
     let mut notify_response: Option<String> = None;
     let mut is_error = false;
@@ -4896,6 +4955,111 @@ mod tests {
             .try_recv()
             .expect("MaxIterations must emit a notification");
         assert!(notification.is_error, "MaxIterations must set is_error");
+    }
+
+    #[tokio::test]
+    async fn outcome_processor_reconciles_missing_fire_accounting() {
+        // Regression: when `fire_mission`'s post-spawn `save_mission` fails,
+        // the persisted mission is missing the new thread_id, threads_today
+        // bump, last_fire_at stamp, and (for cron) advanced next_fire_at.
+        // The outcome processor must reconcile these fields the next time
+        // it runs so the durable state catches up — otherwise tick re-fires
+        // against the stale schedule once the in-memory cooldown elapses.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Create a cron mission with `next_fire_at` already in the past, to
+        // mimic the post-failed-fire state directly. (Going through
+        // `fire_mission` with a fault-injecting store would require a new
+        // TestStore variant; this is the equivalent end state.)
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "reconcile-test",
+                "g",
+                MissionCadence::Cron {
+                    expression: "* * * * *".into(),
+                    timezone: None,
+                },
+                vec![],
+            )
+            .await
+            .unwrap();
+        {
+            let mut missions = store.missions.write().await;
+            let mission = missions.get_mut(&id).unwrap();
+            mission.next_fire_at = Some(chrono::Utc::now() - chrono::Duration::seconds(120));
+            mission.threads_today = 0;
+            mission.thread_history.clear();
+            mission.last_fire_at = None;
+        }
+
+        // Run the outcome processor with a thread_id that the persisted
+        // mission has never seen — exactly the state a failed `save_mission`
+        // would leave us in.
+        let orphan_thread_id = crate::types::thread::ThreadId::new();
+        process_mission_outcome_and_notify(
+            &(Arc::clone(&store) as Arc<dyn Store>),
+            id,
+            orphan_thread_id,
+            &ThreadOutcome::Completed {
+                response: Some("done".into()),
+            },
+            mgr.notification_tx_for_test(),
+        )
+        .await
+        .unwrap();
+
+        let reloaded = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            reloaded.thread_history.contains(&orphan_thread_id),
+            "outcome processor must idempotently append the missing thread_id"
+        );
+        assert_eq!(
+            reloaded.threads_today, 1,
+            "threads_today must catch up after reconcile"
+        );
+        assert!(
+            reloaded.last_fire_at.is_some(),
+            "last_fire_at must be stamped after reconcile"
+        );
+        assert!(
+            reloaded
+                .next_fire_at
+                .is_some_and(|next| next > chrono::Utc::now()),
+            "next_fire_at must be advanced past now() after reconcile, got {:?}",
+            reloaded.next_fire_at
+        );
+
+        // Reconcile is idempotent: replaying with the same thread_id must
+        // not double-count threads_today or duplicate the history entry.
+        process_mission_outcome_and_notify(
+            &(Arc::clone(&store) as Arc<dyn Store>),
+            id,
+            orphan_thread_id,
+            &ThreadOutcome::Completed {
+                response: Some("done".into()),
+            },
+            mgr.notification_tx_for_test(),
+        )
+        .await
+        .unwrap();
+        let reloaded = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(
+            reloaded
+                .thread_history
+                .iter()
+                .filter(|t| **t == orphan_thread_id)
+                .count(),
+            1,
+            "thread_history must not duplicate on replay"
+        );
+        assert_eq!(
+            reloaded.threads_today, 1,
+            "threads_today must not double-count on replay"
+        );
     }
 
     /// A pattern that fails to compile (or exceeds the size cap) must be
