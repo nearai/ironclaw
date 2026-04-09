@@ -212,6 +212,7 @@ jobs:
           PR_BODY+=$'\n'"<!-- staging-ci-current:end -->"
           PR_BODY+=$'\n\n'"Waiting for gates:"
           PR_BODY+=$'\n'"- Tests: running on PR (staging-promotion-tests.yml)"
+          PR_BODY+=$'\n'"- E2E: running on PR (staging-promotion-tests.yml)"
           PR_BODY+=$'\n'"- Claude Code review: running on PR (claude-review.yml)"
           PR_BODY+=$'\n\n'"---"
           PR_BODY+=$'\n'"*Auto-created by staging-ci workflow*"
@@ -296,23 +297,24 @@ jobs:
           TIMEOUT=3000  # 50 minutes
           ELAPSED=0
           INTERVAL=30
-          # Required check names that must be present and successful before the gate passes.
-          # "Promotion Tests / Run Tests" is the roll-up from staging-promotion-tests.yml → test.yml.
-          REQUIRED_CHECKS="Promotion Tests / Run Tests"
+          # Required check names (newline-delimited) that must be present and successful.
+          REQUIRED_CHECKS="Promotion Tests / Run Tests
+          Promotion E2E / E2E Tests"
 
           while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
-            # Get all check runs, excluding Railway deployments
+            # Get all check runs, excluding Railway deployments.
+            # De-duplicate by name: keep only the latest run per check name (highest id)
+            # to avoid false negatives from earlier failed re-runs.
             CHECKS_JSON=$(gh api "repos/${REPO}/commits/${PR_SHA}/check-runs" \
-              --jq '[.check_runs[] | select(.app.slug != "railway-app" and .app.slug != "railway")]' 2>/dev/null || echo "[]")
+              --jq '[.check_runs[] | select(.app.slug != "railway-app" and .app.slug != "railway")]
+                    | group_by(.name) | map(sort_by(.id) | last)' 2>/dev/null || echo "[]")
 
             PENDING=$(echo "$CHECKS_JSON" | jq '[.[] | select(.status != "completed")] | length')
-            # Treat failure, cancelled, timed_out, action_required, and stale as failures
+            # Treat any non-success/skipped/neutral conclusion as failure
             FAILED=$(echo "$CHECKS_JSON" | jq '[.[] | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral")] | length')
-            SKIPPED=$(echo "$CHECKS_JSON" | jq '[.[] | select(.conclusion == "skipped")] | length')
             TOTAL=$(echo "$CHECKS_JSON" | jq 'length')
-            NON_SKIPPED=$((TOTAL - SKIPPED))
 
-            echo "Checks: ${TOTAL} total, $((TOTAL - PENDING)) completed, ${PENDING} pending, ${FAILED} failed, ${SKIPPED} skipped (${ELAPSED}s)"
+            echo "Checks: ${TOTAL} total, $((TOTAL - PENDING)) completed, ${PENDING} pending, ${FAILED} failed (${ELAPSED}s)"
 
             if [ "$TOTAL" -gt 0 ] && [ "$PENDING" -eq 0 ]; then
               if [ "$FAILED" -gt 0 ]; then
@@ -321,16 +323,21 @@ jobs:
                 echo "checks_passed=false" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
-              # Verify required checks are present and successful
-              MISSING=""
-              for req in $REQUIRED_CHECKS; do
+              # Verify required checks are present and concluded with "success"
+              GATE_OK=true
+              while IFS= read -r req; do
+                [ -z "$req" ] && continue
+                req=$(echo "$req" | xargs)  # trim whitespace
                 STATUS=$(echo "$CHECKS_JSON" | jq -r --arg name "$req" '.[] | select(.name == $name) | .conclusion // "missing"')
                 if [ -z "$STATUS" ] || [ "$STATUS" = "missing" ]; then
-                  MISSING="${MISSING} ${req}"
+                  echo "::error::Required check not found: ${req}"
+                  GATE_OK=false
+                elif [ "$STATUS" != "success" ]; then
+                  echo "::error::Required check '${req}' concluded with '${STATUS}' (expected success)"
+                  GATE_OK=false
                 fi
-              done
-              if [ -n "$MISSING" ]; then
-                echo "::error::Required checks not found:${MISSING}"
+              done <<< "$REQUIRED_CHECKS"
+              if [ "$GATE_OK" != "true" ]; then
                 echo "checks_passed=false" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
@@ -515,12 +522,11 @@ jobs:
   # ── Update tested tag (always, so next batch covers only new commits) ──
   update-tag:
     name: Update staging-tested tag
-    needs: [check-changes, create-promotion-pr, gate]
+    needs: [check-changes, create-promotion-pr]
     if: >
       always() &&
       needs.check-changes.outputs.has_changes == 'true' &&
-      needs.create-promotion-pr.result == 'success' &&
-      needs.gate.result == 'success'
+      needs.create-promotion-pr.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
