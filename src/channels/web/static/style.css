@@ -1279,14 +1279,28 @@ body {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  width: 100%;
   padding: 6px 10px;
   cursor: pointer;
   user-select: none;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font: inherit;
   transition: background 0.15s;
 }
 
-.activity-tool-header:hover {
+.activity-tool-header:not(:disabled):hover {
   background: var(--bg-tertiary);
+}
+
+.activity-tool-header:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.activity-tool-header:disabled {
+  cursor: default;
 }
 
 .activity-tool-icon {
@@ -1380,17 +1394,27 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
+  width: 100%;
   padding: 6px 10px;
   cursor: pointer;
   user-select: none;
   font-size: var(--text-sm);
   color: var(--text-secondary);
+  border: 0;
   border-radius: var(--radius);
+  background: transparent;
+  text-align: left;
+  font: inherit;
   transition: background 0.15s;
 }
 
 .activity-summary:hover {
   background: var(--bg-tertiary);
+}
+
+.activity-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .activity-summary-chevron {

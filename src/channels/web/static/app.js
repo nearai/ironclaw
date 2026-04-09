@@ -1454,6 +1454,12 @@ function removeActivityThinking() {
   }
 }
 
+function setActivityToolExpanded(header, body, chevron, expanded) {
+  body.classList.toggle('expanded', expanded);
+  chevron.classList.toggle('expanded', expanded);
+  header.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+}
+
 function addToolCard(name) {
   // Hide thinking instead of destroying — it may reappear between tool rounds
   if (_activityThinking) _activityThinking.style.display = 'none';
@@ -1464,8 +1470,10 @@ function addToolCard(name) {
   card.setAttribute('data-tool-name', name);
   card.setAttribute('data-status', 'running');
 
-  const header = document.createElement('div');
+  const header = document.createElement('button');
+  header.type = 'button';
   header.className = 'activity-tool-header';
+  header.setAttribute('aria-expanded', 'false');
 
   const icon = document.createElement('span');
   icon.className = 'activity-tool-icon';
@@ -1496,8 +1504,8 @@ function addToolCard(name) {
   body.appendChild(output);
 
   header.addEventListener('click', () => {
-    body.classList.toggle('expanded');
-    chevron.classList.toggle('expanded', body.classList.contains('expanded'));
+    const isExpanded = body.classList.contains('expanded');
+    setActivityToolExpanded(header, body, chevron, !isExpanded);
   });
 
   card.appendChild(header);
@@ -1556,8 +1564,8 @@ function completeToolCard(name, success, error, parameters) {
       // Auto-expand so the error is immediately visible
       const body = entry.card.querySelector('.activity-tool-body');
       const chevron = entry.card.querySelector('.activity-tool-chevron');
-      if (body) body.classList.add('expanded');
-      if (chevron) chevron.classList.add('expanded');
+      const header = entry.card.querySelector('.activity-tool-header');
+      if (body && chevron && header) setActivityToolExpanded(header, body, chevron, true);
     }
   }
 }
@@ -1633,15 +1641,18 @@ function finalizeActivityGroup() {
   // Build summary line
   const durationStr = totalDuration < 10 ? totalDuration.toFixed(1) + 's' : Math.floor(totalDuration) + 's';
   const toolWord = toolCount === 1 ? 'tool' : 'tools';
-  const summary = document.createElement('div');
+  const summary = document.createElement('button');
+  summary.type = 'button';
   summary.className = 'activity-summary';
+  summary.setAttribute('aria-expanded', 'false');
   summary.innerHTML = '<span class="activity-summary-chevron">&#9656;</span>'
     + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>'
     + '<span class="activity-summary-duration">(' + durationStr + ')</span>';
 
   summary.addEventListener('click', () => {
     const isOpen = cardsContainer.style.display !== 'none';
-    cardsContainer.style.display = isOpen ? 'none' : 'block';
+    cardsContainer.style.display = isOpen ? 'none' : 'flex';
+    summary.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
     summary.querySelector('.activity-summary-chevron').classList.toggle('expanded', !isOpen);
   });
 
@@ -2702,8 +2713,10 @@ function createHistoricalActivityToolCard(toolCall) {
   card.setAttribute('data-tool-name', toolCall.name || 'tool');
   card.setAttribute('data-status', failed ? 'fail' : 'success');
 
-  const header = document.createElement('div');
+  const header = document.createElement('button');
+  header.type = 'button';
   header.className = 'activity-tool-header';
+  header.setAttribute('aria-expanded', 'false');
 
   const icon = document.createElement('span');
   icon.className = 'activity-tool-icon';
@@ -2742,16 +2755,16 @@ function createHistoricalActivityToolCard(toolCall) {
 
   if (output.textContent) {
     header.addEventListener('click', () => {
-      body.classList.toggle('expanded');
-      chevron.classList.toggle('expanded', body.classList.contains('expanded'));
+      const isExpanded = body.classList.contains('expanded');
+      setActivityToolExpanded(header, body, chevron, !isExpanded);
     });
   } else {
     chevron.style.visibility = 'hidden';
+    header.disabled = true;
   }
 
   if (failed && output.textContent) {
-    body.classList.add('expanded');
-    chevron.classList.add('expanded');
+    setActivityToolExpanded(header, body, chevron, true);
   }
 
   card.appendChild(header);
@@ -2772,14 +2785,17 @@ function createToolCallsSummaryElement(toolCalls) {
   }
 
   const toolWord = toolCalls.length === 1 ? 'tool' : 'tools';
-  const summary = document.createElement('div');
+  const summary = document.createElement('button');
+  summary.type = 'button';
   summary.className = 'activity-summary';
+  summary.setAttribute('aria-expanded', 'false');
   summary.innerHTML = '<span class="activity-summary-chevron">&#9656;</span>'
     + '<span class="activity-summary-text">Used ' + toolCalls.length + ' ' + toolWord + '</span>';
 
   summary.addEventListener('click', () => {
     const isOpen = cardsContainer.style.display !== 'none';
-    cardsContainer.style.display = isOpen ? 'none' : 'block';
+    cardsContainer.style.display = isOpen ? 'none' : 'flex';
+    summary.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
     summary.querySelector('.activity-summary-chevron').classList.toggle('expanded', !isOpen);
   });
 
