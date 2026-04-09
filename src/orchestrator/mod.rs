@@ -127,6 +127,7 @@ pub async fn setup_orchestrator(
             mcp_per_job_enabled: std::env::var("MCP_PER_JOB_ENABLED")
                 .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
                 .unwrap_or(false),
+            user_id: config.owner_id.clone(),
             claude_code_enabled: config.claude_code.enabled,
             acp_enabled: config.acp.enabled,
         };

@@ -7,7 +7,7 @@
 //! - A token for Job A cannot access endpoints for Job B
 //! - Credential grants are per-job: only secrets explicitly granted are accessible
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
@@ -38,6 +38,9 @@ pub struct TokenStore {
     tokens: Arc<RwLock<HashMap<Uuid, String>>>,
     /// Maps job_id -> granted credentials. Revoked alongside the token.
     credential_grants: Arc<RwLock<HashMap<Uuid, Vec<CredentialGrant>>>>,
+    /// Maps job_id -> exhaustive set of MCP secret names the job may access.
+    /// Computed at job creation from the mounted MCP server configs.
+    mcp_secret_allowlist: Arc<RwLock<HashMap<Uuid, HashSet<String>>>>,
 }
 
 impl TokenStore {
@@ -45,6 +48,7 @@ impl TokenStore {
         Self {
             tokens: Arc::new(RwLock::new(HashMap::new())),
             credential_grants: Arc::new(RwLock::new(HashMap::new())),
+            mcp_secret_allowlist: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -65,10 +69,11 @@ impl TokenStore {
             .unwrap_or(false)
     }
 
-    /// Remove a token and its credential grants (on container cleanup).
+    /// Remove a token, credential grants, and MCP secret allowlist (on container cleanup).
     pub async fn revoke(&self, job_id: Uuid) {
         self.tokens.write().await.remove(&job_id);
         self.credential_grants.write().await.remove(&job_id);
+        self.mcp_secret_allowlist.write().await.remove(&job_id);
     }
 
     /// Get the number of active tokens (for diagnostics).
@@ -86,6 +91,27 @@ impl TokenStore {
     /// Retrieve credential grants for a job.
     pub async fn get_grants(&self, job_id: Uuid) -> Option<Vec<CredentialGrant>> {
         self.credential_grants.read().await.get(&job_id).cloned()
+    }
+
+    /// Store the exhaustive set of MCP secret names a job is allowed to access.
+    /// Computed at job creation from the mounted MCP server configs.
+    pub async fn store_mcp_secret_allowlist(&self, job_id: Uuid, allowlist: HashSet<String>) {
+        if !allowlist.is_empty() {
+            self.mcp_secret_allowlist
+                .write()
+                .await
+                .insert(job_id, allowlist);
+        }
+    }
+
+    /// Check whether a secret name is in the job's MCP secret allowlist.
+    pub async fn is_mcp_secret_allowed(&self, job_id: Uuid, secret_name: &str) -> bool {
+        self.mcp_secret_allowlist
+            .read()
+            .await
+            .get(&job_id)
+            .map(|allowlist| allowlist.contains(secret_name))
+            .unwrap_or(false)
     }
 }
 
@@ -254,6 +280,79 @@ mod tests {
 
         // Empty vec should not create an entry
         assert!(store.get_grants(job_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_mcp_secret_allowlist_store_and_check() {
+        let store = TokenStore::new();
+        let job_id = Uuid::new_v4();
+
+        assert!(
+            !store
+                .is_mcp_secret_allowed(job_id, "mcp_serpstat_access_token")
+                .await
+        );
+
+        let allowlist: HashSet<String> = [
+            "mcp_serpstat_access_token".to_string(),
+            "mcp_serpstat_access_token_refresh_token".to_string(),
+        ]
+        .into();
+
+        store.store_mcp_secret_allowlist(job_id, allowlist).await;
+
+        assert!(
+            store
+                .is_mcp_secret_allowed(job_id, "mcp_serpstat_access_token")
+                .await
+        );
+        assert!(
+            store
+                .is_mcp_secret_allowed(job_id, "mcp_serpstat_access_token_refresh_token")
+                .await
+        );
+        assert!(
+            !store
+                .is_mcp_secret_allowed(job_id, "mcp_github_access_token")
+                .await
+        );
+        assert!(!store.is_mcp_secret_allowed(job_id, "GITHUB_TOKEN").await);
+    }
+
+    #[tokio::test]
+    async fn test_mcp_secret_allowlist_revoked_on_cleanup() {
+        let store = TokenStore::new();
+        let job_id = Uuid::new_v4();
+
+        let _token = store.create_token(job_id).await;
+        let allowlist: HashSet<String> = ["mcp_test_access_token".to_string()].into();
+        store.store_mcp_secret_allowlist(job_id, allowlist).await;
+
+        assert!(
+            store
+                .is_mcp_secret_allowed(job_id, "mcp_test_access_token")
+                .await
+        );
+
+        store.revoke(job_id).await;
+
+        assert!(
+            !store
+                .is_mcp_secret_allowed(job_id, "mcp_test_access_token")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_secret_allowlist_empty_not_stored() {
+        let store = TokenStore::new();
+        let job_id = Uuid::new_v4();
+
+        store
+            .store_mcp_secret_allowlist(job_id, HashSet::new())
+            .await;
+
+        assert!(!store.is_mcp_secret_allowed(job_id, "anything").await);
     }
 
     #[tokio::test]

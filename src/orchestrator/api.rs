@@ -75,6 +75,18 @@ impl OrchestratorApi {
             .route("/worker/{job_id}/event", post(job_event_handler))
             .route("/worker/{job_id}/prompt", get(get_prompt_handler))
             .route("/worker/{job_id}/credentials", get(get_credentials_handler))
+            .route(
+                "/worker/{job_id}/mcp/secrets/get",
+                post(mcp_secret_get_handler),
+            )
+            .route(
+                "/worker/{job_id}/mcp/secrets/exists",
+                post(mcp_secret_exists_handler),
+            )
+            .route(
+                "/worker/{job_id}/mcp/secrets/create",
+                post(mcp_secret_create_handler),
+            )
             .route_layer(axum::middleware::from_fn_with_state(
                 state.token_store.clone(),
                 worker_auth_middleware,
@@ -496,6 +508,120 @@ async fn get_credentials_handler(
         StatusCode::OK,
         Json(serde_json::to_value(&credentials).unwrap_or(serde_json::Value::Null)),
     ))
+}
+
+// -- MCP secrets proxy handlers --
+
+#[derive(Debug, Deserialize)]
+struct McpSecretRequest {
+    name: String,
+}
+
+// No Debug — `value` contains a plaintext secret.
+#[derive(Deserialize)]
+struct McpSecretCreateRequest {
+    name: String,
+    value: String,
+    #[serde(default)]
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Validate allowlist + resolve secrets store (shared guard for all MCP secret endpoints).
+async fn require_mcp_secrets_access<'a>(
+    state: &'a OrchestratorState,
+    job_id: Uuid,
+    secret_name: &str,
+) -> Result<&'a (dyn SecretsStore + Send + Sync), StatusCode> {
+    if !state
+        .token_store
+        .is_mcp_secret_allowed(job_id, secret_name)
+        .await
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    state
+        .secrets_store
+        .as_deref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)
+}
+
+async fn mcp_secret_get_handler(
+    State(state): State<OrchestratorState>,
+    Path(job_id): Path<Uuid>,
+    Json(req): Json<McpSecretRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let secrets = require_mcp_secrets_access(&state, job_id, &req.name).await?;
+
+    let decrypted = secrets
+        .get_decrypted(&state.user_id, &req.name)
+        .await
+        .map_err(|e| {
+            tracing::debug!(
+                job_id = %job_id,
+                name = %req.name,
+                "MCP secret lookup failed: {e}"
+            );
+            StatusCode::NOT_FOUND
+        })?;
+
+    // Record usage for audit trail (best-effort, matching get_credentials_handler)
+    if let Ok(secret) = secrets.get(&state.user_id, &req.name).await
+        && let Err(e) = secrets.record_usage(secret.id).await
+    {
+        tracing::warn!(
+            job_id = %job_id,
+            name = %req.name,
+            "Failed to record MCP secret usage: {e}"
+        );
+    }
+
+    Ok(Json(serde_json::json!({ "value": decrypted.expose() })))
+}
+
+async fn mcp_secret_exists_handler(
+    State(state): State<OrchestratorState>,
+    Path(job_id): Path<Uuid>,
+    Json(req): Json<McpSecretRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let secrets = require_mcp_secrets_access(&state, job_id, &req.name).await?;
+
+    let exists = match secrets.exists(&state.user_id, &req.name).await {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::debug!(
+                job_id = %job_id,
+                name = %req.name,
+                "MCP secret exists check failed: {e}"
+            );
+            false
+        }
+    };
+
+    Ok(Json(serde_json::json!({ "exists": exists })))
+}
+
+async fn mcp_secret_create_handler(
+    State(state): State<OrchestratorState>,
+    Path(job_id): Path<Uuid>,
+    Json(req): Json<McpSecretCreateRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let secrets = require_mcp_secrets_access(&state, job_id, &req.name).await?;
+
+    let mut params = crate::secrets::CreateSecretParams::new(req.name.clone(), &req.value);
+    if let Some(expires_at) = req.expires_at {
+        params = params.with_expiry(expires_at);
+    }
+
+    secrets.create(&state.user_id, params).await.map_err(|e| {
+        tracing::error!(
+            job_id = %job_id,
+            name = %req.name,
+            "Failed to create MCP secret: {e}"
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 fn format_finish_reason(reason: crate::llm::FinishReason) -> String {
@@ -987,5 +1113,251 @@ mod tests {
         let handle = jm.get_handle(job_id).await.unwrap();
         assert_eq!(handle.worker_iteration, 5);
         assert_eq!(handle.last_worker_status.as_deref(), Some("Iteration 5"));
+    }
+
+    // -- MCP secrets proxy tests --
+
+    fn test_state_with_secrets() -> (OrchestratorState, TokenStore) {
+        use crate::testing::credentials::test_secrets_store;
+        let secrets_store = Arc::new(test_secrets_store());
+        let token_store = TokenStore::new();
+        let jm = ContainerJobManager::new(ContainerJobConfig::default(), token_store.clone());
+        let state = OrchestratorState {
+            llm: Arc::new(StubLlm::default()),
+            job_manager: Arc::new(jm),
+            token_store: token_store.clone(),
+            job_event_tx: None,
+            prompt_queue: Arc::new(Mutex::new(HashMap::new())),
+            store: None,
+            secrets_store: Some(secrets_store),
+            user_id: "<unset>".to_string(),
+            job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+        };
+        (state, token_store)
+    }
+
+    #[tokio::test]
+    async fn mcp_secrets_get_rejects_non_allowlisted_name() {
+        let (state, token_store) = test_state_with_secrets();
+        let job_id = Uuid::new_v4();
+        let token = token_store.create_token(job_id).await;
+        // No allowlist stored → all names rejected
+        let router = OrchestratorApi::router(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/mcp/secrets/get", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"name":"GITHUB_TOKEN"}"#))
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn mcp_secrets_get_returns_decrypted_value() {
+        use secrecy::SecretString;
+        let (state, token_store) = test_state_with_secrets();
+        let job_id = Uuid::new_v4();
+        let token = token_store.create_token(job_id).await;
+
+        // Store the allowlist
+        let allowlist: std::collections::HashSet<String> =
+            ["mcp_test_access_token".to_string()].into();
+        token_store
+            .store_mcp_secret_allowlist(job_id, allowlist)
+            .await;
+
+        // Create the secret
+        state
+            .secrets_store
+            .as_ref()
+            .unwrap()
+            .create(
+                "<unset>",
+                crate::secrets::CreateSecretParams {
+                    name: "mcp_test_access_token".to_string(),
+                    value: SecretString::from("my-oauth-token".to_string()),
+                    provider: None,
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let router = OrchestratorApi::router(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/mcp/secrets/get", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"name":"mcp_test_access_token"}"#))
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["value"], "my-oauth-token");
+    }
+
+    #[tokio::test]
+    async fn mcp_secrets_exists_returns_correct_result() {
+        let (state, token_store) = test_state_with_secrets();
+        let job_id = Uuid::new_v4();
+        let token = token_store.create_token(job_id).await;
+
+        let allowlist: std::collections::HashSet<String> =
+            ["mcp_test_access_token".to_string()].into();
+        token_store
+            .store_mcp_secret_allowlist(job_id, allowlist)
+            .await;
+
+        let router = OrchestratorApi::router(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/mcp/secrets/exists", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"name":"mcp_test_access_token"}"#))
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // Secret doesn't exist yet, should return false
+        assert_eq!(json["exists"], false); // safety: test assertion
+    }
+
+    #[tokio::test]
+    async fn mcp_secrets_exists_returns_true_after_create() {
+        use secrecy::SecretString;
+        let (state, token_store) = test_state_with_secrets();
+        let job_id = Uuid::new_v4();
+        let token = token_store.create_token(job_id).await;
+
+        let allowlist: std::collections::HashSet<String> =
+            ["mcp_test_access_token".to_string()].into();
+        token_store
+            .store_mcp_secret_allowlist(job_id, allowlist)
+            .await;
+
+        // Create the secret via the store directly
+        state
+            .secrets_store
+            .as_ref()
+            .unwrap()
+            .create(
+                "<unset>",
+                crate::secrets::CreateSecretParams {
+                    name: "mcp_test_access_token".to_string(),
+                    value: SecretString::from("some-value".to_string()),
+                    provider: None,
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let router = OrchestratorApi::router(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/mcp/secrets/exists", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"name":"mcp_test_access_token"}"#))
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["exists"], true);
+    }
+
+    #[tokio::test]
+    async fn mcp_secrets_returns_503_without_store() {
+        let state = test_state(); // no secrets store
+        let job_id = Uuid::new_v4();
+        let token = state.token_store.create_token(job_id).await;
+
+        // Even with an allowlist, 503 if no secrets store
+        let allowlist: std::collections::HashSet<String> =
+            ["mcp_test_access_token".to_string()].into();
+        state
+            .token_store
+            .store_mcp_secret_allowlist(job_id, allowlist)
+            .await;
+
+        let router = OrchestratorApi::router(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/mcp/secrets/get", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"name":"mcp_test_access_token"}"#))
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn mcp_secrets_create_stores_and_retrieves() {
+        let (state, token_store) = test_state_with_secrets();
+        let job_id = Uuid::new_v4();
+        let token = token_store.create_token(job_id).await;
+
+        let allowlist: std::collections::HashSet<String> =
+            ["mcp_test_access_token".to_string()].into();
+        token_store
+            .store_mcp_secret_allowlist(job_id, allowlist)
+            .await;
+
+        let router = OrchestratorApi::router(state);
+
+        // Create a secret via the create endpoint
+        let create_req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/mcp/secrets/create", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                r#"{"name":"mcp_test_access_token","value":"fresh-token"}"#,
+            ))
+            .unwrap();
+
+        let resp = router.clone().oneshot(create_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["ok"], true);
+
+        // Retrieve via the get endpoint
+        let get_req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/mcp/secrets/get", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"name":"mcp_test_access_token"}"#))
+            .unwrap();
+
+        let resp = router.oneshot(get_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["value"], "fresh-token");
     }
 }

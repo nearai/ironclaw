@@ -399,6 +399,48 @@ impl WorkerHttpClient {
             })
     }
 
+    /// Get a decrypted MCP secret from the orchestrator.
+    pub async fn mcp_secret_get(&self, name: &str) -> Result<String, WorkerError> {
+        let body = serde_json::json!({ "name": name });
+        let resp: serde_json::Value = self
+            .post_json("mcp/secrets/get", &body, "mcp secret get")
+            .await?;
+        resp["value"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| WorkerError::SecretResolveFailed {
+                secret_name: name.to_string(),
+                reason: "missing 'value' in response".to_string(),
+            })
+    }
+
+    /// Check if an MCP secret exists on the orchestrator.
+    pub async fn mcp_secret_exists(&self, name: &str) -> Result<bool, WorkerError> {
+        let body = serde_json::json!({ "name": name });
+        let resp: serde_json::Value = self
+            .post_json("mcp/secrets/exists", &body, "mcp secret exists")
+            .await?;
+        Ok(resp["exists"].as_bool().unwrap_or(false))
+    }
+
+    /// Create/update an MCP secret on the orchestrator.
+    pub async fn mcp_secret_create(
+        &self,
+        name: &str,
+        value: &str,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<(), WorkerError> {
+        let body = serde_json::json!({
+            "name": name,
+            "value": value,
+            "expires_at": expires_at,
+        });
+        let _: serde_json::Value = self
+            .post_json("mcp/secrets/create", &body, "mcp secret create")
+            .await?;
+        Ok(())
+    }
+
     /// Signal job completion to the orchestrator.
     pub async fn report_complete(&self, report: &CompletionReport) -> Result<(), WorkerError> {
         let _: serde_json::Value = self

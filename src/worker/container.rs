@@ -22,15 +22,23 @@ use crate::config::SafetyConfig;
 use crate::context::JobContext;
 use crate::error::WorkerError;
 use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, ResponseMetadata};
+use crate::secrets::SecretsStore;
 use crate::tools::ToolRegistry;
 use crate::tools::execute::{execute_tool_simple, process_tool_result};
+use crate::tools::mcp::config::load_mcp_servers_from;
+use crate::tools::mcp::create_client_from_config;
+use crate::tools::mcp::{McpProcessManager, McpSessionManager};
 use crate::worker::api::{CompletionReport, JobEventPayload, StatusUpdate, WorkerHttpClient};
 use crate::worker::autonomous_recovery::{
     AutonomousRecoveryAction, AutonomousRecoveryState, EMPTY_TOOL_COMPLETION_FAILURE,
     EMPTY_TOOL_COMPLETION_NUDGE, FORCE_TEXT_RECOVERY_PROMPT,
 };
 use crate::worker::proxy_llm::ProxyLlmProvider;
+use crate::worker::proxy_secrets::ProxySecretsStore;
 use ironclaw_safety::SafetyLayer;
+
+/// Default path where the orchestrator mounts MCP config inside the container.
+const DEFAULT_MCP_CONFIG_PATH: &str = "/home/sandbox/.ironclaw/mcp-servers.json";
 
 /// Configuration for the worker runtime.
 pub struct WorkerConfig {
@@ -133,6 +141,17 @@ impl WorkerRuntime {
             );
         }
 
+        // Initialize MCP tools from the mounted config (non-fatal).
+        let proxy_secrets: Option<Arc<dyn SecretsStore + Send + Sync>> =
+            Some(Arc::new(ProxySecretsStore::new(Arc::clone(&self.client))));
+        let user_id = std::env::var("IRONCLAW_USER_ID").unwrap_or_else(|_| "default".to_string());
+        let mcp_config_path = std::env::var("IRONCLAW_MCP_CONFIG_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from(DEFAULT_MCP_CONFIG_PATH));
+
+        let (mcp_tool_count, mcp_process_manager) =
+            load_mcp_tools(&mcp_config_path, &self.tools, proxy_secrets, &user_id).await;
+
         // Report that we're starting
         self.client
             .report_status(&StatusUpdate {
@@ -148,18 +167,27 @@ impl WorkerRuntime {
         // Build initial context
         let mut reason_ctx = ReasoningContext::new().with_job(&job.description);
 
+        let mcp_note = if mcp_tool_count > 0 {
+            format!(
+                "\nYou also have {} MCP tool(s) for external service integration.",
+                mcp_tool_count
+            )
+        } else {
+            String::new()
+        };
+
         reason_ctx.messages.push(ChatMessage::system(format!(
             r#"You are an autonomous agent running inside a Docker container.
 
 Job: {}
 Description: {}
 
-You have tools for shell commands, file operations, and code editing.
+You have tools for shell commands, file operations, and code editing.{}
 Work independently to complete this job. When finished, your final message MUST include the phrase "The job is complete" to signal termination."#,
-            job.title, job.description
+            job.title, job.description, mcp_note
         )));
 
-        // Load tool definitions
+        // Load tool definitions (includes MCP tools if any were registered above)
         reason_ctx.available_tools = self.tools.tool_definitions().await;
 
         // Shared iteration tracker — read after the loop to report accurate counts.
@@ -299,6 +327,11 @@ Work independently to complete this job. When finished, your final message MUST 
             }
         }
 
+        // Clean up MCP stdio processes (nice-to-have; Docker kills them on container stop).
+        if let Some(pm) = mcp_process_manager {
+            pm.shutdown_all().await;
+        }
+
         Ok(())
     }
 
@@ -311,6 +344,72 @@ Work independently to complete this job. When finished, your final message MUST 
             })
             .await;
     }
+}
+
+/// Load MCP tools from a config file into the tool registry.
+///
+/// Returns `(tools_loaded, process_manager)`. All failures are logged at
+/// `debug!` level and never propagate — the worker continues with dev tools only.
+async fn load_mcp_tools(
+    config_path: &std::path::Path,
+    tools: &ToolRegistry,
+    secrets: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    user_id: &str,
+) -> (usize, Option<Arc<McpProcessManager>>) {
+    let servers_file = match load_mcp_servers_from(config_path).await {
+        Ok(f) if f.servers.is_empty() => {
+            tracing::debug!("No MCP servers configured at {}", config_path.display());
+            return (0, None);
+        }
+        Ok(f) => f,
+        Err(e) => {
+            tracing::debug!("No MCP config at {}: {e}", config_path.display());
+            return (0, None);
+        }
+    };
+
+    let session_mgr = Arc::new(McpSessionManager::new());
+    let process_mgr = Arc::new(McpProcessManager::new());
+    let mut total_tools = 0usize;
+
+    for server in servers_file.enabled_servers() {
+        let server_name = server.name.clone();
+        let client = match create_client_from_config(
+            server.clone(),
+            &session_mgr,
+            &process_mgr,
+            secrets.clone(),
+            user_id,
+        )
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!("Failed to create MCP client for '{}': {e}", server_name);
+                continue;
+            }
+        };
+
+        let tool_impls = match client.create_tools().await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::debug!(
+                    "Failed to load tools from MCP server '{}': {e}",
+                    server_name
+                );
+                continue;
+            }
+        };
+
+        let count = tool_impls.len();
+        for tool in tool_impls {
+            tools.register(tool).await;
+        }
+        total_tools += count;
+        tracing::debug!("Loaded {count} tool(s) from MCP server '{server_name}'");
+    }
+
+    (total_tools, Some(process_mgr))
 }
 
 /// Container delegate: implements `LoopDelegate` for the Docker container context.
@@ -603,6 +702,7 @@ impl LoopDelegate for ContainerDelegate {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::agent::agentic_loop::truncate_for_preview;
 
     #[test]
@@ -627,5 +727,59 @@ mod tests {
         let result = truncate_for_preview("é is fancy", 1);
         // Should truncate to 0 chars (can't fit "é" in 1 byte)
         assert_eq!(result, "...");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_config_missing_returns_zero() {
+        let tools = Arc::new(ToolRegistry::new());
+        let nonexistent = std::path::Path::new("/nonexistent/mcp-servers.json");
+        let (count, pm) = load_mcp_tools(nonexistent, &tools, None, "test").await;
+        assert_eq!(count, 0);
+        assert!(pm.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_mcp_config_invalid_json_returns_zero() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "not valid json!!!").unwrap();
+
+        let tools = Arc::new(ToolRegistry::new());
+        let (count, pm) = load_mcp_tools(tmp.path(), &tools, None, "test").await;
+        assert_eq!(count, 0);
+        assert!(pm.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_mcp_config_empty_servers_returns_zero() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), r#"{"servers": [], "schema_version": 1}"#).unwrap();
+
+        let tools = Arc::new(ToolRegistry::new());
+        let (count, pm) = load_mcp_tools(tmp.path(), &tools, None, "test").await;
+        assert_eq!(count, 0);
+        // Empty server list short-circuits before creating process manager.
+        assert!(pm.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_mcp_unreachable_server_continues_gracefully() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            r#"{
+                "servers": [
+                    {"name": "unreachable", "url": "http://127.0.0.1:1", "enabled": true}
+                ],
+                "schema_version": 1
+            }"#,
+        )
+        .unwrap();
+
+        let tools = Arc::new(ToolRegistry::new());
+        let (count, pm) = load_mcp_tools(tmp.path(), &tools, None, "test").await;
+        // MCP client creation may succeed (it's lazy) but create_tools will fail.
+        // Either way, no tools should be registered.
+        assert_eq!(count, 0);
+        assert!(pm.is_some());
     }
 }
