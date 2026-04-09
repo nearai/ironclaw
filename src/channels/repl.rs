@@ -15,6 +15,8 @@
 //! - `/compact` - Compact the context
 //! - `/new` - Start a new thread
 //! - `yes`/`no`/`always` - Respond to tool approval prompts
+//!   Approval prompts intentionally stay text-based for parity with other channels;
+//!   there is no arrow-key selector path.
 //! - `Esc` - Interrupt current operation
 
 use std::borrow::Cow;
@@ -37,6 +39,7 @@ use rustyline::{
 use termimad::MadSkin;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use uuid::Uuid;
 
 use crate::agent::truncate_for_preview;
 use crate::bootstrap::ironclaw_base_dir;
@@ -146,141 +149,10 @@ impl ConditionalEventHandler for EscInterruptHandler {
     }
 }
 
-/// Approval action chosen by the interactive selector.
-#[derive(Clone, Copy)]
-enum ApprovalAction {
-    Approve,
-    Always,
-    Deny,
-}
-
-impl std::fmt::Display for ApprovalAction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Approve => write!(f, "Approve (y)"),
-            Self::Always => write!(f, "Always approve (a)"),
-            Self::Deny => write!(f, "Deny (n)"),
-        }
-    }
-}
-
-impl ApprovalAction {
-    fn as_input(self) -> &'static str {
-        match self {
-            Self::Approve => "y",
-            Self::Always => "a",
-            Self::Deny => "n",
-        }
-    }
-}
-
-/// Interactive approval selector using crossterm raw mode.
-/// Returns the approval action string ("y", "a", or "n").
-fn run_approval_selector(allow_always: bool) -> Option<&'static str> {
-    use crossterm::{
-        cursor,
-        event::{self, Event as CtEvent, KeyCode as CtKeyCode, KeyEventKind},
-        execute,
-        terminal::{self, ClearType},
-    };
-
-    let options: Vec<ApprovalAction> = if allow_always {
-        vec![
-            ApprovalAction::Approve,
-            ApprovalAction::Always,
-            ApprovalAction::Deny,
-        ]
-    } else {
-        vec![ApprovalAction::Approve, ApprovalAction::Deny]
-    };
-
-    let num = options.len();
-    let mut sel: usize = 0;
-    // Total lines: options + hint line
-    let total_lines = (num + 1) as u16;
-
-    let render = |sel: usize| {
-        let mut w = io::stderr();
-        let pipe = format!("{}│{}", fmt::accent(), fmt::reset());
-        for (i, opt) in options.iter().enumerate() {
-            if i == sel {
-                let _ = write!(w, "  {pipe}  {}● {opt}{}\r\n", fmt::bold(), fmt::reset());
-            } else {
-                let _ = write!(w, "  {pipe}  {}○ {opt}{}\r\n", fmt::dim(), fmt::reset());
-            }
-        }
-        let _ = write!(
-            w,
-            "  {}└{} {}↑↓ enter to select{}\r\n",
-            fmt::accent(),
-            fmt::reset(),
-            fmt::dim(),
-            fmt::reset()
-        );
-        let _ = w.flush();
-    };
-
-    let _ = terminal::enable_raw_mode();
-    render(sel);
-
-    let result = loop {
-        let Ok(evt) = event::read() else { break None };
-        if let CtEvent::Key(key) = evt {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-            match key.code {
-                CtKeyCode::Up | CtKeyCode::Char('k') => {
-                    sel = if sel == 0 { num - 1 } else { sel - 1 };
-                }
-                CtKeyCode::Down | CtKeyCode::Char('j') => {
-                    sel = (sel + 1) % num;
-                }
-                CtKeyCode::Enter => break Some(options[sel].as_input()),
-                CtKeyCode::Char('y') | CtKeyCode::Char('Y') => break Some("y"),
-                CtKeyCode::Char('a') | CtKeyCode::Char('A') if allow_always => break Some("a"),
-                CtKeyCode::Char('n') | CtKeyCode::Char('N') => break Some("n"),
-                CtKeyCode::Esc => break None,
-                _ => continue,
-            }
-            // Redraw: move up, clear, render
-            let mut w = io::stderr();
-            let _ = execute!(w, cursor::MoveUp(total_lines));
-            let _ = execute!(w, terminal::Clear(ClearType::FromCursorDown));
-            render(sel);
-        }
-    };
-
-    let _ = terminal::disable_raw_mode();
-
-    // Overwrite selector with the confirmed choice
-    let mut w = io::stderr();
-    let _ = execute!(w, cursor::MoveUp(total_lines));
-    let _ = execute!(w, terminal::Clear(ClearType::FromCursorDown));
-    let (label, color) = if let Some(action) = result {
-        let l = options
-            .iter()
-            .find(|o| o.as_input() == action)
-            .unwrap_or(&options[0]);
-        let c = if action == "n" {
-            fmt::error()
-        } else {
-            fmt::success()
-        };
-        (l.to_string(), c)
-    } else {
-        (ApprovalAction::Deny.to_string(), fmt::error())
-    };
-    let _ = writeln!(
-        w,
-        "  {}└{} {color}● {label}{}",
-        fmt::accent(),
-        fmt::reset(),
-        fmt::reset()
-    );
-
-    result
-}
+// REPL approvals intentionally use the same plain-text yes/no/always path as
+// other channels. That keeps the terminal flow aligned with SubmissionParser
+// and avoids a selector-specific approval path that can diverge from engine
+// gate handling.
 
 /// Build a termimad skin with our color scheme.
 fn make_skin() -> MadSkin {
@@ -367,6 +239,8 @@ pub struct ReplChannel {
     suppress_banner: Arc<AtomicBool>,
     /// Sender to inject messages into the agent loop (set after start()).
     msg_tx: Arc<Mutex<Option<mpsc::Sender<IncomingMessage>>>>,
+    /// Pending approval request currently shown in the REPL.
+    pending_approval: Arc<Mutex<Option<Uuid>>>,
     /// When true, the readline thread must yield stdin (approval selector or agent processing).
     stdin_locked: Arc<AtomicBool>,
     /// Number of transient status lines (Thinking) to erase on next output.
@@ -388,6 +262,7 @@ impl ReplChannel {
             is_streaming: Arc::new(AtomicBool::new(false)),
             suppress_banner: Arc::new(AtomicBool::new(false)),
             msg_tx: Arc::new(Mutex::new(None)),
+            pending_approval: Arc::new(Mutex::new(None)),
             stdin_locked: Arc::new(AtomicBool::new(false)),
             transient_lines: std::sync::atomic::AtomicU8::new(0),
         }
@@ -407,6 +282,7 @@ impl ReplChannel {
             is_streaming: Arc::new(AtomicBool::new(false)),
             suppress_banner: Arc::new(AtomicBool::new(false)),
             msg_tx: Arc::new(Mutex::new(None)),
+            pending_approval: Arc::new(Mutex::new(None)),
             stdin_locked: Arc::new(AtomicBool::new(false)),
             transient_lines: std::sync::atomic::AtomicU8::new(0),
         }
@@ -449,6 +325,27 @@ impl Default for ReplChannel {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn rewrite_repl_approval_submission(
+    line: &str,
+    pending_approval: &Arc<Mutex<Option<Uuid>>>,
+) -> Option<String> {
+    let submission = crate::agent::SubmissionParser::parse(line);
+    let crate::agent::Submission::ApprovalResponse { approved, always } = submission else {
+        return None;
+    };
+
+    let request_id = pending_approval
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.take())?;
+    serde_json::to_string(&crate::agent::Submission::ExecApproval {
+        request_id,
+        approved,
+        always,
+    })
+    .ok()
 }
 
 fn print_help() {
@@ -504,6 +401,7 @@ impl Channel for ReplChannel {
         let user_id = self.user_id.clone();
         let debug_mode = Arc::clone(&self.debug_mode);
         let suppress_banner = Arc::clone(&self.suppress_banner);
+        let pending_approval = Arc::clone(&self.pending_approval);
         let stdin_locked = Arc::clone(&self.stdin_locked);
         let esc_interrupt_triggered_for_thread = Arc::new(AtomicBool::new(false));
 
@@ -613,8 +511,10 @@ impl Channel for ReplChannel {
                             _ => {}
                         }
 
+                        let content = rewrite_repl_approval_submission(line, &pending_approval)
+                            .unwrap_or_else(|| line.to_string());
                         let msg =
-                            IncomingMessage::new("repl", &user_id, line).with_timezone(&sys_tz);
+                            IncomingMessage::new("repl", &user_id, content).with_timezone(&sys_tz);
                         // Lock stdin before sending so readline doesn't restart
                         // while the agent is processing (approval selector needs stdin)
                         stdin_locked.store(true, Ordering::Relaxed);
@@ -670,6 +570,19 @@ impl Channel for ReplChannel {
         _msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        let approval_prompt_already_rendered = self
+            .pending_approval
+            .lock()
+            .ok()
+            .and_then(|guard| *guard)
+            .is_some()
+            && response.content.contains("requires approval");
+        if approval_prompt_already_rendered {
+            self.stdin_locked.store(false, Ordering::Relaxed);
+            self.finish_single_message_turn().await;
+            return Ok(());
+        }
+
         let width = fmt::term_width();
 
         // If we were streaming, the content was already printed via StreamChunk.
@@ -770,12 +683,17 @@ impl Channel for ReplChannel {
                 }
             }
             StatusUpdate::ApprovalNeeded {
-                request_id: _,
+                request_id,
                 tool_name,
                 description: _,
                 parameters,
                 allow_always,
             } => {
+                if let Ok(parsed) = Uuid::parse_str(&request_id)
+                    && let Ok(mut guard) = self.pending_approval.lock()
+                {
+                    *guard = Some(parsed);
+                }
                 self.clear_transient();
                 let pipe = format!("{}│{}", fmt::accent(), fmt::reset());
 
@@ -797,30 +715,15 @@ impl Channel for ReplChannel {
                     }
                 }
                 eprintln!("  {pipe}");
-                // Run interactive selector directly from send_status
-                // stdin is already locked by Thinking/ToolStarted, so the
-                // readline thread is not competing for stdin.
-                let msg_tx = Arc::clone(&self.msg_tx);
-                let user_id = self.user_id.clone();
-                let lock_flag = Arc::clone(&self.stdin_locked);
-                let single_message_mode = self.single_message.is_some();
-                tokio::task::spawn_blocking(move || {
-                    let action = run_approval_selector(allow_always).unwrap_or("n");
-                    // Unlock stdin so readline can resume after approval
-                    lock_flag.store(false, Ordering::Relaxed);
-                    let Ok(guard) = msg_tx.lock() else {
-                        return;
-                    };
-                    if let Some(tx) = guard.as_ref() {
-                        let msg = if single_message_mode {
-                            IncomingMessage::new("repl", &user_id, action)
-                                .with_metadata(serde_json::json!({ "single_message_mode": true }))
-                        } else {
-                            IncomingMessage::new("repl", &user_id, action)
-                        };
-                        let _ = tx.blocking_send(msg);
-                    }
-                });
+                let choices = if allow_always {
+                    "Reply 'yes' to approve, 'always' to auto-approve, or 'no' to deny."
+                } else {
+                    "Reply 'yes' to approve or 'no' to deny."
+                };
+                eprintln!("  {}{choices}{}", fmt::dim(), fmt::reset());
+                // Resume readline so the user can answer via the normal
+                // submission parser path.
+                self.stdin_locked.store(false, Ordering::Relaxed);
             }
             StatusUpdate::AuthRequired {
                 extension_name,
@@ -828,6 +731,9 @@ impl Channel for ReplChannel {
                 setup_url,
                 ..
             } => {
+                if let Ok(mut guard) = self.pending_approval.lock() {
+                    *guard = None;
+                }
                 eprintln!();
                 eprintln!(
                     "{}  Authentication required for {extension_name}{}",
@@ -847,6 +753,9 @@ impl Channel for ReplChannel {
                 success,
                 message,
             } => {
+                if let Ok(mut guard) = self.pending_approval.lock() {
+                    *guard = None;
+                }
                 if success {
                     eprintln!(
                         "{}  {extension_name}: {message}{}",

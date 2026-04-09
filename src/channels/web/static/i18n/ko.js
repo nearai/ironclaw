@@ -119,6 +119,7 @@ I18n.register('ko', {
   'chat.conversations': '대화',
   'chat.send': '보내기',
   'chat.attachImages': '이미지 첨부',
+  'chat.scrollToBottom': '맨 아래로 스크롤',
   'chat.empty': '내용을 보려면 파일을 선택하세요',
   'chat.loading': '로딩 중...',
   'chat.loadingOlder': '이전 메시지 로드 중...',

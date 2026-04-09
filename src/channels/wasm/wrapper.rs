@@ -4295,6 +4295,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use secrecy::SecretString;
+
     use crate::channels::Channel;
     use crate::channels::OutgoingResponse;
     use crate::channels::wasm::capabilities::ChannelCapabilities;
@@ -4307,12 +4309,14 @@ mod tests {
         WasmChannel, WebsocketRuntimeConfig, build_discord_gateway_presence_update,
         build_websocket_identify_message, build_websocket_resume_message,
         discord_gateway_presence_status, drain_guest_logs, parse_websocket_invalid_session,
-        parse_websocket_ready_session, rewrite_http_url_for_testing,
-        should_warn_on_heartbeat_interval, uses_owner_broadcast_target,
-        websocket_heartbeat_sleep_duration, websocket_reconnect_backoff,
+        parse_websocket_ready_session, resolve_websocket_identify_message,
+        rewrite_http_url_for_testing, should_warn_on_heartbeat_interval,
+        uses_owner_broadcast_target, websocket_heartbeat_sleep_duration,
+        websocket_reconnect_backoff,
     };
     use crate::pairing::PairingStore;
-    use crate::testing::credentials::TEST_TELEGRAM_BOT_TOKEN;
+    use crate::secrets::{CreateSecretParams, InMemorySecretsStore, SecretsCrypto, SecretsStore};
+    use crate::testing::credentials::{TEST_CRYPTO_KEY, TEST_TELEGRAM_BOT_TOKEN};
     use crate::tools::wasm::{
         Capabilities as ToolCapabilities, EndpointPattern, HttpCapability, LogLevel, ResourceLimits,
     };
@@ -4357,6 +4361,7 @@ mod tests {
                     prefix: Some("Bot ".to_string()),
                 },
                 host_patterns: vec!["discord.com".to_string()],
+                optional: false,
             },
         );
         tool_capabilities.http = Some(http);
@@ -4422,20 +4427,34 @@ mod tests {
     /// not hardcoded "default".
     #[tokio::test]
     async fn test_resolve_websocket_identify_message_uses_owner_scope() {
-        use super::resolve_websocket_identify_message;
-        use crate::secrets::SecretsStore;
-        use crate::testing::credentials::test_secrets_store;
-
-        let store = test_secrets_store();
-
-        // Store secret under a specific owner, NOT under "default"
+        let crypto =
+            Arc::new(SecretsCrypto::new(SecretString::from(TEST_CRYPTO_KEY.to_string())).unwrap());
+        let store: Arc<dyn SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
         store
             .create(
                 "owner_42",
-                crate::secrets::CreateSecretParams::new("discord_bot_token", "real_bot_token"),
+                CreateSecretParams {
+                    name: "discord_bot_token".to_string(),
+                    value: SecretString::from("real_bot_token".to_string()),
+                    provider: None,
+                    expires_at: None,
+                },
             )
             .await
-            .expect("store token"); // safety: test code only
+            .unwrap();
+        store
+            .create(
+                "default",
+                CreateSecretParams {
+                    name: "discord_bot_token".to_string(),
+                    value: SecretString::from("default-bot-token".to_string()),
+                    provider: None,
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
 
         let config = WebsocketRuntimeConfig {
             url: "wss://gateway.discord.gg/?v=10&encoding=json".to_string(),
@@ -4447,17 +4466,20 @@ mod tests {
             identify_secret_name: Some("discord_bot_token".to_string()),
         };
 
-        // Should find the secret under "owner_42"
-        let payload = resolve_websocket_identify_message(&config, Some(&store), "owner_42").await;
-        assert!(payload.is_some(), "should resolve from owner scope"); // safety: test code only
-        let json: serde_json::Value = serde_json::from_str(payload.as_ref().unwrap()).unwrap(); // safety: test code only
+        let payload =
+            resolve_websocket_identify_message(&config, Some(store.as_ref()), "owner_42").await;
+        assert!(payload.is_some());
+        let json: serde_json::Value = serde_json::from_str(payload.as_ref().unwrap()).unwrap();
         assert_eq!(json["d"]["token"], serde_json::json!("real_bot_token"));
 
-        // Must NOT find the secret under "default"
-        let no_payload = resolve_websocket_identify_message(&config, Some(&store), "default").await;
-        assert!(
-            no_payload.is_none(),
-            "default scope must not find owner_42's secret"
+        let no_payload =
+            resolve_websocket_identify_message(&config, Some(store.as_ref()), "default").await;
+        assert!(no_payload.is_some());
+        let no_payload_json: serde_json::Value =
+            serde_json::from_str(no_payload.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            no_payload_json["d"]["token"],
+            serde_json::json!("default-bot-token")
         );
     }
 
