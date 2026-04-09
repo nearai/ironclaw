@@ -123,20 +123,121 @@ fn round_f32_to_f64(val: f32) -> f64 {
     ((val as f64) * 1_000_000.0).round() / 1_000_000.0
 }
 
-/// Normalize a JSON Schema for OpenAI strict mode compliance.
+/// Normalize a JSON Schema for OpenAI tool-calling compliance.
 ///
-/// OpenAI strict function calling requires:
-/// - Every object must have `"additionalProperties": false`
-/// - `"required"` must list ALL property keys
-/// - Optional fields use `"type": ["<original>", "null"]` instead of being omitted from `required`
-/// - Nested objects and array items are recursively normalized
+/// Two transforms are applied at the provider boundary:
 ///
-/// This is applied as a clone-and-transform at the provider boundary so the
-/// original tool definitions remain unchanged for other providers.
-pub(crate) fn normalize_schema_strict(schema: &JsonValue) -> JsonValue {
+/// 1. **Top-level flatten.** OpenAI's tool API (Chat Completions and the
+///    Responses API alike) rejects schemas whose top level isn't
+///    `type: "object"`, or that contain top-level `oneOf`/`anyOf`/`allOf`/
+///    `enum`/`not`. The exact error is:
+///
+///    ```text
+///    Invalid schema for function '<name>': schema must have type 'object'
+///    and not have 'oneOf'/'anyOf'/'allOf'/'enum'/'not' at the top level.
+///    ```
+///
+///    Some MCP servers (notably the GitHub Copilot MCP at
+///    `api.githubcopilot.com/mcp/`) advertise tools whose top-level schema is
+///    a `oneOf` for action dispatch. There's no API-side workaround, so when
+///    we detect this we replace `parameters` with a permissive object
+///    envelope (`{type: "object", properties: {}, additionalProperties: true,
+///    required: []}`) and append the original schema to the tool description
+///    as advisory text. The MCP server still validates the actual shape on
+///    its end, so the tool keeps working — we just lose API-level schema
+///    enforcement and the LLM has to read the variant structure from the
+///    description.
+///
+/// 2. **Strict-mode recursive normalization.** OpenAI strict function
+///    calling requires:
+///    - Every object must have `"additionalProperties": false`
+///    - `"required"` must list ALL property keys
+///    - Optional fields use `"type": ["<original>", "null"]` instead of
+///      being omitted from `required`
+///    - Nested objects and array items are recursively normalized
+///
+/// `description` is a `&mut String` because the top-level flatten needs to
+/// append a hint to it. Pass an owned clone of the tool description and read
+/// it back after the call. If no flatten was needed, `description` is
+/// untouched.
+///
+/// Note on Anthropic: this normalizer is also applied to Anthropic via
+/// `RigAdapter::convert_tools`. Anthropic accepts top-level `oneOf` natively,
+/// so the flatten is slightly lossy for Claude users on tools that have a
+/// top-level union, but the description hint preserves the variant info and
+/// Claude is good at reading schemas out of free text. Keeping a single
+/// normalizer for all rig-based providers is simpler than threading
+/// per-provider flags through the adapter.
+pub(crate) fn normalize_schema_strict(schema: &JsonValue, description: &mut String) -> JsonValue {
     let mut schema = schema.clone();
+
+    // Step 1: top-level flatten. If the schema has a forbidden top-level
+    // construct, there's no point recursing into the variants we're about to
+    // discard, so we short-circuit.
+    if needs_top_level_flatten(&schema) {
+        flatten_top_level(&mut schema, description);
+        return schema;
+    }
+
+    // Step 2: recursive strict-mode normalization.
     normalize_schema_recursive(&mut schema);
     schema
+}
+
+/// True if `schema`'s top level would be rejected by OpenAI's tool API.
+fn needs_top_level_flatten(schema: &JsonValue) -> bool {
+    const FORBIDDEN_TOP_LEVEL: &[&str] = &["oneOf", "anyOf", "allOf", "enum", "not"];
+    match schema {
+        JsonValue::Object(map) => {
+            let has_forbidden = FORBIDDEN_TOP_LEVEL.iter().any(|k| map.contains_key(*k));
+            let bad_type = !matches!(map.get("type"), Some(JsonValue::String(s)) if s == "object");
+            has_forbidden || bad_type
+        }
+        // Schema isn't even a JSON object — definitely not OpenAI-compatible.
+        _ => true,
+    }
+}
+
+/// Replace `parameters` with a permissive object envelope and append the
+/// original schema to `description` as advisory text. Truncates the hint on a
+/// char boundary if the original schema is too large to fit in a reasonable
+/// description budget.
+fn flatten_top_level(parameters: &mut JsonValue, description: &mut String) {
+    // OpenAI has no documented hard limit on tool description length, but
+    // long descriptions waste prompt budget on every turn. 1500 bytes fits a
+    // typical MCP dispatcher schema and still leaves room for the original
+    // tool description above it.
+    const SCHEMA_HINT_MAX_BYTES: usize = 1500;
+
+    if let Ok(original_text) = serde_json::to_string(parameters)
+        && !original_text.is_empty()
+    {
+        let hint = if original_text.len() > SCHEMA_HINT_MAX_BYTES {
+            // Truncate on a char boundary to avoid splitting a multi-byte
+            // character. JSON output's structural characters are ASCII but
+            // string field values can be arbitrary unicode.
+            let mut end = SCHEMA_HINT_MAX_BYTES;
+            while end > 0 && !original_text.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{} ... (truncated)", &original_text[..end])
+        } else {
+            original_text
+        };
+        description.push_str(
+            "\n\nUpstream JSON schema (advisory; the actual top-level union has been \
+             flattened so the OpenAI tool API will accept the tool — pick one variant \
+             and pass its fields as a flat object):\n",
+        );
+        description.push_str(&hint);
+    }
+
+    *parameters = serde_json::json!({
+        "type": "object",
+        "properties": {},
+        "additionalProperties": true,
+        "required": []
+    });
 }
 
 fn normalize_schema_recursive(schema: &mut JsonValue) {
@@ -457,15 +558,23 @@ fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
 
 /// Convert IronClaw tool definitions to rig-core format.
 ///
-/// Applies OpenAI strict-mode schema normalization to ensure all tool
-/// parameter schemas comply with OpenAI's function calling requirements.
+/// Applies `normalize_schema_strict` at the boundary, which both
+/// strict-normalizes nested objects AND flattens any top-level
+/// `oneOf`/`anyOf`/`allOf`/`enum`/`not` (OpenAI's tool API rejects those at
+/// the top level even when the rest of the schema is valid). The flatten may
+/// append an advisory hint to the tool description, so we pass an owned
+/// clone through and read it back.
 fn convert_tools(tools: &[IronToolDefinition]) -> Vec<RigToolDefinition> {
     tools
         .iter()
-        .map(|t| RigToolDefinition {
-            name: t.name.clone(),
-            description: t.description.clone(),
-            parameters: normalize_schema_strict(&t.parameters),
+        .map(|t| {
+            let mut description = t.description.clone();
+            let parameters = normalize_schema_strict(&t.parameters, &mut description);
+            RigToolDefinition {
+                name: t.name.clone(),
+                description,
+                parameters,
+            }
         })
         .collect()
 }
@@ -850,6 +959,212 @@ mod tests {
         assert_eq!(round_f32_to_f64(0.0_f32), 0.0_f64);
         // Original cast produces artifacts — our fix should not
         assert_ne!(0.7_f32 as f64, 0.7_f64);
+    }
+
+    // ── normalize_schema_strict: top-level flatten ────────────────────────
+    //
+    // OpenAI's tool API rejects schemas whose top level isn't `type:
+    // "object"` or that contain top-level `oneOf`/`anyOf`/`allOf`/`enum`/
+    // `not`. The GitHub Copilot MCP server exposes a tool with exactly that
+    // shape (action dispatch via top-level union), and the agent gets HTTP
+    // 400 the moment it tries to enumerate tools. `normalize_schema_strict`
+    // detects the bad shape, flattens parameters to a permissive object
+    // envelope, and stuffs the original schema into the description as
+    // advisory text so the LLM can still pick variant fields. Both rig-based
+    // providers and the Codex Responses API client share this normalizer.
+
+    #[test]
+    fn test_normalize_schema_strict_passes_through_valid_object_schema() {
+        let input = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" }
+            },
+            "required": ["query"]
+        });
+        let mut description = "Search the index".to_string();
+        let result = normalize_schema_strict(&input, &mut description);
+
+        // Strict-mode normalization runs: additionalProperties forced false
+        // and required is set to ALL keys, but the structural shape is
+        // unchanged.
+        assert_eq!(result["type"], "object");
+        assert_eq!(result["additionalProperties"], false);
+        assert_eq!(result["required"], serde_json::json!(["query"]));
+        assert!(result["properties"]["query"].is_object());
+        assert_eq!(
+            description, "Search the index",
+            "description must be untouched when no flatten happened"
+        );
+    }
+
+    #[test]
+    fn test_normalize_schema_strict_flattens_top_level_oneof() {
+        // Mirrors the GitHub Copilot MCP `github` tool shape that triggered
+        // the original 400.
+        let input = serde_json::json!({
+            "type": "object",
+            "oneOf": [
+                { "properties": { "action": { "const": "create_issue" }, "title": { "type": "string" } } },
+                { "properties": { "action": { "const": "list_issues" }, "repo":  { "type": "string" } } }
+            ]
+        });
+        let mut description = "GitHub umbrella tool".to_string();
+        let result = normalize_schema_strict(&input, &mut description);
+
+        assert_eq!(result["type"], "object");
+        assert!(
+            result.get("oneOf").is_none(),
+            "top-level oneOf must be removed"
+        );
+        assert_eq!(result["additionalProperties"], true);
+        assert!(result["properties"].is_object());
+        assert!(result["required"].as_array().unwrap().is_empty());
+        assert!(
+            description.contains("Upstream JSON schema"),
+            "description must include the advisory hint"
+        );
+        assert!(
+            description.contains("create_issue"),
+            "original schema variants must survive in the hint"
+        );
+    }
+
+    #[test]
+    fn test_normalize_schema_strict_flattens_anyof_allof_enum_not() {
+        for forbidden in ["anyOf", "allOf", "enum", "not"] {
+            let input = serde_json::json!({
+                "type": "object",
+                forbidden: ["whatever"]
+            });
+            let mut description = "tool".to_string();
+            let result = normalize_schema_strict(&input, &mut description);
+            assert!(
+                result.get(forbidden).is_none(),
+                "top-level {forbidden} must be stripped"
+            );
+            assert_eq!(result["type"], "object");
+            assert_eq!(result["additionalProperties"], true);
+        }
+    }
+
+    #[test]
+    fn test_normalize_schema_strict_replaces_non_object_top_level_type() {
+        // A schema like `{"type": "string"}` is not a valid OpenAI tool
+        // parameters object — replace wholesale.
+        let input = serde_json::json!({ "type": "string" });
+        let mut description = "weird tool".to_string();
+        let result = normalize_schema_strict(&input, &mut description);
+        assert_eq!(result["type"], "object");
+        assert!(result["properties"].is_object());
+        assert_eq!(result["additionalProperties"], true);
+    }
+
+    #[test]
+    fn test_normalize_schema_strict_preserves_nested_oneof() {
+        // Nested combinators inside `properties` are FINE for the API. Only
+        // the top level is forbidden, so the nested oneOf must survive
+        // (its variants get recursively strict-normalized but the union
+        // itself is preserved). `filter` is marked required so strict mode
+        // doesn't wrap it in an `anyOf` for nullability — that would move
+        // the inner oneOf one level deeper and obscure what we're checking.
+        let input = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "filter": {
+                    "oneOf": [
+                        { "type": "string" },
+                        { "type": "object", "properties": { "regex": { "type": "string" } } }
+                    ]
+                }
+            },
+            "required": ["filter"]
+        });
+        let mut description = "search".to_string();
+        let result = normalize_schema_strict(&input, &mut description);
+
+        assert_eq!(result["type"], "object");
+        // Nested oneOf survives untouched at the same path.
+        let nested = &result["properties"]["filter"]["oneOf"];
+        assert!(nested.is_array(), "nested oneOf must be preserved");
+        assert_eq!(nested.as_array().unwrap().len(), 2);
+        // The object variant inside the nested oneOf got strict-mode
+        // normalized (additionalProperties: false, all keys required).
+        let object_variant = &nested[1];
+        assert_eq!(object_variant["type"], "object");
+        assert_eq!(object_variant["additionalProperties"], false);
+        assert_eq!(description, "search");
+    }
+
+    #[test]
+    fn test_normalize_schema_strict_truncates_huge_schema_on_char_boundary() {
+        // 4KB blob with a multi-byte char near the truncation point. The
+        // truncated hint must not panic and must end on a valid char
+        // boundary.
+        let big_string = "α".repeat(2000); // each `α` is 2 bytes in UTF-8 → 4000 bytes
+        let input = serde_json::json!({
+            "anyOf": [{ "description": big_string }]
+        });
+        let mut description = "tool".to_string();
+        let result = normalize_schema_strict(&input, &mut description);
+        assert!(description.contains("(truncated)"));
+        assert_eq!(result["type"], "object");
+        assert!(result.get("anyOf").is_none());
+    }
+
+    /// Caller-level regression test: drives `convert_tools` (the rig-based
+    /// provider entry point) end to end with a GitHub-Copilot-shaped tool
+    /// definition and asserts the resulting `RigToolDefinition` has a clean
+    /// top level. This is the test that would have caught the OpenAI-via-rig
+    /// path regressing the same way the Codex path did.
+    #[test]
+    fn test_convert_tools_handles_top_level_oneof_dispatcher() {
+        let tools = vec![IronToolDefinition {
+            name: "github".to_string(),
+            description: "GitHub MCP umbrella tool".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "oneOf": [
+                    {
+                        "properties": {
+                            "action": { "const": "create_issue" },
+                            "title":  { "type": "string" }
+                        },
+                        "required": ["action", "title"]
+                    },
+                    {
+                        "properties": {
+                            "action": { "const": "list_issues" },
+                            "repo":   { "type": "string" }
+                        },
+                        "required": ["action", "repo"]
+                    }
+                ]
+            }),
+        }];
+        let converted = convert_tools(&tools);
+        assert_eq!(converted.len(), 1);
+        let tool = &converted[0];
+
+        assert_eq!(tool.name, "github");
+        assert_eq!(tool.parameters["type"], "object");
+        assert!(
+            tool.parameters.get("oneOf").is_none(),
+            "top-level oneOf must not survive into the rig-core ToolDefinition"
+        );
+        assert_eq!(tool.parameters["additionalProperties"], true);
+        assert!(
+            tool.description.starts_with("GitHub MCP umbrella tool"),
+            "original description must come first"
+        );
+        assert!(
+            tool.description.contains("Upstream JSON schema"),
+            "advisory hint must be appended"
+        );
+        assert!(
+            tool.description.contains("create_issue") && tool.description.contains("list_issues"),
+            "variant info must be retained in the hint"
+        );
     }
 
     #[test]
