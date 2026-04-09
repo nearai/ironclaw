@@ -174,6 +174,10 @@ impl LogLevelHandle {
 ///
 /// Returns the `LogLevelHandle` so callers can swap the filter at runtime.
 /// The fmt layer and `WebLogLayer` are attached alongside the reloadable filter.
+///
+/// When `suppress_stderr` is true, the stderr formatter is omitted. This is
+/// used in TUI mode where logs are displayed in the dedicated Logs tab instead
+/// of interleaving with the alternate screen.
 pub fn init_tracing(
     log_broadcaster: Arc<LogBroadcaster>,
     suppress_stderr: bool,

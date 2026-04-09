@@ -1,0 +1,59 @@
+---
+title: File Handling
+description: Let your agent read and write files in the local filesystem
+---
+
+The file tools give the agent access to the local filesystem. All paths are resolved relative to the workspace root unless absolute paths are provided.
+
+---
+
+## Setup
+
+File tools require `ALLOW_LOCAL_TOOLS=true`. They are disabled by default to prevent accidental filesystem access in hosted or shared environments.
+
+```bash
+export ALLOW_LOCAL_TOOLS=true
+```
+
+---
+
+## Available Actions
+
+- `read_file`: Read the contents of a file.
+- `write_file`: Write content to a file, creating parent directories as needed.
+- `list_dir`: List the contents of a directory.
+- `apply_patch`: Apply a unified diff patch to a file. This is the preferred way for the agent to make targeted edits to existing files rather than rewriting them in full.
+
+---
+
+## Example Usage
+
+> "Read my project notes at `projects/ironclaw/notes.md`"
+
+> "Write a README for my project to `projects/ironclaw/README.md`"
+
+> "What files are in my `projects/` directory?"
+
+> "Update the status section in `projects/notes.md` to say Completed"
+
+---
+
+## Security Considerations
+
+<AccordionGroup>
+  <Accordion title="Path resolution and sandboxing" icon="folder">
+  Relative paths like `notes/todo.md` resolve to `<workspace>/notes/todo.md`. Absolute paths are used as-is.
+  </Accordion>
+
+  <Accordion title="Path traversal protection" icon="shield">
+    The sanitizer detects path traversal patterns (`../`) in file paths supplied by external content. Paths that resolve outside the workspace root are blocked by policy.
+  </Accordion>
+
+  <Accordion title="Sanitization of file contents" icon="search">
+    `read_file` passes file contents through the Safety Layer. If a file contains patterns that look like API keys, tokens, or private keys, the leak detector will redact them before the LLM sees them.
+  </Accordion>
+
+  <Accordion title="No shell interpretation" icon="terminal">
+    File paths are not passed through a shell. Characters like `;`, `&`, and `$()` in paths are treated as literals and cannot be used for command injection.
+  </Accordion>
+</AccordionGroup>

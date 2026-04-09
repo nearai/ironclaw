@@ -28,6 +28,18 @@ fn format_count(n: u64, suffix: &str) -> String {
     }
 }
 
+fn format_vertical_list(title: &str, items: &[String]) -> String {
+    if items.is_empty() {
+        return format!("{}:\n  (none)", title);
+    }
+
+    let mut out = format!("{}:\n", title);
+    for item in items {
+        out.push_str(&format!("  {}\n", item));
+    }
+    out.trim_end().to_string()
+}
+
 impl Agent {
     /// Handle job-related intents without turn tracking.
     pub(super) async fn handle_job_or_command(
@@ -709,7 +721,7 @@ impl Agent {
                 "  /interrupt        Stop current operation\n",
                 "  /new              New conversation thread\n",
                 "  /thread <id>      Switch to thread\n",
-                "  /resume <id>      Resume from checkpoint\n",
+                "  /resume           Resume a previous conversation\n",
                 "\n",
                 "Skills:\n",
                 "  /skills             List installed skills\n",
@@ -796,9 +808,9 @@ impl Agent {
 
             "tools" => {
                 let tools = self.tools().list().await;
-                Ok(SubmissionResult::response(format!(
-                    "Available tools: {}",
-                    tools.join(", ")
+                Ok(SubmissionResult::response(format_vertical_list(
+                    "Available tools",
+                    &tools,
                 )))
             }
 
@@ -1145,5 +1157,24 @@ impl Agent {
         {
             tracing::warn!("Model persistence task failed: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_vertical_list;
+
+    #[test]
+    fn format_vertical_list_renders_one_item_per_line() {
+        let formatted = format_vertical_list(
+            "Available tools",
+            &[
+                "time".to_string(),
+                "shell".to_string(),
+                "github".to_string(),
+            ],
+        );
+
+        assert_eq!(formatted, "Available tools:\n  time\n  shell\n  github");
     }
 }

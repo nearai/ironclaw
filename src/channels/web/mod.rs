@@ -681,8 +681,9 @@ impl Channel for GatewayChannel {
                 message: msg,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::ToolStarted { name } => AppEvent::ToolStarted {
+            StatusUpdate::ToolStarted { name, detail, .. } => AppEvent::ToolStarted {
                 name,
+                detail,
                 thread_id: thread_id.clone(),
             },
             StatusUpdate::ToolCompleted {
@@ -690,6 +691,7 @@ impl Channel for GatewayChannel {
                 success,
                 error,
                 parameters,
+                ..
             } => AppEvent::ToolCompleted {
                 name,
                 success,
@@ -697,7 +699,7 @@ impl Channel for GatewayChannel {
                 parameters,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::ToolResult { name, preview } => AppEvent::ToolResult {
+            StatusUpdate::ToolResult { name, preview, .. } => AppEvent::ToolResult {
                 name,
                 preview,
                 thread_id: thread_id.clone(),
@@ -789,10 +791,30 @@ impl Channel for GatewayChannel {
                 cost_usd,
                 thread_id,
             },
+            StatusUpdate::JobStatus { job_id, status } => AppEvent::JobStatus {
+                job_id,
+                message: status,
+            },
+            StatusUpdate::JobResult { job_id, status } => AppEvent::JobResult {
+                job_id,
+                status,
+                session_id: None,
+                fallback_deliverable: None,
+            },
             StatusUpdate::SkillActivated { skill_names } => AppEvent::SkillActivated {
                 skill_names,
                 thread_id,
             },
+            StatusUpdate::RoutineUpdate { .. }
+            | StatusUpdate::ContextPressure { .. }
+            | StatusUpdate::SandboxStatus { .. }
+            | StatusUpdate::SecretsStatus { .. }
+            | StatusUpdate::CostGuard { .. }
+            | StatusUpdate::ThreadList { .. }
+            | StatusUpdate::EngineThreadList { .. }
+            | StatusUpdate::ConversationHistory { .. } => {
+                return Ok(());
+            }
         };
 
         // Scope events to the user when user_id is available in metadata.
