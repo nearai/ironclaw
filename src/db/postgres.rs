@@ -1012,11 +1012,11 @@ impl UserStore for PgBackend {
     async fn update_user_quota(
         &self,
         id: &str,
-        max_agents: Option<i32>,
-        max_tokens: Option<i64>,
+        max_routines: Option<i32>,
+        max_cost_per_day_cents: Option<i64>,
     ) -> Result<(), DatabaseError> {
         self.store
-            .update_user_quota(id, max_agents, max_tokens)
+            .update_user_quota(id, max_routines, max_cost_per_day_cents)
             .await
     }
 

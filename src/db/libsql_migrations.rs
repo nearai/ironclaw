@@ -596,8 +596,8 @@ CREATE TABLE IF NOT EXISTS users (
     last_login_at TEXT,
     created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
     metadata TEXT NOT NULL DEFAULT '{}',
-    max_agents INTEGER,
-    max_tokens INTEGER
+    max_routines INTEGER,
+    max_cost_per_day_cents INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS api_tokens (
@@ -840,8 +840,8 @@ CREATE TABLE IF NOT EXISTS users (
     last_login_at TEXT,
     created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
     metadata TEXT NOT NULL DEFAULT '{}',
-    max_agents INTEGER,
-    max_tokens INTEGER
+    max_routines INTEGER,
+    max_cost_per_day_cents INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS api_tokens (
@@ -965,8 +965,8 @@ CREATE INDEX IF NOT EXISTS idx_pairing_requests_channel ON pairing_requests (cha
         21,
         "user_quotas",
         r#"
-ALTER TABLE users ADD COLUMN max_agents INTEGER;
-ALTER TABLE users ADD COLUMN max_tokens INTEGER;
+ALTER TABLE users ADD COLUMN max_routines INTEGER;
+ALTER TABLE users ADD COLUMN max_cost_per_day_cents INTEGER;
 "#,
     ),
 ];
@@ -978,8 +978,8 @@ const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] = &[
     (15, "conversations", "source_channel"),
     (18, "wasm_tools", "scope"),
     (18, "dynamic_tools", "scope"),
-    (21, "users", "max_agents"),
-    (21, "users", "max_tokens"),
+    (21, "users", "max_routines"),
+    (21, "users", "max_cost_per_day_cents"),
 ];
 
 /// Check whether `table` already contains `column` via `pragma_table_info`.

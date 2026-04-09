@@ -328,10 +328,10 @@ pub struct UserRecord {
     /// Who created/invited this user (nullable for bootstrap users).
     pub created_by: Option<String>,
     pub metadata: serde_json::Value,
-    /// Maximum number of agents this user can create. None = no quota (fail-closed).
-    pub max_agents: Option<i32>,
-    /// Total cumulative token quota. None = no quota (fail-closed).
-    pub max_tokens: Option<i64>,
+    /// Maximum number of routines this user can create. None = no quota (fail-closed).
+    pub max_routines: Option<i32>,
+    /// Maximum daily LLM spend in cents. None = no quota (fail-closed).
+    pub max_cost_per_day_cents: Option<i64>,
 }
 
 /// An API token for authenticating requests (hash stored, never plaintext).
@@ -965,12 +965,12 @@ pub trait UserStore: Send + Sync {
         display_name: &str,
         metadata: &serde_json::Value,
     ) -> Result<(), DatabaseError>;
-    /// Update a user's quota fields (max_agents, max_tokens).
+    /// Update a user's quota fields (max_routines, max_cost_per_day_cents).
     async fn update_user_quota(
         &self,
         id: &str,
-        max_agents: Option<i32>,
-        max_tokens: Option<i64>,
+        max_routines: Option<i32>,
+        max_cost_per_day_cents: Option<i64>,
     ) -> Result<(), DatabaseError>;
     /// Record a login timestamp.
     async fn record_login(&self, id: &str) -> Result<(), DatabaseError>;

@@ -1210,7 +1210,7 @@ impl Tool for RoutineCreateTool {
             routine_verification_fingerprint(&routine),
         );
 
-        // Quota enforcement: check max_agents before creating.
+        // Quota enforcement: check max_routines before creating.
         // Admin users are exempt; non-admin users without quota are denied.
         let is_admin = ctx
             .metadata
@@ -1221,10 +1221,10 @@ impl Tool for RoutineCreateTool {
         if !is_admin {
             match self.store.get_user(&ctx.user_id).await {
                 Ok(Some(user)) => {
-                    let max = user.max_agents;
+                    let max = user.max_routines;
                     if max.is_none() {
                         return Err(ToolError::ExecutionFailed(
-                            "No agent quota assigned. Contact an administrator to set usage limits.".to_string(),
+                            "No routine quota assigned. Contact an administrator to set usage limits.".to_string(),
                         ));
                     }
                     if let Some(limit) = max {
@@ -1239,7 +1239,7 @@ impl Tool for RoutineCreateTool {
                             })?;
                         if current >= i64::from(limit) {
                             return Err(ToolError::ExecutionFailed(format!(
-                                "Agent limit reached: {} of {} allowed. \
+                                "Routine limit reached: {} of {} allowed. \
                                  Contact an administrator to increase your quota.",
                                 current, limit
                             )));

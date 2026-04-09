@@ -24,8 +24,8 @@ fn row_to_user(row: &libsql::Row) -> Result<UserRecord, DatabaseError> {
         last_login_at: get_opt_ts(row, 7),
         created_by: get_opt_text(row, 8),
         metadata,
-        max_agents: get_opt_i64(row, 10).map(|v| v as i32),
-        max_tokens: get_opt_i64(row, 11),
+        max_routines: get_opt_i64(row, 10).map(|v| v as i32),
+        max_cost_per_day_cents: get_opt_i64(row, 11),
     })
 }
 
@@ -110,7 +110,7 @@ impl UserStore for LibSqlBackend {
             .query(
                 r#"
                 SELECT id, email, display_name, status, role, created_at, updated_at,
-                       last_login_at, created_by, metadata, max_agents, max_tokens
+                       last_login_at, created_by, metadata, max_routines, max_cost_per_day_cents
                 FROM users WHERE id = ?1
                 "#,
                 params![id],
@@ -134,7 +134,7 @@ impl UserStore for LibSqlBackend {
             .query(
                 r#"
                 SELECT id, email, display_name, status, role, created_at, updated_at,
-                       last_login_at, created_by, metadata, max_agents, max_tokens
+                       last_login_at, created_by, metadata, max_routines, max_cost_per_day_cents
                 FROM users WHERE LOWER(email) = LOWER(?1)
                 "#,
                 params![email],
@@ -160,7 +160,7 @@ impl UserStore for LibSqlBackend {
             conn.query(
                 r#"
                 SELECT id, email, display_name, status, role, created_at, updated_at,
-                       last_login_at, created_by, metadata, max_agents, max_tokens
+                       last_login_at, created_by, metadata, max_routines, max_cost_per_day_cents
                 FROM users WHERE status = ?1
                 ORDER BY created_at DESC
                 "#,
@@ -172,7 +172,7 @@ impl UserStore for LibSqlBackend {
             conn.query(
                 r#"
                 SELECT id, email, display_name, status, role, created_at, updated_at,
-                       last_login_at, created_by, metadata, max_agents, max_tokens
+                       last_login_at, created_by, metadata, max_routines, max_cost_per_day_cents
                 FROM users
                 ORDER BY created_at DESC
                 "#,
@@ -238,19 +238,19 @@ impl UserStore for LibSqlBackend {
     async fn update_user_quota(
         &self,
         id: &str,
-        max_agents: Option<i32>,
-        max_tokens: Option<i64>,
+        max_routines: Option<i32>,
+        max_cost_per_day_cents: Option<i64>,
     ) -> Result<(), DatabaseError> {
         let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
         // libSQL: NULL is passed when the Option is None via Value::Null.
-        let mr = max_agents.map_or(libsql::Value::Null, |v| {
+        let mr = max_routines.map_or(libsql::Value::Null, |v| {
             libsql::Value::Integer(i64::from(v))
         });
-        let mc = max_tokens
+        let mc = max_cost_per_day_cents
             .map_or(libsql::Value::Null, libsql::Value::Integer);
         conn.execute(
-            "UPDATE users SET max_agents = ?2, max_tokens = ?3, updated_at = ?4 WHERE id = ?1",
+            "UPDATE users SET max_routines = ?2, max_cost_per_day_cents = ?3, updated_at = ?4 WHERE id = ?1",
             libsql::params![id, mr, mc, now],
         )
         .await
@@ -368,7 +368,7 @@ impl UserStore for LibSqlBackend {
                     t.last_used_at, t.created_at, t.revoked_at,
                     u.id, u.email, u.display_name, u.status, u.role, u.created_at,
                     u.updated_at, u.last_login_at, u.created_by, u.metadata,
-                    u.max_agents, u.max_tokens
+                    u.max_routines, u.max_cost_per_day_cents
                 FROM api_tokens t
                 JOIN users u ON u.id = t.user_id
                 WHERE t.token_hash = ?1
@@ -417,8 +417,8 @@ impl UserStore for LibSqlBackend {
                     last_login_at: get_opt_ts(&row, 15),
                     created_by: get_opt_text(&row, 16),
                     metadata,
-                    max_agents: get_opt_i64(&row, 18).map(|v| v as i32),
-                    max_tokens: get_opt_i64(&row, 19),
+                    max_routines: get_opt_i64(&row, 18).map(|v| v as i32),
+                    max_cost_per_day_cents: get_opt_i64(&row, 19),
                 };
 
                 Ok(Some((token, user)))
@@ -784,8 +784,8 @@ mod tests {
             last_login_at: None,
             created_by: None,
             metadata: serde_json::json!({}),
-            max_agents: None,
-            max_tokens: None,
+            max_routines: None,
+            max_cost_per_day_cents: None,
         }
     }
 
