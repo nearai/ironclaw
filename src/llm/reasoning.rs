@@ -1030,8 +1030,12 @@ Example:
 Respond directly with your final answer. Do not wrap your response in any special tags."#
         };
 
+        let preamble = std::env::var("AGENT_PREAMBLE").unwrap_or_else(|_| {
+            "You are IronClaw Agent, a secure autonomous assistant.".to_string()
+        });
+
         format!(
-            r#"You are IronClaw Agent, a secure autonomous assistant.
+            r#"{preamble}
 
 {response_format}
 
