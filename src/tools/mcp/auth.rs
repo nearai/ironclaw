@@ -1930,7 +1930,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_url_safe_https() {
-        assert!(validate_url_safe("https://example.com/path").await.is_ok());
+        // Use an IP-literal to avoid DNS dependency in sandboxed CI.
+        // 8.8.8.8 is a public routable IP — not "dangerous" per is_dangerous_ip().
+        assert!(
+            validate_url_safe("https://8.8.8.8/path").await.is_ok(),
+            "HTTPS with a non-dangerous public IP should be accepted"
+        );
     }
 
     #[tokio::test]
