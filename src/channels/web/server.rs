@@ -27,6 +27,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
 use crate::ownership::Owned;
+use crate::standby::{TidePoolConfigureRequest, bearer_token};
 use axum::http::HeaderMap;
 
 use crate::agent::SessionManager;
@@ -474,6 +475,146 @@ pub struct GatewayState {
     /// When this sender is dropped, the sweep loops exit gracefully.
     #[allow(dead_code)]
     pub oauth_sweep_shutdown: Option<tokio::sync::watch::Sender<()>>,
+    /// Standby control for pre-started gateway configure mode.
+    pub standby_control: Option<Arc<crate::standby::StandbyControl>>,
+    /// Whether the HTTP server has been started (for idempotent start).
+    pub server_started: std::sync::atomic::AtomicBool,
+    /// Runtime configuration overrides applied via standby configure.
+    pub runtime_overrides: GatewayRuntimeOverrides,
+}
+
+/// Runtime overrides applied via the standby configure endpoint.
+#[derive(Debug, Clone, Default)]
+pub struct GatewayRuntimeOverrides {
+    // Placeholder for future runtime override fields.
+}
+
+// --- Getter helpers (return Option refs for chaining with .ok_or()) ---
+impl GatewayState {
+    pub fn workspace_pool(&self) -> Option<&Arc<WorkspacePool>> {
+        self.workspace_pool.as_ref()
+    }
+    pub fn workspace(&self) -> Option<Arc<Workspace>> {
+        self.workspace.clone()
+    }
+    pub fn skill_registry(&self) -> Option<&Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>> {
+        self.skill_registry.as_ref()
+    }
+    pub fn skill_catalog(&self) -> Option<&Arc<ironclaw_skills::catalog::SkillCatalog>> {
+        self.skill_catalog.as_ref()
+    }
+    pub fn store(&self) -> Option<&Arc<dyn Database>> {
+        self.store.as_ref()
+    }
+    pub fn extension_manager(&self) -> Option<&Arc<ExtensionManager>> {
+        self.extension_manager.as_ref()
+    }
+    pub fn log_broadcaster(&self) -> Option<&Arc<LogBroadcaster>> {
+        self.log_broadcaster.as_ref()
+    }
+    pub fn llm_provider(&self) -> Option<&Arc<dyn crate::llm::LlmProvider>> {
+        self.llm_provider.as_ref()
+    }
+    pub fn session_manager(&self) -> Option<&Arc<SessionManager>> {
+        self.session_manager.as_ref()
+    }
+    pub fn active_config_snapshot(&self) -> &ActiveConfigSnapshot {
+        &self.active_config
+    }
+}
+
+// --- Setter helpers used by the builder in mod.rs ---
+//
+// These operate on `&mut GatewayState` directly. Callers in mod.rs use
+// `Arc::get_mut(&mut self.state).expect(...)` to obtain the mutable reference
+// during gateway construction (before the Arc is shared).
+impl GatewayState {
+    pub fn set_workspace(&mut self, ws: Arc<Workspace>) {
+        self.workspace = Some(ws);
+    }
+    pub fn set_workspace_pool(&mut self, pool: Arc<WorkspacePool>) {
+        self.workspace_pool = Some(pool);
+    }
+    pub fn set_session_manager(&mut self, sm: Arc<SessionManager>) {
+        self.session_manager = Some(sm);
+    }
+    pub fn set_log_broadcaster(&mut self, lb: Arc<LogBroadcaster>) {
+        self.log_broadcaster = Some(lb);
+    }
+    pub fn set_log_level_handle(&mut self, h: Arc<crate::channels::web::log_layer::LogLevelHandle>) {
+        self.log_level_handle = Some(h);
+    }
+    pub fn set_extension_manager(&mut self, em: Arc<ExtensionManager>) {
+        self.extension_manager = Some(em);
+    }
+    pub fn set_tool_registry(&mut self, tr: Arc<ToolRegistry>) {
+        self.tool_registry = Some(tr);
+    }
+    pub fn set_store(&mut self, store: Arc<dyn Database>) {
+        self.store = Some(store);
+    }
+    pub fn set_db_authenticator(&mut self, auth: Arc<crate::channels::web::auth::DbAuthenticator>) {
+        self.db_auth = Some(auth);
+    }
+    pub fn set_job_manager(&mut self, jm: Arc<ContainerJobManager>) {
+        self.job_manager = Some(jm);
+    }
+    pub fn set_prompt_queue(&mut self, pq: PromptQueue) {
+        self.prompt_queue = Some(pq);
+    }
+    pub fn set_scheduler(&mut self, slot: crate::tools::builtin::SchedulerSlot) {
+        self.scheduler = Some(slot);
+    }
+    pub fn set_skill_registry(&mut self, sr: Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>) {
+        self.skill_registry = Some(sr);
+    }
+    pub fn set_skill_catalog(&mut self, sc: Arc<ironclaw_skills::catalog::SkillCatalog>) {
+        self.skill_catalog = Some(sc);
+    }
+    pub fn set_llm_provider(&mut self, llm: Arc<dyn crate::llm::LlmProvider>) {
+        self.llm_provider = Some(llm);
+    }
+    pub fn set_registry_entries(&mut self, entries: Vec<crate::extensions::RegistryEntry>) {
+        self.registry_entries = entries;
+    }
+    pub fn set_cost_guard(&mut self, cg: Arc<crate::agent::cost_guard::CostGuard>) {
+        self.cost_guard = Some(cg);
+    }
+    pub fn set_routine_engine_slot(&mut self, slot: RoutineEngineSlot) {
+        self.routine_engine = slot;
+    }
+    pub fn set_active_config(&mut self, config: ActiveConfigSnapshot) {
+        self.active_config = config;
+    }
+    pub fn set_secrets_store(&mut self, store: Arc<dyn crate::secrets::SecretsStore + Send + Sync>) {
+        self.secrets_store = Some(store);
+    }
+    pub fn set_oauth_allowed_domains(&mut self, domains: Vec<String>) {
+        self.oauth_allowed_domains = domains;
+    }
+    pub fn set_oauth_config(
+        &mut self,
+        providers: Arc<std::collections::HashMap<String, Arc<dyn crate::channels::web::oauth::providers::OAuthProvider>>>,
+        state_store: Arc<crate::channels::web::oauth::state_store::OAuthStateStore>,
+        base_url: String,
+        allowed_domains: Vec<String>,
+        near_nonce_store: Option<Arc<crate::channels::web::oauth::near::NearNonceStore>>,
+        near_rpc_url: Option<String>,
+        near_network: Option<String>,
+        shutdown_tx: tokio::sync::watch::Sender<()>,
+    ) {
+        self.oauth_providers = Some(providers);
+        self.oauth_state_store = Some(state_store);
+        self.oauth_base_url = Some(base_url);
+        self.oauth_allowed_domains = allowed_domains;
+        self.near_nonce_store = near_nonce_store;
+        self.near_rpc_url = near_rpc_url;
+        self.near_network = near_network;
+        self.oauth_sweep_shutdown = Some(shutdown_tx);
+    }
+    pub fn set_pairing_store(&mut self, store: Arc<crate::pairing::PairingStore>) {
+        self.pairing_store = Some(store);
+    }
 }
 
 /// Start the gateway HTTP server.

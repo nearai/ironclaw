@@ -160,45 +160,53 @@ impl GatewayChannel {
         }
     }
 
+    /// Obtain a mutable reference to the inner `GatewayState`.
+    ///
+    /// Must only be called during construction (before the `Arc` is shared).
+    fn state_mut(&mut self) -> &mut GatewayState {
+        Arc::get_mut(&mut self.state)
+            .expect("GatewayState must be mutated before the Arc is shared")
+    }
+
     /// Inject the workspace reference for the memory API.
     pub fn with_workspace(mut self, workspace: Arc<Workspace>) -> Self {
-        self.state.set_workspace(workspace);
+        self.state_mut().set_workspace(workspace);
         self
     }
 
     /// Inject the session manager for thread/session info.
     pub fn with_session_manager(mut self, sm: Arc<SessionManager>) -> Self {
-        self.state.set_session_manager(sm);
+        self.state_mut().set_session_manager(sm);
         self
     }
 
     /// Inject the log broadcaster for the logs SSE endpoint.
     pub fn with_log_broadcaster(mut self, lb: Arc<LogBroadcaster>) -> Self {
-        self.state.set_log_broadcaster(lb);
+        self.state_mut().set_log_broadcaster(lb);
         self
     }
 
     /// Inject the log level handle for runtime log level control.
     pub fn with_log_level_handle(mut self, h: Arc<LogLevelHandle>) -> Self {
-        self.state.set_log_level_handle(h);
+        self.state_mut().set_log_level_handle(h);
         self
     }
 
     /// Inject the extension manager for the extensions API.
     pub fn with_extension_manager(mut self, em: Arc<ExtensionManager>) -> Self {
-        self.state.set_extension_manager(em);
+        self.state_mut().set_extension_manager(em);
         self
     }
 
     /// Inject the tool registry for the extensions API.
     pub fn with_tool_registry(mut self, tr: Arc<ToolRegistry>) -> Self {
-        self.state.set_tool_registry(tr);
+        self.state_mut().set_tool_registry(tr);
         self
     }
 
     /// Inject the database store for sandbox job persistence.
     pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
-        self.state.set_store(store);
+        self.state_mut().set_store(store);
         self
     }
 
@@ -208,7 +216,7 @@ impl GatewayChannel {
         // Share the same DbAuthenticator (and its cache) between the auth
         // middleware and GatewayState so handlers can invalidate the cache
         // on security-critical actions (suspend, role change, token revoke).
-        self.state
+        self.state_mut()
             .set_db_authenticator(Arc::new(authenticator.clone()));
         self.auth.db_auth = Some(authenticator);
         self
@@ -216,7 +224,7 @@ impl GatewayChannel {
 
     /// Inject the container job manager for sandbox operations.
     pub fn with_job_manager(mut self, jm: Arc<ContainerJobManager>) -> Self {
-        self.state.set_job_manager(jm);
+        self.state_mut().set_job_manager(jm);
         self
     }
 
@@ -232,55 +240,55 @@ impl GatewayChannel {
             >,
         >,
     ) -> Self {
-        self.state.set_prompt_queue(pq);
+        self.state_mut().set_prompt_queue(pq);
         self
     }
 
     /// Inject the scheduler for sending follow-up messages to agent jobs.
     pub fn with_scheduler(mut self, slot: crate::tools::builtin::SchedulerSlot) -> Self {
-        self.state.set_scheduler(slot);
+        self.state_mut().set_scheduler(slot);
         self
     }
 
     /// Inject the skill registry for skill management API.
     pub fn with_skill_registry(mut self, sr: Arc<std::sync::RwLock<SkillRegistry>>) -> Self {
-        self.state.set_skill_registry(sr);
+        self.state_mut().set_skill_registry(sr);
         self
     }
 
     /// Inject the skill catalog for skill search API.
     pub fn with_skill_catalog(mut self, sc: Arc<SkillCatalog>) -> Self {
-        self.state.set_skill_catalog(sc);
+        self.state_mut().set_skill_catalog(sc);
         self
     }
 
     /// Inject the LLM provider for OpenAI-compatible API proxy.
     pub fn with_llm_provider(mut self, llm: Arc<dyn crate::llm::LlmProvider>) -> Self {
-        self.state.set_llm_provider(llm);
+        self.state_mut().set_llm_provider(llm);
         self
     }
 
     /// Inject registry catalog entries for the available extensions API.
     pub fn with_registry_entries(mut self, entries: Vec<crate::extensions::RegistryEntry>) -> Self {
-        self.state.set_registry_entries(entries);
+        self.state_mut().set_registry_entries(entries);
         self
     }
 
     /// Inject the cost guard for token/cost tracking in the status popover.
     pub fn with_cost_guard(mut self, cg: Arc<crate::agent::cost_guard::CostGuard>) -> Self {
-        self.state.set_cost_guard(cg);
+        self.state_mut().set_cost_guard(cg);
         self
     }
 
     /// Inject a shared routine engine slot used by other HTTP ingress paths.
     pub fn with_routine_engine_slot(mut self, slot: server::RoutineEngineSlot) -> Self {
-        self.state.set_routine_engine_slot(slot);
+        self.state_mut().set_routine_engine_slot(slot);
         self
     }
 
     /// Inject the active (resolved) configuration snapshot for the status endpoint.
     pub fn with_active_config(mut self, config: server::ActiveConfigSnapshot) -> Self {
-        self.state.set_active_config(config);
+        self.state_mut().set_active_config(config);
         self
     }
 
@@ -289,7 +297,7 @@ impl GatewayChannel {
         mut self,
         store: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
     ) -> Self {
-        self.state.set_secrets_store(store);
+        self.state_mut().set_secrets_store(store);
         self
     }
 
@@ -378,7 +386,7 @@ impl GatewayChannel {
         if providers.is_empty() && !has_near {
             // No OAuth providers and no NEAR — still apply domain restrictions
             // to OIDC if configured.
-            self.state.set_oauth_allowed_domains(allowed_domains);
+            self.state_mut().set_oauth_allowed_domains(allowed_domains);
             if !self.auth.oidc_allowed_domains.is_empty() {
                 return self;
             }
@@ -409,7 +417,7 @@ impl GatewayChannel {
             }
         });
 
-        self.state.set_oauth_config(
+        self.state_mut().set_oauth_config(
             providers,
             state_store,
             base_url,
@@ -424,13 +432,13 @@ impl GatewayChannel {
 
     /// Inject the per-user workspace pool for multi-user mode.
     pub fn with_workspace_pool(mut self, pool: Arc<server::WorkspacePool>) -> Self {
-        self.state.set_workspace_pool(pool);
+        self.state_mut().set_workspace_pool(pool);
         self
     }
 
     /// Inject the shared pairing store for the pairing API endpoints.
     pub fn with_pairing_store(mut self, store: Arc<crate::pairing::PairingStore>) -> Self {
-        self.state.set_pairing_store(store);
+        self.state_mut().set_pairing_store(store);
         self
     }
 
