@@ -53,6 +53,8 @@ pub async fn tool_policy_get_handler(
 /// Body must be a JSON `AdminToolPolicy`. Tool names and user IDs are
 /// validated for basic sanity (non-empty, reasonable length).
 ///
+/// This endpoint is a full replace (last write wins), not a merge/patch.
+///
 /// Only available in multi-tenant mode (returns 404 in single-user deployments).
 pub async fn tool_policy_put_handler(
     State(state): State<Arc<GatewayState>>,

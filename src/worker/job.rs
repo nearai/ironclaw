@@ -1177,8 +1177,7 @@ struct JobDelegate<'a> {
     has_text_response: std::sync::atomic::AtomicBool,
     /// Cached (user_id, role) for admin tool policy filtering. Populated once
     /// on first access to avoid repeated DB lookups.
-    cached_user_info:
-        tokio::sync::OnceCell<(String, crate::ownership::UserRole)>,
+    cached_user_info: tokio::sync::OnceCell<(String, crate::ownership::UserRole)>,
 }
 
 impl<'a> JobDelegate<'a> {
@@ -1203,10 +1202,8 @@ impl<'a> JobDelegate<'a> {
 
                 let role = if let Some(store) = self.worker.store() {
                     match store.db().get_user(&user_id).await {
-                        Ok(Some(user)) if user.role == "admin" => {
-                            crate::ownership::UserRole::Admin
-                        }
-                        Ok(_) => crate::ownership::UserRole::Member,
+                        Ok(Some(user)) => crate::ownership::UserRole::from_db_role(&user.role),
+                        Ok(None) => crate::ownership::UserRole::Member,
                         Err(e) => {
                             tracing::debug!(
                                 job_id = %self.worker.job_id,

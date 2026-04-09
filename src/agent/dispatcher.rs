@@ -422,6 +422,17 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             tool_defs
         };
 
+        // Apply admin tool policy first so admin-disabled tools are removed
+        // before per-user permission filtering and session auto-approval.
+        let tool_defs = crate::tools::permissions::filter_admin_disabled_tools(
+            tool_defs,
+            self.agent.config.multi_tenant,
+            &self.tenant.identity().role,
+            self.tenant.user_id(),
+            self.agent.store(),
+        )
+        .await;
+
         // Apply per-user tool permission filtering.
         //
         // Load tool_permissions from the per-user DB settings store (same
@@ -509,18 +520,6 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 sess.auto_approve_tool(name);
             }
         }
-
-        // Apply admin tool policy: remove tools the admin has globally or
-        // per-user disabled. Only active in multi-tenant mode. Admin users are
-        // exempt — they always see every tool so they cannot lock themselves out.
-        let tool_defs = crate::tools::permissions::filter_admin_disabled_tools(
-            tool_defs,
-            self.agent.config.multi_tenant,
-            &self.tenant.identity().role,
-            self.tenant.user_id(),
-            self.agent.store(),
-        )
-        .await;
 
         // Update context for this iteration
         reason_ctx.available_tools = tool_defs;
@@ -2508,6 +2507,56 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingToolsProvider {
+        seen_tools: std::sync::Mutex<Vec<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for RecordingToolsProvider {
+        fn model_name(&self) -> &str {
+            "recording-tools"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            Ok(CompletionResponse {
+                content: "ok".to_string(),
+                input_tokens: 0,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
+            let names: Vec<String> = request.tools.iter().map(|t| t.name.clone()).collect();
+            self.seen_tools
+                .lock()
+                .expect("recording tools mutex poisoned")
+                .push(names);
+            Ok(ToolCompletionResponse {
+                content: Some("ok".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 0,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
     /// Helper to build a test Agent with a custom LLM provider and
     /// `max_tool_iterations` override.
     fn make_test_agent_with_llm(llm: Arc<dyn LlmProvider>, max_tool_iterations: usize) -> Agent {
@@ -2618,6 +2667,157 @@ mod tests {
             inner.is_ok(),
             "Dispatcher returned an error: {:?}",
             inner.err()
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_admin_policy_filter_happens_before_auto_approval_and_llm_call() {
+        use crate::agent::session::Session;
+        use crate::channels::IncomingMessage;
+        use crate::llm::ChatMessage;
+        use crate::tools::builtin::{EchoTool, TimeTool};
+        use crate::tools::permissions::{ADMIN_SETTINGS_USER_ID, ADMIN_TOOL_POLICY_KEY};
+        use tokio::sync::Mutex;
+
+        let (db, _tmp_dir) = crate::testing::test_db().await;
+        db.set_setting(
+            "member-user",
+            "tool_permissions",
+            &serde_json::json!({
+                "echo": "always_allow",
+                "time": "always_allow"
+            }),
+        )
+        .await
+        .expect("failed to seed member tool permissions");
+        db.set_setting(
+            ADMIN_SETTINGS_USER_ID,
+            ADMIN_TOOL_POLICY_KEY,
+            &serde_json::json!({
+                "disabled_tools": ["echo"]
+            }),
+        )
+        .await
+        .expect("failed to seed admin tool policy");
+
+        let llm = Arc::new(RecordingToolsProvider::default());
+        let llm_for_assert = Arc::clone(&llm);
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register_sync(Arc::new(EchoTool));
+        tools.register_sync(Arc::new(TimeTool));
+
+        let deps = AgentDeps {
+            owner_id: "default".to_string(),
+            store: Some(db),
+            llm: llm as Arc<dyn LlmProvider>,
+            cheap_llm: None,
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+            })),
+            tools,
+            workspace: None,
+            extension_manager: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skills_config: SkillsConfig::default(),
+            hooks: Arc::new(HookRegistry::new()),
+            cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            sse_tx: None,
+            http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            builder: None,
+            llm_backend: "nearai".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+        };
+
+        let agent = Agent::new(
+            AgentConfig {
+                name: "test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_cost_per_user_per_day_cents: None,
+                max_tool_iterations: 5,
+                auto_approve_tools: true,
+                default_timezone: "UTC".to_string(),
+                max_jobs_per_user: None,
+                max_tokens_per_job: 0,
+                multi_tenant: true,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
+                engine_v2: false,
+            },
+            deps,
+            Arc::new(ChannelManager::new()),
+            None,
+            None,
+            None,
+            Some(Arc::new(ContextManager::new(1))),
+            None,
+        );
+
+        let session = Arc::new(Mutex::new(Session::new("member-user")));
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread(Some("admin-policy")).id
+        };
+        let tenant = agent.tenant_ctx("member-user").await;
+        let message = IncomingMessage::new("test", "member-user", "hello");
+        let initial_messages = vec![ChatMessage::user("hello")];
+
+        let result = agent
+            .run_agentic_loop(
+                &message,
+                tenant,
+                Arc::clone(&session),
+                thread_id,
+                initial_messages,
+            )
+            .await;
+        assert!(result.is_ok(), "dispatcher run failed");
+
+        // admin-disabled tools must not remain auto-approved in session
+        let sess = session.lock().await;
+        assert!(
+            !sess.is_tool_auto_approved("echo"),
+            "echo is admin-disabled and must not be auto-approved"
+        );
+        assert!(
+            sess.is_tool_auto_approved("time"),
+            "time should remain auto-approved"
+        );
+        drop(sess);
+
+        // LLM should never see admin-disabled tools in available_tools.
+        let calls = llm_for_assert
+            .seen_tools
+            .lock()
+            .expect("recording tools mutex poisoned")
+            .clone();
+        assert!(
+            !calls.is_empty(),
+            "LLM should have been called at least once"
+        );
+        assert!(
+            !calls[0].iter().any(|name| name == "echo"),
+            "admin-disabled tool leaked into LLM tool list: {:?}",
+            calls[0]
+        );
+        assert!(
+            calls[0].iter().any(|name| name == "time"),
+            "expected non-disabled tool to remain available: {:?}",
+            calls[0]
         );
     }
 

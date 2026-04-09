@@ -175,10 +175,6 @@ Work independently to complete this job. When finished, your final message MUST 
                 last_output: Mutex::new(String::new()),
                 iteration_tracker: iteration_tracker.clone(),
                 recovery_state: Mutex::new(AutonomousRecoveryState::default()),
-                multi_tenant: false,
-                user_role: crate::ownership::UserRole::Member,
-                user_id: String::new(),
-                db: None,
             };
 
             let config = AgenticLoopConfig {
@@ -332,14 +328,6 @@ struct ContainerDelegate {
     /// `CompletionReport` can include accurate iteration counts.
     iteration_tracker: Arc<Mutex<u32>>,
     recovery_state: Mutex<AutonomousRecoveryState>,
-    // Fields for admin tool policy filtering. The container worker currently
-    // has no DB access, so filtering is a no-op. These fields are set from
-    // the job metadata received from the orchestrator, enabling defence-in-depth
-    // if the container gains DB connectivity in the future.
-    multi_tenant: bool,
-    user_role: crate::ownership::UserRole,
-    user_id: String,
-    db: Option<Arc<dyn crate::db::Database>>,
 }
 
 impl ContainerDelegate {
@@ -422,22 +410,7 @@ impl LoopDelegate for ContainerDelegate {
             reason_ctx.available_tools.clear();
         } else {
             // Refresh tools (in case WASM tools were built)
-            let tool_defs = self.tools.tool_definitions().await;
-
-            // Apply admin tool policy filtering. The container worker has no
-            // direct DB access, so this is a no-op today (db=None skips the
-            // filter). The orchestrator enforces the policy before proxying.
-            // Kept here for defence-in-depth if the container gains DB access.
-            let tool_defs = crate::tools::permissions::filter_admin_disabled_tools(
-                tool_defs,
-                self.multi_tenant,
-                &self.user_role,
-                &self.user_id,
-                self.db.as_ref(),
-            )
-            .await;
-
-            reason_ctx.available_tools = tool_defs;
+            reason_ctx.available_tools = self.tools.tool_definitions().await;
         }
 
         None
