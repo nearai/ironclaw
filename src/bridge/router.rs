@@ -51,6 +51,68 @@ fn gate_display_parameters(pending: &PendingGate) -> serde_json::Value {
         .unwrap_or_else(|| pending.parameters.clone())
 }
 
+async fn send_pending_gate_status(agent: &Agent, message: &IncomingMessage, pending: &PendingGate) {
+    let display_parameters = gate_display_parameters(pending);
+
+    match &pending.resume_kind {
+        ironclaw_engine::ResumeKind::Approval { allow_always } => {
+            let _ = agent
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::ApprovalNeeded {
+                        request_id: pending.request_id.to_string(),
+                        tool_name: pending.action_name.clone(),
+                        description: pending.description.clone(),
+                        parameters: display_parameters,
+                        allow_always: *allow_always,
+                    },
+                    &message.metadata,
+                )
+                .await;
+        }
+        ironclaw_engine::ResumeKind::Authentication {
+            credential_name,
+            instructions,
+            auth_url,
+        } => {
+            let _ = agent
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::AuthRequired {
+                        extension_name: credential_name.clone(),
+                        instructions: Some(instructions.clone()),
+                        auth_url: auth_url.clone(),
+                        setup_url: None,
+                    },
+                    &message.metadata,
+                )
+                .await;
+        }
+        ironclaw_engine::ResumeKind::External { .. } => {}
+    }
+}
+
+fn pending_gate_prompt_message(pending: &PendingGate) -> Option<String> {
+    match &pending.resume_kind {
+        ironclaw_engine::ResumeKind::Approval { .. } => Some(format!(
+            "Tool '{}' requires approval. Reply 'yes' to approve, 'no' to deny.",
+            pending.action_name
+        )),
+        ironclaw_engine::ResumeKind::Authentication {
+            credential_name, ..
+        } => Some(format!(
+            "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
+            credential_name
+        )),
+        ironclaw_engine::ResumeKind::External { .. } => Some(format!(
+            "Waiting for external confirmation (gate: {})...",
+            pending.gate_name
+        )),
+    }
+}
+
 fn resumed_action_result_message(
     action_name: &str,
     output: &serde_json::Value,
@@ -93,64 +155,16 @@ async fn insert_and_notify_pending_gate(
         );
     }
 
-    match &pending.resume_kind {
-        ironclaw_engine::ResumeKind::Approval { allow_always } => {
-            let _ = agent
-                .channels
-                .send_status(
-                    &message.channel,
-                    StatusUpdate::ApprovalNeeded {
-                        request_id: pending.request_id.to_string(),
-                        tool_name: pending.action_name.clone(),
-                        description: pending.description.clone(),
-                        parameters: display_parameters,
-                        allow_always: *allow_always,
-                    },
-                    &message.metadata,
-                )
-                .await;
-
-            Ok(Some(format!(
-                "Tool '{}' requires approval. Reply 'yes' to approve, 'no' to deny.",
-                pending.action_name
-            )))
-        }
-        ironclaw_engine::ResumeKind::Authentication {
-            credential_name,
-            instructions,
-            auth_url,
-        } => {
-            let _ = agent
-                .channels
-                .send_status(
-                    &message.channel,
-                    StatusUpdate::AuthRequired {
-                        extension_name: credential_name.clone(),
-                        instructions: Some(instructions.clone()),
-                        auth_url: auth_url.clone(),
-                        setup_url: None,
-                    },
-                    &message.metadata,
-                )
-                .await;
-
-            Ok(Some(format!(
-                "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
-                credential_name
-            )))
-        }
-        ironclaw_engine::ResumeKind::External { callback_id } => {
-            tracing::debug!(
-                gate = %pending.gate_name,
-                callback = %callback_id,
-                "GatePaused(External)"
-            );
-            Ok(Some(format!(
-                "Waiting for external confirmation (gate: {})...",
-                pending.gate_name
-            )))
-        }
+    if let ironclaw_engine::ResumeKind::External { callback_id } = &pending.resume_kind {
+        tracing::debug!(
+            gate = %pending.gate_name,
+            callback = %callback_id,
+            "GatePaused(External)"
+        );
     }
+
+    send_pending_gate_status(agent, message, &pending).await;
+    Ok(pending_gate_prompt_message(&pending))
 }
 
 async fn execute_pending_gate_action(
@@ -1866,33 +1880,42 @@ async fn handle_with_engine_inner(
     let thread_scope = message.conversation_scope();
     let scoped_thread_id = parse_engine_thread_id(thread_scope);
 
-    if let PendingGateResolution::Resolved(gate) =
-        resolve_pending_gate_for_user(&state.pending_gates, &message.user_id, thread_scope).await
-        && matches!(
-            gate.resume_kind,
-            ironclaw_engine::ResumeKind::Authentication { .. }
-        )
+    match resolve_pending_gate_for_user(&state.pending_gates, &message.user_id, thread_scope).await
     {
-        let request_id = gate.request_id;
-        let resolution =
-            if content.trim().is_empty() || content.trim().eq_ignore_ascii_case("cancel") {
-                ironclaw_engine::GateResolution::Cancelled
-            } else {
-                ironclaw_engine::GateResolution::CredentialProvided {
-                    token: content.trim().to_string(),
-                }
-            };
-        drop(guard);
-        return resolve_gate(agent, message, gate.thread_id, request_id, resolution).await;
-    }
-
-    if matches!(
-        resolve_pending_gate_for_user(&state.pending_gates, &message.user_id, thread_scope).await,
-        PendingGateResolution::Ambiguous
-    ) {
-        return Ok(Some(
-            "Multiple authentication prompts are waiting. Reply from the original thread.".into(),
-        ));
+        PendingGateResolution::Resolved(gate)
+            if matches!(
+                gate.resume_kind,
+                ironclaw_engine::ResumeKind::Authentication { .. }
+            ) =>
+        {
+            let request_id = gate.request_id;
+            let resolution =
+                if content.trim().is_empty() || content.trim().eq_ignore_ascii_case("cancel") {
+                    ironclaw_engine::GateResolution::Cancelled
+                } else {
+                    ironclaw_engine::GateResolution::CredentialProvided {
+                        token: content.trim().to_string(),
+                    }
+                };
+            drop(guard);
+            return resolve_gate(agent, message, gate.thread_id, request_id, resolution).await;
+        }
+        PendingGateResolution::Resolved(gate)
+            if matches!(
+                gate.resume_kind,
+                ironclaw_engine::ResumeKind::Approval { .. }
+            ) =>
+        {
+            drop(guard);
+            send_pending_gate_status(agent, message, &gate).await;
+            return Ok(pending_gate_prompt_message(&gate));
+        }
+        PendingGateResolution::Ambiguous => {
+            return Ok(Some(
+                "Multiple pending gates are waiting. Reply from the original thread.".into(),
+            ));
+        }
+        PendingGateResolution::Resolved(_) | PendingGateResolution::None => {}
     }
 
     if let Some(thread_id) = scoped_thread_id
@@ -2453,6 +2476,8 @@ async fn forward_event_to_channel(
                     channel_name,
                     StatusUpdate::ToolStarted {
                         name: display_name.clone(),
+                        detail: params_summary.clone(),
+                        call_id: None,
                     },
                     metadata,
                 )
@@ -2465,6 +2490,7 @@ async fn forward_event_to_channel(
                         success: true,
                         error: None,
                         parameters: Some(format!("{duration_ms}ms")),
+                        call_id: None,
                     },
                     metadata,
                 )
@@ -2482,6 +2508,8 @@ async fn forward_event_to_channel(
                     channel_name,
                     StatusUpdate::ToolStarted {
                         name: display_name.clone(),
+                        detail: params_summary.clone(),
+                        call_id: None,
                     },
                     metadata,
                 )
@@ -2494,6 +2522,7 @@ async fn forward_event_to_channel(
                         success: false,
                         error: Some(error.clone()),
                         parameters: None,
+                        call_id: None,
                     },
                     metadata,
                 )
@@ -2584,6 +2613,7 @@ fn thread_event_to_app_events(
             vec![
                 AppEvent::ToolStarted {
                     name: display_name.clone(),
+                    detail: params_summary.clone(),
                     thread_id: Some(thread_id.into()),
                 },
                 AppEvent::ToolCompleted {
@@ -2605,6 +2635,7 @@ fn thread_event_to_app_events(
             vec![
                 AppEvent::ToolStarted {
                     name: display_name.clone(),
+                    detail: params_summary.clone(),
                     thread_id: Some(thread_id.into()),
                 },
                 AppEvent::ToolCompleted {
@@ -3285,9 +3316,22 @@ async fn migrate_legacy_user_ids(store: &Arc<dyn ironclaw_engine::Store>, owner_
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use std::sync::LazyLock;
+    use std::sync::Mutex as StdMutex;
+    use std::time::Duration;
     use tokio::sync::Mutex as TokioMutex;
     use tokio::sync::RwLock as TokioRwLock;
+
+    use crate::agent::AgentDeps;
+    use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+    use crate::channels::{ChannelManager, IncomingMessage, StatusUpdate};
+    use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
+    use crate::context::ContextManager;
+    use crate::hooks::HookRegistry;
+    use crate::testing::{StubChannel, StubLlm};
+    use crate::tools::ToolRegistry;
+    use ironclaw_safety::SafetyLayer;
 
     static ENGINE_STATE_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
 
@@ -3773,6 +3817,141 @@ mod tests {
             secrets_store: None,
             auth_manager: None,
         }
+    }
+
+    async fn make_test_agent_with_status_channel(
+        channel_name: &str,
+    ) -> (Agent, Arc<StdMutex<Vec<StatusUpdate>>>) {
+        let (stub, _sender) = StubChannel::new(channel_name);
+        let statuses = stub.captured_statuses_handle();
+        let manager = ChannelManager::new();
+        manager.add(Box::new(stub)).await;
+
+        let deps = AgentDeps {
+            owner_id: "default".to_string(),
+            store: None,
+            llm: Arc::new(StubLlm::default()),
+            cheap_llm: None,
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+            })),
+            tools: Arc::new(ToolRegistry::new()),
+            workspace: None,
+            extension_manager: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skills_config: SkillsConfig::default(),
+            hooks: Arc::new(HookRegistry::new()),
+            cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            sse_tx: None,
+            http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            builder: None,
+            llm_backend: "nearai".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+        };
+
+        let agent = Agent::new(
+            AgentConfig {
+                name: "test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_cost_per_user_per_day_cents: None,
+                max_tool_iterations: 50,
+                auto_approve_tools: false,
+                default_timezone: "UTC".to_string(),
+                max_jobs_per_user: None,
+                max_tokens_per_job: 0,
+                multi_tenant: false,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
+                engine_v2: true,
+            },
+            deps,
+            Arc::new(manager),
+            None,
+            None,
+            None,
+            Some(Arc::new(ContextManager::new(1))),
+            None,
+        );
+
+        (agent, statuses)
+    }
+
+    #[tokio::test]
+    async fn handle_with_engine_reemits_approval_status_for_pending_gate() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let state = make_expected_test_state(store);
+            let thread_id = ironclaw_engine::ThreadId::new();
+            let pending = sample_pending_gate(
+                "alice",
+                thread_id,
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            );
+            state
+                .pending_gates
+                .insert(pending.clone())
+                .await
+                .expect("insert pending gate");
+
+            *lock.write().await = Some(state);
+
+            let (agent, statuses) = make_test_agent_with_status_channel("tui").await;
+            let message = IncomingMessage::new("tui", "alice", "what now?")
+                .with_thread(thread_id.to_string());
+
+            let result = handle_with_engine_inner(&agent, &message, &message.content, 0)
+                .await
+                .expect("handle with engine");
+
+            let text = result.expect("waiting message");
+            assert!(
+                text.contains("approval"),
+                "expected approval guidance, got: {text}"
+            );
+
+            let statuses = statuses.lock().expect("poisoned").clone();
+            assert!(
+                statuses.iter().any(|status| matches!(
+                    status,
+                    StatusUpdate::ApprovalNeeded {
+                        request_id,
+                        tool_name,
+                        description,
+                        parameters,
+                        allow_always,
+                    } if request_id == &pending.request_id.to_string()
+                        && tool_name == "shell"
+                        && description == "pending gate"
+                        && parameters == &serde_json::json!({"cmd": "ls"})
+                        && *allow_always
+                )),
+                "expected approval status to be re-emitted, got: {statuses:?}"
+            );
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("router approval re-emit test");
     }
 
     /// find_most_recent_thread returns the active thread when one exists.

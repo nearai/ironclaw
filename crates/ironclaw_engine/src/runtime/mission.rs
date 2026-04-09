@@ -4,21 +4,27 @@
 //! progress. The manager handles lifecycle (create, pause, resume, complete)
 //! and delegates thread spawning to [`ThreadManager`].
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
+use serde::Deserialize;
 use tokio::sync::RwLock;
 use tracing::debug;
 
-use crate::memory::RetrievalEngine;
+use ironclaw_skills::types::ActivationCriteria;
+use ironclaw_skills::v2::{CodeSnippet, SkillRepairRecord, SkillRepairType, V2SkillMetadata};
+
+use crate::executor::trace::{ExecutionTrace, IssueSeverity};
+use crate::memory::{RetrievalEngine, SkillTracker};
 use crate::runtime::manager::ThreadManager;
 use crate::runtime::messaging::ThreadOutcome;
 use crate::traits::store::Store;
 use crate::types::error::EngineError;
-use crate::types::memory::MemoryDoc;
+use crate::types::memory::{DocId, DocType, MemoryDoc};
 use crate::types::mission::{Mission, MissionCadence, MissionId, MissionStatus, next_cron_fire};
 use crate::types::project::ProjectId;
 use crate::types::shared_owner_id;
-use crate::types::thread::{ThreadConfig, ThreadId, ThreadType};
+use crate::types::thread::{ActiveSkillProvenance, Thread, ThreadConfig, ThreadId, ThreadType};
 
 /// Notification emitted when a mission thread completes.
 ///
@@ -585,10 +591,12 @@ impl MissionManager {
     /// Subscribes to the ThreadManager's event broadcast channel and watches
     /// for `StateChanged { to: Done }`. For each completed non-Mission thread:
     ///
-    /// 1. **Error diagnosis** — if trace has issues, fires `thread_completed_with_issues`
-    /// 2. **Skill extraction** — if thread succeeded with many steps/actions,
+    /// 1. **Skill repair** — if an active skill looks stale or incomplete,
+    ///    fires `thread_completed_with_skill_gap`
+    /// 2. **Error diagnosis** — if trace has issues, fires `thread_completed_with_issues`
+    /// 3. **Skill extraction** — if thread succeeded with many steps/actions,
     ///    fires `thread_completed_with_learnings`
-    /// 3. **Conversation insights** — after every N threads in a conversation,
+    /// 4. **Conversation insights** — after every N threads in a conversation,
     ///    fires `conversation_insights_due`
     pub fn start_event_listener(self: &Arc<Self>, _owner_id: String) {
         let mgr = Arc::clone(self);
@@ -609,17 +617,9 @@ impl MissionManager {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
-                        // Only react to threads transitioning to Done
-                        let is_done = matches!(
-                            event.kind,
-                            crate::types::event::EventKind::StateChanged {
-                                to: crate::types::thread::ThreadState::Done,
-                                ..
-                            }
-                        );
-                        if !is_done {
+                        let Some(terminal_state) = learning_terminal_state(&event.kind) else {
                             continue;
-                        }
+                        };
 
                         // Load the completed thread
                         let thread = match mgr.store.load_thread(event.thread_id).await {
@@ -632,8 +632,49 @@ impl MissionManager {
                             continue;
                         }
 
-                        // ── Trigger 1: Error diagnosis ──────────────────
                         let trace = crate::executor::trace::build_trace(&thread);
+                        // Single pass over events for both skill-repair and
+                        // error-diagnosis triggers (avoids repeated iteration
+                        // on large event logs).
+                        let (error_messages, _observed_actions) =
+                            collect_errors_and_actions(&thread);
+                        let active_skills = thread.active_skills();
+
+                        // ── Trigger 1: Skill repair ───────────────────────
+                        // NOTE: skill-repair and error-diagnosis can both fire
+                        // for the same thread. Each targets a different mission
+                        // so they won't collide, but both may spawn concurrent
+                        // threads. This is intentional — skill-repair fixes the
+                        // *skill* while error-diagnosis fixes the *prompt/orchestrator*.
+                        if !active_skills.is_empty() {
+                            let tracker = SkillTracker::new(Arc::clone(&mgr.store));
+                            let success = thread_completed_successfully(&thread, &trace);
+                            for skill in &active_skills {
+                                if let Err(e) = tracker.record_usage(skill.doc_id, success).await {
+                                    debug!(
+                                        skill_doc_id = %skill.doc_id.0,
+                                        thread_id = %thread.id,
+                                        "event listener: failed to record skill usage: {e}"
+                                    );
+                                }
+                            }
+
+                            if let Some(payload) =
+                                build_skill_gap_payload(&thread, &trace, &active_skills)
+                                && let Err(e) = mgr
+                                    .fire_on_system_event(
+                                        "engine",
+                                        "thread_completed_with_skill_gap",
+                                        &thread.user_id,
+                                        Some(payload),
+                                    )
+                                    .await
+                            {
+                                debug!("event listener: failed to fire skill repair: {e}");
+                            }
+                        }
+
+                        // ── Trigger 2: Error diagnosis ──────────────────
                         if !trace.issues.is_empty() {
                             let issues: Vec<serde_json::Value> = trace
                                 .issues
@@ -641,29 +682,11 @@ impl MissionManager {
                                 .map(|i| {
                                     serde_json::json!({
                                         "severity": format!("{:?}", i.severity),
-                                        "category": i.category,
-                                        "description": i.description,
+                                        "category": i.category.clone(),
+                                        "description": i.description.clone(),
                                         "step": i.step,
                                     })
                                 })
-                                .collect();
-
-                            let error_messages: Vec<String> = thread
-                                .events
-                                .iter()
-                                .filter_map(|e| {
-                                    if let crate::types::event::EventKind::ActionFailed {
-                                        action_name,
-                                        error,
-                                        ..
-                                    } = &e.kind
-                                    {
-                                        Some(format!("{action_name}: {error}"))
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .take(10)
                                 .collect();
 
                             let payload = serde_json::json!({
@@ -686,7 +709,7 @@ impl MissionManager {
                             }
                         }
 
-                        // ── Trigger 2: Skill extraction ──────────────────
+                        // ── Trigger 3: Skill extraction ──────────────────
                         let action_count = thread
                             .events
                             .iter()
@@ -698,7 +721,7 @@ impl MissionManager {
                             })
                             .count();
 
-                        if thread.state == crate::types::thread::ThreadState::Done
+                        if terminal_state == crate::types::thread::ThreadState::Done
                             && trace
                                 .issues
                                 .iter()
@@ -744,54 +767,59 @@ impl MissionManager {
                             }
                         }
 
-                        // ── Trigger 3: Conversation insights ────────────
-                        // Use the thread's project_id as a proxy for conversation scope.
-                        let conv_key = thread.project_id.0.to_string();
-                        let count = conv_thread_counts.entry(conv_key.clone()).or_insert(0);
-                        *count += 1;
+                        // ── Trigger 4: Conversation insights ────────────
+                        // Keep insights tied to successful completions only.
+                        if should_count_for_conversation_insights(terminal_state) {
+                            // Use the thread's project_id as a proxy for conversation scope.
+                            let conv_key = thread.project_id.0.to_string();
+                            let count = conv_thread_counts.entry(conv_key.clone()).or_insert(0);
+                            *count += 1;
 
-                        if (*count).is_multiple_of(CONVERSATION_INSIGHTS_INTERVAL) {
-                            // Collect recent thread goals for context
-                            let thread_goals: Vec<String> = match mgr
-                                .store
-                                .list_threads(thread.project_id, &thread.user_id)
-                                .await
-                            {
-                                Ok(threads) => threads
+                            if (*count).is_multiple_of(CONVERSATION_INSIGHTS_INTERVAL) {
+                                // Collect recent thread goals for context
+                                let thread_goals: Vec<String> = match mgr
+                                    .store
+                                    .list_threads(thread.project_id, &thread.user_id)
+                                    .await
+                                {
+                                    Ok(threads) => threads
+                                        .iter()
+                                        .rev()
+                                        .take(CONVERSATION_INSIGHTS_INTERVAL as usize)
+                                        .map(|t| t.goal.clone())
+                                        .collect(),
+                                    Err(_) => vec![thread.goal.clone()],
+                                };
+
+                                // Collect sample user messages from recent threads
+                                let sample_messages: Vec<String> = thread
+                                    .messages
                                     .iter()
-                                    .rev()
-                                    .take(CONVERSATION_INSIGHTS_INTERVAL as usize)
-                                    .map(|t| t.goal.clone())
-                                    .collect(),
-                                Err(_) => vec![thread.goal.clone()],
-                            };
+                                    .filter(|m| m.role == crate::types::message::MessageRole::User)
+                                    .map(|m| m.content.chars().take(200).collect::<String>())
+                                    .take(10)
+                                    .collect();
 
-                            // Collect sample user messages from recent threads
-                            let sample_messages: Vec<String> = thread
-                                .messages
-                                .iter()
-                                .filter(|m| m.role == crate::types::message::MessageRole::User)
-                                .map(|m| m.content.chars().take(200).collect::<String>())
-                                .take(10)
-                                .collect();
+                                let payload = serde_json::json!({
+                                    "project_id": thread.project_id.0.to_string(),
+                                    "completed_thread_count": *count,
+                                    "thread_goals": thread_goals,
+                                    "sample_user_messages": sample_messages,
+                                });
 
-                            let payload = serde_json::json!({
-                                "project_id": thread.project_id.0.to_string(),
-                                "completed_thread_count": *count,
-                                "thread_goals": thread_goals,
-                                "sample_user_messages": sample_messages,
-                            });
-
-                            if let Err(e) = mgr
-                                .fire_on_system_event(
-                                    "engine",
-                                    "conversation_insights_due",
-                                    &thread.user_id,
-                                    Some(payload),
-                                )
-                                .await
-                            {
-                                debug!("event listener: failed to fire conversation insights: {e}");
+                                if let Err(e) = mgr
+                                    .fire_on_system_event(
+                                        "engine",
+                                        "conversation_insights_due",
+                                        &thread.user_id,
+                                        Some(payload),
+                                    )
+                                    .await
+                                {
+                                    debug!(
+                                        "event listener: failed to fire conversation insights: {e}"
+                                    );
+                                }
                             }
                         }
                     }
@@ -884,11 +912,11 @@ impl MissionManager {
         Ok(id)
     }
 
-    /// Ensure all three learning missions exist for the given project.
+    /// Ensure the built-in learning missions exist for the given project.
     ///
-    /// Creates (if missing) the self-improvement, skill extraction, and
-    /// conversation insights missions. This is the preferred entry point —
-    /// call once at project bootstrap.
+    /// Creates (if missing) the self-improvement, skill repair, skill
+    /// extraction, and conversation insights missions. This is the preferred
+    /// entry point — call once at project bootstrap.
     pub async fn ensure_learning_missions(
         &self,
         project_id: ProjectId,
@@ -901,7 +929,23 @@ impl MissionManager {
         self.ensure_self_improvement_mission(project_id, user_id)
             .await?;
 
-        // 2. Skill extraction (formerly playbook extraction)
+        // 2. Skill repair
+        self.ensure_mission_by_metadata(
+            project_id,
+            user_id,
+            "skill_repair",
+            "skill-repair",
+            SKILL_REPAIR_GOAL,
+            MissionCadence::OnSystemEvent {
+                source: "engine".into(),
+                event_type: "thread_completed_with_skill_gap".into(),
+            },
+            "Repair versioned skills when execution reveals stale or incomplete instructions",
+            5,
+        )
+        .await?;
+
+        // 3. Skill extraction (formerly playbook extraction)
         self.ensure_mission_by_metadata(
             project_id,
             user_id,
@@ -917,7 +961,7 @@ impl MissionManager {
         )
         .await?;
 
-        // 3. Conversation insights
+        // 4. Conversation insights
         self.ensure_mission_by_metadata(
             project_id,
             user_id,
@@ -933,7 +977,7 @@ impl MissionManager {
         )
         .await?;
 
-        // 4. Expected behavior (user feedback loop)
+        // 5. Expected behavior (user feedback loop)
         self.ensure_mission_by_metadata(
             project_id,
             user_id,
@@ -1281,6 +1325,15 @@ async fn process_mission_outcome_and_notify(
                     "failed to process self-improvement output: {e}"
                 );
             }
+
+            if is_skill_repair_mission(&mission)
+                && let Err(e) = process_skill_repair_output(store, &mission, text).await
+            {
+                debug!(
+                    mission_id = %mission_id,
+                    "failed to process skill-repair output: {e}"
+                );
+            }
         }
         ThreadOutcome::Completed { response: None } => {}
         ThreadOutcome::Failed { error } => {
@@ -1322,6 +1375,15 @@ fn is_self_improvement_mission(mission: &Mission) -> bool {
     mission
         .metadata
         .get("self_improvement")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Check if a mission is the skill-repair mission.
+fn is_skill_repair_mission(mission: &Mission) -> bool {
+    mission
+        .metadata
+        .get("skill_repair")
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
 }
@@ -1495,6 +1557,491 @@ fn extract_json_from_response(response: &str) -> Option<serde_json::Value> {
         .filter(|v| v.is_object())
 }
 
+#[derive(Debug, Deserialize)]
+struct SkillRepairMissionOutput {
+    doc_id: DocId,
+    repair_type: SkillRepairType,
+    updated_content: String,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    activation: Option<ActivationCriteria>,
+    #[serde(default)]
+    code_snippets: Option<Vec<CodeSnippet>>,
+}
+
+async fn process_skill_repair_output(
+    store: &Arc<dyn Store>,
+    mission: &Mission,
+    response: &str,
+) -> Result<(), EngineError> {
+    let json_val = match extract_json_from_response(response) {
+        Some(v) => v,
+        None => {
+            debug!("skill-repair: no structured JSON in response");
+            return Ok(());
+        }
+    };
+    let repair: SkillRepairMissionOutput =
+        serde_json::from_value(json_val).map_err(|e| EngineError::Skill {
+            reason: format!("invalid skill-repair output: {e}"),
+        })?;
+
+    let Some(triggered_skill) = triggered_skill_provenance(mission, repair.doc_id) else {
+        return Err(EngineError::Skill {
+            reason: if has_skill_trigger_payload(mission) {
+                format!(
+                    "skill-repair attempted to modify untriggered skill {}",
+                    repair.doc_id.0
+                )
+            } else {
+                "skill-repair requires an active skill trigger payload".into()
+            },
+        });
+    };
+    if repair.updated_content.trim().is_empty() {
+        return Err(EngineError::Skill {
+            reason: format!(
+                "skill-repair produced empty updated_content for skill {}",
+                repair.doc_id.0
+            ),
+        });
+    }
+
+    let existing =
+        store
+            .load_memory_doc(repair.doc_id)
+            .await?
+            .ok_or_else(|| EngineError::Skill {
+                reason: format!("skill doc not found: {}", repair.doc_id.0),
+            })?;
+    if existing.project_id != mission.project_id {
+        return Err(EngineError::Skill {
+            reason: format!(
+                "skill-repair attempted to modify skill {} outside mission project",
+                repair.doc_id.0
+            ),
+        });
+    }
+    if !existing.is_owned_by(&mission.user_id) {
+        return Err(EngineError::AccessDenied {
+            user_id: mission.user_id.clone(),
+            entity: format!("skill {}", repair.doc_id.0),
+        });
+    }
+    if existing.doc_type != DocType::Skill {
+        return Err(EngineError::Skill {
+            reason: format!(
+                "skill-repair attempted to modify non-skill doc {} ({:?})",
+                repair.doc_id.0, existing.doc_type
+            ),
+        });
+    }
+    serde_json::from_value::<V2SkillMetadata>(existing.metadata.clone()).map_err(|e| {
+        EngineError::Skill {
+            reason: format!("invalid skill metadata for {}: {e}", repair.doc_id.0),
+        }
+    })?;
+    let from_version = triggered_skill.version;
+    let source_thread_id = mission
+        .last_trigger_payload
+        .as_ref()
+        .and_then(|payload| payload.get("source_thread_id"))
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string);
+    let summary = if repair.summary.trim().is_empty() {
+        format!("Applied {:?} repair", repair.repair_type)
+    } else {
+        repair.summary.clone()
+    };
+
+    let tracker = SkillTracker::new(Arc::clone(store));
+    tracker
+        .update_skill(
+            repair.doc_id,
+            repair.updated_content,
+            Some(triggered_skill.version),
+            move |meta| {
+                if let Some(description) = repair.description {
+                    meta.description = description;
+                }
+                if let Some(activation) = repair.activation {
+                    meta.activation = activation;
+                }
+                if let Some(code_snippets) = repair.code_snippets {
+                    meta.code_snippets = code_snippets;
+                }
+                meta.repairs.push(SkillRepairRecord {
+                    source_thread_id,
+                    from_version,
+                    to_version: meta.version,
+                    repair_type: repair.repair_type,
+                    summary,
+                    repaired_at: Some(chrono::Utc::now()),
+                });
+                if meta.repairs.len() > 10 {
+                    let keep_from = meta.repairs.len() - 10;
+                    meta.repairs.drain(0..keep_from);
+                }
+            },
+        )
+        .await
+}
+
+fn has_skill_trigger_payload(mission: &Mission) -> bool {
+    mission
+        .last_trigger_payload
+        .as_ref()
+        .and_then(|payload| payload.get("active_skills"))
+        .and_then(|value| value.as_array())
+        .is_some_and(|skills| !skills.is_empty())
+}
+
+fn triggered_skill_provenance(mission: &Mission, doc_id: DocId) -> Option<ActiveSkillProvenance> {
+    mission
+        .last_trigger_payload
+        .as_ref()
+        .and_then(|payload| payload.get("active_skills"))
+        .cloned()
+        .and_then(|value| serde_json::from_value::<Vec<ActiveSkillProvenance>>(value).ok())
+        .and_then(|skills| skills.into_iter().find(|skill| skill.doc_id == doc_id))
+}
+
+/// Collects error messages and deduplicated observed action names in a single
+/// pass over `thread.events`.  Previous implementation used separate passes
+/// which is wasteful for threads with large event logs.
+fn collect_errors_and_actions(thread: &Thread) -> (Vec<String>, Vec<String>) {
+    let mut error_messages = Vec::new();
+    let mut actions = Vec::new();
+    let mut seen = HashSet::new();
+
+    for event in &thread.events {
+        match &event.kind {
+            crate::types::event::EventKind::ActionFailed {
+                action_name, error, ..
+            } => {
+                if !is_recoverable_action_failure(error) && error_messages.len() < 10 {
+                    error_messages.push(format!("{action_name}: {error}"));
+                }
+                if seen.insert(action_name.clone()) {
+                    actions.push(action_name.clone());
+                }
+            }
+            crate::types::event::EventKind::ActionExecuted { action_name, .. } => {
+                if seen.insert(action_name.clone()) {
+                    actions.push(action_name.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (error_messages, actions)
+}
+
+fn learning_terminal_state(
+    event_kind: &crate::types::event::EventKind,
+) -> Option<crate::types::thread::ThreadState> {
+    match event_kind {
+        crate::types::event::EventKind::StateChanged {
+            to: crate::types::thread::ThreadState::Done,
+            ..
+        } => Some(crate::types::thread::ThreadState::Done),
+        crate::types::event::EventKind::StateChanged {
+            to: crate::types::thread::ThreadState::Failed,
+            ..
+        } => Some(crate::types::thread::ThreadState::Failed),
+        _ => None,
+    }
+}
+
+fn should_count_for_conversation_insights(
+    terminal_state: crate::types::thread::ThreadState,
+) -> bool {
+    terminal_state == crate::types::thread::ThreadState::Done
+}
+
+fn has_action_failures(thread: &Thread) -> bool {
+    thread.events.iter().any(|event| match &event.kind {
+        crate::types::event::EventKind::ActionFailed { error, .. } => {
+            !is_recoverable_action_failure(error)
+        }
+        _ => false,
+    })
+}
+
+fn is_recoverable_auth_failure_text(text: &str) -> bool {
+    text.to_ascii_lowercase()
+        .contains("authentication required for credential ")
+}
+
+fn is_recoverable_action_failure(error: &str) -> bool {
+    is_recoverable_auth_failure_text(error)
+}
+
+fn action_params_summary(event: &crate::types::event::ThreadEvent) -> Option<&str> {
+    match &event.kind {
+        crate::types::event::EventKind::ActionExecuted { params_summary, .. }
+        | crate::types::event::EventKind::ActionFailed { params_summary, .. } => {
+            params_summary.as_deref()
+        }
+        _ => None,
+    }
+}
+
+fn contains_word(haystack: &str, word: &str) -> bool {
+    for (start, _) in haystack.match_indices(word) {
+        let before_ok = start == 0 || haystack.as_bytes()[start - 1].is_ascii_whitespace();
+        let end = start + word.len();
+        let after_ok = end == haystack.len() || haystack.as_bytes()[end].is_ascii_whitespace();
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
+}
+
+fn has_shell_verification_action(thread: &Thread) -> bool {
+    const PHRASE_PATTERNS: &[&str] = &[
+        "cargo test",
+        "pytest",
+        "npm test",
+        "pnpm test",
+        "yarn test",
+        "go test",
+        "git diff",
+        "git status",
+        "gh pr view",
+        "gh issue view",
+        "cat ",
+        "head ",
+        "tail ",
+        "grep ",
+        "rg ",
+        "find ",
+        "stat ",
+    ];
+    const WORD_PATTERNS: &[&str] = &["ls", "diff", "status", "view", "show"];
+
+    thread.events.iter().any(|event| match &event.kind {
+        crate::types::event::EventKind::ActionExecuted { action_name, .. }
+            if action_name == "shell" =>
+        {
+            action_params_summary(event)
+                .map(|summary| {
+                    let lower = summary.to_lowercase();
+                    PHRASE_PATTERNS
+                        .iter()
+                        .any(|pattern| lower.contains(pattern))
+                        || WORD_PATTERNS.iter().any(|word| contains_word(&lower, word))
+                })
+                .unwrap_or(false)
+        }
+        crate::types::event::EventKind::ActionFailed { action_name, .. }
+            if action_name == "shell" =>
+        {
+            action_params_summary(event)
+                .map(|summary| {
+                    let lower = summary.to_lowercase();
+                    PHRASE_PATTERNS
+                        .iter()
+                        .any(|pattern| lower.contains(pattern))
+                        || WORD_PATTERNS.iter().any(|word| contains_word(&lower, word))
+                })
+                .unwrap_or(false)
+        }
+        _ => false,
+    })
+}
+
+fn has_mutating_shell_or_git_action(thread: &Thread) -> bool {
+    const PHRASE_PATTERNS: &[&str] = &[
+        "apply_patch",
+        "git commit",
+        "git push",
+        "git pull",
+        "git merge",
+        "git rebase",
+        "git cherry-pick",
+        "git revert",
+        "git reset",
+        "git checkout",
+        "git switch",
+        "cargo fmt",
+        "rustfmt",
+        "npm install",
+        "pnpm install",
+        "yarn install",
+        "mkdir ",
+        "rm ",
+        "mv ",
+        "cp ",
+        "touch ",
+        "tee ",
+        "sed -i",
+        "perl -pi",
+    ];
+    const WORD_PATTERNS: &[&str] = &[
+        "write", "create", "delete", "remove", "rename", "patch", "install", "format",
+    ];
+
+    thread.events.iter().any(|event| match &event.kind {
+        crate::types::event::EventKind::ActionExecuted { action_name, .. }
+        | crate::types::event::EventKind::ActionFailed { action_name, .. }
+            if action_name == "shell" || action_name == "git" =>
+        {
+            action_params_summary(event)
+                .map(|summary| {
+                    let lower = summary.to_lowercase();
+                    PHRASE_PATTERNS
+                        .iter()
+                        .any(|pattern| lower.contains(pattern))
+                        || WORD_PATTERNS.iter().any(|word| contains_word(&lower, word))
+                })
+                .unwrap_or(false)
+        }
+        _ => false,
+    })
+}
+
+fn infer_skill_repair_hints(
+    thread: &Thread,
+    trace: &ExecutionTrace,
+    error_messages: &[String],
+    observed_actions: &[String],
+) -> Vec<SkillRepairType> {
+    let mut hints = Vec::new();
+    let mut push_hint = |hint| {
+        if !hints.contains(&hint) {
+            hints.push(hint);
+        }
+    };
+
+    let lower_signals = error_messages
+        .iter()
+        .map(|message| message.to_lowercase())
+        .chain(
+            trace
+                .issues
+                .iter()
+                .filter(|issue| {
+                    !(issue.category == "tool_error"
+                        && is_recoverable_auth_failure_text(&issue.description))
+                })
+                .map(|issue| issue.description.to_lowercase()),
+        )
+        .collect::<Vec<_>>();
+
+    let recoverable_auth_failures = thread
+        .events
+        .iter()
+        .filter_map(|event| {
+            if let crate::types::event::EventKind::ActionFailed { error, .. } = &event.kind
+                && is_recoverable_auth_failure_text(error)
+            {
+                Some(error.to_lowercase())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if lower_signals
+        .iter()
+        .chain(recoverable_auth_failures.iter())
+        .any(|message| {
+            ["auth", "login", "token", "credential", "permission denied"]
+                .iter()
+                .any(|needle| message.contains(needle))
+        })
+    {
+        push_hint(SkillRepairType::MissingPrerequisite);
+    }
+
+    if lower_signals.iter().any(|message| {
+        [
+            "command not found",
+            "no such file",
+            "not found",
+            "could not find",
+            "unknown file",
+            "unknown path",
+        ]
+        .iter()
+        .any(|needle| message.contains(needle))
+    }) {
+        push_hint(SkillRepairType::StaleCommandPath);
+    }
+
+    let mutating_actions = observed_actions.iter().any(|action| {
+        matches!(
+            action.as_str(),
+            "write_file" | "apply_patch" | "memory_write" | "skill_install" | "skill_remove"
+        )
+    }) || has_mutating_shell_or_git_action(thread);
+    let verification_actions = observed_actions.iter().any(|action| {
+        matches!(
+            action.as_str(),
+            "read_file" | "memory_read" | "memory_search" | "cargo_test" | "pytest"
+        )
+    }) || has_shell_verification_action(thread);
+    if mutating_actions && !verification_actions {
+        push_hint(SkillRepairType::MissingVerification);
+    }
+
+    if !error_messages.is_empty() && thread.state == crate::types::thread::ThreadState::Done {
+        push_hint(SkillRepairType::MissingPitfall);
+    }
+
+    hints
+}
+
+fn build_skill_gap_payload(
+    thread: &Thread,
+    trace: &ExecutionTrace,
+    active_skills: &[ActiveSkillProvenance],
+) -> Option<serde_json::Value> {
+    let (error_messages, observed_actions) = collect_errors_and_actions(thread);
+    let repair_hints = infer_skill_repair_hints(thread, trace, &error_messages, &observed_actions);
+    if repair_hints.is_empty() {
+        return None;
+    }
+
+    let issues: Vec<serde_json::Value> = trace
+        .issues
+        .iter()
+        .map(|issue| {
+            serde_json::json!({
+                "severity": format!("{:?}", issue.severity),
+                "category": issue.category.clone(),
+                "description": issue.description.clone(),
+                "step": issue.step,
+            })
+        })
+        .collect();
+
+    Some(serde_json::json!({
+        "source_thread_id": thread.id.0.to_string(),
+        "goal": thread.goal,
+        "active_skills": active_skills,
+        "issues": issues,
+        "error_messages": error_messages,
+        "observed_actions": observed_actions,
+        "repair_hints": repair_hints,
+    }))
+}
+
+fn thread_completed_successfully(thread: &Thread, trace: &ExecutionTrace) -> bool {
+    thread.state == crate::types::thread::ThreadState::Done
+        && !has_action_failures(thread)
+        && trace
+            .issues
+            .iter()
+            .all(|issue| issue.severity != IssueSeverity::Error)
+}
+
 /// The goal for the self-improvement mission (autoresearch-style program).
 ///
 /// This is the "program.md" — a concrete, step-by-step prompt that tells the
@@ -1510,6 +2057,9 @@ pub const FIX_PATTERN_DB_TAG: &str = "fix_patterns";
 
 /// The goal for the skill extraction mission.
 const SKILL_EXTRACTION_GOAL: &str = include_str!("../../prompts/mission_skill_extraction.md");
+
+/// The goal for the skill-repair mission.
+const SKILL_REPAIR_GOAL: &str = include_str!("../../prompts/mission_skill_repair.md");
 
 /// The goal for the conversation insights mission.
 const CONVERSATION_INSIGHTS_GOAL: &str =
@@ -1548,11 +2098,15 @@ mod tests {
     use crate::types::capability::{ActionDef, CapabilityLease};
     use crate::types::error::EngineError;
     use crate::types::event::ThreadEvent;
-    use crate::types::memory::{DocId, MemoryDoc};
+    use crate::types::memory::{DocId, DocType, MemoryDoc};
     use crate::types::mission::{Mission, MissionCadence, MissionId, MissionStatus};
     use crate::types::project::{Project, ProjectId};
+    use crate::types::step::StepId;
     use crate::types::step::{ActionResult, LlmResponse, Step, TokenUsage};
-    use crate::types::thread::{Thread, ThreadId, ThreadState};
+    use crate::types::thread::{ActiveSkillProvenance, Thread, ThreadId, ThreadState, ThreadType};
+    use ironclaw_skills::SkillTrust;
+    use ironclaw_skills::types::ActivationCriteria;
+    use ironclaw_skills::v2::{SkillMetrics, SkillRepairType, V2SkillMetadata, V2SkillSource};
 
     // ── TestStore — in-memory Store that persists missions ───
 
@@ -1570,6 +2124,33 @@ mod tests {
                 docs: tokio::sync::RwLock::new(Vec::new()),
             }
         }
+    }
+
+    fn make_skill_doc(project_id: ProjectId, user_id: &str, name: &str) -> MemoryDoc {
+        let meta = V2SkillMetadata {
+            name: name.to_string(),
+            version: 1,
+            description: format!("{name} description"),
+            activation: ActivationCriteria::default(),
+            source: V2SkillSource::Extracted,
+            trust: SkillTrust::Trusted,
+            code_snippets: vec![],
+            metrics: SkillMetrics::default(),
+            parent_version: None,
+            revisions: vec![],
+            repairs: vec![],
+            content_hash: "sha256:test".to_string(),
+        };
+
+        let mut doc = MemoryDoc::new(
+            project_id,
+            user_id,
+            DocType::Skill,
+            format!("skill:{name}"),
+            "Original skill content",
+        );
+        doc.metadata = serde_json::to_value(&meta).expect("serialize test skill metadata");
+        doc
     }
 
     #[async_trait::async_trait]
@@ -3426,6 +4007,421 @@ mod tests {
         assert!(
             mission.next_fire_at.unwrap() > chrono::Utc::now(),
             "next_fire_at must be in the future"
+        );
+    }
+
+    #[test]
+    fn conversation_insights_count_only_done_threads() {
+        assert!(should_count_for_conversation_insights(ThreadState::Done));
+        assert!(!should_count_for_conversation_insights(ThreadState::Failed));
+    }
+
+    #[test]
+    fn build_skill_gap_payload_uses_active_skill_provenance() {
+        let project_id = ProjectId::new();
+        let mut thread = Thread::new(
+            "repair a github workflow",
+            ThreadType::Foreground,
+            project_id,
+            "alice",
+            ThreadConfig::default(),
+        );
+        thread.state = ThreadState::Done;
+        let skill_doc_id = DocId::new();
+        thread
+            .set_active_skills(&[ActiveSkillProvenance {
+                doc_id: skill_doc_id,
+                name: "github-pr-workflow".to_string(),
+                version: 3,
+                snippet_names: vec!["list_prs".to_string()],
+                force_activated: false,
+            }])
+            .unwrap();
+        thread.add_event(crate::types::event::EventKind::ActionFailed {
+            step_id: StepId::new(),
+            action_name: "shell".to_string(),
+            call_id: "call_1".to_string(),
+            error: "gh auth status: not authenticated".to_string(),
+            params_summary: None,
+        });
+
+        let trace = crate::executor::trace::build_trace(&thread);
+        let active_skills = thread.active_skills();
+        let payload = build_skill_gap_payload(&thread, &trace, &active_skills).unwrap();
+
+        assert_eq!(
+            payload["active_skills"][0]["doc_id"],
+            serde_json::Value::String(skill_doc_id.0.to_string())
+        );
+        let hints = payload["repair_hints"].as_array().unwrap();
+        assert!(
+            hints
+                .iter()
+                .any(|hint| hint.as_str() == Some("missing_prerequisite")),
+            "repair hints should include missing_prerequisite: {payload}"
+        );
+    }
+
+    #[test]
+    fn build_skill_gap_payload_preserves_recoverable_auth_prerequisite_hints() {
+        let project_id = ProjectId::new();
+        let mut thread = Thread::new(
+            "repair a github workflow",
+            ThreadType::Foreground,
+            project_id,
+            "alice",
+            ThreadConfig::default(),
+        );
+        thread.state = ThreadState::Done;
+        thread
+            .set_active_skills(&[ActiveSkillProvenance {
+                doc_id: DocId::new(),
+                name: "github-pr-workflow".to_string(),
+                version: 3,
+                snippet_names: vec![],
+                force_activated: false,
+            }])
+            .unwrap();
+        thread.add_event(crate::types::event::EventKind::ActionFailed {
+            step_id: StepId::new(),
+            action_name: "shell".to_string(),
+            call_id: "call_1".to_string(),
+            error: "authentication required for credential github".to_string(),
+            params_summary: None,
+        });
+
+        let trace = crate::executor::trace::build_trace(&thread);
+        let payload = build_skill_gap_payload(&thread, &trace, &thread.active_skills()).unwrap();
+        let hints = payload["repair_hints"].as_array().unwrap();
+
+        assert!(
+            hints
+                .iter()
+                .any(|hint| hint.as_str() == Some("missing_prerequisite")),
+            "recoverable auth failures should still produce missing_prerequisite: {payload}"
+        );
+    }
+
+    #[test]
+    fn learning_terminal_state_accepts_failed_threads() {
+        let failed_event = crate::types::event::EventKind::StateChanged {
+            from: ThreadState::Running,
+            to: ThreadState::Failed,
+            reason: Some("boom".into()),
+        };
+        assert_eq!(
+            learning_terminal_state(&failed_event),
+            Some(ThreadState::Failed)
+        );
+
+        let done_event = crate::types::event::EventKind::StateChanged {
+            from: ThreadState::Completed,
+            to: ThreadState::Done,
+            reason: None,
+        };
+        assert_eq!(
+            learning_terminal_state(&done_event),
+            Some(ThreadState::Done)
+        );
+    }
+
+    #[test]
+    fn thread_completed_successfully_requires_done_without_action_failures() {
+        let project_id = ProjectId::new();
+
+        let mut clean_thread = Thread::new(
+            "clean success",
+            ThreadType::Foreground,
+            project_id,
+            "alice",
+            ThreadConfig::default(),
+        );
+        clean_thread.state = ThreadState::Done;
+        let clean_trace = crate::executor::trace::build_trace(&clean_thread);
+        assert!(thread_completed_successfully(&clean_thread, &clean_trace));
+
+        let mut failing_thread = Thread::new(
+            "tool failure",
+            ThreadType::Foreground,
+            project_id,
+            "alice",
+            ThreadConfig::default(),
+        );
+        failing_thread.state = ThreadState::Done;
+        failing_thread.add_event(crate::types::event::EventKind::ActionFailed {
+            step_id: StepId::new(),
+            action_name: "shell".to_string(),
+            call_id: "call_1".to_string(),
+            error: "gh auth status: not authenticated".to_string(),
+            params_summary: Some("gh auth status".to_string()),
+        });
+        let failing_trace = crate::executor::trace::build_trace(&failing_thread);
+        assert!(!thread_completed_successfully(
+            &failing_thread,
+            &failing_trace
+        ));
+    }
+
+    #[tokio::test]
+    async fn process_skill_repair_output_updates_skill_and_records_repair() {
+        let store = Arc::new(TestStore::new());
+        let project_id = ProjectId::new();
+        let skill_doc = make_skill_doc(project_id, "alice", "github-pr-workflow");
+        let skill_doc_id = skill_doc.id;
+        store.save_memory_doc(&skill_doc).await.unwrap();
+
+        let mut mission = Mission::new(
+            project_id,
+            "alice",
+            "skill-repair",
+            SKILL_REPAIR_GOAL,
+            MissionCadence::Manual,
+        );
+        mission.metadata = serde_json::json!({"skill_repair": true});
+        mission.last_trigger_payload = Some(serde_json::json!({
+            "source_thread_id": "thread-123",
+            "active_skills": [{
+                "doc_id": skill_doc_id,
+                "name": "github-pr-workflow",
+                "version": 1,
+                "snippet_names": [],
+                "force_activated": false
+            }]
+        }));
+
+        let response = serde_json::json!({
+            "doc_id": skill_doc_id,
+            "repair_type": "missing_verification",
+            "summary": "Added a smoke-test step after the gh command.",
+            "updated_content": "1. Run `gh auth status`\n2. Run the PR command\n3. Verify with `gh pr view`",
+            "description": "GitHub PR workflow with auth and verification",
+        })
+        .to_string();
+
+        process_skill_repair_output(&(store.clone() as Arc<dyn Store>), &mission, &response)
+            .await
+            .unwrap();
+
+        let updated = store.load_memory_doc(skill_doc_id).await.unwrap().unwrap();
+        let meta: V2SkillMetadata = serde_json::from_value(updated.metadata).unwrap();
+        assert_eq!(meta.version, 2);
+        assert_eq!(meta.parent_version, Some(1));
+        assert_eq!(
+            updated.content,
+            "1. Run `gh auth status`\n2. Run the PR command\n3. Verify with `gh pr view`"
+        );
+        assert_eq!(meta.repairs.len(), 1);
+        assert_eq!(
+            meta.repairs[0].repair_type,
+            SkillRepairType::MissingVerification
+        );
+        assert_eq!(
+            meta.repairs[0].source_thread_id.as_deref(),
+            Some("thread-123")
+        );
+        assert_eq!(meta.revisions.len(), 1);
+        assert_eq!(meta.revisions[0].content, "Original skill content");
+    }
+
+    #[tokio::test]
+    async fn process_skill_repair_output_rejects_stale_trigger_version() {
+        let store = Arc::new(TestStore::new());
+        let project_id = ProjectId::new();
+        let mut skill_doc = make_skill_doc(project_id, "alice", "github-pr-workflow");
+        let skill_doc_id = skill_doc.id;
+        skill_doc.content = "Skill content already updated to v2".to_string();
+        let mut meta: V2SkillMetadata = serde_json::from_value(skill_doc.metadata.clone()).unwrap();
+        meta.version = 2;
+        meta.parent_version = Some(1);
+        skill_doc.metadata = serde_json::to_value(&meta).unwrap();
+        store.save_memory_doc(&skill_doc).await.unwrap();
+
+        let mut mission = Mission::new(
+            project_id,
+            "alice",
+            "skill-repair",
+            SKILL_REPAIR_GOAL,
+            MissionCadence::Manual,
+        );
+        mission.metadata = serde_json::json!({"skill_repair": true});
+        mission.last_trigger_payload = Some(serde_json::json!({
+            "source_thread_id": "thread-123",
+            "active_skills": [{
+                "doc_id": skill_doc_id,
+                "name": "github-pr-workflow",
+                "version": 1,
+                "snippet_names": [],
+                "force_activated": false
+            }]
+        }));
+
+        let response = serde_json::json!({
+            "doc_id": skill_doc_id,
+            "repair_type": "missing_verification",
+            "summary": "Stale repair output.",
+            "updated_content": "1. Run the stale command\n2. Verify it"
+        })
+        .to_string();
+
+        let err =
+            process_skill_repair_output(&(store.clone() as Arc<dyn Store>), &mission, &response)
+                .await
+                .unwrap_err();
+        match err {
+            EngineError::Skill { reason } => assert!(
+                reason.contains("version conflict"),
+                "expected version conflict, got: {reason}"
+            ),
+            other => panic!("expected skill error, got: {other:?}"),
+        }
+
+        let updated = store.load_memory_doc(skill_doc_id).await.unwrap().unwrap();
+        let updated_meta: V2SkillMetadata = serde_json::from_value(updated.metadata).unwrap();
+        assert_eq!(updated.content, "Skill content already updated to v2");
+        assert_eq!(updated_meta.version, 2);
+        assert!(updated_meta.repairs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_skill_repair_output_rejects_empty_content() {
+        let store = Arc::new(TestStore::new());
+        let project_id = ProjectId::new();
+        let skill_doc = make_skill_doc(project_id, "alice", "github-pr-workflow");
+        let skill_doc_id = skill_doc.id;
+        store.save_memory_doc(&skill_doc).await.unwrap();
+
+        let mut mission = Mission::new(
+            project_id,
+            "alice",
+            "skill-repair",
+            SKILL_REPAIR_GOAL,
+            MissionCadence::Manual,
+        );
+        mission.metadata = serde_json::json!({"skill_repair": true});
+        mission.last_trigger_payload = Some(serde_json::json!({
+            "source_thread_id": "thread-123",
+            "active_skills": [{
+                "doc_id": skill_doc_id,
+                "name": "github-pr-workflow",
+                "version": 1,
+                "snippet_names": [],
+                "force_activated": false
+            }]
+        }));
+
+        let response = serde_json::json!({
+            "doc_id": skill_doc_id,
+            "repair_type": "missing_verification",
+            "summary": "This should be rejected.",
+            "updated_content": "   "
+        })
+        .to_string();
+
+        let err =
+            process_skill_repair_output(&(store.clone() as Arc<dyn Store>), &mission, &response)
+                .await
+                .unwrap_err();
+        match err {
+            EngineError::Skill { reason } => assert!(
+                reason.contains("empty updated_content"),
+                "expected empty-content validation, got: {reason}"
+            ),
+            other => panic!("expected skill error, got: {other:?}"),
+        }
+
+        let updated = store.load_memory_doc(skill_doc_id).await.unwrap().unwrap();
+        let updated_meta: V2SkillMetadata = serde_json::from_value(updated.metadata).unwrap();
+        assert_eq!(updated.content, "Original skill content");
+        assert_eq!(updated_meta.version, 1);
+        assert!(updated_meta.repairs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_skill_repair_output_rejects_shared_skill_updates() {
+        let store = Arc::new(TestStore::new());
+        let project_id = ProjectId::new();
+        let skill_doc = make_skill_doc(project_id, shared_owner_id(), "github-pr-workflow");
+        let skill_doc_id = skill_doc.id;
+        store.save_memory_doc(&skill_doc).await.unwrap();
+
+        let mut mission = Mission::new(
+            project_id,
+            "alice",
+            "skill-repair",
+            SKILL_REPAIR_GOAL,
+            MissionCadence::Manual,
+        );
+        mission.metadata = serde_json::json!({"skill_repair": true});
+        mission.last_trigger_payload = Some(serde_json::json!({
+            "source_thread_id": "thread-123",
+            "active_skills": [{
+                "doc_id": skill_doc_id,
+                "name": "github-pr-workflow",
+                "version": 1,
+                "snippet_names": [],
+                "force_activated": false
+            }]
+        }));
+
+        let response = serde_json::json!({
+            "doc_id": skill_doc_id,
+            "repair_type": "missing_verification",
+            "summary": "Attempted shared skill update.",
+            "updated_content": "1. Verify auth\n2. Run the command"
+        })
+        .to_string();
+
+        let err =
+            process_skill_repair_output(&(store.clone() as Arc<dyn Store>), &mission, &response)
+                .await
+                .unwrap_err();
+        match err {
+            EngineError::AccessDenied { user_id, entity } => {
+                assert_eq!(user_id, "alice");
+                assert!(entity.contains(&skill_doc_id.0.to_string()));
+            }
+            other => panic!("expected access denied, got: {other:?}"),
+        }
+
+        let unchanged = store.load_memory_doc(skill_doc_id).await.unwrap().unwrap();
+        let meta: V2SkillMetadata = serde_json::from_value(unchanged.metadata).unwrap();
+        assert_eq!(unchanged.content, "Original skill content");
+        assert_eq!(meta.version, 1);
+        assert!(meta.repairs.is_empty());
+    }
+
+    #[test]
+    fn build_skill_gap_payload_skips_read_only_shell_workflows() {
+        let project_id = ProjectId::new();
+        let mut thread = Thread::new(
+            "inspect github pull requests",
+            ThreadType::Foreground,
+            project_id,
+            "alice",
+            ThreadConfig::default(),
+        );
+        thread.state = ThreadState::Done;
+        thread
+            .set_active_skills(&[ActiveSkillProvenance {
+                doc_id: DocId::new(),
+                name: "github-pr-workflow".to_string(),
+                version: 1,
+                snippet_names: vec![],
+                force_activated: false,
+            }])
+            .unwrap();
+        thread.add_event(crate::types::event::EventKind::ActionExecuted {
+            step_id: StepId::new(),
+            action_name: "shell".to_string(),
+            call_id: "call_1".to_string(),
+            params_summary: Some("gh pr list --repo nearai/ironclaw".to_string()),
+            duration_ms: 15,
+        });
+
+        let trace = crate::executor::trace::build_trace(&thread);
+        assert!(
+            build_skill_gap_payload(&thread, &trace, &thread.active_skills()).is_none(),
+            "read-only shell workflows should not trigger skill repair"
         );
     }
 }
