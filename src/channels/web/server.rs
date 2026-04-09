@@ -1001,11 +1001,29 @@ async fn i18n_app_handler() -> impl IntoResponse {
 
 // --- Health ---
 
-async fn health_handler() -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "healthy",
-        channel: "gateway",
-    })
+async fn health_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> (StatusCode, Json<HealthResponse>) {
+    if let Some(control) = state.standby_control.as_ref() {
+        let snapshot = control.startup_snapshot().await;
+        if !snapshot.configure_ready && !snapshot.runtime_started {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(HealthResponse {
+                    status: "starting",
+                    channel: "gateway",
+                }),
+            );
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(HealthResponse {
+            status: "healthy",
+            channel: "gateway",
+        }),
+    )
 }
 
 /// Return an OAuth error landing page response.
@@ -1725,6 +1743,44 @@ async fn chat_send_handler(
             status: "accepted",
         }),
     ))
+}
+
+async fn configure_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
+    Json(request): Json<TidePoolConfigureRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let control = state.standby_control.as_ref().ok_or((
+        StatusCode::NOT_FOUND,
+        "standby configure is not enabled".to_string(),
+    ))?;
+
+    let token = bearer_token(&headers)
+        .ok_or((StatusCode::UNAUTHORIZED, "missing bearer token".to_string()))?;
+    if !control.authenticate(token) {
+        return Err((StatusCode::UNAUTHORIZED, "invalid bearer token".to_string()));
+    }
+    if !control.is_configure_ready().await {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "standby runtime is still prewarming".to_string(),
+        ));
+    }
+
+    control
+        .begin_configure()
+        .await
+        .map_err(|message| (StatusCode::CONFLICT, message.to_string()))?;
+
+    let result = control.enqueue(request).await;
+    let success = matches!(result, Ok(Ok(())));
+    control.finish_configure(success).await;
+
+    match result {
+        Ok(Ok(())) => Ok(StatusCode::OK),
+        Ok(Err(failure)) => Err((failure.status, failure.message)),
+        Err(message) => Err((StatusCode::INTERNAL_SERVER_ERROR, message)),
+    }
 }
 
 async fn chat_approval_handler(
@@ -3601,6 +3657,195 @@ mod tests {
         Router::new()
             .route("/oauth/callback", get(oauth_callback_handler))
             .with_state(state)
+    }
+
+    fn test_configure_router(state: Arc<GatewayState>) -> Router {
+        Router::new()
+            .route("/api/health", get(health_handler))
+            .route("/api/configure", post(configure_handler))
+            .with_state(state)
+    }
+
+    fn test_standby_state(control: Arc<crate::standby::StandbyControl>) -> Arc<GatewayState> {
+        Arc::new(GatewayState {
+            msg_tx: tokio::sync::RwLock::new(None),
+            sse: Arc::new(SseManager::new()),
+            workspace: None,
+            workspace_pool: None,
+            session_manager: None,
+            log_broadcaster: None,
+            log_level_handle: None,
+            extension_manager: None,
+            tool_registry: None,
+            store: None,
+            job_manager: None,
+            prompt_queue: None,
+            owner_id: "test".to_string(),
+            shutdown_tx: tokio::sync::RwLock::new(None),
+            server_started: std::sync::atomic::AtomicBool::new(false),
+            ws_tracker: None,
+            llm_provider: None,
+            skill_registry: None,
+            skill_catalog: None,
+            scheduler: None,
+            chat_rate_limiter: PerUserRateLimiter::new(30, 60),
+            oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
+            webhook_rate_limiter: RateLimiter::new(10, 60),
+            registry_entries: vec![],
+            cost_guard: None,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+            startup_time: std::time::Instant::now(),
+            active_config: ActiveConfigSnapshot::default(),
+            secrets_store: None,
+            db_auth: None,
+            pairing_store: None,
+            oauth_providers: None,
+            oauth_state_store: None,
+            oauth_base_url: None,
+            oauth_allowed_domains: Vec::new(),
+            near_nonce_store: None,
+            near_rpc_url: None,
+            near_network: None,
+            oauth_sweep_shutdown: None,
+            standby_control: Some(control),
+            runtime_overrides: GatewayRuntimeOverrides::default(),
+        })
+    }
+
+    fn sample_configure_request() -> TidePoolConfigureRequest {
+        TidePoolConfigureRequest {
+            agent_id: Uuid::nil(),
+            llm: crate::standby::TidePoolConfigureLlm {
+                backend: "openai".to_string(),
+                model: "gpt-4.1".to_string(),
+                api_key: Some("secret".to_string()),
+                base_url: Some("https://example.com".to_string()),
+            },
+            mcp_servers: Vec::new(),
+            channels: Vec::new(),
+            persona: crate::standby::TidePoolConfigurePersona {
+                soul: "helpful".to_string(),
+                parameters: serde_json::json!({}),
+                skills: Vec::new(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_configure_requires_bearer_token() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let control = crate::standby::StandbyControl::new("gateway-token", tx);
+        let app = test_configure_router(test_standby_state(control));
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/configure")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&sample_configure_request()).expect("serialize request"),
+            ))
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_configure_happy_path_and_repeat_conflict() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let control = crate::standby::StandbyControl::new("gateway-token", tx);
+        control.mark_configure_ready("standby.waiting_for_configure").await;
+        let app = test_configure_router(test_standby_state(control));
+
+        tokio::spawn(async move {
+            if let Some(command) = rx.recv().await {
+                let _ = command.response_tx.send(Ok(()));
+            }
+        });
+
+        let request_body =
+            serde_json::to_vec(&sample_configure_request()).expect("serialize request");
+
+        let first = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/configure")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header(axum::http::header::AUTHORIZATION, "Bearer gateway-token")
+            .body(Body::from(request_body.clone()))
+            .expect("first request");
+        let first_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), first)
+            .await
+            .expect("first response");
+        assert_eq!(first_resp.status(), StatusCode::OK);
+
+        let second = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/configure")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header(axum::http::header::AUTHORIZATION, "Bearer gateway-token")
+            .body(Body::from(request_body))
+            .expect("second request");
+        let second_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, second)
+            .await
+            .expect("second response");
+        assert_eq!(second_resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_standby_health_and_configure_wait_for_prewarm() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let control = crate::standby::StandbyControl::new("gateway-token", tx);
+        let app = test_configure_router(test_standby_state(Arc::clone(&control)));
+
+        let health_before = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/health")
+            .body(Body::empty())
+            .expect("health-before request");
+        let health_before_resp =
+            ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), health_before)
+                .await
+                .expect("health-before response");
+        assert_eq!(health_before_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let configure_before = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/configure")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header(axum::http::header::AUTHORIZATION, "Bearer gateway-token")
+            .body(Body::from(
+                serde_json::to_vec(&sample_configure_request()).expect("serialize request"),
+            ))
+            .expect("configure-before request");
+        let configure_before_resp =
+            ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), configure_before)
+                .await
+                .expect("configure-before response");
+        assert_eq!(configure_before_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        control.mark_configure_ready("standby.waiting_for_configure").await;
+
+        let health_after = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/health")
+            .body(Body::empty())
+            .expect("health-after request");
+        let health_after_resp =
+            ServiceExt::<axum::http::Request<Body>>::oneshot(app, health_after)
+                .await
+                .expect("health-after response");
+        assert_eq!(health_after_resp.status(), StatusCode::OK);
     }
 
     #[cfg(feature = "libsql")]

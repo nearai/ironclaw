@@ -67,6 +67,7 @@ pub struct AppComponents {
 #[derive(Default)]
 pub struct AppBuilderFlags {
     pub no_db: bool,
+    pub skip_db_migrations: bool,
 }
 
 /// Builder that orchestrates the 5 mechanical init phases.
@@ -139,9 +140,15 @@ impl AppBuilder {
             return Ok(());
         }
 
-        let (db, handles) = crate::db::connect_with_handles(&self.config.database)
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let (db, handles) = if self.flags.skip_db_migrations {
+            crate::db::connect_without_migrations(&self.config.database)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?
+        } else {
+            crate::db::connect_with_handles(&self.config.database)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?
+        };
         self.handles = Some(handles);
 
         // Post-init: ensure owner user row exists and rewrite 'default' user_id rows.

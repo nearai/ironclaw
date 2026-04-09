@@ -12,6 +12,7 @@ use crate::channels::web::sse::DEFAULT_MAX_CONNECTIONS;
 use crate::config::{DEFAULT_GATEWAY_PORT, GatewayConfig, set_runtime_env};
 use crate::llm::ProviderRegistry;
 use crate::registry::embedded::load_embedded;
+use crate::Config;
 use crate::settings::Settings;
 use crate::tools::mcp::config::save_mcp_servers;
 use crate::tools::mcp::{McpServerConfig, McpServersFile};
@@ -100,6 +101,7 @@ pub struct StandbyControl {
 struct StandbyStartupState {
     last_stage: &'static str,
     runtime_started: bool,
+    configure_ready: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -107,6 +109,7 @@ struct StandbyStartupState {
 pub struct StandbyStartupSnapshot {
     pub last_stage: String,
     pub runtime_started: bool,
+    pub configure_ready: bool,
 }
 
 impl StandbyControl {
@@ -116,8 +119,9 @@ impl StandbyControl {
             token_hash: hash_token(auth_token),
             request_tx,
             startup_state: Mutex::new(StandbyStartupState {
-                last_stage: "standby.waiting_for_configure",
+                last_stage: "standby.prewarm.pending",
                 runtime_started: false,
+                configure_ready: false,
             }),
             runtime_started_notify: Notify::new(),
         })
@@ -156,6 +160,17 @@ impl StandbyControl {
         } else {
             self.mark_startup_stage("configure.reset_waiting").await;
         }
+    }
+
+    pub async fn mark_configure_ready(&self, stage: &'static str) {
+        let mut startup_state = self.startup_state.lock().await;
+        startup_state.last_stage = stage;
+        startup_state.configure_ready = true;
+        tracing::info!(stage, "standby configure readiness reached");
+    }
+
+    pub async fn is_configure_ready(&self) -> bool {
+        self.startup_state.lock().await.configure_ready
     }
 
     pub async fn enqueue(
@@ -214,6 +229,7 @@ impl StandbyControl {
         StandbyStartupSnapshot {
             last_stage: startup_state.last_stage.to_string(),
             runtime_started: startup_state.runtime_started,
+            configure_ready: startup_state.configure_ready,
         }
     }
 }
@@ -285,6 +301,23 @@ pub fn resolve_standby_gateway_config(
             oidc: None,
         },
     ))
+}
+
+pub async fn prewarm_runtime_dependencies(
+    toml_path: Option<&Path>,
+    no_db: bool,
+) -> Result<(), String> {
+    if no_db {
+        return Ok(());
+    }
+
+    let config = Config::from_env_with_toml(toml_path)
+        .await
+        .map_err(|error| format!("failed to load config for standby prewarm: {error}"))?;
+    crate::db::connect_from_config(&config.database)
+        .await
+        .map_err(|error| format!("failed to prewarm database for standby: {error}"))?;
+    Ok(())
 }
 
 pub async fn apply_runtime_config(request: &TidePoolConfigureRequest) -> Result<(), String> {

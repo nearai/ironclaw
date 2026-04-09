@@ -23,6 +23,10 @@ use ironclaw::{
     llm::create_session_manager,
     orchestrator::{ReaperConfig, SandboxReaper},
     pairing::PairingStore,
+    standby::{
+        ConfigureCommand, ConfigureFailure, StandbyControl, apply_runtime_config,
+        prewarm_runtime_dependencies, resolve_standby_gateway_config, write_persona_files,
+    },
     tracing_fmt::{init_cli_tracing, init_worker_tracing},
     webhooks::{self, ToolWebhookState},
 };
@@ -291,6 +295,21 @@ async fn async_main() -> anyhow::Result<()> {
     };
 
     let startup_start = std::time::Instant::now();
+    let log_broadcaster = Arc::new(LogBroadcaster::new());
+
+    if cli.standby {
+        let log_level_handle = ironclaw::channels::web::log_layer::init_tracing(
+            Arc::clone(&log_broadcaster),
+            false,
+        );
+        return run_standby(
+            &cli,
+            startup_start,
+            Arc::clone(&log_broadcaster),
+            Arc::clone(&log_level_handle),
+        )
+        .await;
+    }
 
     // ── Agent startup ──────────────────────────────────────────────────
 
@@ -315,6 +334,7 @@ async fn async_main() -> anyhow::Result<()> {
     if cli.auto_approve {
         ironclaw::config::set_runtime_env("AGENT_AUTO_APPROVE_TOOLS", "true");
     }
+    apply_no_db_config_overrides(&cli);
 
     // Load initial config from env + disk + optional TOML (before DB is available).
     // Credentials may be missing at this point — that's fine. LlmConfig::resolve()
@@ -333,13 +353,6 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Err(e) => return Err(e.into()),
     };
-
-    // Initialize session manager before channel setup
-    let session = create_session_manager(config.llm.session.clone()).await;
-
-    // Create log broadcaster before tracing init so the WebLogLayer can capture all events.
-    let log_broadcaster = Arc::new(LogBroadcaster::new());
-
     // Initialize tracing with a reloadable EnvFilter so the gateway can switch
     // log levels at runtime without restarting.
     let suppress_stderr =
@@ -353,9 +366,231 @@ async fn async_main() -> anyhow::Result<()> {
     tracing::debug!("Loaded configuration for agent: {}", config.agent.name);
     tracing::debug!("LLM backend: {}", config.llm.backend);
 
+    run_agent_with_config(
+        &cli,
+        startup_start,
+        config,
+        toml_path,
+        log_broadcaster,
+        log_level_handle,
+        None,
+        false,
+    )
+    .await
+}
+
+fn apply_no_db_config_overrides(cli: &Cli) {
+    if !cli.no_db {
+        return;
+    }
+
+    ironclaw::config::set_runtime_env("DATABASE_BACKEND", "libsql");
+    if std::env::var("DATABASE_URL")
+        .ok()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        ironclaw::config::set_runtime_env("DATABASE_URL", "unused://libsql");
+    }
+}
+
+async fn run_standby(
+    cli: &Cli,
+    startup_start: std::time::Instant,
+    log_broadcaster: Arc<LogBroadcaster>,
+    log_level_handle: Arc<ironclaw::channels::web::log_layer::LogLevelHandle>,
+) -> anyhow::Result<()> {
+    let toml_path = cli.config.as_deref();
+    let (owner_id, gateway_config) =
+        resolve_standby_gateway_config(toml_path).map_err(anyhow::Error::msg)?;
+    let (request_tx, mut request_rx) = tokio::sync::mpsc::channel::<ConfigureCommand>(1);
+
+    let mut gateway = GatewayChannel::new(gateway_config.clone(), owner_id);
+    let standby_control = StandbyControl::new(gateway.auth_token(), request_tx);
+    gateway = gateway.with_standby_control(Arc::clone(&standby_control));
+    let bound = gateway.start_server_only().await?;
+    standby_control
+        .mark_startup_stage("standby.prewarm.start")
+        .await;
+    let prewarm_start = std::time::Instant::now();
+    prewarm_runtime_dependencies(toml_path, cli.no_db)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    ironclaw::bootstrap::log_startup_timing(
+        "standby.prewarm_runtime_dependencies",
+        prewarm_start.elapsed(),
+    );
+    standby_control
+        .mark_configure_ready("standby.waiting_for_configure")
+        .await;
+
+    tracing::info!(
+        addr = %bound,
+        "Gateway standby mode is ready; waiting for /api/configure"
+    );
+
+    let command = request_rx
+        .recv()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("standby configure channel closed unexpectedly"))?;
+    standby_control
+        .mark_startup_stage("configure.received")
+        .await;
+
+    if let Err(message) = apply_runtime_config(&command.request).await {
+        standby_control
+            .mark_startup_stage("runtime_config.apply_failed")
+            .await;
+        let _ = command.response_tx.send(Err(ConfigureFailure {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            message: message.clone(),
+        }));
+        anyhow::bail!("{message}");
+    }
+    standby_control
+        .mark_startup_stage("runtime_config.applied")
+        .await;
+
+    standby_control
+        .mark_startup_stage("config.reload.start")
+        .await;
+    let config_reload_start = std::time::Instant::now();
+    let config = match Config::from_env_with_toml(toml_path).await {
+        Ok(config) => config,
+        Err(error) => {
+            ironclaw::bootstrap::log_startup_timing(
+                "standby.config_reload",
+                config_reload_start.elapsed(),
+            );
+            standby_control
+                .mark_startup_stage("config.reload.failed")
+                .await;
+            let message = error.to_string();
+            let _ = command.response_tx.send(Err(ConfigureFailure {
+                status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                message: message.clone(),
+            }));
+            anyhow::bail!("{message}");
+        }
+    };
+    ironclaw::bootstrap::log_startup_timing("standby.config_reload", config_reload_start.elapsed());
+    standby_control
+        .mark_startup_stage("config.reload.ready")
+        .await;
+    tracing::info!(
+        agent_id = %command.request.agent_id,
+        llm_backend = %config.llm.backend,
+        "Standby configure accepted; completing full startup"
+    );
+
+    let gateway_state = Arc::clone(gateway.state());
+    let persona = command.request.persona.clone();
+    standby_control
+        .mark_startup_stage("agent.bootstrap.start")
+        .await;
+    let mut agent_future = std::pin::pin!(run_agent_with_config(
+        cli,
+        startup_start,
+        config,
+        toml_path,
+        log_broadcaster,
+        log_level_handle,
+        Some((gateway, persona)),
+        true,
+    ));
+    let mut runtime_ready = std::pin::pin!(standby_control.wait_for_runtime_started());
+
+    let startup_result = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            tokio::select! {
+                () = runtime_ready.as_mut() => return Ok(()),
+                joined = agent_future.as_mut() => return joined,
+            }
+        }
+    })
+    .await;
+
+    match startup_result {
+        Ok(Ok(())) => {
+            let _ = command.response_tx.send(Ok(()));
+        }
+        Ok(Err(error)) => {
+            standby_control
+                .mark_startup_stage("agent.bootstrap.failed")
+                .await;
+            let _ = command.response_tx.send(Err(ConfigureFailure {
+                status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                message: error.to_string(),
+            }));
+            return Err(error);
+        }
+        Err(_) => {
+            standby_control
+                .mark_startup_stage("agent.bootstrap.timeout")
+                .await;
+            let snapshot = standby_control.startup_snapshot().await;
+            let diagnostic = serde_json::json!({
+                "lastStage": snapshot.last_stage,
+                "runtimeStarted": snapshot.runtime_started,
+                "serverStarted": gateway_state.server_started.load(std::sync::atomic::Ordering::Relaxed),
+                "hasMsgTx": gateway_state.msg_tx.read().await.is_some(),
+                "hasSessionManager": gateway_state.session_manager().is_some(),
+                "hasLlmProvider": gateway_state.llm_provider().is_some(),
+                "hasWorkspace": gateway_state.workspace().is_some(),
+                "activeConfig": gateway_state.active_config_snapshot(),
+            });
+            tracing::error!(diagnostic = %diagnostic, "standby startup timed out");
+            let _ = command.response_tx.send(Err(ConfigureFailure {
+                status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                message: format!(
+                    "timed out waiting for configured gateway startup (last stage: {})",
+                    snapshot.last_stage
+                ),
+            }));
+            anyhow::bail!(
+                "timed out waiting for configured gateway startup (last stage: {})",
+                snapshot.last_stage
+            );
+        }
+    }
+
+    agent_future.as_mut().await
+}
+
+async fn run_agent_with_config(
+    cli: &Cli,
+    startup_start: std::time::Instant,
+    config: Config,
+    toml_path: Option<&std::path::Path>,
+    log_broadcaster: Arc<LogBroadcaster>,
+    log_level_handle: Arc<ironclaw::channels::web::log_layer::LogLevelHandle>,
+    mut prestarted_gateway: Option<(GatewayChannel, ironclaw::standby::TidePoolConfigurePersona)>,
+    standby_db_prewarmed: bool,
+) -> anyhow::Result<()> {
+    let standby_control = prestarted_gateway
+        .as_ref()
+        .and_then(|(gateway, _)| gateway.state().standby_control.clone());
+
+    if let Some(control) = standby_control.as_ref() {
+        control
+            .mark_startup_stage("agent.session_manager.start")
+            .await;
+    }
+    // Initialize session manager before channel setup
+    let session = create_session_manager(config.llm.session.clone()).await;
+    if let Some(control) = standby_control.as_ref() {
+        control
+            .mark_startup_stage("agent.session_manager.ready")
+            .await;
+        control.mark_startup_stage("app_builder.start").await;
+    }
+
     // ── Phase 1-5: Build all core components via AppBuilder ────────────
 
-    let flags = AppBuilderFlags { no_db: cli.no_db };
+    let flags = AppBuilderFlags {
+        no_db: cli.no_db,
+        skip_db_migrations: standby_db_prewarmed,
+    };
     let components = AppBuilder::new(
         config,
         flags,
