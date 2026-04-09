@@ -115,6 +115,43 @@ jobs:
           cache-from: type=gha,scope=worker
           cache-to: type=gha,mode=max,scope=worker
 
+      - name: Create releases-manager app token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_RELEASES_MANAGER_APP_ID }}
+          private-key: ${{ secrets.GH_RELEASES_MANAGER_APP_PRIVATE_KEY }}
+          owner: nearai
+          repositories: ironclaw-dind
+
+      - name: Trigger ironclaw-dind Build & Push
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [[ "${EVENT_NAME}" == "workflow_call" && -n "${VERSION}" ]]; then
+            gh api repos/nearai/ironclaw-dind/dispatches \
+              --method POST \
+              --input - <<EOF
+            {
+              "event_type": "ironclaw_release_tag",
+              "client_payload": {
+                "version": "${VERSION}"
+              }
+            }
+            EOF
+          else
+            gh api repos/nearai/ironclaw-dind/dispatches \
+              --method POST \
+              --input - <<EOF
+            {
+              "event_type": "ironclaw_release_tag",
+              "client_payload": {}
+            }
+            EOF
+          fi
+
       - name: Summary
         run: |
           {
