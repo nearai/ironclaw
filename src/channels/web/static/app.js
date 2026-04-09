@@ -2695,53 +2695,97 @@ function addToolCallsSummary(toolCalls) {
   container.scrollTop = container.scrollHeight;
 }
 
-function createToolCallsSummaryElement(toolCalls) {
-  const div = document.createElement('div');
-  div.className = 'tool-calls-summary';
+function createHistoricalActivityToolCard(toolCall) {
+  const card = document.createElement('div');
+  const failed = !!toolCall.has_error;
+  card.className = 'activity-tool-card';
+  card.setAttribute('data-tool-name', toolCall.name || 'tool');
+  card.setAttribute('data-status', failed ? 'fail' : 'success');
 
   const header = document.createElement('div');
-  header.className = 'tool-calls-header';
-  header.textContent = toolCalls.length + ' tool' + (toolCalls.length !== 1 ? 's' : '') + ' used';
-  div.appendChild(header);
+  header.className = 'activity-tool-header';
 
-  const list = document.createElement('div');
-  list.className = 'tool-calls-list';
+  const icon = document.createElement('span');
+  icon.className = 'activity-tool-icon';
+  icon.innerHTML = failed
+    ? '<span class="activity-icon-fail">&#10007;</span>'
+    : '<span class="activity-icon-success">&#10003;</span>';
 
-  for (const tc of toolCalls) {
-    const item = document.createElement('div');
-    item.className = 'tool-call-item' + (tc.has_error ? ' tool-error' : '');
+  const toolName = document.createElement('span');
+  toolName.className = 'activity-tool-name';
+  toolName.textContent = toolCall.name || 'tool';
 
-    const icon = tc.has_error ? '\u2717' : '\u2713';
-    const nameSpan = document.createElement('span');
-    nameSpan.className = 'tool-call-name';
-    nameSpan.textContent = icon + ' ' + tc.name;
-    item.appendChild(nameSpan);
+  const duration = document.createElement('span');
+  duration.className = 'activity-tool-duration';
+  duration.textContent = '';
 
-    if (tc.result_preview) {
-      const preview = document.createElement('div');
-      preview.className = 'tool-call-preview';
-      preview.textContent = tc.result_preview;
-      item.appendChild(preview);
-    }
-    if (tc.error) {
-      const errDiv = document.createElement('div');
-      errDiv.className = 'tool-call-error-text';
-      errDiv.textContent = tc.error;
-      item.appendChild(errDiv);
-    }
+  const chevron = document.createElement('span');
+  chevron.className = 'activity-tool-chevron';
+  chevron.innerHTML = '&#9656;';
 
-    list.appendChild(item);
+  header.appendChild(icon);
+  header.appendChild(toolName);
+  header.appendChild(duration);
+  header.appendChild(chevron);
+
+  const body = document.createElement('div');
+  body.className = 'activity-tool-body';
+
+  const output = document.createElement('pre');
+  output.className = 'activity-tool-output';
+
+  const detailParts = [];
+  if (toolCall.result_preview) detailParts.push(toolCall.result_preview);
+  if (toolCall.error) detailParts.push('Error:\n' + toolCall.error);
+  output.textContent = detailParts.join('\n\n');
+  body.appendChild(output);
+
+  if (output.textContent) {
+    header.addEventListener('click', () => {
+      body.classList.toggle('expanded');
+      chevron.classList.toggle('expanded', body.classList.contains('expanded'));
+    });
+  } else {
+    chevron.style.visibility = 'hidden';
   }
 
-  div.appendChild(list);
+  if (failed && output.textContent) {
+    body.classList.add('expanded');
+    chevron.classList.add('expanded');
+  }
 
-  header.style.cursor = 'pointer';
-  header.addEventListener('click', () => {
-    list.classList.toggle('expanded');
-    header.classList.toggle('expanded');
+  card.appendChild(header);
+  card.appendChild(body);
+  return card;
+}
+
+function createToolCallsSummaryElement(toolCalls) {
+  const group = document.createElement('div');
+  group.className = 'activity-group collapsed';
+
+  const cardsContainer = document.createElement('div');
+  cardsContainer.className = 'activity-cards-container';
+  cardsContainer.style.display = 'none';
+
+  for (const tc of toolCalls) {
+    cardsContainer.appendChild(createHistoricalActivityToolCard(tc));
+  }
+
+  const toolWord = toolCalls.length === 1 ? 'tool' : 'tools';
+  const summary = document.createElement('div');
+  summary.className = 'activity-summary';
+  summary.innerHTML = '<span class="activity-summary-chevron">&#9656;</span>'
+    + '<span class="activity-summary-text">Used ' + toolCalls.length + ' ' + toolWord + '</span>';
+
+  summary.addEventListener('click', () => {
+    const isOpen = cardsContainer.style.display !== 'none';
+    cardsContainer.style.display = isOpen ? 'none' : 'block';
+    summary.querySelector('.activity-summary-chevron').classList.toggle('expanded', !isOpen);
   });
 
-  return div;
+  group.appendChild(summary);
+  group.appendChild(cardsContainer);
+  return group;
 }
 
 function removeScrollSpinner() {
