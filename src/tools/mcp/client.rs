@@ -662,12 +662,32 @@ fn extract_server_name(url: &str) -> String {
 /// `notion_notion-search` the LLM would emit a call for `notion_notion_search`
 /// and the registry lookup would miss, leaving the tool unreachable.
 ///
-/// The original (possibly hyphenated) tool name is still stored on the
-/// `McpToolWrapper`'s inner `McpTool` and used verbatim when forwarding the
-/// `tools/call` request to the MCP server, so this normalization is
-/// internal-only and does not affect protocol compatibility.
+/// We replace **every** non-`[A-Za-z0-9_]` character with `_`, not just
+/// dashes. The MCP spec doesn't actually constrain tool names to OpenAI's
+/// `^[a-zA-Z0-9_-]{1,64}$` regex — a server could legally return
+/// `notion.search` or `notion:create_issue` — and the same LLM normalization
+/// that bites on `-` will bite on `.` and `:` too. Replacing them all up
+/// front is a one-line defense that makes the registry key bulletproof.
+/// `extract_server_name` already strips `.` from the host portion of a URL,
+/// but the tool portion of the prefixed name was unprotected. Multi-byte
+/// unicode characters (e.g. emoji or non-ASCII letters) are also normalized
+/// to `_` so the registry key stays a valid Rust identifier suffix.
+///
+/// The original (possibly hyphenated / dotted / unicode) tool name is still
+/// stored on the `McpToolWrapper`'s inner `McpTool` and used verbatim when
+/// forwarding the `tools/call` request to the MCP server, so this
+/// normalization is internal-only and does not affect protocol compatibility.
 pub(crate) fn mcp_tool_id(server_name: &str, tool_name: &str) -> String {
-    format!("{server_name}_{tool_name}").replace('-', "_")
+    format!("{server_name}_{tool_name}")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Wrapper that implements Tool for an MCP tool.
@@ -1437,6 +1457,33 @@ mod tests {
     fn test_mcp_tool_id_passthrough_for_already_canonical_names() {
         assert_eq!(mcp_tool_id("github", "list_issues"), "github_list_issues");
         assert_eq!(mcp_tool_id("local", "ping"), "local_ping");
+    }
+
+    #[test]
+    fn test_mcp_tool_id_normalizes_non_identifier_chars() {
+        // The MCP spec doesn't restrict tool names to OpenAI's
+        // `[a-zA-Z0-9_-]` regex. A server could legally return names with
+        // dots, colons, slashes, spaces, or non-ASCII characters. The same
+        // LLM normalization that bites on `-` will bite on these too, so
+        // canonicalize them all to `_` defensively.
+        assert_eq!(
+            mcp_tool_id("notion", "notion.search"),
+            "notion_notion_search"
+        );
+        assert_eq!(
+            mcp_tool_id("github", "github:create_issue"),
+            "github_github_create_issue"
+        );
+        assert_eq!(
+            mcp_tool_id("local", "do something now"),
+            "local_do_something_now"
+        );
+        // Path-like tool names: every separator becomes `_`.
+        assert_eq!(mcp_tool_id("fs", "files/read"), "fs_files_read");
+        // Multi-byte unicode (each `α` is 2 UTF-8 bytes) → each char
+        // becomes a single `_` in the output. Tests both correct char
+        // iteration AND that the char count translates 1:1.
+        assert_eq!(mcp_tool_id("local", "αβγ"), "local____");
     }
 
     /// Regression test (helper level): create_tools must surface the
