@@ -135,9 +135,13 @@ impl LlmConfig {
         }
 
         // Session config (used by NearAI provider for OAuth/session-token auth)
-        let nearai_auth_url = optional_env("NEARAI_AUTH_URL")?
-            .unwrap_or_else(|| "https://private.near.ai".to_string());
-        validate_base_url(&nearai_auth_url, "NEARAI_AUTH_URL")?;
+        // Only validate user-provided URLs; hardcoded defaults are trusted.
+        let nearai_auth_url = if let Some(url) = optional_env("NEARAI_AUTH_URL")? {
+            validate_base_url(&url, "NEARAI_AUTH_URL")?;
+            url
+        } else {
+            "https://private.near.ai".to_string()
+        };
         let session = SessionConfig {
             auth_base_url: nearai_auth_url,
             session_path: optional_env("NEARAI_SESSION_PATH")?
@@ -163,16 +167,18 @@ impl LlmConfig {
         } else {
             crate::llm::DEFAULT_MODEL.to_string()
         };
+        // Only validate user-provided URLs; hardcoded defaults are trusted.
         let nearai_base_url = if let Some(url) = nearai_override.and_then(|o| o.base_url.clone()) {
+            validate_base_url(&url, "NEARAI_BASE_URL")?;
             url
         } else if let Some(url) = optional_env("NEARAI_BASE_URL")? {
+            validate_base_url(&url, "NEARAI_BASE_URL")?;
             url
         } else if nearai_api_key.is_some() {
             "https://cloud-api.near.ai".to_string()
         } else {
             "https://private.near.ai".to_string()
         };
-        validate_base_url(&nearai_base_url, "NEARAI_BASE_URL")?;
         let nearai = NearAiConfig {
             model: nearai_model,
             cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
@@ -261,12 +267,18 @@ impl LlmConfig {
                 .or(optional_env("OPENAI_CODEX_MODEL")?)
                 .or(optional_env("OPENAI_MODEL")?)
                 .unwrap_or_else(|| "gpt-5.3-codex".to_string());
-            let auth_endpoint = optional_env("OPENAI_CODEX_AUTH_URL")?
-                .unwrap_or_else(|| "https://auth.openai.com".to_string());
-            validate_base_url(&auth_endpoint, "OPENAI_CODEX_AUTH_URL")?;
-            let api_base_url = optional_env("OPENAI_CODEX_API_URL")?
-                .unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".to_string());
-            validate_base_url(&api_base_url, "OPENAI_CODEX_API_URL")?;
+            let auth_endpoint = if let Some(url) = optional_env("OPENAI_CODEX_AUTH_URL")? {
+                validate_base_url(&url, "OPENAI_CODEX_AUTH_URL")?;
+                url
+            } else {
+                "https://auth.openai.com".to_string()
+            };
+            let api_base_url = if let Some(url) = optional_env("OPENAI_CODEX_API_URL")? {
+                validate_base_url(&url, "OPENAI_CODEX_API_URL")?;
+                url
+            } else {
+                "https://chatgpt.com/backend-api/codex".to_string()
+            };
             let client_id = optional_env("OPENAI_CODEX_CLIENT_ID")?
                 .unwrap_or_else(|| "app_EMoamEEZ73f0CkXaXp7hrann".to_string());
             let session_path = optional_env("OPENAI_CODEX_SESSION_PATH")?
@@ -495,13 +507,15 @@ impl LlmConfig {
         }
 
         // Resolve base URL: codex override > builtin_overrides (DB) > legacy settings (DB) > env var > registry default
+        // Only validate user-provided URLs (from settings/env); hardcoded
+        // registry defaults are trusted and skip DNS resolution.
         let is_codex_chatgpt = codex_base_url_override.is_some();
         let env_base_url = if let Some(env_var) = base_url_env {
             optional_env(env_var)?
         } else {
             None
         };
-        let base_url = codex_base_url_override
+        let user_supplied_url = codex_base_url_override
             .or_else(|| {
                 // DB settings: per-provider base_url override
                 settings
@@ -519,7 +533,9 @@ impl LlmConfig {
                     _ => None,
                 }
             })
-            .or(env_base_url)
+            .or(env_base_url);
+        let base_url = user_supplied_url
+            .clone()
             .or_else(|| default_base_url.map(String::from))
             .unwrap_or_default();
 
@@ -536,9 +552,12 @@ impl LlmConfig {
         // Provider base URLs are explicit operator configuration, so allow
         // private/local endpoints while still rejecting unsafe schemes,
         // public plaintext HTTP, and special blocked addresses.
-        if !base_url.is_empty() {
+        // Only validate user-supplied URLs; registry defaults are trusted.
+        if let Some(ref url) = user_supplied_url
+            && !url.is_empty()
+        {
             let field = base_url_env.unwrap_or("LLM_BASE_URL");
-            validate_operator_base_url(&base_url, field)?;
+            validate_operator_base_url(url, field)?;
         }
 
         // Resolve model: selected_model (DB) > per-provider override (DB) > env var > registry default
@@ -710,7 +729,8 @@ mod tests {
 
         let settings = Settings {
             llm_backend: Some("openai_compatible".to_string()),
-            openai_compatible_base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            // Use IP literal to avoid DNS resolution in sandboxed test environments.
+            openai_compatible_base_url: Some("https://8.8.8.8/api/v1".to_string()),
             selected_model: Some("openai/gpt-5.1-codex".to_string()),
             ..Default::default()
         };
@@ -732,7 +752,8 @@ mod tests {
 
         let settings = Settings {
             llm_backend: Some("openai_compatible".to_string()),
-            openai_compatible_base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            // Use IP literal to avoid DNS resolution in sandboxed test environments.
+            openai_compatible_base_url: Some("https://8.8.8.8/api/v1".to_string()),
             selected_model: Some("openai/gpt-5.1-codex".to_string()),
             ..Default::default()
         };

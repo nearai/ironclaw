@@ -153,12 +153,15 @@ impl Tunnel for CustomTunnel {
 
     async fn health_check(&self) -> bool {
         if let Some(ref url) = self.health_url {
-            return reqwest::Client::new()
+            return reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new())
                 .get(url)
                 .timeout(std::time::Duration::from_secs(5))
                 .send()
                 .await
-                .is_ok();
+                .is_ok_and(|r| r.status().is_success());
         }
 
         let guard = self.proc.lock().await;
