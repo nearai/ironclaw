@@ -10,6 +10,9 @@
 //! types become thin wrappers that delegate to `Arc<dyn Database>`.
 
 #[cfg(feature = "postgres")]
+pub mod migration_fixup;
+
+#[cfg(feature = "postgres")]
 pub mod postgres;
 
 #[cfg(feature = "postgres")]
@@ -330,6 +333,20 @@ pub struct UserRecord {
     pub metadata: serde_json::Value,
 }
 
+impl UserRecord {
+    /// Returns `true` if this user holds the admin role.
+    ///
+    /// Comparison is case-insensitive so a future row that stores
+    /// `"Admin"` (e.g. from a manual SQL fix or a renaming refactor)
+    /// still authenticates as admin instead of silently failing
+    /// closed. Use this helper everywhere instead of literal
+    /// `user.role == "admin"` so the canonicalisation rule lives in
+    /// one place.
+    pub fn is_admin(&self) -> bool {
+        self.role.eq_ignore_ascii_case("admin")
+    }
+}
+
 /// An API token for authenticating requests (hash stored, never plaintext).
 #[derive(Debug, Clone)]
 pub struct ApiTokenRecord {
@@ -519,6 +536,14 @@ pub trait JobStore: Send + Sync {
         actual_time_secs: i32,
         actual_value: Option<Decimal>,
     ) -> Result<(), DatabaseError>;
+
+    /// Create a lightweight system job for audit trail purposes.
+    ///
+    /// System jobs are instantly-completed job records that serve as FK anchors
+    /// for `ActionRecord`s created by non-agent callers (gateway handlers, CLI
+    /// commands, routine engines). They have `category = 'system'` and
+    /// `status = 'completed'` (snake_case to match `JobState::Completed.to_string()`).
+    async fn create_system_job(&self, user_id: &str, source: &str) -> Result<Uuid, DatabaseError>;
 }
 
 #[async_trait]

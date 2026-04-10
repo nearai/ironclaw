@@ -18,6 +18,7 @@ pub struct ChannelsConfig {
     pub http: Option<HttpConfig>,
     pub gateway: Option<GatewayConfig>,
     pub signal: Option<SignalConfig>,
+    pub tui: Option<TuiChannelConfig>,
     /// Directory containing WASM channel modules (default: ~/.ironclaw/channels/).
     pub wasm_channels_dir: std::path::PathBuf,
     /// Whether WASM channels are enabled.
@@ -30,6 +31,12 @@ pub struct ChannelsConfig {
 #[derive(Debug, Clone)]
 pub struct CliConfig {
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TuiChannelConfig {
+    pub theme: String,
+    pub sidebar_visible: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -362,6 +369,15 @@ impl ChannelsConfig {
         };
 
         let cli_enabled = db_first_bool(cs.cli_enabled, defaults.cli_enabled, "CLI_ENABLED")?;
+        let cli_mode = optional_env("CLI_MODE")?.unwrap_or_default();
+        let tui = if cli_mode.eq_ignore_ascii_case("tui") {
+            Some(TuiChannelConfig {
+                theme: optional_env("TUI_THEME")?.unwrap_or_else(|| "dark".to_string()),
+                sidebar_visible: parse_bool_env("TUI_SIDEBAR", true)?,
+            })
+        } else {
+            None
+        };
 
         Ok(Self {
             cli: CliConfig {
@@ -370,6 +386,7 @@ impl ChannelsConfig {
             http,
             gateway,
             signal,
+            tui,
             wasm_channels_dir: {
                 // DB-first: use settings if explicitly set, else env, else default.
                 // defaults.wasm_channels_dir is None, so any Some(..) is an explicit DB override.
@@ -536,6 +553,7 @@ mod tests {
             http: None,
             gateway: None,
             signal: None,
+            tui: None,
             wasm_channels_dir: PathBuf::from("/tmp/channels"),
             wasm_channels_enabled: true,
             wasm_channel_owner_ids: HashMap::new(),
@@ -560,6 +578,7 @@ mod tests {
             http: None,
             gateway: None,
             signal: None,
+            tui: None,
             wasm_channels_dir: PathBuf::from("/opt/channels"),
             wasm_channels_enabled: false,
             wasm_channel_owner_ids: ids,
@@ -621,5 +640,30 @@ mod tests {
 
         // SAFETY: under ENV_MUTEX
         unsafe { std::env::remove_var("GATEWAY_AUTH_TOKEN") };
+    }
+
+    #[test]
+    fn resolve_enables_tui_mode_from_env() {
+        let _guard = lock_env();
+        let settings = Settings::default();
+
+        // SAFETY: under ENV_MUTEX
+        unsafe {
+            std::env::set_var("CLI_MODE", "tui");
+            std::env::set_var("TUI_THEME", "light");
+            std::env::set_var("TUI_SIDEBAR", "false");
+        }
+
+        let cfg = ChannelsConfig::resolve(&settings, "owner-scope").expect("resolve");
+        let tui = cfg.tui.expect("tui config");
+        assert_eq!(tui.theme, "light");
+        assert!(!tui.sidebar_visible);
+
+        // SAFETY: under ENV_MUTEX
+        unsafe {
+            std::env::remove_var("CLI_MODE");
+            std::env::remove_var("TUI_THEME");
+            std::env::remove_var("TUI_SIDEBAR");
+        }
     }
 }

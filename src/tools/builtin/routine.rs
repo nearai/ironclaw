@@ -27,7 +27,8 @@ use crate::agent::routine_engine::RoutineEngine;
 use crate::context::JobContext;
 use crate::db::Database;
 use crate::tools::tool::{
-    ApprovalRequirement, Tool, ToolDiscoverySummary, ToolError, ToolOutput, require_str,
+    ApprovalRequirement, EngineCompatibility, Tool, ToolDiscoverySummary, ToolError, ToolOutput,
+    require_str,
 };
 
 // ==================== routine_create ====================
@@ -1238,6 +1239,10 @@ impl Tool for RoutineCreateTool {
     fn requires_sanitization(&self) -> bool {
         false
     }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
+    }
 }
 
 // ==================== routine_list ====================
@@ -1327,6 +1332,10 @@ impl Tool for RoutineListTool {
 
     fn requires_sanitization(&self) -> bool {
         false
+    }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
     }
 }
 
@@ -1491,6 +1500,10 @@ impl Tool for RoutineUpdateTool {
     fn requires_sanitization(&self) -> bool {
         false
     }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
+    }
 }
 
 // ==================== routine_delete ====================
@@ -1578,6 +1591,10 @@ impl Tool for RoutineDeleteTool {
     fn requires_sanitization(&self) -> bool {
         false
     }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
+    }
 }
 
 // ==================== routine_fire ====================
@@ -1658,6 +1675,10 @@ impl Tool for RoutineFireTool {
 
     fn requires_sanitization(&self) -> bool {
         false
+    }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
     }
 }
 
@@ -1798,6 +1819,10 @@ impl Tool for RoutineHistoryTool {
     fn requires_sanitization(&self) -> bool {
         false
     }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
+    }
 }
 
 // ==================== event_emit ====================
@@ -1862,6 +1887,10 @@ impl Tool for EventEmitTool {
 
     fn requires_sanitization(&self) -> bool {
         true
+    }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
     }
 }
 
@@ -2673,4 +2702,8 @@ mod tests {
                 && max_iterations == 25
         ));
     }
+
+    // Engine compatibility for routine tools is verified at the registry level
+    // via `tool_definitions_for_engine_excludes_v1_only_from_v2`. Each tool's
+    // `engine_compatibility()` returns `V1Only` — see the impl blocks above.
 }

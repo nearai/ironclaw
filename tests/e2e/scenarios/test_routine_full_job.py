@@ -15,62 +15,60 @@ from helpers import SEL, api_get, api_post
 
 # -- Helpers ------------------------------------------------------------------
 
-async def _send_chat_message(page, message: str) -> None:
-    """Send a chat message and wait for the assistant turn to appear."""
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.wait_for(state="visible", timeout=5000)
-    assistant_messages = page.locator(SEL["message_assistant"])
-    before_count = await assistant_messages.count()
+async def _send_chat_message(
+    base_url: str,
+    message: str,
+    *,
+    expected_fragment: str | None = None,
+    timeout: float = 30.0,
+) -> dict:
+    """Send a chat message through the API and handle approval if required."""
+    thread = await api_post(base_url, "/api/chat/thread/new")
+    thread.raise_for_status()
+    thread_id = thread.json()["id"]
 
-    await chat_input.fill(message)
-    await chat_input.press("Enter")
-
-    wait_args = {
-        "selector": SEL["message_assistant"],
-        "expectedCount": before_count + 1,
-    }
-
-    async def _wait_for_assistant() -> None:
-        await page.wait_for_function(
-            """({ selector, expectedCount }) => {
-                return document.querySelectorAll(selector).length >= expectedCount;
-            }""",
-            arg=wait_args,
-            timeout=30000,
-        )
-
-    async def _wait_for_approval():
-        approval_card = page.locator(SEL["approval_card"]).last
-        await approval_card.wait_for(
-            state="visible",
-            timeout=30000,
-        )
-        return approval_card
-
-    assistant_task = asyncio.create_task(_wait_for_assistant())
-    approval_task = asyncio.create_task(_wait_for_approval())
-
-    done, pending = await asyncio.wait(
-        {assistant_task, approval_task},
-        return_when=asyncio.FIRST_COMPLETED,
+    send = await api_post(
+        base_url,
+        "/api/chat/send",
+        json={"content": message, "thread_id": thread_id},
+        timeout=30,
     )
+    assert send.status_code in (200, 202), send.text[:400]
 
-    for task in pending:
-        task.cancel()
-    if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
+    for _ in range(int(timeout * 2)):
+        history = await api_get(
+            base_url,
+            f"/api/chat/history?thread_id={thread_id}",
+            timeout=15,
+        )
+        history.raise_for_status()
+        data = history.json()
 
-    if assistant_task in done and assistant_task.exception() is None:
-        await assistant_task
-        return
+        pending = data.get("pending_gate") or data.get("pending_approval")
+        if pending:
+            approval = await api_post(
+                base_url,
+                "/api/chat/approval",
+                json={
+                    "request_id": pending["request_id"],
+                    "action": "approve",
+                    "thread_id": thread_id,
+                },
+                timeout=15,
+            )
+            assert approval.status_code == 202, approval.text[:400]
 
-    if approval_task not in done or approval_task.exception() is not None:
-        await assistant_task
-        return
+        turns = data.get("turns", [])
+        if turns and turns[-1].get("response"):
+            response = turns[-1]["response"]
+            if expected_fragment is None or expected_fragment.lower() in response.lower():
+                return data
 
-    approval_card = await approval_task
-    await approval_card.locator("button.approve").click()
-    await _wait_for_assistant()
+        await asyncio.sleep(0.5)
+
+    raise AssertionError(
+        f"Chat command '{message}' did not complete within {timeout}s"
+    )
 
 
 async def _open_tab(page, tab: str) -> None:
@@ -144,7 +142,11 @@ async def test_full_job_routine_completes_with_tools(page, ironclaw_server):
     name = f"fjob-{uuid.uuid4().hex[:8]}"
 
     # Step 1: Create full_job routine via chat
-    await _send_chat_message(page, f"create full-job owner routine {name}")
+    await _send_chat_message(
+        ironclaw_server,
+        f"create full-job owner routine {name}",
+        expected_fragment=name,
+    )
     routine = await _wait_for_routine(ironclaw_server, name)
 
     assert routine["id"]
@@ -183,7 +185,11 @@ async def test_cron_routine_appears_and_can_be_manually_triggered(page, ironclaw
     """Cron routines should expose schedule metadata and support manual trigger."""
     name = f"cron-{uuid.uuid4().hex[:8]}"
 
-    await _send_chat_message(page, f"create cron owner routine {name}")
+    await _send_chat_message(
+        ironclaw_server,
+        f"create cron owner routine {name}",
+        expected_fragment=name,
+    )
     routine = await _wait_for_routine(ironclaw_server, name)
 
     assert routine["trigger_type"] == "cron"
@@ -210,7 +216,11 @@ async def test_failed_routine_is_visible_in_ui(page, ironclaw_server):
     name = f"fail-{uuid.uuid4().hex[:8]}"
     failure_reason = "Response contained no message or tool call"
 
-    await _send_chat_message(page, f"create failing lightweight owner routine {name}")
+    await _send_chat_message(
+        ironclaw_server,
+        f"create failing lightweight owner routine {name}",
+        expected_fragment=name,
+    )
     routine = await _wait_for_routine(ironclaw_server, name)
 
     trigger_response = await api_post(
@@ -232,7 +242,7 @@ async def test_failed_routine_is_visible_in_ui(page, ironclaw_server):
     detail = page.locator("#routine-detail")
     await detail.wait_for(state="visible", timeout=10000)
     await detail.locator(".badge.failed").first.wait_for(state="visible", timeout=10000)
-    assert "failing" in (await detail.locator(".badge.failed").first.inner_text()).lower()
+    assert "failed" in (await detail.locator(".badge.failed").first.inner_text()).lower()
 
     recent_run_row = detail.locator("table.routines-table tbody tr").first
     await recent_run_row.wait_for(state="visible", timeout=10000)

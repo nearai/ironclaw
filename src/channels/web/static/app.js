@@ -1000,6 +1000,32 @@ function sendMessage() {
   const content = input.value.trim();
   if (!content && stagedImages.length === 0) return;
 
+  // Intercept approval keywords when an unresolved approval card is pending.
+  // Find the most recent unresolved card (resolved cards linger 1.5s before removal).
+  const approvalCards = Array.from(document.querySelectorAll('.approval-card'));
+  const approvalCard = approvalCards.reverse().find(card => !card.querySelector('.approval-resolved'));
+  if (approvalCard && content) {
+    const lower = content.toLowerCase();
+    let action = null;
+    if (['yes', 'y', 'approve', 'ok', '/approve', '/yes', '/y'].includes(lower)) {
+      action = 'approve';
+    } else if (['always', 'a', 'yes always', 'approve always', '/always', '/a'].includes(lower)) {
+      action = 'always';
+    } else if (['no', 'n', 'deny', 'reject', 'cancel', '/deny', '/no', '/n'].includes(lower)) {
+      action = 'deny';
+    }
+    if (action) {
+      input.value = '';
+      autoResizeTextarea(input);
+      input.focus();
+      const requestId = approvalCard.getAttribute('data-request-id');
+      if (requestId) {
+        sendApprovalAction(requestId, action);
+      }
+      return;
+    }
+  }
+
   const userMsg = addMessage('user', content || '(images attached)');
   input.value = '';
   autoResizeTextarea(input);
@@ -1842,6 +1868,7 @@ function showJobCard(data) {
     browseBtn.className = 'job-card-browse';
     browseBtn.href = data.browse_url;
     browseBtn.target = '_blank';
+    browseBtn.rel = 'noopener noreferrer';
     browseBtn.textContent = I18n.t('jobs.browse');
     card.appendChild(browseBtn);
   }
@@ -1852,11 +1879,44 @@ function showJobCard(data) {
 
 // --- Auth card ---
 
-function handleAuthRequired(data) {
+async function handleAuthRequired(data) {
   if (data.thread_id && !isCurrentThread(data.thread_id)) {
     unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
     debouncedLoadThreads();
     return;
+  }
+  if (data.extension_name && getConfigureOverlay(data.extension_name)) {
+    return;
+  }
+  const existingCard = data.extension_name ? getAuthCard(data.extension_name) : getAuthCard();
+  if (existingCard && !data.request_id) {
+    const existingRequestId = existingCard.getAttribute('data-request-id');
+    const existingThreadId = existingCard.getAttribute('data-thread-id');
+    const incomingThreadId = data.thread_id || currentThreadId || null;
+    if (existingRequestId && (!existingThreadId || !incomingThreadId || existingThreadId === incomingThreadId)) {
+      return;
+    }
+  }
+  if (!data.request_id) {
+    const threadId = data.thread_id || currentThreadId || null;
+    if (threadId) {
+      try {
+        const history = await apiFetch('/api/chat/history?thread_id=' + encodeURIComponent(threadId));
+        const pendingGate = history && history.pending_gate;
+        if (pendingGate && pendingGate.request_id) {
+          const resumeKind = parseGateResumeKind(pendingGate.resume_kind);
+          if (resumeKind && resumeKind.type === 'authentication') {
+            handleGateRequired({
+              ...pendingGate,
+              thread_id: pendingGate.thread_id || threadId,
+            });
+            return;
+          }
+        }
+      } catch (_) {
+        // Fall through to the legacy card when pending-gate hydration fails.
+      }
+    }
   }
   setAuthFlowPending(true, data.instructions);
   if (data.auth_url) {
@@ -1914,8 +1974,12 @@ function handleGateResolved(data) {
     return;
   }
   document.querySelectorAll('.approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]').forEach((el) => el.remove());
-  if (data.resolution === 'credential_provided' || data.resolution === 'cancelled') {
-    removeAuthCard(data.tool_name);
+  if (
+    data.resolution === 'credential_provided'
+    || data.resolution === 'cancelled'
+    || data.resolution === 'external_callback'
+  ) {
+    removeAuthCard();
     enableChatInput();
   }
 }
@@ -2082,16 +2146,21 @@ function showSetupCard(data) {
     card.appendChild(instr);
   }
 
-  if (onboarding.setup_url && /^https?:\/\//i.test(onboarding.setup_url)) {
-    const links = document.createElement('div');
-    links.className = 'auth-links';
-    const setupLink = document.createElement('a');
-    setupLink.href = onboarding.setup_url;
-    setupLink.target = '_blank';
-    setupLink.rel = 'noopener noreferrer';
-    setupLink.textContent = I18n.t('authRequired.getToken');
-    links.appendChild(setupLink);
-    card.appendChild(links);
+  if (onboarding.setup_url) {
+    // Strict HTTPS validation via shared helper — defends against
+    // `javascript:`/`data:` URLs in extension/registry metadata.
+    const parsedSetupUrl = parseHttpsExternalUrl(onboarding.setup_url, 'setup');
+    if (parsedSetupUrl) {
+      const links = document.createElement('div');
+      links.className = 'auth-links';
+      const setupLink = document.createElement('a');
+      setupLink.href = parsedSetupUrl.href;
+      setupLink.target = '_blank';
+      setupLink.rel = 'noopener noreferrer';
+      setupLink.textContent = I18n.t('authRequired.getToken');
+      links.appendChild(setupLink);
+      card.appendChild(links);
+    }
   }
 
   const form = document.createElement('div');
@@ -2223,22 +2292,30 @@ function showAuthCard(data) {
   links.className = 'auth-links';
 
   if (data.auth_url) {
-    const oauthBtn = document.createElement('button');
-    oauthBtn.className = 'auth-oauth';
-    oauthBtn.textContent = I18n.t('authRequired.authenticateWith', {name: data.extension_name});
-    oauthBtn.addEventListener('click', () => {
-      openOAuthUrl(data.auth_url);
-    });
-    links.appendChild(oauthBtn);
+    const parsedAuthUrl = parseHttpsOAuthUrl(data.auth_url);
+    if (parsedAuthUrl) {
+      const oauthLink = document.createElement('a');
+      oauthLink.className = 'auth-oauth';
+      oauthLink.href = parsedAuthUrl.href;
+      oauthLink.target = '_blank';
+      // Match the other external links: include `noreferrer` so the
+      // OAuth provider does not see the in-app Referer header.
+      oauthLink.rel = 'noopener noreferrer';
+      oauthLink.textContent = I18n.t('authRequired.authenticateWith', {name: data.extension_name});
+      links.appendChild(oauthLink);
+    }
   }
 
-  if (data.setup_url && /^https?:\/\//i.test(data.setup_url)) {
-    const setupLink = document.createElement('a');
-    setupLink.href = data.setup_url;
-    setupLink.target = '_blank';
-    setupLink.rel = 'noopener noreferrer';
-    setupLink.textContent = I18n.t('authRequired.getToken');
-    links.appendChild(setupLink);
+  if (data.setup_url) {
+    const parsedSetupUrl = parseHttpsExternalUrl(data.setup_url, 'setup');
+    if (parsedSetupUrl) {
+      const setupLink = document.createElement('a');
+      setupLink.href = parsedSetupUrl.href;
+      setupLink.target = '_blank';
+      setupLink.rel = 'noopener noreferrer';
+      setupLink.textContent = I18n.t('authRequired.getToken');
+      links.appendChild(setupLink);
+    }
   }
 
   if (links.children.length > 0) {
@@ -2991,19 +3068,53 @@ chatInput.addEventListener('blur', () => {
   setTimeout(hideSlashAutocomplete, 150);
 });
 
-// Infinite scroll: load older messages when scrolled near the top
+// Infinite scroll: load older messages when scrolled near the top.
+// Also toggles the scroll-to-bottom button when the user has scrolled up.
+// The handler is rAF-throttled so rapid scroll events coalesce into at most
+// one layout read per frame.
+let _scrollRafPending = false;
 document.getElementById('chat-messages').addEventListener('scroll', function () {
-  if (this.scrollTop < 100 && hasMore && !loadingOlder) {
+  const container = this;
+  if (container.scrollTop < 100 && hasMore && !loadingOlder) {
     loadingOlder = true;
     // Show spinner at top
     const spinner = document.createElement('div');
     spinner.id = 'scroll-load-spinner';
     spinner.className = 'scroll-load-spinner';
     spinner.innerHTML = '<div class="spinner"></div> Loading older messages...';
-    this.insertBefore(spinner, this.firstChild);
+    container.insertBefore(spinner, container.firstChild);
     loadHistory(oldestTimestamp);
   }
+  if (_scrollRafPending) return;
+  _scrollRafPending = true;
+  requestAnimationFrame(() => {
+    _scrollRafPending = false;
+    const btn = document.getElementById('scroll-to-bottom-btn');
+    if (!btn) return;
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    btn.style.display = distanceFromBottom > 200 ? 'flex' : 'none';
+  });
 });
+
+document.getElementById('scroll-to-bottom-btn').addEventListener('click', () => {
+  const container = document.getElementById('chat-messages');
+  container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+});
+
+// Keep the scroll-to-bottom button anchored just above the chat input,
+// even when the textarea grows to multiple lines.
+(() => {
+  const input = document.querySelector('.chat-container .chat-input');
+  const container = document.querySelector('.chat-container');
+  if (!input || !container || typeof ResizeObserver === 'undefined') return;
+  const ro = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      const h = entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
+      container.style.setProperty('--chat-input-height', `${Math.ceil(h)}px`);
+    }
+  });
+  ro.observe(input);
+})();
 
 function autoResizeTextarea(el) {
   const prev = el.offsetHeight;
@@ -3864,16 +3975,20 @@ function loadInlineChannelSetup(ext, container) {
         container.appendChild(text);
       }
 
-      if (onboarding.setup_url && /^https?:\/\//i.test(onboarding.setup_url)) {
-        const links = document.createElement('div');
-        links.className = 'auth-links';
-        const link = document.createElement('a');
-        link.href = onboarding.setup_url;
-        link.target = '_blank';
-        link.rel = 'noopener noreferrer';
-        link.textContent = I18n.t('authRequired.getToken');
-        links.appendChild(link);
-        container.appendChild(links);
+      if (onboarding.setup_url) {
+        // Strict HTTPS validation via shared helper.
+        const parsedSetupUrl2 = parseHttpsExternalUrl(onboarding.setup_url, 'setup');
+        if (parsedSetupUrl2) {
+          const links = document.createElement('div');
+          links.className = 'auth-links';
+          const link = document.createElement('a');
+          link.href = parsedSetupUrl2.href;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          link.textContent = I18n.t('authRequired.getToken');
+          links.appendChild(link);
+          container.appendChild(links);
+        }
       }
 
       const form = document.createElement('div');
@@ -4233,7 +4348,7 @@ function currentUserIsAdmin() {
 // Rejects javascript:, data:, and other non-HTTPS schemes to prevent URL-injection.
 // Uses the URL constructor to safely parse and validate the scheme, which also
 // handles non-string values (objects, null, etc.) that would throw on .startsWith().
-function openOAuthUrl(url) {
+function parseHttpsExternalUrl(url, label) {
   let parsed;
   try {
     parsed = new URL(url);
@@ -4241,11 +4356,38 @@ function openOAuthUrl(url) {
       throw new Error('non-HTTPS protocol: ' + parsed.protocol);
     }
   } catch (e) {
-    console.warn('Blocked invalid/non-HTTPS OAuth URL:', url, e.message);
+    console.warn(`Blocked invalid/non-HTTPS ${label} URL:`, url, e.message);
     showToast(I18n.t('extensions.invalidOAuthUrl'), 'error');
-    return;
+    return null;
   }
-  window.open(parsed.href, '_blank', 'width=600,height=700');
+  return parsed;
+}
+
+function parseHttpsOAuthUrl(url) {
+  return parseHttpsExternalUrl(url, 'OAuth');
+}
+
+function openOAuthUrl(url) {
+  const parsed = parseHttpsOAuthUrl(url);
+  if (!parsed) return;
+  // `noopener,noreferrer` defends against tabnabbing — without these the
+  // OAuth provider page can read `window.opener` and reach back into the
+  // app tab. `noreferrer` also strips the Referer header.
+  const opened = window.open(
+    parsed.href,
+    '_blank',
+    'width=600,height=700,noopener,noreferrer',
+  );
+  // Some browsers ignore the noopener feature flag in window.open's third
+  // argument when the window is non-null; explicitly null the opener as a
+  // belt-and-suspenders defense.
+  if (opened) {
+    try {
+      opened.opener = null;
+    } catch (_) {
+      /* opener may already be null in cross-origin contexts */
+    }
+  }
 }
 
 // --- Pairing ---
@@ -4669,7 +4811,7 @@ function renderJobDetail(job) {
     headerHtml += '<button class="btn-restart" data-action="restart-job" data-id="' + escapeHtml(job.id) + '">Retry</button>';
   }
   if (job.browse_url) {
-    headerHtml += '<a class="btn-browse" href="' + escapeHtml(job.browse_url) + '" target="_blank">Browse Files</a>';
+    headerHtml += '<a class="btn-browse" href="' + escapeHtml(job.browse_url) + '" target="_blank" rel="noopener noreferrer">Browse Files</a>';
   }
 
   header.innerHTML = headerHtml;
@@ -5352,7 +5494,7 @@ function renderMissionsList(missions) {
     return '<tr class="mission-row" data-action="open-mission" data-id="' + escapeHtml(m.id) + '">'
       + '<td>' + escapeHtml(m.name) + '</td>'
       + '<td class="truncate">' + escapeHtml(m.goal) + '</td>'
-      + '<td>' + escapeHtml(m.cadence_type) + '</td>'
+      + '<td>' + escapeHtml(m.cadence_description || m.cadence_type) + '</td>'
       + '<td>' + m.thread_count + '</td>'
       + '<td><span class="badge ' + statusClass + '">' + escapeHtml(m.status) + '</span></td>'
       + '<td>'
@@ -5402,7 +5544,7 @@ function renderMissionDetail(m) {
     + '<div class="job-description-body">' + renderMarkdown(m.goal) + '</div></div>';
 
   html += '<div class="job-meta-grid">'
-    + metaItem(I18n.t('missions.cadence'), m.cadence_type)
+    + metaItem(I18n.t('missions.cadence'), m.cadence_description || m.cadence_type)
     + metaItem(I18n.t('missions.status'), m.status)
     + metaItem(I18n.t('missions.threadsToday'), m.threads_today + ' / ' + (m.max_threads_per_day || '∞'))
     + metaItem(I18n.t('missions.totalThreads'), m.thread_count)
@@ -6132,7 +6274,7 @@ function renderCatalogSkillCard(entry, installedNames) {
   name.textContent = entry.name || entry.slug;
   name.href = 'https://clawhub.ai/skills/' + encodeURIComponent(entry.slug);
   name.target = '_blank';
-  name.rel = 'noopener';
+  name.rel = 'noopener noreferrer';
   name.style.textDecoration = 'none';
   name.style.color = 'inherit';
   name.title = I18n.t('skills.viewOnClawHub');
@@ -6205,7 +6347,8 @@ function renderCatalogSkillCard(entry, installedNames) {
   actions.className = 'ext-actions';
 
   var slug = entry.slug || entry.name;
-  var isInstalled = installedNames[entry.name] || installedNames[slug];
+  var slugSuffix = slug.indexOf('/') >= 0 ? slug.split('/').pop() : slug;
+  var isInstalled = entry.installed || installedNames[entry.name] || installedNames[slug] || installedNames[slugSuffix];
 
   if (isInstalled) {
     var label = document.createElement('span');
@@ -6216,14 +6359,14 @@ function renderCatalogSkillCard(entry, installedNames) {
     var installBtn = document.createElement('button');
     installBtn.className = 'btn-ext install';
     installBtn.textContent = I18n.t('extensions.install');
-    installBtn.addEventListener('click', (function(s, btn) {
+    installBtn.addEventListener('click', (function(displayName, slugValue, btn) {
       return function() {
-        if (!confirm(I18n.t('skills.confirmInstallHub', { name: s }))) return;
+        if (!confirm(I18n.t('skills.confirmInstallHub', { name: displayName }))) return;
         btn.disabled = true;
         btn.textContent = I18n.t('extensions.installing');
-        installSkill(s, null, btn);
+        installSkill(displayName, null, btn, slugValue);
       };
-    })(slug, installBtn));
+    })(entry.name || slug, slug, installBtn));
     actions.appendChild(installBtn);
   }
 
@@ -6252,8 +6395,9 @@ function formatTimeAgo(epochMs) {
   return Math.floor(months / 12) + 'y ago';
 }
 
-function installSkill(nameOrSlug, url, btn) {
-  var body = { name: nameOrSlug, slug: nameOrSlug };
+function installSkill(name, url, btn, slug) {
+  var body = { name: name };
+  if (slug) body.slug = slug;
   if (url) body.url = url;
 
   apiFetch('/api/skills/install', {
@@ -6262,12 +6406,19 @@ function installSkill(nameOrSlug, url, btn) {
     body: body,
   }).then(function(res) {
     if (res.success) {
-      showToast(I18n.t('skills.installedSuccess', {name: nameOrSlug}), 'success');
+      showToast(I18n.t('skills.installedSuccess', {name: name}), 'success');
+      if (btn && btn.parentNode) {
+        var label = document.createElement('span');
+        label.className = 'ext-active-label';
+        label.textContent = I18n.t('status.installed');
+        btn.parentNode.innerHTML = '';
+        btn.parentNode.appendChild(label);
+      }
     } else {
       showToast(I18n.t('extensions.installFailed', { message: res.message || 'unknown error' }), 'error');
     }
     loadSkills();
-    if (btn) { btn.disabled = false; btn.textContent = I18n.t('extensions.install'); }
+    if (btn && !res.success) { btn.disabled = false; btn.textContent = I18n.t('extensions.install'); }
   }).catch(function(err) {
     showToast(I18n.t('extensions.installFailed', { message: err.message }), 'error');
     if (btn) { btn.disabled = false; btn.textContent = I18n.t('extensions.install'); }

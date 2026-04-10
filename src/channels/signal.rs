@@ -1014,7 +1014,7 @@ impl Channel for SignalChannel {
 
         // Send tool result previews to user (debug mode only)
         if self.is_debug()
-            && let StatusUpdate::ToolResult { name, preview } = &status
+            && let StatusUpdate::ToolResult { name, preview, .. } = &status
             && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
         {
             let truncated = if preview.chars().count() > 500 {
@@ -1029,7 +1029,7 @@ impl Channel for SignalChannel {
 
         // Send tool started notification (debug mode only)
         if self.is_debug()
-            && let StatusUpdate::ToolStarted { name } = &status
+            && let StatusUpdate::ToolStarted { name, .. } = &status
             && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
         {
             let message = format!("\u{25CB} Running tool: {}", name);

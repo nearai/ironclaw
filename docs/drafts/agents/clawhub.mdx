@@ -1,0 +1,131 @@
+---
+title: ClawHub Registry
+sidebarTitle: ClawHub
+description: Discover and install skills from the ClawHub registry
+---
+
+ClawHub is the official registry for IronClaw skills. It lets you discover community-built skills, install them with a single command, and keep them up to date — without leaving the agent interface.
+
+## What ClawHub Provides
+
+- **Searchable catalog** of skills organized by category and keyword
+- **Versioned downloads** — install a specific version or always pull the latest
+- **Trust boundary** — all registry-installed skills run under the **Installed** trust level, limiting tool access to read-only operations
+
+<Warning>
+Skills from ClawHub are installed with **Installed** trust, not **Trusted** trust. They cannot execute shell commands, write files, or make HTTP requests. If you need elevated access, download the SKILL.md manually and place it in `~/.ironclaw/skills/` after reviewing the contents.
+</Warning>
+
+## Skill Tools
+
+Four built-in tools manage skills at runtime. Use them directly in conversation:
+
+### skill_list
+
+List all discovered skills on this instance, including trust level, activation status, and source directory.
+
+```
+skill_list
+
+# Example output:
+# kubernetes-deploy  (trusted)    ~/.ironclaw/skills/
+# git-helper         (trusted)    <workspace>/skills/
+# python-lint        (installed)  ~/.ironclaw/installed_skills/
+```
+
+### skill_search
+
+Search the ClawHub registry for available skills matching a query.
+
+```
+skill_search "terraform infrastructure"
+
+# Returns: skill name, description, version, download count, tags
+```
+
+### skill_install
+
+Download and install a skill from ClawHub into `~/.ironclaw/installed_skills/`.
+
+```
+skill_install python-lint
+skill_install python-lint@0.3.1   # pin a specific version
+```
+
+The skill is immediately available after installation — no restart required.
+
+### skill_remove
+
+Remove an installed skill from `~/.ironclaw/installed_skills/`.
+
+```
+skill_remove python-lint
+```
+
+Trusted skills in `~/.ironclaw/skills/` must be removed manually by deleting the directory.
+
+## Configuration
+
+```bash
+# ClawHub registry URL
+SKILLS_CATALOG_URL=https://clawhub.dev
+
+# Maximum tokens injected per turn across all active skills
+SKILLS_MAX_TOKENS=4000
+
+# Scan skill directories at startup
+SKILLS_AUTO_DISCOVER=true
+```
+
+## How Installation Works
+
+<Steps>
+  <Step title="Search or browse">
+    Use `skill_search` or visit [clawhub.dev](https://clawhub.dev) to find a skill. Note the skill's slug (e.g., `python-lint`).
+  </Step>
+
+  <Step title="Install">
+    Run `skill_install <slug>`. The agent fetches the SKILL.md from the registry and writes it to `~/.ironclaw/installed_skills/<slug>/SKILL.md`.
+  </Step>
+
+  <Step title="Activation">
+    On the next turn, the skill is eligible for scoring and injection. It will activate automatically when your messages match its keywords or patterns.
+  </Step>
+
+  <Step title="Verification">
+    Run `skill_list` to confirm the skill appears with `(installed)` trust level.
+  </Step>
+</Steps>
+
+## Updating Skills
+
+Skills installed from ClawHub are pinned to the version at installation time. To update:
+
+```
+skill_remove python-lint
+skill_install python-lint
+```
+
+This removes the old version and installs the current latest from the registry.
+
+## Publishing to ClawHub
+
+ClawHub is an open registry. To publish a skill:
+
+1. Write a valid SKILL.md following the [SKILL.md Format](/agents/skills-format)
+2. Test it locally by placing it in `~/.ironclaw/skills/`
+3. Submit via the ClawHub web interface at [clawhub.dev](https://clawhub.dev)
+
+Published skills are reviewed before appearing in search results.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Skills Overview" icon="puzzle" href="/agents/skills">
+    How the activation pipeline and trust levels work
+  </Card>
+
+  <Card title="SKILL.md Format" icon="file-text" href="/agents/skills-format">
+    Write your own skills from scratch
+  </Card>
+</CardGroup>

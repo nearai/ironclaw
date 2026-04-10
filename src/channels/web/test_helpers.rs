@@ -82,6 +82,7 @@ impl TestGatewayBuilder {
             llm_provider: self.llm_provider,
             skill_registry: None,
             skill_catalog: None,
+            auth_manager: None,
             scheduler: None,
             chat_rate_limiter: PerUserRateLimiter::new(30, 60),
             oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
@@ -102,6 +103,7 @@ impl TestGatewayBuilder {
             near_rpc_url: None,
             near_network: None,
             oauth_sweep_shutdown: None,
+            tool_dispatcher: None,
         })
     }
 

@@ -1,0 +1,243 @@
+---
+title: FAQ
+sidebarTitle: FAQ
+description: Frequently asked questions
+---
+
+Common questions about IronClaw.
+
+## General
+
+<AccordionGroup>
+  <Accordion title="What is IronClaw?" icon="help-circle">
+    IronClaw is a secure, self-hosted AI assistant that runs on your own hardware. It provides a personal AI with strong privacy guarantees through multi-layer security.
+  </Accordion>
+
+  <Accordion title="Do I need Docker?" icon="container">
+    **No for basic use, yes for job sandboxing.**
+
+    IronClaw runs as a standalone binary. Docker is only required if you want to use:
+    - Sandboxed job execution (Claude Code mode)
+    - WASM tool building with automatic compilation
+
+    Without Docker, IronClaw still works fully — just without the Docker sandbox layer.
+  </Accordion>
+
+  <Accordion title="Can I run without PostgreSQL?" icon="database">
+    **Yes.** IronClaw includes libSQL (embedded SQLite) as an alternative.
+
+    libSQL requires no separate server and is recommended for personal use. PostgreSQL is recommended for production or multi-user deployments.
+  </Accordion>
+
+  <Accordion title="Is my data sent to NEAR AI?" icon="shield">
+    Only prompts and responses go to your chosen LLM provider. Your:
+    - Conversations are stored locally
+    - Files remain on your machine
+    - Secrets are encrypted locally
+    - Settings are in your database
+
+    If using a cloud provider (NEAR AI, Anthropic, OpenAI), your prompts/responses are sent to them. Use Ollama or Tinfoil for maximum privacy.
+  </Accordion>
+
+  <Accordion title="How is IronClaw different from openclaw?" icon="git-compare">
+    | Feature | IronClaw | openclaw |
+    |---------|----------|----------|
+    | Deployment | Local, self-hosted | Cloud service |
+    | Data | Your hardware, your control | openclaw infrastructure |
+    | Language | Rust | Varies |
+    | Security | Multi-layer, local-first | Cloud security |
+
+    IronClaw is the self-hosted version for users who want complete control over their data.
+  </Accordion>
+</AccordionGroup>
+
+## Configuration
+
+<AccordionGroup>
+  <Accordion title="How do I switch LLM providers?" icon="refresh-cw">
+    ```bash
+    # Re-run the wizard
+    ironclaw onboard --skip-auth
+
+    # Or edit ~/.ironclaw/.env
+    export LLM_BACKEND=anthropic
+    export ANTHROPIC_API_KEY=sk-ant-...
+    ```
+  </Accordion>
+
+  <Accordion title="How do I add a second channel?" icon="plus">
+    ```bash
+    ironclaw onboard --channels-only
+    ```
+
+    This runs only Step 6 of the wizard, letting you add channels without reconfiguring everything.
+  </Accordion>
+
+  <Accordion title="What's the difference between skills and tools?" icon="git-compare">
+    | Skills | Tools |
+    |--------|-------|
+    | SKILL.md prompt extensions | Executable code |
+    | Extends LLM behavior | Extends capabilities |
+    | No code execution | Can run arbitrary code |
+    | Trust-based activation | Capability-based security |
+
+    Skills guide the LLM's behavior. Tools give it new abilities.
+  </Accordion>
+
+  <Accordion title="Where is my data stored?" icon="database">
+    By default: `~/.ironclaw/`
+
+    ```
+    ~/.ironclaw/
+    ├── ironclaw.db          # libSQL database
+    ├── .env                 # Bootstrap config
+    ├── channels/            # WASM channels
+    ├── tools/               # WASM tools
+    └── skills/              # SKILL.md files
+    ```
+
+    Change with `IRONCLAW_BASE_DIR`.
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="How do I reset everything?" icon="trash">
+    ```bash
+    # Stop IronClaw
+    killall ironclaw
+
+    # Remove data
+    rm -rf ~/.ironclaw
+
+    # Restart fresh
+    ironclaw onboard
+    ```
+
+    <Warning>This permanently deletes all your data.</Warning>
+  </Accordion>
+
+  <Accordion title="Why is the wizard asking for a browser?" icon="globe">
+    NEAR AI OAuth requires a browser for authentication. It opens your default browser to complete login.
+
+    On VPS/servers without a browser, use:
+    - NEAR AI Cloud API key (option 4 in auth menu)
+    - Or set `IRONCLAW_OAUTH_CALLBACK_URL` to a public URL
+  </Accordion>
+
+  <Accordion title="How do I run IronClaw as a service?" icon="server">
+    ```bash
+    # Install service
+    ironclaw service install
+
+    # Start
+    sudo systemctl enable --now ironclaw  # Linux
+    brew services start ironclaw            # macOS
+    ```
+  </Accordion>
+
+  <Accordion title="Can I use IronClaw behind a reverse proxy?" icon="network">
+    **Yes.** Configure your reverse proxy to forward to the Web Gateway:
+
+    ```nginx
+    location / {
+      proxy_pass http://localhost:3000;
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+    }
+    ```
+
+    See [VPS Install](/install/vps) for examples.
+  </Accordion>
+</AccordionGroup>
+
+## Security
+
+<AccordionGroup>
+  <Accordion title="How secure is IronClaw?" icon="shield">
+    IronClaw uses defense in depth:
+
+    1. **Safety Layer** — Prompt injection defense
+    2. **WASM Sandbox** — Sandboxed tool execution
+    3. **Docker Sandbox** — Container isolation
+    4. **Secrets Encryption** — AES-256-GCM
+    5. **Zero-Exposure Model** — Credentials never in containers
+
+    See [Security Overview](/security) for details.
+  </Accordion>
+
+  <Accordion title="Can IronClaw be hacked?" icon="alert-triangle">
+    No software is unhackable. IronClaw reduces risk through:
+    - Multiple isolation layers
+    - Minimal attack surface
+    - Security-first design
+    - Regular updates
+
+    Follow security best practices and keep updated.
+  </Accordion>
+
+  <Accordion title="Is my data encrypted?" icon="lock">
+    - **Secrets**: AES-256-GCM encrypted
+    - **Database**: Unencrypted by default (use full-disk encryption)
+    - **Network**: TLS to providers
+
+    See [Secrets](/security/secrets) and [Database](/setup/database) for details.
+  </Accordion>
+
+  <Accordion title="What if a tool is malicious?" icon="bug">
+    Tools run in:
+    - WASM sandbox (memory limits, fuel metering)
+    - Docker sandbox (container isolation)
+    - Network proxy (controlled access)
+
+    Even if a tool is compromised, it's contained.
+  </Accordion>
+</AccordionGroup>
+
+## Advanced
+
+<AccordionGroup>
+  <Accordion title="Can I run IronClaw on a Raspberry Pi?" icon="cpu">
+    **Yes**, with caveats:
+    - Use libSQL (not PostgreSQL)
+    - Use Ollama with small models (3B parameters)
+    - Expect slower performance
+    - Use SD card for storage
+
+    ```bash
+    # Install for ARM
+    curl -fsSL https://install.ironclaw.ai | bash
+    ```
+  </Accordion>
+
+  <Accordion title="Can I use my own LLM?" icon="brain">
+    **Yes.** Use the OpenAI-compatible backend:
+
+    ```bash
+    export LLM_BACKEND=openai_compatible
+    export LLM_BASE_URL=http://your-llm:8000/v1
+    export LLM_API_KEY=your-key
+    ```
+
+    Or use Ollama for local models.
+  </Accordion>
+
+  <Accordion title="Can I contribute?" icon="github">
+    Yes! IronClaw is open source:
+
+    - GitHub: https://github.com/ironclaw-ai/ironclaw
+    - Issues: Report bugs and feature requests
+    - PRs: Welcome with tests
+
+    See CONTRIBUTING.md in the repository.
+  </Accordion>
+</AccordionGroup>
+
+## Still Have Questions?
+
+- [Troubleshooting](/help/troubleshooting) — Common issues
+- [CLI Reference](/reference/cli) — Command reference
+- [Configuration](/setup/configuration) — Environment variables
+- [GitHub Issues](https://github.com/ironclaw-ai/ironclaw/issues) — Bug reports

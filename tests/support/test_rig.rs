@@ -34,6 +34,154 @@ use ironclaw::llm::recording::{HttpExchange, HttpInterceptor, ReplayingHttpInter
 /// response stream so tests don't need to account for them manually.
 const BOOTSTRAP_GREETING_MARKER: &str = "always-on chief of staff";
 
+/// Configuration for selectively seeding `secrets` rows into a fresh test
+/// rig database from an existing libSQL file.
+///
+/// Live tests use this to pull *only* the credentials they need (e.g. a
+/// Google OAuth token) out of the developer's real `~/.ironclaw/ironclaw.db`
+/// without cloning the rest of the database. Memory, history, secrets the
+/// test didn't ask for — none of it crosses the boundary. The destination
+/// DB starts empty, the listed secret rows are inserted under the test
+/// rig's owner user, and the test must seed any other state itself.
+#[derive(Clone, Debug)]
+pub struct SeededSecretsConfig {
+    /// Path to the source libSQL file (typically `~/.ironclaw/ironclaw.db`).
+    pub source_path: std::path::PathBuf,
+    /// User ID to filter the source rows on (typically the developer's
+    /// owner_id from the live config).
+    pub source_user_id: String,
+    /// Names of the secrets to copy. Names not present in the source are
+    /// logged as warnings and silently skipped — the test will fail fast
+    /// on its own missing-credential path if a required name was wrong.
+    pub names: Vec<String>,
+}
+
+/// Open the source libSQL database read-only and copy the listed secret
+/// rows into the destination database under `owner_user_id`. The source
+/// is *only* read; the destination must already have the `secrets` table
+/// (i.e. migrations have run on it).
+///
+/// This intentionally avoids `std::fs::copy` of the underlying SQLite
+/// file: copying the whole DB would also pull in workspace memory,
+/// conversation history, and *every other* secret row, which is the
+/// regression we are explicitly fixing.
+#[cfg(feature = "libsql")]
+async fn seed_secrets_into(
+    dest_db: &libsql::Database,
+    config: &SeededSecretsConfig,
+    owner_user_id: &str,
+) -> Result<(), String> {
+    if config.names.is_empty() {
+        return Ok(());
+    }
+    if !config.source_path.exists() {
+        return Err(format!(
+            "source libSQL DB not found: {}",
+            config.source_path.display()
+        ));
+    }
+    eprintln!(
+        "[TestRig] Seeding {} secret(s) from {} (user_id={}) → temp DB (owner={})",
+        config.names.len(),
+        config.source_path.display(),
+        config.source_user_id,
+        owner_user_id,
+    );
+
+    // Open the source via a separate libSQL connection. We never write to
+    // it. The source process (the developer's running ironclaw) can keep
+    // running concurrently — libSQL's WAL mode permits a reader from
+    // another connection.
+    let src_db = libsql::Builder::new_local(&config.source_path)
+        .build()
+        .await
+        .map_err(|e| format!("open source libSQL DB: {e}"))?;
+    let src_conn = src_db
+        .connect()
+        .map_err(|e| format!("connect to source libSQL DB: {e}"))?;
+
+    // Build a parameterized IN-clause: `?, ?, ?...`. We bind names + the
+    // owner separately to keep this injection-safe even though the input
+    // is technically test-controlled.
+    let placeholders = std::iter::repeat_n("?", config.names.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let select_sql = format!(
+        "SELECT name, encrypted_value, key_salt, provider, expires_at \
+         FROM secrets \
+         WHERE user_id = ? AND name IN ({placeholders})"
+    );
+    let mut params: Vec<libsql::Value> = Vec::with_capacity(1 + config.names.len());
+    params.push(libsql::Value::Text(config.source_user_id.clone()));
+    for name in &config.names {
+        params.push(libsql::Value::Text(name.clone()));
+    }
+
+    let mut rows = src_conn
+        .query(&select_sql, params)
+        .await
+        .map_err(|e| format!("query source secrets: {e}"))?;
+
+    let dest_conn = dest_db
+        .connect()
+        .map_err(|e| format!("connect to destination libSQL DB: {e}"))?;
+
+    let mut copied: Vec<String> = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| format!("iterate source secrets: {e}"))?
+    {
+        let name: String = row.get(0).map_err(|e| format!("read secrets.name: {e}"))?;
+        let encrypted_value: Vec<u8> = row
+            .get(1)
+            .map_err(|e| format!("read secrets.encrypted_value: {e}"))?;
+        let key_salt: Vec<u8> = row
+            .get(2)
+            .map_err(|e| format!("read secrets.key_salt: {e}"))?;
+        let provider: Option<String> = row
+            .get(3)
+            .map_err(|e| format!("read secrets.provider: {e}"))?;
+        let expires_at: Option<String> = row
+            .get(4)
+            .map_err(|e| format!("read secrets.expires_at: {e}"))?;
+
+        let id = uuid::Uuid::new_v4().to_string();
+        dest_conn
+            .execute(
+                "INSERT INTO secrets \
+                    (id, user_id, name, encrypted_value, key_salt, provider, expires_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                libsql::params![
+                    id,
+                    owner_user_id.to_string(),
+                    name.clone(),
+                    encrypted_value,
+                    key_salt,
+                    provider,
+                    expires_at,
+                ],
+            )
+            .await
+            .map_err(|e| format!("insert seeded secret '{name}' into destination: {e}"))?;
+        copied.push(name);
+    }
+
+    let missing: Vec<&String> = config
+        .names
+        .iter()
+        .filter(|n| !copied.contains(n))
+        .collect();
+    if !missing.is_empty() {
+        eprintln!(
+            "[TestRig] WARNING: requested secrets not found in source: {:?}",
+            missing
+        );
+    }
+    eprintln!("[TestRig] Seeded secrets: {:?}", copied);
+    Ok(())
+}
+
 /// A running test agent with methods to inject messages and inspect results.
 pub struct TestRig {
     /// The test channel for sending messages and reading captures.
@@ -324,6 +472,7 @@ impl TestRig {
                     success: false,
                     error,
                     parameters,
+                    ..
                 } = status
                 {
                     let detail = format!(
@@ -367,6 +516,7 @@ impl TestRig {
                 success: false,
                 error,
                 parameters,
+                ..
             } = status
             {
                 let detail = format!(
@@ -433,6 +583,8 @@ pub struct TestRigBuilder {
     wasm_tools: Vec<WasmToolSpec>,
     keep_bootstrap: bool,
     engine_v2: bool,
+    channel_name_override: Option<String>,
+    seeded_secrets: Option<SeededSecretsConfig>,
 }
 
 impl TestRigBuilder {
@@ -453,7 +605,47 @@ impl TestRigBuilder {
             wasm_tools: Vec::new(),
             keep_bootstrap: false,
             engine_v2: false,
+            channel_name_override: None,
+            seeded_secrets: None,
         }
+    }
+
+    /// Override the test channel name (default: "test", or "gateway" when
+    /// `.with_bootstrap()` is set). Use this when you need the channel name to
+    /// match a real-world channel (e.g. "gateway") so that downstream features
+    /// keyed on the channel name (assistant conversations, mission notify
+    /// channels) behave the same as in production.
+    pub fn with_channel_name(mut self, name: impl Into<String>) -> Self {
+        self.channel_name_override = Some(name.into());
+        self
+    }
+
+    /// Selectively seed `secrets` rows from an existing libSQL file into
+    /// the test rig's fresh temp database.
+    ///
+    /// Live tests use this to pull just the credentials they need (e.g.
+    /// `google_oauth_token`) out of the developer's real
+    /// `~/.ironclaw/ironclaw.db` so OAuth-backed flows work end-to-end —
+    /// without cloning conversation history, workspace memory, or any
+    /// secret the test didn't ask for. The destination DB starts empty;
+    /// the listed rows are inserted under the test rig's owner user; any
+    /// other state the test relies on must be seeded by the test itself.
+    ///
+    /// Names that don't exist in the source are logged as warnings and
+    /// silently skipped — the test will fail fast on its own missing
+    /// credential path if a required name was wrong.
+    pub fn with_seeded_secrets(
+        mut self,
+        source_path: std::path::PathBuf,
+        source_user_id: impl Into<String>,
+        names: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.seeded_secrets = Some(SeededSecretsConfig {
+            source_path,
+            source_user_id: source_user_id.into(),
+            names: names.into_iter().map(Into::into).collect(),
+        });
+        self
     }
 
     /// Load a real WASM tool binary into the test rig.
@@ -605,11 +797,20 @@ impl TestRigBuilder {
             wasm_tools,
             keep_bootstrap,
             engine_v2,
+            channel_name_override,
+            seeded_secrets,
         } = self;
 
-        // 1. Create temp dir + libSQL database + run migrations.
+        // 1. Create temp dir + fresh libSQL database + run migrations.
+        //
+        // The destination DB is always created empty. If the test asked
+        // for specific secrets via `with_seeded_secrets(...)`, we copy
+        // *only* those rows out of the source DB after migrations have
+        // run — never the whole file. Memory, history, conversations,
+        // and unrequested secrets stay isolated in the source.
         let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
         let db_path = temp_dir.path().join("test_rig.db");
+
         let backend = LibSqlBackend::new_local(&db_path)
             .await
             .expect("failed to create test LibSqlBackend");
@@ -617,6 +818,18 @@ impl TestRigBuilder {
             .run_migrations()
             .await
             .expect("failed to run migrations");
+
+        // Build the backend-specific handles so AppBuilder can wire the
+        // secrets store. `with_database()` alone leaves handles=None,
+        // which silently disables `SecretsStore` and breaks every test
+        // that needs OAuth/encrypted credentials. `with_database_and_handles()`
+        // is the right pairing.
+        let db_handles = ironclaw::db::DatabaseHandles {
+            #[cfg(feature = "libsql")]
+            libsql_db: Some(backend.shared_db()),
+            #[cfg(feature = "postgres")]
+            pg_pool: None,
+        };
         let db: Arc<dyn ironclaw::db::Database> = Arc::new(backend);
 
         // 2. Build Config.
@@ -640,6 +853,26 @@ impl TestRigBuilder {
         config.skills.enabled = enable_skills;
         if let Some(v) = auto_approve_tools {
             config.agent.auto_approve_tools = v;
+        }
+
+        // 2b. Selectively seed `secrets` rows from the source DB if the
+        // test asked for it. We seed *after* migrations have run (so the
+        // schema exists in the destination) and *under the owner_user_id
+        // from the active config* so production credential lookups
+        // (`SELECT ... WHERE user_id = owner`) hit the seeded rows. The
+        // source DB is opened read-only via a separate libSQL connection;
+        // nothing else (memory, conversations, other secrets) crosses the
+        // boundary.
+        #[cfg(feature = "libsql")]
+        if let Some(ref ss) = seeded_secrets {
+            let owner = config.owner_id.clone();
+            let dest_handle = db_handles
+                .libsql_db
+                .as_ref()
+                .expect("libsql backend handle is required to seed secrets");
+            seed_secrets_into(dest_handle.as_ref(), ss, &owner)
+                .await
+                .expect("failed to seed live-test secrets into temp DB");
         }
 
         // 3. Create SessionManager + LogBroadcaster.
@@ -688,7 +921,7 @@ impl TestRigBuilder {
             session,
             log_broadcaster,
         );
-        builder.with_database(Arc::clone(&db));
+        builder.with_database_and_handles(Arc::clone(&db), db_handles);
         builder.with_llm(llm);
         let mut components = builder
             .build_all()
@@ -894,6 +1127,7 @@ impl TestRigBuilder {
             skill_catalog: components.skill_catalog,
             skills_config: components.config.skills.clone(),
             hooks: components.hooks,
+            auth_manager: None,
             cost_guard: components.cost_guard,
             sse_tx: None,
             http_interceptor,
@@ -907,11 +1141,30 @@ impl TestRigBuilder {
 
         // 7. Create TestChannel and ChannelManager.
         // When testing bootstrap, the channel must be named "gateway" because
-        // the bootstrap greeting targets only the gateway channel.
-        let test_channel = if self.keep_bootstrap {
-            Arc::new(TestChannel::new().with_name("gateway"))
+        // the bootstrap greeting targets only the gateway channel. An explicit
+        // override (via `with_channel_name`) takes precedence so tests can
+        // mirror real-world channel naming for features keyed on the channel
+        // name (e.g. mission notifications routed back to the source channel).
+        //
+        // Channel user_id selection: when the test rig has live-seeded
+        // secrets, align the channel user identity with the config's
+        // owner_id so that production credential lookups
+        // (`secrets WHERE user_id = ?`) hit the rows we just inserted.
+        // Without this, the rig would seed real secrets but every
+        // credential lookup would key off the hardcoded `"test-user"`
+        // and miss them. For non-seeded tests we keep the historical
+        // `"test-user"` default so existing tests don't change behaviour.
+        let channel_user_id = if seeded_secrets.is_some() {
+            components.config.owner_id.clone()
         } else {
-            Arc::new(TestChannel::new())
+            "test-user".to_string()
+        };
+        let test_channel = if let Some(ref name) = channel_name_override {
+            Arc::new(TestChannel::with_user_id(channel_user_id).with_name(name.clone()))
+        } else if keep_bootstrap {
+            Arc::new(TestChannel::with_user_id(channel_user_id).with_name("gateway"))
+        } else {
+            Arc::new(TestChannel::with_user_id(channel_user_id))
         };
         let handle = TestChannelHandle::new(Arc::clone(&test_channel));
         let channel_manager = ChannelManager::new();
