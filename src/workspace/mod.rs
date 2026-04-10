@@ -512,6 +512,9 @@ const HEARTBEAT_SEED: &str = include_str!("seeds/HEARTBEAT.md");
 /// Default template seeded into TOOLS.md on first access.
 const TOOLS_SEED: &str = include_str!("seeds/TOOLS.md");
 
+/// Frontend customization guide seeded into `.system/gateway/README.md`.
+const FRONTEND_SEED: &str = include_str!("seeds/FRONTEND.md");
+
 /// Initial assistant-thread greeting, persisted once when a user is provisioned.
 pub const GREETING_SEED: &str = include_str!("seeds/GREETING.md");
 
@@ -2209,6 +2212,7 @@ impl Workspace {
             (paths::USER, include_str!("seeds/USER.md")),
             (paths::HEARTBEAT, HEARTBEAT_SEED),
             (paths::TOOLS, TOOLS_SEED),
+            (".system/gateway/README.md", FRONTEND_SEED),
         ];
 
         // Check freshness BEFORE seeding identity files, otherwise the
@@ -2262,6 +2266,12 @@ impl Workspace {
                 serde_json::json!({
                     "hygiene": {"enabled": true, "retention_days": 7},
                     "skip_versioning": true
+                }),
+            ),
+            (
+                ".system/gateway/.config",
+                serde_json::json!({
+                    "skip_indexing": true
                 }),
             ),
         ];
