@@ -753,6 +753,12 @@ mod tests {
         }
 
         let _mutex = crate::config::helpers::lock_env();
+        // Stub nearai URLs to avoid DNS resolution for private.near.ai.
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("NEARAI_AUTH_URL", "http://localhost:0");
+            std::env::set_var("NEARAI_BASE_URL", "http://localhost:0");
+        }
         let prev = std::env::var("LLM_BACKEND").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
@@ -876,6 +882,8 @@ mod tests {
         let _guard = crate::config::helpers::lock_env();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
+            std::env::set_var("NEARAI_AUTH_URL", "http://localhost:0");
+            std::env::set_var("NEARAI_BASE_URL", "http://localhost:0");
             std::env::remove_var("LLM_BACKEND");
         }
         let settings = Settings::default();

@@ -958,6 +958,12 @@ mod tests {
     #[tokio::test]
     async fn re_resolve_llm_strips_admin_only_keys_for_non_operator_user() {
         use crate::db::SettingsStore;
+        // Stub nearai URLs to avoid DNS resolution for private.near.ai.
+        // SAFETY: test-only, no concurrent env access expected.
+        unsafe {
+            std::env::set_var("NEARAI_AUTH_URL", "http://localhost:0");
+            std::env::set_var("NEARAI_BASE_URL", "http://localhost:0");
+        }
 
         let store = FakeSettingsStore::new();
         // Seed a non-admin user's per-user settings with an admin-only key
@@ -993,6 +999,12 @@ mod tests {
 
     #[tokio::test]
     async fn re_resolve_llm_keeps_admin_only_keys_for_operator() {
+        // Stub nearai URLs to avoid DNS resolution for private.near.ai.
+        // SAFETY: test-only, no concurrent env access expected.
+        unsafe {
+            std::env::set_var("NEARAI_AUTH_URL", "http://localhost:0");
+            std::env::set_var("NEARAI_BASE_URL", "http://localhost:0");
+        }
         let store = FakeSettingsStore::new();
         store
             .seed(
