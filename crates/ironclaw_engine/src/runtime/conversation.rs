@@ -303,6 +303,12 @@ impl ConversationManager {
                         serde_json::Value::String(tz.to_string()),
                     );
                 }
+                // Stable conversation ID for stateful LLM backends (session
+                // routing, prompt caching, cost attribution).
+                initial_metadata.insert(
+                    "conversation_id".into(),
+                    serde_json::Value::String(conversation_id.0.to_string()),
+                );
 
                 // Spawn new foreground thread with conversation history.
                 self.thread_manager
@@ -1205,5 +1211,162 @@ mod tests {
             result.is_err(),
             "expected Err for unknown conversation, got Ok"
         );
+    }
+
+    #[tokio::test]
+    async fn thread_metadata_includes_conversation_id() {
+        let store = Arc::new(MockStore::new());
+        let tm = Arc::new(ThreadManager::new(
+            Arc::new(MockLlm(Mutex::new(vec![LlmOutput {
+                response: LlmResponse::Text("hi".into()),
+                usage: TokenUsage::default(),
+            }]))),
+            Arc::new(MockEffects),
+            store.clone(),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+        let cm = ConversationManager::new(Arc::clone(&tm), store.clone());
+
+        let conv_id = cm.get_or_create_conversation("web", "u1").await.unwrap();
+        let project = ProjectId::new();
+
+        let tid = cm
+            .handle_user_message(conv_id, "Hello", project, "u1", ThreadConfig::default(), None)
+            .await
+            .unwrap();
+
+        // The spawned thread must carry the conversation_id in its metadata
+        let thread = store.load_thread(tid).await.unwrap().unwrap();
+        let stored = thread
+            .metadata
+            .get("conversation_id")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert_eq!(stored, conv_id.0.to_string());
+
+        // Let thread finish so we don't leak the task
+        let _ = tm.join_thread(tid).await;
+    }
+
+    /// A mock LLM that captures the LlmCallConfig metadata from each call.
+    struct CapturingMockLlm {
+        captured: Mutex<Vec<HashMap<String, String>>>,
+    }
+
+    impl CapturingMockLlm {
+        fn new() -> Self {
+            Self {
+                captured: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmBackend for CapturingMockLlm {
+        async fn complete(
+            &self,
+            _: &[ThreadMessage],
+            _: &[ActionDef],
+            config: &LlmCallConfig,
+        ) -> Result<LlmOutput, EngineError> {
+            self.captured.lock().unwrap().push(config.metadata.clone());
+            Ok(LlmOutput {
+                response: LlmResponse::Text("ok".into()),
+                usage: TokenUsage::default(),
+            })
+        }
+        fn model_name(&self) -> &str {
+            "capturing-mock"
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_call_receives_conversation_id_in_metadata() {
+        let store = Arc::new(MockStore::new());
+        let llm = Arc::new(CapturingMockLlm::new());
+        let tm = Arc::new(ThreadManager::new(
+            llm.clone(),
+            Arc::new(MockEffects),
+            store.clone(),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+        let cm = ConversationManager::new(Arc::clone(&tm), store.clone());
+
+        let conv_id = cm.get_or_create_conversation("web", "u1").await.unwrap();
+        let project = ProjectId::new();
+
+        let tid = cm
+            .handle_user_message(conv_id, "Hello", project, "u1", ThreadConfig::default(), None)
+            .await
+            .unwrap();
+
+        let _ = tm.join_thread(tid).await;
+
+        let captured = llm.captured.lock().unwrap();
+        assert!(!captured.is_empty(), "LLM should have been called at least once");
+        let meta = &captured[0];
+        assert_eq!(
+            meta.get("conversation_id").unwrap(),
+            &conv_id.0.to_string(),
+            "LLM metadata must include stable conversation_id"
+        );
+        assert_eq!(
+            meta.get("thread_id").unwrap(),
+            &tid.0.to_string(),
+            "LLM metadata must include thread_id"
+        );
+        assert_eq!(
+            meta.get("user_id").unwrap(),
+            "u1",
+            "LLM metadata must include user_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn llm_metadata_omits_conversation_id_when_absent() {
+        // When a thread is spawned directly (not via ConversationManager),
+        // conversation_id should not appear in the LLM metadata.
+        let store: Arc<dyn Store> = Arc::new(MockStore::new());
+        let llm = Arc::new(CapturingMockLlm::new());
+        let tm = Arc::new(ThreadManager::new(
+            llm.clone(),
+            Arc::new(MockEffects),
+            store.clone(),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+
+        let project = ProjectId::new();
+        let tid = tm
+            .spawn_thread_with_history(
+                "test",
+                ThreadType::Foreground,
+                project,
+                ThreadConfig::default(),
+                None,
+                "u1",
+                vec![ThreadMessage::user("hi")],
+                serde_json::Map::new(), // no initial_metadata
+            )
+            .await
+            .unwrap();
+
+        let _ = tm.join_thread(tid).await;
+
+        let captured = llm.captured.lock().unwrap();
+        assert!(!captured.is_empty());
+        let meta = &captured[0];
+        assert!(
+            !meta.contains_key("conversation_id"),
+            "conversation_id should be absent when thread has no conversation metadata"
+        );
+        // thread_id and user_id should still be present
+        assert!(meta.contains_key("thread_id"));
+        assert!(meta.contains_key("user_id"));
     }
 }
