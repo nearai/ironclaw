@@ -1500,7 +1500,9 @@ impl Agent {
                 // allowing approval-shaped messages to target it. Without this
                 // check, an attacker could use approval messages to hijack any
                 // thread by UUID.
-                if thread.pending_approval.is_none() {
+                if thread.pending_approval.is_none()
+                    && matches!(submission, Submission::ExecApproval { .. })
+                {
                     tracing::warn!(
                         %target_thread_id,
                         approval_channel = %message.channel,
@@ -1511,6 +1513,9 @@ impl Agent {
                         "Error: no pending approval on this thread".into(),
                     ));
                 }
+                // ApprovalResponse (bare "yes"/"no"/"always") without a
+                // pending approval: fall through to normal handling so the
+                // should_route_as_approval guard can downgrade to UserInput.
 
                 let authorized = crate::agent::session::is_approval_authorized(
                     thread.source_channel.as_deref(),
