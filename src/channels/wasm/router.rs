@@ -647,8 +647,9 @@ pub fn create_wasm_channel_router(
 
 /// Webhook-only variant for merging into the gateway server.
 ///
-/// Excludes auxiliary routes (`/oauth/callback`, `/wasm-channels/health`)
-/// that would collide with the gateway's own routes.
+/// Excludes `/oauth/callback` (collides with the gateway's own OAuth
+/// handler) and `/wasm-channels/health` (auxiliary diagnostic endpoint
+/// not needed on the gateway, which has `/api/health`).
 pub fn create_wasm_webhook_routes(
     router: Arc<WasmChannelRouter>,
     extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,

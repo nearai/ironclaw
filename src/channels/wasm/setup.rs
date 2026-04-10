@@ -52,8 +52,8 @@ pub struct WasmChannelSetup {
     pub channels: Vec<(String, Box<dyn crate::channels::Channel>)>,
     pub channel_names: Vec<String>,
     pub webhook_routes: Option<axum::Router>,
-    /// Webhook-only routes safe to merge into the gateway (no `/oauth/callback`
-    /// or other paths that would collide with gateway-owned routes).
+    /// Webhook-only routes safe to merge into the gateway.  Excludes
+    /// `/oauth/callback` (collides with gateway) and auxiliary endpoints.
     pub gateway_webhook_routes: Option<axum::Router>,
     /// Runtime objects needed for hot-activation via ExtensionManager.
     pub wasm_channel_runtime: Arc<WasmChannelRuntime>,
@@ -165,8 +165,8 @@ pub async fn setup_wasm_channels(
         extension_manager.map(Arc::clone),
     ));
 
-    // Gateway-safe variant excludes /oauth/callback and /wasm-channels/health
-    // which would collide with the gateway's own routes.
+    // Gateway-safe variant: only /webhook/* routes (no /oauth/callback which
+    // collides with the gateway, no /wasm-channels/health diagnostic endpoint).
     let gateway_webhook_routes = Some(create_wasm_webhook_routes(
         Arc::clone(&wasm_router),
         extension_manager.map(Arc::clone),

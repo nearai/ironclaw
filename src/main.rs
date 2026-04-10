@@ -649,7 +649,9 @@ async fn async_main() -> anyhow::Result<()> {
         {
             http_channel_state = Some(http_channel.shared_state());
         }
-        webhook_routes.push(http_channel.routes());
+        let http_routes = http_channel.routes();
+        webhook_routes.push(http_routes.clone());
+        gateway_webhook_routes.push(http_routes);
         let (host, port) = http_channel.addr();
         webhook_server_addr = Some(
             format!("{}:{}", host, port)

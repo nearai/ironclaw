@@ -90,6 +90,39 @@ pub type PromptQueue = Arc<
 pub type RoutineEngineSlot =
     Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>;
 
+/// Catch-panic layer that truncates panic payloads to avoid leaking sensitive
+/// data.  Shared by the gateway's own routes and any additional (webhook)
+/// routes merged into the same server.
+fn catch_panic_layer() -> tower_http::catch_panic::CatchPanicLayer<
+    impl Fn(Box<dyn std::any::Any + Send + 'static>) -> axum::http::Response<axum::body::Body> + Clone,
+> {
+    tower_http::catch_panic::CatchPanicLayer::custom(
+        |panic_info: Box<dyn std::any::Any + Send + 'static>| {
+            let detail = if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else {
+                "unknown panic".to_string()
+            };
+            let safe_detail = if detail.len() > 200 {
+                let end = detail.floor_char_boundary(200);
+                format!("{}…", &detail[..end])
+            } else {
+                detail
+            };
+            tracing::error!("Handler panicked: {}", safe_detail);
+            axum::http::Response::builder()
+                .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                .header("content-type", "text/plain")
+                .body(axum::body::Body::from("Internal Server Error"))
+                .unwrap_or_else(|_| {
+                    axum::http::Response::new(axum::body::Body::from("Internal Server Error"))
+                })
+        },
+    )
+}
+
 fn redact_oauth_state_for_logs(state: &str) -> String {
     let digest = Sha256::digest(state.as_bytes());
     let mut short_hash = String::with_capacity(12);
@@ -840,33 +873,7 @@ pub async fn start_server(
         .merge(projects)
         .merge(protected)
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB max request body (image uploads)
-        .layer(tower_http::catch_panic::CatchPanicLayer::custom(
-            |panic_info: Box<dyn std::any::Any + Send + 'static>| {
-                let detail = if let Some(s) = panic_info.downcast_ref::<String>() {
-                    s.clone()
-                } else if let Some(s) = panic_info.downcast_ref::<&str>() {
-                    (*s).to_string()
-                } else {
-                    "unknown panic".to_string()
-                };
-                // Truncate panic payload to avoid leaking sensitive data into logs.
-                // Use floor_char_boundary to avoid panicking on multi-byte UTF-8.
-                let safe_detail = if detail.len() > 200 {
-                    let end = detail.floor_char_boundary(200);
-                    format!("{}…", &detail[..end])
-                } else {
-                    detail
-                };
-                tracing::error!("Handler panicked: {}", safe_detail);
-                axum::http::Response::builder()
-                    .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
-                    .header("content-type", "text/plain")
-                    .body(axum::body::Body::from("Internal Server Error"))
-                    .unwrap_or_else(|_| {
-                        axum::http::Response::new(axum::body::Body::from("Internal Server Error"))
-                    })
-            },
-        ))
+        .layer(catch_panic_layer())
         .layer(cors)
         .layer(SetResponseHeaderLayer::if_not_present(
             header::X_CONTENT_TYPE_OPTIONS,
@@ -904,7 +911,7 @@ pub async fn start_server(
         app = app.merge(
             route
                 .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
-                .layer(tower_http::catch_panic::CatchPanicLayer::new()),
+                .layer(catch_panic_layer()),
         );
     }
 
