@@ -189,7 +189,19 @@ async fn register_channel(
         .channels
         .wasm_channel_owner_ids
         .get(channel_name.as_str())
-        .map(ToString::to_string);
+        .map(ToString::to_string)
+        // Fallback: read owner_id from capabilities file config
+        .or_else(|| {
+            loaded
+                .capabilities_file
+                .as_ref()
+                .and_then(|f| f.config.get("owner_id"))
+                .and_then(|v| match v {
+                    serde_json::Value::String(s) => Some(s.clone()),
+                    serde_json::Value::Number(n) => Some(n.to_string()),
+                    _ => None,
+                })
+        });
 
     let secret_name = loaded.webhook_secret_name();
     let sig_key_secret_name = loaded.signature_key_secret_name();
