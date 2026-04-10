@@ -98,24 +98,8 @@ impl FileHistory {
         tool_name: &str,
     ) -> Result<Option<Uuid>, ToolError> {
         // Canonicalize early so the stored path matches what validate_path
-        // will produce during undo lookup. On macOS, `/var` is a symlink to
-        // `/private/var`, so temp-dir paths differ between the original and
-        // canonicalized forms. When the file doesn't exist yet (write_file's
-        // "new file" case), canonicalize the parent directory and join the
-        // filename — the parent always exists.
-        let path = match path.canonicalize() {
-            Ok(p) => p,
-            Err(_) => {
-                if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
-                    parent
-                        .canonicalize()
-                        .unwrap_or_else(|_| parent.to_path_buf())
-                        .join(name)
-                } else {
-                    path.to_path_buf()
-                }
-            }
-        };
+        // will produce during undo lookup.
+        let path = Self::canonical(path);
         let path = path.as_path();
 
         // Check file size before reading — skip snapshot for very large files
