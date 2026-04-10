@@ -2055,12 +2055,27 @@ fn build_orchestrator_inputs(
     let context: Vec<serde_json::Value> = bootstrap_messages
         .iter()
         .map(|m| {
+            // Serialize action_calls through the Python interchange shape
+            // (`{name, call_id, params}`) so the bootstrap context is
+            // round-trip compatible with `python_json_to_action_calls`.
+            // Using bare `m.action_calls` here produces the canonical Rust
+            // serde format (`{action_name, id, parameters}`), which the
+            // Python orchestrator passes back verbatim on the next
+            // `__llm_complete__` call — and `python_json_to_action_calls`
+            // then fails with "missing field `name`", orphaning every
+            // subsequent tool result. This is the SECOND code path (after
+            // `handle_llm_complete`) that feeds action_calls into the
+            // Python working transcript; both must use the same shape.
+            let calls_json = m
+                .action_calls
+                .as_ref()
+                .map(|calls| serde_json::Value::Array(action_calls_to_python_json(calls)));
             serde_json::json!({
                 "role": format!("{:?}", m.role),
                 "content": m.content,
                 "action_name": m.action_name,
                 "action_call_id": m.action_call_id,
-                "action_calls": m.action_calls,
+                "action_calls": calls_json,
             })
         })
         .collect();
