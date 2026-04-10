@@ -67,9 +67,18 @@ COPY providers.json providers.json
 RUN cargo build --profile dist --bin ironclaw
 
 # Stage 4b: Build all WASM extensions from source (only used by runtime-staging)
-FROM builder AS wasm-builder
+#
+# Inherits from chef (not builder) so WASM extensions only rebuild when
+# tools-src/, channels-src/, registry/, or wit/ change — not on every
+# src/ edit. The extensions are standalone crates with their own lockfiles.
+FROM chef AS wasm-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends jq && rm -rf /var/lib/apt/lists/*
+
+COPY tools-src/ tools-src/
+COPY channels-src/ channels-src/
+COPY registry/ registry/
+COPY wit/ wit/
 
 RUN set -eux; \
     mkdir -p /app/wasm-bundles/tools /app/wasm-bundles/channels; \
