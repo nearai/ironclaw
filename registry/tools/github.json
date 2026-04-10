@@ -21,8 +21,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.22.0/tool-github-0.2.2-wasm32-wasip2.tar.gz",
-      "sha256": "70b55af593193d8fa495c0f702ea23284d83a624124f8a5f7564916ec5032c3f"
+      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw_tui-v0.1.0/tool-github-0.2.3-wasm32-wasip2.tar.gz",
+      "sha256": "5526117e886673132557793855e1c01af0abcbed00d25ad66313976075504f96"
     }
   },
   "auth_summary": {
