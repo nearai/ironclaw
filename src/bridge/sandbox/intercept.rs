@@ -159,6 +159,16 @@ pub async fn maybe_intercept(
                 .get("command")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            // Pass through environment variables from the tool call so
+            // `shell_exec(env={"FOO": "bar"})` works inside the sandbox.
+            let mut env = HashMap::new();
+            if let Some(env_obj) = parameters.get("env").and_then(|v| v.as_object()) {
+                for (k, v) in env_obj {
+                    if let Some(s) = v.as_str() {
+                        env.insert(k.clone(), s.to_string());
+                    }
+                }
+            }
             // shell may declare its workdir via the same path arg we already
             // resolved. Convert it to None when the workdir is the mount root.
             let cwd: Option<&Path> = if rel_path.as_os_str().is_empty() {
@@ -166,7 +176,7 @@ pub async fn maybe_intercept(
             } else {
                 Some(rel_path.as_path())
             };
-            match backend.shell(command, HashMap::new(), cwd).await {
+            match backend.shell(command, env, cwd).await {
                 Ok(out) => serde_json::json!({
                     "stdout": out.stdout,
                     "stderr": out.stderr,

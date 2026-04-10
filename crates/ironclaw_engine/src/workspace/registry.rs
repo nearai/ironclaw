@@ -147,13 +147,16 @@ impl WorkspaceMounts {
                 return Ok(mounts.resolve(path));
             }
         }
-        // Slow path: build, cache, resolve.
+        // Slow path: acquire write lock, then re-check (double-checked
+        // locking) to avoid calling factory.build() twice when two threads
+        // race on the same project's first access.
+        let mut cache = self.inner.by_project.write().await;
+        if let Some(mounts) = cache.get(&project_id) {
+            return Ok(mounts.resolve(path));
+        }
         let mounts = self.inner.factory.build(project_id).await?;
         let resolution = mounts.resolve(path);
-        {
-            let mut cache = self.inner.by_project.write().await;
-            cache.entry(project_id).or_insert(mounts);
-        }
+        cache.insert(project_id, mounts);
         Ok(resolution)
     }
 

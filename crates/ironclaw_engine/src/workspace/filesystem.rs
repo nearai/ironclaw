@@ -78,7 +78,19 @@ impl FilesystemBackend {
     /// canonicalized — for those, we walk up to the closest existing
     /// ancestor, canonicalize *that*, then re-attach the missing tail.
     fn canonicalize_under_root(&self, joined: &Path) -> Result<PathBuf, MountError> {
-        // Find the longest existing prefix.
+        // When the root doesn't exist yet (project dir not created), skip
+        // the canonicalization check entirely. Lexical safety is already
+        // guaranteed by `safe_join` (no `..`, no absolute paths). Without
+        // this guard, the existing-prefix walk would climb up to a real
+        // ancestor (e.g. `/tmp`) and the `starts_with` check against the
+        // non-existent root would always fail, blocking writes that would
+        // create the directory.
+        let canonical_root = match std::fs::canonicalize(&self.root) {
+            Ok(r) => r,
+            Err(_) => return Ok(joined.to_path_buf()),
+        };
+
+        // Find the longest existing prefix of `joined`.
         let mut existing_prefix = joined.to_path_buf();
         let mut tail: Vec<std::ffi::OsString> = Vec::new();
         loop {
@@ -100,9 +112,6 @@ impl FilesystemBackend {
             Ok(p) => p,
             Err(_) => existing_prefix.clone(),
         };
-        // canonicalize the root too — if it doesn't exist yet, fall back to lexical.
-        let canonical_root =
-            std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
 
         if !canonical_prefix.starts_with(&canonical_root) {
             return Err(MountError::invalid_path(
