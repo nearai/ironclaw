@@ -166,20 +166,50 @@ impl ToolRegistry {
         }
     }
 
-    /// Unregister a tool.
+    /// Resolve a tool name to the key under which it is registered,
+    /// trying the exact name first, then hyphen→underscore and
+    /// underscore→hyphen aliases.
+    fn resolve_key(tools: &HashMap<String, Arc<dyn Tool>>, name: &str) -> Option<String> {
+        if tools.contains_key(name) {
+            return Some(name.to_string());
+        }
+        // Reverse alias: hyphens → underscores (LLM normalization)
+        let underscore_alias = name.replace('-', "_");
+        if underscore_alias != name && tools.contains_key(&underscore_alias) {
+            return Some(underscore_alias);
+        }
+        // Legacy alias: underscores → hyphens (older WASM extensions)
+        let hyphen_alias = name.replace('_', "-");
+        if hyphen_alias != name && tools.contains_key(&hyphen_alias) {
+            return Some(hyphen_alias);
+        }
+        None
+    }
+
+    /// Unregister a tool.  Uses the same alias resolution as `get()` so
+    /// callers that pass hyphenated names still find underscore-registered
+    /// tools.
     pub async fn unregister(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.write().await.remove(name)
+        let mut tools = self.tools.write().await;
+        let key = Self::resolve_key(&tools, name)?;
+        tools.remove(&key)
     }
 
     /// Get a tool by name.
+    ///
+    /// Falls back to a hyphen→underscore alias when the exact name is not
+    /// found, so that tool calls from LLM providers that normalise hyphens
+    /// (e.g. `notion_notion_search` vs the registered `notion_notion-search`)
+    /// still resolve correctly.
     pub async fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         let tools = self.tools.read().await;
-        tools.get(name).map(Arc::clone)
+        let key = Self::resolve_key(&tools, name)?;
+        tools.get(&key).map(Arc::clone)
     }
 
     /// Check if a tool exists.
     pub async fn has(&self, name: &str) -> bool {
-        self.tools.read().await.contains_key(name)
+        self.get(name).await.is_some()
     }
 
     /// List all tool names.
@@ -1103,5 +1133,79 @@ mod tests {
         registry.retain_only(&[]).await;
         let after = registry.list().await.len();
         assert_eq!(before, after);
+    }
+
+    /// Regression test: tool names with hyphens must be resolvable when the
+    /// LLM provider normalises hyphens to underscores (nearai/ironclaw#NNN).
+    #[tokio::test]
+    async fn get_resolves_hyphen_to_underscore_alias() {
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool)).await;
+
+        // Register a tool whose name contains underscores (the normalised
+        // form produced by the MCP prefixed-name fix).
+        struct UnderscoreTool;
+        #[async_trait::async_trait]
+        impl Tool for UnderscoreTool {
+            fn name(&self) -> &str {
+                "notion_notion_search"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+        registry.register(Arc::new(UnderscoreTool)).await;
+
+        // Exact match works
+        assert!(registry.get("notion_notion_search").await.is_some());
+        // Hyphenated variant resolves via alias
+        assert!(registry.get("notion_notion-search").await.is_some());
+        // has() also resolves
+        assert!(registry.has("notion_notion-search").await);
+        // Completely wrong name still fails
+        assert!(registry.get("nonexistent_tool").await.is_none());
+    }
+
+    /// Regression test: legacy underscore→hyphen alias still works.
+    #[tokio::test]
+    async fn get_resolves_underscore_to_hyphen_alias() {
+        let registry = ToolRegistry::new();
+
+        struct HyphenTool;
+        #[async_trait::async_trait]
+        impl Tool for HyphenTool {
+            fn name(&self) -> &str {
+                "my-old-tool"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+        registry.register(Arc::new(HyphenTool)).await;
+
+        // Exact hyphenated match works
+        assert!(registry.get("my-old-tool").await.is_some());
+        // Underscored variant resolves via legacy alias
+        assert!(registry.get("my_old_tool").await.is_some());
     }
 }

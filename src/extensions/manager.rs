@@ -4029,7 +4029,7 @@ impl ExtensionManager {
         // AuthRequired so the activate handler triggers the OAuth flow.
         // Some servers (e.g. GitHub MCP) return 400 with "Authorization header
         // is badly formatted" instead of 401 when auth is missing or invalid.
-        let mcp_tools = client.list_tools().await.map_err(|e| {
+        let _mcp_tools = client.list_tools().await.map_err(|e| {
             let msg = e.to_string();
             let msg_lower = msg.to_ascii_lowercase();
             if msg_lower.contains("requires authentication")
@@ -4048,10 +4048,7 @@ impl ExtensionManager {
             .await
             .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
 
-        let tool_names: Vec<String> = mcp_tools
-            .iter()
-            .map(|t| format!("{}_{}", name, t.name))
-            .collect();
+        let tool_names: Vec<String> = tool_impls.iter().map(|t| t.name().to_string()).collect();
 
         for tool in tool_impls {
             self.tool_registry.register(tool).await;
