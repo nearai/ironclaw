@@ -22,6 +22,10 @@ use crate::tools::tool::{
 /// Maximum number of snapshots to keep by default.
 const DEFAULT_MAX_SNAPSHOTS: usize = 50;
 
+/// Maximum file size (in bytes) that will be snapshotted in memory.
+/// Files larger than this are skipped to prevent memory exhaustion.
+const MAX_SNAPSHOT_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+
 /// A snapshot of a file's content before modification.
 #[derive(Debug, Clone)]
 pub struct FileSnapshot {
@@ -38,8 +42,8 @@ pub struct FileSnapshot {
     pub timestamp: DateTime<Utc>,
     /// Which tool made the change (e.g., "apply_patch", "write_file").
     pub tool_name: String,
-    /// Turn number when the change was made.
-    pub turn_number: usize,
+    /// Monotonically increasing sequence number within this history.
+    pub sequence_number: u64,
 }
 
 /// In-memory history of file modifications for the current session.
@@ -47,6 +51,7 @@ pub struct FileSnapshot {
 pub struct FileHistory {
     snapshots: VecDeque<FileSnapshot>,
     max_snapshots: usize,
+    next_sequence: u64,
 }
 
 impl Default for FileHistory {
@@ -61,6 +66,7 @@ impl FileHistory {
         Self {
             snapshots: VecDeque::new(),
             max_snapshots: DEFAULT_MAX_SNAPSHOTS,
+            next_sequence: 1,
         }
     }
 
@@ -69,6 +75,7 @@ impl FileHistory {
         Self {
             snapshots: VecDeque::new(),
             max_snapshots,
+            next_sequence: 1,
         }
     }
 
@@ -82,8 +89,22 @@ impl FileHistory {
         job_id: Uuid,
         path: &Path,
         tool_name: &str,
-        turn_number: usize,
     ) -> Result<Option<Uuid>, ToolError> {
+        // Check file size before reading — skip snapshot for very large files
+        // to prevent memory exhaustion (up to 50 snapshots × 10MB = 500MB worst case).
+        match tokio::fs::metadata(path).await {
+            Ok(meta) if meta.is_file() && meta.len() > MAX_SNAPSHOT_FILE_SIZE => {
+                tracing::debug!(
+                    "skipping file_history snapshot for {}: size {} exceeds {}",
+                    path.display(),
+                    meta.len(),
+                    MAX_SNAPSHOT_FILE_SIZE,
+                );
+                return Ok(None);
+            }
+            _ => {}
+        }
+
         // Read as raw bytes to support binary files.
         let content_before = match tokio::fs::read(path).await {
             Ok(c) => Some(c),
@@ -96,6 +117,9 @@ impl FileHistory {
             }
         };
 
+        let seq = self.next_sequence;
+        self.next_sequence += 1;
+
         let id = Uuid::new_v4();
         let snapshot = FileSnapshot {
             id,
@@ -104,7 +128,7 @@ impl FileHistory {
             content_before,
             timestamp: Utc::now(),
             tool_name: tool_name.to_string(),
-            turn_number,
+            sequence_number: seq,
         };
 
         self.snapshots.push_back(snapshot);
@@ -268,7 +292,7 @@ impl Tool for FileUndoTool {
             Some(snapshot) => {
                 let result = serde_json::json!({
                     "path": path.display().to_string(),
-                    "restored_from_turn": snapshot.turn_number,
+                    "restored_from_snapshot": snapshot.sequence_number,
                     "tool_that_modified": snapshot.tool_name,
                     "snapshot_timestamp": snapshot.timestamp.to_rfc3339(),
                     "success": true
@@ -320,7 +344,7 @@ mod tests {
 
         // Take snapshot
         let id = history
-            .snapshot(job, &file_path, "apply_patch", 1)
+            .snapshot(job, &file_path, "apply_patch")
             .await
             .unwrap();
         assert!(id.is_some());
@@ -333,7 +357,7 @@ mod tests {
         assert!(restored.is_some());
         let snapshot = restored.unwrap();
         assert_eq!(snapshot.tool_name, "apply_patch");
-        assert_eq!(snapshot.turn_number, 1);
+        assert_eq!(snapshot.sequence_number, 1);
 
         // File should be back to original
         let content = std::fs::read_to_string(&file_path).unwrap();
@@ -349,13 +373,13 @@ mod tests {
 
         let mut history = FileHistory::new();
         history
-            .snapshot(job, &file_path, "apply_patch", 1)
+            .snapshot(job, &file_path, "apply_patch")
             .await
             .unwrap();
 
         std::fs::write(&file_path, "v2").unwrap();
         history
-            .snapshot(job, &file_path, "apply_patch", 2)
+            .snapshot(job, &file_path, "apply_patch")
             .await
             .unwrap();
 
@@ -384,7 +408,7 @@ mod tests {
             let file_path = dir.path().join(format!("file{}.txt", i));
             std::fs::write(&file_path, format!("content {}", i)).unwrap();
             history
-                .snapshot(job, &file_path, "write_file", i)
+                .snapshot(job, &file_path, "write_file")
                 .await
                 .unwrap();
         }
@@ -409,7 +433,7 @@ mod tests {
 
         let mut history = FileHistory::new();
         let id = history
-            .snapshot(job, &file_path, "write_file", 1)
+            .snapshot(job, &file_path, "write_file")
             .await
             .unwrap();
 
@@ -427,7 +451,7 @@ mod tests {
 
         let mut history = FileHistory::new();
         history
-            .snapshot(job, &file_path, "write_file", 1)
+            .snapshot(job, &file_path, "write_file")
             .await
             .unwrap();
 
@@ -440,31 +464,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_restore_to_specific_turn() {
+    async fn test_snapshots_have_increasing_sequence_numbers() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("test.txt");
         let job = test_job_id();
 
-        std::fs::write(&file_path, "turn1").unwrap();
+        std::fs::write(&file_path, "v1").unwrap();
         let mut history = FileHistory::new();
         history
-            .snapshot(job, &file_path, "apply_patch", 1)
+            .snapshot(job, &file_path, "apply_patch")
             .await
             .unwrap();
 
-        std::fs::write(&file_path, "turn2").unwrap();
+        std::fs::write(&file_path, "v2").unwrap();
         history
-            .snapshot(job, &file_path, "apply_patch", 2)
+            .snapshot(job, &file_path, "apply_patch")
             .await
             .unwrap();
 
-        std::fs::write(&file_path, "turn3").unwrap();
+        std::fs::write(&file_path, "v3").unwrap();
 
         // Get all snapshots for the file
         let snapshots = history.snapshots_for(job, &file_path);
         assert_eq!(snapshots.len(), 2);
-        assert_eq!(snapshots[0].turn_number, 2); // newest first
-        assert_eq!(snapshots[1].turn_number, 1);
+        assert_eq!(snapshots[0].sequence_number, 2); // newest first
+        assert_eq!(snapshots[1].sequence_number, 1);
     }
 
     #[tokio::test]
@@ -479,7 +503,7 @@ mod tests {
         // Simulate a modification with snapshot
         {
             let mut h = history.write().await;
-            h.snapshot(ctx.job_id, &file_path, "apply_patch", 1)
+            h.snapshot(ctx.job_id, &file_path, "apply_patch")
                 .await
                 .unwrap();
         }
@@ -535,7 +559,7 @@ mod tests {
         // Step 1: Snapshot before "patching"
         {
             let mut h = history.write().await;
-            h.snapshot(ctx.job_id, &file_path, "apply_patch", 1)
+            h.snapshot(ctx.job_id, &file_path, "apply_patch")
                 .await
                 .unwrap();
         }

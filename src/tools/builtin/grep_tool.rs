@@ -11,6 +11,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use tokio::process::Command;
 
+use ironclaw_safety::sensitive_paths::is_sensitive_path;
+
 use crate::context::JobContext;
 use crate::tools::builtin::path_utils::validate_path;
 use crate::tools::builtin::shell::SAFE_ENV_VARS;
@@ -157,6 +159,13 @@ impl Tool for GrepTool {
 
         // Validate search path
         let search_path = validate_path(path_str, self.base_dir.as_deref())?;
+        if is_sensitive_path(&search_path) {
+            return Err(ToolError::ExecutionFailed(
+                "Access denied: search path may contain credentials. \
+                 Use `secret_list` and `secret_create` to manage credentials securely."
+                    .to_string(),
+            ));
+        }
 
         // Build rg command
         let mut cmd = Command::new("rg");

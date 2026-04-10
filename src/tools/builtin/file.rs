@@ -389,7 +389,7 @@ impl Tool for WriteFileTool {
         // Snapshot existing file before overwriting (for file_undo)
         if let Some(ref history) = self.file_history {
             let mut h = history.write().await;
-            if let Err(e) = h.snapshot(ctx.job_id, &path, "write_file", 0).await {
+            if let Err(e) = h.snapshot(ctx.job_id, &path, "write_file").await {
                 tracing::debug!("file_history snapshot failed before write_file: {}", e);
             }
         }
@@ -791,7 +791,8 @@ impl Tool for ApplyPatchTool {
         let (match_count, match_method) = file_edit_guard::count_matches(&content, old_string);
         if match_count == 0 {
             let preview = if old_string.len() > 200 {
-                format!("{}...", &old_string[..200])
+                let truncated: String = old_string.chars().take(200).collect();
+                format!("{truncated}...")
             } else {
                 old_string.to_string()
             };
@@ -818,7 +819,7 @@ impl Tool for ApplyPatchTool {
         // Snapshot before modification (for file_undo)
         if let Some(ref history) = self.file_history {
             let mut h = history.write().await;
-            if let Err(e) = h.snapshot(ctx.job_id, &path, "apply_patch", 0).await {
+            if let Err(e) = h.snapshot(ctx.job_id, &path, "apply_patch").await {
                 tracing::debug!("file_history snapshot failed before apply_patch: {}", e);
             }
         }
@@ -1343,7 +1344,11 @@ mod tests {
     async fn test_read_file_utf8_emoji_not_binary() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("emoji.txt");
-        std::fs::write(&file_path, "Hello World! Rust is great.").unwrap();
+        std::fs::write(
+            &file_path,
+            "Hello \u{1F30D}! Rust is great. Caf\u{00E9} r\u{00E9}sum\u{00E9}.",
+        )
+        .unwrap();
 
         let tool = ReadFileTool::new().with_base_dir(dir.path().to_path_buf());
         let ctx = JobContext::default();

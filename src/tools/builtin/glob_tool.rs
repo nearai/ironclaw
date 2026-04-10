@@ -10,6 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use glob::{MatchOptions, glob_with};
 
+use ironclaw_safety::sensitive_paths::is_sensitive_path;
+
 use crate::context::JobContext;
 use crate::tools::builtin::path_utils::{DEFAULT_EXCLUDED_DIRS, validate_path};
 use crate::tools::tool::{
@@ -113,6 +115,13 @@ impl Tool for GlobTool {
 
         // Validate search root
         let search_root = validate_path(path_str, self.base_dir.as_deref())?;
+        if is_sensitive_path(&search_root) {
+            return Err(ToolError::ExecutionFailed(
+                "Access denied: search root may contain credentials. \
+                 Use `secret_list` and `secret_create` to manage credentials securely."
+                    .to_string(),
+            ));
+        }
 
         // Construct full glob pattern
         let full_pattern = search_root.join(pattern);
@@ -146,7 +155,7 @@ impl Tool for GlobTool {
                 let Ok(relative) = path.strip_prefix(&search_root_clone) else {
                     continue;
                 };
-                if is_excluded_path(relative) {
+                if is_excluded_path(relative) || is_sensitive_path(&path) {
                     continue;
                 }
 
@@ -277,9 +286,10 @@ mod tests {
     async fn test_glob_sorted_by_mtime() {
         let dir = TempDir::new().unwrap();
 
-        // Create files with staggered timestamps
+        // Create files with staggered timestamps.
+        // 1100ms ensures different mtimes even on filesystems with 1s granularity.
         fs::write(dir.path().join("old.txt"), "old").unwrap();
-        thread::sleep(std::time::Duration::from_millis(50));
+        thread::sleep(std::time::Duration::from_millis(1100));
         fs::write(dir.path().join("new.txt"), "new").unwrap();
 
         let tool = GlobTool::new().with_base_dir(dir.path().to_path_buf());
