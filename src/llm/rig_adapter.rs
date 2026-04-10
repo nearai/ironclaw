@@ -255,11 +255,52 @@ fn schema_flatten_hint_intro(detected: Option<&'static str>) -> &'static str {
     }
 }
 
+/// Walk the top-level `oneOf` / `anyOf` / `allOf` arrays in `schema` and
+/// collect every property the variants declare into a single map. First-write
+/// wins on conflicting types — if two variants declare the same field name
+/// with different schemas, the first one's schema is kept and the second is
+/// dropped. The full schema still goes into the description hint, so the
+/// truncation we lose here is recoverable from there.
+///
+/// This is the structured-info recovery layer for `flatten_top_level`. The
+/// LLM now sees a real `properties` map instead of `{}`, so it can do
+/// schema-based reasoning about which fields exist across the union — even
+/// though strict-mode validation is disabled at the API layer.
+fn merge_top_level_variant_properties(schema: &JsonValue) -> serde_json::Map<String, JsonValue> {
+    let mut merged = serde_json::Map::new();
+    let Some(obj) = schema.as_object() else {
+        return merged;
+    };
+    for keyword in &["oneOf", "anyOf", "allOf"] {
+        let Some(JsonValue::Array(variants)) = obj.get(*keyword) else {
+            continue;
+        };
+        for variant in variants {
+            let Some(props) = variant.get("properties").and_then(|v| v.as_object()) else {
+                continue;
+            };
+            for (key, value) in props {
+                if !merged.contains_key(key) {
+                    merged.insert(key.clone(), value.clone());
+                }
+            }
+        }
+    }
+    merged
+}
+
 /// Replace `parameters` with a permissive object envelope and append the
 /// original schema to `description` as advisory text. Truncates the hint on a
 /// char boundary if the original schema is too large to fit in a reasonable
 /// description budget. The hint introduction is keyword-aware so the LLM
 /// gets the right shape guidance for `oneOf`/`anyOf`/`allOf`/`enum`/`not`.
+///
+/// The flattened envelope is no longer empty — `merge_top_level_variant_properties`
+/// walks the union variants and rebuilds a flat `properties` map so the LLM
+/// has structured field hints to reason about. Strict-mode validation is
+/// still disabled (`additionalProperties: true`, `required: []`) so the LLM
+/// is free to send any combination of variant fields and the upstream MCP
+/// server enforces the actual constraints.
 fn flatten_top_level(parameters: &mut JsonValue, description: &mut String) {
     // OpenAI has no documented hard limit on tool description length, but
     // long descriptions waste prompt budget on every turn. 1500 bytes fits a
@@ -268,6 +309,7 @@ fn flatten_top_level(parameters: &mut JsonValue, description: &mut String) {
     const SCHEMA_HINT_MAX_BYTES: usize = 1500;
 
     let detected = detect_forbidden_top_level(parameters);
+    let merged_properties = merge_top_level_variant_properties(parameters);
 
     if let Ok(original_text) = serde_json::to_string(parameters)
         && !original_text.is_empty()
@@ -290,7 +332,7 @@ fn flatten_top_level(parameters: &mut JsonValue, description: &mut String) {
 
     *parameters = serde_json::json!({
         "type": "object",
-        "properties": {},
+        "properties": JsonValue::Object(merged_properties),
         "additionalProperties": true,
         "required": []
     });
@@ -1143,6 +1185,83 @@ mod tests {
         assert_eq!(result["type"], "object");
         assert!(result["properties"].is_object());
         assert_eq!(result["additionalProperties"], true);
+    }
+
+    #[test]
+    fn test_normalize_schema_strict_merges_variant_properties() {
+        // Top-level oneOf flatten now merges all variants' properties into
+        // the envelope so the LLM sees structured field hints instead of
+        // an empty `{}`. Mirrors the GitHub Copilot `github` tool shape:
+        // each variant declares its own subset of fields keyed by `action`.
+        let input = serde_json::json!({
+            "type": "object",
+            "oneOf": [
+                {
+                    "properties": {
+                        "action": { "const": "create_issue" },
+                        "title":  { "type": "string" },
+                        "body":   { "type": "string" }
+                    },
+                    "required": ["action", "title"]
+                },
+                {
+                    "properties": {
+                        "action": { "const": "list_issues" },
+                        "repo":   { "type": "string" },
+                        "state":  { "type": "string" }
+                    },
+                    "required": ["action", "repo"]
+                }
+            ]
+        });
+        let mut description = "github".to_string();
+        let result = normalize_schema_strict(&input, &mut description);
+
+        // The flatten happened.
+        assert_eq!(result["type"], "object");
+        assert!(result.get("oneOf").is_none());
+        assert_eq!(result["additionalProperties"], true);
+        // Strict-mode `required` is empty so the LLM can mix fields from
+        // different variants without failing OpenAI validation.
+        assert_eq!(result["required"], serde_json::json!([]));
+
+        // CRITICAL: properties is no longer `{}` — every field from every
+        // variant must appear so the LLM can pick what to send.
+        let props = result["properties"].as_object().expect("merged properties");
+        assert!(props.contains_key("action"), "discriminator must merge");
+        assert!(props.contains_key("title"), "create_issue field must merge");
+        assert!(props.contains_key("body"), "create_issue field must merge");
+        assert!(props.contains_key("repo"), "list_issues field must merge");
+        assert!(props.contains_key("state"), "list_issues field must merge");
+        assert_eq!(props.len(), 5);
+    }
+
+    #[test]
+    fn test_normalize_schema_strict_merge_first_write_wins_on_conflict() {
+        // If two variants declare the same field with different schemas,
+        // first-write wins. Documented behaviour — the description hint
+        // still has the full original schema for ambiguous cases.
+        let input = serde_json::json!({
+            "type": "object",
+            "anyOf": [
+                {
+                    "properties": {
+                        "value": { "type": "string", "description": "first" }
+                    }
+                },
+                {
+                    "properties": {
+                        "value": { "type": "integer", "description": "second" }
+                    }
+                }
+            ]
+        });
+        let mut description = "ambiguous".to_string();
+        let result = normalize_schema_strict(&input, &mut description);
+
+        let value_schema = &result["properties"]["value"];
+        assert_eq!(value_schema["type"], "string");
+        assert_eq!(value_schema["description"], "first");
     }
 
     #[test]
