@@ -52,6 +52,8 @@ impl LlmConfig {
             openai_codex: None,
             request_timeout_secs: 120,
             cheap_model: None,
+            cheap_backend: None,
+            cheap_provider: None,
             smart_routing_cascade: false,
         }
     }
@@ -305,6 +307,67 @@ impl LlmConfig {
         // Falls back to NearAI-specific cheap_model in provider chain logic.
         let cheap_model = optional_env("LLM_CHEAP_MODEL")?;
 
+        // Cheap backend: when set and different from primary, resolve independently.
+        // Priority: DB setting > env var
+        let cheap_backend = settings
+            .llm_cheap_backend
+            .clone()
+            .or(optional_env("LLM_CHEAP_BACKEND")?);
+
+        // Resolve cheap provider config when cheap_backend differs from primary
+        let cheap_provider = if let Some(ref cb) = cheap_backend {
+            let cb_lower = cb.to_lowercase();
+            let is_cheap_nearai =
+                cb_lower == "nearai" || cb_lower == "near_ai" || cb_lower == "near";
+            let is_cheap_bedrock =
+                cb_lower == "bedrock" || cb_lower == "aws_bedrock" || cb_lower == "aws";
+            if is_cheap_nearai || is_cheap_bedrock || cb_lower == backend.to_lowercase() {
+                // NearAI/bedrock handled separately in create_cheap_provider_for_backend,
+                // same-backend handled by existing clone logic
+                None
+            } else {
+                // Check custom providers first
+                let cheap_custom = settings
+                    .llm_custom_providers
+                    .iter()
+                    .find(|p| p.id.to_lowercase() == cb_lower);
+                if let Some(custom) = cheap_custom {
+                    match Self::resolve_custom_provider(custom, settings) {
+                        Ok(reg) => Some(reg),
+                        Err(e) => {
+                            tracing::warn!(
+                                cheap_backend = %cb,
+                                error = %e,
+                                "Failed to resolve custom cheap provider, falling back to primary"
+                            );
+                            None
+                        }
+                    }
+                } else if let Some(_def) = registry.find(&cb_lower) {
+                    // Built-in registry provider
+                    match Self::resolve_registry_provider(&cb_lower, &registry, settings) {
+                        Ok(reg) => Some(reg),
+                        Err(e) => {
+                            tracing::warn!(
+                                cheap_backend = %cb,
+                                error = %e,
+                                "Failed to resolve registry cheap provider, falling back to primary"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        cheap_backend = %cb,
+                        "Unknown cheap_backend — not in registry or custom providers"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Generic smart routing cascade flag.
         // Defaults to true. Overrides NearAI-specific smart_routing_cascade.
         let smart_routing_cascade = parse_optional_env("SMART_ROUTING_CASCADE", true)?;
@@ -331,6 +394,8 @@ impl LlmConfig {
             openai_codex,
             request_timeout_secs,
             cheap_model,
+            cheap_backend,
+            cheap_provider,
             smart_routing_cascade,
         })
     }

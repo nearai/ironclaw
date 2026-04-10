@@ -117,6 +117,11 @@ pub struct Settings {
     #[serde(default)]
     pub llm_backend: Option<String>,
 
+    /// Cheap/fast model backend for smart routing. When set and different from
+    /// `llm_backend`, the cheap provider is resolved independently.
+    #[serde(default)]
+    pub llm_cheap_backend: Option<String>,
+
     /// Custom LLM providers defined by the user through the web UI.
     #[serde(default)]
     pub llm_custom_providers: Vec<CustomLlmProviderSettings>,

@@ -177,6 +177,15 @@ pub struct LlmConfig {
     /// Works with any backend. Set via `LLM_CHEAP_MODEL` env var.
     /// When set, takes priority over the NearAI-specific `NEARAI_CHEAP_MODEL`.
     pub cheap_model: Option<String>,
+    /// Backend for the cheap/fast model. When set and different from `backend`,
+    /// the cheap provider is resolved independently through the provider registry
+    /// instead of cloning the primary backend's config.
+    /// Set via `LLM_CHEAP_BACKEND` env var or `llm_cheap_backend` DB setting.
+    pub cheap_backend: Option<String>,
+    /// Pre-resolved provider config for the cheap backend (when it differs from primary).
+    /// Populated during config resolution when `cheap_backend` is set and differs
+    /// from the primary `backend`.
+    pub cheap_provider: Option<RegistryProviderConfig>,
     /// Enable cascade mode for smart routing (retry with primary if cheap model
     /// response seems uncertain). Default: true. Set via `SMART_ROUTING_CASCADE`.
     pub smart_routing_cascade: bool,

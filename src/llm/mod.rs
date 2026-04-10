@@ -484,6 +484,42 @@ fn create_cheap_provider_for_backend(
     session: Arc<SessionManager>,
     cheap_model: &str,
 ) -> Result<Option<Arc<dyn LlmProvider>>, LlmError> {
+    // ── Cross-backend cheap provider ────────────────────────────────────
+    // When cheap_backend is set and differs from the primary backend,
+    // resolve the cheap provider independently instead of cloning primary.
+    if let Some(ref cheap_backend) = config.cheap_backend {
+        if cheap_backend != &config.backend {
+            tracing::debug!(
+                cheap_backend = %cheap_backend,
+                cheap_model = %cheap_model,
+                primary_backend = %config.backend,
+                "Creating cross-backend cheap provider"
+            );
+            if cheap_backend == "nearai" || cheap_backend == "near_ai" || cheap_backend == "near" {
+                let mut cheap_config = config.nearai.clone();
+                cheap_config.model = cheap_model.to_string();
+                let provider = create_llm_provider_with_config(
+                    &cheap_config,
+                    session,
+                    config.request_timeout_secs,
+                )?;
+                return Ok(Some(provider));
+            }
+            if let Some(ref cheap_reg) = config.cheap_provider {
+                let mut cheap_reg_config = cheap_reg.clone();
+                cheap_reg_config.model = cheap_model.to_string();
+                let provider =
+                    create_registry_provider(&cheap_reg_config, config.request_timeout_secs)?;
+                return Ok(Some(provider));
+            }
+            tracing::warn!(
+                cheap_backend = %cheap_backend,
+                "cheap_backend is set but no cheap_provider config resolved — \
+                 falling back to primary backend for cheap model"
+            );
+        }
+    }
+
     if config.backend == "nearai" {
         let mut cheap_config = config.nearai.clone();
         cheap_config.model = cheap_model.to_string();
@@ -741,6 +777,8 @@ mod tests {
             gemini_oauth: None,
             request_timeout_secs: 120,
             cheap_model: None,
+            cheap_backend: None,
+            cheap_provider: None,
             smart_routing_cascade: true,
             openai_codex: None,
         }

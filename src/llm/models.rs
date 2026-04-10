@@ -347,6 +347,8 @@ pub(crate) fn build_nearai_model_fetch_config() -> crate::config::LlmConfig {
         gemini_oauth: None,
         request_timeout_secs: 120,
         cheap_model: None,
+        cheap_backend: None,
+        cheap_provider: None,
         smart_routing_cascade: false,
         openai_codex: None,
     }
