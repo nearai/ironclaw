@@ -790,35 +790,22 @@ impl Tool for ApplyPatchTool {
             file_edit_guard::read_file_with_encoding(&path).await?;
 
         // Try to find the old_string, with fuzzy matching fallbacks
-        let (match_count, actual_old_string, match_method) = {
-            let (count, method) = file_edit_guard::count_matches(&content, old_string);
-            if count > 0 {
-                // Determine the actual string to replace
-                let actual = if method == MatchMethod::Exact {
-                    old_string.to_string()
-                } else if let Some(m) = file_edit_guard::find_match(&content, old_string) {
-                    m.actual
-                } else {
-                    old_string.to_string()
-                };
-                (count, actual, method)
+        let (match_count, match_method) = file_edit_guard::count_matches(&content, old_string);
+        if match_count == 0 {
+            let preview = if old_string.len() > 200 {
+                format!("{}...", &old_string[..200])
             } else {
-                // Provide a helpful error with the old_string included
-                let preview = if old_string.len() > 200 {
-                    format!("{}...", &old_string[..200])
-                } else {
-                    old_string.to_string()
-                };
-                return Err(ToolError::ExecutionFailed(format!(
-                    "String to replace not found in {}.\n\
-                     old_string:\n{}\n\n\
-                     Make sure old_string matches the file content exactly, \
-                     including whitespace and indentation.",
-                    path.display(),
-                    preview
-                )));
-            }
-        };
+                old_string.to_string()
+            };
+            return Err(ToolError::ExecutionFailed(format!(
+                "String to replace not found in {}.\n\
+                 old_string:\n{}\n\n\
+                 Make sure old_string matches the file content exactly, \
+                 including whitespace and indentation.",
+                path.display(),
+                preview
+            )));
+        }
 
         // Uniqueness validation
         if !replace_all && match_count > 1 {
@@ -838,11 +825,53 @@ impl Tool for ApplyPatchTool {
             }
         }
 
-        // Apply replacement using the actual matched string
+        // Apply replacement using actual match ranges so fuzzy replace_all
+        // updates every normalized variant, not only the first byte-identical one.
         let new_content = if replace_all {
-            content.replace(&actual_old_string, new_string)
+            let mut matches = Vec::new();
+            let mut search_offset = 0usize;
+            while let Some(m) = file_edit_guard::find_match_from(&content, old_string, search_offset)
+            {
+                if m.end <= m.start {
+                    return Err(ToolError::ExecutionFailed(
+                        "Internal error: apply_patch produced an empty match.".to_string(),
+                    ));
+                }
+                matches.push((m.start, m.end));
+                search_offset = m.end;
+            }
+
+            if matches.len() != match_count {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Internal error: expected {} matches in {}, but found {} while applying replacements.",
+                    match_count,
+                    path.display(),
+                    matches.len()
+                )));
+            }
+
+            let mut rebuilt = String::with_capacity(content.len());
+            let mut last = 0usize;
+            for (start, end) in matches {
+                rebuilt.push_str(&content[last..start]);
+                rebuilt.push_str(new_string);
+                last = end;
+            }
+            rebuilt.push_str(&content[last..]);
+            rebuilt
         } else {
-            content.replacen(&actual_old_string, new_string, 1)
+            let m = file_edit_guard::find_match(&content, old_string).ok_or_else(|| {
+                ToolError::ExecutionFailed(format!(
+                    "String to replace not found in {} while applying the edit.",
+                    path.display()
+                ))
+            })?;
+
+            let mut rebuilt = String::with_capacity(content.len() - m.actual.len() + new_string.len());
+            rebuilt.push_str(&content[..m.start]);
+            rebuilt.push_str(new_string);
+            rebuilt.push_str(&content[m.end..]);
+            rebuilt
         };
 
         let replacements = if replace_all { match_count } else { 1 };
@@ -1454,6 +1483,39 @@ mod tests {
         assert_eq!(replacements, 3);
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert!(!content.contains("hello world"));
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_replace_all_rewrites_all_fuzzy_variants() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(
+            &file_path,
+            "hello world  \nhello world\n\nhello world\nhello world   \n",
+        )
+        .unwrap();
+
+        let tool = ApplyPatchTool::new().with_base_dir(dir.path().to_path_buf());
+        let ctx = JobContext::default();
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().unwrap(),
+                    "old_string": "hello world\nhello world\n",
+                    "new_string": "goodbye\ngoodbye\n",
+                    "replace_all": true
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let replacements = result.result.get("replacements").unwrap().as_u64().unwrap();
+        assert_eq!(replacements, 2);
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert!(!content.contains("hello world"));
+        assert!(content.contains("goodbye\ngoodbye\n"));
     }
 
     #[tokio::test]

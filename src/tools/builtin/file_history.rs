@@ -32,7 +32,8 @@ pub struct FileSnapshot {
     /// Absolute path to the file.
     pub path: PathBuf,
     /// File content before the modification (raw bytes for binary support).
-    pub content_before: Vec<u8>,
+    /// `None` means the file did not exist before the change.
+    pub content_before: Option<Vec<u8>>,
     /// When the snapshot was taken.
     pub timestamp: DateTime<Utc>,
     /// Which tool made the change (e.g., "apply_patch", "write_file").
@@ -74,7 +75,8 @@ impl FileHistory {
     /// Take a snapshot of a file's content before modification.
     ///
     /// Reads the file at `path` and stores its content. If the file does not
-    /// exist, no snapshot is created (returns `Ok(None)`).
+    /// exist, the snapshot records that absence so `file_undo` can remove the
+    /// newly-created file.
     pub async fn snapshot(
         &mut self,
         job_id: Uuid,
@@ -82,11 +84,10 @@ impl FileHistory {
         tool_name: &str,
         turn_number: usize,
     ) -> Result<Option<Uuid>, ToolError> {
-        // Only snapshot existing files — new file creation has nothing to undo.
         // Read as raw bytes to support binary files.
-        let content = match tokio::fs::read(path).await {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        let content_before = match tokio::fs::read(path).await {
+            Ok(c) => Some(c),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => {
                 return Err(ToolError::ExecutionFailed(format!(
                     "Failed to snapshot file before modification: {}",
@@ -100,7 +101,7 @@ impl FileHistory {
             id,
             job_id,
             path: path.to_path_buf(),
-            content_before: content,
+            content_before,
             timestamp: Utc::now(),
             tool_name: tool_name.to_string(),
             turn_number,
@@ -156,9 +157,25 @@ impl FileHistory {
             return Ok(None);
         };
 
-        tokio::fs::write(&snapshot.path, &snapshot.content_before)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to restore file: {}", e)))?;
+        match &snapshot.content_before {
+            Some(content) => {
+                tokio::fs::write(&snapshot.path, content).await.map_err(|e| {
+                    ToolError::ExecutionFailed(format!("Failed to restore file: {}", e))
+                })?;
+            }
+            None => {
+                match tokio::fs::remove_file(&snapshot.path).await {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(ToolError::ExecutionFailed(format!(
+                            "Failed to remove file during restore: {}",
+                            e
+                        )));
+                    }
+                }
+            }
+        }
 
         Ok(Some(snapshot))
     }
@@ -396,9 +413,30 @@ mod tests {
             .await
             .unwrap();
 
-        // No snapshot created for non-existent files
-        assert!(id.is_none());
-        assert!(history.is_empty());
+        assert!(id.is_some());
+        assert_eq!(history.len(), 1);
+        let snapshot = history.latest_snapshot_for(job, &file_path).unwrap();
+        assert!(snapshot.content_before.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_restore_removes_newly_created_file() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("new_file.txt");
+        let job = test_job_id();
+
+        let mut history = FileHistory::new();
+        history
+            .snapshot(job, &file_path, "write_file", 1)
+            .await
+            .unwrap();
+
+        std::fs::write(&file_path, "created later").unwrap();
+        assert!(file_path.exists());
+
+        let restored = history.restore_latest(job, &file_path).await.unwrap();
+        assert!(restored.is_some());
+        assert!(!file_path.exists());
     }
 
     #[tokio::test]

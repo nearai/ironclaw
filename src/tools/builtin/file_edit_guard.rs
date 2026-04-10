@@ -114,6 +114,10 @@ pub struct FuzzyMatch {
     pub actual: String,
     /// What normalization was applied.
     pub method: MatchMethod,
+    /// Byte start offset of the match in the original haystack.
+    pub start: usize,
+    /// Byte end offset of the match in the original haystack.
+    pub end: usize,
 }
 
 #[derive(Debug, PartialEq)]
@@ -124,32 +128,52 @@ pub enum MatchMethod {
     Both,
 }
 
+#[derive(Debug)]
+struct MatchSpan {
+    actual: String,
+    start: usize,
+    end: usize,
+}
+
 /// Try to find `needle` in `haystack`, falling back to normalized forms.
 ///
 /// Returns the actual substring from `haystack` that matched, so replacements
 /// preserve the file's original formatting.
 pub fn find_match(haystack: &str, needle: &str) -> Option<FuzzyMatch> {
+    find_match_from(haystack, needle, 0)
+}
+
+/// Find the next match at or after `start_offset`.
+pub fn find_match_from(haystack: &str, needle: &str, start_offset: usize) -> Option<FuzzyMatch> {
+    let search = haystack.get(start_offset..)?;
+
     // 1. Exact match
-    if haystack.contains(needle) {
+    if let Some(idx) = search.find(needle) {
+        let start = start_offset + idx;
+        let end = start + needle.len();
         return Some(FuzzyMatch {
             actual: needle.to_string(),
             method: MatchMethod::Exact,
+            start,
+            end,
         });
     }
 
     // 2. Trailing whitespace normalization
     let needle_stripped = strip_trailing_whitespace(needle);
-    let haystack_stripped = strip_trailing_whitespace(haystack);
-    if let Some(actual) = find_original_span(haystack, &haystack_stripped, &needle_stripped) {
+    let haystack_stripped = strip_trailing_whitespace(search);
+    if let Some(span) = find_original_span(search, &haystack_stripped, &needle_stripped) {
         return Some(FuzzyMatch {
-            actual,
+            actual: span.actual,
             method: MatchMethod::TrailingWhitespace,
+            start: start_offset + span.start,
+            end: start_offset + span.end,
         });
     }
 
     // 3. Quote normalization (curly → straight on both sides)
     let needle_normalized = normalize_quotes(needle);
-    let haystack_normalized = normalize_quotes(haystack);
+    let haystack_normalized = normalize_quotes(search);
     if let Some(idx) = haystack_normalized.find(&needle_normalized) {
         // Map back to original haystack to preserve curly quotes in the actual string.
         // Quote normalization is char-for-char (same byte length for ASCII replacements),
@@ -157,20 +181,26 @@ pub fn find_match(haystack: &str, needle: &str) -> Option<FuzzyMatch> {
         // may differ. Use char-based indexing instead.
         let char_start = haystack_normalized[..idx].chars().count();
         let char_len = needle_normalized.chars().count();
-        let actual: String = haystack.chars().skip(char_start).take(char_len).collect();
+        let start_in_search = char_to_byte_idx(search, char_start)?;
+        let end_in_search = char_to_byte_idx(search, char_start + char_len)?;
+        let actual = search.get(start_in_search..end_in_search)?.to_string();
         return Some(FuzzyMatch {
             actual,
             method: MatchMethod::QuoteNormalization,
+            start: start_offset + start_in_search,
+            end: start_offset + end_in_search,
         });
     }
 
     // 4. Both normalizations
     let needle_both = normalize_quotes(&needle_stripped);
     let haystack_both = normalize_quotes(&haystack_stripped);
-    if let Some(actual) = find_original_span(haystack, &haystack_both, &needle_both) {
+    if let Some(span) = find_original_span(search, &haystack_both, &needle_both) {
         return Some(FuzzyMatch {
-            actual,
+            actual: span.actual,
             method: MatchMethod::Both,
+            start: start_offset + span.start,
+            end: start_offset + span.end,
         });
     }
 
@@ -235,70 +265,68 @@ fn find_original_span(
     original: &str,
     normalized_haystack: &str,
     normalized_needle: &str,
-) -> Option<String> {
+) -> Option<MatchSpan> {
     let idx = normalized_haystack.find(normalized_needle)?;
+    let char_idx = normalized_haystack[..idx].chars().count();
+    let needle_char_len = normalized_needle.chars().count();
 
-    // Map normalized byte offset → original byte offset via line tracking.
-    // Both strings have the same number of lines, and normalization only removes
-    // trailing whitespace, so we can map line-by-line.
-    let norm_lines: Vec<&str> = normalized_haystack.lines().collect();
-    let orig_lines: Vec<&str> = original.lines().collect();
+    let start = map_normalized_char_to_original_byte(original, char_idx)?;
+    let end = map_normalized_char_to_original_byte(original, char_idx + needle_char_len)?;
 
-    if norm_lines.len() != orig_lines.len() {
-        return None;
+    Some(MatchSpan {
+        actual: original.get(start..end)?.to_string(),
+        start,
+        end,
+    })
+}
+
+fn char_to_byte_idx(s: &str, char_idx: usize) -> Option<usize> {
+    if char_idx == s.chars().count() {
+        return Some(s.len());
     }
 
-    // Find which line and column the normalized index falls on
-    let mut norm_offset = 0;
-    let mut start_line = 0;
-    let mut start_col = 0;
-    for (i, line) in norm_lines.iter().enumerate() {
-        let line_end = norm_offset + line.len();
-        if idx >= norm_offset && idx <= line_end {
-            start_line = i;
-            start_col = idx - norm_offset;
-            break;
-        }
-        norm_offset = line_end + 1; // +1 for \n
+    s.char_indices().nth(char_idx).map(|(idx, _)| idx)
+}
+
+fn map_normalized_char_to_original_byte(original: &str, normalized_char_idx: usize) -> Option<usize> {
+    if normalized_char_idx == 0 {
+        return Some(0);
     }
 
-    let end_idx = idx + normalized_needle.len();
-    let mut end_line = start_line;
-    let mut end_col = 0;
-    norm_offset = 0;
-    for (i, line) in norm_lines.iter().enumerate() {
-        let line_end = norm_offset + line.len();
-        if end_idx >= norm_offset && end_idx <= line_end {
-            end_line = i;
-            end_col = end_idx - norm_offset;
-            break;
-        }
-        norm_offset = line_end + 1;
-    }
+    let mut normalized_seen = 0usize;
+    let mut original_byte = 0usize;
 
-    // Now extract from original using line/col positions
-    let mut result = String::new();
-    for i in start_line..=end_line {
-        if i >= orig_lines.len() {
-            return None;
-        }
-        let line = orig_lines[i];
-        let from = if i == start_line { start_col } else { 0 };
-        let to = if i == end_line {
-            end_col.min(line.len())
+    for segment in original.split_inclusive('\n') {
+        let (line, has_newline) = if let Some(stripped) = segment.strip_suffix('\n') {
+            (stripped, true)
         } else {
-            line.len()
+            (segment, false)
         };
-        if from > line.len() || to > line.len() {
-            return None;
+
+        let trimmed = line.trim_end();
+        let trimmed_chars = trimmed.chars().count();
+
+        if normalized_char_idx <= normalized_seen + trimmed_chars {
+            let within_line = normalized_char_idx - normalized_seen;
+            return Some(original_byte + char_to_byte_idx(line, within_line)?);
         }
-        result.push_str(&line[from..to]);
-        if i < end_line {
-            result.push('\n');
+        normalized_seen += trimmed_chars;
+        original_byte += line.len();
+
+        if has_newline {
+            if normalized_char_idx == normalized_seen + 1 {
+                return Some(original_byte + 1);
+            }
+            normalized_seen += 1;
+            original_byte += 1;
         }
     }
 
-    Some(result)
+    if normalized_char_idx == normalized_seen {
+        Some(original_byte)
+    } else {
+        None
+    }
 }
 
 // ── Encoding detection ───────────────────────────────────────────────
@@ -534,6 +562,16 @@ mod tests {
         let needle = "let msg = \"hello\";";
         let m = find_match(file, needle).unwrap();
         assert_eq!(m.method, MatchMethod::QuoteNormalization);
+    }
+
+    #[test]
+    fn test_both_normalizations_match_with_smart_quotes_is_safe() {
+        let file = "let msg = \u{201C}hello\u{201D};  \n";
+        let needle = "let msg = \"hello\";\n";
+        let m = find_match(file, needle).unwrap();
+        assert_eq!(m.method, MatchMethod::Both);
+        assert_eq!(m.actual, "let msg = \u{201C}hello\u{201D};");
+        assert_eq!(&file[m.start..m.end], m.actual);
     }
 
     #[test]
