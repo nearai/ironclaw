@@ -1323,7 +1323,7 @@ async def telegram_e2e_server(
             ),
             "SANDBOX_ENABLED": "false",
             "SKILLS_ENABLED": "true",
-            "ROUTINES_ENABLED": "false",
+            "ROUTINES_ENABLED": "true",
             "HEARTBEAT_ENABLED": "false",
             "EMBEDDING_ENABLED": "false",
             "WASM_ENABLED": "true",

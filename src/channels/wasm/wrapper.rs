@@ -386,9 +386,10 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             self.inject_host_credentials(&host, &mut headers, &mut logical_url);
         }
 
-        let transport_url = rewrite_http_url_for_testing(&logical_url)
-            .or_else(|| rewrite_telegram_api_url_for_testing(&logical_url))
-            .unwrap_or_else(|| logical_url.clone());
+        let rewritten_transport_url = rewrite_http_url_for_testing(&logical_url)
+            .or_else(|| rewrite_telegram_api_url_for_testing(&logical_url));
+        let allow_private_test_target = rewritten_transport_url.is_some();
+        let transport_url = rewritten_transport_url.unwrap_or_else(|| logical_url.clone());
         if transport_url != logical_url {
             tracing::info!(
                 logical_url = %logical_url,
@@ -408,7 +409,10 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             .unwrap_or(10 * 1024 * 1024);
 
         // Resolve hostname and reject private/internal IPs to prevent DNS rebinding.
-        reject_private_ip(&transport_url)?;
+        // Test-only URL rewrites intentionally point at local fake servers.
+        if !allow_private_test_target {
+            reject_private_ip(&transport_url)?;
+        }
 
         // Make the HTTP request using a dedicated single-threaded runtime.
         // We're inside spawn_blocking, so we can't rely on the main runtime's
@@ -825,6 +829,36 @@ fn resolve_message_scope(
         (owner_scope_id.to_string(), true)
     } else {
         (sender_id.to_string(), false)
+    }
+}
+
+async fn resolve_message_scope_with_pairing(
+    channel_name: &str,
+    owner_scope_id: &str,
+    owner_actor_id: Option<&str>,
+    sender_id: &str,
+    pairing_store: &PairingStore,
+) -> (String, bool) {
+    if owner_actor_id.is_some_and(|owner_actor_id| owner_actor_id == sender_id) {
+        return (owner_scope_id.to_string(), true);
+    }
+
+    match pairing_store.resolve_identity(channel_name, sender_id).await {
+        Ok(Some(identity)) => {
+            let resolved_user_id = identity.owner_id.to_string();
+            let is_owner_sender = resolved_user_id == owner_scope_id;
+            (resolved_user_id, is_owner_sender)
+        }
+        Ok(None) => (sender_id.to_string(), false),
+        Err(error) => {
+            tracing::warn!(
+                channel = %channel_name,
+                sender_id = %sender_id,
+                "Failed to resolve paired sender identity: {}",
+                error
+            );
+            resolve_message_scope(owner_scope_id, owner_actor_id, sender_id)
+        }
     }
 }
 
@@ -2467,11 +2501,14 @@ impl WasmChannel {
                 }
             }
 
-            let (resolved_user_id, is_owner_sender) = resolve_message_scope(
+            let (resolved_user_id, is_owner_sender) = resolve_message_scope_with_pairing(
+                &self.name,
                 &self.owner_scope_id,
                 self.owner_actor_id.as_deref(),
                 &emitted.user_id,
-            );
+                self.pairing_store.as_ref(),
+            )
+            .await;
 
             // Convert to IncomingMessage
             let mut msg = IncomingMessage::new(&self.name, &resolved_user_id, &emitted.content)
@@ -2637,6 +2674,7 @@ impl WasmChannel {
                                             channel_name: &channel_name,
                                             owner_scope_id: &owner_scope_id,
                                             owner_actor_id: owner_actor_id.as_deref(),
+                                            pairing_store: pairing_store.as_ref(),
                                             message_tx: &message_tx,
                                             rate_limiter: &rate_limiter,
                                             last_broadcast_metadata: &last_broadcast_metadata,
@@ -2803,11 +2841,14 @@ impl WasmChannel {
                 }
             }
 
-            let (resolved_user_id, is_owner_sender) = resolve_message_scope(
+            let (resolved_user_id, is_owner_sender) = resolve_message_scope_with_pairing(
+                dispatch.channel_name,
                 dispatch.owner_scope_id,
                 dispatch.owner_actor_id,
                 &emitted.user_id,
-            );
+                dispatch.pairing_store,
+            )
+            .await;
 
             // Convert to IncomingMessage
             let mut msg =
@@ -2896,6 +2937,7 @@ struct EmitDispatchContext<'a> {
     channel_name: &'a str,
     owner_scope_id: &'a str,
     owner_actor_id: Option<&'a str>,
+    pairing_store: &'a PairingStore,
     message_tx: &'a RwLock<Option<mpsc::Sender<IncomingMessage>>>,
     rate_limiter: &'a RwLock<ChannelEmitRateLimiter>,
     last_broadcast_metadata: &'a tokio::sync::RwLock<Option<String>>,
@@ -3445,6 +3487,7 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
                                 channel_name: &ctx.channel_name,
                                 owner_scope_id: &ctx.owner_scope_id,
                                 owner_actor_id: ctx.owner_actor_id.as_deref(),
+                                pairing_store: ctx.pairing_store.as_ref(),
                                 message_tx: &ctx.message_tx,
                                 rate_limiter: &ctx.rate_limiter,
                                 last_broadcast_metadata: &ctx.last_broadcast_metadata,
@@ -4320,6 +4363,37 @@ mod tests {
     use crate::tools::wasm::{
         Capabilities as ToolCapabilities, EndpointPattern, HttpCapability, LogLevel, ResourceLimits,
     };
+
+    #[cfg(feature = "libsql")]
+    async fn make_db_backed_pairing_store(owner_id: &str) -> (PairingStore, tempfile::TempDir) {
+        use crate::db::libsql::LibSqlBackend;
+        use crate::db::{Database, UserRecord};
+        use crate::ownership::OwnershipCache;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("wrapper-pairing-test.db");
+        let db = LibSqlBackend::new_local(&db_path).await.expect("libsql db");
+        db.run_migrations().await.expect("migrations");
+
+        let db: Arc<dyn Database> = Arc::new(db);
+        db.get_or_create_user(UserRecord {
+            id: owner_id.to_string(),
+            role: "member".to_string(),
+            display_name: owner_id.to_string(),
+            status: "active".to_string(),
+            email: None,
+            last_login_at: None,
+            created_by: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("owner user");
+
+        (PairingStore::new(db, Arc::new(OwnershipCache::new())), dir)
+    }
+
     fn create_test_channel() -> WasmChannel {
         create_test_channel_with_owner_scope("default")
     }
@@ -4745,6 +4819,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        let pairing_store = PairingStore::new_noop();
 
         let rate_limiter = Arc::new(tokio::sync::RwLock::new(
             crate::channels::wasm::host::ChannelEmitRateLimiter::new(
@@ -4763,6 +4838,7 @@ mod tests {
                 channel_name: "test-channel",
                 owner_scope_id: "default",
                 owner_actor_id: None,
+                pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
                 last_broadcast_metadata: &last_broadcast_metadata,
@@ -4793,6 +4869,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        let pairing_store = PairingStore::new_noop();
 
         let rate_limiter = Arc::new(tokio::sync::RwLock::new(
             crate::channels::wasm::host::ChannelEmitRateLimiter::new(
@@ -4812,6 +4889,7 @@ mod tests {
                 channel_name: "test-channel",
                 owner_scope_id: "default",
                 owner_actor_id: None,
+                pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
                 last_broadcast_metadata: &last_broadcast_metadata,
@@ -4837,6 +4915,7 @@ mod tests {
 
         // No sender available (channel not started)
         let message_tx = Arc::new(tokio::sync::RwLock::new(None));
+        let pairing_store = PairingStore::new_noop();
         let rate_limiter = Arc::new(tokio::sync::RwLock::new(
             crate::channels::wasm::host::ChannelEmitRateLimiter::new(
                 crate::channels::wasm::capabilities::EmitRateLimitConfig::default(),
@@ -4852,6 +4931,7 @@ mod tests {
                 channel_name: "test-channel",
                 owner_scope_id: "default",
                 owner_actor_id: None,
+                pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
                 last_broadcast_metadata: &last_broadcast_metadata,
@@ -5812,6 +5892,56 @@ mod tests {
     }
 
     #[test]
+    fn test_http_request_allows_private_target_for_telegram_test_rewrite() {
+        let _guard = crate::config::helpers::lock_env();
+        let original = std::env::var(TELEGRAM_TEST_API_BASE_ENV).ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var(TELEGRAM_TEST_API_BASE_ENV, "http://127.0.0.1:1");
+        }
+
+        let capabilities =
+            ChannelCapabilities::for_channel("test").with_tool_capabilities(ToolCapabilities {
+                http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                    "api.telegram.org",
+                )])),
+                ..Default::default()
+            });
+        let mut store = super::ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            capabilities,
+            std::collections::HashMap::new(),
+            Vec::new(),
+            Arc::new(PairingStore::new_noop()),
+        );
+
+        let result = super::near::agent::channel_host::Host::http_request(
+            &mut store,
+            "GET".to_string(),
+            "https://api.telegram.org/bot123/getMe".to_string(),
+            "{}".to_string(),
+            None,
+            Some(1_000),
+        );
+
+        assert!(result.is_err(), "test rewrite should still attempt the request");
+        assert!(
+            !result.unwrap_err().contains("private/internal IP"),
+            "test rewrite should bypass private IP guard"
+        );
+
+        // SAFETY: Under ENV_MUTEX, restore original state.
+        unsafe {
+            if let Some(value) = original {
+                std::env::set_var(TELEGRAM_TEST_API_BASE_ENV, value);
+            } else {
+                std::env::remove_var(TELEGRAM_TEST_API_BASE_ENV);
+            }
+        }
+    }
+
+    #[test]
     fn test_should_skip_response_leak_scan_only_for_telegram_getupdates() {
         use super::should_skip_response_leak_scan;
 
@@ -5908,6 +6038,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        let pairing_store = PairingStore::new_noop();
 
         let rate_limiter = Arc::new(tokio::sync::RwLock::new(
             crate::channels::wasm::host::ChannelEmitRateLimiter::new(
@@ -5949,6 +6080,7 @@ mod tests {
                 channel_name: "test-channel",
                 owner_scope_id: "default",
                 owner_actor_id: None,
+                pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
                 last_broadcast_metadata: &last_broadcast_metadata,
@@ -5993,6 +6125,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        let pairing_store = PairingStore::new_noop();
         let rate_limiter = Arc::new(tokio::sync::RwLock::new(
             crate::channels::wasm::host::ChannelEmitRateLimiter::new(
                 crate::channels::wasm::capabilities::EmitRateLimitConfig::default(),
@@ -6010,6 +6143,7 @@ mod tests {
                 channel_name: "telegram",
                 owner_scope_id: "owner-scope",
                 owner_actor_id: Some("telegram-owner"),
+                pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
                 last_broadcast_metadata: &last_broadcast_metadata,
@@ -6035,6 +6169,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        let pairing_store = PairingStore::new_noop();
         let rate_limiter = Arc::new(tokio::sync::RwLock::new(
             crate::channels::wasm::host::ChannelEmitRateLimiter::new(
                 crate::channels::wasm::capabilities::EmitRateLimitConfig::default(),
@@ -6051,6 +6186,7 @@ mod tests {
                 channel_name: "telegram",
                 owner_scope_id: "owner-scope",
                 owner_actor_id: Some("telegram-owner"),
+                pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
                 last_broadcast_metadata: &last_broadcast_metadata,
@@ -6067,6 +6203,67 @@ mod tests {
         assert_eq!(msg.sender_id, "guest-42"); // safety: test-only assertion
         assert_eq!(msg.conversation_scope(), Some("999")); // safety: test-only assertion
         assert!(last_broadcast_metadata.read().await.is_none()); // safety: test-only assertion
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_dispatch_emitted_messages_paired_sender_sets_owner_scope() {
+        use crate::channels::wasm::host::EmittedMessage;
+        use crate::ownership::OwnerId;
+
+        let (pairing_store, _dir) = make_db_backed_pairing_store("owner-scope").await;
+        let pairing_request = pairing_store
+            .upsert_request(
+                "telegram",
+                "guest-77",
+                Some(serde_json::json!({ "chat_id": 777 })),
+            )
+            .await
+            .expect("pairing request");
+        pairing_store
+            .approve(
+                "telegram",
+                &pairing_request.code,
+                &OwnerId::from("owner-scope"),
+            )
+            .await
+            .expect("pairing approval");
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        let rate_limiter = Arc::new(tokio::sync::RwLock::new(
+            crate::channels::wasm::host::ChannelEmitRateLimiter::new(
+                crate::channels::wasm::capabilities::EmitRateLimitConfig::default(),
+            ),
+        ));
+        let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
+
+        let result = WasmChannel::dispatch_emitted_messages(
+            EmitDispatchContext {
+                channel_name: "telegram",
+                owner_scope_id: "owner-scope",
+                owner_actor_id: Some("telegram-owner"),
+                pairing_store: &pairing_store,
+                message_tx: &message_tx,
+                rate_limiter: &rate_limiter,
+                last_broadcast_metadata: &last_broadcast_metadata,
+                settings_store: None,
+            },
+            vec![
+                EmittedMessage::new("guest-77", "Hello from paired user")
+                    .with_metadata(r#"{"chat_id":777}"#),
+            ],
+        )
+        .await;
+
+        assert!(result.is_ok());
+
+        let msg = rx.try_recv().expect("Should receive message");
+        assert_eq!(msg.user_id, "owner-scope");
+        assert_eq!(msg.sender_id, "guest-77");
+        assert_eq!(msg.conversation_scope(), Some("777"));
+        let stored_metadata = last_broadcast_metadata.read().await.clone();
+        assert_eq!(stored_metadata.as_deref(), Some(r#"{"chat_id":777}"#));
     }
 
     #[tokio::test]
@@ -6117,6 +6314,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        let pairing_store = PairingStore::new_noop();
 
         let rate_limiter = Arc::new(tokio::sync::RwLock::new(
             crate::channels::wasm::host::ChannelEmitRateLimiter::new(
@@ -6132,6 +6330,7 @@ mod tests {
                 channel_name: "test-channel",
                 owner_scope_id: "default",
                 owner_actor_id: None,
+                pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
                 last_broadcast_metadata: &last_broadcast_metadata,
