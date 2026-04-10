@@ -59,6 +59,8 @@ pub enum AppEvent {
     ToolStarted {
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
     #[serde(rename = "tool_completed")]
@@ -123,6 +125,24 @@ pub enum AppEvent {
     #[serde(rename = "auth_completed")]
     AuthCompleted {
         extension_name: String,
+        success: bool,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+    #[serde(rename = "pairing_required")]
+    PairingRequired {
+        channel: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        instructions: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        onboarding: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+    #[serde(rename = "pairing_completed")]
+    PairingCompleted {
+        channel: String,
         success: bool,
         message: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -340,6 +360,8 @@ impl AppEvent {
             Self::ApprovalNeeded { .. } => "approval_needed",
             Self::AuthRequired { .. } => "auth_required",
             Self::AuthCompleted { .. } => "auth_completed",
+            Self::PairingRequired { .. } => "pairing_required",
+            Self::PairingCompleted { .. } => "pairing_completed",
             Self::GateRequired { .. } => "gate_required",
             Self::GateResolved { .. } => "gate_resolved",
             Self::Error { .. } => "error",
@@ -391,6 +413,7 @@ mod tests {
             },
             AppEvent::ToolStarted {
                 name: String::new(),
+                detail: None,
                 thread_id: None,
             },
             AppEvent::ToolCompleted {
@@ -435,6 +458,18 @@ mod tests {
             },
             AppEvent::AuthCompleted {
                 extension_name: String::new(),
+                success: true,
+                message: String::new(),
+                thread_id: None,
+            },
+            AppEvent::PairingRequired {
+                channel: String::new(),
+                instructions: None,
+                onboarding: None,
+                thread_id: None,
+            },
+            AppEvent::PairingCompleted {
+                channel: String::new(),
                 success: true,
                 message: String::new(),
                 thread_id: None,

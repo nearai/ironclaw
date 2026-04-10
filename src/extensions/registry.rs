@@ -377,11 +377,7 @@ mod tests {
     fn registry_with_catalog() -> ExtensionRegistry {
         let catalog = crate::registry::catalog::RegistryCatalog::load_or_embedded()
             .expect("catalog should load");
-        let catalog_entries: Vec<RegistryEntry> = catalog
-            .all()
-            .iter()
-            .filter_map(|m| m.to_registry_entry())
-            .collect();
+        let catalog_entries: Vec<RegistryEntry> = catalog.discovery_entries();
         ExtensionRegistry::new_with_catalog(catalog_entries)
     }
 
@@ -414,6 +410,22 @@ mod tests {
         // Linear should be near the top since it has both keywords
         let linear_pos = results.iter().position(|r| r.entry.name == "linear");
         assert!(linear_pos.is_some(), "Linear should appear in results");
+    }
+
+    #[tokio::test]
+    async fn test_search_gws_alias_finds_google_tools() {
+        let registry = registry_with_catalog();
+        let results = registry.search("gws").await;
+        assert!(
+            results.iter().any(|result| result.entry.name == "gmail"),
+            "gws search should surface Gmail"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|result| result.entry.name == "google_drive"),
+            "gws search should surface Google Drive"
+        );
     }
 
     #[tokio::test]

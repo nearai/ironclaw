@@ -1364,6 +1364,7 @@ mod tests {
         let mut acc = ResponseAccumulator::new("resp_test".to_string(), "m".to_string());
         assert!(!acc.process(AppEvent::ToolStarted {
             name: "memory_search".to_string(),
+            detail: None,
             thread_id: Some("t".to_string()),
         }));
         assert!(!acc.process(AppEvent::ToolResult {

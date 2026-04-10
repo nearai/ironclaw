@@ -36,6 +36,7 @@ use crate::history::{
     AgentJobRecord, AgentJobSummary, ConversationMessage, ConversationSummary, LlmCallRecord,
     SandboxJobRecord, SandboxJobSummary, SettingRow,
 };
+use crate::ownership::Owned;
 use crate::workspace::Workspace;
 
 // ---------------------------------------------------------------------------
@@ -98,7 +99,7 @@ impl TenantScope {
     /// Fetch a job by ID, returning `None` if it doesn't belong to this user.
     pub async fn get_job(&self, id: Uuid) -> Result<Option<JobContext>, DatabaseError> {
         match self.inner.get_job(id).await? {
-            Some(ctx) if ctx.user_id == self.identity.owner_id.as_str() => Ok(Some(ctx)),
+            Some(ctx) if ctx.is_owned_by(self.identity.owner_id.as_str()) => Ok(Some(ctx)),
             _ => Ok(None),
         }
     }
@@ -152,7 +153,7 @@ impl TenantScope {
         id: Uuid,
     ) -> Result<Option<SandboxJobRecord>, DatabaseError> {
         match self.inner.get_sandbox_job(id).await? {
-            Some(job) if job.user_id == self.identity.owner_id.as_str() => Ok(Some(job)),
+            Some(job) if job.is_owned_by(self.identity.owner_id.as_str()) => Ok(Some(job)),
             _ => Ok(None),
         }
     }
@@ -180,7 +181,7 @@ impl TenantScope {
     /// Fetch a routine by ID, returning `None` if it doesn't belong to this user.
     pub async fn get_routine(&self, id: Uuid) -> Result<Option<Routine>, DatabaseError> {
         match self.inner.get_routine(id).await? {
-            Some(r) if r.user_id == self.identity.owner_id.as_str() => Ok(Some(r)),
+            Some(r) if r.is_owned_by(self.identity.owner_id.as_str()) => Ok(Some(r)),
             _ => Ok(None),
         }
     }
@@ -526,6 +527,56 @@ impl SystemScope {
     /// a specific user without exposing the raw database handle.
     pub fn workspace_for_user(&self, user_id: impl Into<String>) -> Workspace {
         Workspace::new_with_db(user_id, Arc::clone(&self.inner))
+    }
+
+    /// Load the current admin tool policy from the shared admin settings scope.
+    pub async fn get_admin_tool_policy(
+        &self,
+    ) -> Result<Option<crate::tools::permissions::AdminToolPolicy>, DatabaseError> {
+        match self
+            .inner
+            .get_setting(
+                crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+                crate::tools::permissions::ADMIN_TOOL_POLICY_KEY,
+            )
+            .await?
+        {
+            Some(value) => {
+                crate::tools::permissions::parse_admin_tool_policy(value, "system_scope")
+                    .map(Some)
+                    .map_err(|error| DatabaseError::Serialization(error.to_string()))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Replace the current admin tool policy in the shared admin settings scope.
+    pub async fn set_admin_tool_policy(
+        &self,
+        policy: &crate::tools::permissions::AdminToolPolicy,
+    ) -> Result<(), DatabaseError> {
+        crate::tools::permissions::validate_admin_tool_policy(policy)
+            .map_err(DatabaseError::Serialization)?;
+        let value = serde_json::to_value(policy)
+            .map_err(|error| DatabaseError::Serialization(error.to_string()))?;
+        self.inner
+            .set_setting(
+                crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+                crate::tools::permissions::ADMIN_TOOL_POLICY_KEY,
+                &value,
+            )
+            .await
+    }
+
+    /// Read a user's role for system-process authorization decisions.
+    pub async fn get_user_role(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<crate::ownership::UserRole>, DatabaseError> {
+        self.inner
+            .get_user(user_id)
+            .await
+            .map(|record| record.map(|user| crate::ownership::UserRole::from_db_role(&user.role)))
     }
 
     // === Routine engine ===

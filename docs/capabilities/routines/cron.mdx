@@ -1,0 +1,46 @@
+---
+title: Cron Routines
+description: Schedule recurring tasks with cron expressions
+---
+
+Cron routines fire on a repeating schedule using standard cron expressions. Use them for any task that should happen at a predictable time — daily reports, weekly cleanups, hourly checks.
+
+---
+
+## Creating a Cron Routine
+
+Describe the schedule and task to the agent. It will call `routine_create` on your behalf:
+
+```
+Create a routine that runs every weekday at 9am and summarizes
+what I worked on yesterday by reading my daily notes, then
+writes a standup draft to memory at daily/standup.md.
+```
+
+---
+
+## Execution Model
+
+When a cron routine fires:
+
+1. The routine engine creates a new agent job with the action prompt
+2. The job runs through the full agent loop — LLM reasoning, tool calls, safety layer
+3. Output is written to memory or sent via a channel notification (if configured)
+4. The run is recorded in routine history, accessible via `routine_history`
+
+Routine jobs run as standard jobs and count against `MAX_PARALLEL_JOBS`. If the limit is reached when a cron fires, the routine job queues as Pending.
+
+---
+
+## Configuration
+
+```bash
+# Enable routines
+ROUTINES_ENABLED=true
+
+# Cron tick interval (how often the engine checks for due jobs)
+ROUTINES_CRON_INTERVAL=60    # seconds
+
+# Max routines running simultaneously
+ROUTINES_MAX_CONCURRENT=3
+```

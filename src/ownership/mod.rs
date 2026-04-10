@@ -1,8 +1,8 @@
 //! Centralized ownership types for IronClaw.
 //!
 //! `Identity` is the single struct that flows from the channel boundary through
-//! every scope constructor and authorization check. `can_act_on` is the sole
-//! place that decides whether an actor may mutate a resource.
+//! every scope constructor and authorization check. The [`Owned`] trait provides
+//! a uniform `is_owned_by(user_id)` check across all resource types.
 //!
 //! Known single-tenant assumptions still remain elsewhere in the app. In
 //! particular, extension lifecycle/configuration, orchestrator secret injection,
@@ -49,6 +49,25 @@ pub enum UserRole {
     Member,
 }
 
+impl UserRole {
+    /// Parse a role string persisted in the users table.
+    ///
+    /// Unknown values are treated as `Member` for a safe, least-privilege
+    /// fallback.
+    pub fn from_db_role(role: &str) -> Self {
+        if role.eq_ignore_ascii_case("admin") {
+            Self::Admin
+        } else {
+            Self::Member
+        }
+    }
+
+    /// Returns `true` when the role has admin privileges.
+    pub fn is_admin(&self) -> bool {
+        matches!(self, Self::Admin)
+    }
+}
+
 /// Scope of a tool or skill. Extension point — nothing sets `Global` yet.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResourceScope {
@@ -76,13 +95,24 @@ impl Identity {
     }
 }
 
-/// Central authorization check: returns true if the actor owns the resource.
+/// Trait for types that have a user owner.
 ///
-/// Ownership is strict equality — role has no effect here.
-/// Admin-only operations are gated by a separate scope type; do not add
-/// role-based bypasses to this function.
-pub fn can_act_on(actor: &Identity, resource_owner: &OwnerId) -> bool {
-    actor.owner_id == *resource_owner
+/// Provides a uniform `is_owned_by(user_id)` check across all resource types
+/// (jobs, routines, etc.). Engine types (Mission, Thread, Project) have their
+/// own inherent `is_owned_by` that additionally handles shared ownership
+/// (`__shared__`); those are left as-is.
+///
+/// **Do NOT implement on engine types** (`Mission`, `Thread`, `Project`,
+/// `MemoryDoc`). They have inherent `is_owned_by()` methods with
+/// shared-ownership semantics that differ from this trait's default.
+pub trait Owned {
+    /// Returns the raw `user_id` string identifying the owner.
+    fn owner_user_id(&self) -> &str;
+
+    /// Returns true if `user_id` owns this resource.
+    fn is_owned_by(&self, user_id: &str) -> bool {
+        self.owner_user_id() == user_id
+    }
 }
 
 pub mod cache;
@@ -91,34 +121,6 @@ pub use cache::OwnershipCache;
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_can_act_on_own_resource() {
-        let actor = Identity {
-            owner_id: OwnerId::from("alice"),
-            role: UserRole::Member,
-        };
-        assert!(can_act_on(&actor, &OwnerId::from("alice")));
-    }
-
-    #[test]
-    fn test_cannot_act_on_others_resource() {
-        let actor = Identity {
-            owner_id: OwnerId::from("alice"),
-            role: UserRole::Member,
-        };
-        assert!(!can_act_on(&actor, &OwnerId::from("bob")));
-    }
-
-    #[test]
-    fn test_admin_cannot_act_on_others_resource() {
-        // Admin role does NOT bypass ownership in can_act_on
-        let actor = Identity {
-            owner_id: OwnerId::from("alice"),
-            role: UserRole::Admin,
-        };
-        assert!(!can_act_on(&actor, &OwnerId::from("bob")));
-    }
 
     #[test]
     fn test_owner_id_display() {
@@ -145,5 +147,51 @@ mod tests {
         let id = Identity::new("alice", UserRole::Admin);
         assert_eq!(id.owner_id.as_str(), "alice");
         assert_eq!(id.role, UserRole::Admin);
+    }
+
+    #[test]
+    fn test_user_role_from_db_role() {
+        assert_eq!(UserRole::from_db_role("admin"), UserRole::Admin);
+        assert_eq!(UserRole::from_db_role("ADMIN"), UserRole::Admin);
+        assert_eq!(UserRole::from_db_role("member"), UserRole::Member);
+        assert_eq!(UserRole::from_db_role("owner"), UserRole::Member);
+        assert!(UserRole::Admin.is_admin());
+        assert!(!UserRole::Member.is_admin());
+    }
+
+    // --- Owned trait tests ---
+
+    struct FakeResource {
+        user_id: String,
+    }
+
+    impl Owned for FakeResource {
+        fn owner_user_id(&self) -> &str {
+            &self.user_id
+        }
+    }
+
+    #[test]
+    fn test_owned_is_owned_by_own_user() {
+        let r = FakeResource {
+            user_id: "alice".to_string(),
+        };
+        assert!(r.is_owned_by("alice"));
+    }
+
+    #[test]
+    fn test_owned_is_not_owned_by_other_user() {
+        let r = FakeResource {
+            user_id: "alice".to_string(),
+        };
+        assert!(!r.is_owned_by("bob"));
+    }
+
+    #[test]
+    fn test_owned_owner_user_id() {
+        let r = FakeResource {
+            user_id: "henry".to_string(),
+        };
+        assert_eq!(r.owner_user_id(), "henry");
     }
 }
