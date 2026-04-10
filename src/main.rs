@@ -770,7 +770,15 @@ async fn async_main() -> anyhow::Result<()> {
                 .tunnel
                 .public_url
                 .clone()
-                .unwrap_or_else(|| format!("http://{}:{}", gw_config.host, gw_config.port));
+                .unwrap_or_else(|| {
+                    // 0.0.0.0 / [::] are valid bind addresses but not valid
+                    // OAuth redirect hosts — use localhost instead.
+                    let host = match gw_config.host.as_str() {
+                        "0.0.0.0" | "::" | "[::]" => "localhost",
+                        other => other,
+                    };
+                    format!("http://{}:{}", host, gw_config.port)
+                });
             ext_mgr.enable_gateway_mode(gw_base).await;
             gw = gw.with_extension_manager(Arc::clone(ext_mgr));
         }
