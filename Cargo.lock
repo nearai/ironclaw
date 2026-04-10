@@ -3909,6 +3909,7 @@ dependencies = [
  "insta",
  "ironclaw_common",
  "ironclaw_engine",
+ "ironclaw_gateway",
  "ironclaw_safety",
  "ironclaw_skills",
  "ironclaw_tui",
@@ -3998,6 +3999,16 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "ironclaw_gateway"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
