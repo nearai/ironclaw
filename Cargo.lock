@@ -3978,8 +3978,10 @@ dependencies = [
 name = "ironclaw_common"
 version = "0.1.0"
 dependencies = [
+ "chrono-tz",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -3988,6 +3990,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "cron",
+ "ironclaw_common",
  "ironclaw_skills",
  "monty",
  "pretty_assertions",

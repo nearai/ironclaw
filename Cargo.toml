@@ -5,6 +5,7 @@ exclude = [
     "channels-src/telegram",
     "channels-src/slack",
     "channels-src/whatsapp",
+    "tools-src/composio",
     "tools-src/github",
     "tools-src/gmail",
     "tools-src/google-calendar",

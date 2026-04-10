@@ -779,6 +779,20 @@ async fn async_main() -> anyhow::Result<()> {
             ));
             gw = gw.with_tool_dispatcher(dispatcher);
         }
+        if let Some(ref ext_mgr) = components.extension_manager {
+            // Enable gateway mode so MCP OAuth returns auth URLs to the frontend
+            // instead of calling open::that() on the server.
+            let gw_base = config
+                .tunnel
+                .public_url
+                .clone()
+                .unwrap_or_else(|| oauth_base_url(&gw_config.host, gw_config.port));
+            ext_mgr.enable_gateway_mode(gw_base).await;
+            gw = gw.with_extension_manager(Arc::clone(ext_mgr));
+        }
+        if !components.catalog_entries.is_empty() {
+            gw = gw.with_registry_entries(components.catalog_entries.clone());
+        }
 
         // Wire pairing store (requires ownership_cache from main).
         if let Some(ref d) = components.db {
@@ -1387,4 +1401,46 @@ async fn async_main() -> anyhow::Result<()> {
     tracing::debug!("Agent shutdown complete");
 
     Ok(())
+}
+
+/// Build the OAuth base URL from the gateway bind address and port.
+///
+/// Unspecified addresses (`0.0.0.0`, `::`, `[::]`) are mapped to `localhost`
+/// because they are valid bind addresses but not valid OAuth redirect hosts.
+fn oauth_base_url(host: &str, port: u16) -> String {
+    let trimmed = host.trim_start_matches('[').trim_end_matches(']');
+    let is_unspecified = trimmed
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_unspecified());
+    if is_unspecified {
+        format!("http://localhost:{}", port)
+    } else {
+        format!("http://{}:{}", host, port)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oauth_base_url_maps_unspecified_to_localhost() {
+        assert_eq!(oauth_base_url("0.0.0.0", 3033), "http://localhost:3033");
+        assert_eq!(oauth_base_url("::", 3033), "http://localhost:3033");
+        assert_eq!(oauth_base_url("[::]", 3033), "http://localhost:3033");
+        assert_eq!(
+            oauth_base_url("0:0:0:0:0:0:0:0", 3033),
+            "http://localhost:3033"
+        );
+    }
+
+    #[test]
+    fn oauth_base_url_preserves_explicit_host() {
+        assert_eq!(oauth_base_url("127.0.0.1", 3000), "http://127.0.0.1:3000");
+        assert_eq!(
+            oauth_base_url("my-server.example.com", 8080),
+            "http://my-server.example.com:8080"
+        );
+        assert_eq!(oauth_base_url("::1", 3000), "http://::1:3000");
+    }
 }
