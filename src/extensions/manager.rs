@@ -5181,10 +5181,7 @@ impl ExtensionManager {
             .await
             .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
 
-        let tool_names: Vec<String> = mcp_tools
-            .iter()
-            .map(|t| format!("{}_{}", name, t.name))
-            .collect();
+        let tool_names: Vec<String> = tool_impls.iter().map(|t| t.name().to_string()).collect();
 
         for tool in tool_impls {
             self.tool_registry.register(tool).await;

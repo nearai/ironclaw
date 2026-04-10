@@ -599,7 +599,7 @@ impl McpClient {
         Ok(mcp_tools
             .into_iter()
             .map(|t| {
-                let prefixed_name = format!("{}_{}", self.server_name, t.name);
+                let prefixed_name = format!("{}_{}", self.server_name, t.name).replace('-', "_");
                 Arc::new(McpToolWrapper {
                     tool: t,
                     prefixed_name,
@@ -1381,6 +1381,34 @@ mod tests {
         };
         let approval = wrapper.requires_approval(&serde_json::json!({}));
         assert_eq!(approval, ApprovalRequirement::Never);
+    }
+
+    /// Regression test: MCP tool prefixed names must normalise hyphens to
+    /// underscores so that LLM providers that strip hyphens can still resolve
+    /// tool calls back to the registered name.
+    #[tokio::test]
+    async fn test_create_tools_normalises_hyphens_in_prefixed_name() {
+        // Build a client whose server_name contains no hyphens (factory
+        // already normalises it) and feed it a tool list with hyphenated
+        // tool names — the prefixed name must be fully underscored.
+        let client = McpClient::new_with_name("notion", "http://localhost:9999");
+
+        // Manually populate the tools cache with a hyphenated tool name.
+        let hyphenated_tool = McpTool {
+            name: "notion-search".to_string(),
+            description: "Search".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            annotations: None,
+        };
+        *client.tools_cache.write().await = Some(vec![hyphenated_tool]);
+
+        let tools = client.create_tools().await.expect("create_tools");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(
+            tools[0].name(),
+            "notion_notion_search",
+            "Hyphens in MCP tool names must be replaced with underscores"
+        );
     }
 
     // Regression test: empty/whitespace-only tokens must not produce a
