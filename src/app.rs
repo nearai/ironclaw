@@ -561,6 +561,7 @@ impl AppBuilder {
         // Create WASM tool runtime eagerly so extensions installed after startup
         // (e.g. via the web UI) can still be activated. The tools directory is only
         // needed when loading modules, not for engine initialisation.
+        #[cfg(feature = "wasm-sandbox")]
         let wasm_tool_runtime: Option<Arc<WasmToolRuntime>> = if self.config.wasm.enabled {
             WasmToolRuntime::new(self.config.wasm.to_runtime_config())
                 .map(Arc::new)
@@ -569,9 +570,13 @@ impl AppBuilder {
         } else {
             None
         };
+        #[cfg(not(feature = "wasm-sandbox"))]
+        let wasm_tool_runtime: Option<Arc<WasmToolRuntime>> = None;
 
         // Load WASM tools and MCP servers concurrently
+        #[cfg(feature = "wasm-sandbox")]
         let wasm_tools_future = {
+            use crate::tools::wasm::{WasmToolLoader, load_dev_tools};
             let wasm_tool_runtime = wasm_tool_runtime.clone();
             let secrets_store = self.secrets_store.clone();
             let tools = Arc::clone(tools);
@@ -631,6 +636,8 @@ impl AppBuilder {
                 dev_loaded_tool_names
             }
         };
+        #[cfg(not(feature = "wasm-sandbox"))]
+        let wasm_tools_future = async { Vec::<String>::new() };
 
         let mcp_servers_future = {
             let secrets_store = self.secrets_store.clone();

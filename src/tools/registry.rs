@@ -28,9 +28,11 @@ use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{
     ApprovalRequirement, EngineVersion, Tool, ToolDiscoverySummary, ToolDomain,
 };
+use crate::tools::wasm::{Capabilities, ResourceLimits, SharedCredentialRegistry};
+#[cfg(feature = "wasm-sandbox")]
 use crate::tools::wasm::{
-    Capabilities, OAuthRefreshConfig, ResourceLimits, SharedCredentialRegistry, WasmError,
-    WasmStorageError, WasmToolRuntime, WasmToolStore, WasmToolWrapper,
+    OAuthRefreshConfig, WasmError, WasmStorageError, WasmToolRuntime, WasmToolStore,
+    WasmToolWrapper,
 };
 use crate::workspace::Workspace;
 use ironclaw_skills::catalog::SkillCatalog;
@@ -935,6 +937,7 @@ impl ToolRegistry {
     ///     ..Default::default()
     /// }).await?;
     /// ```
+    #[cfg(feature = "wasm-sandbox")]
     pub async fn register_wasm(&self, reg: WasmToolRegistration<'_>) -> Result<(), WasmError> {
         // Prepare the module (validates and compiles)
         let prepared = reg
@@ -1017,6 +1020,7 @@ impl ToolRegistry {
     ///     "my_tool",
     /// ).await?;
     /// ```
+    #[cfg(feature = "wasm-sandbox")]
     pub async fn register_wasm_from_storage(
         &self,
         store: &dyn WasmToolStore,
@@ -1067,6 +1071,7 @@ impl ToolRegistry {
 }
 
 /// Error when registering a WASM tool from storage.
+#[cfg(feature = "wasm-sandbox")]
 #[derive(Debug, thiserror::Error)]
 pub enum WasmRegistrationError {
     #[error("Storage error: {0}")]
@@ -1077,6 +1082,7 @@ pub enum WasmRegistrationError {
 }
 
 /// Configuration for registering a WASM tool.
+#[cfg(feature = "wasm-sandbox")]
 pub struct WasmToolRegistration<'a> {
     /// Unique name for the tool.
     pub name: &'a str,

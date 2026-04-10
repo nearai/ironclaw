@@ -30,6 +30,9 @@ pub use autonomy::{
 pub use builder::{
     BuildPhase, BuildRequirement, BuildResult, BuildSoftwareTool, BuilderConfig, Language,
     LlmSoftwareBuilder, SoftwareBuilder, SoftwareType, Template, TemplateEngine, TemplateType,
+};
+#[cfg(feature = "wasm-sandbox")]
+pub use builder::{
     TestCase, TestHarness, TestResult, TestSuite, ValidationError, ValidationResult, WasmValidator,
 };
 pub(crate) use coercion::prepare_tool_params;

@@ -25,7 +25,9 @@
 
 mod core;
 mod templates;
+#[cfg(feature = "wasm-sandbox")]
 mod testing;
+#[cfg(feature = "wasm-sandbox")]
 mod validation;
 
 pub use core::{
@@ -33,5 +35,7 @@ pub use core::{
     Language, LlmSoftwareBuilder, SoftwareBuilder, SoftwareType,
 };
 pub use templates::{Template, TemplateEngine, TemplateType};
+#[cfg(feature = "wasm-sandbox")]
 pub use testing::{TestCase, TestHarness, TestResult, TestSuite};
+#[cfg(feature = "wasm-sandbox")]
 pub use validation::{ValidationError, ValidationResult, WasmValidator};

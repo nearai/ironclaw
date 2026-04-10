@@ -85,6 +85,7 @@ impl WasmConfig {
     }
 
     /// Convert to WasmRuntimeConfig.
+    #[cfg(feature = "wasm-sandbox")]
     pub fn to_runtime_config(&self) -> crate::tools::wasm::WasmRuntimeConfig {
         use crate::tools::wasm::{FuelConfig, ResourceLimits, WasmRuntimeConfig};
 

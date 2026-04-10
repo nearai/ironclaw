@@ -149,10 +149,10 @@ open = "5"
 # The postgres feature provides ToSql/FromSql for postgres-types (shared by tokio-postgres)
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
-# WASM sandbox for untrusted tool execution
-wasmtime = { version = "43.0.1", features = ["component-model"] }
-wasmtime-wasi = "43.0.1"  # WASI support for component model
-wasmparser = "0.245.1"  # WASM binary parsing for validation
+# WASM sandbox for untrusted tool execution (feature-gated for armv7 compat)
+wasmtime = { version = "43.0.1", features = ["component-model"], optional = true }
+wasmtime-wasi = { version = "43.0.1", optional = true }
+wasmparser = { version = "0.245.1", optional = true }
 
 # Cryptography for secrets management
 aes-gcm = "0.10"
@@ -229,7 +229,8 @@ tempfile = "3"
 insta = "1.46.3"
 
 [features]
-default = ["postgres", "libsql", "html-to-markdown", "tui"]
+default = ["postgres", "libsql", "html-to-markdown", "tui", "wasm-sandbox"]
+wasm-sandbox = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasmparser"]
 postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
