@@ -10,6 +10,9 @@
 //! built-in default is treated as "unset" and falls through to env.
 //!
 //! Exceptions:
+//! - **LLM config** (backend, model, base_url, api_key): **env > DB > default**
+//!   so that cloud deployments (Railway, Render, Fly.io) can override
+//!   onboarding-persisted values via platform Variables UI (12-factor app).
 //! - Bootstrap configs (database, secrets): env-only (DB not yet available)
 //! - Security-sensitive fields (allow_local_tools, allow_full_access,
 //!   cost limits, auth tokens): env-only
