@@ -1958,7 +1958,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_url_safe_https() {
-        assert!(validate_url_safe("https://example.com/path").await.is_ok());
+        // Use an IP literal to avoid DNS dependency in sandboxed environments.
+        assert!(
+            validate_url_safe("https://93.184.215.14/path")
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
