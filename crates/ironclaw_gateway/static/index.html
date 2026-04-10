@@ -154,7 +154,7 @@
     <!-- Tab Bar -->
     <div class="tab-bar">
       <div class="tab-indicator" id="tab-indicator"></div>
-      <button class="active" data-tab="chat" data-i18n="tab.chat">Chat</button>
+      <button class="active" data-tab="chat" data-i18n="tab.chat">Chat<span class="tab-approval-badge empty" id="tab-approval-badge"></span></button>
       <button data-tab="memory" data-i18n="tab.memory">Memory</button>
       <button data-tab="jobs" data-i18n="tab.jobs">Jobs</button>
       <button data-tab="missions" data-i18n="tab.missions">Missions</button>
@@ -229,6 +229,27 @@
           <span class="assistant-label" id="assistant-label" data-i18n="chat.assistant">Assistant</span>
           <span class="assistant-meta" id="assistant-meta"></span>
         </div>
+        <!-- Approval Tray: cross-thread pending gate visibility -->
+        <div class="approval-tray" id="approval-tray">
+          <div class="aq-header" id="aq-header">
+            <svg class="aq-header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            </svg>
+            <span class="aq-header-label" data-i18n="approval.awaiting">Awaiting</span>
+            <span class="aq-header-count" id="aq-count">0</span>
+            <div class="spacer"></div>
+            <div class="aq-batch">
+              <button class="aq-batch-btn approve-all" id="aq-approve-all" title="Approve all" data-i18n="approval.approveAll" data-i18n-attr="title">All</button>
+              <button class="aq-batch-btn deny-all" id="aq-deny-all" title="Deny all" data-i18n="approval.denyAll" data-i18n-attr="title">Deny</button>
+            </div>
+            <svg class="aq-header-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="6 9 12 15 18 9"/>
+            </svg>
+          </div>
+          <div class="aq-items" id="aq-items"></div>
+          <div class="aq-divider"></div>
+        </div>
+
         <div class="threads-section-header">
           <span data-i18n="chat.conversations">Conversations</span>
           <div class="spacer"></div>

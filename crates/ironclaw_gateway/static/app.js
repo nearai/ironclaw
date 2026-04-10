@@ -88,6 +88,7 @@ let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
 let pairingPollInterval = null;
 let unreadThreads = new Map(); // thread_id -> unread count
+let pendingGates = new Map(); // request_id -> { request_id, tool_name, description, parameters, thread_id, allow_always, created_at }
 let _loadThreadsTimer = null;
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
@@ -979,6 +980,9 @@ function connectSSE(lastEventIdOverride) {
       debouncedLoadThreads();
     }
 
+    // Track in the approval queue tray for cross-thread visibility.
+    aqAddGate(data);
+
     // Extension setup flows can surface approvals from any settings subtab.
     if (currentTab === 'settings') refreshCurrentSettingsTab();
   });
@@ -1005,11 +1009,25 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('gate_required', (e) => {
     const data = JSON.parse(e.data);
     handleGateRequired(data);
+    // Track approval-type gates in the sidebar tray for cross-thread visibility.
+    var resume = parseGateResumeKind(data.resume_kind);
+    if (!resume || resume.type === 'approval') {
+      aqAddGate({
+        request_id: data.request_id,
+        tool_name: data.tool_name,
+        description: data.description,
+        parameters: data.parameters,
+        thread_id: data.thread_id || currentThreadId,
+        allow_always: !(resume && resume.type === 'approval' && resume.allow_always === false),
+      });
+    }
   });
 
   addTrackedEventListener('gate_resolved', (e) => {
     const data = JSON.parse(e.data);
     handleGateResolved(data);
+    // Remove from sidebar tray.
+    aqResolveGate(data.request_id, data.resolution === 'denied' ? 'deny' : 'approve');
   });
 
   addTrackedEventListener('extension_status', (e) => {
@@ -1417,11 +1435,18 @@ function filterSlashCommands(value) {
 }
 
 function sendApprovalAction(requestId, action) {
+  // Resolve using the gate's owning thread, not the currently-viewed thread.
+  var gateThreadId = currentThreadId;
+  var gateData = pendingGates.get(requestId);
+  if (gateData && gateData.thread_id) {
+    gateThreadId = gateData.thread_id;
+  }
+
   apiFetch('/api/chat/gate/resolve', {
     method: 'POST',
     body: {
       request_id: requestId,
-      thread_id: currentThreadId,
+      thread_id: gateThreadId,
       resolution: action === 'deny' ? 'denied' : 'approved',
       always: action === 'always',
     },
@@ -1429,7 +1454,7 @@ function sendApprovalAction(requestId, action) {
     addMessage('system', 'Failed to send approval: ' + err.message);
   });
 
-  // Disable buttons and show confirmation on the card
+  // Disable buttons and show confirmation on the inline card
   const card = document.querySelector('.approval-card[data-request-id="' + requestId + '"]');
   if (card) {
     const buttons = card.querySelectorAll('.approval-actions button');
@@ -1445,6 +1470,9 @@ function sendApprovalAction(requestId, action) {
     // Remove the card after showing the confirmation briefly
     setTimeout(() => { card.remove(); }, 1500);
   }
+
+  // Also resolve in the approval queue tray
+  aqResolveGate(requestId, action);
 }
 
 function renderMarkdown(text) {
@@ -3191,6 +3219,14 @@ function loadThreads() {
       meta.className = 'thread-meta';
       meta.textContent = relativeTime(thread.updated_at);
       item.appendChild(meta);
+
+      // Pending approval dot (amber pip)
+      if (aqThreadHasPendingGate(thread.id)) {
+        const gateDot = document.createElement('span');
+        gateDot.className = 'thread-item-gate-dot';
+        gateDot.title = 'Pending approval';
+        item.appendChild(gateDot);
+      }
 
       // Unread dot
       const unread = unreadThreads.get(thread.id) || 0;
@@ -9218,3 +9254,213 @@ if (window.__IRONCLAW_LAYOUT__
     && !window.location.hash) {
   switchTab(window.__IRONCLAW_LAYOUT__.tabs.default_tab);
 }
+
+// ============================================================
+// Approval Queue Tray — cross-thread pending gate visibility
+// ============================================================
+
+/** Add a pending gate to the tray and update all indicators. */
+function aqAddGate(data) {
+  if (!data.request_id) return;
+  if (pendingGates.has(data.request_id)) return; // Avoid duplicates on reconnect
+
+  var entry = {
+    request_id: data.request_id,
+    tool_name: data.tool_name || 'unknown',
+    description: data.description || '',
+    parameters: data.parameters || null,
+    thread_id: data.thread_id || currentThreadId,
+    allow_always: data.allow_always !== false,
+    created_at: Date.now(),
+  };
+  pendingGates.set(data.request_id, entry);
+  aqRenderItem(entry);
+  aqUpdateIndicators();
+}
+
+/** Resolve (approve/deny) a gate: animate out, remove from map, update indicators. */
+function aqResolveGate(requestId, action) {
+  var itemEl = document.querySelector('.aq-item[data-request-id="' + CSS.escape(requestId) + '"]');
+  if (itemEl && !itemEl.classList.contains('resolved')) {
+    var actions = itemEl.querySelector('.aq-item-actions');
+    var labelText = action === 'deny' ? 'Denied' : 'Approved';
+    var cls = action === 'deny' ? 'denied' : 'approved';
+    var symbol = action === 'deny' ? '\u2717' : '\u2713';
+    actions.innerHTML = '<span class="aq-resolved-label ' + cls + '">' + symbol + ' ' + labelText + '</span>';
+    itemEl.classList.add('resolved');
+    setTimeout(function () { itemEl.remove(); aqUpdateIndicators(); }, 500);
+  }
+  pendingGates.delete(requestId);
+  // If no animated element, just update now
+  if (!itemEl) aqUpdateIndicators();
+}
+
+/** Render a single tray item and prepend it to the items container. */
+function aqRenderItem(entry) {
+  var container = document.getElementById('aq-items');
+  if (!container) return;
+
+  var item = document.createElement('div');
+  item.className = 'aq-item';
+  item.setAttribute('data-request-id', entry.request_id);
+  item.setAttribute('data-thread-id', entry.thread_id || '');
+  item.addEventListener('click', function () {
+    if (entry.thread_id && entry.thread_id !== currentThreadId) {
+      switchThread(entry.thread_id);
+    }
+  });
+
+  // Top row: tool name + thread badge + time
+  var top = document.createElement('div');
+  top.className = 'aq-item-top';
+
+  var toolSpan = document.createElement('span');
+  toolSpan.className = 'aq-item-tool';
+  toolSpan.textContent = entry.tool_name;
+  top.appendChild(toolSpan);
+
+  var threadSpan = document.createElement('span');
+  threadSpan.className = 'aq-item-thread';
+  threadSpan.textContent = aqThreadLabel(entry.thread_id);
+  top.appendChild(threadSpan);
+
+  var timeSpan = document.createElement('span');
+  timeSpan.className = 'aq-item-time';
+  timeSpan.textContent = 'just now';
+  top.appendChild(timeSpan);
+
+  item.appendChild(top);
+
+  // Description
+  if (entry.description) {
+    var desc = document.createElement('div');
+    desc.className = 'aq-item-desc';
+    desc.textContent = entry.description;
+    item.appendChild(desc);
+  }
+
+  // Actions row
+  var actions = document.createElement('div');
+  actions.className = 'aq-item-actions';
+
+  var approveBtn = document.createElement('button');
+  approveBtn.className = 'aq-btn aq-approve';
+  approveBtn.textContent = I18n.t('approval.approve');
+  approveBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    sendApprovalAction(entry.request_id, 'approve');
+  });
+  actions.appendChild(approveBtn);
+
+  if (entry.allow_always) {
+    var alwaysBtn = document.createElement('button');
+    alwaysBtn.className = 'aq-btn aq-always';
+    alwaysBtn.textContent = I18n.t('approval.always');
+    alwaysBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      sendApprovalAction(entry.request_id, 'always');
+    });
+    actions.appendChild(alwaysBtn);
+  }
+
+  var denyBtn = document.createElement('button');
+  denyBtn.className = 'aq-btn aq-deny';
+  denyBtn.textContent = I18n.t('approval.deny');
+  denyBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    sendApprovalAction(entry.request_id, 'deny');
+  });
+  actions.appendChild(denyBtn);
+
+  var viewBtn = document.createElement('button');
+  viewBtn.className = 'aq-btn aq-view';
+  viewBtn.innerHTML = '&#x2192;';
+  viewBtn.title = 'Jump to thread';
+  viewBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (entry.thread_id) switchThread(entry.thread_id);
+  });
+  actions.appendChild(viewBtn);
+
+  item.appendChild(actions);
+  container.insertBefore(item, container.firstChild);
+}
+
+/** Update all approval queue indicators: tray visibility, badge, count. */
+function aqUpdateIndicators() {
+  var count = pendingGates.size;
+  var tray = document.getElementById('approval-tray');
+  var badge = document.getElementById('tab-approval-badge');
+  var countEl = document.getElementById('aq-count');
+
+  if (tray) {
+    tray.classList.toggle('visible', count > 0);
+  }
+  if (badge) {
+    badge.textContent = count;
+    badge.classList.toggle('empty', count === 0);
+    if (count > 0) {
+      badge.classList.remove('pulse');
+      void badge.offsetWidth; // reflow to re-trigger animation
+      badge.classList.add('pulse');
+    }
+  }
+  if (countEl) {
+    countEl.textContent = count;
+  }
+
+  // Refresh thread list to update gate dots
+  debouncedLoadThreads();
+}
+
+/** Check if a thread has any pending gates. */
+function aqThreadHasPendingGate(threadId) {
+  for (var entry of pendingGates.values()) {
+    if (entry.thread_id === threadId) return true;
+  }
+  return false;
+}
+
+/** Get a short label for a thread ID (e.g. "main", truncated ID). */
+function aqThreadLabel(threadId) {
+  if (!threadId) return 'main';
+  if (threadId === assistantThreadId) return 'main';
+  // Truncate long UUIDs
+  if (threadId.length > 12) return threadId.substring(0, 8);
+  return threadId;
+}
+
+// Tray collapse/expand toggle
+(function () {
+  var header = document.getElementById('aq-header');
+  if (header) {
+    header.addEventListener('click', function () {
+      var tray = document.getElementById('approval-tray');
+      if (tray) tray.classList.toggle('collapsed');
+    });
+  }
+
+  // Batch approve all
+  var approveAll = document.getElementById('aq-approve-all');
+  if (approveAll) {
+    approveAll.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var ids = Array.from(pendingGates.keys());
+      ids.forEach(function (id, i) {
+        setTimeout(function () { sendApprovalAction(id, 'approve'); }, i * 100);
+      });
+    });
+  }
+
+  // Batch deny all
+  var denyAll = document.getElementById('aq-deny-all');
+  if (denyAll) {
+    denyAll.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var ids = Array.from(pendingGates.keys());
+      ids.forEach(function (id, i) {
+        setTimeout(function () { sendApprovalAction(id, 'deny'); }, i * 100);
+      });
+    });
+  }
+})();
