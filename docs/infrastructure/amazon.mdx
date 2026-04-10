@@ -75,7 +75,7 @@ Unlike DigitalOcean Droplets, EC2 Ubuntu instances do not let you log in directl
 
 ## Configure Your Instance
 
-Now that we are inside the instance, we need to perform some initial configuration. We want to strengthen security by setting up a dedicated user and configuring firewall rules.
+Now that we are inside the instance, we need to perform some initial configuration. We want to strengthen security by setting up a dedicated user and preparing the system for running IronClaw.
 
 ### Update and Upgrade
 
@@ -103,7 +103,7 @@ sudo mkdir -p /home/ironclaw/.ssh
 # Copy the authorized_keys from the ubuntu user
 sudo cp ~/.ssh/authorized_keys /home/ironclaw/.ssh/authorized_keys
 
-# Set the correct permissions (critical — SSH will ignore the file otherwise)
+# Set the correct ownership (critical — SSH will ignore the file otherwise)
 sudo chown -R ironclaw:ironclaw /home/ironclaw/
 sudo chmod 700 /home/ironclaw/.ssh
 sudo chmod 600 /home/ironclaw/.ssh/authorized_keys
