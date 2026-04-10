@@ -2158,6 +2158,15 @@ impl Workspace {
             return Ok(());
         }
 
+        // Capture the content hash at read time. After chunking + embedding
+        // (which can take seconds for large documents with an embedding
+        // provider), we verify the document hasn't been updated by another
+        // writer before replacing chunks. Without this check, writer B
+        // could win the document UPDATE race while writer A wins the later
+        // replace_chunks transaction, leaving content from B but search
+        // chunks from A — a stale-index bug that's hard to diagnose.
+        let content_hash_at_read = content_sha256(&doc.content);
+
         // Chunk the content and (optionally) embed each chunk before touching
         // the DB, so the delete+insert happens in one transaction with no
         // async points in the middle that could race a concurrent reindex.
@@ -2176,6 +2185,28 @@ impl Workspace {
                 None
             };
             writes.push(ChunkWrite { content, embedding });
+        }
+
+        // Optimistic concurrency check: re-read the document and verify
+        // its content hasn't changed since we started chunking. If it has,
+        // another writer updated the document while we were computing
+        // embeddings — our chunks are stale and should be discarded. The
+        // other writer's reindex call will produce correct chunks for the
+        // new content.
+        match self.storage.get_document_by_id(document_id).await {
+            Ok(current_doc) if content_sha256(&current_doc.content) != content_hash_at_read => {
+                tracing::debug!(
+                    document_id = %document_id,
+                    "Skipping chunk replacement — document content changed during embedding computation"
+                );
+                return Ok(());
+            }
+            Err(_) => {
+                // Document was deleted while we were computing embeddings.
+                // Nothing to reindex.
+                return Ok(());
+            }
+            _ => {}
         }
 
         // One transaction: DELETE + N INSERTs. Closes the TOCTOU race where

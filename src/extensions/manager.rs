@@ -2677,16 +2677,38 @@ impl ExtensionManager {
         }
     }
 
+    /// Look up an MCP server config by name, trying both the exact name
+    /// and the legacy hyphen/underscore alias. The factory normalizes
+    /// `server.name` (hyphens → underscores) before creating the client,
+    /// but persisted configs may still use the original hyphenated name.
+    /// `provider_extension_for_tool()` returns the normalized form, so
+    /// callers like `ensure_extension_ready → activate_mcp` may pass
+    /// `my_server` when the persisted config is keyed as `my-server`.
     async fn get_mcp_server(
         &self,
         name: &str,
         user_id: &str,
     ) -> Result<McpServerConfig, crate::tools::mcp::config::ConfigError> {
         let servers = self.load_mcp_servers(user_id).await?;
-        servers.get(name).cloned().ok_or_else(|| {
-            crate::tools::mcp::config::ConfigError::ServerNotFound {
-                name: name.to_string(),
-            }
+        if let Some(config) = servers.get(name) {
+            return Ok(config.clone());
+        }
+        // Try legacy hyphen alias (underscores → hyphens)
+        let hyphen_alias = name.replace('_', "-");
+        if hyphen_alias != name
+            && let Some(config) = servers.get(&hyphen_alias)
+        {
+            return Ok(config.clone());
+        }
+        // Try normalized alias (hyphens → underscores)
+        let underscore_alias = name.replace('-', "_");
+        if underscore_alias != name
+            && let Some(config) = servers.get(&underscore_alias)
+        {
+            return Ok(config.clone());
+        }
+        Err(crate::tools::mcp::config::ConfigError::ServerNotFound {
+            name: name.to_string(),
         })
     }
 

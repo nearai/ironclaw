@@ -393,9 +393,21 @@ fn serialize_json_capped(value: &JsonValue, max_bytes: usize) -> Result<String, 
     let mut ser = serde_json::Serializer::new(writer);
     serde::Serialize::serialize(value, &mut ser).map_err(|_| ())?;
     let buf = ser.into_inner().buf;
-    // The buffer is guaranteed to be valid UTF-8 because serde_json only
-    // emits ASCII structural characters and JSON-escaped unicode.
-    String::from_utf8(buf).map_err(|_| ())
+    // serde_json v1 emits raw UTF-8 for non-ASCII characters (e.g. CJK
+    // characters in property descriptions), so the byte cap can cut
+    // mid-codepoint. Use `from_utf8` with a fallback to `valid_up_to()`
+    // to trim to the last complete codepoint instead of dropping the
+    // entire hint on a UTF-8 error.
+    match String::from_utf8(buf) {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            let valid_len = e.utf8_error().valid_up_to();
+            let mut buf = e.into_bytes();
+            buf.truncate(valid_len);
+            // valid_up_to guarantees the prefix is valid UTF-8
+            Ok(String::from_utf8(buf).expect("valid_up_to guarantees valid UTF-8"))
+        }
+    }
 }
 
 /// Replace `parameters` with a permissive object envelope and append the

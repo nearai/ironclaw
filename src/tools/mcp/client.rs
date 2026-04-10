@@ -317,6 +317,14 @@ impl McpClient {
     ///
     /// If the stored token has expired, automatically attempts a refresh using
     /// the stored refresh token before failing.
+    ///
+    /// Falls back to the legacy (pre-normalization) secret name so that
+    /// existing users who stored tokens under the hyphenated server name
+    /// (e.g. `mcp_my-server_access_token`) aren't broken after the
+    /// factory starts normalizing `server.name` to underscores. Without
+    /// this fallback, `is_authenticated` would report `true` (it has its
+    /// own legacy fallback) but the actual request would send no
+    /// `Authorization` header and the MCP server would 401.
     async fn get_access_token(&self) -> Result<Option<String>, ToolError> {
         let Some(ref secrets) = self.secrets else {
             return Ok(None);
@@ -324,7 +332,8 @@ impl McpClient {
         let Some(ref config) = self.server_config else {
             return Ok(None);
         };
-        resolve_access_token_string_with_refresh(
+        // Try canonical (normalized) secret name first.
+        let result = resolve_access_token_string_with_refresh(
             secrets.as_ref(),
             &self.user_id,
             &config.token_secret_name(),
@@ -337,7 +346,24 @@ impl McpClient {
             },
         )
         .await
-        .map_err(|e| ToolError::ExternalService(format!("Failed to get access token: {}", e)))
+        .map_err(|e| ToolError::ExternalService(format!("Failed to get access token: {}", e)))?;
+
+        if result.is_some() {
+            return Ok(result);
+        }
+
+        // Fall back to the legacy (pre-normalization) secret name.
+        // This path is transitional — the user will re-auth once and
+        // get migrated to the canonical name. Bare get_decrypted (no
+        // refresh) is intentional: wiring refresh through the legacy
+        // naming scheme adds complexity for a self-healing compat path.
+        if let Some(legacy_name) = config.legacy_token_secret_name()
+            && let Ok(decrypted) = secrets.get_decrypted(&self.user_id, &legacy_name).await
+        {
+            return Ok(Some(decrypted.expose().to_string()));
+        }
+
+        Ok(None)
     }
 
     /// Build the headers map for a request (auth, session-id, custom headers).

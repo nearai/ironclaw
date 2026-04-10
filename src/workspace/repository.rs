@@ -366,14 +366,22 @@ impl Repository {
         // same document until this transaction commits. Pinned by
         // `concurrent_writes_to_same_doc_do_not_collide_on_chunk_index`
         // (the libsql variant of the same regression test).
-        tx.execute(
-            "SELECT 1 FROM memory_documents WHERE id = $1 FOR UPDATE",
-            &[&document_id],
-        )
-        .await
-        .map_err(|e| WorkspaceError::ChunkingFailed {
-            reason: format!("Acquire row lock failed: {e}"),
-        })?;
+        let locked = tx
+            .execute(
+                "SELECT 1 FROM memory_documents WHERE id = $1 FOR UPDATE",
+                &[&document_id],
+            )
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: format!("Acquire row lock failed: {e}"),
+            })?;
+        if locked == 0 {
+            return Err(WorkspaceError::ChunkingFailed {
+                reason: format!(
+                    "Document {document_id} not found — cannot acquire per-document lock for chunk replacement"
+                ),
+            });
+        }
 
         tx.execute(
             "DELETE FROM memory_chunks WHERE document_id = $1",
