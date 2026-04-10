@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::context::ContextManager;
 use crate::orchestrator::job_manager::ContainerJobManager;
-use crate::sandbox::connect_docker;
+use crate::docker::connect_docker;
 
 /// Configuration for the sandbox reaper.
 #[derive(Debug, Clone)]
@@ -57,7 +57,7 @@ impl SandboxReaper {
         job_manager: Arc<ContainerJobManager>,
         context_manager: Arc<ContextManager>,
         config: ReaperConfig,
-    ) -> Result<Self, crate::sandbox::SandboxError> {
+    ) -> Result<Self, crate::docker::DockerError> {
         let docker = connect_docker().await?;
         Ok(Self {
             docker,
@@ -685,7 +685,7 @@ mod tests {
             }
 
             // Connect to Docker
-            let docker = match crate::sandbox::connect_docker().await {
+            let docker = match crate::docker::connect_docker().await {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("Skipping e2e test: Docker unavailable: {e}");
@@ -771,7 +771,7 @@ mod tests {
             }
 
             // Connect to Docker and create job manager / context manager
-            let docker = match crate::sandbox::connect_docker().await {
+            let docker = match crate::docker::connect_docker().await {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("Skipping e2e test: Docker unavailable: {e}");
@@ -867,7 +867,7 @@ mod tests {
                 return;
             }
 
-            let docker = match crate::sandbox::connect_docker().await {
+            let docker = match crate::docker::connect_docker().await {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("Skipping e2e test: Docker unavailable: {e}");

@@ -656,12 +656,12 @@ async fn run_agent_with_config(
 
     // Derive user-facing warning from docker_status for channel notification
     let docker_user_warning: Option<String> = match docker_status {
-        ironclaw::sandbox::DockerStatus::NotInstalled => Some(
+        ironclaw::docker::DockerStatus::NotInstalled => Some(
             "Sandbox is enabled but Docker is not installed -- \
              full_job routines will fail until Docker is available."
                 .to_string(),
         ),
-        ironclaw::sandbox::DockerStatus::NotRunning => Some(
+        ironclaw::docker::DockerStatus::NotRunning => Some(
             "Sandbox is enabled but Docker is not running -- \
              full_job routines will fail until Docker is started."
                 .to_string(),

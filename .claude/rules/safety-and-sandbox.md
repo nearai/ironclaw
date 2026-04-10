@@ -1,11 +1,11 @@
 ---
 paths:
   - "src/safety/**"
-  - "src/sandbox/**"
+  - "src/docker.rs"
   - "src/secrets/**"
   - "src/tools/wasm/**"
 ---
-# Safety Layer & Sandbox Rules
+# Safety Layer & Docker Rules
 
 ## Safety Layer
 
@@ -21,13 +21,14 @@ Tool outputs are wrapped in `<tool_output>` XML before reaching the LLM.
 
 The shell tool scrubs sensitive env vars before executing commands. The sanitizer detects command injection patterns (chained commands, subshells, path traversal).
 
-## Sandbox Policies
+## Container Isolation
 
-| Policy | Filesystem | Network |
-|--------|-----------|---------|
-| ReadOnly | Read-only workspace | Allowlisted domains |
-| WorkspaceWrite | Read-write workspace | Allowlisted domains |
-| FullAccess | Full filesystem | Unrestricted |
+When IronClaw runs as a managed agent container (via LobsterPool), container-level isolation is provided by the orchestrator:
+- Memory/CPU limits, network egress filtering, workspace bind mounts
+- Per-agent PostgreSQL database isolation
+- LLM proxy with HMAC-signed auth
+
+The `src/docker.rs` module provides Docker detection and connection utilities used by the orchestrator's container job management system.
 
 ## Zero-Exposure Credential Model
 

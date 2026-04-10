@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::error::OrchestratorError;
 use crate::orchestrator::auth::{CredentialGrant, TokenStore};
-use crate::sandbox::connect_docker;
+use crate::docker::connect_docker;
 
 /// Path to the master worker MCP config on the host.
 const WORKER_MCP_CONFIG_PATH: &str = "/opt/ironclaw/config/worker/mcp-servers.json";
