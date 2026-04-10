@@ -4,7 +4,7 @@ mod abound;
 mod echo;
 pub mod extension_tools;
 mod file;
-mod forex;
+pub(crate) mod forex;
 mod http;
 mod job;
 mod json;

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use reqwest::Client;
 use serde_json::json;
 
@@ -16,6 +17,7 @@ use crate::tools::tool::{
     ApprovalRequirement, RiskLevel, Tool, ToolDomain, ToolError, ToolOutput, require_str,
 };
 
+use super::forex::run_transfer_analysis;
 use super::validate_currency_code;
 
 
@@ -273,7 +275,8 @@ impl Tool for AboundSendWireTool {
     }
 
     fn description(&self) -> &str {
-        "Send a wire transfer via Abound. ALWAYS call analyze_transfer before calling this tool. Requires funding source, beneficiary, amount, and payment reason."
+        "Send a wire transfer via Abound. Two-phase: first call runs timing analysis and \
+         returns a transfer_token. Second call with that transfer_token executes the wire."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -282,22 +285,26 @@ impl Tool for AboundSendWireTool {
             "properties": {
                 "funding_source_id": {
                     "type": "string",
-                    "description": "Funding source ID from account info"
+                    "description": "Funding source ID from account info (phase 1 only)"
                 },
                 "beneficiary_ref_id": {
                     "type": "string",
-                    "description": "Beneficiary reference ID from account info"
+                    "description": "Beneficiary reference ID from account info (phase 1 only)"
                 },
                 "amount": {
                     "type": "number",
-                    "description": "Amount in source currency (e.g. USD)"
+                    "description": "Amount in source currency (e.g. USD). REQUIRED — ask the user if not provided."
                 },
                 "payment_reason_key": {
                     "type": "string",
-                    "description": "Payment reason key from account info (e.g. family_maintenance, gift, education_support, medical_support)"
+                    "description": "Payment reason key (phase 1 only)"
+                },
+                "transfer_token": {
+                    "type": "string",
+                    "description": "Opaque token from phase 1 response. Pass this exactly as-is to confirm and execute the transfer."
                 }
             },
-            "required": ["funding_source_id", "beneficiary_ref_id", "amount", "payment_reason_key"]
+            "required": []
         })
     }
 
@@ -307,6 +314,48 @@ impl Tool for AboundSendWireTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
+
+        // Phase 2: transfer_token present → decode params and execute wire.
+        if let Some(token) = params.get("transfer_token").and_then(|v| v.as_str()) {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(token)
+                .map_err(|e| {
+                    ToolError::InvalidParameters(format!("invalid transfer_token: {e}"))
+                })?;
+            let pending: serde_json::Value =
+                serde_json::from_slice(&decoded).map_err(|e| {
+                    ToolError::InvalidParameters(format!("corrupt transfer_token: {e}"))
+                })?;
+
+            let url = format!("{REMITTANCE_BASE}/send-wire");
+            let wire_result =
+                abound_post(&self.client, &*self.secrets, &ctx.user_id, &url, &pending).await?;
+
+            let status = wire_result
+                .get("status")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let amount = pending.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+            let message = if (200..300).contains(&status) {
+                format!("Wire transfer of ${amount} initiated. Please confirm the action in the app when you see a notification.")
+            } else {
+                let body_text = wire_result
+                    .get("body")
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
+                format!("Wire transfer failed (HTTP {status}). {body_text}")
+            };
+
+            let result = json!({
+                "phase": if (200..300).contains(&status) { "completed" } else { "failed" },
+                "message": message,
+                "transfer": wire_result,
+            });
+            return Ok(ToolOutput::success(result, start.elapsed()));
+        }
+
+        // Phase 1: collect params, run analysis, return token + options.
         let funding_source_id = require_str(&params, "funding_source_id")?;
         let beneficiary_ref_id = require_str(&params, "beneficiary_ref_id")?;
         let amount = params
@@ -315,15 +364,36 @@ impl Tool for AboundSendWireTool {
             .ok_or_else(|| ToolError::InvalidParameters("amount must be a number".into()))?;
         let payment_reason_key = require_str(&params, "payment_reason_key")?;
 
-        let body = json!({
+        let analysis = run_transfer_analysis(
+            &self.client,
+            &*self.secrets,
+            &ctx.user_id,
+            Some(amount),
+            true,
+        )
+        .await
+        .ok();
+
+        let pending = json!({
             "funding_source_id": funding_source_id,
             "beneficiary_ref_id": beneficiary_ref_id,
             "amount": amount,
             "payment_reason_key": payment_reason_key,
         });
+        let token = base64::engine::general_purpose::STANDARD
+            .encode(serde_json::to_vec(&pending).unwrap_or_default());
 
-        let url = format!("{REMITTANCE_BASE}/send-wire");
-        let result = abound_post(&self.client, &*self.secrets, &ctx.user_id, &url, &body).await?;
+        let result = json!({
+            "phase": "confirmation_required",
+            "analysis": analysis,
+            "transfer_token": token,
+            "transfer_details": {
+                "amount": amount,
+                "beneficiary_ref_id": beneficiary_ref_id,
+                "funding_source_id": funding_source_id,
+                "payment_reason_key": payment_reason_key,
+            }
+        });
         Ok(ToolOutput::success(result, start.elapsed()))
     }
 
@@ -339,9 +409,7 @@ impl Tool for AboundSendWireTool {
         RiskLevel::High
     }
 
-    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
-        ApprovalRequirement::Always
-    }
+
 }
 
 // ===========================================================================

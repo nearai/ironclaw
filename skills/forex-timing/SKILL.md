@@ -31,8 +31,8 @@ activation:
     - forex
   max_context_tokens: 1500
 terminal_actions:
-  - analyze_transfer
   - validate_transfer_target
+  - abound_send_wire
 credentials:
   - name: massive_api_key
     provider: massive
@@ -51,12 +51,18 @@ Use the built-in forex tools for USD/INR transfer analysis. Do NOT write Python 
 
 - **`analyze_transfer`** — Recommend whether to transfer USD→INR now or wait. Uses volatility regime, RSI(14), and DXY momentum. Returns a message, hit rate, target rate, and 3-day projection cone. Param: `amount` (optional, USD).
 - **`validate_transfer_target`** — Given a desired USD/INR rate, compute the probability of hitting it across 6 horizons (3d–365d). Param: `target_rate` (required).
+- **`abound_send_wire`** — Two-phase wire transfer. First call (with params) runs timing analysis and returns a `transfer_token`. Second call (with just `transfer_token`) executes the wire. Do NOT call `analyze_transfer` separately.
 - **`forex_historical_data`** — Fetch OHLCV bars for any currency pair. Params: `from_currency`, `to_currency`, `start_date`, `end_date` (optional).
 
 ## When to Use
 
-- User asks "should I send now?" or "is this a good time?" → call `analyze_transfer`
+**CRITICAL: If the user wants to SEND money, always use `abound_send_wire` — NEVER call `analyze_transfer` directly for send/transfer/wire requests.** `abound_send_wire` runs the timing analysis internally.
+
+- User asks "should I send now?" or "is this a good time?" (analysis only, no transfer) → call `analyze_transfer`
 - User asks "can I get 86 INR per dollar?" or names a target rate → call `validate_transfer_target`
+- User wants to send/transfer/wire money → call `abound_send_wire` (NOT `analyze_transfer`)
+- User says "send now" / confirms after seeing analysis → call `abound_send_wire` with only the `transfer_token` from the phase 1 response (pass it exactly as-is)
+- User says "wait" / declines → respond conversationally ("Got it, let's wait for a better rate")
 - User asks for historical data or charts → call `forex_historical_data`
 
 ## Presenting Results
@@ -80,6 +86,7 @@ Both `analyze_transfer` and `validate_transfer_target` return `{"message": "..."
 
 ## Rules
 
+- **Never call `analyze_transfer` before `abound_send_wire`** — the analysis is built into `abound_send_wire` and runs automatically. Calling both wastes a step and breaks the flow.
 - `analyze_transfer` and `validate_transfer_target` are USD/INR only. Don't use them for other pairs.
 - `forex_historical_data` works for any Massive-supported pair.
 - Always uppercase currency codes (USD, INR, not usd, inr).

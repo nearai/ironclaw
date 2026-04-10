@@ -525,6 +525,142 @@ impl AnalyzeTransferTool {
     }
 }
 
+/// Core analysis logic shared by `AnalyzeTransferTool` and `AboundSendWireTool`.
+///
+/// Fetches Massive + DXY data, computes indicators, and returns the structured
+/// `{"message": "...", "plot": {...}}` result.
+pub async fn run_transfer_analysis(
+    client: &Client,
+    secrets: &dyn SecretsStore,
+    user_id: &str,
+    amount: Option<f64>,
+    for_wire: bool,
+) -> Result<serde_json::Value, ToolError> {
+    let now = chrono::Utc::now();
+    let today = now.date_naive();
+    let start_str = (today - chrono::Duration::days(220)).format("%Y-%m-%d").to_string();
+    let end_str = today.format("%Y-%m-%d").to_string();
+
+    let massive_url = format!(
+        "{MASSIVE_BASE}/C:USDINR/range/1/day/{start_str}/{end_str}?sort=asc&limit=5000"
+    );
+    let now_unix = now.timestamp();
+    let dxy_url = format!(
+        "https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB?interval=1d&period1={}&period2={now_unix}",
+        now_unix - 35 * 86400,
+    );
+
+    let bearer = massive_bearer(secrets, user_id).await?;
+
+    let (massive_resp, dxy_resp) = tokio::join!(
+        client
+            .get(&massive_url)
+            .header("Authorization", format!("Bearer {bearer}"))
+            .send(),
+        client
+            .get(&dxy_url)
+            .header("User-Agent", "Mozilla/5.0")
+            .send(),
+    );
+
+    let massive_resp = massive_resp.map_err(|e| ToolError::ExternalService(e.to_string()))?;
+    if massive_resp.status().as_u16() != 200 {
+        return Err(ToolError::ExternalService(format!(
+            "Massive API HTTP {}",
+            massive_resp.status()
+        )));
+    }
+    let massive_body: serde_json::Value = massive_resp
+        .json()
+        .await
+        .map_err(|e| ToolError::ExternalService(e.to_string()))?;
+    let bars = parse_massive_bars(&massive_body)?;
+    if bars.len() < 23 {
+        return Err(ToolError::ExternalService(format!(
+            "Insufficient data: need 23 bars, got {}",
+            bars.len()
+        )));
+    }
+
+    let dxy_dir = match dxy_resp {
+        Ok(r) => match r.json::<serde_json::Value>().await {
+            Ok(body) => parse_dxy_direction(&body),
+            Err(_) => "unknown",
+        },
+        Err(_) => "unknown",
+    };
+
+    let closes: Vec<f64> = bars.iter().map(|b| b.close).collect();
+    let vol_window = 20;
+    let vol_slice = &closes[closes.len().saturating_sub(vol_window)..];
+    let daily_vol = sample_std(&log_returns(vol_slice));
+    let vb = vol_bucket(daily_vol);
+
+    let rsi_val = rsi(&closes, 14);
+    let rsi_rounded = rsi_val.map(|r| (r * 10.0).round() / 10.0);
+    let rb = rsi_val.map(rsi_bucket).unwrap_or("mid");
+
+    let hr = hit_rate(vb, rb, dxy_dir);
+    let current_rate = closes[closes.len() - 1];
+    let (target_rate, projection) = compute_cone(current_rate, daily_vol, vb, today);
+    let recommend = if hr < 45.0 { "now" } else { "wait" };
+
+    let historical: Vec<serde_json::Value> = bars[bars.len().saturating_sub(30)..]
+        .iter()
+        .map(|b| json!({"date": b.date, "close": b.close}))
+        .collect();
+
+    let could_save = amount.map(|a| ((target_rate - current_rate) * a * 100.0).round() / 100.0);
+
+    let action_verb = if recommend == "now" {
+        "Transfer now"
+    } else {
+        "Wait — hold off"
+    };
+    let mut message = format!(
+        "{action_verb}. USD/INR is at {current_rate:.4}; target {:.4}. \
+         Regime: {vb} volatility, RSI {} ({rb}), DXY {dxy_dir}. \
+         Hit-rate for this regime: {:.1}%.",
+        (target_rate * 10000.0).round() / 10000.0,
+        rsi_rounded
+            .map(|r| format!("{r}"))
+            .unwrap_or_else(|| "N/A".into()),
+        (hr * 10.0).round() / 10.0,
+    );
+    if recommend == "wait" {
+        if let Some(save) = could_save
+            && save > 0.0
+        {
+            message.push_str(&format!(
+                " If you wait, you could get ₹{save:.2} more on your transfer."
+            ));
+        }
+    }
+    if for_wire {
+        message.push_str(
+            " — Send now or wait? Reply **send now** to proceed with the transfer, \
+             or **wait** to hold off for a better rate.",
+        );
+    }
+
+    Ok(json!({
+        "message": message,
+        "plot": {
+            "historical": historical,
+            "projection": projection,
+            "current_rate": current_rate,
+            "target_rate": (target_rate * 10000.0).round() / 10000.0,
+            "vol_regime": vb,
+            "daily_vol": (daily_vol * 1_000_000.0).round() / 1_000_000.0,
+            "rsi": rsi_rounded,
+            "dxy_direction": dxy_dir,
+            "hit_rate_pct": (hr * 10.0).round() / 10.0,
+            "recommend": recommend,
+            "could_save": could_save,
+        }
+    }))
+}
+
 #[async_trait]
 impl Tool for AnalyzeTransferTool {
     fn name(&self) -> &str {
@@ -561,137 +697,14 @@ impl Tool for AnalyzeTransferTool {
     ) -> Result<ToolOutput, ToolError> {
         let timer = Instant::now();
         let amount = params.get("amount").and_then(|v| v.as_f64());
-        let for_wire = params.get("for_wire").and_then(|v| v.as_bool()).unwrap_or(false);
+        let for_wire = params
+            .get("for_wire")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
-        let now = chrono::Utc::now();
-        let today = now.date_naive();
-        let start_str = (today - chrono::Duration::days(220)).format("%Y-%m-%d").to_string();
-        let end_str = today.format("%Y-%m-%d").to_string();
-
-        let massive_url = format!(
-            "{MASSIVE_BASE}/C:USDINR/range/1/day/{start_str}/{end_str}?sort=asc&limit=5000"
-        );
-        let now_unix = now.timestamp();
-        let dxy_url = format!(
-            "https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB?interval=1d&period1={}&period2={now_unix}",
-            now_unix - 35 * 86400,
-        );
-
-        let bearer = massive_bearer(&*self.secrets, &ctx.user_id).await?;
-
-        // Fetch Massive + DXY in parallel
-        let (massive_resp, dxy_resp) = tokio::join!(
-            self.client
-                .get(&massive_url)
-                .header("Authorization", format!("Bearer {bearer}"))
-                .send(),
-            self.client
-                .get(&dxy_url)
-                .header("User-Agent", "Mozilla/5.0")
-                .send(),
-        );
-
-        // Parse Massive response
-        let massive_resp = massive_resp.map_err(|e| ToolError::ExternalService(e.to_string()))?;
-        if massive_resp.status().as_u16() != 200 {
-            return Err(ToolError::ExternalService(format!(
-                "Massive API HTTP {}",
-                massive_resp.status()
-            )));
-        }
-        let massive_body: serde_json::Value = massive_resp
-            .json()
-            .await
-            .map_err(|e| ToolError::ExternalService(e.to_string()))?;
-        let bars = parse_massive_bars(&massive_body)?;
-        if bars.len() < 23 {
-            return Err(ToolError::ExternalService(format!(
-                "Insufficient data: need 23 bars, got {}",
-                bars.len()
-            )));
-        }
-
-        // Parse DXY (non-fatal)
-        let dxy_dir = match dxy_resp {
-            Ok(r) => match r.json::<serde_json::Value>().await {
-                Ok(body) => parse_dxy_direction(&body),
-                Err(_) => "unknown",
-            },
-            Err(_) => "unknown",
-        };
-
-        // Compute indicators
-        let closes: Vec<f64> = bars.iter().map(|b| b.close).collect();
-        let vol_window = 20;
-        let vol_slice = &closes[closes.len().saturating_sub(vol_window)..];
-        let daily_vol = sample_std(&log_returns(vol_slice));
-        let vb = vol_bucket(daily_vol);
-
-        let rsi_val = rsi(&closes, 14);
-        let rsi_rounded = rsi_val.map(|r| (r * 10.0).round() / 10.0);
-        let rb = rsi_val.map(rsi_bucket).unwrap_or("mid");
-
-        let hr = hit_rate(vb, rb, dxy_dir);
-        let current_rate = closes[closes.len() - 1];
-        let (target_rate, projection) = compute_cone(current_rate, daily_vol, vb, today);
-        let recommend = if hr < 45.0 { "now" } else { "wait" };
-
-        let historical: Vec<serde_json::Value> = bars[bars.len().saturating_sub(30)..]
-            .iter()
-            .map(|b| json!({"date": b.date, "close": b.close}))
-            .collect();
-
-        // Potential savings in INR: always computed when amount is provided.
-        let could_save =
-            amount.map(|a| ((target_rate - current_rate) * a * 100.0).round() / 100.0);
-
-        let action_verb = if recommend == "now" {
-            "Transfer now"
-        } else {
-            "Wait — hold off"
-        };
-        let mut message = format!(
-            "{action_verb}. USD/INR is at {current_rate:.4}; target {:.4}. \
-             Regime: {vb} volatility, RSI {} ({rb}), DXY {dxy_dir}. \
-             Hit-rate for this regime: {:.1}%.",
-            (target_rate * 10000.0).round() / 10000.0,
-            rsi_rounded
-                .map(|r| format!("{r}"))
-                .unwrap_or_else(|| "N/A".into()),
-            (hr * 10.0).round() / 10.0,
-        );
-        if recommend == "wait" {
-            if let Some(save) = could_save
-                && save > 0.0
-            {
-                message.push_str(&format!(
-                    " If you wait, you could get ₹{save:.2} more on your transfer."
-                ));
-            }
-        }
-        if for_wire {
-            message.push_str(
-                " — Send now or wait? Reply **send now** to proceed with the transfer, \
-                 or **wait** to hold off for a better rate.",
-            );
-        }
-
-        let result = json!({
-            "message": message,
-            "plot": {
-                "historical": historical,
-                "projection": projection,
-                "current_rate": current_rate,
-                "target_rate": (target_rate * 10000.0).round() / 10000.0,
-                "vol_regime": vb,
-                "daily_vol": (daily_vol * 1_000_000.0).round() / 1_000_000.0,
-                "rsi": rsi_rounded,
-                "dxy_direction": dxy_dir,
-                "hit_rate_pct": (hr * 10.0).round() / 10.0,
-                "recommend": recommend,
-                "could_save": could_save,
-            }
-        });
+        let result =
+            run_transfer_analysis(&self.client, &*self.secrets, &ctx.user_id, amount, for_wire)
+                .await?;
 
         Ok(ToolOutput::success(result, timer.elapsed()))
     }

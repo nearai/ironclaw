@@ -727,6 +727,31 @@ async fn handle_execute_code_step(
                 })
                 .collect();
 
+            // Check for terminal actions in code execution results.
+            // Same logic as handle_execute_actions_parallel phase 4.
+            if result.final_answer.is_none() {
+                let terminal_set: Vec<String> = thread
+                    .metadata
+                    .get("_terminal_actions")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                for r in &result.action_results {
+                    if !r.is_error && terminal_set.iter().any(|t| t == &r.action_name) {
+                        if let Some(obj) = thread.metadata.as_object_mut() {
+                            obj.insert("_terminal_result".to_string(), r.output.clone());
+                        }
+                        debug!(action = %r.action_name, "stashed terminal action result (code path)");
+                        break;
+                    }
+                }
+            }
+
             let result_json = serde_json::json!({
                 "return_value": result.return_value,
                 "stdout": result.stdout,
