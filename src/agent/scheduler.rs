@@ -313,6 +313,7 @@ impl Scheduler {
                 sse_tx: self.sse_tx.clone(),
                 approval_context,
                 http_interceptor: self.http_interceptor.clone(),
+                multi_tenant: self.config.multi_tenant,
             };
             let worker = Worker::new(job_id, deps);
 

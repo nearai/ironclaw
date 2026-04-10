@@ -11519,6 +11519,12 @@ mod tests {
 
     #[test]
     fn test_telegram_token_colon_preserved_in_validation_url() {
+        // ScopedEnvVar holds ENV_MUTEX for the test's lifetime, preventing
+        // a concurrent test from setting IRONCLAW_TEST_TELEGRAM_API_BASE_URL.
+        // Setting to "" is equivalent to unset — telegram_api_base_url()
+        // filters empty values. ScopedEnvVar restores the previous value on drop.
+        let _env = ScopedEnvVar::set(TELEGRAM_TEST_API_BASE_ENV, "");
+
         // Regression: Telegram tokens (format: numeric_id:alphanumeric_string) must NOT
         // have their colon URL-encoded to %3A, as this breaks the validation endpoint.
         // Previously: form_urlencoded::byte_serialize encoded the token, causing 404s.
