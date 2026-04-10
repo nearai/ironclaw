@@ -222,7 +222,8 @@ fn print_model_list(models: &Option<Vec<String>>, active_model: Option<&String>)
         }
         None => {
             println!(
-                "\n  Could not fetch model list (missing credentials or provider unavailable)."
+                "\n  Could not fetch model list (missing credentials or provider unavailable).\
+                 \n  Tip: Run `ironclaw doctor` to check your configuration."
             );
         }
     }
@@ -364,7 +365,9 @@ fn cmd_set_provider(
                 .chain(registry.all().iter().map(|d| d.id.as_str()))
                 .collect();
             anyhow::anyhow!(
-                "Unknown provider '{}'. Known providers: {}",
+                "Unknown provider '{}'.\n\nAvailable providers: {}\n\n\
+                 Tip: Run `ironclaw models list` to see all providers with descriptions,\n\
+                 or `ironclaw onboard --step provider` for interactive setup.",
                 provider,
                 known.join(", ")
             )
@@ -413,6 +416,21 @@ fn cmd_set_provider(
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| config_toml_path().display().to_string())
     );
+
+    // Remind the user about API key requirements for the newly selected provider
+    if let Some(def) = registry.find(&canonical_id)
+        && def.api_key_required
+        && let Some(ref env_var) = def.api_key_env
+    {
+        let has_key = std::env::var(env_var).is_ok();
+        if !has_key {
+            println!();
+            println!(
+                "Note: {} requires an API key. Set {} or run `ironclaw onboard --step provider` to configure.",
+                canonical_id, env_var
+            );
+        }
+    }
 
     Ok(())
 }
@@ -551,6 +569,9 @@ async fn cmd_list_providers(
     if !verbose {
         println!();
         println!("* = active provider. Use --verbose for details.");
+        println!();
+        println!("To switch provider: ironclaw models set-provider <name>");
+        println!("For guided setup:   ironclaw onboard --step provider");
     }
 
     Ok(())
@@ -619,7 +640,8 @@ async fn cmd_show_provider(
             .chain(registry.all().iter().map(|d| d.id.as_str()))
             .collect();
         anyhow::anyhow!(
-            "Unknown provider '{}'. Known providers: {}",
+            "Unknown provider '{}'.\n\nAvailable providers: {}\n\n\
+             Tip: Run `ironclaw models list` to see all providers with descriptions.",
             id,
             known.join(", ")
         )
