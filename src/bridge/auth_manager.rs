@@ -296,8 +296,9 @@ impl AuthManager {
                 ToolReadiness::NeedsAuth {
                     credential_name: described.credential_name,
                     instructions,
-                    auth_url: crate::auth::oauth::sanitize_auth_url(auth.auth_url())
-                        .or(described.auth_url),
+                    auth_url: crate::auth::oauth::sanitize_auth_url(auth.auth_url()).or_else(
+                        || crate::auth::oauth::sanitize_auth_url(described.auth_url.as_deref()),
+                    ),
                 }
             }
             Ok(crate::extensions::EnsureReadyOutcome::NeedsSetup { instructions, .. }) => {

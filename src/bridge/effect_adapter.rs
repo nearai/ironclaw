@@ -595,7 +595,7 @@ impl EffectBridgeAdapter {
                         ironclaw_engine::ResumeKind::Authentication {
                             credential_name,
                             instructions,
-                            auth_url,
+                            auth_url: sanitize_auth_url(auth_url.as_deref()),
                         },
                         None,
                     ));
