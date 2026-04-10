@@ -118,6 +118,183 @@ pub async fn create_client_from_config(
 mod tests {
     use super::*;
 
+    use std::collections::HashMap;
+
+    use crate::secrets::{CreateSecretParams, InMemorySecretsStore, SecretsCrypto, SecretsStore};
+    use crate::testing::credentials::TEST_CRYPTO_KEY;
+    use crate::tools::mcp::OAuthConfig;
+    use crate::tools::mcp::client::McpClientConstructor;
+
+    fn empty_secrets_store() -> Arc<dyn SecretsStore + Send + Sync> {
+        let key = secrecy::SecretString::from(TEST_CRYPTO_KEY.to_string());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("test crypto"));
+        Arc::new(InMemorySecretsStore::new(crypto))
+    }
+
+    /// Regression for nearai/ironclaw#1948 — caller-level coverage.
+    ///
+    /// `requires_auth()` had a unit test for the custom-Authorization-header
+    /// case, but nothing exercised the *caller* of that predicate. This test
+    /// drives `create_client_from_config` (the caller) and asserts the
+    /// factory takes the non-auth construction path when the user has set
+    /// their own Authorization header on a remote https MCP server.
+    ///
+    /// Without this caller-level coverage, a future change that bypassed
+    /// `requires_auth()` (e.g. by inlining the localhost check, or by
+    /// reordering the `has_tokens || requires_auth()` short-circuit) could
+    /// re-introduce the bug while leaving the predicate unit tests green.
+    ///
+    /// See `.claude/rules/testing.md` ("Test Through the Caller, Not Just
+    /// the Helper") for the rule and the bug history.
+    #[tokio::test]
+    async fn factory_takes_non_auth_path_when_authorization_header_set() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Authorization".to_string(),
+            "Bearer sk-user-supplied".to_string(),
+        );
+        let server = McpServerConfig::new("authheader-1948", "https://api.example.com")
+            .with_headers(headers);
+
+        let secrets = empty_secrets_store();
+        let session_manager = Arc::new(McpSessionManager::new());
+        let process_manager = Arc::new(McpProcessManager::new());
+
+        let client = create_client_from_config(
+            server,
+            &session_manager,
+            &process_manager,
+            Some(secrets),
+            "test-user",
+        )
+        .await
+        .expect("factory should succeed for https config with custom Authorization header");
+
+        assert_eq!(
+            client.constructor_kind(),
+            McpClientConstructor::WithTransport,
+            "factory must take the non-auth construction path when the user has \
+             supplied an Authorization header — taking the OAuth/auth path triggers \
+             unexpected DCR/refresh side effects (nearai/ironclaw#1948)"
+        );
+    }
+
+    /// Regression for nearai/ironclaw#1948 — case-insensitive variant.
+    ///
+    /// HTTP header names are case-insensitive (RFC 9110). The factory must
+    /// honor a custom `AUTHORIZATION` header even when OAuth metadata is
+    /// pre-configured (the strongest signal that the user owns the
+    /// credential path).
+    #[tokio::test]
+    async fn factory_takes_non_auth_path_with_uppercase_authorization_and_oauth_config() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "AUTHORIZATION".to_string(),
+            "Bearer sk-user-supplied".to_string(),
+        );
+        let server = McpServerConfig::new("authheader-1948-upper", "https://api.example.com")
+            .with_headers(headers)
+            .with_oauth(OAuthConfig::new("client-id"));
+
+        let secrets = empty_secrets_store();
+        let session_manager = Arc::new(McpSessionManager::new());
+        let process_manager = Arc::new(McpProcessManager::new());
+
+        let client = create_client_from_config(
+            server,
+            &session_manager,
+            &process_manager,
+            Some(secrets),
+            "test-user",
+        )
+        .await
+        .expect("factory should succeed even with both OAuth config and Authorization header");
+
+        assert_eq!(
+            client.constructor_kind(),
+            McpClientConstructor::WithTransport,
+            "an explicit Authorization header must win over pre-configured OAuth \
+             metadata (nearai/ironclaw#1948)"
+        );
+    }
+
+    /// Negative control for the same regression.
+    ///
+    /// Without a custom Authorization header, a remote https MCP server
+    /// *should* take the auth construction path. If this test ever stops
+    /// seeing `Authenticated`, the factory's call site has stopped honoring
+    /// `requires_auth()` at all and the positive tests above are not
+    /// actually proving anything.
+    #[tokio::test]
+    async fn factory_takes_auth_path_for_remote_https_without_authorization_header() {
+        let server = McpServerConfig::new("noheader-1948", "https://api.example.com");
+
+        let secrets = empty_secrets_store();
+        let session_manager = Arc::new(McpSessionManager::new());
+        let process_manager = Arc::new(McpProcessManager::new());
+
+        let client = create_client_from_config(
+            server,
+            &session_manager,
+            &process_manager,
+            Some(secrets),
+            "test-user",
+        )
+        .await
+        .expect("factory should succeed for plain remote https config");
+
+        assert_eq!(
+            client.constructor_kind(),
+            McpClientConstructor::Authenticated,
+            "without an explicit Authorization header, the factory must enter \
+             the auth construction path (otherwise the positive tests above \
+             prove nothing — see nearai/ironclaw#1948)"
+        );
+    }
+
+    /// Negative control: with stored OAuth tokens, the factory must take
+    /// the auth path even when `requires_auth()` returns false. This pins
+    /// the `has_tokens || requires_auth()` short-circuit so a refactor
+    /// that drops the `has_tokens` clause does not silently break sessions
+    /// that have already authenticated.
+    #[tokio::test]
+    async fn factory_takes_auth_path_when_tokens_already_stored() {
+        // Localhost https — `requires_auth()` returns false, so without
+        // the `has_tokens` short-circuit the factory would take the
+        // non-auth path and the user would lose access to their stored
+        // OAuth token.
+        let server = McpServerConfig::new("stored-token-1948", "https://localhost:8443");
+
+        let secrets = empty_secrets_store();
+        secrets
+            .create(
+                "test-user",
+                CreateSecretParams::new("mcp_stored-token-1948_access_token", "stored-oauth-token"),
+            )
+            .await
+            .expect("seed token");
+
+        let session_manager = Arc::new(McpSessionManager::new());
+        let process_manager = Arc::new(McpProcessManager::new());
+
+        let client = create_client_from_config(
+            server,
+            &session_manager,
+            &process_manager,
+            Some(secrets),
+            "test-user",
+        )
+        .await
+        .expect("factory should succeed for localhost https with stored token");
+
+        assert_eq!(
+            client.constructor_kind(),
+            McpClientConstructor::Authenticated,
+            "stored OAuth tokens must keep routing through the auth path even \
+             when requires_auth() returns false; otherwise refresh stops working"
+        );
+    }
+
     #[tokio::test]
     async fn test_factory_non_oauth_http_has_session_manager() {
         let server = McpServerConfig::new("test-server", "http://localhost:9999");
