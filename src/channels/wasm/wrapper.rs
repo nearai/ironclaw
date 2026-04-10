@@ -110,6 +110,8 @@ struct ChannelStoreData {
     host_credentials: Vec<ResolvedHostCredential>,
     /// Pairing store for DM pairing (guest access control).
     pairing_store: Arc<PairingStore>,
+    /// Optional websocket outbound sender for channels with a managed runtime.
+    websocket_outbound_tx: Option<mpsc::UnboundedSender<String>>,
     /// Dedicated tokio runtime for HTTP requests, lazily initialized.
     /// Reused across multiple `http_request` calls within one execution.
     http_runtime: Option<tokio::runtime::Runtime>,
@@ -123,6 +125,7 @@ impl ChannelStoreData {
         credentials: HashMap<String, String>,
         host_credentials: Vec<ResolvedHostCredential>,
         pairing_store: Arc<PairingStore>,
+        websocket_outbound_tx: Option<mpsc::UnboundedSender<String>>,
     ) -> Self {
         // Create a minimal WASI context (no filesystem, no env vars for security)
         let wasi = WasiCtxBuilder::new().build();
@@ -135,6 +138,7 @@ impl ChannelStoreData {
             credentials,
             host_credentials,
             pairing_store,
+            websocket_outbound_tx,
             http_runtime: None,
         }
     }
@@ -299,6 +303,16 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         self.host_state
             .workspace_write(&path, content)
             .map_err(|e| e.to_string())
+    }
+
+    fn websocket_send_text(&mut self, payload: String) -> Result<(), String> {
+        let sender = self
+            .websocket_outbound_tx
+            .as_ref()
+            .ok_or_else(|| "websocket runtime not available for this channel".to_string())?;
+        sender
+            .send(payload)
+            .map_err(|_| "websocket runtime is not accepting outbound frames".to_string())
     }
 
     fn http_request(
@@ -744,6 +758,10 @@ pub struct WasmChannel {
     /// Websocket runtime shutdown signal sender.
     websocket_shutdown_tx: RwLock<Option<oneshot::Sender<()>>>,
 
+    /// Host-managed websocket outbound sender used by `on_respond` and
+    /// `on_poll` to emit protocol-specific websocket frames.
+    websocket_outbound_tx: Arc<RwLock<Option<mpsc::UnboundedSender<String>>>>,
+
     /// Serializes websocket-triggered poll executions.
     websocket_poll_lock: Arc<Mutex<()>>,
 
@@ -896,6 +914,7 @@ impl WasmChannel {
             shutdown_tx: RwLock::new(None),
             poll_shutdown_tx: RwLock::new(None),
             websocket_shutdown_tx: RwLock::new(None),
+            websocket_outbound_tx: Arc::new(RwLock::new(None)),
             websocket_poll_lock: Arc::new(Mutex::new(())),
             endpoints: RwLock::new(Vec::new()),
             credentials: Arc::new(RwLock::new(HashMap::new())),
@@ -1150,11 +1169,15 @@ impl WasmChannel {
         let owner_actor_id = self.owner_actor_id.clone();
         let websocket_secrets_store = self.secrets_store.clone();
         let websocket_poll_lock = Arc::clone(&self.websocket_poll_lock);
+        let websocket_outbound_tx_state = Arc::clone(&self.websocket_outbound_tx);
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<String>();
+        if let Ok(mut guard) = self.websocket_outbound_tx.try_write() {
+            *guard = Some(outbound_tx.clone());
+        }
 
         tokio::spawn(async move {
             let mut shutdown = std::pin::pin!(shutdown_rx);
             let mut reconnect_attempt = 0u32;
-            let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<String>();
 
             tracing::info!(
                 channel = %channel_name,
@@ -1163,17 +1186,33 @@ impl WasmChannel {
             );
             let queue_path = websocket_queue_path(&channel_name);
             let processing_queue_path = websocket_processing_queue_path(&channel_name);
-            let identify_payload =
-                resolve_websocket_identify_message(&config, websocket_secrets_store.as_deref())
-                    .await;
-            let mut session_state = WebsocketSessionState::new(identify_payload.as_deref());
+            let websocket_protocol = config.protocol_kind();
+            let websocket_auth = match resolve_websocket_auth(
+                &config,
+                websocket_secrets_store.as_deref(),
+                &owner_scope_id,
+            )
+            .await
+            {
+                Some(auth) => auth,
+                None => {
+                    tracing::warn!(
+                        channel = %channel_name,
+                        protocol = ?websocket_protocol,
+                        owner_scope_id = %owner_scope_id,
+                        "Websocket runtime missing required auth secrets; not starting"
+                    );
+                    *websocket_outbound_tx_state.write().await = None;
+                    return;
+                }
+            };
+            let mut session_state = WebsocketSessionState::new(&config, Some(&websocket_auth));
 
             'reconnect: loop {
                 let connect_url = session_state.connect_url(&config.url);
                 let connect_result = tokio_tungstenite::connect_async(connect_url).await;
                 let (stream, _) = match connect_result {
                     Ok(parts) => {
-                        reconnect_attempt = 0;
                         tracing::info!(channel = %channel_name, "Websocket runtime connected");
                         parts
                     }
@@ -1191,6 +1230,7 @@ impl WasmChannel {
                             _ = tokio::time::sleep(backoff) => continue 'reconnect,
                             _ = &mut shutdown => {
                                 tracing::info!(channel = %channel_name, "Stopping websocket runtime");
+                                *websocket_outbound_tx_state.write().await = None;
                                 break 'reconnect;
                             }
                         }
@@ -1200,6 +1240,83 @@ impl WasmChannel {
                 let (mut write, mut read) = stream.split();
                 let mut next_heartbeat: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
                 session_state.reset_connection();
+                let mut stop_runtime = false;
+                let mut should_reconnect = false;
+
+                for action in session_state.on_connected(Some(&websocket_auth)) {
+                    match action {
+                        WebsocketFrameAction::SetHeartbeat { interval_ms } => {
+                            next_heartbeat = Some(Box::pin(tokio::time::sleep(
+                                websocket_heartbeat_sleep_duration(interval_ms),
+                            )));
+                        }
+                        WebsocketFrameAction::Send(payload) => {
+                            if let Err(error) =
+                                write.send(WebsocketMessage::Text(payload.into())).await
+                            {
+                                tracing::warn!(
+                                    channel = %channel_name,
+                                    error = %error,
+                                    "Websocket protocol bootstrap send failed"
+                                );
+                                should_reconnect = true;
+                                break;
+                            }
+                        }
+                        WebsocketFrameAction::Reconnect { reset_session } => {
+                            if reset_session {
+                                session_state.invalidate_session();
+                            }
+                            should_reconnect = true;
+                            break;
+                        }
+                        WebsocketFrameAction::StopRuntime => {
+                            stop_runtime = true;
+                            break;
+                        }
+                        WebsocketFrameAction::Enqueue(raw_text) => {
+                            if let Err(error) = workspace_store.append_json_text_queue(
+                                &queue_path,
+                                &raw_text,
+                                WEBSOCKET_EVENT_QUEUE_MAX_ITEMS,
+                            ) {
+                                tracing::warn!(
+                                    channel = %channel_name,
+                                    error = %error,
+                                    "Failed to enqueue websocket bootstrap frame"
+                                );
+                            }
+                        }
+                    }
+                }
+
+                if stop_runtime {
+                    tracing::info!(
+                        channel = %channel_name,
+                        protocol = ?websocket_protocol,
+                        "Stopping websocket runtime per protocol request"
+                    );
+                    *websocket_outbound_tx_state.write().await = None;
+                    break 'reconnect;
+                }
+                if should_reconnect {
+                    let backoff = websocket_reconnect_backoff(reconnect_attempt);
+                    reconnect_attempt = reconnect_attempt.saturating_add(1);
+                    tracing::info!(
+                        channel = %channel_name,
+                        protocol = ?websocket_protocol,
+                        backoff_secs = backoff.as_secs(),
+                        "Websocket runtime bootstrap requested reconnect"
+                    );
+                    tokio::select! {
+                        _ = tokio::time::sleep(backoff) => continue 'reconnect,
+                        _ = &mut shutdown => {
+                            tracing::info!(channel = %channel_name, "Stopping websocket runtime");
+                            *websocket_outbound_tx_state.write().await = None;
+                            break 'reconnect;
+                        }
+                    }
+                }
 
                 loop {
                     tokio::select! {
@@ -1210,14 +1327,19 @@ impl WasmChannel {
                                 std::future::pending::<()>().await;
                             }
                         } => {
-                            if let Some(payload) = build_websocket_heartbeat_message(session_state.last_sequence.clone())
-                                && let Err(error) = write.send(WebsocketMessage::Text(payload.into())).await
-                            {
-                                tracing::warn!(channel = %channel_name, error = %error, "Websocket heartbeat send failed");
-                                break;
+                            match session_state.heartbeat_tick(&channel_name) {
+                                WebsocketHeartbeatAction::None => {}
+                                WebsocketHeartbeatAction::Send(payload) => {
+                                    if let Err(error) = write.send(WebsocketMessage::Text(payload.into())).await {
+                                        tracing::warn!(channel = %channel_name, error = %error, "Websocket heartbeat send failed");
+                                        break;
+                                    }
+                                }
+                                WebsocketHeartbeatAction::Reconnect => break,
                             }
 
-                            next_heartbeat = session_state.heartbeat_interval_ms
+                            next_heartbeat = session_state
+                                .heartbeat_interval_ms()
                                 .map(|interval_ms| Box::pin(tokio::time::sleep(websocket_heartbeat_sleep_duration(interval_ms))));
                         }
                         outbound = outbound_rx.recv() => {
@@ -1230,6 +1352,7 @@ impl WasmChannel {
                         }
                         _ = &mut shutdown => {
                             tracing::info!(channel = %channel_name, "Stopping websocket runtime");
+                            *websocket_outbound_tx_state.write().await = None;
                             break 'reconnect;
                         }
                         message = read.next() => {
@@ -1241,7 +1364,7 @@ impl WasmChannel {
                                     let actions = session_state.process_text_frame(
                                         &text,
                                         &channel_name,
-                                        identify_payload.as_deref(),
+                                        Some(&websocket_auth),
                                         workspace_store.as_ref(),
                                         pairing_store.as_ref(),
                                     );
@@ -1291,6 +1414,7 @@ impl WasmChannel {
                                                             owner_scope_id: owner_scope_id.clone(),
                                                             owner_actor_id: owner_actor_id.clone(),
                                                             secrets_store: websocket_secrets_store.clone(),
+                                                            protocol_kind: websocket_protocol,
                                                             outbound_tx: outbound_tx.clone(),
                                                             queue_path: queue_path.clone(),
                                                             processing_queue_path: processing_queue_path.clone(),
@@ -1299,8 +1423,16 @@ impl WasmChannel {
                                                     );
                                                 }
                                             }
-                                            WebsocketFrameAction::InvalidateAndReconnect => {
+                                            WebsocketFrameAction::Reconnect { reset_session } => {
+                                                if reset_session {
+                                                    session_state.invalidate_session();
+                                                }
                                                 should_reconnect = true;
+                                                break;
+                                            }
+                                            WebsocketFrameAction::StopRuntime => {
+                                                stop_runtime = true;
+                                                should_break = true;
                                                 break;
                                             }
                                         }
@@ -1332,6 +1464,16 @@ impl WasmChannel {
                     }
                 }
 
+                if stop_runtime {
+                    tracing::info!(
+                        channel = %channel_name,
+                        protocol = ?websocket_protocol,
+                        "Stopping websocket runtime per protocol request"
+                    );
+                    *websocket_outbound_tx_state.write().await = None;
+                    break 'reconnect;
+                }
+
                 let backoff = websocket_reconnect_backoff(reconnect_attempt);
                 reconnect_attempt = reconnect_attempt.saturating_add(1);
                 tracing::info!(
@@ -1343,10 +1485,12 @@ impl WasmChannel {
                     _ = tokio::time::sleep(backoff) => {}
                     _ = &mut shutdown => {
                         tracing::info!(channel = %channel_name, "Stopping websocket runtime");
+                        *websocket_outbound_tx_state.write().await = None;
                         break 'reconnect;
                     }
                 }
             }
+            *websocket_outbound_tx_state.write().await = None;
         });
     }
 
@@ -1358,6 +1502,7 @@ impl WasmChannel {
         credentials: HashMap<String, String>,
         host_credentials: Vec<ResolvedHostCredential>,
         pairing_store: Arc<PairingStore>,
+        websocket_outbound_tx: Option<mpsc::UnboundedSender<String>>,
     ) -> Result<Store<ChannelStoreData>, WasmChannelError> {
         let engine = runtime.engine();
         let limits = &prepared.limits;
@@ -1370,6 +1515,7 @@ impl WasmChannel {
             credentials,
             host_credentials,
             pairing_store,
+            websocket_outbound_tx,
         );
         let mut store = Store::new(engine, store_data);
 
@@ -1505,6 +1651,7 @@ impl WasmChannel {
                     credentials,
                     host_credentials,
                     pairing_store,
+                    None,
                 )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
@@ -1658,6 +1805,7 @@ impl WasmChannel {
                     credentials,
                     host_credentials,
                     pairing_store,
+                    None,
                 )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
@@ -1755,6 +1903,7 @@ impl WasmChannel {
                     credentials,
                     host_credentials,
                     pairing_store,
+                    None,
                 )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
@@ -1885,6 +2034,7 @@ impl WasmChannel {
                     credentials,
                     host_credentials,
                     pairing_store,
+                    None,
                 )?;
 
                 tracing::info!("Instantiating WASM component for on_respond");
@@ -2026,6 +2176,7 @@ impl WasmChannel {
                     credentials,
                     host_credentials,
                     pairing_store,
+                    None,
                 )?;
 
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
@@ -2113,6 +2264,7 @@ impl WasmChannel {
         .await;
         let pairing_store = self.pairing_store.clone();
         let workspace_store = self.workspace_store.clone();
+        let websocket_outbound_tx = self.websocket_outbound_tx.read().await.clone();
 
         let Some(wit_update) = status_to_wit(status, metadata) else {
             return Ok(());
@@ -2127,6 +2279,7 @@ impl WasmChannel {
                     credentials,
                     host_credentials,
                     pairing_store,
+                    websocket_outbound_tx,
                 )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
@@ -2203,6 +2356,7 @@ impl WasmChannel {
                     credentials_snapshot,
                     host_credentials,
                     pairing_store,
+                    None,
                 )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
@@ -2575,6 +2729,7 @@ impl WasmChannel {
                             &credentials,
                             host_credentials,
                             pairing_store.clone(),
+                            None,
                             callback_timeout,
                             &workspace_store,
                         ).await;
@@ -2637,6 +2792,7 @@ impl WasmChannel {
         credentials: &RwLock<HashMap<String, String>>,
         host_credentials: Vec<ResolvedHostCredential>,
         pairing_store: Arc<PairingStore>,
+        websocket_outbound_tx: Option<mpsc::UnboundedSender<String>>,
         timeout: Duration,
         workspace_store: &Arc<ChannelWorkspaceStore>,
     ) -> Result<Vec<EmittedMessage>, WasmChannelError> {
@@ -2666,6 +2822,7 @@ impl WasmChannel {
                     credentials_snapshot,
                     host_credentials,
                     pairing_store,
+                    websocket_outbound_tx,
                 )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
@@ -3051,6 +3208,7 @@ impl Channel for WasmChannel {
 
         // Stop websocket runtime by dropping the sender (receiver will complete)
         let _ = self.websocket_shutdown_tx.write().await.take();
+        let _ = self.websocket_outbound_tx.write().await.take();
 
         // Clear the message sender
         *self.message_tx.write().await = None;
@@ -3064,12 +3222,37 @@ impl Channel for WasmChannel {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebsocketProtocolKind {
+    DiscordGateway,
+    WecomAibot,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DiscordGatewayWebsocketConfig {
+    identify: Option<serde_json::Value>,
+    identify_secret_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct WecomAibotWebsocketConfig {
+    bot_id_secret_name: String,
+    bot_secret_name: String,
+    heartbeat_interval_ms: u64,
+    max_missed_heartbeat_acks: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum WebsocketProtocolConfig {
+    DiscordGateway(DiscordGatewayWebsocketConfig),
+    WecomAibot(WecomAibotWebsocketConfig),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct WebsocketRuntimeConfig {
     pub(crate) url: String,
     pub(crate) connect_on_start: bool,
-    pub(crate) identify: Option<serde_json::Value>,
-    pub(crate) identify_secret_name: Option<String>,
+    protocol: WebsocketProtocolConfig,
 }
 
 impl WebsocketRuntimeConfig {
@@ -3097,19 +3280,88 @@ impl WebsocketRuntimeConfig {
             return None;
         }
 
+        let protocol_name = match raw.get("protocol").and_then(serde_json::Value::as_str) {
+            Some(value) => Some(normalize_websocket_protocol_name(value)?),
+            None => None,
+        };
+
+        let protocol = match protocol_name {
+            Some("wecom-aibot") => {
+                let bot_id_secret_name = raw
+                    .get("bot_id_secret_name")
+                    .and_then(serde_json::Value::as_str)?
+                    .trim()
+                    .to_string();
+                let bot_secret_name = raw
+                    .get("bot_secret_name")
+                    .or_else(|| raw.get("bot_secret_secret_name"))
+                    .and_then(serde_json::Value::as_str)?
+                    .trim()
+                    .to_string();
+                if bot_id_secret_name.is_empty() || bot_secret_name.is_empty() {
+                    return None;
+                }
+                WebsocketProtocolConfig::WecomAibot(WecomAibotWebsocketConfig {
+                    bot_id_secret_name,
+                    bot_secret_name,
+                    heartbeat_interval_ms: raw
+                        .get("heartbeat_interval_ms")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(30_000),
+                    max_missed_heartbeat_acks: raw
+                        .get("max_missed_heartbeat_acks")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok())
+                        .unwrap_or(2),
+                })
+            }
+            Some("discord-gateway") | None => {
+                WebsocketProtocolConfig::DiscordGateway(DiscordGatewayWebsocketConfig {
+                    identify: raw.get("identify").cloned(),
+                    identify_secret_name: raw
+                        .get("identify_secret_name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned),
+                })
+            }
+            Some(_) => return None,
+        };
+
         Some(Self {
             url: url.to_string(),
             connect_on_start: raw
                 .get("connect_on_start")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
-            identify: raw.get("identify").cloned(),
-            identify_secret_name: raw
-                .get("identify_secret_name")
-                .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned),
+            protocol,
         })
     }
+
+    fn protocol_kind(&self) -> WebsocketProtocolKind {
+        match self.protocol {
+            WebsocketProtocolConfig::DiscordGateway(_) => WebsocketProtocolKind::DiscordGateway,
+            WebsocketProtocolConfig::WecomAibot(_) => WebsocketProtocolKind::WecomAibot,
+        }
+    }
+}
+
+fn normalize_websocket_protocol_name(protocol: &str) -> Option<&'static str> {
+    match protocol
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-")
+        .as_str()
+    {
+        "discord-gateway" => Some("discord-gateway"),
+        "wecom-aibot" => Some("wecom-aibot"),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ResolvedWebsocketAuth {
+    DiscordIdentify(String),
+    WecomAibot { bot_id: String, secret: String },
 }
 
 fn websocket_queue_path(channel_name: &str) -> String {
@@ -3120,15 +3372,43 @@ fn websocket_processing_queue_path(channel_name: &str) -> String {
     format!("channels/{channel_name}/{WEBSOCKET_EVENT_PROCESSING_QUEUE_RELATIVE_PATH}")
 }
 
-async fn resolve_websocket_identify_message(
+async fn resolve_websocket_auth(
     config: &WebsocketRuntimeConfig,
     store: Option<&(dyn SecretsStore + Send + Sync)>,
+    owner_scope_id: &str,
+) -> Option<ResolvedWebsocketAuth> {
+    match &config.protocol {
+        WebsocketProtocolConfig::DiscordGateway(discord) => {
+            let identify = discord.identify.clone()?;
+            let secret_name = discord.identify_secret_name.as_ref()?;
+            let secret = resolve_websocket_secret(store, owner_scope_id, secret_name).await?;
+            build_websocket_identify_message(&identify, &secret)
+                .map(ResolvedWebsocketAuth::DiscordIdentify)
+        }
+        WebsocketProtocolConfig::WecomAibot(wecom) => {
+            let bot_id =
+                resolve_websocket_secret(store, owner_scope_id, &wecom.bot_id_secret_name).await?;
+            let secret =
+                resolve_websocket_secret(store, owner_scope_id, &wecom.bot_secret_name).await?;
+            Some(ResolvedWebsocketAuth::WecomAibot { bot_id, secret })
+        }
+    }
+}
+
+async fn resolve_websocket_secret(
+    store: Option<&(dyn SecretsStore + Send + Sync)>,
+    owner_scope_id: &str,
+    secret_name: &str,
 ) -> Option<String> {
-    let identify = config.identify.clone()?;
-    let secret_name = config.identify_secret_name.as_ref()?;
-    let store = store?;
-    let secret = store.get_decrypted("default", secret_name).await.ok()?;
-    build_websocket_identify_message(&identify, secret.expose())
+    if let Some(store) = store
+        && let Ok(secret) = store.get_decrypted(owner_scope_id, secret_name).await
+    {
+        return Some(secret.expose().to_string());
+    }
+
+    std::env::var(secret_name.to_uppercase())
+        .ok()
+        .filter(|value| !value.is_empty())
 }
 
 fn build_websocket_identify_message(identify: &serde_json::Value, token: &str) -> Option<String> {
@@ -3145,12 +3425,40 @@ fn build_websocket_identify_message(identify: &serde_json::Value, token: &str) -
     .ok()
 }
 
+fn build_wecom_aibot_subscribe_message(bot_id: &str, secret: &str) -> Option<String> {
+    serde_json::to_string(&serde_json::json!({
+        "cmd": "aibot_subscribe",
+        "headers": {
+            "req_id": websocket_request_id("aibot_subscribe"),
+        },
+        "body": {
+            "bot_id": bot_id,
+            "secret": secret,
+        }
+    }))
+    .ok()
+}
+
 fn build_websocket_heartbeat_message(sequence: Option<serde_json::Value>) -> Option<String> {
     serde_json::to_string(&serde_json::json!({
         "op": 1,
         "d": sequence.unwrap_or(serde_json::Value::Null),
     }))
     .ok()
+}
+
+fn build_wecom_aibot_ping_message() -> Option<String> {
+    serde_json::to_string(&serde_json::json!({
+        "cmd": "ping",
+        "headers": {
+            "req_id": websocket_request_id("ping"),
+        }
+    }))
+    .ok()
+}
+
+fn websocket_request_id(prefix: &str) -> String {
+    format!("{prefix}-{}", Uuid::new_v4())
 }
 
 fn build_discord_gateway_presence_update(status: &str) -> Option<String> {
@@ -3166,20 +3474,18 @@ fn build_discord_gateway_presence_update(status: &str) -> Option<String> {
     .ok()
 }
 
-fn build_gateway_presence_update(
+fn build_protocol_post_poll_update(
+    protocol_kind: WebsocketProtocolKind,
     channel_name: &str,
     workspace_store: &crate::channels::wasm::host::ChannelWorkspaceStore,
     pairing_store: &PairingStore,
 ) -> Option<String> {
-    if channel_name != "discord" {
-        return None;
+    match protocol_kind {
+        WebsocketProtocolKind::DiscordGateway => build_discord_gateway_presence_update(
+            discord_gateway_presence_status(channel_name, workspace_store, pairing_store),
+        ),
+        WebsocketProtocolKind::WecomAibot => None,
     }
-
-    build_discord_gateway_presence_update(discord_gateway_presence_status(
-        channel_name,
-        workspace_store,
-        pairing_store,
-    ))
 }
 
 fn discord_gateway_presence_status(
@@ -3284,6 +3590,61 @@ fn extract_token_from_identify_payload(identify_payload: &str) -> Option<String>
         .map(ToOwned::to_owned)
 }
 
+struct WecomAibotAckFrame {
+    req_id: String,
+    errcode: i64,
+    errmsg: Option<String>,
+}
+
+enum WecomAibotIncomingFrame {
+    Ack(WecomAibotAckFrame),
+    Callback,
+    Event { disconnected: bool },
+    Unknown,
+}
+
+fn parse_wecom_aibot_frame(text: &str) -> WecomAibotIncomingFrame {
+    let payload: serde_json::Value = match serde_json::from_str(text) {
+        Ok(payload) => payload,
+        Err(_) => return WecomAibotIncomingFrame::Unknown,
+    };
+
+    if let Some(cmd) = payload.get("cmd").and_then(serde_json::Value::as_str) {
+        if cmd == "aibot_msg_callback" {
+            return WecomAibotIncomingFrame::Callback;
+        }
+
+        if cmd.ends_with("_event") || cmd == "aibot_event_callback" {
+            let disconnected = payload
+                .get("body")
+                .and_then(|body| body.get("event"))
+                .and_then(|event| event.get("eventtype"))
+                .and_then(serde_json::Value::as_str)
+                == Some("disconnected_event");
+
+            return WecomAibotIncomingFrame::Event { disconnected };
+        }
+    }
+
+    if let Some(req_id) = payload
+        .get("headers")
+        .and_then(|headers| headers.get("req_id"))
+        .and_then(serde_json::Value::as_str)
+        && let Some(errcode) = payload.get("errcode").and_then(serde_json::Value::as_i64)
+    {
+        return WecomAibotIncomingFrame::Ack(WecomAibotAckFrame {
+            req_id: req_id.to_string(),
+            errcode,
+            errmsg: payload
+                .get("errmsg")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned),
+        });
+    }
+
+    WecomAibotIncomingFrame::Unknown
+}
+
 fn drain_guest_logs(
     channel_name: &str,
     callback: &str,
@@ -3334,6 +3695,7 @@ struct WebsocketPollContext {
     owner_scope_id: String,
     owner_actor_id: Option<String>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    protocol_kind: WebsocketProtocolKind,
     outbound_tx: mpsc::UnboundedSender<String>,
     queue_path: String,
     processing_queue_path: String,
@@ -3379,6 +3741,7 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
                 &ctx.credentials,
                 host_credentials,
                 ctx.pairing_store.clone(),
+                Some(ctx.outbound_tx.clone()),
                 ctx.callback_timeout,
                 &ctx.workspace_store,
             )
@@ -3408,7 +3771,8 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
                 }
             }
 
-            if let Some(payload) = build_gateway_presence_update(
+            if let Some(payload) = build_protocol_post_poll_update(
+                ctx.protocol_kind,
                 &ctx.channel_name,
                 ctx.workspace_store.as_ref(),
                 ctx.pairing_store.as_ref(),
@@ -3431,16 +3795,20 @@ enum WebsocketFrameAction {
     Send(String),
     /// Enqueue the raw text into the workspace event queue.
     Enqueue(String),
-    /// Clear session state and reconnect with a fresh identify.
-    InvalidateAndReconnect,
+    /// Reconnect, optionally resetting protocol session state first.
+    Reconnect { reset_session: bool },
+    /// Stop the runtime without reconnecting.
+    StopRuntime,
 }
 
-/// Tracks websocket session state across reconnects.
-///
-/// Keeps heartbeat interval, sequence counter, and Discord Gateway session
-/// resumption fields. The [`process_text_frame`] method parses incoming frames
-/// and returns a list of [`WebsocketFrameAction`]s the caller should execute.
-struct WebsocketSessionState {
+enum WebsocketHeartbeatAction {
+    None,
+    Send(String),
+    Reconnect,
+}
+
+/// Tracks Discord Gateway session state across reconnects.
+struct DiscordGatewaySessionState {
     heartbeat_interval_ms: Option<u64>,
     last_sequence: Option<serde_json::Value>,
     session_id: Option<String>,
@@ -3451,7 +3819,7 @@ struct WebsocketSessionState {
     attempted_resume: bool,
 }
 
-impl WebsocketSessionState {
+impl DiscordGatewaySessionState {
     fn new(identify_payload: Option<&str>) -> Self {
         let token = identify_payload.and_then(extract_token_from_identify_payload);
         Self {
@@ -3540,9 +3908,9 @@ impl WebsocketSessionState {
             self.session_id = Some(sid);
             self.resume_gateway_url = resume_url;
 
-            if let Some(payload) =
-                build_gateway_presence_update(channel_name, workspace_store, pairing_store)
-            {
+            if let Some(payload) = build_discord_gateway_presence_update(
+                discord_gateway_presence_status(channel_name, workspace_store, pairing_store),
+            ) {
                 actions.push(WebsocketFrameAction::Send(payload));
             }
         }
@@ -3561,7 +3929,9 @@ impl WebsocketSessionState {
                 "Received non-resumable invalid session; will reconnect with fresh identify"
             );
             self.invalidate_session();
-            actions.push(WebsocketFrameAction::InvalidateAndReconnect);
+            actions.push(WebsocketFrameAction::Reconnect {
+                reset_session: false,
+            });
             return actions;
         }
 
@@ -3569,6 +3939,207 @@ impl WebsocketSessionState {
         actions.push(WebsocketFrameAction::Enqueue(text.to_string()));
 
         actions
+    }
+}
+
+struct WecomAibotSessionState {
+    heartbeat_interval_ms: u64,
+    max_missed_heartbeat_acks: u32,
+    missed_heartbeat_acks: u32,
+}
+
+impl WecomAibotSessionState {
+    fn new(heartbeat_interval_ms: u64, max_missed_heartbeat_acks: u32) -> Self {
+        Self {
+            heartbeat_interval_ms: heartbeat_interval_ms.max(1),
+            max_missed_heartbeat_acks: max_missed_heartbeat_acks.max(1),
+            missed_heartbeat_acks: 0,
+        }
+    }
+
+    fn reset_connection(&mut self) {
+        self.missed_heartbeat_acks = 0;
+    }
+
+    fn on_connected(&mut self, auth: Option<&ResolvedWebsocketAuth>) -> Vec<WebsocketFrameAction> {
+        let Some(ResolvedWebsocketAuth::WecomAibot { bot_id, secret }) = auth else {
+            return Vec::new();
+        };
+
+        build_wecom_aibot_subscribe_message(bot_id, secret)
+            .map(|payload| vec![WebsocketFrameAction::Send(payload)])
+            .unwrap_or_default()
+    }
+
+    fn heartbeat_tick(&mut self, channel_name: &str) -> WebsocketHeartbeatAction {
+        if self.missed_heartbeat_acks >= self.max_missed_heartbeat_acks {
+            tracing::warn!(
+                channel = %channel_name,
+                missed_heartbeat_acks = self.missed_heartbeat_acks,
+                max_missed_heartbeat_acks = self.max_missed_heartbeat_acks,
+                "Websocket heartbeat ack threshold exceeded; reconnecting"
+            );
+            return WebsocketHeartbeatAction::Reconnect;
+        }
+
+        self.missed_heartbeat_acks = self.missed_heartbeat_acks.saturating_add(1);
+        build_wecom_aibot_ping_message()
+            .map(WebsocketHeartbeatAction::Send)
+            .unwrap_or(WebsocketHeartbeatAction::None)
+    }
+
+    fn process_text_frame(&mut self, text: &str, channel_name: &str) -> Vec<WebsocketFrameAction> {
+        match parse_wecom_aibot_frame(text) {
+            WecomAibotIncomingFrame::Ack(ack) => {
+                if ack.req_id.starts_with("aibot_subscribe") {
+                    if ack.errcode != 0 {
+                        tracing::warn!(
+                            channel = %channel_name,
+                            req_id = %ack.req_id,
+                            errcode = ack.errcode,
+                            errmsg = ack.errmsg.as_deref().unwrap_or(""),
+                            "WeCom websocket auth failed; reconnecting"
+                        );
+                        return vec![WebsocketFrameAction::Reconnect {
+                            reset_session: false,
+                        }];
+                    }
+
+                    self.missed_heartbeat_acks = 0;
+                    return vec![WebsocketFrameAction::SetHeartbeat {
+                        interval_ms: self.heartbeat_interval_ms,
+                    }];
+                }
+
+                if ack.req_id.starts_with("ping") {
+                    if ack.errcode != 0 {
+                        tracing::warn!(
+                            channel = %channel_name,
+                            req_id = %ack.req_id,
+                            errcode = ack.errcode,
+                            errmsg = ack.errmsg.as_deref().unwrap_or(""),
+                            "WeCom websocket heartbeat ack returned error"
+                        );
+                    } else {
+                        self.missed_heartbeat_acks = 0;
+                    }
+                    return Vec::new();
+                }
+
+                vec![WebsocketFrameAction::Enqueue(text.to_string())]
+            }
+            WecomAibotIncomingFrame::Event {
+                disconnected: true, ..
+            } => {
+                tracing::warn!(
+                    channel = %channel_name,
+                    "WeCom websocket received disconnected_event; stopping runtime"
+                );
+                vec![
+                    WebsocketFrameAction::Enqueue(text.to_string()),
+                    WebsocketFrameAction::StopRuntime,
+                ]
+            }
+            WecomAibotIncomingFrame::Callback
+            | WecomAibotIncomingFrame::Event { .. }
+            | WecomAibotIncomingFrame::Unknown => {
+                vec![WebsocketFrameAction::Enqueue(text.to_string())]
+            }
+        }
+    }
+}
+
+enum WebsocketSessionState {
+    Discord(DiscordGatewaySessionState),
+    WecomAibot(WecomAibotSessionState),
+}
+
+impl WebsocketSessionState {
+    fn new(config: &WebsocketRuntimeConfig, auth: Option<&ResolvedWebsocketAuth>) -> Self {
+        match &config.protocol {
+            WebsocketProtocolConfig::DiscordGateway(_) => {
+                let identify_payload = match auth {
+                    Some(ResolvedWebsocketAuth::DiscordIdentify(payload)) => Some(payload.as_str()),
+                    _ => None,
+                };
+                Self::Discord(DiscordGatewaySessionState::new(identify_payload))
+            }
+            WebsocketProtocolConfig::WecomAibot(wecom) => {
+                Self::WecomAibot(WecomAibotSessionState::new(
+                    wecom.heartbeat_interval_ms,
+                    wecom.max_missed_heartbeat_acks,
+                ))
+            }
+        }
+    }
+
+    fn connect_url<'a>(&'a self, default_url: &'a str) -> &'a str {
+        match self {
+            Self::Discord(state) => state.connect_url(default_url),
+            Self::WecomAibot(_) => default_url,
+        }
+    }
+
+    fn reset_connection(&mut self) {
+        match self {
+            Self::Discord(state) => state.reset_connection(),
+            Self::WecomAibot(state) => state.reset_connection(),
+        }
+    }
+
+    fn invalidate_session(&mut self) {
+        if let Self::Discord(state) = self {
+            state.invalidate_session();
+        }
+    }
+
+    fn heartbeat_interval_ms(&self) -> Option<u64> {
+        match self {
+            Self::Discord(state) => state.heartbeat_interval_ms,
+            Self::WecomAibot(state) => Some(state.heartbeat_interval_ms),
+        }
+    }
+
+    fn on_connected(&mut self, auth: Option<&ResolvedWebsocketAuth>) -> Vec<WebsocketFrameAction> {
+        match self {
+            Self::Discord(_) => Vec::new(),
+            Self::WecomAibot(state) => state.on_connected(auth),
+        }
+    }
+
+    fn heartbeat_tick(&mut self, channel_name: &str) -> WebsocketHeartbeatAction {
+        match self {
+            Self::Discord(state) => build_websocket_heartbeat_message(state.last_sequence.clone())
+                .map(WebsocketHeartbeatAction::Send)
+                .unwrap_or(WebsocketHeartbeatAction::None),
+            Self::WecomAibot(state) => state.heartbeat_tick(channel_name),
+        }
+    }
+
+    fn process_text_frame(
+        &mut self,
+        text: &str,
+        channel_name: &str,
+        auth: Option<&ResolvedWebsocketAuth>,
+        workspace_store: &crate::channels::wasm::host::ChannelWorkspaceStore,
+        pairing_store: &PairingStore,
+    ) -> Vec<WebsocketFrameAction> {
+        match self {
+            Self::Discord(state) => {
+                let identify_payload = match auth {
+                    Some(ResolvedWebsocketAuth::DiscordIdentify(payload)) => Some(payload.as_str()),
+                    _ => None,
+                };
+                state.process_text_frame(
+                    text,
+                    channel_name,
+                    identify_payload,
+                    workspace_store,
+                    pairing_store,
+                )
+            }
+            Self::WecomAibot(state) => state.process_text_frame(text, channel_name),
+        }
     }
 }
 
@@ -4177,10 +4748,11 @@ mod tests {
     };
     use crate::channels::wasm::wrapper::{
         EmitDispatchContext, HttpResponse, TELEGRAM_TEST_API_BASE_ENV, WasmChannel,
-        WebsocketRuntimeConfig, build_discord_gateway_presence_update,
+        WebsocketProtocolConfig, WebsocketRuntimeConfig, build_discord_gateway_presence_update,
         build_websocket_identify_message, build_websocket_resume_message,
+        build_wecom_aibot_ping_message, build_wecom_aibot_subscribe_message,
         discord_gateway_presence_status, drain_guest_logs, parse_websocket_invalid_session,
-        parse_websocket_ready_session, should_warn_on_heartbeat_interval,
+        parse_websocket_ready_session, parse_wecom_aibot_frame, should_warn_on_heartbeat_interval,
         uses_owner_broadcast_target, websocket_heartbeat_sleep_duration,
         websocket_reconnect_backoff,
     };
@@ -4255,21 +4827,94 @@ mod tests {
 
         assert_eq!(config.url, "wss://gateway.discord.gg/?v=10&encoding=json");
         assert!(config.connect_on_start);
-        assert_eq!(
-            config.identify_secret_name.as_deref(),
-            Some("discord_bot_token")
-        );
-        assert_eq!(
-            config.identify,
-            Some(serde_json::json!({
-                "intents": 513,
-                "properties": {
-                    "os": "linux",
-                    "browser": "ironclaw",
-                    "device": "ironclaw"
-                }
-            }))
-        );
+        match config.protocol {
+            WebsocketProtocolConfig::DiscordGateway(discord) => {
+                assert_eq!(
+                    discord.identify_secret_name.as_deref(),
+                    Some("discord_bot_token")
+                );
+                assert_eq!(
+                    discord.identify,
+                    Some(serde_json::json!({
+                        "intents": 513,
+                        "properties": {
+                            "os": "linux",
+                            "browser": "ironclaw",
+                            "device": "ironclaw"
+                        }
+                    }))
+                );
+            }
+            WebsocketProtocolConfig::WecomAibot(_) => panic!("expected discord websocket config"),
+        }
+    }
+
+    #[test]
+    fn test_wecom_websocket_runtime_config_reads_capability_payload() {
+        let tool_capabilities = ToolCapabilities {
+            http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                "openws.work.weixin.qq.com",
+            )])),
+            websocket: Some(serde_json::json!({
+                "url": "wss://openws.work.weixin.qq.com",
+                "connect_on_start": true,
+                "protocol": "wecom_aibot",
+                "bot_id_secret_name": "wecom_bot_id",
+                "bot_secret_name": "wecom_bot_secret",
+                "heartbeat_interval_ms": 45000,
+                "max_missed_heartbeat_acks": 3
+            })),
+            ..Default::default()
+        };
+
+        let capabilities =
+            ChannelCapabilities::for_channel("wecom").with_tool_capabilities(tool_capabilities);
+
+        let config = WebsocketRuntimeConfig::from_capabilities(&capabilities)
+            .expect("websocket config should be parsed");
+
+        assert_eq!(config.url, "wss://openws.work.weixin.qq.com");
+        assert!(config.connect_on_start);
+        match config.protocol {
+            WebsocketProtocolConfig::WecomAibot(wecom) => {
+                assert_eq!(wecom.bot_id_secret_name, "wecom_bot_id");
+                assert_eq!(wecom.bot_secret_name, "wecom_bot_secret");
+                assert_eq!(wecom.heartbeat_interval_ms, 45_000);
+                assert_eq!(wecom.max_missed_heartbeat_acks, 3);
+            }
+            WebsocketProtocolConfig::DiscordGateway(_) => panic!("expected wecom websocket config"),
+        }
+    }
+
+    #[test]
+    fn test_wecom_websocket_runtime_config_accepts_legacy_secret_field_alias() {
+        let tool_capabilities = ToolCapabilities {
+            http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                "openws.work.weixin.qq.com",
+            )])),
+            websocket: Some(serde_json::json!({
+                "url": "wss://openws.work.weixin.qq.com",
+                "connect_on_start": true,
+                "protocol": "wecom-aibot",
+                "bot_id_secret_name": "wecom_bot_id",
+                "bot_secret_secret_name": "wecom_bot_secret"
+            })),
+            ..Default::default()
+        };
+
+        let capabilities =
+            ChannelCapabilities::for_channel("wecom").with_tool_capabilities(tool_capabilities);
+
+        let config = WebsocketRuntimeConfig::from_capabilities(&capabilities)
+            .expect("legacy websocket config should still be parsed");
+
+        match config.protocol {
+            WebsocketProtocolConfig::WecomAibot(wecom) => {
+                assert_eq!(wecom.bot_id_secret_name, "wecom_bot_id");
+                assert_eq!(wecom.bot_secret_name, "wecom_bot_secret");
+            }
+            WebsocketProtocolConfig::DiscordGateway(_) => panic!("expected wecom websocket config"),
+        }
     }
 
     #[test]
@@ -4308,6 +4953,87 @@ mod tests {
             ChannelCapabilities::for_channel("discord").with_tool_capabilities(tool_capabilities);
 
         assert!(WebsocketRuntimeConfig::from_capabilities(&capabilities).is_none());
+    }
+
+    #[test]
+    fn test_websocket_runtime_config_rejects_unknown_protocol() {
+        let tool_capabilities = ToolCapabilities {
+            http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                "gateway.discord.gg",
+            )])),
+            websocket: Some(serde_json::json!({
+                "url": "wss://gateway.discord.gg/?v=10&encoding=json",
+                "connect_on_start": true,
+                "protocol": "something_else"
+            })),
+            ..Default::default()
+        };
+
+        let capabilities =
+            ChannelCapabilities::for_channel("discord").with_tool_capabilities(tool_capabilities);
+
+        assert!(WebsocketRuntimeConfig::from_capabilities(&capabilities).is_none());
+    }
+
+    #[test]
+    fn test_build_wecom_aibot_messages_include_expected_commands() {
+        let subscribe = build_wecom_aibot_subscribe_message("bot-123", "secret-456").unwrap();
+        let subscribe_json: serde_json::Value = serde_json::from_str(&subscribe).unwrap();
+        assert_eq!(subscribe_json["cmd"], serde_json::json!("aibot_subscribe"));
+        assert_eq!(
+            subscribe_json["body"]["bot_id"],
+            serde_json::json!("bot-123")
+        );
+        assert_eq!(
+            subscribe_json["body"]["secret"],
+            serde_json::json!("secret-456")
+        );
+        assert!(
+            subscribe_json["headers"]["req_id"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("aibot_subscribe-"))
+        );
+
+        let ping = build_wecom_aibot_ping_message().unwrap();
+        let ping_json: serde_json::Value = serde_json::from_str(&ping).unwrap();
+        assert_eq!(ping_json["cmd"], serde_json::json!("ping"));
+        assert!(
+            ping_json["headers"]["req_id"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("ping-"))
+        );
+    }
+
+    #[test]
+    fn test_parse_wecom_aibot_frame_classifies_control_and_callback_frames() {
+        let auth_ack = serde_json::json!({
+            "headers": { "req_id": "aibot_subscribe-123" },
+            "errcode": 0,
+            "errmsg": "ok"
+        });
+        assert!(matches!(
+            parse_wecom_aibot_frame(&auth_ack.to_string()),
+            super::WecomAibotIncomingFrame::Ack(_)
+        ));
+
+        let callback = serde_json::json!({
+            "cmd": "aibot_msg_callback",
+            "headers": { "req_id": "req-1" },
+            "body": { "msgtype": "text" }
+        });
+        assert!(matches!(
+            parse_wecom_aibot_frame(&callback.to_string()),
+            super::WecomAibotIncomingFrame::Callback
+        ));
+
+        let disconnected_event = serde_json::json!({
+            "cmd": "aibot_event_callback",
+            "body": { "event": { "eventtype": "disconnected_event" } }
+        });
+        assert!(matches!(
+            parse_wecom_aibot_frame(&disconnected_event.to_string()),
+            super::WecomAibotIncomingFrame::Event { disconnected: true }
+        ));
     }
 
     #[test]
@@ -4538,6 +5264,7 @@ mod tests {
             &credentials,
             Vec::new(), // no host credentials in test
             Arc::new(PairingStore::new_noop()),
+            None,
             timeout,
             &workspace_store,
         )
@@ -5473,6 +6200,7 @@ mod tests {
             creds,
             Vec::new(),
             Arc::new(PairingStore::new_noop()),
+            None,
         );
 
         let error = format!(
@@ -5507,6 +6235,7 @@ mod tests {
             std::collections::HashMap::new(),
             Vec::new(),
             Arc::new(PairingStore::new_noop()),
+            None,
         );
 
         let input = "some error message";
@@ -5538,6 +6267,7 @@ mod tests {
             creds,
             host_creds,
             Arc::new(PairingStore::new_noop()),
+            None,
         );
 
         // Error containing URL-encoded form of the credential
@@ -5571,6 +6301,7 @@ mod tests {
             creds,
             Vec::new(),
             Arc::new(PairingStore::new_noop()),
+            None,
         );
 
         let input = "should not match anything";
@@ -5593,6 +6324,7 @@ mod tests {
             std::collections::HashMap::new(),
             Vec::new(),
             Arc::new(PairingStore::new_noop()),
+            None,
         );
 
         let result = super::near::agent::channel_host::Host::http_request(

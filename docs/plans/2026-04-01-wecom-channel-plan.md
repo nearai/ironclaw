@@ -45,6 +45,50 @@ Because of this, the practical MVP path in IronClaw is:
 This still gives us a useful enterprise WeChat channel while preserving a clean
 upgrade path to Bot WS later.
 
+## Bot-Primary Follow-up Direction
+
+Now that the callback + Agent API path exists, the next phase should move
+IronClaw toward the same model used by OpenClaw and the community plugin:
+
+- WeCom Bot WebSocket as the primary inbound and in-conversation reply path
+- WeCom Agent API as the proactive send and media fallback path
+- self-built app callback as an optional parallel inbound path, not the only
+  primary transport
+
+The critical design goal for this phase is to avoid introducing WeCom-specific
+host special cases. The host should support multiple websocket protocol modes,
+while the `wecom` channel remains responsible for WeCom message parsing and
+reply construction.
+
+### Current Bot-First Status
+
+The repository now has the first slice of this Bot-first phase in place:
+
+- the WASM host websocket runtime supports protocol modes for both
+  `discord-gateway` and `wecom-aibot`
+- the WIT host interface exposes a generic `websocket-send-text` function so a
+  channel can reply over an active websocket session without a WeCom-specific
+  host API
+- `wecom.capabilities.json` is now Bot-first:
+  - `wecom_bot_id` and `wecom_bot_secret` are required
+  - self-built app and callback secrets remain optional fallback transports
+- the `wecom` channel now consumes websocket callback frames in `on-poll`
+  and can send text replies over the Bot websocket path in `on-respond`
+- websocket inbound coverage now includes core Bot message shapes beyond plain
+  text, including `image`, `voice`, `file`, `video`, `mixed`, and quoted-text
+  context passthrough
+- websocket event handling now includes welcome-entry plus basic interactive
+  event mapping for template-card and feedback callbacks
+
+Still pending after this slice:
+
+- richer Bot reply coverage such as stream/markdown/card/media-specific reply
+  helpers
+- stronger req_id / ack tracking and any needed serialized reply queueing per
+  conversation
+- more complete event coverage and end-to-end validation against real WeCom Bot
+  traffic
+
 ## Recommended Scope
 
 ### MVP
@@ -101,6 +145,72 @@ Likely supporting modules:
 - Feishu and Telegram already show the intended WASM channel shape
 - WeCom is closer to a fresh external channel than a variant of Feishu or Telegram
 
+### Host WebSocket Runtime Generalization
+
+The current websocket runtime in `src/channels/wasm/wrapper.rs` should be
+treated as a reusable websocket shell plus protocol-specific adapters.
+
+Recommended split:
+
+- generic websocket lifecycle in host runtime:
+  - connect / disconnect / reconnect
+  - frame read/write loop
+  - bounded raw-frame queueing into workspace
+  - triggering `on-poll`
+  - generic channel-to-host websocket text send
+- protocol-specific state machine:
+  - `discord-gateway`
+  - `wecom-aibot`
+
+Avoid:
+
+- `if channel_name == "wecom"` branches in the host runtime
+- reusing Discord `identify` / `resume` / `READY` assumptions for WeCom
+- adding WeCom-only host imports when a generic websocket send primitive works
+
+### WeCom AIBot WebSocket Protocol Notes
+
+Based on the official `@wecom/aibot-node-sdk`, the Bot WebSocket path looks like:
+
+- default websocket URL:
+  - `wss://openws.work.weixin.qq.com`
+- auth frame:
+  - `{"cmd":"aibot_subscribe","headers":{"req_id":"..."},"body":{"bot_id":"...","secret":"..."}}`
+- heartbeat frame:
+  - `{"cmd":"ping","headers":{"req_id":"..."}}`
+- inbound message callback:
+  - `cmd = "aibot_msg_callback"`
+- inbound event callback:
+  - `cmd = "aibot_event_callback"`
+- auth / heartbeat ack:
+  - no `cmd`, but `headers.req_id` plus `errcode` / `errmsg`
+
+This differs enough from Discord that it should be implemented as a first-class
+protocol mode rather than as more logic inside the existing Discord state
+machine.
+
+### Host ABI Addition
+
+To support Bot-first replies cleanly, the WASM channel host should expose a
+generic websocket send primitive via WIT, for example:
+
+- `websocket-send-text(payload: string) -> result<_, string>`
+
+This allows `on-respond` to send a Bot reply frame through the active websocket
+connection without introducing a WeCom-only host API.
+
+### WeCom Channel Responsibilities In Bot Phase
+
+The `wecom` channel should own:
+
+- parsing `aibot_msg_callback` and `aibot_event_callback` frames in `on-poll`
+- mapping Bot message/event payloads to `IncomingMessage`
+- building WeCom Bot reply frames in `on-respond`
+- deciding when to use Bot reply vs Agent API fallback
+
+The host should not interpret WeCom business payloads beyond websocket protocol
+control behavior.
+
 ## Config Model
 
 Suggested config shape:
@@ -115,10 +225,13 @@ Suggested config shape:
 - `allow_from`
 - `polling_enabled` or equivalent reconnect control
 - `inbound_merge_window_ms`
+- `bot_transport_enabled`
+- `callback_transport_enabled`
 
 ### Secret Model
 
-Required secrets for MVP should be split by transport:
+Secrets should be split by transport, with Bot credentials treated as the
+primary path in the Bot-first phase:
 
 - Bot WS:
   - `wecom_bot_id`
@@ -129,7 +242,19 @@ Required secrets for MVP should be split by transport:
   - `wecom_corp_secret`
   - `wecom_agent_id`
 
+- Callback inbound:
+  - `wecom_callback_token`
+  - `wecom_callback_encoding_aes_key`
+
 Keep secrets owner-scoped like other WASM channels.
+
+Practical setup posture:
+
+- Bot-only should be enough for a minimal chat bot experience
+- Agent credentials should remain optional but strongly recommended for media and
+  proactive sends
+- callback credentials should be optional when users want parallel self-built app
+  inbound
 
 ## Runtime State
 
@@ -207,6 +332,16 @@ Add Bot WS for:
 - richer reply behavior
 - closer parity with OpenClaw's official path
 
+Recommended Phase 2 implementation order:
+
+1. generalize host websocket runtime into protocol modes
+2. add generic websocket send host capability
+3. add `wecom-aibot` websocket capability config
+4. implement WeCom Bot inbound parsing in `on-poll`
+5. implement WeCom Bot text reply path in `on-respond`
+6. preserve Agent API as fallback / supplement
+7. keep callback inbound optional and parallel
+
 This keeps us aligned with the external reference direction without blocking the
 first PR on host websocket runtime changes.
 
@@ -218,30 +353,40 @@ first PR on host websocket runtime changes.
 - auth display info
 - setup secrets
 - HTTP allowlist for WeCom APIs
-- optional websocket-related config if needed by runtime
+- websocket config with explicit protocol mode
 - owner-scoped config defaults
+
+For the Bot-first phase, prefer an explicit websocket config shape such as:
+
+- `protocol = "wecom-aibot"`
+- `url = "wss://openws.work.weixin.qq.com"`
+- `connect_on_start = true`
+- `bot_id_secret_name = "wecom_bot_id"`
+- `bot_secret_name = "wecom_bot_secret"`
+- optional heartbeat / reconnect tuning if the runtime exposes it
 
 Potential domains will depend on the final WeCom endpoints, but keep them tightly allowlisted.
 
 ## Suggested Development Order
 
-1. Scaffold `channels-src/wecom`
-2. Add `wecom.capabilities.json`
-3. Register in registry / bundles
-4. Implement config parsing and workspace state
-5. Implement Bot WS connect/auth lifecycle
-6. Implement text inbound -> emit message
-7. Implement text outbound reply
-8. Add image/file/voice inbound
-9. Add dedupe
-10. Add merge window
-11. Add Agent API outbound supplement
-12. Add docs and parity updates
+1. Generalize host websocket runtime into protocol modes
+2. Add generic websocket text send host capability
+3. Extend `wecom.capabilities.json` for Bot WS primary config
+4. Implement WeCom Bot WS connect/auth/heartbeat lifecycle
+5. Implement Bot text inbound -> emit message
+6. Implement Bot text outbound reply
+7. Restore Agent API as fallback / supplement
+8. Add image/file/voice/video Bot inbound coverage
+9. Add req_id + msg_id dedupe
+10. Revisit merge window after runtime timing support
+11. Add docs and parity updates
 
 ## Tests
 
 Initial test targets:
 
+- websocket runtime protocol parsing for `discord-gateway` vs `wecom-aibot`
+- WeCom auth / heartbeat / ack frame handling
 - config parsing
 - token expiry / refresh behavior
 - message dedupe state
@@ -259,8 +404,8 @@ When implementation starts, update:
 
 ## Open Questions
 
-- exact WeCom Bot WS auth handshake shape
 - exact Agent API media upload flow
 - whether Bot WS supports all required reply media types
-- whether callback inbound should be added in PR 1 or deferred
+- whether callback inbound should stay enabled by default once Bot WS exists, or
+  be opt-in parallel inbound
 - whether quoted-message context should be part of MVP

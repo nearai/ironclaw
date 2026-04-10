@@ -3,46 +3,58 @@
   "wit_version": "0.3.0",
   "type": "channel",
   "name": "wecom",
-  "description": "WeCom self-built app callback channel for receiving and responding to Enterprise WeChat messages",
+  "description": "WeCom bot-first channel with bot WebSocket sessions plus optional self-built app fallback for proactive send and callback inbound",
   "auth": {
-    "secret_name": "wecom_corp_id",
+    "secret_name": "wecom_bot_id",
     "display_name": "WeCom",
-    "instructions": "Create a WeCom self-built application, enable message callbacks, and collect Corp ID, Corp Secret, Agent ID, callback Token, and callback EncodingAESKey. This MVP uses HTTP callback + Agent API rather than the bot WebSocket path.",
+    "instructions": "Create a WeCom intelligent bot and collect Bot ID and Bot Secret for the primary websocket session path. Optionally configure a self-built app with Corp ID, Corp Secret, Agent ID, callback Token, and callback EncodingAESKey for Agent API fallback and callback inbound.",
     "setup_url": "https://open.work.weixin.qq.com/",
-    "token_hint": "Corp ID looks like wwxxxx..., Agent ID is numeric, callback EncodingAESKey is 43 characters",
-    "env_var": "WECOM_CORP_ID"
+    "token_hint": "Bot ID/Secret come from WeCom bot setup; Corp ID looks like wwxxxx..., Agent ID is numeric, callback EncodingAESKey is 43 characters",
+    "env_var": "WECOM_BOT_ID"
   },
   "setup": {
     "required_secrets": [
       {
-        "name": "wecom_corp_id",
-        "prompt": "Enter your WeCom Corp ID (for example wwxxxx...)",
-        "validation": "^ww[a-zA-Z0-9]{16}$",
+        "name": "wecom_bot_id",
+        "prompt": "Enter your WeCom Bot ID",
+        "validation": "^[A-Za-z0-9_-]{3,128}$",
         "optional": false
       },
       {
-        "name": "wecom_corp_secret",
-        "prompt": "Enter your WeCom self-built app Corp Secret",
+        "name": "wecom_bot_secret",
+        "prompt": "Enter your WeCom Bot Secret",
         "validation": "^[A-Za-z0-9_-]{16,128}$",
         "optional": false
       },
       {
+        "name": "wecom_corp_id",
+        "prompt": "Enter your WeCom Corp ID (optional app fallback, for example wwxxxx...)",
+        "validation": "^ww[a-zA-Z0-9]{16}$",
+        "optional": true
+      },
+      {
+        "name": "wecom_corp_secret",
+        "prompt": "Enter your WeCom self-built app Corp Secret (optional app fallback)",
+        "validation": "^[A-Za-z0-9_-]{16,128}$",
+        "optional": true
+      },
+      {
         "name": "wecom_agent_id",
-        "prompt": "Enter your WeCom Agent ID (numeric)",
+        "prompt": "Enter your WeCom Agent ID (optional app fallback, numeric)",
         "validation": "^[1-9][0-9]{0,15}$",
-        "optional": false
+        "optional": true
       },
       {
         "name": "wecom_callback_token",
-        "prompt": "Enter your WeCom callback Token",
+        "prompt": "Enter your WeCom callback Token (optional callback inbound)",
         "validation": "^[A-Za-z0-9._~-]{3,128}$",
-        "optional": false
+        "optional": true
       },
       {
         "name": "wecom_callback_encoding_aes_key",
-        "prompt": "Enter your WeCom callback EncodingAESKey (43 chars)",
+        "prompt": "Enter your WeCom callback EncodingAESKey (optional callback inbound, 43 chars)",
         "validation": "^[A-Za-z0-9]{43}$",
-        "optional": false
+        "optional": true
       }
     ],
     "setup_url": "https://open.work.weixin.qq.com/",
@@ -51,13 +63,23 @@
   "capabilities": {
     "http": {
       "allowlist": [
-        { "host": "qyapi.weixin.qq.com", "path_prefix": "/cgi-bin/" }
+        { "host": "qyapi.weixin.qq.com", "path_prefix": "/cgi-bin/" },
+        { "host": "openws.work.weixin.qq.com", "path_prefix": "/", "methods": ["GET"] }
       ],
       "max_response_bytes": 20971520,
       "rate_limit": {
         "requests_per_minute": 60,
         "requests_per_hour": 2000
       }
+    },
+    "websocket": {
+      "url": "wss://openws.work.weixin.qq.com",
+      "connect_on_start": true,
+      "protocol": "wecom_aibot",
+      "bot_id_secret_name": "wecom_bot_id",
+      "bot_secret_name": "wecom_bot_secret",
+      "heartbeat_interval_ms": 30000,
+      "max_missed_heartbeat_acks": 2
     },
     "secrets": {
       "allowed_names": ["wecom_*"]

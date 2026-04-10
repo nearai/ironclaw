@@ -1,14 +1,9 @@
-//! WeCom self-built app callback channel for IronClaw.
+//! WeCom channel for IronClaw.
 //!
-//! This initial MVP uses WeCom's HTTP callback + Agent API path:
-//! - inbound messages arrive through `/webhook/wecom`
-//! - outbound replies use `cgi-bin/message/send`
-//! - media uploads use `cgi-bin/media/upload`
-//!
-//! The official OpenClaw WeCom plugin primarily uses the bot websocket path.
-//! IronClaw's current WASM websocket runtime is still Discord-shaped, so this
-//! channel starts with the callback path while we evaluate a more generic WS
-//! runtime later.
+//! Current shape:
+//! - bot websocket is the primary session path for inbound text/events and text replies
+//! - self-built app callback remains available for inbound webhook delivery
+//! - Agent API remains the fallback path for proactive send and attachment send
 
 wit_bindgen::generate!({
     world: "sandboxed-channel",
@@ -21,6 +16,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use cbc::Decryptor;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha1::{Digest, Sha1};
 use subtle::ConstantTimeEq;
 
@@ -43,6 +39,10 @@ const CALLBACK_AES_KEY_PATH: &str = "callback_encoding_aes_key";
 const TOKEN_PATH: &str = "tenant_access_token";
 const TOKEN_EXPIRY_PATH: &str = "token_expiry";
 const RECENT_MSG_IDS_PATH: &str = "recent_msg_ids";
+const WEBSOCKET_EVENT_QUEUE_PATH: &str = "state/gateway_event_queue_processing";
+
+const WECOM_WS_REPLY_CMD: &str = "aibot_respond_msg";
+const WECOM_WS_WELCOME_CMD: &str = "aibot_respond_welcome_msg";
 
 const TEXT_CHUNK_LIMIT_BYTES: usize = 1800;
 const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
@@ -70,6 +70,10 @@ struct WecomConfig {
 struct WecomMessageMetadata {
     to_user: String,
     source_msg_id: Option<String>,
+    ws_req_id: Option<String>,
+    ws_chat_id: Option<String>,
+    ws_chat_type: Option<String>,
+    ws_reply_cmd: Option<String>,
 }
 
 #[derive(Debug)]
@@ -95,6 +99,115 @@ struct ParsedCallbackEvent {
 enum ParsedCallbackPayload {
     Message(ParsedCallbackMessage),
     Event(ParsedCallbackEvent),
+}
+
+#[derive(Debug, Clone)]
+enum PairingReplyRoute {
+    AgentApi { to_user: String },
+    Websocket { req_id: String, reply_cmd: String },
+}
+
+#[derive(Debug, Deserialize)]
+struct WecomWsFrame<T> {
+    headers: WecomWsHeaders,
+    body: T,
+}
+
+#[derive(Debug, Deserialize)]
+struct WecomWsHeaders {
+    req_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WecomWsSender {
+    userid: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WecomWsTextContent {
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WecomWsBinaryContent {
+    url: String,
+    #[serde(default)]
+    aeskey: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WecomWsMixedItem {
+    #[serde(default, alias = "msgtype", alias = "type", alias = "itemtype")]
+    item_type: Option<String>,
+    #[serde(default)]
+    text: Option<WecomWsTextContent>,
+    #[serde(default)]
+    image: Option<WecomWsBinaryContent>,
+    #[serde(default)]
+    file: Option<WecomWsBinaryContent>,
+    #[serde(default)]
+    video: Option<WecomWsBinaryContent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WecomWsMixedContent {
+    #[serde(default, alias = "msgItem", alias = "items")]
+    msg_item: Vec<WecomWsMixedItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WecomWsQuoteContent {
+    #[serde(default, alias = "msgtype", alias = "type")]
+    msg_type: Option<String>,
+    #[serde(default)]
+    text: Option<WecomWsTextContent>,
+    #[serde(default)]
+    voice: Option<WecomWsTextContent>,
+    #[serde(default)]
+    content: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WecomWsMessageBody {
+    msgid: String,
+    #[serde(default)]
+    chatid: Option<String>,
+    #[serde(default)]
+    chattype: Option<String>,
+    from: WecomWsSender,
+    msgtype: String,
+    #[serde(default)]
+    text: Option<WecomWsTextContent>,
+    #[serde(default)]
+    voice: Option<WecomWsTextContent>,
+    #[serde(default)]
+    image: Option<WecomWsBinaryContent>,
+    #[serde(default)]
+    file: Option<WecomWsBinaryContent>,
+    #[serde(default)]
+    video: Option<WecomWsBinaryContent>,
+    #[serde(default)]
+    mixed: Option<WecomWsMixedContent>,
+    #[serde(default)]
+    quote: Option<WecomWsQuoteContent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WecomWsEventBody {
+    msgid: String,
+    #[serde(default)]
+    chatid: Option<String>,
+    #[serde(default)]
+    chattype: Option<String>,
+    from: WecomWsSender,
+    event: WecomWsEvent,
+}
+
+#[derive(Debug, Deserialize)]
+struct WecomWsEvent {
+    eventtype: String,
+    #[serde(flatten)]
+    extra: JsonMap<String, JsonValue>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -458,7 +571,23 @@ fn load_allow_from() -> Vec<String> {
     allowed
 }
 
-fn is_sender_allowed(sender_id: &str) -> Result<bool, String> {
+fn send_pairing_reply(route: &PairingReplyRoute, code: &str) -> Result<(), String> {
+    let content = format!(
+        "This WeCom channel requires approval before chatting. Pairing code: {}",
+        code
+    );
+    match route {
+        PairingReplyRoute::AgentApi { to_user } => send_text_message(to_user, &content),
+        PairingReplyRoute::Websocket { req_id, reply_cmd } => {
+            send_websocket_text_reply(req_id, reply_cmd, &content)
+        }
+    }
+}
+
+fn is_sender_allowed(
+    sender_id: &str,
+    pairing_reply: Option<PairingReplyRoute>,
+) -> Result<bool, String> {
     let owner_id = channel_host::workspace_read(OWNER_ID_PATH).filter(|s| !s.is_empty());
     if owner_id.as_deref() == Some(sender_id) {
         return Ok(true);
@@ -482,13 +611,9 @@ fn is_sender_allowed(sender_id: &str) -> Result<bool, String> {
         let meta = serde_json::json!({ "user_id": sender_id }).to_string();
         let result = channel_host::pairing_upsert_request(CHANNEL_NAME, sender_id, &meta)?;
         if result.created {
-            let _ = send_text_message(
-                sender_id,
-                &format!(
-                    "This WeCom channel requires approval before chatting. Pairing code: {}",
-                    result.code
-                ),
-            );
+            if let Some(reply_route) = pairing_reply {
+                let _ = send_pairing_reply(&reply_route, &result.code);
+            }
         }
     }
 
@@ -895,6 +1020,468 @@ fn chunk_text(text: &str, limit_bytes: usize) -> Vec<String> {
     chunks
 }
 
+fn build_websocket_text_reply_payloads(
+    req_id: &str,
+    reply_cmd: &str,
+    content: &str,
+) -> Result<Vec<String>, String> {
+    let mut payloads = Vec::new();
+    for chunk in chunk_text(content, TEXT_CHUNK_LIMIT_BYTES) {
+        let payload = serde_json::json!({
+            "cmd": reply_cmd,
+            "headers": {
+                "req_id": req_id,
+            },
+            "body": {
+                "msgtype": "text",
+                "text": {
+                    "content": chunk,
+                }
+            }
+        });
+        payloads.push(
+            serde_json::to_string(&payload)
+                .map_err(|e| format!("Failed to serialize WeCom websocket reply: {e}"))?,
+        );
+    }
+    Ok(payloads)
+}
+
+fn send_websocket_text_reply(req_id: &str, reply_cmd: &str, content: &str) -> Result<(), String> {
+    for payload in build_websocket_text_reply_payloads(req_id, reply_cmd, content)? {
+        channel_host::websocket_send_text(&payload)
+            .map_err(|e| format!("Failed to send WeCom websocket reply: {e}"))?;
+    }
+    Ok(())
+}
+
+fn websocket_fallback_target(sender_id: &str, chat_type: Option<&str>) -> String {
+    if chat_type == Some("group") {
+        String::new()
+    } else {
+        sender_id.to_string()
+    }
+}
+
+fn websocket_metadata_json(
+    sender_id: &str,
+    msg_id: &str,
+    req_id: &str,
+    chat_id: Option<&str>,
+    chat_type: Option<&str>,
+    reply_cmd: &str,
+) -> Result<String, String> {
+    serde_json::to_string(&WecomMessageMetadata {
+        to_user: websocket_fallback_target(sender_id, chat_type),
+        source_msg_id: Some(msg_id.to_string()),
+        ws_req_id: Some(req_id.to_string()),
+        ws_chat_id: chat_id.map(ToOwned::to_owned),
+        ws_chat_type: chat_type.map(ToOwned::to_owned),
+        ws_reply_cmd: Some(reply_cmd.to_string()),
+    })
+    .map_err(|e| format!("Failed to serialize WeCom websocket metadata: {e}"))
+}
+
+fn websocket_attachment_from_binary(
+    msg_id: &str,
+    msg_type: &str,
+    content: &WecomWsBinaryContent,
+) -> InboundAttachment {
+    let (mime_type, extension) = match msg_type {
+        "image" => ("image/*", "img"),
+        "video" => ("video/*", "video"),
+        _ => ("application/octet-stream", "bin"),
+    };
+
+    InboundAttachment {
+        id: format!("{msg_id}:{msg_type}"),
+        mime_type: mime_type.to_string(),
+        filename: Some(format!("{msg_id}.{extension}")),
+        size_bytes: None,
+        source_url: Some(content.url.clone()),
+        storage_key: None,
+        extracted_text: None,
+        extras_json: serde_json::json!({
+            "aeskey": content.aeskey,
+            "wecom_ws_msgtype": msg_type,
+        })
+        .to_string(),
+    }
+}
+
+fn websocket_quote_context(quote: Option<&WecomWsQuoteContent>) -> Option<String> {
+    let quote = quote?;
+    let quoted_text = quote
+        .text
+        .as_ref()
+        .map(|text| text.content.trim())
+        .filter(|text| !text.is_empty())
+        .or_else(|| {
+            quote
+                .voice
+                .as_ref()
+                .map(|voice| voice.content.trim())
+                .filter(|text| !text.is_empty())
+        })
+        .or_else(|| {
+            quote
+                .content
+                .as_deref()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+        })?;
+
+    let quote_kind = quote
+        .msg_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|kind| !kind.is_empty())
+        .unwrap_or("message");
+    Some(format!("Quoted {quote_kind}: {quoted_text}"))
+}
+
+fn with_websocket_quote_context(content: String, quote: Option<&WecomWsQuoteContent>) -> String {
+    match websocket_quote_context(quote) {
+        Some(quoted) if content.trim().is_empty() => quoted,
+        Some(quoted) => format!("{quoted}\n\n{content}"),
+        None => content,
+    }
+}
+
+fn websocket_event_summary(event: &WecomWsEvent) -> Option<String> {
+    match event.eventtype.as_str() {
+        "enter_chat" => Some("User entered the WeCom bot chat.".to_string()),
+        "template_card_event" => {
+            let event_key = event
+                .extra
+                .get("event_key")
+                .or_else(|| event.extra.get("eventKey"))
+                .and_then(JsonValue::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            Some(match event_key {
+                Some(key) => format!("User clicked a WeCom template card action: {key}"),
+                None => "User clicked a WeCom template card action.".to_string(),
+            })
+        }
+        "feedback_event" => {
+            let score = event
+                .extra
+                .get("score")
+                .or_else(|| event.extra.get("rating"))
+                .and_then(JsonValue::as_i64);
+            Some(match score {
+                Some(score) => format!("User submitted WeCom feedback with score {score}."),
+                None => "User submitted WeCom feedback.".to_string(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn infer_mixed_item_type(item: &WecomWsMixedItem) -> &str {
+    item.item_type
+        .as_deref()
+        .filter(|kind| !kind.trim().is_empty())
+        .unwrap_or_else(|| {
+            if item.text.is_some() {
+                "text"
+            } else if item.image.is_some() {
+                "image"
+            } else if item.file.is_some() {
+                "file"
+            } else if item.video.is_some() {
+                "video"
+            } else {
+                "unknown"
+            }
+        })
+}
+
+fn websocket_mixed_content_parts(
+    msg_id: &str,
+    mixed: &WecomWsMixedContent,
+) -> (String, Vec<InboundAttachment>) {
+    let mut text_parts = Vec::new();
+    let mut attachments = Vec::new();
+
+    for (index, item) in mixed.msg_item.iter().enumerate() {
+        match infer_mixed_item_type(item) {
+            "text" => {
+                if let Some(text) = item
+                    .text
+                    .as_ref()
+                    .map(|text| text.content.trim())
+                    .filter(|text| !text.is_empty())
+                {
+                    text_parts.push(text.to_string());
+                }
+            }
+            "image" => {
+                if let Some(image) = item.image.as_ref() {
+                    attachments.push(websocket_attachment_from_binary(
+                        &format!("{msg_id}:{index}"),
+                        "image",
+                        image,
+                    ));
+                }
+            }
+            "file" => {
+                if let Some(file) = item.file.as_ref() {
+                    attachments.push(websocket_attachment_from_binary(
+                        &format!("{msg_id}:{index}"),
+                        "file",
+                        file,
+                    ));
+                }
+            }
+            "video" => {
+                if let Some(video) = item.video.as_ref() {
+                    attachments.push(websocket_attachment_from_binary(
+                        &format!("{msg_id}:{index}"),
+                        "video",
+                        video,
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (text_parts.join("\n"), attachments)
+}
+
+fn handle_websocket_message_frame(frame: WecomWsFrame<WecomWsMessageBody>) {
+    let body = frame.body;
+    if !should_process_message_id(&body.msgid) {
+        return;
+    }
+
+    let sender_id = body.from.userid;
+    match is_sender_allowed(
+        &sender_id,
+        Some(PairingReplyRoute::Websocket {
+            req_id: frame.headers.req_id.clone(),
+            reply_cmd: WECOM_WS_REPLY_CMD.to_string(),
+        }),
+    ) {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            channel_host::log(
+                channel_host::LogLevel::Error,
+                &format!("WeCom websocket sender authorization failed: {error}"),
+            );
+            return;
+        }
+    }
+
+    let mut attachments = Vec::new();
+    let content = match body.msgtype.as_str() {
+        "text" => body.text.map(|text| text.content).unwrap_or_default(),
+        "voice" => body.voice.map(|voice| voice.content).unwrap_or_default(),
+        "markdown" => body.text.map(|text| text.content).unwrap_or_default(),
+        "image" => {
+            if let Some(image) = body.image.as_ref() {
+                attachments.push(websocket_attachment_from_binary(
+                    &body.msgid,
+                    "image",
+                    image,
+                ));
+            }
+            String::new()
+        }
+        "file" => {
+            if let Some(file) = body.file.as_ref() {
+                attachments.push(websocket_attachment_from_binary(&body.msgid, "file", file));
+            }
+            String::new()
+        }
+        "video" => {
+            if let Some(video) = body.video.as_ref() {
+                attachments.push(websocket_attachment_from_binary(
+                    &body.msgid,
+                    "video",
+                    video,
+                ));
+            }
+            String::new()
+        }
+        "mixed" => {
+            if let Some(mixed) = body.mixed.as_ref() {
+                let (mixed_text, mixed_attachments) =
+                    websocket_mixed_content_parts(&body.msgid, mixed);
+                attachments.extend(mixed_attachments);
+                mixed_text
+            } else {
+                String::new()
+            }
+        }
+        other => {
+            channel_host::log(
+                channel_host::LogLevel::Info,
+                &format!("Ignoring unsupported WeCom websocket message type: {other}"),
+            );
+            return;
+        }
+    };
+    let content = with_websocket_quote_context(content, body.quote.as_ref());
+
+    let metadata_json = match websocket_metadata_json(
+        &sender_id,
+        &body.msgid,
+        &frame.headers.req_id,
+        body.chatid.as_deref(),
+        body.chattype.as_deref(),
+        WECOM_WS_REPLY_CMD,
+    ) {
+        Ok(json) => json,
+        Err(error) => {
+            channel_host::log(channel_host::LogLevel::Error, &error);
+            return;
+        }
+    };
+
+    channel_host::emit_message(&EmittedMessage {
+        user_id: sender_id,
+        user_name: None,
+        content,
+        thread_id: None,
+        metadata_json,
+        attachments,
+    });
+}
+
+fn handle_websocket_event_frame(frame: WecomWsFrame<WecomWsEventBody>) {
+    let body = frame.body;
+    if !should_process_message_id(&body.msgid) {
+        return;
+    }
+
+    let Some(content) = websocket_event_summary(&body.event) else {
+        channel_host::log(
+            channel_host::LogLevel::Info,
+            &format!(
+                "Ignoring WeCom websocket event type: {}",
+                body.event.eventtype
+            ),
+        );
+        return;
+    };
+
+    let reply_cmd = if body.event.eventtype == "enter_chat" {
+        WECOM_WS_WELCOME_CMD
+    } else {
+        WECOM_WS_REPLY_CMD
+    };
+
+    let sender_id = body.from.userid;
+    match is_sender_allowed(
+        &sender_id,
+        Some(PairingReplyRoute::Websocket {
+            req_id: frame.headers.req_id.clone(),
+            reply_cmd: reply_cmd.to_string(),
+        }),
+    ) {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            channel_host::log(
+                channel_host::LogLevel::Error,
+                &format!("WeCom websocket sender authorization failed: {error}"),
+            );
+            return;
+        }
+    }
+
+    let metadata_json = match websocket_metadata_json(
+        &sender_id,
+        &body.msgid,
+        &frame.headers.req_id,
+        body.chatid.as_deref(),
+        body.chattype.as_deref(),
+        reply_cmd,
+    ) {
+        Ok(json) => json,
+        Err(error) => {
+            channel_host::log(channel_host::LogLevel::Error, &error);
+            return;
+        }
+    };
+
+    channel_host::emit_message(&EmittedMessage {
+        user_id: sender_id,
+        user_name: None,
+        content,
+        thread_id: None,
+        metadata_json,
+        attachments: Vec::new(),
+    });
+}
+
+fn process_websocket_event_queue() {
+    let queue_json = channel_host::workspace_read(WEBSOCKET_EVENT_QUEUE_PATH).unwrap_or_default();
+    if queue_json.trim().is_empty() || queue_json.trim() == "[]" {
+        return;
+    }
+
+    let frames: Vec<String> = match serde_json::from_str(&queue_json) {
+        Ok(value) => value,
+        Err(error) => {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("Failed to deserialize WeCom websocket queue: {error}"),
+            );
+            let _ = channel_host::workspace_write(WEBSOCKET_EVENT_QUEUE_PATH, "[]");
+            return;
+        }
+    };
+
+    if let Err(error) = channel_host::workspace_write(WEBSOCKET_EVENT_QUEUE_PATH, "[]") {
+        channel_host::log(
+            channel_host::LogLevel::Warn,
+            &format!("Failed to clear WeCom websocket queue: {error}"),
+        );
+    }
+
+    for frame in frames {
+        let cmd = serde_json::from_str::<serde_json::Value>(&frame)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("cmd")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            });
+
+        match cmd.as_deref() {
+            Some("aibot_msg_callback") => {
+                match serde_json::from_str::<WecomWsFrame<WecomWsMessageBody>>(&frame) {
+                    Ok(parsed) => handle_websocket_message_frame(parsed),
+                    Err(error) => channel_host::log(
+                        channel_host::LogLevel::Warn,
+                        &format!("Failed to parse WeCom websocket message frame: {error}"),
+                    ),
+                }
+            }
+            Some("aibot_event_callback") => {
+                match serde_json::from_str::<WecomWsFrame<WecomWsEventBody>>(&frame) {
+                    Ok(parsed) => handle_websocket_event_frame(parsed),
+                    Err(error) => channel_host::log(
+                        channel_host::LogLevel::Warn,
+                        &format!("Failed to parse WeCom websocket event frame: {error}"),
+                    ),
+                }
+            }
+            Some(other) => channel_host::log(
+                channel_host::LogLevel::Debug,
+                &format!("Ignoring WeCom websocket control frame: {other}"),
+            ),
+            None => {}
+        }
+    }
+}
+
 fn update_recent_message_ids(
     existing_json: Option<&str>,
     msg_id: &str,
@@ -957,7 +1544,12 @@ fn handle_callback_message(parsed: ParsedCallbackMessage) {
 
     let sender_id = parsed.sender_id.clone();
 
-    match is_sender_allowed(&sender_id) {
+    match is_sender_allowed(
+        &sender_id,
+        Some(PairingReplyRoute::AgentApi {
+            to_user: sender_id.clone(),
+        }),
+    ) {
         Ok(true) => {}
         Ok(false) => return,
         Err(error) => {
@@ -990,6 +1582,10 @@ fn handle_callback_message(parsed: ParsedCallbackMessage) {
     let metadata = WecomMessageMetadata {
         to_user: sender_id.clone(),
         source_msg_id: Some(parsed.msg_id),
+        ws_req_id: None,
+        ws_chat_id: None,
+        ws_chat_type: None,
+        ws_reply_cmd: None,
     };
     let metadata_json = match serde_json::to_string(&metadata) {
         Ok(json) => json,
@@ -1088,13 +1684,24 @@ impl Guest for WecomChannel {
             }
         }
 
+        let callback_enabled = channel_host::workspace_read(CALLBACK_TOKEN_PATH)
+            .filter(|value| !value.trim().is_empty())
+            .is_some()
+            && channel_host::workspace_read(CALLBACK_AES_KEY_PATH)
+                .filter(|value| !value.trim().is_empty())
+                .is_some();
+
         Ok(ChannelConfig {
             display_name: "WeCom".to_string(),
-            http_endpoints: vec![HttpEndpointConfig {
-                path: "/webhook/wecom".to_string(),
-                methods: vec!["GET".to_string(), "POST".to_string()],
-                require_secret: false,
-            }],
+            http_endpoints: if callback_enabled {
+                vec![HttpEndpointConfig {
+                    path: "/webhook/wecom".to_string(),
+                    methods: vec!["GET".to_string(), "POST".to_string()],
+                    require_secret: false,
+                }]
+            } else {
+                Vec::new()
+            },
             poll: None,
         })
     }
@@ -1169,11 +1776,33 @@ impl Guest for WecomChannel {
         text_response(200, "success")
     }
 
-    fn on_poll() {}
+    fn on_poll() {
+        process_websocket_event_queue();
+    }
 
     fn on_respond(response: AgentResponse) -> Result<(), String> {
         let metadata: WecomMessageMetadata = serde_json::from_str(&response.metadata_json)
             .map_err(|e| format!("Failed to parse WeCom response metadata: {e}"))?;
+
+        if let Some(req_id) = metadata.ws_req_id.as_deref() {
+            let reply_cmd = metadata
+                .ws_reply_cmd
+                .as_deref()
+                .unwrap_or(WECOM_WS_REPLY_CMD);
+            if !response.content.trim().is_empty() {
+                send_websocket_text_reply(req_id, reply_cmd, &response.content)?;
+            }
+            for attachment in &response.attachments {
+                if metadata.to_user.trim().is_empty() {
+                    return Err(
+                        "WeCom websocket attachment fallback requires a direct-message sender"
+                            .to_string(),
+                    );
+                }
+                send_media_message(&metadata.to_user, attachment)?;
+            }
+            return Ok(());
+        }
 
         if !response.content.trim().is_empty() {
             send_text_message(&metadata.to_user, &response.content)?;
@@ -1236,7 +1865,7 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_expose_expected_webhook_path_and_required_secrets() {
+    fn capabilities_expose_expected_webhook_path_and_bot_first_setup() {
         let caps: serde_json::Value =
             serde_json::from_str(WECOM_CAPABILITIES_JSON).expect("capabilities parse");
         assert_eq!(
@@ -1248,10 +1877,157 @@ mod tests {
             .expect("required secrets array");
         assert!(required
             .iter()
-            .any(|entry| entry["name"] == "wecom_corp_id"));
+            .any(|entry| entry["name"] == "wecom_bot_id" && entry["optional"] == false));
         assert!(required
             .iter()
-            .any(|entry| entry["name"] == "wecom_callback_encoding_aes_key"));
+            .any(|entry| entry["name"] == "wecom_bot_secret" && entry["optional"] == false));
+        assert!(required
+            .iter()
+            .any(|entry| entry["name"] == "wecom_corp_id" && entry["optional"] == true));
+        assert!(required
+            .iter()
+            .any(|entry| entry["name"] == "wecom_callback_encoding_aes_key"
+                && entry["optional"] == true));
+    }
+
+    #[test]
+    fn websocket_text_reply_payloads_chunk_content_and_reuse_req_id() {
+        let content = "a".repeat(TEXT_CHUNK_LIMIT_BYTES + 17);
+        let payloads = build_websocket_text_reply_payloads("req-123", WECOM_WS_REPLY_CMD, &content)
+            .expect("payloads");
+
+        assert_eq!(payloads.len(), 2);
+        let first: serde_json::Value = serde_json::from_str(&payloads[0]).expect("first payload");
+        let second: serde_json::Value = serde_json::from_str(&payloads[1]).expect("second payload");
+
+        assert_eq!(first["cmd"], serde_json::json!(WECOM_WS_REPLY_CMD));
+        assert_eq!(first["headers"]["req_id"], serde_json::json!("req-123"));
+        assert_eq!(
+            first["body"]["text"]["content"]
+                .as_str()
+                .expect("first chunk")
+                .len(),
+            TEXT_CHUNK_LIMIT_BYTES
+        );
+        assert_eq!(
+            second["body"]["text"]["content"]
+                .as_str()
+                .expect("second chunk")
+                .len(),
+            17
+        );
+    }
+
+    #[test]
+    fn websocket_metadata_json_marks_group_chats_as_agent_api_ineligible() {
+        let json = websocket_metadata_json(
+            "zhangsan",
+            "msg-1",
+            "req-1",
+            Some("chat-1"),
+            Some("group"),
+            WECOM_WS_REPLY_CMD,
+        )
+        .expect("metadata json");
+
+        let metadata: WecomMessageMetadata = serde_json::from_str(&json).expect("metadata");
+        assert_eq!(metadata.to_user, "");
+        assert_eq!(metadata.ws_req_id.as_deref(), Some("req-1"));
+        assert_eq!(metadata.ws_chat_id.as_deref(), Some("chat-1"));
+        assert_eq!(metadata.ws_chat_type.as_deref(), Some("group"));
+        assert_eq!(metadata.ws_reply_cmd.as_deref(), Some(WECOM_WS_REPLY_CMD));
+    }
+
+    #[test]
+    fn websocket_quote_context_prefixes_user_content() {
+        let quote = WecomWsQuoteContent {
+            msg_type: Some("text".to_string()),
+            text: Some(WecomWsTextContent {
+                content: "Earlier message".to_string(),
+            }),
+            voice: None,
+            content: None,
+        };
+
+        let content = with_websocket_quote_context("Current message".to_string(), Some(&quote));
+        assert_eq!(content, "Quoted text: Earlier message\n\nCurrent message");
+    }
+
+    #[test]
+    fn websocket_mixed_content_parts_extract_text_and_images() {
+        let mixed = WecomWsMixedContent {
+            msg_item: vec![
+                WecomWsMixedItem {
+                    item_type: Some("text".to_string()),
+                    text: Some(WecomWsTextContent {
+                        content: "First line".to_string(),
+                    }),
+                    image: None,
+                    file: None,
+                    video: None,
+                },
+                WecomWsMixedItem {
+                    item_type: Some("image".to_string()),
+                    text: None,
+                    image: Some(WecomWsBinaryContent {
+                        url: "https://example.com/image".to_string(),
+                        aeskey: Some("aes".to_string()),
+                    }),
+                    file: None,
+                    video: None,
+                },
+                WecomWsMixedItem {
+                    item_type: None,
+                    text: Some(WecomWsTextContent {
+                        content: "Second line".to_string(),
+                    }),
+                    image: None,
+                    file: None,
+                    video: None,
+                },
+            ],
+        };
+
+        let (content, attachments) = websocket_mixed_content_parts("msg-1", &mixed);
+        assert_eq!(content, "First line\nSecond line");
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].id, "msg-1:1:image");
+        assert_eq!(
+            attachments[0].source_url.as_deref(),
+            Some("https://example.com/image")
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&attachments[0].extras_json)
+                .expect("extras json")["aeskey"],
+            serde_json::json!("aes")
+        );
+    }
+
+    #[test]
+    fn websocket_event_summary_formats_interactive_events() {
+        let template_card_event = WecomWsEvent {
+            eventtype: "template_card_event".to_string(),
+            extra: serde_json::from_value(serde_json::json!({
+                "event_key": "approve"
+            }))
+            .expect("template card extras"),
+        };
+        assert_eq!(
+            websocket_event_summary(&template_card_event).as_deref(),
+            Some("User clicked a WeCom template card action: approve")
+        );
+
+        let feedback_event = WecomWsEvent {
+            eventtype: "feedback_event".to_string(),
+            extra: serde_json::from_value(serde_json::json!({
+                "score": 5
+            }))
+            .expect("feedback extras"),
+        };
+        assert_eq!(
+            websocket_event_summary(&feedback_event).as_deref(),
+            Some("User submitted WeCom feedback with score 5.")
+        );
     }
 
     #[test]
