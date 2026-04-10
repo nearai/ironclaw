@@ -379,9 +379,7 @@ impl Tool for WriteFileTool {
         if let Ok(existing_meta) = fs::metadata(&path).await
             && let Some(ref read_state) = self.read_state
         {
-            let current_mtime = existing_meta
-                .modified()
-                .unwrap_or(std::time::UNIX_EPOCH);
+            let current_mtime = existing_meta.modified().unwrap_or(std::time::UNIX_EPOCH);
             let state = read_state.read().await;
             if let Err(e) = state.check_before_edit(ctx.job_id, &path, current_mtime) {
                 tracing::debug!("write_file staleness warning: {}", e);
