@@ -407,7 +407,9 @@ pub async fn execute_orchestrator(
                 let args = &call.args;
                 let kwargs = &call.kwargs;
 
-                debug!(action = %action_name, "orchestrator: host function call");
+                if action_name != "__regex_match__" {
+                    debug!(action = %action_name, "orchestrator: host function call");
+                }
 
                 let ext_result = match action_name.as_str() {
                     // FINAL(result) — orchestrator returns its outcome
