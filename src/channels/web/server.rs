@@ -13,7 +13,7 @@ use axum::{
     http::{StatusCode, header},
     middleware,
     response::{
-        IntoResponse,
+        IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post, put},
@@ -26,12 +26,25 @@ use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
+use axum::http::HeaderMap;
+
 use crate::agent::SessionManager;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
 use crate::channels::relay::DEFAULT_RELAY_NAME;
 use crate::channels::web::auth::{
-    AuthenticatedUser, CombinedAuthState, UserIdentity, auth_middleware,
+    AdminUser, AuthenticatedUser, CombinedAuthState, UserIdentity, auth_middleware,
+};
+use crate::channels::web::handlers::chat::chat_events_handler;
+use crate::channels::web::handlers::engine::{
+    engine_mission_detail_handler, engine_mission_fire_handler, engine_mission_pause_handler,
+    engine_mission_resume_handler, engine_missions_handler, engine_missions_summary_handler,
+    engine_project_detail_handler, engine_projects_handler, engine_thread_detail_handler,
+    engine_thread_events_handler, engine_thread_steps_handler, engine_threads_handler,
+};
+use crate::channels::web::handlers::frontend::{
+    frontend_layout_handler, frontend_layout_update_handler, frontend_widget_file_handler,
+    frontend_widgets_handler,
 };
 use crate::channels::web::handlers::jobs::{
     job_files_list_handler, job_files_read_handler, jobs_cancel_handler, jobs_detail_handler,
@@ -52,6 +65,7 @@ use crate::channels::web::handlers::routines::{
 use crate::channels::web::handlers::settings::{
     settings_delete_handler, settings_export_handler, settings_get_handler,
     settings_import_handler, settings_list_handler, settings_set_handler,
+    settings_tools_list_handler, settings_tools_set_handler,
 };
 use crate::channels::web::handlers::skills::{
     skills_install_handler, skills_list_handler, skills_remove_handler, skills_search_handler,
@@ -88,6 +102,29 @@ fn redact_oauth_state_for_logs(state: &str) -> String {
         let _ = write!(&mut short_hash, "{byte:02x}");
     }
     format!("sha256:{short_hash}:len={}", state.len())
+}
+
+pub(crate) fn rate_limit_key_from_headers(headers: &HeaderMap) -> String {
+    // Try X-Forwarded-For first (reverse proxy), then X-Real-IP.
+    let xff = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .into_iter()
+        .flat_map(|s| s.split(','))
+        .map(str::trim)
+        .find_map(|candidate| candidate.parse::<std::net::IpAddr>().ok())
+        .map(|ip| ip.to_string());
+
+    if let Some(ip) = xff {
+        return ip;
+    }
+
+    headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<std::net::IpAddr>().ok())
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Simple sliding-window rate limiter.
@@ -170,15 +207,21 @@ pub struct ActiveConfigSnapshot {
 ///
 /// Prevents one user from exhausting the rate limit for all users in multi-tenant mode.
 pub struct PerUserRateLimiter {
-    limiters: std::sync::RwLock<std::collections::HashMap<String, RateLimiter>>,
+    limiters: std::sync::Mutex<lru::LruCache<String, RateLimiter>>,
     max_requests: u64,
     window_secs: u64,
 }
 
 impl PerUserRateLimiter {
+    // SAFETY: 2048 is non-zero, so the unwrap in `new()` is infallible.
+    const MAX_KEYS: std::num::NonZeroUsize = match std::num::NonZeroUsize::new(2048) {
+        Some(v) => v,
+        None => unreachable!(),
+    };
+
     pub fn new(max_requests: u64, window_secs: u64) -> Self {
         Self {
-            limiters: std::sync::RwLock::new(std::collections::HashMap::new()),
+            limiters: std::sync::Mutex::new(lru::LruCache::new(Self::MAX_KEYS)),
             max_requests,
             window_secs,
         }
@@ -186,32 +229,16 @@ impl PerUserRateLimiter {
 
     /// Try to consume one request for the given user. Returns `true` if allowed.
     pub fn check(&self, user_id: &str) -> bool {
-        // Fast path: check existing limiter under read lock.
-        // On lock poisoning (another thread panicked while holding the lock),
-        // allow the request rather than crashing the server.
-        {
-            let map = match self.limiters.read() {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::warn!("PerUserRateLimiter read lock poisoned; recovering");
-                    e.into_inner()
-                }
-            };
-            if let Some(limiter) = map.get(user_id) {
-                return limiter.check();
-            }
-        }
-        // Slow path: create limiter under write lock.
-        let mut map = match self.limiters.write() {
+        let mut map = match self.limiters.lock() {
             Ok(m) => m,
             Err(e) => {
-                tracing::warn!("PerUserRateLimiter write lock poisoned; recovering");
+                tracing::warn!("PerUserRateLimiter lock poisoned; recovering");
                 e.into_inner()
             }
         };
-        let limiter = map
-            .entry(user_id.to_string())
-            .or_insert_with(|| RateLimiter::new(self.max_requests, self.window_secs));
+        let limiter = map.get_or_insert_mut(user_id.to_string(), || {
+            RateLimiter::new(self.max_requests, self.window_secs)
+        });
         limiter.check()
     }
 }
@@ -231,6 +258,9 @@ pub struct WorkspacePool {
     search_config: crate::config::WorkspaceSearchConfig,
     workspace_config: crate::config::WorkspaceConfig,
     cache: tokio::sync::RwLock<std::collections::HashMap<String, Arc<Workspace>>>,
+    /// Cached admin system prompt content. `None` = not yet loaded;
+    /// `Some("")` = loaded but empty/not set.
+    admin_prompt_cache: Arc<tokio::sync::RwLock<Option<String>>>,
 }
 
 impl WorkspacePool {
@@ -248,14 +278,24 @@ impl WorkspacePool {
             search_config,
             workspace_config,
             cache: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+            admin_prompt_cache: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
+    /// Clear the admin prompt cache. Called after the PUT handler updates
+    /// the prompt so all workspaces see the new content on the next turn.
+    pub async fn invalidate_admin_prompt(&self) {
+        let mut guard = self.admin_prompt_cache.write().await;
+        *guard = None;
+    }
+
     /// Build a workspace for a user, applying search config, embeddings,
-    /// global read scopes, and memory layers.
+    /// global read scopes, memory layers, and admin prompt.
     fn build_workspace(&self, user_id: &str) -> Workspace {
         let mut ws = Workspace::new_with_db(user_id, Arc::clone(&self.db))
-            .with_search_config(&self.search_config);
+            .with_search_config(&self.search_config)
+            .with_admin_prompt()
+            .with_admin_prompt_cache(Arc::clone(&self.admin_prompt_cache));
 
         if let Some(ref emb) = self.embeddings {
             ws = ws.with_embeddings_cached(Arc::clone(emb), self.embedding_cache_config.clone());
@@ -336,6 +376,14 @@ impl crate::tools::builtin::memory::WorkspaceResolver for WorkspacePool {
 
         let ws = Arc::new(self.build_workspace(user_id));
         cache.insert(user_id.to_string(), Arc::clone(&ws));
+        drop(cache);
+
+        // Match the seeded workspace behavior used by the prompt-side lookup so
+        // v1 memory tools and the v1 system prompt see the same per-user scope.
+        if let Err(e) = ws.seed_if_empty().await {
+            tracing::warn!(user_id = user_id, "Failed to seed workspace: {}", e);
+        }
+
         tracing::debug!(user_id = user_id, "Created per-user workspace");
         ws
     }
@@ -376,15 +424,17 @@ pub struct GatewayState {
     /// LLM provider for OpenAI-compatible API proxy.
     pub llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
     /// Skill registry for skill management API.
-    pub skill_registry: Option<Arc<std::sync::RwLock<crate::skills::SkillRegistry>>>,
+    pub skill_registry: Option<Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>>,
     /// Skill catalog for searching the ClawHub registry.
-    pub skill_catalog: Option<Arc<crate::skills::catalog::SkillCatalog>>,
+    pub skill_catalog: Option<Arc<ironclaw_skills::catalog::SkillCatalog>>,
+    /// Shared auth manager for gateway auth submission and readiness checks.
+    pub auth_manager: Option<Arc<crate::bridge::auth_manager::AuthManager>>,
     /// Scheduler for sending follow-up messages to running agent jobs.
     pub scheduler: Option<crate::tools::builtin::SchedulerSlot>,
     /// Per-user rate limiter for chat endpoints (30 messages per 60 seconds per user).
     pub chat_rate_limiter: PerUserRateLimiter,
-    /// Rate limiter for OAuth callback endpoints (10 requests per 60 seconds).
-    pub oauth_rate_limiter: RateLimiter,
+    /// Per-IP rate limiter for OAuth/auth endpoints (20 requests per 60 seconds per IP).
+    pub oauth_rate_limiter: PerUserRateLimiter,
     /// Rate limiter for webhook trigger endpoints (10 requests per 60 seconds).
     pub webhook_rate_limiter: RateLimiter,
     /// Registry catalog entries for the available extensions API.
@@ -402,6 +452,72 @@ pub struct GatewayState {
     pub secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
     /// DB auth cache for invalidation on security-critical actions.
     pub db_auth: Option<Arc<crate::channels::web::auth::DbAuthenticator>>,
+    /// Shared pairing store (one instance per server, not per request).
+    pub pairing_store: Option<Arc<crate::pairing::PairingStore>>,
+    /// OAuth providers for social login (None when OAuth is disabled).
+    pub oauth_providers: Option<
+        Arc<
+            std::collections::HashMap<
+                String,
+                Arc<dyn crate::channels::web::oauth::providers::OAuthProvider>,
+            >,
+        >,
+    >,
+    /// In-memory store for pending OAuth flows (CSRF + PKCE state).
+    pub oauth_state_store: Option<Arc<crate::channels::web::oauth::state_store::OAuthStateStore>>,
+    /// Base URL for constructing OAuth callback URLs.
+    pub oauth_base_url: Option<String>,
+    /// Email domains allowed for OAuth/OIDC login. Empty means allow all.
+    pub oauth_allowed_domains: Vec<String>,
+    /// NEAR wallet auth nonce store (None when NEAR auth is disabled).
+    pub near_nonce_store: Option<Arc<crate::channels::web::oauth::near::NearNonceStore>>,
+    /// NEAR RPC endpoint URL for access key verification.
+    pub near_rpc_url: Option<String>,
+    /// NEAR network name (mainnet/testnet) for the frontend wallet connector.
+    pub near_network: Option<String>,
+    /// Shutdown signal for OAuth/NEAR sweep background tasks.
+    /// When this sender is dropped, the sweep loops exit gracefully.
+    #[allow(dead_code)]
+    pub oauth_sweep_shutdown: Option<tokio::sync::watch::Sender<()>>,
+    /// Cache for the assembled frontend HTML served from `/`.
+    ///
+    /// The cache key is derived from the `updated_at` of
+    /// `.system/gateway/layout.json` and the `.system/gateway/widgets/`
+    /// directory — both returned by a single cheap `list(".system/gateway/")`
+    /// call. A hit skips reading the layout, every widget manifest, every
+    /// widget JS file, and every widget CSS file. A miss (or absent cache)
+    /// falls through to the full `build_frontend_html()` path.
+    pub frontend_html_cache: Arc<tokio::sync::RwLock<Option<FrontendHtmlCache>>>,
+    /// Channel-agnostic tool dispatcher for routing handler operations through
+    /// the tool pipeline with audit trail.
+    pub tool_dispatcher: Option<Arc<crate::tools::dispatch::ToolDispatcher>>,
+}
+
+/// Cached result of `build_frontend_html()`, keyed by a cheap workspace
+/// signature so the fast path only needs one `list()` call per request.
+#[derive(Debug, Clone)]
+pub struct FrontendHtmlCache {
+    /// Signature the cache is valid for. The cache is bypassed when the
+    /// current workspace signature differs from this one.
+    pub key: FrontendCacheKey,
+    /// The assembled HTML, or `None` if the layout had no customizations
+    /// and the caller should serve the embedded default unchanged.
+    pub html: Option<String>,
+}
+
+/// Cheap workspace fingerprint covering the inputs of `build_frontend_html`.
+///
+/// Uses the per-entry `updated_at` timestamps returned by `Workspace::list`
+/// (the directory entry's `updated_at` is "latest among children", so widget
+/// file edits bubble up automatically). Timestamps are stored as
+/// `(seconds, nanoseconds)` pairs to avoid depending on `chrono` types here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontendCacheKey {
+    /// Signature for `.system/gateway/layout.json`, or `None` if absent.
+    pub layout: Option<(i64, u32)>,
+    /// Signature for `.system/gateway/widgets/` (max child mtime), or `None`
+    /// if the directory is empty or absent.
+    pub widgets: Option<(i64, u32)>,
 }
 
 /// Start the gateway HTTP server.
@@ -443,6 +559,33 @@ pub async fn start_server(
         .route(
             "/api/webhooks/u/{user_id}/{path}",
             post(crate::channels::web::handlers::webhooks::webhook_trigger_user_scoped_handler),
+        )
+        // OAuth social login routes (public, no auth required)
+        .route(
+            "/auth/providers",
+            get(crate::channels::web::handlers::auth::providers_handler),
+        )
+        .route(
+            "/auth/login/{provider}",
+            get(crate::channels::web::handlers::auth::login_handler),
+        )
+        .route(
+            "/auth/callback/{provider}",
+            get(crate::channels::web::handlers::auth::callback_handler)
+                .post(crate::channels::web::handlers::auth::callback_post_handler),
+        )
+        .route(
+            "/auth/logout",
+            post(crate::channels::web::handlers::auth::logout_handler),
+        )
+        // NEAR wallet auth (challenge-response, not OAuth redirect)
+        .route(
+            "/auth/near/challenge",
+            get(crate::channels::web::handlers::auth::near_challenge_handler),
+        )
+        .route(
+            "/auth/near/verify",
+            post(crate::channels::web::handlers::auth::near_verify_handler),
         );
 
     // Protected routes (require auth)
@@ -450,6 +593,7 @@ pub async fn start_server(
     let protected = Router::new()
         // Chat
         .route("/api/chat/send", post(chat_send_handler))
+        .route("/api/chat/gate/resolve", post(chat_gate_resolve_handler))
         .route("/api/chat/approval", post(chat_approval_handler))
         .route("/api/chat/auth-token", post(chat_auth_token_handler))
         .route("/api/chat/auth-cancel", post(chat_auth_cancel_handler))
@@ -483,6 +627,10 @@ pub async fn start_server(
         )
         // Extensions
         .route("/api/extensions", get(extensions_list_handler))
+        .route(
+            "/api/extensions/readiness",
+            get(extensions_readiness_handler),
+        )
         .route("/api/extensions/tools", get(extensions_tools_handler))
         .route("/api/extensions/registry", get(extensions_registry_handler))
         .route("/api/extensions/install", post(extensions_install_handler))
@@ -515,6 +663,46 @@ pub async fn start_server(
             axum::routing::delete(routines_delete_handler),
         )
         .route("/api/routines/{id}/runs", get(routines_runs_handler))
+        // Engine v2
+        .route("/api/engine/threads", get(engine_threads_handler))
+        .route(
+            "/api/engine/threads/{id}",
+            get(engine_thread_detail_handler),
+        )
+        .route(
+            "/api/engine/threads/{id}/steps",
+            get(engine_thread_steps_handler),
+        )
+        .route(
+            "/api/engine/threads/{id}/events",
+            get(engine_thread_events_handler),
+        )
+        .route("/api/engine/projects", get(engine_projects_handler))
+        .route(
+            "/api/engine/projects/{id}",
+            get(engine_project_detail_handler),
+        )
+        .route("/api/engine/missions", get(engine_missions_handler))
+        .route(
+            "/api/engine/missions/summary",
+            get(engine_missions_summary_handler),
+        )
+        .route(
+            "/api/engine/missions/{id}",
+            get(engine_mission_detail_handler),
+        )
+        .route(
+            "/api/engine/missions/{id}/fire",
+            post(engine_mission_fire_handler),
+        )
+        .route(
+            "/api/engine/missions/{id}/pause",
+            post(engine_mission_pause_handler),
+        )
+        .route(
+            "/api/engine/missions/{id}/resume",
+            post(engine_mission_resume_handler),
+        )
         // Skills
         .route("/api/skills", get(skills_list_handler))
         .route("/api/skills/search", post(skills_search_handler))
@@ -527,6 +715,14 @@ pub async fn start_server(
         .route("/api/settings", get(settings_list_handler))
         .route("/api/settings/export", get(settings_export_handler))
         .route("/api/settings/import", post(settings_import_handler))
+        // NOTE: These static routes intentionally shadow `/api/settings/{key}` when
+        // key="tools". Axum resolves static routes before parameterized ones, so this
+        // works correctly. Avoid adding a setting named literally "tools".
+        .route("/api/settings/tools", get(settings_tools_list_handler))
+        .route(
+            "/api/settings/tools/{name}",
+            axum::routing::put(settings_tools_set_handler),
+        )
         .route("/api/settings/{key}", get(settings_get_handler))
         .route(
             "/api/settings/{key}",
@@ -573,6 +769,20 @@ pub async fn start_server(
             put(super::handlers::secrets::secrets_put_handler)
                 .delete(super::handlers::secrets::secrets_delete_handler),
         )
+        // Admin tool policy
+        .route(
+            "/api/admin/tool-policy",
+            get(super::handlers::tool_policy::tool_policy_get_handler)
+                .put(super::handlers::tool_policy::tool_policy_put_handler),
+        )
+        // Admin system prompt — tighter body cap than the global 10 MB so an
+        // oversized payload is rejected before being parsed into memory.
+        .route(
+            "/api/admin/system-prompt",
+            get(super::handlers::system_prompt::get_handler)
+                .put(super::handlers::system_prompt::put_handler)
+                .layer(DefaultBodyLimit::max(128 * 1024)),
+        )
         // Usage reporting (admin)
         .route(
             "/api/admin/usage",
@@ -593,6 +803,16 @@ pub async fn start_server(
         .route(
             "/api/tokens/{id}",
             axum::routing::delete(super::handlers::tokens::tokens_revoke_handler),
+        )
+        // Frontend extension API
+        .route(
+            "/api/frontend/layout",
+            get(frontend_layout_handler).put(frontend_layout_update_handler),
+        )
+        .route("/api/frontend/widgets", get(frontend_widgets_handler))
+        .route(
+            "/api/frontend/widget/{id}/{*file}",
+            get(frontend_widget_file_handler),
         )
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))
@@ -626,6 +846,7 @@ pub async fn start_server(
         .route("/i18n/index.js", get(i18n_index_handler))
         .route("/i18n/en.js", get(i18n_en_handler))
         .route("/i18n/zh-CN.js", get(i18n_zh_handler))
+        .route("/i18n/ko.js", get(i18n_ko_handler))
         .route("/i18n-app.js", get(i18n_app_handler));
 
     // Project file serving (behind auth to prevent unauthorized file access).
@@ -706,18 +927,7 @@ pub async fn start_server(
         ))
         .layer(SetResponseHeaderLayer::if_not_present(
             header::HeaderName::from_static("content-security-policy"),
-            header::HeaderValue::from_static(
-                "default-src 'self'; \
-                 script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; \
-                 style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
-                 font-src https://fonts.gstatic.com; \
-                 connect-src 'self'; \
-                 img-src 'self' data:; \
-                 object-src 'none'; \
-                 frame-ancestors 'none'; \
-                 base-uri 'self'; \
-                 form-action 'self'",
-            ),
+            BASE_CSP_HEADER.clone(),
         ))
         .with_state(state.clone());
 
@@ -739,26 +949,452 @@ pub async fn start_server(
     Ok(bound_addr)
 }
 
-// --- Static file handlers ---
+// --- Content Security Policy ---
+//
+// A single source of truth for the gateway's CSP. The static value below is
+// used by the global response-header layer for every endpoint. The
+// ---- Content-Security-Policy construction ----------------------------
+//
+// The gateway serves two flavors of CSP on the same set of directives:
+//
+// * The static header applied by `SetResponseHeaderLayer` to *every*
+//   response (see [`BASE_CSP_HEADER`]). No inline scripts are authorized.
+// * A per-response variant produced by [`build_csp`] with a `'nonce-…'`
+//   source added to `script-src`, used only by `index_handler` when it
+//   serves customized HTML containing inline `<script>` blocks.
+//
+// Both variants MUST carry the same directive set except for `script-src`
+// — if one grows a new `connect-src` origin, the other silently stays on
+// the old policy, and customized pages end up under a stricter CSP than
+// plain pages (or vice versa). Previous versions of this file duplicated
+// the full directive string in two places, so adding a CDN to one was a
+// latent regression waiting to happen. Keep every directive as a named
+// constant and assemble both flavors via [`build_csp`] so there is a
+// single source of truth.
 
-async fn index_handler() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        include_str!("static/index.html"),
+/// `script-src` sources other than `'self'` and the per-response nonce.
+const SCRIPT_SRC_EXTRAS: &str =
+    "https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://esm.sh";
+const STYLE_SRC: &str = "'self' 'unsafe-inline' https://fonts.googleapis.com";
+const FONT_SRC: &str = "https://fonts.gstatic.com data:";
+const CONNECT_SRC: &str =
+    "'self' https://esm.sh https://rpc.mainnet.near.org https://rpc.testnet.near.org";
+const IMG_SRC: &str =
+    "'self' data: blob: https://*.googleusercontent.com https://avatars.githubusercontent.com";
+const FRAME_SRC: &str = "https://accounts.google.com https://appleid.apple.com";
+const FORM_ACTION: &str =
+    "'self' https://accounts.google.com https://github.com https://appleid.apple.com";
+
+/// Build a CSP string. When `nonce` is `Some`, the resulting policy adds
+/// `'nonce-{nonce}'` to `script-src` so a single inline `<script
+/// nonce="{nonce}">` block on the same response is authorized. When
+/// `nonce` is `None`, the policy matches the static header emitted by
+/// [`BASE_CSP_HEADER`]. This is the single source of truth for the
+/// gateway CSP — edit per-directive constants above, not the format
+/// string here.
+fn build_csp(nonce: Option<&str>) -> String {
+    let script_nonce = match nonce {
+        Some(n) => format!(" 'nonce-{n}'"),
+        None => String::new(),
+    };
+    format!(
+        "default-src 'self'; \
+         script-src 'self'{script_nonce} {SCRIPT_SRC_EXTRAS}; \
+         style-src {STYLE_SRC}; \
+         font-src {FONT_SRC}; \
+         connect-src {CONNECT_SRC}; \
+         img-src {IMG_SRC}; \
+         frame-src {FRAME_SRC}; \
+         object-src 'none'; \
+         frame-ancestors 'none'; \
+         base-uri 'self'; \
+         form-action {FORM_ACTION}"
     )
 }
 
-async fn css_handler() -> impl IntoResponse {
+/// Static CSP header applied to every gateway response by the
+/// response-header layer. Assembled at first use via [`build_csp`] with no
+/// nonce. Falls back to a minimally-permissive `default-src 'self'` if the
+/// assembled value somehow fails to parse as a `HeaderValue` — in practice
+/// the assembled string is pure ASCII and this branch is unreachable, but
+/// production code in this repo doesn't use `.expect()` on request-path
+/// values.
+static BASE_CSP_HEADER: std::sync::LazyLock<header::HeaderValue> = std::sync::LazyLock::new(|| {
+    header::HeaderValue::from_str(&build_csp(None))
+        .unwrap_or_else(|_| header::HeaderValue::from_static("default-src 'self'"))
+});
+
+/// Build a CSP equivalent to the static header but with `'nonce-{nonce}'`
+/// added to the `script-src` directive. Thin wrapper kept for call-site
+/// readability (the name is the contract the nonce handler wants).
+fn build_csp_with_nonce(nonce: &str) -> String {
+    build_csp(Some(nonce))
+}
+
+/// Generate a fresh per-response CSP nonce. 16 random bytes hex-encoded
+/// (32 chars) — well above the 128-bit minimum recommended for nonces and
+/// matching the `OsRng + hex` pattern used elsewhere in this module
+/// (see `tokens_create_handler`).
+fn generate_csp_nonce() -> String {
+    use rand::RngCore;
+    use rand::rngs::OsRng;
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+// --- Frontend bundle assembly ---
+
+use ironclaw_gateway::assets;
+use ironclaw_gateway::{FrontendBundle, LayoutConfig, NONCE_PLACEHOLDER};
+
+use crate::channels::web::handlers::frontend::{load_resolved_widgets, read_layout_config};
+
+/// Compute a cheap cache key for `build_frontend_html` — one `list` call
+/// against `.system/gateway/`. The directory entry for `widgets/` carries the
+/// max `updated_at` of its children, so any widget file edit naturally bubbles
+/// into the key without needing to read individual manifests.
+async fn compute_frontend_cache_key(workspace: &crate::workspace::Workspace) -> FrontendCacheKey {
+    let Ok(entries) = workspace.list(".system/gateway/").await else {
+        return FrontendCacheKey {
+            layout: None,
+            widgets: None,
+        };
+    };
+    let mut key = FrontendCacheKey {
+        layout: None,
+        widgets: None,
+    };
+    for entry in entries {
+        let ts = entry
+            .updated_at
+            .map(|t| (t.timestamp(), t.timestamp_subsec_nanos()));
+        match entry.name() {
+            "layout.json" if !entry.is_directory => key.layout = ts,
+            "widgets" if entry.is_directory => key.widgets = ts,
+            _ => {}
+        }
+    }
+    key
+}
+
+/// Build customized HTML from the workspace gateway config.
+///
+/// Returns `None` if the workspace is unavailable or the loaded layout has no
+/// customizations and no widgets — in that case the caller serves the embedded
+/// default HTML unchanged. Custom CSS is deliberately **not** included in the
+/// returned bundle: `css_handler` appends `.system/gateway/custom.css` onto
+/// `/style.css` so the stylesheet is the single source of truth for CSS
+/// overrides.
+///
+/// The assembled HTML is cached in `GatewayState::frontend_html_cache` behind
+/// a fingerprint of `.system/gateway/layout.json` and `.system/gateway/widgets/`
+/// mtimes (computed with a single `list()` call). A cache hit skips reading
+/// every widget manifest / JS / CSS file, which would otherwise fire on every
+/// page load.
+///
+/// **Multi-tenant safety.** In multi-user mode (`workspace_pool` set) this
+/// function ALWAYS returns `None`, regardless of whether `state.workspace` is
+/// also populated. The customization assembly path is fundamentally
+/// single-tenant: `index_handler` (`GET /`) is the unauthenticated bootstrap
+/// route — no user identity is available at request time, so there is no way
+/// to resolve the *correct* per-user workspace inside this function. Reading
+/// `state.workspace` instead would expose one global workspace's
+/// customizations to every user, and the process-wide
+/// `frontend_html_cache` would pin the leak across requests. We refuse the
+/// path entirely and serve the embedded default to all users; per-user
+/// customization can ride a future JS-side fetch against
+/// `/api/frontend/layout`, which is authenticated and routes through
+/// `resolve_workspace(&state, &user)` so it returns the right workspace.
+/// See `crates/ironclaw_gateway/static/app.js` — the layout-config IIFE
+/// already reads `window.__IRONCLAW_LAYOUT__`, which a future change can
+/// populate from a `fetch('/api/frontend/layout')` after auth.
+///
+/// **Cache key TOCTOU window (known and accepted).** The fast-path cache
+/// key is computed by [`compute_frontend_cache_key`] in a single
+/// `Workspace::list` call, but the slow-path data read
+/// (`read_layout_config` + `load_resolved_widgets`) happens *after* that
+/// key is observed, in separate workspace operations. A workspace write
+/// landing between the two — operator edits `layout.json` while a
+/// request is mid-rebuild — can therefore produce a cache entry whose
+/// HTML was assembled from a layout *newer* than the key it's stored
+/// under. The next request after the writes settle will recompute the
+/// key, see a different fingerprint, and replace the cache entry, so
+/// the staleness window is always self-correcting and bounded by one
+/// rebuild round-trip.
+///
+/// This is intentional. Making the read+key+store sequence atomic would
+/// require a workspace-level read lock that the rest of the gateway
+/// doesn't take, and would punish the (much hotter) cache hit path with
+/// extra coordination. The acceptability rests on three observations:
+/// (a) the staleness window is bounded by a single `list()` call's
+/// worth of wall time, (b) the cache is per-process so the staleness
+/// can never outlive `Drop` of `GatewayState`, and (c) layout writes
+/// are rare and operator-initiated — there is no realistic workload
+/// that fires a write at the cadence required to keep the entry
+/// permanently stale. If a future workload changes that calculus, the
+/// right fix is a workspace version generation counter, not a lock
+/// around this function.
+async fn build_frontend_html(state: &GatewayState) -> Option<String> {
+    if state.workspace_pool.is_some() {
+        // Multi-tenant: refuse the assembly path entirely. See the function
+        // doc comment above for the full rationale. The cache write below
+        // is unreachable on this branch, so the cache stays empty and
+        // cannot leak one user's customizations to another.
+        return None;
+    }
+
+    let ws = state.workspace.as_ref()?;
+
+    // Fast path — cache hit. One workspace `list()` call, no file reads.
+    let cache_key = compute_frontend_cache_key(ws).await;
+    {
+        let cache = state.frontend_html_cache.read().await;
+        if let Some(ref cached) = *cache
+            && cached.key == cache_key
+        {
+            return cached.html.clone();
+        }
+    }
+
+    // Slow path — rebuild.
+    let layout = read_layout_config(ws).await;
+    let widgets = load_resolved_widgets(ws, &layout).await;
+
+    // Skip assembly when nothing is customized. `layout_has_customizations`
+    // is the single source of truth so adding a new field to `LayoutConfig`
+    // forces an update in one place instead of a big boolean expression here.
+    let html = if widgets.is_empty() && !layout_has_customizations(&layout) {
+        None
+    } else {
+        let bundle = FrontendBundle {
+            layout,
+            widgets,
+            // Custom CSS is served via /style.css (css_handler) to avoid
+            // double-application — see the doc comment on this function.
+            custom_css: None,
+        };
+        Some(ironclaw_gateway::assemble_index(
+            assets::INDEX_HTML,
+            &bundle,
+        ))
+    };
+
+    // Store in cache. If another request raced us here, either writer wins —
+    // both produced the same HTML for the same key, so the cache ends up
+    // consistent either way.
+    *state.frontend_html_cache.write().await = Some(FrontendHtmlCache {
+        key: cache_key,
+        html: html.clone(),
+    });
+
+    html
+}
+
+/// Returns `true` if the layout config has any field that would affect the
+/// rendered HTML. When this returns `false` and there are no widgets, the
+/// gateway serves the embedded default unchanged.
+fn layout_has_customizations(layout: &LayoutConfig) -> bool {
+    let b = &layout.branding;
+    let t = &layout.tabs;
+    let c = &layout.chat;
+    // `branding.colors` is opaque to this function — `BrandingColors` may
+    // exist as `Some({})` (both fields `None`) or with values that the
+    // `is_safe_css_color` validator strips at injection time. Treating
+    // bare `colors.is_some()` as a customization forces the customized
+    // HTML path (and the per-response nonce CSP that comes with it) for
+    // layouts that produce zero effective branding output. Require at
+    // least one trimmed-non-empty color field, mirroring what
+    // `to_css_vars` actually emits.
+    let has_branding_colors = b.colors.as_ref().is_some_and(|colors| {
+        let nonempty = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+        nonempty(&colors.primary) || nonempty(&colors.accent)
+    });
+    // Same precedent for URL fields: route through the `safe_logo_url`
+    // / `safe_favicon_url` getters that apply `is_safe_url`. A
+    // `layout.json` with `logo_url: "javascript:alert(1)"` would
+    // otherwise force the customized HTML path even though the value
+    // gets dropped at consumer time. Symmetric with how branding colors
+    // are gated above.
+    b.title.is_some()
+        || b.subtitle.is_some()
+        || b.safe_logo_url().is_some()
+        || b.safe_favicon_url().is_some()
+        || has_branding_colors
+        || t.order.is_some()
+        || t.hidden.is_some()
+        || t.default_tab.is_some()
+        || c.suggestions.is_some()
+        || c.image_upload.is_some()
+        || c.upgrade_inline_json.is_some()
+        || !layout.widgets.is_empty()
+}
+
+// --- Static file handlers ---
+//
+// All frontend assets are embedded in the `ironclaw_gateway` crate.
+// These handlers serve them with appropriate MIME types and cache headers.
+
+/// Substitute [`NONCE_PLACEHOLDER`] sentinels in the assembled HTML with a
+/// fresh per-response CSP nonce.
+///
+/// **Why an attribute-targeted replace, not a bare string replace.** The
+/// assembled HTML embeds widget JavaScript inline (so a CSP-protected
+/// `<script src>` doesn't need to authenticate against `/api/frontend/widget/...`).
+/// A widget author has every right to write the literal string
+/// `__IRONCLAW_CSP_NONCE__` inside their own source — in a comment, a log
+/// line, a test fixture, or just as a constant they happen to define. A
+/// naive `html.replace(NONCE_PLACEHOLDER, nonce)` would silently rewrite
+/// every such occurrence into a per-request nonce, mutating widget code
+/// in a way the author didn't ask for.
+///
+/// The substitution here targets the full attribute form
+/// `nonce="__IRONCLAW_CSP_NONCE__"`, which is the exact shape
+/// `assemble_index` emits when stamping nonces onto `<script>` tags. The
+/// double-quoted sentinel is unambiguous in HTML context — it can never
+/// accidentally match free text in a JS module body, a comment, or a
+/// JSON payload. Inline `<style>` blocks deliberately get no nonce
+/// (style-src allows `'unsafe-inline'`) so they're untouched either way.
+fn stamp_nonce_into_html(html_with_placeholder: &str, nonce: &str) -> String {
+    let placeholder_attr = format!("nonce=\"{NONCE_PLACEHOLDER}\"");
+    let nonce_attr = format!("nonce=\"{nonce}\"");
+    html_with_placeholder.replace(&placeholder_attr, &nonce_attr)
+}
+
+async fn index_handler(State(state): State<Arc<GatewayState>>) -> Response {
+    // Try to assemble customized HTML from workspace frontend config.
+    // Falls back to embedded HTML if workspace is unavailable or has no
+    // customizations — in that case there are no inline scripts and the
+    // global CSP layer applies unchanged.
+    let assembled = build_frontend_html(&state).await;
+
+    let Some(html_with_placeholder) = assembled else {
+        return (
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            assets::INDEX_HTML,
+        )
+            .into_response();
+    };
+
+    // Customized path: the assembled HTML contains inline `<script>` blocks
+    // (layout config + widget modules) carrying [`NONCE_PLACEHOLDER`] in
+    // their `nonce` attribute. Stamp a fresh per-response nonce in both
+    // the HTML and the response's Content-Security-Policy header so the
+    // browser actually executes the scripts.
+    //
+    // Setting `Content-Security-Policy` here suppresses the global
+    // `SetResponseHeaderLayer::if_not_present` value for this response only.
+    let nonce = generate_csp_nonce();
+    let html = stamp_nonce_into_html(&html_with_placeholder, &nonce);
+    let csp = build_csp_with_nonce(&nonce);
+
     (
         [
-            (header::CONTENT_TYPE, "text/css"),
-            (header::CACHE_CONTROL, "no-cache"),
+            (header::CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
+            (header::CACHE_CONTROL, "no-cache".to_string()),
+            (
+                header::HeaderName::from_static("content-security-policy"),
+                csp,
+            ),
         ],
-        include_str!("static/style.css"),
+        html,
     )
+        .into_response()
+}
+
+/// Compute the strong ETag value for a CSS body.
+///
+/// Strong validators are quoted, sha-prefixed, and truncated to 16 hex chars
+/// (64 bits) — collisions are statistically irrelevant for cache validation
+/// and the short form keeps headers compact. The same scheme is used for
+/// both the embedded base stylesheet and the workspace-customized variant
+/// so a flip between the two flavors naturally invalidates the client's
+/// cached copy.
+fn css_etag(body: &str) -> String {
+    let digest = Sha256::digest(body.as_bytes());
+    let hex = hex::encode(digest);
+    // 16 hex chars = 64 bits, plenty for content addressing.
+    format!("\"sha256-{}\"", &hex[..16])
+}
+
+async fn css_handler(State(state): State<Arc<GatewayState>>, headers: HeaderMap) -> Response {
+    // Append custom CSS from `.system/gateway/custom.css` if it exists.
+    //
+    // The hot path (no workspace overlay) borrows `assets::STYLE_CSS` directly
+    // via `Cow::Borrowed` so we don't allocate / copy the entire embedded
+    // stylesheet on every request. We only fall through to an owned
+    // `format!` when there's actually content to append.
+    //
+    // **Multi-tenant safety.** This must mirror the same guard
+    // `build_frontend_html` already enforces (see its doc comment): in
+    // multi-user mode (`workspace_pool.is_some()`) we cannot resolve a
+    // per-user workspace because `/style.css` is the unauthenticated
+    // bootstrap stylesheet — there is no user identity at request time.
+    // Reading from `state.workspace` here would expose one global
+    // workspace's `custom.css` to every user, defeating the
+    // `index_handler` guard at the sibling endpoint. Refuse the overlay
+    // path entirely in multi-tenant mode and serve the embedded base
+    // stylesheet to all users; per-user CSS overrides can ride a future
+    // authenticated `/api/frontend/custom-css` endpoint.
+    let css: std::borrow::Cow<'static, str> = if state.workspace_pool.is_some() {
+        std::borrow::Cow::Borrowed(assets::STYLE_CSS)
+    } else {
+        match &state.workspace {
+            Some(ws) => match ws.read(".system/gateway/custom.css").await {
+                Ok(doc) if !doc.content.trim().is_empty() => std::borrow::Cow::Owned(format!(
+                    "{}\n/* --- custom overrides --- */\n{}",
+                    assets::STYLE_CSS,
+                    doc.content
+                )),
+                _ => std::borrow::Cow::Borrowed(assets::STYLE_CSS),
+            },
+            None => std::borrow::Cow::Borrowed(assets::STYLE_CSS),
+        }
+    };
+
+    // Strong validator over the assembled body. The cache key naturally
+    // tracks both base stylesheet edits (compile-time) and `custom.css`
+    // edits (workspace mutation) — operators no longer need to ask users
+    // to hard-refresh after tweaking branding.
+    let etag = css_etag(&css);
+
+    // Conditional GET: if the client already holds this exact body, send a
+    // 304 with no body and let the browser reuse its cached copy. RFC 9110
+    // §13.1.2 — `If-None-Match` is a list of validators; we accept either
+    // an exact match or the literal `*`. Anything else falls through to a
+    // full 200 response.
+    if let Some(value) = headers.get(header::IF_NONE_MATCH)
+        && let Ok(s) = value.to_str()
+        && s.split(',').any(|v| {
+            let v = v.trim();
+            v == "*" || v == etag
+        })
+    {
+        return (
+            StatusCode::NOT_MODIFIED,
+            [
+                (header::ETAG, etag.as_str()),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+        )
+            .into_response();
+    }
+
+    (
+        [
+            (header::CONTENT_TYPE, "text/css".to_string()),
+            // Keep `no-cache` so the browser always revalidates — combined
+            // with the ETag this gives us "fast 304" semantics rather than
+            // a stale `max-age` window where operator edits don't show up.
+            (header::CACHE_CONTROL, "no-cache".to_string()),
+            (header::ETAG, etag),
+        ],
+        css,
+    )
+        .into_response()
 }
 
 async fn js_handler() -> impl IntoResponse {
@@ -767,7 +1403,7 @@ async fn js_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "application/javascript"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/app.js"),
+        assets::APP_JS,
     )
 }
 
@@ -777,7 +1413,7 @@ async fn theme_init_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "application/javascript"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/theme-init.js"),
+        assets::THEME_INIT_JS,
     )
 }
 
@@ -787,7 +1423,7 @@ async fn favicon_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "image/x-icon"),
             (header::CACHE_CONTROL, "public, max-age=86400"),
         ],
-        include_bytes!("static/favicon.ico").as_slice(),
+        assets::FAVICON_ICO,
     )
 }
 
@@ -797,7 +1433,7 @@ async fn i18n_index_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "application/javascript"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/i18n/index.js"),
+        assets::I18N_INDEX_JS,
     )
 }
 
@@ -807,7 +1443,7 @@ async fn i18n_en_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "application/javascript"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/i18n/en.js"),
+        assets::I18N_EN_JS,
     )
 }
 
@@ -817,7 +1453,17 @@ async fn i18n_zh_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "application/javascript"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/i18n/zh-CN.js"),
+        assets::I18N_ZH_CN_JS,
+    )
+}
+
+async fn i18n_ko_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::I18N_KO_JS,
     )
 }
 
@@ -827,7 +1473,7 @@ async fn i18n_app_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "application/javascript"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/i18n-app.js"),
+        assets::I18N_APP_JS,
     )
 }
 
@@ -842,7 +1488,7 @@ async fn health_handler() -> Json<HealthResponse> {
 
 /// Return an OAuth error landing page response.
 fn oauth_error_page(label: &str) -> axum::response::Response {
-    let html = crate::cli::oauth_defaults::landing_html(label, false);
+    let html = crate::auth::oauth::landing_html(label, false);
     axum::response::Html(html).into_response()
 }
 
@@ -859,7 +1505,7 @@ async fn oauth_callback_handler(
     State(state): State<Arc<GatewayState>>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    use crate::cli::oauth_defaults;
+    use crate::auth::oauth;
 
     // Check for error from OAuth provider (e.g., user denied consent)
     if let Some(error) = params.get("error") {
@@ -892,7 +1538,7 @@ async fn oauth_callback_handler(
         }
     };
 
-    let decoded_state = match oauth_defaults::decode_hosted_oauth_state(&state_param) {
+    let decoded_state = match oauth::decode_hosted_oauth_state(&state_param) {
         Ok(decoded) => decoded,
         Err(error) => {
             let redacted_state = redact_oauth_state_for_logs(&state_param);
@@ -928,7 +1574,7 @@ async fn oauth_callback_handler(
     };
 
     // Check flow expiry (5 minutes, matching TCP listener timeout)
-    if flow.created_at.elapsed() > oauth_defaults::OAUTH_FLOW_EXPIRY {
+    if flow.created_at.elapsed() > oauth::OAUTH_FLOW_EXPIRY {
         tracing::warn!(
             extension = %flow.extension_name,
             "OAuth flow expired"
@@ -941,6 +1587,7 @@ async fn oauth_callback_handler(
                     extension_name: flow.extension_name.clone(),
                     success: false,
                     message: "OAuth flow expired. Please try again.".to_string(),
+                    thread_id: None,
                 },
             );
         }
@@ -951,12 +1598,12 @@ async fn oauth_callback_handler(
     // Exchange the authorization code for tokens.
     // Use the platform exchange proxy when configured, otherwise call the
     // provider's token URL directly.
-    let exchange_proxy_url = oauth_defaults::exchange_proxy_url();
+    let exchange_proxy_url = oauth::exchange_proxy_url();
 
     let result: Result<(), String> = async {
         let token_response = if let Some(proxy_url) = &exchange_proxy_url {
             let oauth_proxy_auth_token = flow.oauth_proxy_auth_token().unwrap_or_default();
-            oauth_defaults::exchange_via_proxy(oauth_defaults::ProxyTokenExchangeRequest {
+            oauth::exchange_via_proxy(oauth::ProxyTokenExchangeRequest {
                 proxy_url,
                 gateway_token: oauth_proxy_auth_token,
                 token_url: &flow.token_url,
@@ -971,7 +1618,7 @@ async fn oauth_callback_handler(
             .await
             .map_err(|e| e.to_string())?
         } else {
-            oauth_defaults::exchange_oauth_code_with_params(
+            oauth::exchange_oauth_code_with_params(
                 &flow.token_url,
                 &flow.client_id,
                 flow.client_secret.as_deref(),
@@ -987,13 +1634,13 @@ async fn oauth_callback_handler(
 
         // Validate the token before storing (catches wrong account, etc.)
         if let Some(ref validation) = flow.validation_endpoint {
-            oauth_defaults::validate_oauth_token(&token_response.access_token, validation)
+            oauth::validate_oauth_token(&token_response.access_token, validation)
                 .await
                 .map_err(|e| e.to_string())?;
         }
 
         // Store tokens encrypted in the secrets store
-        oauth_defaults::store_oauth_tokens(
+        oauth::store_oauth_tokens(
             flow.secrets.as_ref(),
             &flow.user_id,
             &flow.secret_name,
@@ -1091,9 +1738,25 @@ async fn oauth_callback_handler(
     // from "Installed (Authenticate)" → "Active" without a second click.
     // OAuth success is independent of activation — tokens are already stored.
     // Report auth as successful and attempt activation as a bonus step.
-    let final_message = if success {
-        match ext_mgr.activate(&flow.extension_name, &flow.user_id).await {
-            Ok(result) => result.message,
+    let final_message = if success && flow.auto_activate_extension {
+        match ext_mgr
+            .ensure_extension_ready(
+                &flow.extension_name,
+                &flow.user_id,
+                crate::extensions::EnsureReadyIntent::ExplicitActivate,
+            )
+            .await
+        {
+            Ok(crate::extensions::EnsureReadyOutcome::Ready { activation, .. }) => activation
+                .map(|result| result.message)
+                .unwrap_or_else(|| format!("{} authenticated successfully", flow.display_name)),
+            Ok(crate::extensions::EnsureReadyOutcome::NeedsAuth { auth, .. }) => auth
+                .instructions()
+                .map(String::from)
+                .unwrap_or_else(|| format!("{} authenticated successfully", flow.display_name)),
+            Ok(crate::extensions::EnsureReadyOutcome::NeedsSetup { instructions, .. }) => {
+                instructions
+            }
             Err(e) => {
                 tracing::warn!(
                     extension = %flow.extension_name,
@@ -1106,11 +1769,14 @@ async fn oauth_callback_handler(
                 )
             }
         }
+    } else if success {
+        format!("{} authenticated successfully", flow.display_name)
     } else {
         message
     };
 
     // Broadcast event to notify the web UI
+    let extension_name = flow.extension_name.clone();
     if let Some(ref sse) = flow.sse_manager {
         sse.broadcast_for_user(
             &flow.user_id,
@@ -1118,11 +1784,80 @@ async fn oauth_callback_handler(
                 extension_name: flow.extension_name,
                 success,
                 message: final_message.clone(),
+                thread_id: None,
             },
         );
     }
 
-    let html = oauth_defaults::landing_html(&flow.display_name, success);
+    if success {
+        match crate::bridge::resolve_engine_auth_callback(&flow.user_id, &flow.secret_name).await {
+            Ok(crate::bridge::AuthCallbackContinuation::ResolveGateExternal {
+                channel,
+                thread_scope,
+                request_id,
+            }) => {
+                if let Some(tx) = state.msg_tx.read().await.as_ref().cloned() {
+                    let callback =
+                        crate::agent::submission::Submission::ExternalCallback { request_id };
+                    match serde_json::to_string(&callback) {
+                        Ok(content) => {
+                            let mut msg = IncomingMessage::new(&channel, &flow.user_id, content);
+                            if let Some(thread_id) = thread_scope {
+                                msg = msg.with_thread(thread_id);
+                            }
+                            if let Err(e) = tx.send(msg).await {
+                                tracing::warn!(
+                                    extension = %extension_name,
+                                    user_id = %flow.user_id,
+                                    error = %e,
+                                    "Failed to resolve pending engine auth gate after OAuth callback"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                extension = %extension_name,
+                                user_id = %flow.user_id,
+                                error = %e,
+                                "Failed to serialize external callback submission"
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(crate::bridge::AuthCallbackContinuation::ReplayMessage {
+                channel,
+                thread_scope,
+                content,
+            }) => {
+                if let Some(tx) = state.msg_tx.read().await.as_ref().cloned() {
+                    let mut msg = IncomingMessage::new(&channel, &flow.user_id, content);
+                    if let Some(thread_id) = thread_scope {
+                        msg = msg.with_thread(thread_id);
+                    }
+                    if let Err(e) = tx.send(msg).await {
+                        tracing::warn!(
+                            extension = %extension_name,
+                            user_id = %flow.user_id,
+                            error = %e,
+                            "Failed to replay pending engine auth request after OAuth callback"
+                        );
+                    }
+                }
+            }
+            Ok(crate::bridge::AuthCallbackContinuation::None) => {}
+            Err(e) => {
+                tracing::warn!(
+                    extension = %extension_name,
+                    user_id = %flow.user_id,
+                    error = %e,
+                    "Failed to resume pending engine auth gate after OAuth callback"
+                );
+            }
+        }
+    }
+
+    let html = oauth::landing_html(&flow.display_name, success);
     axum::response::Html(html).into_response()
 }
 
@@ -1225,10 +1960,12 @@ async fn relay_events_handler(
 /// Query params: `provider`, `team_id`.
 async fn slack_relay_oauth_callback_handler(
     State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     // Rate limit
-    if !state.oauth_rate_limiter.check() {
+    let ip = rate_limit_key_from_headers(&headers);
+    if !state.oauth_rate_limiter.check(&ip) {
         return axum::response::Html(
             "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
              <h2>Too Many Requests</h2>\
@@ -1381,6 +2118,7 @@ async fn slack_relay_oauth_callback_handler(
         extension_name: DEFAULT_RELAY_NAME.to_string(),
         success,
         message: message.clone(),
+        thread_id: None,
     });
 
     if success {
@@ -1613,7 +2351,60 @@ async fn chat_approval_handler(
     ))
 }
 
-/// Submit an auth token directly to the extension manager, bypassing the message pipeline.
+async fn chat_gate_resolve_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Json(req): Json<GateResolveRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    match req.resolution {
+        GateResolutionPayload::Approved { always } => {
+            let action = if always { "always" } else { "approve" }.to_string();
+            let _ = chat_approval_handler(
+                State(state),
+                AuthenticatedUser(user),
+                Json(ApprovalRequest {
+                    request_id: req.request_id,
+                    action,
+                    thread_id: req.thread_id,
+                }),
+            )
+            .await?;
+            Ok(Json(ActionResponse::ok("Gate resolution accepted.")))
+        }
+        GateResolutionPayload::Denied => {
+            let _ = chat_approval_handler(
+                State(state),
+                AuthenticatedUser(user),
+                Json(ApprovalRequest {
+                    request_id: req.request_id,
+                    action: "deny".into(),
+                    thread_id: req.thread_id,
+                }),
+            )
+            .await?;
+            Ok(Json(ActionResponse::ok("Gate resolution accepted.")))
+        }
+        GateResolutionPayload::CredentialProvided { token } => {
+            let thread_id = req.thread_id.ok_or((
+                StatusCode::BAD_REQUEST,
+                "thread_id is required for credential resolution".to_string(),
+            ))?;
+            dispatch_engine_auth_resolution(&state, &user.user_id, &thread_id, token).await?;
+            Ok(Json(ActionResponse::ok("Credential submitted.")))
+        }
+        GateResolutionPayload::Cancelled => {
+            let thread_id = req.thread_id.ok_or((
+                StatusCode::BAD_REQUEST,
+                "thread_id is required for cancellation".to_string(),
+            ))?;
+            dispatch_engine_auth_resolution(&state, &user.user_id, &thread_id, "cancel".into())
+                .await?;
+            Ok(Json(ActionResponse::ok("Gate cancelled.")))
+        }
+    }
+}
+
+/// Submit an auth token directly to the shared auth manager, bypassing the message pipeline.
 ///
 /// The token never touches the LLM, chat history, or SSE stream.
 async fn chat_auth_token_handler(
@@ -1621,13 +2412,47 @@ async fn chat_auth_token_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<AuthTokenRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Extension manager not available".to_string(),
-    ))?;
+    if let Some(ref thread_id) = req.thread_id
+        && crate::bridge::get_engine_pending_auth(&user.user_id, Some(thread_id))
+            .await
+            .is_some()
+    {
+        dispatch_engine_auth_resolution(&state, &user.user_id, thread_id, req.token.clone())
+            .await?;
+        return Ok(Json(ActionResponse::ok("Credential submitted.")));
+    }
 
-    match ext_mgr
-        .configure_token(&req.extension_name, &req.token, &user.user_id)
+    let auth_manager = state
+        .auth_manager
+        .clone()
+        .or_else(|| {
+            state
+                .tool_registry
+                .as_ref()
+                .and_then(|tr| tr.secrets_store().cloned())
+                .or_else(|| state.secrets_store.clone())
+                .or_else(|| {
+                    state
+                        .extension_manager
+                        .as_ref()
+                        .map(|em| std::sync::Arc::clone(em.secrets()))
+                })
+                .map(|secrets| {
+                    Arc::new(crate::bridge::auth_manager::AuthManager::new(
+                        secrets,
+                        state.skill_registry.clone(),
+                        state.extension_manager.clone(),
+                        state.tool_registry.clone(),
+                    ))
+                })
+        })
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Auth manager not available".to_string(),
+        ))?;
+
+    match auth_manager
+        .submit_auth_token(&req.extension_name, &req.token, &user.user_id)
         .await
     {
         Ok(result) => {
@@ -1649,6 +2474,7 @@ async fn chat_auth_token_handler(
                         instructions: Some(result.message),
                         auth_url: None,
                         setup_url: None,
+                        thread_id: req.thread_id.clone(),
                     },
                 );
             } else if result.activated {
@@ -1661,6 +2487,7 @@ async fn chat_auth_token_handler(
                         extension_name: req.extension_name.clone(),
                         success: true,
                         message: result.message,
+                        thread_id: req.thread_id.clone(),
                     },
                 );
             } else {
@@ -1670,6 +2497,7 @@ async fn chat_auth_token_handler(
                         extension_name: req.extension_name.clone(),
                         success: false,
                         message: result.message,
+                        thread_id: req.thread_id.clone(),
                     },
                 );
             }
@@ -1678,6 +2506,7 @@ async fn chat_auth_token_handler(
         }
         Err(e) => {
             let msg = e.to_string();
+
             // Re-emit auth_required for retry on validation errors
             if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
                 state.sse.broadcast_for_user(
@@ -1687,6 +2516,7 @@ async fn chat_auth_token_handler(
                         instructions: Some(msg.clone()),
                         auth_url: None,
                         setup_url: None,
+                        thread_id: req.thread_id.clone(),
                     },
                 );
             }
@@ -1699,9 +2529,20 @@ async fn chat_auth_token_handler(
 async fn chat_auth_cancel_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
-    Json(_req): Json<AuthCancelRequest>,
+    Json(req): Json<AuthCancelRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    if let Some(ref thread_id) = req.thread_id
+        && crate::bridge::get_engine_pending_auth(&user.user_id, Some(thread_id))
+            .await
+            .is_some()
+    {
+        dispatch_engine_auth_resolution(&state, &user.user_id, thread_id, "cancel".into()).await?;
+        return Ok(Json(ActionResponse::ok("Auth cancelled")));
+    }
+
     clear_auth_mode(&state, &user.user_id).await;
+    // Also clear engine v2 pending auth so the next message isn't consumed as a token.
+    crate::bridge::clear_engine_pending_auth(&user.user_id, req.thread_id.as_deref()).await;
     Ok(Json(ActionResponse::ok("Auth cancelled")))
 }
 
@@ -1716,20 +2557,6 @@ pub async fn clear_auth_mode(state: &GatewayState, user_id: &str) {
             thread.pending_auth = None;
         }
     }
-}
-
-async fn chat_events_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let sse = state.sse.subscribe(Some(user.user_id)).ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Too many connections".to_string(),
-    ))?;
-    Ok((
-        [("X-Accel-Buffering", "no"), ("Cache-Control", "no-cache")],
-        sse,
-    ))
 }
 
 /// Check whether an Origin header value points to a local address.
@@ -1793,6 +2620,64 @@ struct HistoryQuery {
     before: Option<String>,
 }
 
+async fn engine_pending_gate_info(
+    user_id: &str,
+    thread_id: Option<&str>,
+) -> Option<PendingGateInfo> {
+    let pending = crate::bridge::get_engine_pending_gate(user_id, thread_id)
+        .await
+        .ok()??;
+    Some(PendingGateInfo {
+        request_id: pending.request_id,
+        thread_id: pending.thread_id.to_string(),
+        gate_name: pending.gate_name,
+        tool_name: pending.tool_name,
+        description: pending.description,
+        parameters: pending.parameters,
+        resume_kind: serde_json::to_value(pending.resume_kind).unwrap_or_default(),
+    })
+}
+
+async fn history_pending_gate_info(
+    user_id: &str,
+    thread_id: Option<&str>,
+) -> Option<PendingGateInfo> {
+    if thread_id.is_some() {
+        // Thread-scoped pending gates are authoritative once the client sends a
+        // thread_id. The unscoped fallback only exists for legacy callers that
+        // do not know which thread owns the gate yet.
+        return engine_pending_gate_info(user_id, thread_id).await;
+    }
+    engine_pending_gate_info(user_id, None).await
+}
+
+async fn dispatch_engine_auth_resolution(
+    state: &GatewayState,
+    user_id: &str,
+    thread_id: &str,
+    content: String,
+) -> Result<(), (StatusCode, String)> {
+    let tx = {
+        let tx_guard = state.msg_tx.read().await;
+        tx_guard
+            .as_ref()
+            .ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Channel not started".to_string(),
+            ))?
+            .clone()
+    };
+
+    let msg = IncomingMessage::new("gateway", user_id, content).with_thread(thread_id.to_string());
+
+    tx.send(msg).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Channel closed".to_string(),
+        )
+    })
+}
+
 async fn chat_history_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -1830,6 +2715,8 @@ async fn chat_history_handler(
         sess.active_thread
             .ok_or((StatusCode::NOT_FOUND, "No active thread".to_string()))?
     };
+    let thread_id_str = thread_id.to_string();
+    let thread_scope = Some(thread_id_str.as_str());
 
     // Verify the thread belongs to the authenticated user before returning any data.
     // In-memory threads are already scoped by user via session_manager, but DB
@@ -1865,7 +2752,7 @@ async fn chat_history_handler(
             turns,
             has_more,
             oldest_timestamp,
-            pending_approval: None,
+            pending_gate: history_pending_gate_info(&user.user_id, thread_scope).await,
         }));
     }
 
@@ -1905,14 +2792,18 @@ async fn chat_history_handler(
             })
             .collect();
 
-        let pending_approval = thread
-            .pending_approval
-            .as_ref()
-            .map(|pa| PendingApprovalInfo {
-                request_id: pa.request_id.to_string(),
-                tool_name: pa.tool_name.clone(),
-                description: pa.description.clone(),
-                parameters: serde_json::to_string_pretty(&pa.parameters).unwrap_or_default(),
+        let pending_gate = history_pending_gate_info(&user.user_id, thread_scope)
+            .await
+            .or_else(|| {
+                thread.pending_approval.as_ref().map(|pa| PendingGateInfo {
+                    request_id: pa.request_id.to_string(),
+                    thread_id: thread_id.to_string(),
+                    gate_name: "approval".into(),
+                    tool_name: pa.tool_name.clone(),
+                    description: pa.description.clone(),
+                    parameters: serde_json::to_string_pretty(&pa.parameters).unwrap_or_default(),
+                    resume_kind: serde_json::json!({"Approval":{"allow_always":true}}),
+                })
             });
 
         return Ok(Json(HistoryResponse {
@@ -1920,7 +2811,7 @@ async fn chat_history_handler(
             turns,
             has_more: false,
             oldest_timestamp: None,
-            pending_approval,
+            pending_gate,
         }));
     }
 
@@ -1939,7 +2830,7 @@ async fn chat_history_handler(
                 turns,
                 has_more,
                 oldest_timestamp,
-                pending_approval: None,
+                pending_gate: history_pending_gate_info(&user.user_id, thread_scope).await,
             }));
         }
     }
@@ -1950,7 +2841,7 @@ async fn chat_history_handler(
         turns: Vec::new(),
         has_more: false,
         oldest_timestamp: None,
-        pending_approval: None,
+        pending_gate: history_pending_gate_info(&user.user_id, thread_scope).await,
     }))
 }
 
@@ -2196,13 +3087,16 @@ async fn extensions_list_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let pairing_store = crate::pairing::PairingStore::new();
     let mut owner_bound_channels = std::collections::HashSet::new();
+    let mut paired_channels = std::collections::HashSet::new();
     for ext in &installed {
-        if ext.kind == crate::extensions::ExtensionKind::WasmChannel
-            && ext_mgr.has_wasm_channel_owner_binding(&ext.name).await
-        {
-            owner_bound_channels.insert(ext.name.clone());
+        if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
+            if ext_mgr.has_wasm_channel_owner_binding(&ext.name).await {
+                owner_bound_channels.insert(ext.name.clone());
+            }
+            if ext_mgr.has_wasm_channel_pairing(&ext.name).await {
+                paired_channels.insert(ext.name.clone());
+            }
         }
     }
     let extensions = installed
@@ -2211,7 +3105,7 @@ async fn extensions_list_handler(
             let activation_status =
                 crate::channels::web::handlers::extensions::derive_activation_status(
                     &ext,
-                    &pairing_store,
+                    paired_channels.contains(&ext.name),
                     owner_bound_channels.contains(&ext.name),
                 );
             ExtensionInfo {
@@ -2228,11 +3122,76 @@ async fn extensions_list_handler(
                 activation_status,
                 activation_error: ext.activation_error,
                 version: ext.version,
+                onboarding_state: None,
+                onboarding: None,
             }
         })
         .collect();
 
     Ok(Json(ExtensionListResponse { extensions }))
+}
+
+fn extension_phase_for_web(
+    ext: &crate::extensions::InstalledExtension,
+) -> crate::extensions::ExtensionPhase {
+    if ext.activation_error.is_some() {
+        crate::extensions::ExtensionPhase::Error
+    } else if ext.needs_setup {
+        crate::extensions::ExtensionPhase::NeedsSetup
+    } else if ext.has_auth && !ext.authenticated {
+        crate::extensions::ExtensionPhase::NeedsAuth
+    } else if ext.active
+        || matches!(
+            ext.kind,
+            crate::extensions::ExtensionKind::WasmChannel
+                | crate::extensions::ExtensionKind::ChannelRelay
+        )
+    {
+        crate::extensions::ExtensionPhase::Ready
+    } else {
+        crate::extensions::ExtensionPhase::NeedsActivation
+    }
+}
+
+async fn extensions_readiness_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+) -> Result<Json<ExtensionReadinessResponse>, (StatusCode, String)> {
+    let ext_mgr = state.extension_manager.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Extension manager not available (secrets store required)".to_string(),
+    ))?;
+
+    let installed = ext_mgr
+        .list(None, false, &user.user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let extensions = installed
+        .into_iter()
+        .map(|ext| {
+            let phase = match extension_phase_for_web(&ext) {
+                crate::extensions::ExtensionPhase::Installed => "installed",
+                crate::extensions::ExtensionPhase::NeedsSetup => "needs_setup",
+                crate::extensions::ExtensionPhase::NeedsAuth => "needs_auth",
+                crate::extensions::ExtensionPhase::NeedsActivation => "needs_activation",
+                crate::extensions::ExtensionPhase::Activating => "activating",
+                crate::extensions::ExtensionPhase::Ready => "ready",
+                crate::extensions::ExtensionPhase::Error => "error",
+            }
+            .to_string();
+            ExtensionReadinessInfo {
+                name: ext.name,
+                kind: ext.kind.to_string(),
+                phase,
+                authenticated: ext.authenticated,
+                active: ext.active,
+                activation_error: ext.activation_error,
+            }
+        })
+        .collect();
+
+    Ok(Json(ExtensionReadinessResponse { extensions }))
 }
 
 async fn extensions_tools_handler(
@@ -2290,6 +3249,7 @@ async fn extensions_install_handler(
         "mcp_server" => Some(crate::extensions::ExtensionKind::McpServer),
         "wasm_tool" => Some(crate::extensions::ExtensionKind::WasmTool),
         "wasm_channel" => Some(crate::extensions::ExtensionKind::WasmChannel),
+        "acp_agent" => Some(crate::extensions::ExtensionKind::AcpAgent),
         _ => None,
     });
 
@@ -2299,33 +3259,71 @@ async fn extensions_install_handler(
     {
         Ok(result) => {
             let mut resp = ActionResponse::ok(result.message);
-
-            // Auto-activate WASM tools after install (install = active).
-            if result.kind == crate::extensions::ExtensionKind::WasmTool {
-                if let Err(e) = ext_mgr.activate(&req.name, &user.user_id).await {
+            match ext_mgr
+                .ensure_extension_ready(
+                    &req.name,
+                    &user.user_id,
+                    crate::extensions::EnsureReadyIntent::PostInstall,
+                )
+                .await
+            {
+                Ok(readiness) => apply_extension_readiness_to_response(&mut resp, readiness, true),
+                Err(e) => {
                     tracing::debug!(
                         extension = %req.name,
                         error = %e,
-                        "Auto-activation after install failed"
+                        "Post-install readiness follow-through failed"
                     );
-                }
-
-                // Check auth after activation. This may initiate OAuth both for scope
-                // expansion and for first-time auth when credentials are already
-                // configured (e.g., built-in providers). We only surface an auth_url
-                // when the extension reports it is awaiting authorization.
-                match ext_mgr.auth(&req.name, &user.user_id).await {
-                    Ok(auth_result) if auth_result.auth_url().is_some() => {
-                        // Scope expansion or initial OAuth: user needs to authorize
-                        resp.auth_url = auth_result.auth_url().map(String::from);
-                    }
-                    _ => {}
                 }
             }
 
             Ok(Json(resp))
         }
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+    }
+}
+
+fn apply_extension_readiness_to_response(
+    resp: &mut ActionResponse,
+    readiness: crate::extensions::EnsureReadyOutcome,
+    preserve_success: bool,
+) {
+    match readiness {
+        crate::extensions::EnsureReadyOutcome::Ready { activation, .. } => {
+            if let Some(activation) = activation {
+                resp.message = activation.message;
+                resp.activated = Some(true);
+            }
+        }
+        crate::extensions::EnsureReadyOutcome::NeedsAuth { auth, .. } => {
+            let fallback = format!("'{}' requires authentication.", auth.name);
+            if !preserve_success {
+                resp.success = false;
+                resp.message = auth
+                    .instructions()
+                    .map(String::from)
+                    .unwrap_or_else(|| fallback.clone());
+            } else if let Some(instructions) = auth.instructions() {
+                resp.message = format!("{}. {}", resp.message, instructions);
+            }
+            resp.auth_url = auth.auth_url().map(String::from);
+            resp.awaiting_token = Some(auth.is_awaiting_token());
+            resp.instructions = auth.instructions().map(String::from);
+        }
+        crate::extensions::EnsureReadyOutcome::NeedsSetup {
+            instructions,
+            setup_url,
+            ..
+        } => {
+            if !preserve_success {
+                resp.success = false;
+                resp.message = instructions.clone();
+            } else {
+                resp.message = format!("{}. {}", resp.message, instructions);
+            }
+            resp.instructions = Some(instructions);
+            resp.auth_url = setup_url;
+        }
     }
 }
 
@@ -2344,80 +3342,20 @@ async fn extensions_activate_handler(
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
-    match ext_mgr.activate(&name, &user.user_id).await {
-        Ok(result) => {
-            tracing::info!(
-                extension = %name,
-                "extensions_activate_handler: activation succeeded"
-            );
-            // Activation loaded the WASM module. Check if the tool needs
-            // OAuth scope expansion (e.g., adding google-docs when gmail
-            // already has a token but missing the documents scope).
-            // Initial OAuth setup is triggered via configure.
-            let mut resp = ActionResponse::ok(result.message);
-            if let Ok(auth_result) = ext_mgr.auth(&name, &user.user_id).await
-                && auth_result.auth_url().is_some()
-            {
-                resp.auth_url = auth_result.auth_url().map(String::from);
-            }
+    match ext_mgr
+        .ensure_extension_ready(
+            &name,
+            &user.user_id,
+            crate::extensions::EnsureReadyIntent::ExplicitActivate,
+        )
+        .await
+    {
+        Ok(readiness) => {
+            let mut resp = ActionResponse::ok(format!("Extension '{}' is ready.", name));
+            apply_extension_readiness_to_response(&mut resp, readiness, false);
             Ok(Json(resp))
         }
-        Err(activate_err) => {
-            let needs_auth = matches!(
-                &activate_err,
-                crate::extensions::ExtensionError::AuthRequired
-            );
-
-            tracing::trace!(
-                extension = %name,
-                error = %activate_err,
-                needs_auth = needs_auth,
-                "extensions_activate_handler: activation failed, attempting auth fallback"
-            );
-
-            if !needs_auth {
-                return Ok(Json(ActionResponse::fail(activate_err.to_string())));
-            }
-
-            // Activation failed due to auth; try authenticating first.
-            match ext_mgr.auth(&name, &user.user_id).await {
-                Ok(auth_result) if auth_result.is_authenticated() => {
-                    tracing::trace!(
-                        extension = %name,
-                        "extensions_activate_handler: auth reports authenticated, retrying activate"
-                    );
-                    // Auth succeeded, retry activation.
-                    match ext_mgr.activate(&name, &user.user_id).await {
-                        Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
-                        Err(e) => {
-                            tracing::warn!(
-                                extension = %name,
-                                error = %e,
-                                "extensions_activate_handler: retry after auth still failed"
-                            );
-                            Ok(Json(ActionResponse::fail(e.to_string())))
-                        }
-                    }
-                }
-                Ok(auth_result) => {
-                    // Auth in progress (OAuth URL or awaiting manual token).
-                    let mut resp = ActionResponse::fail(
-                        auth_result
-                            .instructions()
-                            .map(String::from)
-                            .unwrap_or_else(|| format!("'{}' requires authentication.", name)),
-                    );
-                    resp.auth_url = auth_result.auth_url().map(String::from);
-                    resp.awaiting_token = Some(auth_result.is_awaiting_token());
-                    resp.instructions = auth_result.instructions().map(String::from);
-                    Ok(Json(resp))
-                }
-                Err(auth_err) => Ok(Json(ActionResponse::fail(format!(
-                    "Authentication failed: {}",
-                    auth_err
-                )))),
-            }
-        }
+        Err(err) => Ok(Json(ActionResponse::fail(err.to_string()))),
     }
 }
 
@@ -2624,6 +3562,8 @@ async fn extensions_setup_handler(
         kind,
         secrets: setup.secrets,
         fields: setup.fields,
+        onboarding_state: None,
+        onboarding: None,
     }))
 }
 
@@ -2653,12 +3593,11 @@ async fn extensions_setup_submit_handler(
                 ActionResponse::fail(result.message)
             };
             resp.activated = Some(result.activated);
-            if result.restart_required || !result.activated {
-                resp.needs_restart = Some(true);
-            }
             resp.auth_url = result.auth_url.clone();
             resp.verification = result.verification.clone();
             resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
+            resp.onboarding_state = result.onboarding_state;
+            resp.onboarding = result.onboarding.clone();
             if result.verification.is_none() {
                 // Broadcast auth_completed so the chat UI can dismiss any in-progress
                 // auth card or setup modal that was triggered by tool_auth/tool_activate.
@@ -2668,32 +3607,52 @@ async fn extensions_setup_submit_handler(
                         extension_name: name.clone(),
                         success: result.activated,
                         message: resp.message.clone(),
+                        thread_id: None,
                     },
                 );
             }
             Ok(Json(resp))
         }
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Err(e) => {
+            // Preserve the `activated` field on the failure path so clients
+            // (and regression tests) see an explicit `false` rather than
+            // `null`. `ActionResponse::fail` leaves `activated` as `None`,
+            // which serializes to `null` and makes "did activation fail?"
+            // ambiguous from the wire.
+            let mut resp = ActionResponse::fail(e.to_string());
+            resp.activated = Some(false);
+            Ok(Json(resp))
+        }
     }
 }
 
 // --- Pairing handlers ---
 
 async fn pairing_list_handler(
+    State(state): State<Arc<GatewayState>>,
+    AdminUser(_user): AdminUser,
     Path(channel): Path<String>,
 ) -> Result<Json<PairingListResponse>, (StatusCode, String)> {
-    let store = crate::pairing::PairingStore::new();
-    let requests = store
-        .list_pending(&channel)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let store = state.pairing_store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Pairing store not available".to_string(),
+    ))?;
+    let requests: Vec<crate::db::PairingRequestRecord> =
+        store.list_pending(&channel).await.map_err(|e| {
+            tracing::warn!(error = %e, "pairing list failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal error listing pairing requests".to_string(),
+            )
+        })?;
 
     let infos = requests
         .into_iter()
         .map(|r| PairingRequestInfo {
             code: r.code,
-            sender_id: r.id,
-            meta: r.meta,
-            created_at: r.created_at,
+            sender_id: r.external_id,
+            meta: None,
+            created_at: r.created_at.to_rfc3339(),
         })
         .collect();
 
@@ -2704,23 +3663,36 @@ async fn pairing_list_handler(
 }
 
 async fn pairing_approve_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(channel): Path<String>,
     Json(req): Json<PairingApproveRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    let store = crate::pairing::PairingStore::new();
-    match store.approve(&channel, &req.code) {
-        Ok(Some(approved)) => Ok(Json(ActionResponse::ok(format!(
-            "Pairing approved for sender '{}'",
-            approved.id
-        )))),
-        Ok(None) => Ok(Json(ActionResponse::fail(
-            "Invalid or expired pairing code".to_string(),
+    let flow = crate::pairing::PairingCodeChallenge::new(&channel);
+    let Some(code) =
+        crate::code_challenge::CodeChallengeFlow::normalize_submission(&flow, &req.code)
+    else {
+        return Ok(Json(ActionResponse::fail(
+            "Pairing code is required.".to_string(),
+        )));
+    };
+
+    let store = state.pairing_store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Pairing store not available".to_string(),
+    ))?;
+    let owner_id = crate::ownership::OwnerId::from(user.user_id.clone());
+    match store.approve(&channel, &code, &owner_id).await {
+        Ok(()) => Ok(Json(ActionResponse::ok("Pairing approved.".to_string()))),
+        Err(crate::error::DatabaseError::NotFound { .. }) => Ok(Json(ActionResponse::fail(
+            "Invalid or expired pairing code.".to_string(),
         ))),
-        Err(crate::pairing::PairingStoreError::ApproveRateLimited) => Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            "Too many failed approve attempts; try again later".to_string(),
-        )),
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Err(e) => {
+            tracing::warn!(error = %e, "pairing approval failed");
+            Ok(Json(ActionResponse::fail(
+                "Internal error processing approval.".to_string(),
+            )))
+        }
     }
 }
 
@@ -2856,10 +3828,10 @@ struct GatewayStatusResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::oauth;
     use crate::channels::web::types::{
         ExtensionActivationStatus, classify_wasm_channel_activation,
     };
-    use crate::cli::oauth_defaults;
     use crate::extensions::{ExtensionKind, InstalledExtension};
     use crate::testing::credentials::TEST_GATEWAY_CRYPTO_KEY;
 
@@ -2937,6 +3909,27 @@ mod tests {
     fn test_build_turns_from_db_messages_empty() {
         let turns = build_turns_from_db_messages(&[]);
         assert!(turns.is_empty());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn workspace_pool_resolve_seeds_new_user_workspace() {
+        let (db, _dir) = crate::testing::test_db().await;
+        let pool = WorkspacePool::new(
+            db,
+            None,
+            crate::workspace::EmbeddingCacheConfig::default(),
+            crate::config::WorkspaceSearchConfig::default(),
+            crate::config::WorkspaceConfig::default(),
+        );
+
+        let ws = crate::tools::builtin::memory::WorkspaceResolver::resolve(&pool, "alice").await;
+
+        let readme = ws.read(crate::workspace::paths::README).await.unwrap();
+        let identity = ws.read(crate::workspace::paths::IDENTITY).await.unwrap();
+
+        assert!(!readme.content.trim().is_empty());
+        assert!(!identity.content.trim().is_empty());
     }
 
     #[test]
@@ -3020,8 +4013,13 @@ mod tests {
 
     // --- OAuth callback handler tests ---
 
-    /// Build a minimal `GatewayState` for testing the OAuth callback handler.
-    fn test_gateway_state(ext_mgr: Option<Arc<ExtensionManager>>) -> Arc<GatewayState> {
+    /// Build a minimal `GatewayState` for handler tests.
+    fn test_gateway_state_with_dependencies(
+        ext_mgr: Option<Arc<ExtensionManager>>,
+        store: Option<Arc<dyn Database>>,
+        db_auth: Option<Arc<crate::channels::web::auth::DbAuthenticator>>,
+        pairing_store: Option<Arc<crate::pairing::PairingStore>>,
+    ) -> Arc<GatewayState> {
         Arc::new(GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
             sse: Arc::new(SseManager::new()),
@@ -3032,7 +4030,7 @@ mod tests {
             log_level_handle: None,
             extension_manager: ext_mgr,
             tool_registry: None,
-            store: None,
+            store,
             job_manager: None,
             prompt_queue: None,
             owner_id: "test".to_string(),
@@ -3041,9 +4039,10 @@ mod tests {
             llm_provider: None,
             skill_registry: None,
             skill_catalog: None,
+            auth_manager: None,
             scheduler: None,
             chat_rate_limiter: PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: RateLimiter::new(10, 60),
+            oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
             webhook_rate_limiter: RateLimiter::new(10, 60),
             registry_entries: vec![],
             cost_guard: None,
@@ -3051,8 +4050,23 @@ mod tests {
             startup_time: std::time::Instant::now(),
             active_config: ActiveConfigSnapshot::default(),
             secrets_store: None,
-            db_auth: None,
+            db_auth,
+            pairing_store,
+            oauth_providers: None,
+            oauth_state_store: None,
+            oauth_base_url: None,
+            oauth_allowed_domains: Vec::new(),
+            near_nonce_store: None,
+            near_rpc_url: None,
+            near_network: None,
+            oauth_sweep_shutdown: None,
+            frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            tool_dispatcher: None,
         })
+    }
+
+    fn test_gateway_state(ext_mgr: Option<Arc<ExtensionManager>>) -> Arc<GatewayState> {
+        test_gateway_state_with_dependencies(ext_mgr, None, None, None)
     }
 
     /// Build a test router with just the OAuth callback route.
@@ -3060,6 +4074,304 @@ mod tests {
         Router::new()
             .route("/oauth/callback", get(oauth_callback_handler))
             .with_state(state)
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn insert_test_user(db: &Arc<dyn Database>, id: &str, role: &str) {
+        db.get_or_create_user(crate::db::UserRecord {
+            id: id.to_string(),
+            role: role.to_string(),
+            display_name: id.to_string(),
+            status: "active".to_string(),
+            email: None,
+            last_login_at: None,
+            created_by: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("create test user");
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn make_pairing_test_state() -> (
+        Arc<GatewayState>,
+        Arc<dyn Database>,
+        Arc<crate::pairing::PairingStore>,
+        tempfile::TempDir,
+    ) {
+        let (db, tmp) = crate::testing::test_db().await;
+        insert_test_user(&db, "admin-1", "admin").await;
+        insert_test_user(&db, "member-1", "member").await;
+        let pairing_store = Arc::new(crate::pairing::PairingStore::new(
+            Arc::clone(&db),
+            Arc::new(crate::ownership::OwnershipCache::new()),
+        ));
+        let state = test_gateway_state_with_dependencies(
+            None,
+            Some(Arc::clone(&db)),
+            None,
+            Some(Arc::clone(&pairing_store)),
+        );
+        (state, db, pairing_store, tmp)
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_pairing_list_requires_admin_role() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (state, _db, pairing_store, _tmp) = make_pairing_test_state().await;
+        pairing_store
+            .upsert_request("telegram", "tg-user-1", None)
+            .await
+            .expect("create pairing request");
+
+        let app = Router::new()
+            .route("/api/pairing/{channel}", get(pairing_list_handler))
+            .with_state(state);
+
+        let mut member_req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/pairing/telegram")
+            .body(Body::empty())
+            .expect("member request");
+        member_req.extensions_mut().insert(UserIdentity {
+            user_id: "member-1".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let member_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), member_req)
+            .await
+            .expect("member response");
+        assert_eq!(member_resp.status(), StatusCode::FORBIDDEN);
+
+        let mut admin_req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/pairing/telegram")
+            .body(Body::empty())
+            .expect("admin request");
+        admin_req.extensions_mut().insert(UserIdentity {
+            user_id: "admin-1".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let admin_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, admin_req)
+            .await
+            .expect("admin response");
+        assert_eq!(admin_resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(admin_resp.into_body(), 1024 * 64)
+            .await
+            .expect("admin body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("pairing list json");
+        assert_eq!(
+            parsed["channel"],
+            serde_json::Value::String("telegram".to_string())
+        );
+        assert_eq!(parsed["requests"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            parsed["requests"][0]["sender_id"],
+            serde_json::Value::String("tg-user-1".to_string())
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_pairing_approve_claims_code_for_authenticated_user() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (state, _db, pairing_store, _tmp) = make_pairing_test_state().await;
+        let request = pairing_store
+            .upsert_request("telegram", "tg-user-claim", None)
+            .await
+            .expect("create pairing request");
+
+        let app = Router::new()
+            .route(
+                "/api/pairing/{channel}/approve",
+                post(pairing_approve_handler),
+            )
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/pairing/telegram/approve")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "code": request.code.to_ascii_lowercase() }).to_string(),
+            ))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member-1".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(parsed["success"], serde_json::Value::Bool(true));
+
+        let identity = pairing_store
+            .resolve_identity("telegram", "tg-user-claim")
+            .await
+            .expect("resolve identity")
+            .expect("claimed identity");
+        assert_eq!(identity.owner_id.as_str(), "member-1");
+        assert!(
+            pairing_store
+                .list_pending("telegram")
+                .await
+                .expect("pending list")
+                .is_empty()
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_pairing_approve_rejects_blank_code() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (state, _db, _pairing_store, _tmp) = make_pairing_test_state().await;
+        let app = Router::new()
+            .route(
+                "/api/pairing/{channel}/approve",
+                post(pairing_approve_handler),
+            )
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/pairing/telegram/approve")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({ "code": "   " }).to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member-1".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(parsed["success"], serde_json::Value::Bool(false));
+        assert_eq!(
+            parsed["message"],
+            serde_json::Value::String("Pairing code is required.".to_string())
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_delete_user_evicts_auth_and_pairing_caches() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (db, _tmp) = crate::testing::test_db().await;
+        insert_test_user(&db, "admin-1", "admin").await;
+        insert_test_user(&db, "member-1", "member").await;
+
+        let token = "member-token-123";
+        let hash = crate::channels::web::auth::hash_token(token);
+        db.create_api_token("member-1", "test-token", &hash, &token[..8], None) // safety: test-only, ASCII literal
+            .await
+            .expect("create api token");
+
+        let db_auth = Arc::new(crate::channels::web::auth::DbAuthenticator::new(
+            Arc::clone(&db),
+        ));
+        let pairing_store = Arc::new(crate::pairing::PairingStore::new(
+            Arc::clone(&db),
+            Arc::new(crate::ownership::OwnershipCache::new()),
+        ));
+
+        let auth_identity = db_auth
+            .authenticate(token)
+            .await
+            .expect("db auth lookup")
+            .expect("db auth identity");
+        assert_eq!(auth_identity.user_id, "member-1");
+
+        let request = pairing_store
+            .upsert_request("telegram", "tg-delete-1", None)
+            .await
+            .expect("create pairing request");
+        pairing_store
+            .approve(
+                "telegram",
+                &request.code,
+                &crate::ownership::OwnerId::from("member-1"),
+            )
+            .await
+            .expect("approve pairing");
+        assert!(
+            pairing_store
+                .resolve_identity("telegram", "tg-delete-1")
+                .await
+                .expect("prime pairing cache")
+                .is_some()
+        );
+
+        let state = test_gateway_state_with_dependencies(
+            None,
+            Some(Arc::clone(&db)),
+            Some(Arc::clone(&db_auth)),
+            Some(Arc::clone(&pairing_store)),
+        );
+        let app = Router::new()
+            .route(
+                "/api/admin/users/{id}",
+                axum::routing::delete(crate::channels::web::handlers::users::users_delete_handler),
+            )
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("DELETE")
+            .uri("/api/admin/users/member-1")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "admin-1".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        assert!(
+            db_auth
+                .authenticate(token)
+                .await
+                .expect("post-delete auth lookup")
+                .is_none()
+        );
+        assert!(
+            pairing_store
+                .resolve_identity("telegram", "tg-delete-1")
+                .await
+                .expect("post-delete pairing lookup")
+                .is_none()
+        );
     }
 
     #[derive(Clone, Debug)]
@@ -3192,8 +4504,8 @@ mod tests {
         secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
         sse_manager: Option<Arc<SseManager>>,
         oauth_proxy_auth_token: Option<String>,
-    ) -> crate::cli::oauth_defaults::PendingOAuthFlow {
-        crate::cli::oauth_defaults::PendingOAuthFlow {
+    ) -> crate::auth::oauth::PendingOAuthFlow {
+        crate::auth::oauth::PendingOAuthFlow {
             extension_name: "test_tool".to_string(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
@@ -3215,6 +4527,7 @@ mod tests {
             client_secret_secret_name: None,
             client_secret_expires_at: None,
             created_at: std::time::Instant::now(),
+            auto_activate_extension: true,
         }
     }
 
@@ -3226,7 +4539,13 @@ mod tests {
         let secrets = test_secrets_store();
         let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
 
-        let channel_name = "test-failing-channel";
+        // Use underscore-only name: `canonicalize_extension_name` rewrites
+        // hyphens to underscores, but `configure`'s capabilities-file lookup
+        // does not fall back to the legacy hyphen form, so a hyphenated test
+        // channel name causes `Capabilities file not found` and the handler
+        // takes the `Err` branch (no `activated` field) instead of the
+        // intended "saved but activation failed" branch.
+        let channel_name = "test_failing_channel";
         std::fs::write(
             wasm_channels_dir
                 .path()
@@ -3297,6 +4616,115 @@ mod tests {
             "expected activation failure in message: {:?}",
             parsed
         );
+    }
+
+    #[test]
+    fn test_extension_phase_for_web_prefers_error_then_readiness() {
+        let mut ext = crate::extensions::InstalledExtension {
+            name: "notion".to_string(),
+            kind: crate::extensions::ExtensionKind::McpServer,
+            display_name: None,
+            description: None,
+            url: None,
+            authenticated: false,
+            active: false,
+            tools: Vec::new(),
+            needs_setup: false,
+            has_auth: true,
+            installed: true,
+            activation_error: Some("boom".to_string()),
+            version: None,
+        };
+        assert_eq!(
+            extension_phase_for_web(&ext),
+            crate::extensions::ExtensionPhase::Error
+        );
+
+        ext.activation_error = None;
+        ext.needs_setup = true;
+        assert_eq!(
+            extension_phase_for_web(&ext),
+            crate::extensions::ExtensionPhase::NeedsSetup
+        );
+
+        ext.needs_setup = false;
+        assert_eq!(
+            extension_phase_for_web(&ext),
+            crate::extensions::ExtensionPhase::NeedsAuth
+        );
+
+        ext.authenticated = true;
+        assert_eq!(
+            extension_phase_for_web(&ext),
+            crate::extensions::ExtensionPhase::NeedsActivation
+        );
+
+        ext.active = true;
+        assert_eq!(
+            extension_phase_for_web(&ext),
+            crate::extensions::ExtensionPhase::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn test_extensions_readiness_handler_reports_phase_summary() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        // DB-backed manager so the install path does not fall back to the
+        // developer's real `~/.ironclaw/mcp-servers.json` (which would
+        // panic with `AlreadyInstalled("notion")` on dev machines that
+        // already have a notion entry configured).
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir, _db_dir) = test_ext_mgr_with_db().await;
+        let mut server =
+            crate::tools::mcp::McpServerConfig::new("notion", "https://mcp.notion.com/mcp");
+        server.description = Some("Notion".to_string());
+        ext_mgr
+            .install(
+                "notion",
+                Some(&server.url),
+                Some(crate::extensions::ExtensionKind::McpServer),
+                "test",
+            )
+            .await
+            .expect("install notion mcp");
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route(
+                "/api/extensions/readiness",
+                get(extensions_readiness_handler),
+            )
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/extensions/readiness")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+        let notion = parsed["extensions"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["name"] == "notion"))
+            .expect("notion readiness entry");
+        assert_eq!(notion["kind"], "mcp_server");
+        assert_eq!(notion["phase"], "needs_auth");
+        assert_eq!(notion["authenticated"], false);
+        assert_eq!(notion["active"], false);
     }
 
     #[tokio::test]
@@ -3397,9 +4825,178 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_llm_test_connection_allows_admin_private_base_url() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let state = test_gateway_state(None);
+        let app = Router::new()
+            .route(
+                "/api/llm/test_connection",
+                post(llm_test_connection_handler),
+            )
+            .with_state(state);
+
+        let req_body = serde_json::json!({
+            "adapter": "openai",
+            "base_url": "http://127.0.0.1:9/v1",
+            "model": "test-model"
+        });
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/llm/test_connection")
+            .header("content-type", "application/json")
+            .body(Body::from(req_body.to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+        assert_eq!(parsed["ok"], serde_json::Value::Bool(false));
+        let message = parsed["message"].as_str().unwrap_or_default();
+        assert!(
+            !message.contains("Invalid base URL"),
+            "private localhost endpoint should pass validation: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_llm_test_connection_requires_admin_role() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let state = test_gateway_state(None);
+        let app = Router::new()
+            .route(
+                "/api/llm/test_connection",
+                post(llm_test_connection_handler),
+            )
+            .with_state(state);
+
+        let req_body = serde_json::json!({
+            "adapter": "openai",
+            "base_url": "http://127.0.0.1:9/v1",
+            "model": "test-model"
+        });
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/llm/test_connection")
+            .header("content-type", "application/json")
+            .body(Body::from(req_body.to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_llm_list_models_requires_admin_role() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let state = test_gateway_state(None);
+        let app = Router::new()
+            .route("/api/llm/list_models", post(llm_list_models_handler))
+            .with_state(state);
+
+        let req_body = serde_json::json!({
+            "adapter": "openai",
+            "base_url": "http://127.0.0.1:9/v1"
+        });
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/llm/list_models")
+            .header("content-type", "application/json")
+            .body(Body::from(req_body.to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
     fn expired_flow_created_at() -> Option<std::time::Instant> {
         std::time::Instant::now()
-            .checked_sub(oauth_defaults::OAUTH_FLOW_EXPIRY + std::time::Duration::from_secs(1))
+            .checked_sub(oauth::OAUTH_FLOW_EXPIRY + std::time::Duration::from_secs(1))
+    }
+
+    #[test]
+    fn apply_extension_readiness_preserves_install_success_for_auth_followup() {
+        let mut resp = ActionResponse::ok("Installed notion");
+        apply_extension_readiness_to_response(
+            &mut resp,
+            crate::extensions::EnsureReadyOutcome::NeedsAuth {
+                name: "notion".to_string(),
+                kind: crate::extensions::ExtensionKind::McpServer,
+                phase: crate::extensions::ExtensionPhase::NeedsAuth,
+                credential_name: Some("notion_api_token".to_string()),
+                auth: crate::extensions::AuthResult::awaiting_authorization(
+                    "notion",
+                    crate::extensions::ExtensionKind::McpServer,
+                    "https://example.com/oauth".to_string(),
+                    "gateway".to_string(),
+                ),
+            },
+            true,
+        );
+
+        assert!(resp.success);
+        assert_eq!(resp.auth_url.as_deref(), Some("https://example.com/oauth"));
+        assert_eq!(resp.awaiting_token, Some(false));
+    }
+
+    #[test]
+    fn apply_extension_readiness_fails_activate_when_auth_is_required() {
+        let mut resp = ActionResponse::ok("placeholder");
+        apply_extension_readiness_to_response(
+            &mut resp,
+            crate::extensions::EnsureReadyOutcome::NeedsAuth {
+                name: "notion".to_string(),
+                kind: crate::extensions::ExtensionKind::McpServer,
+                phase: crate::extensions::ExtensionPhase::NeedsAuth,
+                credential_name: Some("notion_api_token".to_string()),
+                auth: crate::extensions::AuthResult::awaiting_token(
+                    "notion",
+                    crate::extensions::ExtensionKind::McpServer,
+                    "Paste your Notion token".to_string(),
+                    None,
+                ),
+            },
+            false,
+        );
+
+        assert!(!resp.success);
+        assert_eq!(resp.awaiting_token, Some(true));
+        assert_eq!(
+            resp.instructions.as_deref(),
+            Some("Paste your Notion token")
+        );
+        assert_eq!(resp.message, "Paste your Notion token");
     }
 
     #[tokio::test]
@@ -3438,9 +5035,9 @@ mod tests {
         );
         assert!(
             csp_str.contains(
-                "script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com"
+                "script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://esm.sh"
             ),
-            "CSP must allow both marked and DOMPurify script CDNs"
+            "CSP must allow the explicit script CDNs without unsafe-inline"
         );
         assert!(
             csp_str.contains("object-src 'none'"),
@@ -3454,6 +5051,417 @@ mod tests {
         if let Some(tx) = state.shutdown_tx.write().await.take() {
             let _ = tx.send(());
         }
+    }
+
+    #[test]
+    fn test_base_and_nonce_csp_agree_outside_script_src() {
+        // Regression for the drift risk flagged in PR #1725 review: the
+        // static header and the per-response nonce header must share every
+        // directive except `script-src`. Build both, strip `script-src …;`
+        // from each, and assert the remaining policy is byte-identical.
+        let base = build_csp(None);
+        let nonce = build_csp(Some("feedc0de"));
+
+        fn strip_script_src(csp: &str) -> String {
+            // Directives are separated by `; `. Drop the one that starts
+            // with `script-src` and rejoin the rest.
+            csp.split("; ")
+                .filter(|d| !d.trim_start().starts_with("script-src"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        }
+
+        assert_eq!(
+            strip_script_src(&base),
+            strip_script_src(&nonce),
+            "base CSP and nonce CSP must agree on every directive except script-src\n\
+             base:  {base}\n\
+             nonce: {nonce}"
+        );
+    }
+
+    #[test]
+    fn test_base_csp_header_matches_build_csp_none() {
+        // The lazy static header used by the response-header layer must be
+        // byte-identical to `build_csp(None)`. If the fallback branch of
+        // the LazyLock ever fires, the header would regress to
+        // `default-src 'self'` and this test would catch it.
+        let lazy = BASE_CSP_HEADER.to_str().expect("static CSP is ASCII");
+        assert_eq!(lazy, build_csp(None));
+    }
+
+    #[test]
+    fn test_build_csp_with_nonce_includes_nonce_source() {
+        // Per-response CSP must add `'nonce-…'` to script-src so a single
+        // inline `<script nonce="…">` block is authorized for that response.
+        let csp = build_csp_with_nonce("deadbeefcafebabe");
+        assert!(
+            csp.contains("script-src 'self' 'nonce-deadbeefcafebabe' https://cdn.jsdelivr.net"),
+            "nonce source must appear immediately after 'self' in script-src; got: {csp}"
+        );
+        // The other directives must match the static BASE_CSP so the
+        // per-response value never accidentally relaxes anything else.
+        for needle in [
+            "default-src 'self'",
+            "style-src 'self' 'unsafe-inline'",
+            "object-src 'none'",
+            "frame-ancestors 'none'",
+            "base-uri 'self'",
+        ] {
+            assert!(csp.contains(needle), "missing directive: {needle}");
+        }
+        // And it must NOT contain `'unsafe-inline'` for scripts.
+        assert!(
+            !csp.contains("script-src 'self' 'unsafe-inline'"),
+            "script-src must not allow 'unsafe-inline'"
+        );
+    }
+
+    #[test]
+    fn test_generate_csp_nonce_is_unique_and_hex() {
+        let a = generate_csp_nonce();
+        let b = generate_csp_nonce();
+        assert_eq!(a.len(), 32, "16 bytes hex-encoded should be 32 chars");
+        assert_ne!(a, b, "nonces must be unique per call");
+        assert!(
+            a.chars().all(|c| c.is_ascii_hexdigit()),
+            "nonce must be lowercase hex"
+        );
+    }
+
+    #[test]
+    fn test_css_etag_is_strong_validator_format() {
+        // Strong validators are double-quoted (no `W/` prefix). The
+        // sha-prefix lets future readers identify the digest function at a
+        // glance, and 16 hex chars (64 bits) is plenty for content-address
+        // collision avoidance on a single-tenant CSS payload.
+        let etag = css_etag("body { color: red; }");
+        assert!(etag.starts_with("\"sha256-"));
+        assert!(etag.ends_with('"'));
+        assert!(!etag.starts_with("W/"));
+        // Header value must be ASCII so it can land in a `HeaderValue`.
+        assert!(etag.is_ascii());
+    }
+
+    #[test]
+    fn test_css_etag_changes_when_body_changes() {
+        // The whole point of the ETag: editing `custom.css` must produce
+        // a new validator so the browser fetches the updated body.
+        let base = css_etag("body { color: red; }");
+        let edited = css_etag("body { color: blue; }");
+        assert_ne!(base, edited);
+        // Adding even a single byte must invalidate.
+        let appended = css_etag("body { color: red; } ");
+        assert_ne!(base, appended);
+    }
+
+    #[test]
+    fn test_css_etag_stable_for_identical_body() {
+        // Two requests against the same assembled body must produce the
+        // same validator — otherwise every request misses the cache.
+        let body = "body { color: red; }";
+        assert_eq!(css_etag(body), css_etag(body));
+    }
+
+    #[tokio::test]
+    async fn test_css_handler_returns_etag_and_serves_304_on_match() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        // Pure-static path: no workspace overlay, so the body is exactly
+        // the embedded `STYLE_CSS`. Cheap and deterministic.
+        let state = test_gateway_state(None);
+        let app = Router::new()
+            .route("/style.css", get(css_handler))
+            .with_state(state);
+
+        // First request: 200 with ETag header.
+        let req = axum::http::Request::builder()
+            .uri("/style.css")
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let etag = resp
+            .headers()
+            .get(header::ETAG)
+            .expect("ETag header must be present on 200")
+            .to_str()
+            .expect("ETag is ASCII")
+            .to_string();
+        assert!(etag.starts_with("\"sha256-"));
+
+        // Second request with `If-None-Match` matching the validator: 304
+        // and an empty body. The browser keeps its cached copy.
+        let req = axum::http::Request::builder()
+            .uri("/style.css")
+            .header(header::IF_NONE_MATCH, &etag)
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+        let body = axum::body::to_bytes(resp.into_body(), 1024)
+            .await
+            .expect("body");
+        assert!(body.is_empty(), "304 must have an empty body");
+
+        // Third request with a stale validator: 200 again. Operators
+        // expect this when `custom.css` changes underneath them — the
+        // browser revalidates, sees the body shifted, and fetches anew.
+        let req = axum::http::Request::builder()
+            .uri("/style.css")
+            .header(header::IF_NONE_MATCH, "\"sha256-0000000000000000\"")
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Multi-tenant safety symmetry: in multi-user mode the CSS handler
+    /// must mirror `build_frontend_html` and refuse to layer
+    /// `.system/gateway/custom.css` from `state.workspace`. The
+    /// `/style.css` route is unauthenticated bootstrap, so there is no
+    /// user identity at request time — reading the global workspace
+    /// would leak one operator's `custom.css` to every other tenant.
+    ///
+    /// The bait here is a global workspace seeded with hostile-looking
+    /// custom CSS. If `css_handler` ever stops short-circuiting on
+    /// `workspace_pool.is_some()`, the bait would land in the response
+    /// body and this test would fail loudly with the leaked content.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_css_handler_returns_base_in_multi_tenant_mode() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        use crate::config::{WorkspaceConfig, WorkspaceSearchConfig};
+        use crate::db::Database as _;
+        use crate::db::libsql::LibSqlBackend;
+        use crate::workspace::EmbeddingCacheConfig;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LibSqlBackend::new_local(&dir.path().join("multi_tenant_css.db"))
+            .await
+            .expect("backend");
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+
+        // Bait: a global workspace with a hostile-looking custom.css.
+        // If css_handler ever reads state.workspace in multi-tenant
+        // mode, the marker would leak into the response body and this
+        // test would fail with an actionable diagnostic.
+        let global_ws = Arc::new(Workspace::new_with_db("tenant-leak-bait", Arc::clone(&db)));
+        global_ws
+            .write(
+                ".system/gateway/custom.css",
+                "body { background: #ff0000; } /* TENANT-LEAK-BAIT */",
+            )
+            .await
+            .expect("seed bait custom.css");
+
+        let pool = Arc::new(WorkspacePool::new(
+            Arc::clone(&db),
+            None,
+            EmbeddingCacheConfig::default(),
+            WorkspaceSearchConfig::default(),
+            WorkspaceConfig::default(),
+        ));
+
+        let mut state = test_gateway_state(None);
+        let state_mut = Arc::get_mut(&mut state).expect("test state must be uniquely owned");
+        state_mut.workspace = Some(global_ws);
+        state_mut.workspace_pool = Some(pool);
+
+        let app = Router::new()
+            .route("/style.css", get(css_handler))
+            .with_state(state);
+
+        let req = axum::http::Request::builder()
+            .uri("/style.css")
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let body_str = String::from_utf8_lossy(&body);
+
+        // Contract 1: the bait marker is absent. If a future regression
+        // re-reads state.workspace in multi-tenant mode, the marker
+        // would land here and this assertion fails with the leaked
+        // content visible in the diagnostic.
+        assert!(
+            !body_str.contains("TENANT-LEAK-BAIT"),
+            "custom.css from global workspace leaked into multi-tenant /style.css \
+             response — css_handler is missing its workspace_pool guard"
+        );
+
+        // Contract 2: the response is exactly the embedded base
+        // stylesheet, byte-for-byte. This catches a subtler regression
+        // where the leak content is dropped but the multi-tenant path
+        // still does the owned `format!` (turning what should be a
+        // borrowed hot-path response into an allocation).
+        assert_eq!(
+            body_str.as_ref(),
+            assets::STYLE_CSS,
+            "multi-tenant /style.css must serve the embedded base stylesheet \
+             unchanged — no overlay, no allocation"
+        );
+    }
+
+    #[test]
+    fn test_stamp_nonce_into_html_replaces_attribute() {
+        // Vanilla case: a placeholder inside a `nonce="…"` attribute on
+        // a script tag must be substituted with the real nonce. Both
+        // the layout-config script and any widget script tags emitted
+        // by `assemble_index` carry the same attribute shape, so a
+        // single test covers every emission point.
+        let html = format!("<script nonce=\"{NONCE_PLACEHOLDER}\">window.X = 1;</script>");
+        let stamped = stamp_nonce_into_html(&html, "deadbeef");
+        assert!(
+            stamped.contains("nonce=\"deadbeef\""),
+            "real nonce attribute must be present after substitution: {stamped}"
+        );
+        assert!(
+            !stamped.contains(NONCE_PLACEHOLDER),
+            "placeholder must be gone after substitution: {stamped}"
+        );
+    }
+
+    #[test]
+    fn test_stamp_nonce_into_html_does_not_mutate_widget_body() {
+        // Regression for the PR #1725 Copilot finding: a bare-string
+        // replace would also rewrite any *body content* that happens to
+        // contain the literal sentinel — e.g. a widget JS module that
+        // mentions `__IRONCLAW_CSP_NONCE__` in a comment, log line, or
+        // string constant. The attribute-targeted replace must leave
+        // those untouched.
+        //
+        // Build a fragment with TWO sentinels: one inside the
+        // legitimate `nonce="…"` attribute (must be replaced) and one
+        // inside the script body as a string constant (must NOT be
+        // replaced).
+        let html = format!(
+            "<script type=\"module\" nonce=\"{NONCE_PLACEHOLDER}\">\n\
+             // hostile widget body — author writes the sentinel as a constant\n\
+             const SENTINEL = \"{NONCE_PLACEHOLDER}\";\n\
+             console.log(SENTINEL);\n\
+             </script>"
+        );
+        let stamped = stamp_nonce_into_html(&html, "cafebabe");
+
+        // Contract 1: the attribute was rewritten.
+        assert!(
+            stamped.contains("nonce=\"cafebabe\""),
+            "attribute must carry the per-response nonce: {stamped}"
+        );
+
+        // Contract 2: the body sentinel survived intact. The widget
+        // author's source must round-trip byte-for-byte.
+        assert!(
+            stamped.contains(&format!("const SENTINEL = \"{NONCE_PLACEHOLDER}\"")),
+            "widget body sentinel must NOT be rewritten: {stamped}"
+        );
+
+        // Contract 3: exactly one occurrence of the placeholder remains
+        // (the one in the body). If a future regression switches to a
+        // bare-string replace, this count would drop to 0 and the test
+        // would fail loudly with the diff.
+        assert_eq!(
+            stamped.matches(NONCE_PLACEHOLDER).count(),
+            1,
+            "exactly one placeholder occurrence (in widget body) must \
+             survive; the attribute one must be replaced. Got: {stamped}"
+        );
+    }
+
+    /// Multi-tenant cache safety: when `workspace_pool` is set,
+    /// `build_frontend_html` must refuse the assembly path entirely and
+    /// return `None` regardless of what `state.workspace` contains.
+    ///
+    /// Background: `index_handler` (`GET /`) is the unauthenticated
+    /// bootstrap route, so it has no user identity at request time.
+    /// Reading `state.workspace` in multi-tenant mode would expose one
+    /// global workspace's customizations to every user, and the
+    /// process-wide `frontend_html_cache` would pin the leak across
+    /// requests. The bait here is a global workspace seeded with a
+    /// hostile-looking layout — if the function ever stops short-
+    /// circuiting on `workspace_pool.is_some()`, that layout would land
+    /// in the assembled HTML and this test would fail loudly.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_build_frontend_html_returns_none_in_multi_tenant_mode() {
+        use crate::config::{WorkspaceConfig, WorkspaceSearchConfig};
+        use crate::db::Database as _;
+        use crate::db::libsql::LibSqlBackend;
+        use crate::workspace::EmbeddingCacheConfig;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LibSqlBackend::new_local(&dir.path().join("multi_tenant_index.db"))
+            .await
+            .expect("backend");
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+
+        // Bait: a *global* workspace with customizations. If
+        // build_frontend_html ever read state.workspace in multi-tenant
+        // mode, the title "TENANT-LEAK-BAIT" would appear in the
+        // assembled HTML for every user. The assertions below pin the
+        // refusal contract — both the return value AND the cache slot.
+        let global_ws = Arc::new(Workspace::new_with_db("tenant-leak-bait", Arc::clone(&db)));
+        global_ws
+            .write(
+                ".system/gateway/layout.json",
+                r#"{"branding":{"title":"TENANT-LEAK-BAIT"}}"#,
+            )
+            .await
+            .expect("seed bait layout");
+
+        let pool = Arc::new(WorkspacePool::new(
+            Arc::clone(&db),
+            None,
+            EmbeddingCacheConfig::default(),
+            WorkspaceSearchConfig::default(),
+            WorkspaceConfig::default(),
+        ));
+
+        // Build state via the standard test helper, then mutate the
+        // workspace + workspace_pool fields. `Arc::get_mut` succeeds here
+        // because no other strong reference exists yet — the helper just
+        // returned the freshly-constructed Arc.
+        let mut state = test_gateway_state(None);
+        let state_mut = Arc::get_mut(&mut state).expect("test state must be uniquely owned");
+        state_mut.workspace = Some(global_ws);
+        state_mut.workspace_pool = Some(pool);
+
+        // Contract 1: build_frontend_html refuses to assemble.
+        let html = build_frontend_html(&state).await;
+        assert!(
+            html.is_none(),
+            "build_frontend_html must return None in multi-tenant mode \
+             (got Some HTML — bait layout may have leaked across tenants)"
+        );
+
+        // Contract 2: the cache slot is still empty. The early return
+        // above MUST short-circuit before the cache write at the bottom
+        // of the function — otherwise a poisoned cache entry would serve
+        // the leaked HTML to subsequent requests even after the bug is
+        // fixed.
+        let cache = state.frontend_html_cache.read().await;
+        assert!(
+            cache.is_none(),
+            "frontend_html_cache must remain empty in multi-tenant mode"
+        );
     }
 
     #[tokio::test]
@@ -3560,7 +5568,7 @@ mod tests {
         };
 
         // Insert an expired flow.
-        let flow = crate::cli::oauth_defaults::PendingOAuthFlow {
+        let flow = crate::auth::oauth::PendingOAuthFlow {
             extension_name: "test_tool".to_string(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
@@ -3582,6 +5590,7 @@ mod tests {
             client_secret_secret_name: None,
             client_secret_expires_at: None,
             created_at,
+            auto_activate_extension: true,
         };
 
         ext_mgr
@@ -3631,7 +5640,7 @@ mod tests {
             eprintln!("Skipping expired OAuth flow SSE test: monotonic uptime below expiry window");
             return;
         };
-        let flow = crate::cli::oauth_defaults::PendingOAuthFlow {
+        let flow = crate::auth::oauth::PendingOAuthFlow {
             extension_name: "test_tool".to_string(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
@@ -3653,6 +5662,7 @@ mod tests {
             client_secret_secret_name: None,
             client_secret_expires_at: None,
             created_at,
+            auto_activate_extension: true,
         };
 
         ext_mgr
@@ -3679,6 +5689,7 @@ mod tests {
                 extension_name,
                 success,
                 message,
+                ..
             } => {
                 assert_eq!(extension_name, "test_tool");
                 assert!(!success, "expired OAuth flow should broadcast failure");
@@ -3736,7 +5747,7 @@ mod tests {
             eprintln!("Skipping OAuth state-prefix test: monotonic uptime below expiry window");
             return;
         };
-        let flow = crate::cli::oauth_defaults::PendingOAuthFlow {
+        let flow = crate::auth::oauth::PendingOAuthFlow {
             extension_name: "test_tool".to_string(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
@@ -3759,6 +5770,7 @@ mod tests {
             client_secret_expires_at: None,
             // Expired — handler will reject after lookup (no network I/O)
             created_at,
+            auto_activate_extension: true,
         };
 
         ext_mgr
@@ -3825,7 +5837,7 @@ mod tests {
             eprintln!("Skipping versioned OAuth state test: monotonic uptime below expiry window");
             return;
         };
-        let flow = crate::cli::oauth_defaults::PendingOAuthFlow {
+        let flow = crate::auth::oauth::PendingOAuthFlow {
             extension_name: "test_tool".to_string(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
@@ -3847,6 +5859,7 @@ mod tests {
             client_secret_secret_name: None,
             client_secret_expires_at: None,
             created_at,
+            auto_activate_extension: true,
         };
 
         ext_mgr
@@ -3858,7 +5871,7 @@ mod tests {
         let state = test_gateway_state(Some(ext_mgr.clone()));
         let app = test_oauth_router(state);
         let versioned_state =
-            crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", Some("myinstance"));
+            crate::auth::oauth::encode_hosted_oauth_state("test_nonce", Some("myinstance"));
 
         let req = axum::http::Request::builder()
             .uri(format!(
@@ -3908,7 +5921,7 @@ mod tests {
             );
             return;
         };
-        let flow = crate::cli::oauth_defaults::PendingOAuthFlow {
+        let flow = crate::auth::oauth::PendingOAuthFlow {
             extension_name: "test_tool".to_string(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
@@ -3930,6 +5943,7 @@ mod tests {
             client_secret_secret_name: None,
             client_secret_expires_at: None,
             created_at,
+            auto_activate_extension: true,
         };
 
         ext_mgr
@@ -3940,8 +5954,7 @@ mod tests {
 
         let state = test_gateway_state(Some(ext_mgr.clone()));
         let app = test_oauth_router(state);
-        let versioned_state =
-            crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", None);
+        let versioned_state = crate::auth::oauth::encode_hosted_oauth_state("test_nonce", None);
 
         let req = axum::http::Request::builder()
             .uri(format!(
@@ -3993,7 +6006,7 @@ mod tests {
         let flow = fresh_pending_oauth_flow(
             Arc::clone(&secrets),
             Some(Arc::clone(&sse_mgr)),
-            crate::cli::oauth_defaults::oauth_proxy_auth_token(),
+            crate::auth::oauth::oauth_proxy_auth_token(),
         );
 
         ext_mgr
@@ -4005,7 +6018,7 @@ mod tests {
         let state = test_gateway_state(Some(ext_mgr.clone()));
         let app = test_oauth_router(state);
         let versioned_state =
-            crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", Some("myinstance"));
+            crate::auth::oauth::encode_hosted_oauth_state("test_nonce", Some("myinstance"));
 
         let req = axum::http::Request::builder()
             .uri(format!(
@@ -4093,7 +6106,7 @@ mod tests {
         let flow = fresh_pending_oauth_flow(
             Arc::clone(&secrets),
             Some(Arc::clone(&sse_mgr)),
-            crate::cli::oauth_defaults::oauth_proxy_auth_token(),
+            crate::auth::oauth::oauth_proxy_auth_token(),
         );
 
         ext_mgr
@@ -4104,8 +6117,7 @@ mod tests {
 
         let state = test_gateway_state(Some(ext_mgr.clone()));
         let app = test_oauth_router(state);
-        let versioned_state =
-            crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", None);
+        let versioned_state = crate::auth::oauth::encode_hosted_oauth_state("test_nonce", None);
 
         let req = axum::http::Request::builder()
             .uri(format!(
@@ -4168,6 +6180,132 @@ mod tests {
         proxy.shutdown().await;
     }
 
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_oauth_callback_happy_path_without_auto_activation() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let proxy = MockOauthProxyServer::start().await;
+        let _env_guard = crate::config::helpers::lock_env();
+        let _exchange_url_guard =
+            set_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", Some(&proxy.base_url()));
+        let _proxy_auth_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", None);
+        let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-test-token"));
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(Arc::clone(&secrets));
+        let sse_mgr = Arc::new(SseManager::new());
+        let mut receiver = sse_mgr.sender().subscribe();
+        let mut flow = fresh_pending_oauth_flow(
+            Arc::clone(&secrets),
+            Some(Arc::clone(&sse_mgr)),
+            crate::auth::oauth::oauth_proxy_auth_token(),
+        );
+        flow.auto_activate_extension = false;
+
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert("test_nonce".to_string(), flow);
+
+        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let app = test_oauth_router(state);
+        let versioned_state =
+            crate::auth::oauth::encode_hosted_oauth_state("test_nonce", Some("myinstance"));
+
+        let req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/callback?code=fake_code&state={}",
+                urlencoding::encode(&versioned_state)
+            ))
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        match receiver.recv().await.expect("auth_completed event").event {
+            crate::channels::web::types::AppEvent::AuthCompleted {
+                extension_name,
+                success,
+                message,
+                ..
+            } => {
+                assert_eq!(extension_name, "test_tool");
+                assert!(success, "OAuth callback should broadcast success");
+                assert_eq!(message, "Test Tool authenticated successfully");
+            }
+            event => panic!("expected AuthCompleted event, got {event:?}"),
+        }
+
+        proxy.shutdown().await;
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_oauth_callback_exchange_failure_broadcasts_auth_completed_failure() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let _env_guard = crate::config::helpers::lock_env();
+        let _exchange_url_guard =
+            set_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", Some("http://127.0.0.1:1"));
+        let _proxy_auth_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", None);
+        let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-test-token"));
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(Arc::clone(&secrets));
+        let sse_mgr = Arc::new(SseManager::new());
+        let mut receiver = sse_mgr.sender().subscribe();
+        let flow = fresh_pending_oauth_flow(
+            Arc::clone(&secrets),
+            Some(Arc::clone(&sse_mgr)),
+            crate::auth::oauth::oauth_proxy_auth_token(),
+        );
+
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert("test_nonce".to_string(), flow);
+
+        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let app = test_oauth_router(state);
+        let versioned_state =
+            crate::auth::oauth::encode_hosted_oauth_state("test_nonce", Some("myinstance"));
+
+        let req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/callback?code=fake_code&state={}",
+                urlencoding::encode(&versioned_state)
+            ))
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        match receiver.recv().await.expect("auth_completed event").event {
+            crate::channels::web::types::AppEvent::AuthCompleted {
+                extension_name,
+                success,
+                message,
+                ..
+            } => {
+                assert_eq!(extension_name, "test_tool");
+                assert!(!success, "OAuth callback failure should broadcast failure");
+                assert!(message.contains("authentication failed"));
+            }
+            event => panic!("expected AuthCompleted event, got {event:?}"),
+        }
+    }
+
     // --- Slack relay OAuth CSRF tests ---
 
     fn test_relay_oauth_router(state: Arc<GatewayState>) -> Router {
@@ -4211,6 +6349,58 @@ mod tests {
             vec![],
         ));
         (ext_mgr, wasm_tools_dir, wasm_channels_dir)
+    }
+
+    /// DB-backed `ExtensionManager` for tests that exercise MCP install/list
+    /// paths.
+    ///
+    /// `test_ext_mgr` builds the manager with `store: None`, which makes
+    /// `load_mcp_servers` fall back to the file-based path
+    /// `~/.ironclaw/mcp-servers.json`. Any test that calls `install` for an
+    /// MCP server with `store: None` will read the developer's real config
+    /// and may panic with `AlreadyInstalled("notion")` (or similar) on
+    /// machines that have configured MCP servers locally.
+    ///
+    /// This sibling builds an isolated in-memory libsql DB AND pre-seeds
+    /// an empty `mcp_servers` setting for the test user so that
+    /// `load_mcp_servers_from_db` does not silently fall back to disk
+    /// (it falls back when the DB has no entry, see `mcp/config.rs:625`).
+    async fn test_ext_mgr_with_db() -> (
+        Arc<ExtensionManager>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let secrets = test_secrets_store();
+        let tool_registry = Arc::new(ToolRegistry::new());
+        let mcp_sm = Arc::new(crate::tools::mcp::session::McpSessionManager::new());
+        let mcp_pm = Arc::new(crate::tools::mcp::process::McpProcessManager::new());
+        let wasm_tools_dir = tempfile::tempdir().expect("temp wasm tools dir");
+        let wasm_channels_dir = tempfile::tempdir().expect("temp wasm channels dir");
+        let (db, db_dir) = crate::testing::test_db().await;
+
+        // Pre-seed an empty servers list so the DB-backed loader does not
+        // fall back to `~/.ironclaw/mcp-servers.json` on dev machines.
+        let empty_servers = crate::tools::mcp::config::McpServersFile::default();
+        crate::tools::mcp::config::save_mcp_servers_to_db(db.as_ref(), "test", &empty_servers)
+            .await
+            .expect("seed empty mcp_servers setting");
+
+        let ext_mgr = Arc::new(ExtensionManager::new(
+            mcp_sm,
+            mcp_pm,
+            secrets,
+            tool_registry,
+            None,
+            None,
+            wasm_tools_dir.path().to_path_buf(),
+            wasm_channels_dir.path().to_path_buf(),
+            None,
+            "test".to_string(),
+            Some(db),
+            vec![],
+        ));
+        (ext_mgr, wasm_tools_dir, wasm_channels_dir, db_dir)
     }
 
     #[tokio::test]

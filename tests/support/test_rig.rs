@@ -20,7 +20,7 @@ use ironclaw::tools::Tool;
 
 use crate::support::instrumented_llm::InstrumentedLlm;
 use crate::support::metrics::{ToolInvocation, TraceMetrics};
-use crate::support::test_channel::{TestChannel, TestChannelHandle};
+use crate::support::test_channel::{CapturedEvent, TestChannel, TestChannelHandle};
 use crate::support::trace_llm::{LlmTrace, TraceLlm};
 
 use ironclaw::llm::recording::{HttpExchange, HttpInterceptor, ReplayingHttpInterceptor};
@@ -33,6 +33,154 @@ use ironclaw::llm::recording::{HttpExchange, HttpInterceptor, ReplayingHttpInter
 /// Used to transparently filter per-user bootstrap greetings from the
 /// response stream so tests don't need to account for them manually.
 const BOOTSTRAP_GREETING_MARKER: &str = "always-on chief of staff";
+
+/// Configuration for selectively seeding `secrets` rows into a fresh test
+/// rig database from an existing libSQL file.
+///
+/// Live tests use this to pull *only* the credentials they need (e.g. a
+/// Google OAuth token) out of the developer's real `~/.ironclaw/ironclaw.db`
+/// without cloning the rest of the database. Memory, history, secrets the
+/// test didn't ask for — none of it crosses the boundary. The destination
+/// DB starts empty, the listed secret rows are inserted under the test
+/// rig's owner user, and the test must seed any other state itself.
+#[derive(Clone, Debug)]
+pub struct SeededSecretsConfig {
+    /// Path to the source libSQL file (typically `~/.ironclaw/ironclaw.db`).
+    pub source_path: std::path::PathBuf,
+    /// User ID to filter the source rows on (typically the developer's
+    /// owner_id from the live config).
+    pub source_user_id: String,
+    /// Names of the secrets to copy. Names not present in the source are
+    /// logged as warnings and silently skipped — the test will fail fast
+    /// on its own missing-credential path if a required name was wrong.
+    pub names: Vec<String>,
+}
+
+/// Open the source libSQL database read-only and copy the listed secret
+/// rows into the destination database under `owner_user_id`. The source
+/// is *only* read; the destination must already have the `secrets` table
+/// (i.e. migrations have run on it).
+///
+/// This intentionally avoids `std::fs::copy` of the underlying SQLite
+/// file: copying the whole DB would also pull in workspace memory,
+/// conversation history, and *every other* secret row, which is the
+/// regression we are explicitly fixing.
+#[cfg(feature = "libsql")]
+async fn seed_secrets_into(
+    dest_db: &libsql::Database,
+    config: &SeededSecretsConfig,
+    owner_user_id: &str,
+) -> Result<(), String> {
+    if config.names.is_empty() {
+        return Ok(());
+    }
+    if !config.source_path.exists() {
+        return Err(format!(
+            "source libSQL DB not found: {}",
+            config.source_path.display()
+        ));
+    }
+    eprintln!(
+        "[TestRig] Seeding {} secret(s) from {} (user_id={}) → temp DB (owner={})",
+        config.names.len(),
+        config.source_path.display(),
+        config.source_user_id,
+        owner_user_id,
+    );
+
+    // Open the source via a separate libSQL connection. We never write to
+    // it. The source process (the developer's running ironclaw) can keep
+    // running concurrently — libSQL's WAL mode permits a reader from
+    // another connection.
+    let src_db = libsql::Builder::new_local(&config.source_path)
+        .build()
+        .await
+        .map_err(|e| format!("open source libSQL DB: {e}"))?;
+    let src_conn = src_db
+        .connect()
+        .map_err(|e| format!("connect to source libSQL DB: {e}"))?;
+
+    // Build a parameterized IN-clause: `?, ?, ?...`. We bind names + the
+    // owner separately to keep this injection-safe even though the input
+    // is technically test-controlled.
+    let placeholders = std::iter::repeat_n("?", config.names.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let select_sql = format!(
+        "SELECT name, encrypted_value, key_salt, provider, expires_at \
+         FROM secrets \
+         WHERE user_id = ? AND name IN ({placeholders})"
+    );
+    let mut params: Vec<libsql::Value> = Vec::with_capacity(1 + config.names.len());
+    params.push(libsql::Value::Text(config.source_user_id.clone()));
+    for name in &config.names {
+        params.push(libsql::Value::Text(name.clone()));
+    }
+
+    let mut rows = src_conn
+        .query(&select_sql, params)
+        .await
+        .map_err(|e| format!("query source secrets: {e}"))?;
+
+    let dest_conn = dest_db
+        .connect()
+        .map_err(|e| format!("connect to destination libSQL DB: {e}"))?;
+
+    let mut copied: Vec<String> = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| format!("iterate source secrets: {e}"))?
+    {
+        let name: String = row.get(0).map_err(|e| format!("read secrets.name: {e}"))?;
+        let encrypted_value: Vec<u8> = row
+            .get(1)
+            .map_err(|e| format!("read secrets.encrypted_value: {e}"))?;
+        let key_salt: Vec<u8> = row
+            .get(2)
+            .map_err(|e| format!("read secrets.key_salt: {e}"))?;
+        let provider: Option<String> = row
+            .get(3)
+            .map_err(|e| format!("read secrets.provider: {e}"))?;
+        let expires_at: Option<String> = row
+            .get(4)
+            .map_err(|e| format!("read secrets.expires_at: {e}"))?;
+
+        let id = uuid::Uuid::new_v4().to_string();
+        dest_conn
+            .execute(
+                "INSERT INTO secrets \
+                    (id, user_id, name, encrypted_value, key_salt, provider, expires_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                libsql::params![
+                    id,
+                    owner_user_id.to_string(),
+                    name.clone(),
+                    encrypted_value,
+                    key_salt,
+                    provider,
+                    expires_at,
+                ],
+            )
+            .await
+            .map_err(|e| format!("insert seeded secret '{name}' into destination: {e}"))?;
+        copied.push(name);
+    }
+
+    let missing: Vec<&String> = config
+        .names
+        .iter()
+        .filter(|n| !copied.contains(n))
+        .collect();
+    if !missing.is_empty() {
+        eprintln!(
+            "[TestRig] WARNING: requested secrets not found in source: {:?}",
+            missing
+        );
+    }
+    eprintln!("[TestRig] Seeded secrets: {:?}", copied);
+    Ok(())
+}
 
 /// A running test agent with methods to inject messages and inspect results.
 pub struct TestRig {
@@ -61,6 +209,18 @@ pub struct TestRig {
     /// Session manager for direct session/thread access in tests.
     #[cfg(feature = "libsql")]
     session_manager: Arc<ironclaw::agent::SessionManager>,
+    /// Secrets store for direct credential manipulation in tests.
+    /// Live tests that exercise the auth gate flow use this to delete
+    /// credentials before sending a tool-using prompt and re-insert
+    /// them after to simulate the user completing OAuth.
+    #[cfg(feature = "libsql")]
+    secrets_store: Option<Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>>,
+    /// Owner identity resolved from `Config::owner_id`. Tests that
+    /// manipulate the secrets store directly need this so their
+    /// `secrets.create(owner_id, ..)` / `secrets.delete(owner_id, ..)`
+    /// calls hit the same scope the agent loop uses.
+    #[cfg(feature = "libsql")]
+    owner_id: String,
     /// Temp directory guard -- keeps the libSQL database file alive.
     #[cfg(feature = "libsql")]
     _temp_dir: tempfile::TempDir,
@@ -166,9 +326,19 @@ impl TestRig {
         self.channel.tool_timings()
     }
 
+    /// Wait until a `Status("Done")` event has been captured, or `timeout` elapses.
+    pub async fn wait_for_done(&self, timeout: Duration) -> bool {
+        self.channel.wait_for_done(timeout).await
+    }
+
     /// Return a snapshot of all captured status events.
     pub fn captured_status_events(&self) -> Vec<StatusUpdate> {
         self.channel.captured_status_events()
+    }
+
+    /// Return the ordered log of captured outbound events.
+    pub fn captured_events(&self) -> Vec<CapturedEvent> {
+        self.channel.captured_events()
     }
 
     /// Clear all captured responses and status events.
@@ -314,6 +484,7 @@ impl TestRig {
                     success: false,
                     error,
                     parameters,
+                    ..
                 } = status
                 {
                     let detail = format!(
@@ -357,6 +528,7 @@ impl TestRig {
                 success: false,
                 error,
                 parameters,
+                ..
             } = status
             {
                 let detail = format!(
@@ -411,15 +583,20 @@ pub struct WasmToolSpec {
 pub struct TestRigBuilder {
     trace: Option<LlmTrace>,
     llm: Option<Arc<dyn LlmProvider>>,
+    config_override: Option<Config>,
     max_tool_iterations: usize,
     injection_check: bool,
     auto_approve_tools: Option<bool>,
     enable_skills: bool,
     enable_routines: bool,
     http_exchanges: Vec<HttpExchange>,
+    http_interceptor_override: Option<Arc<dyn HttpInterceptor>>,
     extra_tools: Vec<Arc<dyn Tool>>,
     wasm_tools: Vec<WasmToolSpec>,
     keep_bootstrap: bool,
+    engine_v2: bool,
+    channel_name_override: Option<String>,
+    seeded_secrets: Option<SeededSecretsConfig>,
 }
 
 impl TestRigBuilder {
@@ -428,16 +605,59 @@ impl TestRigBuilder {
         Self {
             trace: None,
             llm: None,
+            config_override: None,
             max_tool_iterations: 10,
             injection_check: false,
             auto_approve_tools: Some(true),
             enable_skills: false,
             enable_routines: false,
             http_exchanges: Vec::new(),
+            http_interceptor_override: None,
             extra_tools: Vec::new(),
             wasm_tools: Vec::new(),
             keep_bootstrap: false,
+            engine_v2: false,
+            channel_name_override: None,
+            seeded_secrets: None,
         }
+    }
+
+    /// Override the test channel name (default: "test", or "gateway" when
+    /// `.with_bootstrap()` is set). Use this when you need the channel name to
+    /// match a real-world channel (e.g. "gateway") so that downstream features
+    /// keyed on the channel name (assistant conversations, mission notify
+    /// channels) behave the same as in production.
+    pub fn with_channel_name(mut self, name: impl Into<String>) -> Self {
+        self.channel_name_override = Some(name.into());
+        self
+    }
+
+    /// Selectively seed `secrets` rows from an existing libSQL file into
+    /// the test rig's fresh temp database.
+    ///
+    /// Live tests use this to pull just the credentials they need (e.g.
+    /// `google_oauth_token`) out of the developer's real
+    /// `~/.ironclaw/ironclaw.db` so OAuth-backed flows work end-to-end —
+    /// without cloning conversation history, workspace memory, or any
+    /// secret the test didn't ask for. The destination DB starts empty;
+    /// the listed rows are inserted under the test rig's owner user; any
+    /// other state the test relies on must be seeded by the test itself.
+    ///
+    /// Names that don't exist in the source are logged as warnings and
+    /// silently skipped — the test will fail fast on its own missing
+    /// credential path if a required name was wrong.
+    pub fn with_seeded_secrets(
+        mut self,
+        source_path: std::path::PathBuf,
+        source_user_id: impl Into<String>,
+        names: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.seeded_secrets = Some(SeededSecretsConfig {
+            source_path,
+            source_user_id: source_user_id.into(),
+            names: names.into_iter().map(Into::into).collect(),
+        });
+        self
     }
 
     /// Load a real WASM tool binary into the test rig.
@@ -472,6 +692,19 @@ impl TestRigBuilder {
     /// Override the LLM provider directly (takes precedence over trace).
     pub fn with_llm(mut self, llm: Arc<dyn LlmProvider>) -> Self {
         self.llm = Some(llm);
+        self
+    }
+
+    /// Override the Config to mirror real binary behavior.
+    ///
+    /// When set, uses this config instead of `Config::for_testing()`.
+    /// The database path is still overridden to use a temp libSQL file,
+    /// but agent settings (`allow_local_tools`, `engine_v2`, etc.) are
+    /// preserved from the provided config. Post-build forcing of
+    /// `allow_local_tools = true` is skipped so the test matches the
+    /// real binary's tool availability.
+    pub fn with_config(mut self, config: Config) -> Self {
+        self.config_override = Some(config);
         self
     }
 
@@ -523,12 +756,29 @@ impl TestRigBuilder {
         self
     }
 
+    /// Route messages through the engine v2 pipeline instead of the v1 agentic loop.
+    pub fn with_engine_v2(mut self) -> Self {
+        self.engine_v2 = true;
+        self
+    }
+
     /// Add pre-recorded HTTP exchanges for the `ReplayingHttpInterceptor`.
     ///
     /// When set, all `http` tool calls will return these responses in order
     /// instead of making real network requests.
     pub fn with_http_exchanges(mut self, exchanges: Vec<HttpExchange>) -> Self {
         self.http_exchanges = exchanges;
+        self
+    }
+
+    /// Override the HTTP interceptor directly.
+    ///
+    /// When set, this interceptor is used instead of constructing a
+    /// `ReplayingHttpInterceptor` from trace http_exchanges or
+    /// `with_http_exchanges()`. Useful for live-mode recording where a
+    /// `RecordingHttpInterceptor` captures real HTTP traffic.
+    pub fn with_http_interceptor(mut self, interceptor: Arc<dyn HttpInterceptor>) -> Self {
+        self.http_interceptor_override = Some(interceptor);
         self
     }
 
@@ -547,20 +797,32 @@ impl TestRigBuilder {
         let TestRigBuilder {
             trace,
             llm,
+            config_override,
             max_tool_iterations,
             injection_check,
             auto_approve_tools,
             enable_skills,
             enable_routines,
             http_exchanges: explicit_http_exchanges,
+            http_interceptor_override,
             extra_tools,
             wasm_tools,
             keep_bootstrap,
+            engine_v2,
+            channel_name_override,
+            seeded_secrets,
         } = self;
 
-        // 1. Create temp dir + libSQL database + run migrations.
+        // 1. Create temp dir + fresh libSQL database + run migrations.
+        //
+        // The destination DB is always created empty. If the test asked
+        // for specific secrets via `with_seeded_secrets(...)`, we copy
+        // *only* those rows out of the source DB after migrations have
+        // run — never the whole file. Memory, history, conversations,
+        // and unrequested secrets stay isolated in the source.
         let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
         let db_path = temp_dir.path().join("test_rig.db");
+
         let backend = LibSqlBackend::new_local(&db_path)
             .await
             .expect("failed to create test LibSqlBackend");
@@ -568,19 +830,61 @@ impl TestRigBuilder {
             .run_migrations()
             .await
             .expect("failed to run migrations");
+
+        // Build the backend-specific handles so AppBuilder can wire the
+        // secrets store. `with_database()` alone leaves handles=None,
+        // which silently disables `SecretsStore` and breaks every test
+        // that needs OAuth/encrypted credentials. `with_database_and_handles()`
+        // is the right pairing.
+        let db_handles = ironclaw::db::DatabaseHandles {
+            #[cfg(feature = "libsql")]
+            libsql_db: Some(backend.shared_db()),
+            #[cfg(feature = "postgres")]
+            pg_pool: None,
+        };
         let db: Arc<dyn ironclaw::db::Database> = Arc::new(backend);
 
-        // 2. Build Config::for_testing().
+        // 2. Build Config.
+        let has_config_override = config_override.is_some();
         let skills_dir = temp_dir.path().join("skills");
         let installed_skills_dir = temp_dir.path().join("installed_skills");
         let _ = std::fs::create_dir_all(&skills_dir);
         let _ = std::fs::create_dir_all(&installed_skills_dir);
-        let mut config = Config::for_testing(db_path, skills_dir, installed_skills_dir);
+        let mut config = if let Some(mut cfg) = config_override {
+            // Override database to use temp libSQL, but preserve agent/llm settings.
+            cfg.database.backend = ironclaw::config::DatabaseBackend::LibSql;
+            cfg.database.libsql_path = Some(db_path);
+            cfg.skills.local_dir = skills_dir;
+            cfg.skills.installed_dir = installed_skills_dir;
+            cfg
+        } else {
+            Config::for_testing(db_path, skills_dir, installed_skills_dir)
+        };
         config.agent.max_tool_iterations = max_tool_iterations;
         config.safety.injection_check_enabled = injection_check;
         config.skills.enabled = enable_skills;
         if let Some(v) = auto_approve_tools {
             config.agent.auto_approve_tools = v;
+        }
+
+        // 2b. Selectively seed `secrets` rows from the source DB if the
+        // test asked for it. We seed *after* migrations have run (so the
+        // schema exists in the destination) and *under the owner_user_id
+        // from the active config* so production credential lookups
+        // (`SELECT ... WHERE user_id = owner`) hit the seeded rows. The
+        // source DB is opened read-only via a separate libSQL connection;
+        // nothing else (memory, conversations, other secrets) crosses the
+        // boundary.
+        #[cfg(feature = "libsql")]
+        if let Some(ref ss) = seeded_secrets {
+            let owner = config.owner_id.clone();
+            let dest_handle = db_handles
+                .libsql_db
+                .as_ref()
+                .expect("libsql backend handle is required to seed secrets");
+            seed_secrets_into(dest_handle.as_ref(), ss, &owner)
+                .await
+                .expect("failed to seed live-test secrets into temp DB");
         }
 
         // 3. Create SessionManager + LogBroadcaster.
@@ -629,7 +933,7 @@ impl TestRigBuilder {
             session,
             log_broadcaster,
         );
-        builder.with_database(Arc::clone(&db));
+        builder.with_database_and_handles(Arc::clone(&db), db_handles);
         builder.with_llm(llm);
         let mut components = builder
             .build_all()
@@ -650,15 +954,38 @@ impl TestRigBuilder {
         }
 
         // AppBuilder may re-resolve config from env/TOML and override test defaults.
-        // Force test-rig agent flags to the requested deterministic values.
-        components.config.agent.auto_approve_tools = auto_approve_tools.unwrap_or(true);
-        components.config.agent.allow_local_tools = true;
+        // When a config override was provided, preserve its agent settings to mirror
+        // the real binary. Otherwise force deterministic test defaults.
+        if has_config_override {
+            if let Some(v) = auto_approve_tools {
+                components.config.agent.auto_approve_tools = v;
+            }
+            // allow_local_tools comes from the provided config.
+            // engine_v2: honour the builder's explicit override if set.
+            if engine_v2 {
+                components.config.agent.engine_v2 = true;
+            }
+        } else {
+            components.config.agent.auto_approve_tools = auto_approve_tools.unwrap_or(true);
+            components.config.agent.allow_local_tools = true;
+            components.config.agent.engine_v2 = engine_v2;
+        }
+
+        // Reset engine v2 global state so each test gets a clean engine instance.
+        if components.config.agent.engine_v2 {
+            ironclaw::bridge::reset_engine_state().await;
+        }
 
         let scheduler_slot: ironclaw::tools::builtin::SchedulerSlot =
             Arc::new(tokio::sync::RwLock::new(None));
 
         // Build HTTP interceptor once — shared by both AgentDeps and WASM tools.
-        let http_interceptor: Option<Arc<dyn HttpInterceptor>> = {
+        // Direct override takes priority (e.g. RecordingHttpInterceptor for live tests).
+        let http_interceptor: Option<Arc<dyn HttpInterceptor>> = if let Some(override_interceptor) =
+            http_interceptor_override
+        {
+            Some(override_interceptor)
+        } else {
             let exchanges = if explicit_http_exchanges.is_empty() {
                 trace_http_exchanges
             } else {
@@ -673,9 +1000,12 @@ impl TestRigBuilder {
 
         // 6. Register job tools, routine tools, and extra tools.
         {
-            // Ensure filesystem/shell dev tools are always available in the
-            // test rig, even if upstream builder flags/config disable local tools.
-            components.tools.register_dev_tools();
+            // Register filesystem/shell dev tools. When using a config override
+            // (real-binary parity mode), respect the allow_local_tools flag.
+            // Otherwise always register them for test convenience.
+            if !has_config_override || components.config.agent.allow_local_tools {
+                components.tools.register_dev_tools();
+            }
 
             components.tools.register_job_tools(
                 Arc::clone(&components.context_manager),
@@ -697,7 +1027,7 @@ impl TestRigBuilder {
                 let (notify_tx, _notify_rx) = tokio::sync::mpsc::channel(16);
                 let engine = Arc::new(RoutineEngine::new(
                     routine_config,
-                    ironclaw::tenant::AdminScope::new(Arc::clone(db_arc)),
+                    ironclaw::tenant::SystemScope::new(Arc::clone(db_arc)),
                     components.llm.clone(),
                     Arc::clone(ws),
                     notify_tx,
@@ -716,10 +1046,10 @@ impl TestRigBuilder {
             // AppBuilder did not wire them for this environment.
             if enable_skills {
                 let registry = Arc::new(std::sync::RwLock::new(
-                    ironclaw::skills::SkillRegistry::new(temp_dir.path().join("skills"))
+                    ironclaw_skills::SkillRegistry::new(temp_dir.path().join("skills"))
                         .with_installed_dir(temp_dir.path().join("installed_skills")),
                 ));
-                let catalog = ironclaw::skills::catalog::shared_catalog();
+                let catalog = ironclaw_skills::catalog::shared_catalog();
                 components
                     .tools
                     .register_skill_tools(Arc::clone(&registry), Arc::clone(&catalog));
@@ -793,6 +1123,8 @@ impl TestRigBuilder {
         let db_ref = components.db.clone().expect("test rig requires a database");
         let workspace_ref = components.workspace.clone();
         let ext_mgr_ref = components.extension_manager.clone();
+        let secrets_store_ref = components.secrets_store.clone();
+        let owner_id_ref = components.config.owner_id.clone();
         let session_manager_ref = Arc::new(ironclaw::agent::SessionManager::new());
 
         // 7. Construct AgentDeps from AppComponents (mirrors main.rs).
@@ -809,6 +1141,7 @@ impl TestRigBuilder {
             skill_catalog: components.skill_catalog,
             skills_config: components.config.skills.clone(),
             hooks: components.hooks,
+            auth_manager: None,
             cost_guard: components.cost_guard,
             sse_tx: None,
             http_interceptor,
@@ -822,11 +1155,30 @@ impl TestRigBuilder {
 
         // 7. Create TestChannel and ChannelManager.
         // When testing bootstrap, the channel must be named "gateway" because
-        // the bootstrap greeting targets only the gateway channel.
-        let test_channel = if self.keep_bootstrap {
-            Arc::new(TestChannel::new().with_name("gateway"))
+        // the bootstrap greeting targets only the gateway channel. An explicit
+        // override (via `with_channel_name`) takes precedence so tests can
+        // mirror real-world channel naming for features keyed on the channel
+        // name (e.g. mission notifications routed back to the source channel).
+        //
+        // Channel user_id selection: when the test rig has live-seeded
+        // secrets, align the channel user identity with the config's
+        // owner_id so that production credential lookups
+        // (`secrets WHERE user_id = ?`) hit the rows we just inserted.
+        // Without this, the rig would seed real secrets but every
+        // credential lookup would key off the hardcoded `"test-user"`
+        // and miss them. For non-seeded tests we keep the historical
+        // `"test-user"` default so existing tests don't change behaviour.
+        let channel_user_id = if seeded_secrets.is_some() {
+            components.config.owner_id.clone()
         } else {
-            Arc::new(TestChannel::new())
+            "test-user".to_string()
+        };
+        let test_channel = if let Some(ref name) = channel_name_override {
+            Arc::new(TestChannel::with_user_id(channel_user_id).with_name(name.clone()))
+        } else if keep_bootstrap {
+            Arc::new(TestChannel::with_user_id(channel_user_id).with_name("gateway"))
+        } else {
+            Arc::new(TestChannel::with_user_id(channel_user_id))
         };
         let handle = TestChannelHandle::new(Arc::clone(&test_channel));
         let channel_manager = ChannelManager::new();
@@ -889,6 +1241,8 @@ impl TestRigBuilder {
             trace_llm: trace_llm_ref,
             extension_manager: ext_mgr_ref,
             session_manager: session_manager_ref,
+            secrets_store: secrets_store_ref,
+            owner_id: owner_id_ref,
             _temp_dir: temp_dir,
             bootstrap_greetings_to_keep: if keep_bootstrap { 1 } else { 0 },
         }
@@ -920,6 +1274,28 @@ impl TestRig {
         self.trace_llm.as_ref()
     }
 
+    /// Get the secrets store for direct credential manipulation.
+    /// Used by live tests that exercise the auth gate flow — they
+    /// delete a credential to simulate "not yet authenticated", then
+    /// re-insert it after the gate fires to simulate "user completed
+    /// OAuth and the token was stored". Returns `None` only when a
+    /// config override explicitly disables secrets or omits a master
+    /// key. Most test rigs now have a working secrets store because
+    /// `Config::for_testing()` generates a random master key per call.
+    #[cfg(feature = "libsql")]
+    pub fn secrets_store(&self) -> Option<&Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>> {
+        self.secrets_store.as_ref()
+    }
+
+    /// The owner identity resolved from `Config::owner_id`. Tests that
+    /// manipulate the secrets store directly use this as the user_id
+    /// argument to `secrets.create(...)` / `secrets.delete(...)` so
+    /// the rows they touch are the same ones the agent loop sees.
+    #[cfg(feature = "libsql")]
+    pub fn owner_id(&self) -> &str {
+        &self.owner_id
+    }
+
     /// Check if any captured status events contain safety/injection warnings.
     pub fn has_safety_warnings(&self) -> bool {
         self.captured_status_events().iter().any(|s| {
@@ -944,6 +1320,25 @@ pub async fn run_recorded_trace(filename: &str) {
     let trace = LlmTrace::from_file(&path)
         .unwrap_or_else(|e| panic!("failed to load trace {filename}: {e}"));
     let rig = TestRigBuilder::new()
+        .with_trace(trace.clone())
+        .build()
+        .await;
+    rig.run_and_verify_trace(&trace, Duration::from_secs(30))
+        .await;
+    rig.shutdown();
+}
+
+/// Like [`run_recorded_trace`] but routes through the engine v2 pipeline.
+#[cfg(feature = "libsql")]
+pub async fn run_recorded_trace_v2(filename: &str) {
+    let path = format!(
+        "{}/tests/fixtures/llm_traces/recorded/{filename}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let trace = LlmTrace::from_file(&path)
+        .unwrap_or_else(|e| panic!("failed to load trace {filename}: {e}"));
+    let rig = TestRigBuilder::new()
+        .with_engine_v2()
         .with_trace(trace.clone())
         .build()
         .await;

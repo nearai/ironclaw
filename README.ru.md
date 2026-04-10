@@ -18,7 +18,8 @@
   <a href="README.md">English</a> |
   <a href="README.zh-CN.md">简体中文</a> |
   <a href="README.ru.md">Русский</a> |
-  <a href="README.ja.md">日本語</a>
+  <a href="README.ja.md">日本語</a> |
+  <a href="README.ko.md">한국어</a>
 </p>
 
 <p align="center">
@@ -184,7 +185,7 @@ LLM_API_KEY=sk-or-...
 LLM_MODEL=anthropic/claude-sonnet-4
 ```
 
-Смотрите [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md) для получения полного руководства по провайдерам.
+Смотрите [docs/capabilities/llm-providers.md](docs/capabilities/llm-providers.md) для получения полного руководства по провайдерам.
 
 ## Безопасность
 
@@ -308,7 +309,7 @@ cargo test
 cargo test название_теста
 ```
 
-- **Telegram-канал**: Смотрите [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md) для настройки и привязки аккаунта.
+- **Каналы**: Смотрите [docs/channels/overview.mdx](docs/channels/overview.mdx) для настройки Telegram, Discord и других каналов.
 - **Изменение исходников каналов**: Перед `cargo build` выполните `./channels-src/telegram/build.sh`, чтобы обновить встроенный WASM.
 
 ## Наследие OpenClaw

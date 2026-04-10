@@ -132,6 +132,11 @@ def sanitize_line(line: str, state: LexerState) -> str:
         out[i] = ch
         i += 1
 
+    # Rust char literals cannot span lines; reset if still open at EOL.
+    if state.in_char:
+        state.in_char = False
+        state.char_escape = False
+
     return "".join(out)
 
 

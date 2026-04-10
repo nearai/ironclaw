@@ -26,7 +26,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, reload};
 
-use crate::safety::LeakDetector;
+use ironclaw_safety::LeakDetector;
 
 /// Maximum number of recent log entries kept for late-joining SSE subscribers.
 const HISTORY_CAP: usize = 500;
@@ -174,7 +174,14 @@ impl LogLevelHandle {
 ///
 /// Returns the `LogLevelHandle` so callers can swap the filter at runtime.
 /// The fmt layer and `WebLogLayer` are attached alongside the reloadable filter.
-pub fn init_tracing(log_broadcaster: Arc<LogBroadcaster>) -> Arc<LogLevelHandle> {
+///
+/// When `suppress_stderr` is true, the stderr formatter is omitted. This is
+/// used in TUI mode where logs are displayed in the dedicated Logs tab instead
+/// of interleaving with the alternate screen.
+pub fn init_tracing(
+    log_broadcaster: Arc<LogBroadcaster>,
+    suppress_stderr: bool,
+) -> Arc<LogLevelHandle> {
     let raw_filter =
         std::env::var("RUST_LOG").unwrap_or_else(|_| "ironclaw=info,tower_http=warn".to_string());
 
@@ -203,13 +210,19 @@ pub fn init_tracing(log_broadcaster: Arc<LogBroadcaster>) -> Arc<LogLevelHandle>
         base_filter,
     ));
 
-    tracing_subscriber::registry()
-        .with(reload_layer)
-        .with(
+    let fmt_layer = if suppress_stderr {
+        None
+    } else {
+        Some(
             tracing_subscriber::fmt::layer()
                 .with_target(false)
                 .with_writer(crate::tracing_fmt::TruncatingStderr::default()),
         )
+    };
+
+    tracing_subscriber::registry()
+        .with(reload_layer)
+        .with(fmt_layer)
         .with(WebLogLayer::new(log_broadcaster))
         .init();
 
@@ -454,7 +467,7 @@ mod tests {
 
     #[test]
     fn test_leak_detector_scrubs_api_key_in_log() {
-        let detector = crate::safety::LeakDetector::new();
+        let detector = ironclaw_safety::LeakDetector::new();
         let msg = "Connecting with token sk-proj-test1234567890abcdefghij";
         let result = detector.scan_and_clean(msg);
         // Should be blocked (OpenAI key pattern)
@@ -463,7 +476,7 @@ mod tests {
 
     #[test]
     fn test_leak_detector_passes_clean_log() {
-        let detector = crate::safety::LeakDetector::new();
+        let detector = ironclaw_safety::LeakDetector::new();
         let msg = "Request completed status=200 url=https://api.example.com/data";
         let result = detector.scan_and_clean(msg);
         assert!(result.is_ok());

@@ -10,6 +10,21 @@ use crate::bootstrap::ironclaw_base_dir;
 use crate::cli::fmt;
 use crate::settings::Settings;
 
+async fn load_acp_agents_for_doctor()
+-> Result<crate::config::acp::AcpAgentsFile, crate::config::acp::AcpConfigError> {
+    match crate::config::Config::from_env().await {
+        Ok(config) => {
+            let db: Option<std::sync::Arc<dyn crate::db::Database>> =
+                crate::db::connect_from_config(&config.database)
+                    .await
+                    .ok()
+                    .map(|db| db as std::sync::Arc<dyn crate::db::Database>);
+            crate::config::acp::load_acp_agents_for_user(db.as_deref(), &config.owner_id).await
+        }
+        Err(_) => crate::config::acp::load_acp_agents().await,
+    }
+}
+
 /// Run all diagnostic checks and print results.
 pub async fn run_doctor_command() -> anyhow::Result<()> {
     println!();
@@ -97,6 +112,14 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     check(
         "MCP servers",
         check_mcp_config().await,
+        &mut passed,
+        &mut failed,
+        &mut skipped,
+    );
+
+    check(
+        "ACP agents",
+        check_acp_config().await,
         &mut passed,
         &mut failed,
         &mut skipped,
@@ -520,13 +543,50 @@ async fn check_mcp_config() -> CheckResult {
     }
 }
 
+async fn check_acp_config() -> CheckResult {
+    match load_acp_agents_for_doctor().await {
+        Ok(file) => {
+            let agents: Vec<_> = file.enabled_agents().collect();
+            if agents.is_empty() {
+                return CheckResult::Skip("no ACP agents configured".into());
+            }
+
+            let mut invalid = Vec::new();
+            for agent in &agents {
+                if let Err(e) = agent.validate() {
+                    invalid.push(format!("{}: {}", agent.name, e));
+                }
+            }
+
+            if invalid.is_empty() {
+                CheckResult::Pass(format!("{} agent(s) configured, all valid", agents.len()))
+            } else {
+                CheckResult::Fail(format!(
+                    "{} agent(s), {} invalid: {}",
+                    agents.len(),
+                    invalid.len(),
+                    invalid.join("; ")
+                ))
+            }
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") || msg.contains("No such file") {
+                CheckResult::Skip("no ACP config file".into())
+            } else {
+                CheckResult::Fail(format!("config error: {e}"))
+            }
+        }
+    }
+}
+
 // ── Skills ──────────────────────────────────────────────────
 
 async fn check_skills() -> CheckResult {
     let user_dir = ironclaw_base_dir().join("skills");
     let installed_dir = ironclaw_base_dir().join("installed_skills");
 
-    let mut registry = crate::skills::SkillRegistry::new(user_dir.clone());
+    let mut registry = ironclaw_skills::SkillRegistry::new(user_dir.clone());
     registry = registry.with_installed_dir(installed_dir);
 
     // discover_all() returns loaded skill names (not warnings).

@@ -262,6 +262,9 @@ struct SentMessage {
 /// Workspace path for storing polling state.
 const POLLING_STATE_PATH: &str = "state/last_update_id";
 
+/// Workspace path for storing the most recently processed webhook update ID.
+const WEBHOOK_STATE_PATH: &str = "state/last_webhook_update_id";
+
 /// Workspace path for persisting owner_id across WASM callbacks.
 const OWNER_ID_PATH: &str = "state/owner_id";
 
@@ -307,8 +310,7 @@ struct TelegramMessageMetadata {
 /// Channel configuration injected by host.
 ///
 /// The host injects runtime values like tunnel_url and webhook_secret.
-/// The channel doesn't need to know about polling vs webhook mode - it just
-/// checks if tunnel_url is set to determine behavior.
+/// Telegram defaults to polling; webhook mode must be enabled explicitly.
 #[derive(Debug, Deserialize)]
 struct TelegramConfig {
     /// Bot username (without @) for mention detection in groups.
@@ -333,7 +335,6 @@ struct TelegramConfig {
     respond_to_all_group_messages: bool,
 
     /// Public tunnel URL for webhook mode (injected by host from global settings).
-    /// When set, webhook mode is enabled and polling is disabled.
     #[serde(default)]
     tunnel_url: Option<String>,
 
@@ -342,9 +343,21 @@ struct TelegramConfig {
     #[serde(default)]
     webhook_secret: Option<String>,
 
+    /// When true, use webhook mode if tunnel_url is available.
+    #[serde(default)]
+    webhook_enabled: bool,
+
     /// When true, use polling mode even if tunnel_url is available.
     #[serde(default)]
     polling_enabled: bool,
+
+    /// Poll interval in milliseconds (default 30000).
+    #[serde(default)]
+    poll_interval_ms: Option<u32>,
+}
+
+fn webhook_mode(config: &TelegramConfig) -> bool {
+    config.webhook_enabled && config.tunnel_url.is_some() && !config.polling_enabled
 }
 
 // ============================================================================
@@ -518,8 +531,11 @@ impl Guest for TelegramChannel {
             // Clear any stale owner_id from a previous config
             let _ = channel_host::workspace_write(OWNER_ID_PATH, "");
             channel_host::log(
-                channel_host::LogLevel::Warn,
-                "No owner_id configured, bot is open to all users",
+                channel_host::LogLevel::Debug,
+                &format!(
+                    "No owner_id configured; dm_policy={}",
+                    config.dm_policy.as_deref().unwrap_or("pairing")
+                ),
             );
         }
 
@@ -527,27 +543,26 @@ impl Guest for TelegramChannel {
         let dm_policy = config.dm_policy.as_deref().unwrap_or("pairing").to_string();
         let _ = channel_host::workspace_write(DM_POLICY_PATH, &dm_policy);
 
-        let allow_from_json = serde_json::to_string(&config.allow_from.unwrap_or_default())
+        let allow_from_json = serde_json::to_string(&config.allow_from.clone().unwrap_or_default())
             .unwrap_or_else(|_| "[]".to_string());
         let _ = channel_host::workspace_write(ALLOW_FROM_PATH, &allow_from_json);
 
         // Persist bot_username and respond_to_all_group_messages for group handling
         let _ = channel_host::workspace_write(
             BOT_USERNAME_PATH,
-            &config.bot_username.unwrap_or_default(),
+            &config.bot_username.clone().unwrap_or_default(),
         );
         let _ = channel_host::workspace_write(
             RESPOND_TO_ALL_GROUP_PATH,
             &config.respond_to_all_group_messages.to_string(),
         );
 
-        // Mode: use polling if explicitly enabled, otherwise use webhooks when tunnel available.
-        let webhook_mode = config.tunnel_url.is_some() && !config.polling_enabled;
+        let webhook_mode = webhook_mode(&config);
 
         if webhook_mode {
             channel_host::log(
                 channel_host::LogLevel::Info,
-                "Webhook mode enabled (tunnel configured)",
+                "Webhook mode enabled (explicitly configured)",
             );
 
             // Register webhook with Telegram API — propagate errors so a bad token
@@ -567,7 +582,7 @@ impl Guest for TelegramChannel {
         } else {
             channel_host::log(
                 channel_host::LogLevel::Info,
-                "Polling mode enabled (no tunnel configured)",
+                "Polling mode enabled",
             );
 
             // Delete any existing webhook before polling. Telegram returns success
@@ -578,7 +593,7 @@ impl Guest for TelegramChannel {
         // Configure polling only if not in webhook mode
         let poll = if !webhook_mode {
             Some(PollConfig {
-                interval_ms: 30000, // 30 seconds minimum
+                interval_ms: config.poll_interval_ms.unwrap_or(30000),
                 enabled: true,
             })
         } else {
@@ -636,8 +651,31 @@ impl Guest for TelegramChannel {
             }
         };
 
+        let last_processed = channel_host::workspace_read(WEBHOOK_STATE_PATH)
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(-1);
+        let update_id = update.update_id;
+        if update_id <= last_processed {
+            channel_host::log(
+                channel_host::LogLevel::Info,
+                &format!(
+                    "Skipping duplicate or stale webhook update {} (last processed {})",
+                    update_id, last_processed
+                ),
+            );
+            return json_response(200, serde_json::json!({"ok": true}));
+        }
+
         // Handle the update
         handle_update(update);
+
+        if let Err(err) = channel_host::workspace_write(WEBHOOK_STATE_PATH, &update_id.to_string())
+        {
+            channel_host::log(
+                channel_host::LogLevel::Error,
+                &format!("Failed to persist webhook update id: {}", err),
+            );
+        }
 
         // Always respond 200 quickly (Telegram expects fast responses)
         json_response(200, serde_json::json!({"ok": true}))
@@ -1623,8 +1661,8 @@ fn send_pairing_reply(chat_id: i64, code: &str) -> Result<(), String> {
     send_message(
         chat_id,
         &format!(
-            "To pair with this bot, run: `ironclaw pairing approve telegram {}`",
-            code
+            "Enter this code in IronClaw to pair your telegram account: `{}`. CLI fallback: `ironclaw pairing approve telegram {}`",
+            code, code
         ),
         None,
         Some("Markdown"),
@@ -2017,9 +2055,7 @@ fn handle_message(message: TelegramMessage) {
                                     from.id, message.chat.id, result.code
                                 ),
                             );
-                            if result.created {
-                                let _ = send_pairing_reply(message.chat.id, &result.code);
-                            }
+                            let _ = send_pairing_reply(message.chat.id, &result.code);
                         }
                         Err(e) => {
                             channel_host::log(
@@ -2671,6 +2707,33 @@ mod tests {
     }
 
     #[test]
+    fn test_webhook_mode_requires_explicit_enable() {
+        let config: TelegramConfig = serde_json::from_str(
+            r#"{
+                "tunnel_url": "https://example.ngrok.app",
+                "polling_enabled": false
+            }"#,
+        )
+        .unwrap();
+
+        assert!(!webhook_mode(&config));
+    }
+
+    #[test]
+    fn test_webhook_mode_enabled_with_tunnel() {
+        let config: TelegramConfig = serde_json::from_str(
+            r#"{
+                "tunnel_url": "https://example.ngrok.app",
+                "webhook_enabled": true,
+                "polling_enabled": false
+            }"#,
+        )
+        .unwrap();
+
+        assert!(webhook_mode(&config));
+    }
+
+    #[test]
     fn test_classify_status_update_tool_result_ignored() {
         let update = StatusUpdate {
             status: StatusType::ToolResult,
@@ -2804,11 +2867,13 @@ mod tests {
         assert_eq!(attachments[0].id, "large_id"); // Largest photo
         assert_eq!(attachments[0].mime_type, "image/jpeg");
         assert_eq!(attachments[0].size_bytes, Some(54321));
-        assert!(attachments[0]
-            .source_url
-            .as_ref()
-            .unwrap()
-            .contains("large_id"));
+        assert!(
+            attachments[0]
+                .source_url
+                .as_ref()
+                .unwrap()
+                .contains("large_id")
+        );
     }
 
     #[test]

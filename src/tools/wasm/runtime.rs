@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::RwLock;
-use wasmtime::{Config, Engine, OptLevel};
+use wasmtime::{Cache, Config, Engine, OptLevel};
 
 use crate::tools::wasm::error::WasmError;
 use crate::tools::wasm::limits::{FuelConfig, ResourceLimits};
@@ -18,15 +18,17 @@ use crate::tools::wasm::limits::{FuelConfig, ResourceLimits};
 /// which causes any store with an expired epoch deadline to trap.
 pub const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Enable wasmtime's persistent compilation cache for a [`Config`].
+/// Enable Wasmtime's persistent compilation cache for a [`Config`].
 ///
-/// On Unix, this delegates to `cache_config_load_default()` which uses a
-/// shared cache directory. On Windows, each engine gets its own subdirectory
-/// (keyed by `label`) to avoid OS error 33 (`ERROR_LOCK_VIOLATION`) when
-/// multiple engines memory-map files in the same cache directory. See #448.
+/// If `explicit_dir` is `Some`, this writes a small cache TOML file pointing
+/// at that directory and loads it with [`Cache::from_file`].
 ///
-/// If `explicit_dir` is `Some`, it is used as the cache directory on all
-/// platforms, bypassing the default.
+/// If `explicit_dir` is `None`, we load Wasmtime's default cache configuration
+/// by calling `Cache::from_file(None)`.
+///
+/// On Windows, the caller typically passes an engine-specific directory keyed
+/// by `label` to avoid OS error 33 (`ERROR_LOCK_VIOLATION`) when multiple
+/// engines memory-map files in the same cache directory. See #448.
 pub fn enable_compilation_cache(
     wasmtime_config: &mut Config,
     label: &str,
@@ -58,13 +60,13 @@ pub fn enable_compilation_cache(
                 .to_string_lossy()
                 .replace('\\', "\\\\")
                 .replace('"', "\\\"");
-            let toml_content = format!("[cache]\nenabled = true\ndirectory = \"{}\"\n", escaped);
+            let toml_content = format!("[cache]\ndirectory = \"{}\"\n", escaped);
             std::fs::write(&toml_path, toml_content)?;
-            wasmtime_config.cache_config_load(&toml_path)?;
+            wasmtime_config.cache(Some(Cache::from_file(Some(&toml_path))?));
             Ok(())
         }
         None => {
-            wasmtime_config.cache_config_load_default()?;
+            wasmtime_config.cache(Some(Cache::from_file(None)?));
             Ok(())
         }
     }
@@ -422,10 +424,9 @@ mod tests {
 
         let content = std::fs::read_to_string(&toml_path).unwrap();
         assert!(
-            content.contains("[cache]"),
-            "TOML must contain [cache] section"
+            content.contains("directory = \""),
+            "TOML must contain directory key-value setting"
         );
-        assert!(content.contains("enabled = true"), "cache must be enabled");
     }
 
     /// Two engines with different labels must get independent cache directories

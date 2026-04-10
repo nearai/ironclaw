@@ -22,7 +22,6 @@ use crate::config::SafetyConfig;
 use crate::context::JobContext;
 use crate::error::WorkerError;
 use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, ResponseMetadata};
-use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
 use crate::tools::execute::{execute_tool_simple, process_tool_result};
 use crate::worker::api::{CompletionReport, JobEventPayload, StatusUpdate, WorkerHttpClient};
@@ -31,6 +30,7 @@ use crate::worker::autonomous_recovery::{
     EMPTY_TOOL_COMPLETION_NUDGE, FORCE_TEXT_RECOVERY_PROMPT,
 };
 use crate::worker::proxy_llm::ProxyLlmProvider;
+use ironclaw_safety::SafetyLayer;
 
 /// Configuration for the worker runtime.
 pub struct WorkerConfig {
@@ -251,7 +251,9 @@ Work independently to complete this job. When finished, your final message MUST 
                     })
                     .await?;
             }
-            Ok(Ok(LoopOutcome::Stopped | LoopOutcome::NeedApproval(_))) => {
+            Ok(Ok(
+                LoopOutcome::Stopped | LoopOutcome::NeedApproval(_) | LoopOutcome::AuthPending(_),
+            )) => {
                 tracing::info!("Worker for job {} stopped", self.config.job_id);
                 self.client
                     .report_complete(&CompletionReport {
