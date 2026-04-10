@@ -242,9 +242,6 @@ pub fn count_matches(haystack: &str, needle: &str) -> (usize, MatchMethod) {
 /// Strip trailing whitespace from each line while preserving line endings.
 fn strip_trailing_whitespace(s: &str) -> String {
     s.lines()
-        .collect::<Vec<_>>()
-        .join("\n")
-        .lines()
         .map(|line| line.trim_end())
         .collect::<Vec<_>>()
         .join("\n")
