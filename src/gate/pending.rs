@@ -33,6 +33,10 @@ pub struct PendingGate {
     pub user_id: String,
     /// Engine thread that is paused.
     pub thread_id: ThreadId,
+    /// External/client-visible thread id for channels that maintain their own
+    /// conversation identifiers above engine threads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_thread_id: Option<String>,
     /// Conversation the thread belongs to.
     pub conversation_id: ironclaw_engine::ConversationId,
     /// Channel that originated the request.
@@ -62,6 +66,9 @@ pub struct PendingGate {
     /// Completed action output to inject on resume after auth finishes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_output: Option<serde_json::Value>,
+    /// Whether approval has already been granted for this paused action.
+    #[serde(default)]
+    pub approval_already_granted: bool,
 }
 
 impl PendingGate {
@@ -95,7 +102,10 @@ impl From<&PendingGate> for PendingGateView {
     fn from(gate: &PendingGate) -> Self {
         Self {
             request_id: gate.request_id.to_string(),
-            thread_id: gate.thread_id.to_string(),
+            thread_id: gate
+                .scope_thread_id
+                .clone()
+                .unwrap_or_else(|| gate.thread_id.to_string()),
             gate_name: gate.gate_name.clone(),
             tool_name: gate.action_name.clone(),
             description: gate.description.clone(),
@@ -119,6 +129,7 @@ mod tests {
             gate_name: "approval".into(),
             user_id: "user1".into(),
             thread_id: ThreadId::new(),
+            scope_thread_id: None,
             conversation_id: ironclaw_engine::ConversationId::new(),
             source_channel: "telegram".into(),
             action_name: "shell".into(),
@@ -131,6 +142,7 @@ mod tests {
             expires_at: Utc::now() + Duration::seconds(expires_in_secs),
             original_message: None,
             resume_output: None,
+            approval_already_granted: false,
         }
     }
 

@@ -1,0 +1,305 @@
+---
+title: Local Installation
+sidebarTitle: Local
+description: Install IronClaw on Linux, macOS, or Windows
+---
+
+Install IronClaw directly on your local machine for personal use. This is the simplest and most common installation method.
+
+## Installation by OS
+
+<Tabs>
+  <Tab title="Linux">
+    ### Quick Install (Shell Script)
+
+    ```bash
+    curl -fsSL https://install.ironclaw.ai | bash
+    ```
+
+    This installs to `~/.local/bin/ironclaw`. Add to your PATH if needed:
+
+    ```bash
+    export PATH="$HOME/.local/bin:$PATH"
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+    ```
+
+    ### Package Manager (Ubuntu/Debian)
+
+    ```bash
+    # Add repository
+    curl -fsSL https://repo.ironclaw.ai/gpg | sudo gpg --dearmor -o /usr/share/keyrings/ironclaw.gpg
+    echo "deb [signed-by=/usr/share/keyrings/ironclaw.gpg] https://repo.ironclaw.ai stable main" | sudo tee /etc/apt/sources.list.d/ironclaw.list
+
+    # Install
+    sudo apt update
+    sudo apt install ironclaw
+    ```
+
+    ### Build from Source
+
+    ```bash
+    # Prerequisites
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    
+
+    # Build
+    git clone https://github.com/nearai/ironclaw.git
+    cd ironclaw
+    cargo build --release
+
+    # Install
+    sudo cp target/release/ironclaw /usr/local/bin/
+    ```
+
+    ### Post-Install
+
+    1. **Run the wizard**:
+       ```bash
+       ironclaw onboard
+       ```
+
+    2. **Select libSQL** (recommended) during Step 1
+
+    3. **Service setup** (optional):
+       ```bash
+       ironclaw service install
+       sudo systemctl enable --now ironclaw
+       ```
+  </Tab>
+
+  <Tab title="macOS">
+    ### Homebrew (Recommended)
+
+    ```bash
+    # Add tap
+    brew tap ironclaw-ai/tap
+
+    # Install
+    brew install ironclaw
+    ```
+
+    ### Shell Script
+
+    ```bash
+    curl -fsSL https://install.ironclaw.ai | bash
+    ```
+
+    Installs to `~/.local/bin/ironclaw`.
+
+    ### Post-Install
+
+    1. **Run the wizard**:
+       ```bash
+       ironclaw onboard
+       ```
+
+    2. **macOS Keychain** (Step 2): Two system dialogs are expected:
+       - "Enter your password to unlock the keychain"
+       - "Allow ironclaw to access this keychain item"
+
+       Click "Always Allow" to minimize future prompts.
+
+    3. **Service setup** (optional):
+       ```bash
+       ironclaw service install
+       brew services start ironclaw
+       ```
+  </Tab>
+
+  <Tab title="Windows (WSL2)">
+    ### Prerequisites
+
+    1. Install WSL2:
+       ```powershell
+       wsl --install
+       ```
+
+    2. Restart, then open Ubuntu in WSL2
+
+    ### Install in WSL2
+
+    ```bash
+    # Inside WSL2
+    curl -fsSL https://install.ironclaw.ai | bash
+    ```
+
+    ### Access from Windows
+
+    The Web Gateway binds to localhost by default:
+
+    - In WSL2: `http://127.0.0.1:3000`
+    - From Windows: `http://localhost:3000` (WSL2 forwards ports automatically)
+
+    ### Post-Install
+
+    ```bash
+    ironclaw onboard
+    ironclaw run
+    ```
+
+    <Note>
+    WSL2 is the recommended way to run IronClaw on Windows. Native Windows support is available but less tested.
+    </Note>
+  </Tab>
+
+  <Tab title="Windows (Native)">
+    ### PowerShell Install
+
+    ```powershell
+    irm https://install.ironclaw.ai | iex
+    ```
+
+    Or manually:
+    1. Download `ironclaw-x86_64-pc-windows-msvc.zip` from [releases](https://github.com/nearai/ironclaw/releases)
+    2. Extract to `C:\Program Files\IronClaw\`
+    3. Add to PATH
+
+    ### Manual PATH Setup
+
+    ```powershell
+    # Add to system PATH
+    [Environment]::SetEnvironmentVariable(
+      "Path",
+      $env:Path + ";C:\Program Files\IronClaw",
+      "User"
+    )
+    ```
+
+    ### Post-Install
+
+    ```powershell
+    ironclaw onboard
+    ironclaw run
+    ```
+
+    <Warning>
+    Native Windows support is experimental. For production use, prefer WSL2 or Linux.
+    </Warning>
+  </Tab>
+</Tabs>
+
+## Database Recommendation
+
+For local installs, use **libSQL** (embedded SQLite):
+
+```
+Wizard Step 1: Database Connection
+→ Select "libSQL"
+→ Path: ~/.ironclaw/ironclaw.db (default)
+```
+
+Benefits of libSQL for local use:
+- No separate database server to install
+- Zero configuration
+- Automatic migrations
+- Optional Turso cloud sync
+
+PostgreSQL is available but adds complexity for single-user deployments.
+
+## Keychain Behavior
+
+Your OS manages the encryption master key:
+
+<AccordionGroup>
+  <Accordion title="macOS" icon="apple">
+    Uses macOS Keychain. Two dialogs expected:
+    1. "Enter your password to unlock the keychain"
+    2. "Allow ironclaw to access this keychain item"
+
+    Click "Always Allow" on the second dialog to prevent repeated prompts.
+  </Accordion>
+
+  <Accordion title="Linux" icon="linux">
+    Requires `gnome-keyring` or `kwallet`:
+
+    ```bash
+    # Ubuntu/Debian
+    sudo apt install gnome-keyring
+
+    # Fedora
+    sudo dnf install gnome-keyring
+    ```
+
+    If unavailable, use environment variable mode in Step 2.
+  </Accordion>
+
+  <Accordion title="Windows" icon="windows">
+    Uses Windows Data Protection API (DPAPI). No additional setup required.
+  </Accordion>
+</AccordionGroup>
+
+## Service Installation
+
+Run IronClaw as a background service:
+
+<Tabs>
+  <Tab title="Linux (systemd)">
+    ```bash
+    # Install service
+    ironclaw service install
+
+    # Enable and start
+    sudo systemctl enable --now ironclaw
+
+    # Check status
+    sudo systemctl status ironclaw
+
+    # View logs
+    sudo journalctl -u ironclaw -f
+    ```
+  </Tab>
+
+  <Tab title="macOS (launchd)">
+    ```bash
+    # Install service
+    ironclaw service install
+
+    # Start with Homebrew
+    brew services start ironclaw
+
+    # Or manually
+    launchctl load ~/Library/LaunchAgents/ai.ironclaw.service.plist
+
+    # Check status
+    launchctl list | grep ironclaw
+    ```
+  </Tab>
+
+  <Tab title="Windows">
+    Windows service support is coming. For now, use:
+    - Task Scheduler
+    - NSSM (Non-Sucking Service Manager)
+    - Or run in WSL2 with systemd
+  </Tab>
+</Tabs>
+
+## Verify Installation
+
+```bash
+# Check version
+ironclaw --version
+
+# Run diagnostics
+ironclaw doctor
+
+# Expected output:
+# ✓ Binary: ironclaw v0.13.0
+# ✓ Config directory: /home/user/.ironclaw
+# ✓ Database: libSQL (not yet initialized)
+# ✓ Docker: available (optional)
+```
+
+## Next Steps
+
+1. **Run the wizard**: `ironclaw onboard`
+2. **Start IronClaw**: `ironclaw run`
+3. **Open Web Gateway**: `http://127.0.0.1:3000`
+
+<CardGroup cols={2}>
+  <Card title="Wizard Walkthrough" icon="settings" href="/start/wizard">
+    Detailed guide to the 8-step setup wizard
+  </Card>
+  <Card title="Troubleshooting" icon="tool" href="/help/troubleshooting">
+    Common issues and solutions
+  </Card>
+</CardGroup>

@@ -94,7 +94,8 @@ CREATE TABLE IF NOT EXISTS agent_jobs (
     repair_attempts INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     started_at TEXT,
-    completed_at TEXT
+    completed_at TEXT,
+    restart_params TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_jobs_status ON agent_jobs(status);
@@ -959,6 +960,33 @@ CREATE INDEX IF NOT EXISTS idx_pairing_requests_channel ON pairing_requests (cha
     ),
     (
         21,
+        "backfill_conversation_source_channel",
+        // Backfill source_channel for pre-V15 conversation rows. Without this,
+        // any conversation created before V15 has NULL source_channel and the
+        // runtime approval check (`is_approval_authorized`) is fail-closed on
+        // None, so legacy threads reject every approval after a restart.
+        // The `channel` column always holds the original creating channel,
+        // so it is the correct backfill value.
+        r#"
+UPDATE conversations
+SET source_channel = channel
+WHERE source_channel IS NULL;
+"#,
+    ),
+    (
+        22,
+        "sandbox_restart_params",
+        // Add restart_params column for sandbox jobs. Holds a JSON blob
+        // with the mcp_servers filter and max_iterations cap so the
+        // original create_job parameters survive a restart. Marked idempotent
+        // (see IDEMPOTENT_ADD_COLUMN_MIGRATIONS) because the base SCHEMA
+        // includes this column for fresh installs.
+        r#"
+ALTER TABLE agent_jobs ADD COLUMN restart_params TEXT;
+"#,
+    ),
+    (
+        23,
         "llm_calls_created_at_index",
         r#"
 CREATE INDEX IF NOT EXISTS idx_llm_calls_created_at ON llm_calls(created_at);
@@ -973,6 +1001,7 @@ const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] = &[
     (15, "conversations", "source_channel"),
     (18, "wasm_tools", "scope"),
     (18, "dynamic_tools", "scope"),
+    (22, "agent_jobs", "restart_params"),
 ];
 
 /// Check whether `table` already contains `column` via `pragma_table_info`.

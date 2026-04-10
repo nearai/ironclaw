@@ -1,0 +1,94 @@
+name: QA Bug Report
+description: Bug found during QA testing on staging or hosted environments
+title: "[QA] "
+labels: ["qa-bug"]
+body:
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      description: Where was this bug found?
+      options:
+        - hosted-staging (crab shack)
+        - hosted-production
+        - local (cloned ironclaw)
+        - railway-staging
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / Commit Hash
+      description: Paste the commit hash from staging at time of discovery (run `git rev-parse HEAD` or find it on the Railway deploy)
+      placeholder: "e.g. abcdef1"
+    validations:
+      required: true
+
+  - type: input
+    id: qa-date
+    attributes:
+      label: QA Test Date
+      description: Date you discovered this (YYYY-MM-DD)
+      placeholder: "e.g. 2026-04-12"
+    validations:
+      required: true
+
+  - type: input
+    id: feature-area
+    attributes:
+      label: Feature Area
+      description: What part of the app? (e.g. Google Suite extension, Telegram pairing, auth flow)
+      placeholder: "e.g. Extensions → Google Suite install"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Exact steps — numbered, specific, no summaries
+      placeholder: |
+        1. Open extensions tab
+        2. Click "Install Google Suite"
+        3. Fill in credentials and click Save
+        4. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What should happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened? Include the exact error message/text.
+      placeholder: "Error: 'Failed to authenticate with Google: invalid_grant' shown in red toast"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Screenshots
+      description: Paste relevant logs, error output, or attach screenshots. Drag files here.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submit checklist
+      options:
+        - label: Title is specific (not "fix Google Suite" but "Google Suite install throws invalid_grant on OAuth step")
+          required: true
+        - label: Commit hash is filled in
+          required: true
+        - label: Steps are numbered and reproducible
+          required: true

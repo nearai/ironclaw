@@ -817,57 +817,31 @@ mod advanced {
     }
 
     // -----------------------------------------------------------------------
-    // 10. Bootstrap greeting is seeded into assistant conversation
+    // 10. Assistant thread bootstrap remains read-only
     // -----------------------------------------------------------------------
 
-    /// Verifies that the bootstrap greeting is seeded into the assistant
-    /// conversation in the DB when the thread is first created (via
-    /// `add_conversation_message_if_empty`). The greeting is no longer
-    /// broadcast via SSE — it is inserted on the first `/api/chat/threads`
-    /// call.
+    /// Verifies that creating the assistant conversation does not inject a
+    /// synthetic greeting turn into history.
     #[tokio::test]
-    async fn bootstrap_greeting_fires() {
+    async fn assistant_thread_starts_empty() {
         let rig = TestRigBuilder::new().with_bootstrap().build().await;
 
-        // Simulate what chat_threads_handler does: get-or-create the
-        // assistant conversation and seed the greeting if empty.
+        // Simulate the gateway bootstrap path: create the assistant thread.
         let db = rig.database();
         let conv_id = db
             .get_or_create_assistant_conversation("default", "gateway")
             .await
             .expect("create assistant conversation");
 
-        static GREETING: &str = include_str!("../src/workspace/seeds/GREETING.md");
-        let inserted = db
-            .add_conversation_message_if_empty(conv_id, "assistant", GREETING)
-            .await
-            .expect("seed greeting");
-        assert!(inserted, "greeting should be inserted into empty thread");
-
-        // Verify the greeting is in the DB.
+        // Verify the thread is still empty.
         let (messages, _) = db
             .list_conversation_messages_paginated(conv_id, None, 10)
             .await
             .expect("list messages");
         assert_eq!(
             messages.len(),
-            1,
-            "should have exactly one greeting message"
-        );
-        assert!(
-            messages[0].content.contains("chief of staff"),
-            "bootstrap greeting should contain the static text, got: {}",
-            messages[0].content
-        );
-
-        // Second call should not duplicate.
-        let inserted2 = db
-            .add_conversation_message_if_empty(conv_id, "assistant", GREETING)
-            .await
-            .expect("seed greeting again");
-        assert!(
-            !inserted2,
-            "second call should not insert a duplicate greeting"
+            0,
+            "assistant conversation should start empty"
         );
 
         rig.shutdown();
@@ -877,7 +851,7 @@ mod advanced {
     // 11. Bootstrap onboarding completes and clears BOOTSTRAP.md
     // -----------------------------------------------------------------------
 
-    /// Exercises the full onboarding flow: bootstrap greeting is seeded in DB,
+    /// Exercises the full onboarding flow: the assistant thread starts empty,
     /// user converses for 3 turns, agent writes profile + memory + identity,
     /// clears BOOTSTRAP.md, and the workspace reflects all writes.
     #[tokio::test]
@@ -894,18 +868,17 @@ mod advanced {
             .build()
             .await;
 
-        // 1. Seed the greeting via the DB (simulates chat_threads_handler).
+        // 1. Create the assistant thread without injecting history.
         let db = rig.database();
         let conv_id = db
             .get_or_create_assistant_conversation("default", "gateway")
             .await
             .expect("create assistant conversation");
-        static GREETING: &str = include_str!("../src/workspace/seeds/GREETING.md");
-        let inserted = db
-            .add_conversation_message_if_empty(conv_id, "assistant", GREETING)
+        let (messages, _) = db
+            .list_conversation_messages_paginated(conv_id, None, 10)
             .await
-            .expect("seed greeting");
-        assert!(inserted, "bootstrap greeting should be inserted");
+            .expect("list messages");
+        assert!(messages.is_empty(), "assistant thread should start empty");
 
         // 2. BOOTSTRAP.md should exist (non-empty) before onboarding completes.
         let ws = rig.workspace().expect("workspace should exist");

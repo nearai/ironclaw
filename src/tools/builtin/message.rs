@@ -192,7 +192,7 @@ impl Tool for MessageTool {
          file path in the attachments array. Images are sent as photos on Telegram. \
          - Signal: target accepts E.164 (+1234567890) or group ID \
          - Telegram: target accepts username or chat ID \
-         - Slack: target accepts channel (#general) or user ID"
+         - Slack: target accepts channel ID (C0...) or user ID (U0...)"
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -205,11 +205,11 @@ impl Tool for MessageTool {
                 },
                 "channel": {
                     "type": "string",
-                    "description": "Transport/integration name: 'slack-relay', 'telegram', 'signal', 'gateway'. This is NOT a Slack channel ID — use target for that. Defaults to current channel if omitted."
+                    "description": "Transport/integration name: 'slack', 'slack-relay', 'telegram', 'signal', 'gateway'. This is NOT a Slack channel — use target for that. Defaults to current channel if omitted."
                 },
                 "target": {
                     "type": "string",
-                    "description": "Recipient within the transport. Slack: channel ID (C0...), user ID (U0...), or #channel-name. Telegram: chat ID. Signal: E.164 phone or group ID. Defaults to current conversation target if omitted."
+                    "description": "Recipient within the transport. Slack: channel ID (C0...) or user ID (U0...) — must be an ID, not a name. Telegram: chat ID. Signal: E.164 phone or group ID. Defaults to current conversation target if omitted."
                 },
                 "attachments": {
                     "type": "array",
