@@ -14,7 +14,7 @@ use serde_json::json;
 use crate::context::JobContext;
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{
-    ApprovalRequirement, RiskLevel, Tool, ToolDomain, ToolError, ToolOutput, require_str,
+    RiskLevel, Tool, ToolDomain, ToolError, ToolOutput, require_str,
 };
 
 use super::forex::run_transfer_analysis;
@@ -408,8 +408,6 @@ impl Tool for AboundSendWireTool {
     fn risk_level_for(&self, _params: &serde_json::Value) -> RiskLevel {
         RiskLevel::High
     }
-
-
 }
 
 // ===========================================================================
