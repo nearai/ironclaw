@@ -208,6 +208,7 @@ pub struct AgentDeps {
     pub skill_catalog: Option<Arc<ironclaw_skills::catalog::SkillCatalog>>,
     pub skills_config: SkillsConfig,
     pub hooks: Arc<HookRegistry>,
+    pub auth_manager: Option<Arc<crate::bridge::auth_manager::AuthManager>>,
     /// Cost enforcement guardrails (daily budget, hourly rate limits).
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
     /// SSE manager for live job event streaming to the web gateway.
@@ -658,9 +659,6 @@ impl Agent {
 
     /// Run the agent main loop.
     pub async fn run(self) -> Result<(), Error> {
-        // Bootstrap greeting is now handled by chat_threads_handler in server.rs
-        // when the assistant conversation is first created with zero messages.
-
         // Eagerly initialize engine v2 so gateway API endpoints can serve
         // data (projects, missions, threads) before the first chat message.
         if self.config.engine_v2
@@ -1056,11 +1054,6 @@ impl Agent {
             None
         };
 
-        // Bootstrap phase 2: register the thread in session manager and
-        // broadcast the greeting via SSE for any clients already connected.
-        // The greeting was already persisted to DB before start_all(), so
-        // clients that connect after this point will see it via history.
-
         // Hydrate TUI sidebar with existing engine threads and routines so the
         // activity panel is populated before the first user message.
         self.hydrate_tui_sidebar().await;
@@ -1438,6 +1431,11 @@ impl Agent {
                     )
                     .await
                     .map(HandleOutcome::from_legacy);
+                }
+                Submission::ExternalCallback { request_id } => {
+                    return crate::bridge::handle_external_callback(self, message, *request_id)
+                        .await
+                        .map(HandleOutcome::from_legacy);
                 }
                 Submission::Interrupt => {
                     return crate::bridge::handle_interrupt(self, message)
@@ -1837,6 +1835,9 @@ impl Agent {
                 )
                 .await
             }
+            Submission::ExternalCallback { .. } => Ok(SubmissionResult::Error {
+                message: "External callbacks require ENGINE_V2".to_string(),
+            }),
             Submission::ApprovalResponse { approved, always } => {
                 let thread_state = {
                     let sess = session.lock().await;

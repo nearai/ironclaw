@@ -178,7 +178,10 @@ impl SubmissionParser {
         // Try structured JSON approval (from web gateway's /api/chat/approval endpoint)
         if trimmed.starts_with('{')
             && let Ok(submission) = serde_json::from_str::<Submission>(trimmed)
-            && matches!(submission, Submission::ExecApproval { .. })
+            && matches!(
+                submission,
+                Submission::ExecApproval { .. } | Submission::ExternalCallback { .. }
+            )
         {
             return submission;
         }
@@ -295,6 +298,12 @@ pub enum Submission {
         approved: bool,
         /// If true, auto-approve this tool for the rest of the session.
         always: bool,
+    },
+
+    /// External system resolved a pending gate (for example an OAuth callback).
+    ExternalCallback {
+        /// ID of the pending gate request being resolved.
+        request_id: Uuid,
     },
 
     /// Simple approval response (yes/no/always) for the current pending approval.

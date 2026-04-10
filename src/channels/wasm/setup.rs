@@ -527,8 +527,14 @@ async fn inject_channel_secrets_into_config(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
     use super::reserved_wasm_channel_names;
     use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
+    use crate::secrets::{CreateSecretParams, InMemorySecretsStore, SecretsCrypto, SecretsStore};
+    use crate::testing::credentials::TEST_CRYPTO_KEY;
+    use secrecy::SecretString;
 
     /// Build the same reserved-name list that `setup_wasm_channels` uses.
     fn reserved_names() -> Vec<&'static str> {
@@ -584,5 +590,67 @@ mod tests {
                 name
             );
         }
+    }
+
+    #[tokio::test]
+    async fn inject_channel_secrets_uses_owner_scope() {
+        let crypto =
+            Arc::new(SecretsCrypto::new(SecretString::from(TEST_CRYPTO_KEY.to_string())).unwrap());
+        let secrets: Arc<dyn SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+        secrets
+            .create(
+                "owner-123",
+                CreateSecretParams {
+                    name: "feishu_app_id".to_string(),
+                    value: SecretString::from("owner-app-id".to_string()),
+                    provider: None,
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+        secrets
+            .create(
+                "owner-123",
+                CreateSecretParams {
+                    name: "feishu_app_secret".to_string(),
+                    value: SecretString::from("owner-app-secret".to_string()),
+                    provider: None,
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+        secrets
+            .create(
+                "default",
+                CreateSecretParams {
+                    name: "feishu_app_id".to_string(),
+                    value: SecretString::from("default-app-id".to_string()),
+                    provider: None,
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut config_updates = HashMap::new();
+        super::inject_channel_secrets_into_config(
+            "feishu",
+            "owner-123",
+            &Some(Arc::clone(&secrets)),
+            &mut config_updates,
+        )
+        .await;
+
+        assert_eq!(
+            config_updates.get("app_id"),
+            Some(&serde_json::json!("owner-app-id"))
+        );
+        assert_eq!(
+            config_updates.get("app_secret"),
+            Some(&serde_json::json!("owner-app-secret"))
+        );
     }
 }

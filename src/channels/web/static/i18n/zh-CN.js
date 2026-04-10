@@ -119,6 +119,7 @@ I18n.register('zh-CN', {
   'chat.conversations': '对话列表',
   'chat.send': '发送',
   'chat.attachImages': '附加图片',
+  'chat.scrollToBottom': '滚动到底部',
   'chat.empty': '选择文件查看内容',
   'chat.loading': '加载中...',
   'chat.loadingOlder': '加载更早的消息...',

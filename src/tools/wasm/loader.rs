@@ -39,6 +39,7 @@ use std::sync::Arc;
 
 use tokio::fs;
 
+use crate::db::UserStore;
 use crate::secrets::SecretsStore;
 use crate::tools::registry::{ToolRegistry, WasmRegistrationError, WasmToolRegistration};
 use crate::tools::wasm::capabilities_schema::CapabilitiesFile;
@@ -82,6 +83,7 @@ pub struct WasmToolLoader {
     runtime: Arc<WasmToolRuntime>,
     registry: Arc<ToolRegistry>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    role_lookup: Option<Arc<dyn UserStore>>,
 }
 
 impl WasmToolLoader {
@@ -91,12 +93,18 @@ impl WasmToolLoader {
             runtime,
             registry,
             secrets_store: None,
+            role_lookup: None,
         }
     }
 
     /// Set the secrets store for credential injection in WASM tools.
     pub fn with_secrets_store(mut self, store: Arc<dyn SecretsStore + Send + Sync>) -> Self {
         self.secrets_store = Some(store);
+        self
+    }
+
+    pub fn with_role_lookup(mut self, role_lookup: Arc<dyn UserStore>) -> Self {
+        self.role_lookup = Some(role_lookup);
         self
     }
 
@@ -185,6 +193,7 @@ impl WasmToolLoader {
                 schema: None,
                 discovery_summary,
                 secrets_store: self.secrets_store.clone(),
+                role_lookup: self.role_lookup.clone(),
                 oauth_refresh,
             })
             .await?;
@@ -422,8 +431,8 @@ fn resolve_oauth_refresh_config(cap_file: &CapabilitiesFile) -> Option<OAuthRefr
     let auth = cap_file.auth.as_ref()?;
     let oauth = auth.oauth.as_ref()?;
 
-    let builtin = crate::cli::oauth_defaults::builtin_credentials(&auth.secret_name);
-    let exchange_proxy_url = crate::cli::oauth_defaults::exchange_proxy_url();
+    let builtin = crate::auth::oauth::builtin_credentials(&auth.secret_name);
+    let exchange_proxy_url = crate::auth::oauth::exchange_proxy_url();
 
     let client_id = oauth
         .client_id
@@ -446,12 +455,12 @@ fn resolve_oauth_refresh_config(cap_file: &CapabilitiesFile) -> Option<OAuthRefr
                 .and_then(|env| std::env::var(env).ok())
         })
         .or_else(|| builtin.as_ref().map(|c| c.client_secret.to_string()));
-    let client_secret = crate::cli::oauth_defaults::hosted_proxy_client_secret(
+    let client_secret = crate::auth::oauth::hosted_proxy_client_secret(
         &client_secret,
         builtin.as_ref(),
         exchange_proxy_url.is_some(),
     );
-    let oauth_proxy_auth_token = crate::cli::oauth_defaults::oauth_proxy_auth_token();
+    let oauth_proxy_auth_token = crate::auth::oauth::oauth_proxy_auth_token();
 
     Some(OAuthRefreshConfig {
         token_url: oauth.token_url.clone(),
@@ -461,6 +470,9 @@ fn resolve_oauth_refresh_config(cap_file: &CapabilitiesFile) -> Option<OAuthRefr
         gateway_token: oauth_proxy_auth_token,
         secret_name: auth.secret_name.clone(),
         provider: auth.provider.clone(),
+        // TODO: extend WASM tool capabilities so auth.oauth can declare custom
+        // refresh endpoints/params like skills' ProviderRefreshStrategy::Custom.
+        extra_refresh_params: HashMap::new(),
     })
 }
 
