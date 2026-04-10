@@ -2634,15 +2634,17 @@ async fn chat_threads_handler(
         // Seed the bootstrap greeting if this is a brand-new assistant thread.
         // Use add_conversation_message_if_empty to avoid duplicates on concurrent requests.
         static GREETING: &str = include_str!("../../workspace/seeds/GREETING.md");
-        if let Err(e) = store
-            .add_conversation_message_if_empty(assistant_id, "assistant", GREETING)
-            .await
-        {
-            tracing::warn!(
-                user_id = %user.user_id,
-                error = %e,
-                "Failed to seed assistant greeting"
-            );
+        if !GREETING.trim().is_empty() {
+            if let Err(e) = store
+                .add_conversation_message_if_empty(assistant_id, "assistant", GREETING)
+                .await
+            {
+                tracing::warn!(
+                    user_id = %user.user_id,
+                    error = %e,
+                    "Failed to seed assistant greeting"
+                );
+            }
         }
 
         match store
