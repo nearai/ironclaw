@@ -2169,6 +2169,57 @@ fn action_calls_to_python_json(calls: &[ActionCall]) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Build a PII-safe summary of an `action_calls` JSON value for log output.
+///
+/// The action_calls payload contains tool parameters, which can carry user
+/// PII (search queries, file names, email content, conversation text).
+/// Dumping the full value into a `warn!` log would leak that PII to log
+/// aggregation systems (Datadog, CloudWatch, Sentry) the moment the parser
+/// fails — and the parser only fails when the Python ↔ Rust shape drifts,
+/// which is exactly when an operator is most likely to be grepping logs.
+///
+/// We emit only the structural information operators actually need to
+/// debug a shape drift: array length and the keys of the first entry. The
+/// keys themselves are not user data — they're field names like
+/// `name`/`call_id`/`params` that are static across all calls.
+fn summarize_action_calls_for_log(value: &serde_json::Value) -> String {
+    match value.as_array() {
+        Some(arr) if arr.is_empty() => "empty array".to_string(),
+        Some(arr) => {
+            let first_keys = arr
+                .first()
+                .and_then(|v| v.as_object())
+                .map(|obj| {
+                    let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+                    keys.sort_unstable();
+                    keys.join(",")
+                })
+                .unwrap_or_else(|| "<not an object>".to_string());
+            format!(
+                "array of {} entries; first entry keys: [{}]",
+                arr.len(),
+                first_keys
+            )
+        }
+        None => format!("non-array value of type {}", json_value_type_name(value)),
+    }
+}
+
+/// Cheap type-name string for a `serde_json::Value`. Used by
+/// `summarize_action_calls_for_log` to surface the wrong-shape case
+/// (e.g. Python passed a string instead of an array) without leaking the
+/// actual contents.
+fn json_value_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
 /// Deserialize an `action_calls` JSON array (in Python interchange shape)
 /// back into canonical `ActionCall`s.
 ///
@@ -2180,13 +2231,16 @@ fn action_calls_to_python_json(calls: &[ActionCall]) -> Vec<serde_json::Value> {
 /// required field, partial migration), the warning is the operator-visible
 /// breadcrumb that explains why subsequent tool results suddenly look
 /// orphaned to `sanitize_tool_messages`.
+///
+/// The warn log emits a structural summary (`summarize_action_calls_for_log`)
+/// instead of the raw value because tool parameters can contain user PII.
 fn python_json_to_action_calls(value: &serde_json::Value) -> Option<Vec<ActionCall>> {
     match serde_json::from_value::<Vec<PythonActionCall>>(value.clone()) {
         Ok(parsed) => Some(parsed.into_iter().map(ActionCall::from).collect()),
         Err(e) => {
             warn!(
                 error = %e,
-                value = %value,
+                shape = %summarize_action_calls_for_log(value),
                 "Failed to parse action_calls from Python orchestrator — \
                  assistant message will lose tool_call linkage and downstream \
                  tool results will be rewritten as user messages"
@@ -2959,6 +3013,74 @@ mod tests {
         ]);
         // Missing "name", "call_id", "params" → returns None.
         assert!(python_json_to_action_calls(&canonical_json).is_none());
+    }
+
+    #[test]
+    fn summarize_action_calls_for_log_does_not_leak_user_pii() {
+        // The whole point of this helper is that the warn log path on a
+        // shape-drift failure must NOT dump tool parameters (which can
+        // contain user PII like search queries, file names, email content)
+        // into log aggregation systems. The summary should expose only
+        // structural information: array length and the keys of the first
+        // entry. The keys themselves are static (`name`, `call_id`,
+        // `params`), not user data.
+        let pii_value = serde_json::json!([
+            {
+                "name": "google_drive_tool",
+                "call_id": "call_xyz",
+                "params": {
+                    "query": "salary spreadsheet for joe",
+                    "secret_token": "very-sensitive-token-do-not-log"
+                }
+            },
+            {
+                "name": "gmail",
+                "call_id": "call_abc",
+                "params": {
+                    "subject": "private message about layoffs"
+                }
+            }
+        ]);
+        let summary = summarize_action_calls_for_log(&pii_value);
+
+        // Structural info present.
+        assert!(summary.contains("array of 2 entries"));
+        assert!(summary.contains("call_id"));
+        assert!(summary.contains("name"));
+        assert!(summary.contains("params"));
+
+        // PII fields and their values must NOT appear.
+        assert!(
+            !summary.contains("salary"),
+            "summary must not leak user PII from params: {summary}"
+        );
+        assert!(
+            !summary.contains("very-sensitive-token"),
+            "summary must not leak credential-shaped values: {summary}"
+        );
+        assert!(
+            !summary.contains("layoffs"),
+            "summary must not leak free-text content: {summary}"
+        );
+        assert!(
+            !summary.contains("google_drive_tool"),
+            "summary must not leak the tool name itself (could expose intent): {summary}"
+        );
+    }
+
+    #[test]
+    fn summarize_action_calls_for_log_handles_edge_cases() {
+        assert_eq!(
+            summarize_action_calls_for_log(&serde_json::json!([])),
+            "empty array"
+        );
+        assert!(
+            summarize_action_calls_for_log(&serde_json::json!("not an array")).contains("string")
+        );
+        assert!(
+            summarize_action_calls_for_log(&serde_json::json!({"foo": "bar"})).contains("object")
+        );
+        assert!(summarize_action_calls_for_log(&serde_json::json!(null)).contains("null"));
     }
 
     /// Caller-level regression test: feeds `json_to_thread_messages` the
