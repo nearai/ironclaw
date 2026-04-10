@@ -4285,6 +4285,14 @@ function updateInteractiveLoginPanel(overlay, res) {
   }
 }
 
+function maybeOpenInteractiveLoginUrl(name, overlay, res) {
+  if (name !== 'wechat' || !overlay || !res || !res.qr_code_url) return;
+  const qrUrl = res.qr_code_url;
+  if (overlay.dataset.interactiveLoginLastOpenedUrl === qrUrl) return;
+  overlay.dataset.interactiveLoginLastOpenedUrl = qrUrl;
+  window.open(qrUrl, '_blank', 'noopener,noreferrer');
+}
+
 function setInteractiveLoginBusy(overlay, busy, label) {
   const loginBtn = getInteractiveLoginButton(overlay);
   if (!loginBtn) return;
@@ -4331,6 +4339,7 @@ function startInteractiveLogin(name, overlay) {
 
       overlay.dataset.interactiveLoginSessionId = res.session_id;
       updateInteractiveLoginPanel(overlay, res);
+      maybeOpenInteractiveLoginUrl(name, overlay, res);
       setConfigureInlineStatus(overlay, interactiveLoginStatusText(name, res));
       pollInteractiveLogin(name, overlay, res.session_id);
     })
@@ -4358,6 +4367,7 @@ function pollInteractiveLogin(name, overlay, sessionId) {
       if (overlay.dataset.interactiveLoginSessionId !== sessionId) return;
 
       updateInteractiveLoginPanel(overlay, res);
+      maybeOpenInteractiveLoginUrl(name, overlay, res);
       setConfigureInlineStatus(overlay, interactiveLoginStatusText(name, res));
 
       if (res.status === 'pending' || res.status === 'scanned' || res.status === 'refreshed') {
@@ -4395,6 +4405,15 @@ function setConfigureInlineError(overlay, message) {
   if (!error) return;
   error.textContent = message || '';
   error.style.display = message ? 'block' : 'none';
+}
+
+function setConfigureInlineStatus(overlay, message) {
+  const panel = getInteractiveLoginPanel(overlay);
+  if (!panel) return;
+  const status = panel.querySelector('[data-qr-status="true"]');
+  if (!status) return;
+  panel.style.display = message ? '' : 'none';
+  status.textContent = message || '';
 }
 
 function clearConfigureInlineError(overlay) {
