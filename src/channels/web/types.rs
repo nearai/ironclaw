@@ -911,6 +911,14 @@ pub struct SettingWriteRequest {
     pub value: serde_json::Value,
 }
 
+/// Query parameters for settings endpoints.
+/// `?scope=admin` writes to / reads from the admin-default scope.
+#[derive(Debug, Default, Deserialize)]
+pub struct SettingScopeQuery {
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SettingsImportRequest {
     pub settings: std::collections::HashMap<String, serde_json::Value>,

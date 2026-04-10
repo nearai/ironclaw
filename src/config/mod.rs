@@ -241,11 +241,24 @@ impl Config {
         let _ = dotenvy::dotenv();
         crate::bootstrap::load_ironclaw_env();
 
-        // Start with TOML config as a base (lowest priority among the two).
+        // Start with TOML config as a base (lowest priority).
         let mut settings = Settings::default();
         Self::apply_toml_overlay(&mut settings, toml_path)?;
 
-        // Overlay DB settings on top so DB values win over TOML.
+        // Layer admin-scope defaults between TOML and per-user settings.
+        // This lets an admin set instance-wide defaults (e.g. temperature,
+        // model) that members inherit unless they override per-user.
+        // Skip if the user IS the admin scope to avoid a redundant merge.
+        let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
+        if user_id != admin_scope
+            && let Ok(admin_map) = store.get_all_settings(admin_scope).await
+            && !admin_map.is_empty()
+        {
+            let admin_settings = Settings::from_db_map(&admin_map);
+            settings.merge_from(&admin_settings);
+        }
+
+        // Overlay per-user DB settings on top (highest priority).
         match store.get_all_settings(user_id).await {
             Ok(mut map) => {
                 if !is_operator {
@@ -352,9 +365,17 @@ impl Config {
         is_operator: bool,
     ) -> Result<(), ConfigError> {
         let mut settings = if let Some(store) = store {
-            // TOML as base, then DB on top (DB wins).
+            // TOML as base, then admin defaults, then per-user DB on top.
             let mut s = Settings::default();
             Self::apply_toml_overlay(&mut s, toml_path)?;
+            let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
+            if user_id != admin_scope
+                && let Ok(admin_map) = store.get_all_settings(admin_scope).await
+                && !admin_map.is_empty()
+            {
+                let admin_settings = Settings::from_db_map(&admin_map);
+                s.merge_from(&admin_settings);
+            }
             if let Ok(mut map) = store.get_all_settings(user_id).await {
                 if !is_operator {
                     crate::config::helpers::strip_admin_only_llm_keys(&mut map);

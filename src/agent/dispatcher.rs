@@ -585,19 +585,21 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
         // Apply per-user overrides from settings (first iteration only
         // to avoid repeated DB lookups within the same agentic loop).
+        // Uses admin-fallback so admin-set defaults propagate to members
+        // who haven't overridden the value themselves.
         if iteration == 0
             && let Some(store) = self.tenant.store()
         {
             // Model override: "selected_model" — the same key the /model command
             // persists to via SettingsStore (per-user scoped via TenantScope).
-            if let Ok(Some(value)) = store.get_setting("selected_model").await
+            if let Ok(Some(value)) = store.get_setting_with_admin_fallback("selected_model").await
                 && let Some(model) = selected_model_override(&value)
             {
                 reason_ctx.model_override = Some(model);
             }
 
-            // Temperature override from user settings.
-            if let Ok(Some(value)) = store.get_setting("temperature").await
+            // Temperature override from user or admin settings.
+            if let Ok(Some(value)) = store.get_setting_with_admin_fallback("temperature").await
                 && let Some(t) = value.as_f64()
             {
                 reason_ctx.temperature = Some(t as f32);

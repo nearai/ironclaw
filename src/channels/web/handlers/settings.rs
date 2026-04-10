@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use secrecy::SecretString;
@@ -16,6 +16,31 @@ use crate::secrets::{CreateSecretParams, SecretsStore};
 
 /// Sentinel value the frontend sends to mean "key is unchanged, don't touch it".
 const API_KEY_UNCHANGED: &str = "••••••••";
+
+/// Resolve the effective user_id for a settings operation.
+///
+/// When `scope=admin`, the operation targets the shared admin-default scope
+/// (`__admin__`). Only admin users may use this scope; non-admins get 403.
+/// Without the scope parameter (or any other value), operations target the
+/// calling user's own settings.
+fn resolve_settings_scope(
+    user: &crate::channels::web::auth::UserIdentity,
+    query: &SettingScopeQuery,
+) -> Result<String, StatusCode> {
+    if query.scope.as_deref() == Some("admin") {
+        if user.role != "admin" {
+            tracing::warn!(
+                user_id = %user.user_id,
+                role = %user.role,
+                "Non-admin attempted to use scope=admin on settings endpoint"
+            );
+            return Err(StatusCode::FORBIDDEN);
+        }
+        Ok(crate::tools::permissions::ADMIN_SETTINGS_USER_ID.to_string())
+    } else {
+        Ok(user.user_id.clone())
+    }
+}
 
 pub async fn settings_list_handler(
     State(state): State<Arc<GatewayState>>,
@@ -68,13 +93,16 @@ pub async fn settings_get_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Path(key): Path<String>,
+    Query(query): Query<SettingScopeQuery>,
 ) -> Result<Json<SettingResponse>, StatusCode> {
+    let effective_user_id = resolve_settings_scope(&user, &query)?;
+
     let store = state
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let row = store
-        .get_setting_full(&user.user_id, &key)
+        .get_setting_full(&effective_user_id, &key)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get setting '{}': {}", key, e);
@@ -88,7 +116,7 @@ pub async fn settings_get_handler(
         "llm_builtin_overrides" | "llm_custom_providers"
     ) {
         let mut map = std::collections::HashMap::from([(key.clone(), row.value.clone())]);
-        annotate_secret_key_presence(&state, &user.user_id, &mut map).await;
+        annotate_secret_key_presence(&state, &effective_user_id, &mut map).await;
         mask_settings_api_keys(&mut map);
         map.remove(&key).unwrap_or(row.value)
     } else {
@@ -106,8 +134,10 @@ pub async fn settings_set_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Path(key): Path<String>,
+    Query(query): Query<SettingScopeQuery>,
     Json(body): Json<SettingWriteRequest>,
 ) -> Result<StatusCode, StatusCode> {
+    let effective_user_id = resolve_settings_scope(&user, &query)?;
     ensure_setting_write_allowed(&user, &key)?;
 
     let store = state
@@ -117,7 +147,7 @@ pub async fn settings_set_handler(
 
     // Guard: cannot remove a custom provider that is currently active.
     if key == "llm_custom_providers" {
-        guard_active_provider_not_removed(store, &user.user_id, &body.value).await?;
+        guard_active_provider_not_removed(store, &effective_user_id, &body.value).await?;
         validate_custom_providers(&body.value)?;
     }
 
@@ -125,16 +155,16 @@ pub async fn settings_set_handler(
     // The sanitized value has api_key fields removed (stored encrypted instead).
     let sanitized_value = match key.as_str() {
         "llm_builtin_overrides" => {
-            extract_builtin_override_keys(&state, &user.user_id, &body.value).await?
+            extract_builtin_override_keys(&state, &effective_user_id, &body.value).await?
         }
         "llm_custom_providers" => {
-            extract_custom_provider_keys(&state, &user.user_id, &body.value).await?
+            extract_custom_provider_keys(&state, &effective_user_id, &body.value).await?
         }
         _ => body.value.clone(),
     };
 
     store
-        .set_setting(&user.user_id, &key, &sanitized_value)
+        .set_setting(&effective_user_id, &key, &sanitized_value)
         .await
         .map_err(|e| {
             tracing::error!("Failed to set setting '{}': {}", key, e);
@@ -241,7 +271,9 @@ pub async fn settings_delete_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Path(key): Path<String>,
+    Query(query): Query<SettingScopeQuery>,
 ) -> Result<StatusCode, StatusCode> {
+    let effective_user_id = resolve_settings_scope(&user, &query)?;
     ensure_setting_write_allowed(&user, &key)?;
 
     let store = state
@@ -252,12 +284,16 @@ pub async fn settings_delete_handler(
     // Guard: deleting llm_custom_providers is equivalent to setting it to [].
     // Reject if the active backend is a custom provider that would be removed.
     if key == "llm_custom_providers" {
-        guard_active_provider_not_removed(store, &user.user_id, &serde_json::Value::Array(vec![]))
-            .await?;
+        guard_active_provider_not_removed(
+            store,
+            &effective_user_id,
+            &serde_json::Value::Array(vec![]),
+        )
+        .await?;
     }
 
     store
-        .delete_setting(&user.user_id, &key)
+        .delete_setting(&effective_user_id, &key)
         .await
         .map_err(|e| {
             tracing::error!("Failed to delete setting '{}': {}", key, e);
@@ -1217,6 +1253,7 @@ mod tests {
                 workspace_read_scopes: Vec::new(),
             }),
             Path("ollama_base_url".to_string()),
+            Query(SettingScopeQuery::default()),
             Json(SettingWriteRequest {
                 value: serde_json::json!("http://192.168.1.50:11434"),
             }),
@@ -1240,6 +1277,7 @@ mod tests {
                 workspace_read_scopes: Vec::new(),
             }),
             Path("llm_custom_providers".to_string()),
+            Query(SettingScopeQuery::default()),
         )
         .await
         .unwrap_err();
