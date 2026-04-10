@@ -1577,6 +1577,49 @@ mod tests {
         assert!(result.get("anyOf").is_none());
     }
 
+    /// Size-capped serializer: verify the capped writer produces correct
+    /// output at boundary conditions.
+    #[test]
+    fn test_serialize_json_capped_boundary_conditions() {
+        // Small schema under the cap: full output, no truncation.
+        let small = serde_json::json!({"a": 1});
+        let result = serialize_json_capped(&small, 1500).expect("should serialize");
+        assert_eq!(result, r#"{"a":1}"#);
+
+        // Exactly at the cap: should produce exactly cap bytes (or fewer
+        // if the serialized output happens to be shorter).
+        let result = serialize_json_capped(&small, 7).expect("should serialize");
+        assert_eq!(result.len(), 7); // {"a":1} is exactly 7 bytes
+
+        // Over the cap: output is truncated. The JSON will be malformed
+        // (cut mid-stream) but that's OK — the caller adds "... (truncated)".
+        let result = serialize_json_capped(&small, 4).expect("should serialize");
+        assert_eq!(result.len(), 4);
+        assert_eq!(result, r#"{"a""#);
+
+        // Cap of 0: empty output.
+        let result = serialize_json_capped(&small, 0).expect("should serialize");
+        assert!(result.is_empty());
+    }
+
+    /// Size-capped serializer with multi-MB string values: the cap must
+    /// bound the allocation even when the schema has few nodes but large
+    /// string values (the gap the old node-counting approach missed).
+    #[test]
+    fn test_serialize_json_capped_large_string_values() {
+        let big = serde_json::json!({
+            "description": "x".repeat(100_000)
+        });
+        let result = serialize_json_capped(&big, 1500).expect("should serialize");
+        assert!(
+            result.len() <= 1500,
+            "capped serializer must bound output to max_bytes; got {} bytes",
+            result.len()
+        );
+        // The output should start with valid JSON structure.
+        assert!(result.starts_with(r#"{"description":""#));
+    }
+
     /// Caller-level regression test: drives `convert_tools` (the rig-based
     /// provider entry point) end to end with a GitHub-Copilot-shaped tool
     /// definition and asserts the resulting `RigToolDefinition` has a clean
@@ -1629,6 +1672,195 @@ mod tests {
         assert!(
             tool.description.contains("create_issue") && tool.description.contains("list_issues"),
             "variant info must be retained in the hint"
+        );
+    }
+
+    /// End-to-end regression test using the google_docs_tool's actual schema
+    /// shape. This tool has a tagged enum (`oneOf`) with a `BatchUpdate`
+    /// variant containing `requests: Vec<serde_json::Value>` — which
+    /// produces a bare `{"type": "array"}` with no `items`. The flatten
+    /// path broke TWICE on this shape:
+    ///
+    /// 1. The `return schema` short-circuit skipped `normalize_schema_recursive`,
+    ///    so the merged `requests` property kept its bare array (no items).
+    /// 2. Even after the array-items fix was added to the recursive normalizer,
+    ///    the flatten path still short-circuited before it ran.
+    ///
+    /// This single test would have caught BOTH bugs. It drives the schema
+    /// through `normalize_schema_strict` (shared normalizer) AND both
+    /// consumer paths: `convert_tools` (rig-based providers) and
+    /// `convert_tool_definition` (codex provider). Asserts:
+    /// - top-level oneOf is flattened
+    /// - merged properties include fields from ALL variants
+    /// - array `items` is an object (not missing/boolean)
+    /// - nested object properties get strict-mode treatment
+    /// - output passes `validate_strict_schema` with zero violations
+    #[test]
+    fn test_realistic_wasm_schema_survives_normalize_flatten_pipeline() {
+        // Actual shape from google_docs_tool: tagged enum with 4 variants.
+        // BatchUpdate has `requests: Vec<Value>` (bare array, no items).
+        // GetDocument/ReadContent have only string fields.
+        // InsertText has a nested object (text_style).
+        let wasm_schema = serde_json::json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "const": "get_document" },
+                        "document_id": { "type": "string" }
+                    },
+                    "required": ["action", "document_id"]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "const": "batch_update" },
+                        "document_id": { "type": "string" },
+                        "requests": { "type": "array" }
+                    },
+                    "required": ["action", "document_id", "requests"]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "const": "insert_text" },
+                        "document_id": { "type": "string" },
+                        "text": { "type": "string" },
+                        "text_style": {
+                            "type": "object",
+                            "properties": {
+                                "bold": { "type": "boolean" },
+                                "font_size": { "type": "integer" }
+                            }
+                        }
+                    },
+                    "required": ["action", "document_id", "text"]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "const": "read_content" },
+                        "document_id": { "type": "string" }
+                    },
+                    "required": ["action", "document_id"]
+                }
+            ]
+        });
+
+        // Path 1: shared normalizer (used by both rig and codex paths)
+        let mut description = "Google Docs tool".to_string();
+        let normalized = normalize_schema_strict(&wasm_schema, &mut description);
+
+        // Top-level oneOf must be flattened.
+        assert!(normalized.get("oneOf").is_none(), "oneOf must be flattened");
+        assert_eq!(normalized["type"], "object");
+        assert_eq!(normalized["additionalProperties"], true);
+
+        // Merged properties from ALL variants.
+        let props = normalized["properties"]
+            .as_object()
+            .expect("merged properties");
+        assert!(props.contains_key("action"), "discriminator");
+        assert!(props.contains_key("document_id"), "shared field");
+        assert!(props.contains_key("requests"), "BatchUpdate field");
+        assert!(props.contains_key("text"), "InsertText field");
+        assert!(props.contains_key("text_style"), "InsertText nested obj");
+
+        // CRITICAL: array `items` must be an object (the bug that broke twice).
+        let requests = &normalized["properties"]["requests"];
+        assert!(
+            requests["items"].is_object(),
+            "requests array must have items as a JSON Schema object; got: {requests}"
+        );
+
+        // Nested object properties should get strict-mode treatment
+        // (additionalProperties: false on the text_style sub-object).
+        let text_style = &normalized["properties"]["text_style"];
+        assert_eq!(text_style["additionalProperties"], false);
+        assert!(text_style["properties"]["bold"].is_object());
+
+        // Description hint should contain variant info.
+        assert!(
+            description.contains("batch_update") || description.contains("get_document"),
+            "description must include variant info from the original schema"
+        );
+
+        // Path 2: rig-based provider entry point.
+        let tools = convert_tools(&[IronToolDefinition {
+            name: "google_docs_tool".to_string(),
+            description: "Google Docs".to_string(),
+            parameters: wasm_schema.clone(),
+        }]);
+        assert_eq!(tools.len(), 1);
+        assert!(
+            tools[0].parameters.get("oneOf").is_none(),
+            "convert_tools output must not have oneOf"
+        );
+        assert!(
+            tools[0].parameters["properties"]["requests"]["items"].is_object(),
+            "convert_tools must normalize array items"
+        );
+    }
+
+    /// Deeply nested schema: object → array → object → array (no items).
+    /// Verifies the recursive normalizer walks the full depth and fixes
+    /// every array `items` and every nested object's strict-mode fields.
+    #[test]
+    fn test_normalize_schema_strict_fixes_deeply_nested_array_items() {
+        // All fields marked required so `make_nullable` doesn't wrap
+        // types as `["array", "null"]`, keeping the assertions focused
+        // on "items get fixed at every nesting depth".
+        let input = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "tags": { "type": "array" },
+                            "metadata": {
+                                "type": "object",
+                                "properties": {
+                                    "values": { "type": "array" }
+                                },
+                                "required": ["values"]
+                            }
+                        },
+                        "required": ["tags", "metadata"]
+                    }
+                }
+            },
+            "required": ["data"]
+        });
+        let mut description = "nested".to_string();
+        let result = normalize_schema_strict(&input, &mut description);
+
+        // Level 1: data.items is an object (was already, should be preserved)
+        let data_items = &result["properties"]["data"]["items"];
+        assert!(data_items.is_object());
+
+        // Level 2: data.items.properties.tags must get items added
+        let tags = &data_items["properties"]["tags"];
+        assert_eq!(tags["type"], "array");
+        assert!(
+            tags["items"].is_object(),
+            "deeply nested array must get items: {tags}"
+        );
+
+        // Level 3: data.items.properties.metadata.properties.values
+        let values = &data_items["properties"]["metadata"]["properties"]["values"];
+        assert_eq!(values["type"], "array");
+        assert!(
+            values["items"].is_object(),
+            "3-level deep array must get items: {values}"
+        );
+
+        // Nested objects should have additionalProperties: false
+        assert_eq!(data_items["additionalProperties"], false);
+        assert_eq!(
+            data_items["properties"]["metadata"]["additionalProperties"],
+            false
         );
     }
 

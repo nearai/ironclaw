@@ -3267,4 +3267,65 @@ mod tests {
              is no longer needed — either remove it or update the contract."
         );
     }
+
+    /// Regression: `action_calls: null` is Python's legitimate "this
+    /// message has no tool calls" signal (text-only response). Before the
+    /// null filter, `python_json_to_action_calls` would fire a warn log
+    /// with "invalid type: null, expected a sequence" on every text-only
+    /// assistant message — a false alarm that masked real drift issues.
+    #[test]
+    fn json_to_thread_messages_handles_null_action_calls_gracefully() {
+        let messages = serde_json::json!([
+            {
+                "role": "Assistant",
+                "content": "Here is your answer.",
+                "action_calls": null
+            }
+        ]);
+        let parsed = json_to_thread_messages(&messages).expect("must parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].role,
+            crate::types::message::MessageRole::Assistant
+        );
+        assert_eq!(parsed[0].content, "Here is your answer.");
+        assert!(
+            parsed[0].action_calls.is_none(),
+            "null action_calls must produce None, not a parse error"
+        );
+    }
+
+    /// Verify that messages WITHOUT the action_calls key at all (the most
+    /// common case for text responses) also parse correctly — this is the
+    /// baseline that the null-filtering regression test extends.
+    #[test]
+    fn json_to_thread_messages_handles_absent_action_calls() {
+        let messages = serde_json::json!([
+            {"role": "Assistant", "content": "Just text, no tools."}
+        ]);
+        let parsed = json_to_thread_messages(&messages).expect("must parse");
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].action_calls.is_none());
+    }
+
+    /// Empty action_calls array is valid (LLM decided not to call any
+    /// tools this turn but the response still has the array field). Must
+    /// produce `Some(vec![])`, not `None`.
+    #[test]
+    fn json_to_thread_messages_handles_empty_action_calls_array() {
+        let messages = serde_json::json!([
+            {
+                "role": "Assistant",
+                "content": "No tools needed.",
+                "action_calls": []
+            }
+        ]);
+        let parsed = json_to_thread_messages(&messages).expect("must parse");
+        assert_eq!(parsed.len(), 1);
+        let calls = parsed[0]
+            .action_calls
+            .as_ref()
+            .expect("empty array should produce Some(vec![])");
+        assert!(calls.is_empty());
+    }
 }

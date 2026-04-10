@@ -8459,6 +8459,73 @@ mod tests {
         );
     }
 
+    /// Regression: latent provider actions for an MCP server with a
+    /// hyphenated name must produce action_names with underscores, not
+    /// hyphens. The `latent_actions_for_mcp_server` method uses
+    /// `mcp_tool_id(&server.name, &tool.name)` which normalizes ALL
+    /// non-identifier chars to `_`. Without this, the latent action
+    /// `my-server_search` would never match the registered tool
+    /// `my_server_search` when the server activates later.
+    #[tokio::test]
+    async fn latent_provider_actions_normalize_hyphenated_server_names() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let manager = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+        );
+
+        let mut server = McpServerConfig::new("my-mcp-server", "https://example.com/mcp");
+        server.cached_tools = vec![
+            crate::tools::mcp::McpTool {
+                name: "search-all".to_string(),
+                description: "Search everything".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                annotations: None,
+            },
+            crate::tools::mcp::McpTool {
+                name: "get_item".to_string(),
+                description: "Get an item".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                annotations: None,
+            },
+        ];
+        manager
+            .add_mcp_server(server, "test")
+            .await
+            .expect("add mcp server");
+
+        let actions = manager.latent_provider_actions("test").await;
+
+        // The umbrella action for the server itself.
+        assert!(
+            actions.iter().any(|a| a.action_name == "my-mcp-server"),
+            "umbrella action should use the raw server name"
+        );
+
+        // Individual tool actions must have normalized names.
+        let search = actions
+            .iter()
+            .find(|a| a.action_name == "my_mcp_server_search_all")
+            .expect("hyphenated server + tool name must normalize to underscores");
+        assert_eq!(search.provider_extension, "my-mcp-server");
+
+        let get_item = actions
+            .iter()
+            .find(|a| a.action_name == "my_mcp_server_get_item")
+            .expect("already-underscore tool name must still work with hyphenated server");
+        assert_eq!(get_item.provider_extension, "my-mcp-server");
+
+        // Negative: the old (pre-fix) hyphenated form must NOT appear.
+        assert!(
+            !actions
+                .iter()
+                .any(|a| a.action_name == "my-mcp-server_search-all"),
+            "hyphenated action_name must not survive normalization"
+        );
+    }
+
     /// Regression: configuring or removing an MCP server must invalidate
     /// the cached `latent_wasm_provider_actions` map. The cache is built by
     /// scanning the registry for uninstalled `WasmTool`/`McpServer` entries;
