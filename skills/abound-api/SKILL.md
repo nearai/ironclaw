@@ -168,7 +168,7 @@ When the user needs to make a decision from a set of options, emit a **choice se
 ### Format:
 ```
 [[choice_set]]
-{"type":"choice_set","id":"<unique-kebab-id>","title":"<question>","subtitle":"<helper text>","layout":"carousel","items":[{"id":"<option-id>","title":"<short label>","subtitle":"<one line>","description":"<detail paragraph>","cta_label":"<button text>","prompt":"<what to send back when user picks this>"}]}
+{"type":"choice_set","id":"<unique-kebab-id>","title":"<question>","subtitle":"<helper text>","layout":"carousel","items":[{"id":"<option-id>","title":"<short label>","subtitle":"<one line>","description":"<detail paragraph>","image_url":"https://images.unsplash.com/photo-RELEVANT?w=400","cta_label":"<button text>","prompt":"<what to send back when user picks this>"}]}
 [[/choice_set]]
 ```
 
@@ -182,27 +182,28 @@ When the user needs to make a decision from a set of options, emit a **choice se
   - `title`: short label (2-4 words)
   - `subtitle`: one-line summary
   - `description`: 1-2 sentence detail
-  - `image_url`: optional (omit if not relevant)
+  - `image_url`: REQUIRED — use a relevant Unsplash image URL with `?w=400`
   - `cta_label`: button text like "Select", "Show Options", "Choose"
   - `prompt`: the full instruction to send back when the user selects this option
 
 ### Example — selecting a recipient:
 ```
 [[choice_set]]
-{"type":"choice_set","id":"select-recipient","title":"Who would you like to send money to?","subtitle":"Select a recipient from your saved list","layout":"carousel","items":[{"id":"recipient-1","title":"Rahul Sharma","subtitle":"****2222","description":"HDFC Bank account ending in 2222","cta_label":"Send to Rahul","prompt":"Send money to Rahul Sharma (beneficiary ****2222)"},{"id":"recipient-2","title":"Priya Patel","subtitle":"****8899","description":"SBI account ending in 8899","cta_label":"Send to Priya","prompt":"Send money to Priya Patel (beneficiary ****8899)"}]}
+{"type":"choice_set","id":"select-recipient","title":"Who would you like to send money to?","subtitle":"Select a recipient from your saved list","layout":"carousel","items":[{"id":"recipient-1","title":"Rahul Sharma","subtitle":"****2222","description":"HDFC Bank account ending in 2222","image_url":"https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=400","cta_label":"Send to Rahul","prompt":"Send money to Rahul Sharma (beneficiary ****2222)"},{"id":"recipient-2","title":"Priya Patel","subtitle":"****8899","description":"SBI account ending in 8899","image_url":"https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=400","cta_label":"Send to Priya","prompt":"Send money to Priya Patel (beneficiary ****8899)"}]}
 [[/choice_set]]
 ```
 
 ### Example — payment reason:
 ```
 [[choice_set]]
-{"type":"choice_set","id":"payment-reason","title":"What's the purpose of this transfer?","subtitle":"Required for compliance","layout":"carousel","items":[{"id":"family","title":"Family Maintenance","subtitle":"Supporting family","description":"Regular support for family members in India","cta_label":"Select","prompt":"The payment reason is Family Maintenance"},{"id":"gift","title":"Gift","subtitle":"Sending a gift","description":"One-time gift to someone in India","cta_label":"Select","prompt":"The payment reason is Gift"},{"id":"education","title":"Education Support","subtitle":"Tuition & fees","description":"Supporting education expenses in India","cta_label":"Select","prompt":"The payment reason is Education Support"},{"id":"medical","title":"Medical Support","subtitle":"Healthcare costs","description":"Supporting medical expenses in India","cta_label":"Select","prompt":"The payment reason is Medical Support"}]}
+{"type":"choice_set","id":"payment-reason","title":"What's the purpose of this transfer?","subtitle":"Required for compliance","layout":"carousel","items":[{"id":"family","title":"Family Maintenance","subtitle":"Supporting family","description":"Regular support for family members in India","image_url":"https://images.unsplash.com/photo-1511895426328-dc8714191300?w=400","cta_label":"Select","prompt":"The payment reason is Family Maintenance"},{"id":"gift","title":"Gift","subtitle":"Sending a gift","description":"One-time gift to someone in India","image_url":"https://images.unsplash.com/photo-1513885535751-8b9238bd345a?w=400","cta_label":"Select","prompt":"The payment reason is Gift"},{"id":"education","title":"Education Support","subtitle":"Tuition & fees","description":"Supporting education expenses in India","image_url":"https://images.unsplash.com/photo-1523050854058-8df90110c476?w=400","cta_label":"Select","prompt":"The payment reason is Education Support"},{"id":"medical","title":"Medical Support","subtitle":"Healthcare costs","description":"Supporting medical expenses in India","image_url":"https://images.unsplash.com/photo-1538108149393-fbbd81895907?w=400","cta_label":"Select","prompt":"The payment reason is Medical Support"}]}
 [[/choice_set]]
 ```
 
 ### Rules:
 - Always include a text introduction BEFORE the choice set
 - NEVER list options as bullet points or plain text — ALWAYS use the [[choice_set]] format
+- Every item MUST include an `image_url` with a relevant Unsplash image URL (append `?w=400`)
 - Use data from the `abound_account_info` tool to populate choices (real names, real account masks)
 - The `prompt` field should be a complete instruction
 - Keep titles short and scannable
