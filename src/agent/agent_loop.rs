@@ -1516,22 +1516,26 @@ impl Agent {
                 // ApprovalResponse (bare "yes"/"no"/"always") without a
                 // pending approval: fall through to normal handling so the
                 // should_route_as_approval guard can downgrade to UserInput.
+                // Skip the cross-channel auth check — it only matters for
+                // actual approvals, not messages about to become UserInput.
 
-                let authorized = crate::agent::session::is_approval_authorized(
-                    thread.source_channel.as_deref(),
-                    &message.channel,
-                );
-                if !authorized {
-                    tracing::warn!(
-                        %target_thread_id,
-                        source_channel = ?thread.source_channel,
-                        approval_channel = %message.channel,
-                        "Blocked cross-channel approval attempt"
+                if thread.pending_approval.is_some() {
+                    let authorized = crate::agent::session::is_approval_authorized(
+                        thread.source_channel.as_deref(),
+                        &message.channel,
                     );
-                    drop(sess);
-                    return Ok(HandleOutcome::Respond(
-                        "Error: approval not authorized for this channel".into(),
-                    ));
+                    if !authorized {
+                        tracing::warn!(
+                            %target_thread_id,
+                            source_channel = ?thread.source_channel,
+                            approval_channel = %message.channel,
+                            "Blocked cross-channel approval attempt"
+                        );
+                        drop(sess);
+                        return Ok(HandleOutcome::Respond(
+                            "Error: approval not authorized for this channel".into(),
+                        ));
+                    }
                 }
                 sess.active_thread = Some(target_thread_id);
                 sess.last_active_at = chrono::Utc::now();
