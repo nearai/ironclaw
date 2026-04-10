@@ -189,18 +189,27 @@ pub(crate) fn normalize_schema_strict(schema: &JsonValue, description: &mut Stri
                 normalize_schema_recursive(prop_schema);
             }
         }
-        // Fall through to the post-normalization validator (step 3).
-    } else {
-        // Step 2: recursive strict-mode normalization (non-flatten path).
-        normalize_schema_recursive(&mut schema);
+        // Skip the post-normalization strict-mode validator for the flatten
+        // path. The flattened envelope is intentionally non-strict
+        // (additionalProperties: true, required: []), so the strict
+        // validator would fire a false positive on every flattened schema
+        // — 12x per LLM call when there are 12 flattened tools, drowning
+        // real signals in noise. The individual properties were already
+        // normalized recursively above; the top-level permissive shape is
+        // by design, not a bug.
+        return schema;
     }
 
-    // Step 3: post-normalization validation. The normalizer handles the
-    // rules it knows about, but OpenAI's strict-mode spec has more rules
-    // than any single normalizer pass is likely to cover perfectly —
-    // and new rules appear without notice. Running the CI validator as a
-    // debug-level post-check catches anything the normalizer missed so
-    // we get a local diagnostic instead of a runtime HTTP 400.
+    // Step 2: recursive strict-mode normalization (non-flatten path).
+    normalize_schema_recursive(&mut schema);
+
+    // Step 3: post-normalization validation (non-flatten path only).
+    // The normalizer handles the rules it knows about, but OpenAI's
+    // strict-mode spec has more rules than any single normalizer pass is
+    // likely to cover perfectly — and new rules appear without notice.
+    // Running the CI validator as a debug-level post-check catches anything
+    // the normalizer missed so we get a local diagnostic instead of a
+    // runtime HTTP 400. Flattened schemas skip this check (see above).
     //
     // This is deliberately `debug!` (not `warn!`) because the schema
     // still goes through — the tool remains usable, and the LLM provider
