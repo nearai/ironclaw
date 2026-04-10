@@ -25,6 +25,8 @@ activation:
     - "(?i)analyze.*transfer"
     - "(?i)validate.*rate"
     - "(?i)(hit rate|probability|cone|volatility).*forex"
+    - "(?i)(monitor|alert|check).*rate.*mission"
+    - "(?i)rate.*exceed|threshold"
   tags:
     - finance
     - trading
@@ -83,6 +85,18 @@ Both `analyze_transfer` and `validate_transfer_target` return `{"message": "..."
 - Show the required move percentage
 - Present the horizon table (which horizons have reasonable probability)
 - Highlight the recommended horizon if one exists
+
+## Missions & Recurring Monitoring
+
+When the user wants to **monitor exchange rates** or get alerts on rate thresholds, create a mission with `mission_create` and set the goal to use `abound_rate_alert`:
+
+- **`abound_rate_alert`** — Atomic check-and-notify tool. Fetches the current rate, compares against a threshold, and sends a notification if exceeded. All in one call — no parsing needed.
+  Params: `threshold` (required), `from_currency` (default USD), `to_currency` (default INR), `message_id` (default rate_alert).
+
+Example mission goal for rate monitoring:
+> "Call abound_rate_alert(threshold=90) each run. Report the result via FINAL()."
+
+**CRITICAL: For mission threads that monitor rates, always use `abound_rate_alert` — never chain `abound_exchange_rate` + `abound_create_notification` manually.** The single tool is deterministic and avoids parsing errors.
 
 ## Rules
 

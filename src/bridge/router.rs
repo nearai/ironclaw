@@ -803,6 +803,11 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         .set_mission_manager(Arc::clone(&mission_manager))
         .await;
 
+    // Register mission tools as Tier 0 so they're available via structured tool calls
+    agent
+        .tools()
+        .register_mission_tools(Arc::clone(&mission_manager), project_id);
+
     // Wire mission manager into agent for /expected command
     agent
         .set_mission_manager(Arc::clone(&mission_manager))

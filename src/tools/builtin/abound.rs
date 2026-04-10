@@ -496,6 +496,180 @@ impl Tool for AboundCreateNotificationTool {
     }
 }
 
+// ===========================================================================
+// abound_rate_alert — atomic check-and-notify for mission threads
+// ===========================================================================
+
+pub struct AboundRateAlertTool {
+    secrets: Arc<dyn SecretsStore + Send + Sync>,
+    client: Client,
+}
+
+impl AboundRateAlertTool {
+    pub fn new(secrets: Arc<dyn SecretsStore + Send + Sync>) -> Result<Self, ToolError> {
+        Ok(Self {
+            secrets,
+            client: shared_client()?,
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for AboundRateAlertTool {
+    fn name(&self) -> &str {
+        "abound_rate_alert"
+    }
+
+    fn description(&self) -> &str {
+        "Check the current exchange rate and send a notification if it exceeds a threshold. \
+         Designed for mission threads — does everything in one call: fetch rate, compare, notify. \
+         Returns the current rate, whether threshold was exceeded, and whether notification was sent."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "from_currency": {
+                    "type": "string",
+                    "description": "Source currency code (default: USD)",
+                    "default": "USD"
+                },
+                "to_currency": {
+                    "type": "string",
+                    "description": "Target currency code (default: INR)",
+                    "default": "INR"
+                },
+                "threshold": {
+                    "type": "number",
+                    "description": "Rate threshold. Notification is sent if the current rate exceeds this value."
+                },
+                "message_id": {
+                    "type": "string",
+                    "description": "Notification message identifier (default: rate_alert)",
+                    "default": "rate_alert"
+                }
+            },
+            "required": ["threshold"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = Instant::now();
+
+        let from = validate_currency_code(
+            params
+                .get("from_currency")
+                .and_then(|v| v.as_str())
+                .unwrap_or("USD"),
+        )?;
+        let to = validate_currency_code(
+            params
+                .get("to_currency")
+                .and_then(|v| v.as_str())
+                .unwrap_or("INR"),
+        )?;
+        let threshold = params
+            .get("threshold")
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| ToolError::InvalidParameters("threshold must be a number".into()))?;
+        let message_id = params
+            .get("message_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("rate_alert");
+
+        // Step 1: Fetch exchange rate
+        let url = format!("{REMITTANCE_BASE}/exchange-rate?from_currency={from}&to_currency={to}");
+        let rate_response =
+            abound_get(&self.client, &*self.secrets, &ctx.user_id, &url).await?;
+
+        // Parse rate from response: body.data.current_exchange_rate.formatted_value
+        let current_rate = rate_response
+            .get("body")
+            .and_then(|b| b.get("data"))
+            .and_then(|d| d.get("current_exchange_rate"))
+            .and_then(|r| {
+                r.get("value")
+                    .and_then(|v| v.as_f64())
+                    .or_else(|| {
+                        r.get("formatted_value")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<f64>().ok())
+                    })
+            })
+            .unwrap_or(0.0);
+
+        let effective_rate = rate_response
+            .get("body")
+            .and_then(|b| b.get("data"))
+            .and_then(|d| d.get("effective_exchange_rate"))
+            .and_then(|r| {
+                r.get("value")
+                    .and_then(|v| v.as_f64())
+                    .or_else(|| {
+                        r.get("formatted_value")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<f64>().ok())
+                    })
+            })
+            .unwrap_or(0.0);
+
+        let exceeded = current_rate > threshold;
+
+        // Step 2: Send notification if threshold exceeded
+        let notification_sent = if exceeded {
+            let notif_body = json!({
+                "message_id": message_id,
+                "action_type": "notification",
+                "meta_data": {
+                    "alert": format!("{from}/{to} rate alert"),
+                    "current_rate": current_rate,
+                    "effective_rate": effective_rate,
+                    "threshold": threshold,
+                },
+            });
+            let notif_url = format!("{NOTIFICATION_BASE}/create-notification");
+            let notif_result = abound_post(
+                &self.client,
+                &*self.secrets,
+                &ctx.user_id,
+                &notif_url,
+                &notif_body,
+            )
+            .await;
+            notif_result.is_ok()
+        } else {
+            false
+        };
+
+        let result = json!({
+            "current_rate": current_rate,
+            "effective_rate": effective_rate,
+            "threshold": threshold,
+            "exceeded": exceeded,
+            "notification_sent": notification_sent,
+            "pair": format!("{from}/{to}"),
+        });
+        Ok(ToolOutput::success(result, start.elapsed()))
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        true
+    }
+
+    fn domain(&self) -> ToolDomain {
+        ToolDomain::Orchestrator
+    }
+
+    fn risk_level_for(&self, _params: &serde_json::Value) -> RiskLevel {
+        RiskLevel::Low
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

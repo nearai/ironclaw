@@ -16,7 +16,7 @@ use crate::tools::builder::{
 };
 use crate::tools::builtin::{
     AboundAccountInfoTool, AboundCreateNotificationTool, AboundExchangeRateTool,
-    AboundSendWireTool, AnalyzeTransferTool, ApplyPatchTool, CancelJobTool, CreateJobTool,
+    AboundRateAlertTool, AboundSendWireTool, AnalyzeTransferTool, ApplyPatchTool, CancelJobTool, CreateJobTool,
     EchoTool, ExtensionInfoTool, ForexHistoricalDataTool, HttpTool, JobEventsTool, JobPromptTool,
     JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool,
     MemoryTreeTool, MemoryWriteTool, PlanUpdateTool, PromptQueue, ReadFileTool, ShellTool,
@@ -106,11 +106,20 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "plan_update",
     // Permission tools
     "tool_permission_set",
+    // Mission tools (engine v2)
+    "mission_create",
+    "mission_list",
+    "mission_update",
+    "mission_delete",
+    "mission_fire",
+    "mission_pause",
+    "mission_resume",
     // Abound tools
     "abound_account_info",
     "abound_exchange_rate",
     "abound_send_wire",
     "abound_create_notification",
+    "abound_rate_alert",
     // Forex tools
     "forex_historical_data",
     "analyze_transfer",
@@ -396,6 +405,7 @@ impl ToolRegistry {
             register_or_warn!(AboundExchangeRateTool::new(Arc::clone(ss)));
             register_or_warn!(AboundSendWireTool::new(Arc::clone(ss)));
             register_or_warn!(AboundCreateNotificationTool::new(Arc::clone(ss)));
+            register_or_warn!(AboundRateAlertTool::new(Arc::clone(ss)));
             register_or_warn!(ForexHistoricalDataTool::new(Arc::clone(ss)));
             register_or_warn!(AnalyzeTransferTool::new(Arc::clone(ss)));
             register_or_warn!(ValidateTransferTargetTool::new(Arc::clone(ss)));
@@ -842,6 +852,35 @@ impl ToolRegistry {
         self.register_sync(Arc::new(RoutineHistoryTool::new(store)));
         self.register_sync(Arc::new(EventEmitTool::new(engine)));
         tracing::debug!("Registered 7 routine management tools");
+    }
+
+    /// Register mission management tools (engine v2).
+    ///
+    /// These allow the LLM to create, list, update, delete, fire, pause, and
+    /// resume missions via Tier 0 structured tool calls.
+    pub fn register_mission_tools(
+        &self,
+        manager: Arc<ironclaw_engine::MissionManager>,
+        project_id: ironclaw_engine::ProjectId,
+    ) {
+        use crate::tools::builtin::{
+            MissionCreateTool, MissionDeleteTool, MissionFireTool, MissionListTool,
+            MissionPauseTool, MissionResumeTool, MissionUpdateTool,
+        };
+        self.register_sync(Arc::new(MissionCreateTool::new(
+            Arc::clone(&manager),
+            project_id,
+        )));
+        self.register_sync(Arc::new(MissionListTool::new(
+            Arc::clone(&manager),
+            project_id,
+        )));
+        self.register_sync(Arc::new(MissionFireTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(MissionPauseTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(MissionResumeTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(MissionDeleteTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(MissionUpdateTool::new(manager)));
+        tracing::debug!("Registered 7 mission management tools");
     }
 
     /// Register plan management tools.

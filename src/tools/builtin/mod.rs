@@ -10,6 +10,7 @@ mod job;
 mod json;
 pub mod memory;
 mod message;
+pub mod mission;
 pub mod path_utils;
 mod plan;
 mod restart;
@@ -21,7 +22,8 @@ mod time;
 mod tool_info;
 
 pub use abound::{
-    AboundAccountInfoTool, AboundCreateNotificationTool, AboundExchangeRateTool, AboundSendWireTool,
+    AboundAccountInfoTool, AboundCreateNotificationTool, AboundExchangeRateTool,
+    AboundRateAlertTool, AboundSendWireTool,
 };
 pub use echo::EchoTool;
 pub use extension_tools::{
@@ -38,6 +40,10 @@ pub use job::{
 pub use json::JsonTool;
 pub use memory::{MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool};
 pub use message::MessageTool;
+pub use mission::{
+    MissionCreateTool, MissionDeleteTool, MissionFireTool, MissionListTool, MissionPauseTool,
+    MissionResumeTool, MissionUpdateTool,
+};
 pub use plan::PlanUpdateTool;
 pub use restart::RestartTool;
 pub use routine::{
