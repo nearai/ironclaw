@@ -5,4 +5,3 @@ target/
 *.md
 !CLAUDE.md
 node_modules/
-tools-src/

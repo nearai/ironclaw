@@ -119,6 +119,7 @@ I18n.register('en', {
   'chat.conversations': 'Conversations',
   'chat.send': 'Send',
   'chat.attachImages': 'Attach Images',
+  'chat.scrollToBottom': 'Scroll to bottom',
   'chat.empty': 'Select a file to view content',
   'chat.loading': 'Loading...',
   'chat.loadingOlder': 'Loading older messages...',

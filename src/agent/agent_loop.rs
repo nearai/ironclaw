@@ -93,6 +93,19 @@ pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
     }
 }
 
+/// Determine whether a bare-keyword `ApprovalResponse` should be kept as an
+/// approval or downgraded to regular user input.
+///
+/// Returns `true` when the message should be routed as an approval (there IS
+/// a pending approval or it's an explicit slash command). Returns `false`
+/// when the message should be treated as regular `UserInput`.
+///
+/// Used by the legacy routing path; the engine_v2 path performs an equivalent
+/// check earlier (before the BeforeInbound hook).
+fn should_route_as_approval(thread_state: ThreadState, raw_content: &str) -> bool {
+    thread_state == ThreadState::AwaitingApproval || raw_content.trim().starts_with('/')
+}
+
 #[cfg(test)]
 fn resolve_routine_notification_user(metadata: &serde_json::Value) -> Option<String> {
     resolve_owner_scope_notification_user(
@@ -195,6 +208,7 @@ pub struct AgentDeps {
     pub skill_catalog: Option<Arc<ironclaw_skills::catalog::SkillCatalog>>,
     pub skills_config: SkillsConfig,
     pub hooks: Arc<HookRegistry>,
+    pub auth_manager: Option<Arc<crate::bridge::auth_manager::AuthManager>>,
     /// Cost enforcement guardrails (daily budget, hourly rate limits).
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
     /// SSE manager for live job event streaming to the web gateway.
@@ -645,9 +659,6 @@ impl Agent {
 
     /// Run the agent main loop.
     pub async fn run(self) -> Result<(), Error> {
-        // Bootstrap greeting is now handled by chat_threads_handler in server.rs
-        // when the assistant conversation is first created with zero messages.
-
         // Eagerly initialize engine v2 so gateway API endpoints can serve
         // data (projects, missions, threads) before the first chat message.
         if self.config.engine_v2
@@ -1043,11 +1054,6 @@ impl Agent {
             None
         };
 
-        // Bootstrap phase 2: register the thread in session manager and
-        // broadcast the greeting via SSE for any clients already connected.
-        // The greeting was already persisted to DB before start_all(), so
-        // clients that connect after this point will see it via history.
-
         // Hydrate TUI sidebar with existing engine threads and routines so the
         // activity panel is populated before the first user message.
         self.hydrate_tui_sidebar().await;
@@ -1328,6 +1334,29 @@ impl Agent {
             std::any::type_name_of_val(&submission)
         );
 
+        // Engine V2 early downgrade: bare-keyword ApprovalResponse → UserInput
+        // when no approval gate or auth flow is pending. Done before the
+        // BeforeInbound hook check so the downgraded message flows through
+        // the full UserInput pipeline (hooks, drain loop, etc.).
+        // Only applies to engine_v2 because the legacy path needs session/
+        // thread state (not yet resolved) to determine AwaitingApproval.
+        if self.config.engine_v2
+            && matches!(&submission, Submission::ApprovalResponse { .. })
+            && !message.content.trim().starts_with('/')
+        {
+            let has_pending = crate::bridge::has_pending_auth(&message.user_id).await
+                || crate::bridge::has_any_pending_gate(
+                    &message.user_id,
+                    message.conversation_scope(),
+                )
+                .await;
+            if !has_pending {
+                submission = Submission::UserInput {
+                    content: message.content.clone(),
+                };
+            }
+        }
+
         // Hook: BeforeInbound — allow hooks to modify or reject user input
         if let Submission::UserInput { ref content } = submission {
             let event = crate::hooks::HookEvent::Inbound {
@@ -1372,9 +1401,9 @@ impl Agent {
                         .map(HandleOutcome::from_legacy);
                 }
                 Submission::ApprovalResponse { approved, always } => {
-                    // If there's a pending auth, "cancel"/"no" should clear the
-                    // auth flow, not be treated as an approval response.
-                    // Route through handle_with_engine so PendingAuth is checked.
+                    // Reaching here means the message is a slash command (/approve,
+                    // /deny) or has a pending gate/auth — early downgrade above
+                    // already handled the bare-keyword-with-no-gate case.
                     if crate::bridge::has_pending_auth(&message.user_id).await {
                         let content = &message.content;
                         return crate::bridge::handle_with_engine(self, message, content)
@@ -1409,6 +1438,11 @@ impl Agent {
                     )
                     .await
                     .map(HandleOutcome::from_legacy);
+                }
+                Submission::ExternalCallback { request_id } => {
+                    return crate::bridge::handle_external_callback(self, message, *request_id)
+                        .await
+                        .map(HandleOutcome::from_legacy);
                 }
                 Submission::Interrupt => {
                     return crate::bridge::handle_interrupt(self, message)
@@ -1808,9 +1842,108 @@ impl Agent {
                 )
                 .await
             }
+            Submission::ExternalCallback { .. } => Ok(SubmissionResult::Error {
+                message: "External callbacks require ENGINE_V2".to_string(),
+            }),
             Submission::ApprovalResponse { approved, always } => {
-                self.process_approval(message, session, thread_id, None, approved, always)
-                    .await
+                let thread_state = {
+                    let sess = session.lock().await;
+                    sess.threads
+                        .get(&thread_id)
+                        .map(|t| t.state)
+                        .unwrap_or(ThreadState::Idle)
+                };
+                // NOTE: TOCTOU possible — state could change between check
+                // and process_approval; process_approval handles stale cases.
+                if should_route_as_approval(thread_state, &message.content) {
+                    self.process_approval(message, session, thread_id, None, approved, always)
+                        .await
+                } else {
+                    // Run BeforeInbound hooks for the downgraded content —
+                    // the hook check above only fires for UserInput submissions,
+                    // and this was parsed as ApprovalResponse.
+                    let content = message.content.clone();
+                    let hook_event = crate::hooks::HookEvent::Inbound {
+                        user_id: message.user_id.clone(),
+                        channel: message.channel.clone(),
+                        content: content.clone(),
+                        thread_id: message.thread_id.clone(),
+                    };
+                    let content = match self.hooks().run(&hook_event).await {
+                        Err(crate::hooks::HookError::Rejected { reason }) => {
+                            // Match the main UserInput path's rejection behavior.
+                            return Ok(HandleOutcome::Respond(format!(
+                                "[Message rejected: {reason}]"
+                            )));
+                        }
+                        Err(err) => {
+                            // Match the main UserInput path's error behavior.
+                            return Ok(HandleOutcome::Respond(format!(
+                                "[Message blocked by hook policy: {err}]"
+                            )));
+                        }
+                        Ok(crate::hooks::HookOutcome::Continue {
+                            modified: Some(new_content),
+                        }) => new_content,
+                        _ => content, // Continue — no modification
+                    };
+
+                    // Process as user input with the drain loop so queued
+                    // messages during processing are merged, matching the
+                    // Submission::UserInput arm's behavior.
+                    let mut result = self
+                        .process_user_input(
+                            message,
+                            tenant.clone(),
+                            session.clone(),
+                            thread_id,
+                            &content,
+                        )
+                        .await;
+
+                    while let Ok(SubmissionResult::Response { content: outgoing }) = &result {
+                        let merged = {
+                            let mut sess = session.lock().await;
+                            sess.threads
+                                .get_mut(&thread_id)
+                                .and_then(|thread| thread.drain_pending_messages())
+                        };
+                        let Some(next_content) = merged else {
+                            break;
+                        };
+
+                        if let Err(e) = self
+                            .respond_then_done(message, OutgoingResponse::text(outgoing.clone()))
+                            .await
+                        {
+                            tracing::warn!(
+                                %thread_id,
+                                "Failed to send intermediate drain-loop response: {e}"
+                            );
+                        }
+
+                        let mut queued_msg = message.clone();
+                        queued_msg.attachments.clear();
+                        result = self
+                            .process_user_input(
+                                &queued_msg,
+                                tenant.clone(),
+                                session.clone(),
+                                thread_id,
+                                &next_content,
+                            )
+                            .await;
+
+                        if !matches!(&result, Ok(SubmissionResult::Response { .. })) {
+                            let mut sess = session.lock().await;
+                            if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                                thread.requeue_drained(next_content);
+                            }
+                        }
+                    }
+
+                    result
+                }
             }
             Submission::Plan { sub } => {
                 use crate::agent::submission::PlanSubcommand;
@@ -1887,6 +2020,11 @@ impl Agent {
                 Ok(HandleOutcome::Respond(format!("Error: {}", message)))
             }
             SubmissionResult::Interrupted => Ok(HandleOutcome::Respond("Interrupted.".into())),
+            SubmissionResult::AuthPending => {
+                // Auth-required status already sent by handle_auth_intercept.
+                // Thread is in auth mode — suppress text response and Done.
+                Ok(HandleOutcome::Pending)
+            }
             SubmissionResult::NeedApproval { .. } => {
                 // ApprovalNeeded status was already sent by thread_ops.rs before
                 // returning this result. The thread is now in AwaitingApproval —
@@ -2063,6 +2201,74 @@ mod tests {
         };
 
         assert!(should_fallback_routine_notification(&error)); // safety: test-only assertion
+    }
+
+    /// Regression: bare "yes"/"no" when thread is Idle must NOT route as
+    /// approval. Exercises the `should_route_as_approval` guard that the
+    /// legacy match arm uses to decide between `process_approval` and
+    /// `process_user_input`.
+    #[test]
+    fn should_route_as_approval_rejects_bare_keywords_when_idle() {
+        use super::should_route_as_approval;
+        use crate::agent::session::ThreadState;
+
+        // Bare keywords with non-approval thread states → downgrade to UserInput
+        for state in [
+            ThreadState::Idle,
+            ThreadState::Processing,
+            ThreadState::Completed,
+            ThreadState::Interrupted,
+        ] {
+            assert!(
+                !should_route_as_approval(state, "yes"),
+                "bare 'yes' should not route as approval in {state:?}"
+            );
+            assert!(
+                !should_route_as_approval(state, "no"),
+                "bare 'no' should not route as approval in {state:?}"
+            );
+            assert!(
+                !should_route_as_approval(state, "always"),
+                "bare 'always' should not route as approval in {state:?}"
+            );
+            assert!(
+                !should_route_as_approval(state, "ok"),
+                "bare 'ok' should not route as approval in {state:?}"
+            );
+        }
+    }
+
+    /// When thread IS AwaitingApproval, bare keywords must route as approval.
+    #[test]
+    fn should_route_as_approval_accepts_keywords_when_awaiting() {
+        use super::should_route_as_approval;
+        use crate::agent::session::ThreadState;
+
+        assert!(should_route_as_approval(
+            ThreadState::AwaitingApproval,
+            "yes"
+        ));
+        assert!(should_route_as_approval(
+            ThreadState::AwaitingApproval,
+            "no"
+        ));
+        assert!(should_route_as_approval(
+            ThreadState::AwaitingApproval,
+            "always"
+        ));
+    }
+
+    /// Slash commands (/approve, /deny) always route as approval regardless
+    /// of thread state — they are explicit user intent.
+    #[test]
+    fn should_route_as_approval_always_routes_slash_commands() {
+        use super::should_route_as_approval;
+        use crate::agent::session::ThreadState;
+
+        assert!(should_route_as_approval(ThreadState::Idle, "/approve"));
+        assert!(should_route_as_approval(ThreadState::Idle, "/deny"));
+        assert!(should_route_as_approval(ThreadState::Idle, "/yes"));
+        assert!(should_route_as_approval(ThreadState::Processing, "/always"));
     }
 
     #[test]
