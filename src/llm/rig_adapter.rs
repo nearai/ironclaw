@@ -970,6 +970,51 @@ fn build_rig_request(
 /// handling of duplicate JSON keys (most Python/Go servers use last-key-wins,
 /// but this is not guaranteed by the JSON spec). The `effective_model_name()`
 /// trait method should be consulted to determine the model actually used.
+/// When `metadata` contains `user_id` and/or `thread_id`/`conversation_id`,
+/// encodes them as `"{user_id}:{id}"` in the OpenAI `user` field. Prefers
+/// `conversation_id` (stable across turns) over `thread_id` (per-turn engine
+/// ID). This lets OpenAI-compatible backends extract routing context without
+/// needing per-request custom HTTP headers.
+///
+/// If neither key is present, this is a no-op.
+fn inject_user_routing(
+    rig_req: &mut RigRequest,
+    metadata: &std::collections::HashMap<String, String>,
+) {
+    let user_id = metadata.get("user_id").map(String::as_str).unwrap_or("");
+    // Prefer conversation_id (stable across turns) over thread_id (per-turn engine ID).
+    let conv_id = metadata
+        .get("conversation_id")
+        .map(String::as_str)
+        .unwrap_or("");
+    let session_id = if conv_id.is_empty() {
+        metadata.get("thread_id").map(String::as_str).unwrap_or("")
+    } else {
+        conv_id
+    };
+    if user_id.is_empty() && session_id.is_empty() {
+        return;
+    }
+    // Format: "user_id:session_id" when both present, just the non-empty
+    // part when one is missing. Avoids ambiguous ":uuid" or "user:" prefixes.
+    let user_value = match (user_id.is_empty(), session_id.is_empty()) {
+        (false, false) => format!("{user_id}:{session_id}"),
+        (true, false) => session_id.to_string(),
+        (false, true) => user_id.to_string(),
+        (true, true) => unreachable!(), // guarded above
+    };
+    match rig_req.additional_params {
+        Some(ref mut params) => {
+            if let Some(obj) = params.as_object_mut() {
+                obj.insert("user".to_string(), serde_json::json!(user_value));
+            }
+        }
+        None => {
+            rig_req.additional_params = Some(serde_json::json!({ "user": user_value }));
+        }
+    }
+}
+
 fn inject_model_override(rig_req: &mut RigRequest, model_override: Option<&str>) {
     let Some(model) = model_override else {
         return;
@@ -1039,6 +1084,7 @@ where
         )?;
 
         inject_model_override(&mut rig_req, model_override.as_deref());
+        inject_user_routing(&mut rig_req, &request.metadata);
 
         let response =
             self.model
@@ -1101,6 +1147,7 @@ where
         )?;
 
         inject_model_override(&mut rig_req, model_override.as_deref());
+        inject_user_routing(&mut rig_req, &request.metadata);
 
         let response =
             self.model
@@ -2663,5 +2710,103 @@ mod tests {
         let mut req = make_rig_request(None);
         inject_model_override(&mut req, None);
         assert!(req.additional_params.is_none());
+    }
+
+    fn make_metadata(
+        pairs: &[(&str, &str)],
+    ) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn test_inject_user_routing_prefers_conversation_id() {
+        let mut req = make_rig_request(None);
+        let meta = make_metadata(&[
+            ("user_id", "andrew"),
+            ("thread_id", "old-thread-uuid"),
+            ("conversation_id", "stable-conv-123"),
+        ]);
+        inject_user_routing(&mut req, &meta);
+
+        let params = req
+            .additional_params
+            .expect("additional_params should be Some");
+        assert_eq!(
+            params,
+            serde_json::json!({ "user": "andrew:stable-conv-123" })
+        );
+    }
+
+    #[test]
+    fn test_inject_user_routing_falls_back_to_thread_id() {
+        let mut req = make_rig_request(None);
+        let meta = make_metadata(&[
+            ("user_id", "andrew"),
+            ("thread_id", "thread-uuid-456"),
+        ]);
+        inject_user_routing(&mut req, &meta);
+
+        let params = req
+            .additional_params
+            .expect("additional_params should be Some");
+        assert_eq!(
+            params,
+            serde_json::json!({ "user": "andrew:thread-uuid-456" })
+        );
+    }
+
+    #[test]
+    fn test_inject_user_routing_noop_when_empty() {
+        let mut req = make_rig_request(None);
+        let meta = std::collections::HashMap::new();
+        inject_user_routing(&mut req, &meta);
+        assert!(req.additional_params.is_none());
+    }
+
+    #[test]
+    fn test_inject_user_routing_preserves_existing_params() {
+        let mut req = make_rig_request(Some(serde_json::json!({
+            "model": "gpt-4o",
+        })));
+        let meta = make_metadata(&[
+            ("user_id", "grace"),
+            ("conversation_id", "conv-789"),
+        ]);
+        inject_user_routing(&mut req, &meta);
+
+        let params = req.additional_params.expect("should remain Some");
+        let obj = params.as_object().expect("should be object");
+        assert_eq!(obj.get("model"), Some(&serde_json::json!("gpt-4o")));
+        assert_eq!(
+            obj.get("user"),
+            Some(&serde_json::json!("grace:conv-789"))
+        );
+    }
+
+    #[test]
+    fn test_inject_user_routing_user_id_only() {
+        let mut req = make_rig_request(None);
+        let meta = make_metadata(&[("user_id", "andrew")]);
+        inject_user_routing(&mut req, &meta);
+
+        let params = req
+            .additional_params
+            .expect("additional_params should be Some");
+        assert_eq!(params, serde_json::json!({ "user": "andrew" }));
+    }
+
+    #[test]
+    fn test_inject_user_routing_conversation_id_only() {
+        let mut req = make_rig_request(None);
+        let meta = make_metadata(&[("conversation_id", "conv-abc")]);
+        inject_user_routing(&mut req, &meta);
+
+        let params = req
+            .additional_params
+            .expect("additional_params should be Some");
+        assert_eq!(params, serde_json::json!({ "user": "conv-abc" }));
     }
 }
