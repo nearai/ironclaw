@@ -12,8 +12,9 @@ use uuid::Uuid;
 use crate::agent::Agent;
 use crate::agent::compaction::ContextCompactor;
 use crate::agent::dispatcher::{
-    AgenticLoopResult, TurnUsageSummary, check_auth_required, execute_chat_tool_standalone,
-    parse_auth_result,
+    AgenticLoopResult, ParsedAuthData, TurnUsageSummary, auth_instructions_or_default,
+    capture_auth_prompt, emit_auth_required_status, execute_chat_tool_standalone,
+    persist_selected_auth_prompt, restore_selected_auth_prompt,
 };
 use crate::agent::session::{MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState};
 use crate::agent::submission::SubmissionResult;
@@ -25,11 +26,20 @@ use crate::tools::redact_params;
 use ironclaw_common::truncate_preview;
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
+const INVALID_AUTH_TOKEN_MESSAGE: &str = "Invalid token. Please try again.";
 
 fn requires_preexisting_uuid_thread(channel: &str) -> bool {
     // Gateway-style channels send server-issued conversation UUIDs.
     // Unknown UUIDs should be rejected instead of silently creating a new thread.
     matches!(channel, "gateway" | "test")
+}
+
+fn auth_retry_message_for_error(error: &crate::extensions::ExtensionError) -> Option<String> {
+    matches!(
+        error,
+        crate::extensions::ExtensionError::ValidationFailed(_)
+    )
+    .then(|| INVALID_AUTH_TOKEN_MESSAGE.to_string())
 }
 
 fn history_messages_from_thread(thread: &crate::agent::session::Thread) -> Vec<HistoryMessage> {
@@ -109,11 +119,13 @@ fn thread_summaries_from_conversations(
         })
         .collect()
 }
+
 fn turn_usage_from_result(result: &Result<AgenticLoopResult, Error>) -> Option<&TurnUsageSummary> {
     match result {
         Ok(AgenticLoopResult::Response { turn_usage, .. })
         | Ok(AgenticLoopResult::NeedApproval { turn_usage, .. })
-        | Ok(AgenticLoopResult::Failed { turn_usage, .. }) => Some(turn_usage),
+        | Ok(AgenticLoopResult::Failed { turn_usage, .. })
+        | Ok(AgenticLoopResult::AuthPending { turn_usage, .. }) => Some(turn_usage),
         Err(_) => None,
     }
 }
@@ -748,6 +760,38 @@ impl Agent {
                     allow_always,
                 })
             }
+            Ok(AgenticLoopResult::AuthPending {
+                instructions,
+                turn_usage,
+            }) => {
+                // Auth-required status already sent by the dispatcher.
+                // Persist the turn to DB (like Response) but suppress the text SSE event.
+                thread.complete_turn(&instructions);
+                let (turn_number, tool_calls, narrative) = thread
+                    .turns
+                    .last()
+                    .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
+                    .unwrap_or_default();
+                self.persist_tool_calls(
+                    thread_id,
+                    &message.channel,
+                    &message.user_id,
+                    turn_number,
+                    &tool_calls,
+                    narrative.as_deref(),
+                )
+                .await;
+                self.persist_assistant_response(
+                    thread_id,
+                    &message.channel,
+                    &message.user_id,
+                    &instructions,
+                )
+                .await;
+                self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
+                    .await;
+                Ok(SubmissionResult::auth_pending())
+            }
             Ok(AgenticLoopResult::Failed { error, turn_usage }) => {
                 self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                     .await;
@@ -1294,6 +1338,9 @@ impl Agent {
                     .await;
             }
 
+            let mut selected_auth_prompt =
+                restore_selected_auth_prompt(pending.selected_auth_prompt.clone());
+
             // Build context including the tool result
             let mut context_messages = pending.context_messages;
             let deferred_tool_calls = pending.deferred_tool_calls;
@@ -1325,28 +1372,13 @@ impl Agent {
                 }
             }
 
-            // If tool_auth returned awaiting_token, enter auth mode and
-            // return instructions directly (skip agentic loop continuation).
-            if let Some((ext_name, instructions)) =
-                check_auth_required(&pending.tool_name, &tool_result)
-            {
-                self.handle_auth_intercept(
-                    &session,
-                    thread_id,
-                    message,
-                    &tool_result,
-                    ext_name,
-                    instructions.clone(),
-                )
-                .await;
-                return Ok(SubmissionResult::response(instructions));
-            }
-
             context_messages.push(ChatMessage::tool_result(
                 &pending.tool_call_id,
                 &pending.tool_name,
                 result_content,
             ));
+
+            capture_auth_prompt(&mut selected_auth_prompt, &pending.tool_name, &tool_result);
 
             // Replay deferred tool calls from the same assistant message so
             // every tool_use ID gets a matching tool_result before the next
@@ -1542,7 +1574,6 @@ impl Agent {
             // === Phase 3: Post-flight (sequential, in original order) ===
             // Process all results before any conditional return so every
             // tool result is recorded in the session audit trail.
-            let mut deferred_auth: Option<String> = None;
 
             for (tc, deferred_result) in exec_results {
                 if let Ok(ref output) = deferred_result
@@ -1589,33 +1620,27 @@ impl Agent {
                     }
                 }
 
-                // Auth detection — defer return until all results are recorded
-                if deferred_auth.is_none()
-                    && let Some((ext_name, instructions)) =
-                        check_auth_required(&tc.name, &deferred_result)
-                {
-                    self.handle_auth_intercept(
-                        &session,
-                        thread_id,
-                        message,
-                        &deferred_result,
-                        ext_name,
-                        instructions.clone(),
-                    )
-                    .await;
-                    deferred_auth = Some(instructions);
-                }
+                capture_auth_prompt(&mut selected_auth_prompt, &tc.name, &deferred_result);
 
                 context_messages.push(ChatMessage::tool_result(&tc.id, &tc.name, deferred_content));
             }
 
-            // Return auth response after all results are recorded
-            if let Some(instructions) = deferred_auth {
-                return Ok(SubmissionResult::response(instructions));
-            }
-
             // Handle approval if a tool needed it
             if let Some((approval_idx, tc, tool, allow_always)) = approval_needed {
+                // Emit auth prompt alongside the approval card so the user
+                // sees the connect button without waiting for approval to resolve.
+                if let Some((ref ext_name, ref auth_data)) = selected_auth_prompt {
+                    emit_auth_required_status(
+                        &self.channels,
+                        message,
+                        ext_name.clone(),
+                        auth_data.instructions.clone(),
+                        auth_data.auth_url.clone(),
+                        auth_data.setup_url.clone(),
+                    )
+                    .await;
+                }
+
                 let new_pending = PendingApproval {
                     request_id: Uuid::new_v4(),
                     tool_name: tc.name.clone(),
@@ -1625,6 +1650,9 @@ impl Agent {
                     tool_call_id: tc.id.clone(),
                     context_messages: context_messages.clone(),
                     deferred_tool_calls: deferred_tool_calls[approval_idx + 1..].to_vec(),
+                    selected_auth_prompt: persist_selected_auth_prompt(
+                        selected_auth_prompt.as_ref(),
+                    ),
                     // Carry forward the resolved timezone from the original pending approval
                     user_timezone: pending.user_timezone.clone(),
                     allow_always,
@@ -1664,6 +1692,33 @@ impl Agent {
                     parameters,
                     allow_always,
                 });
+            }
+
+            if let Some((ext_name, auth_data)) = selected_auth_prompt {
+                if auth_data.awaiting_token {
+                    let instructions =
+                        auth_instructions_or_default(auth_data.instructions.as_deref());
+                    self.handle_auth_intercept(
+                        &session,
+                        thread_id,
+                        message,
+                        ext_name,
+                        instructions.clone(),
+                        &auth_data,
+                    )
+                    .await;
+                    return Ok(SubmissionResult::auth_pending());
+                }
+
+                emit_auth_required_status(
+                    &self.channels,
+                    message,
+                    ext_name,
+                    auth_data.instructions,
+                    auth_data.auth_url,
+                    auth_data.setup_url,
+                )
+                .await;
             }
 
             // Continue the agentic loop (a tool was already executed this turn)
@@ -1762,6 +1817,36 @@ impl Agent {
                         allow_always,
                     })
                 }
+                Ok(AgenticLoopResult::AuthPending {
+                    instructions,
+                    turn_usage,
+                }) => {
+                    thread.complete_turn(&instructions);
+                    let (turn_number, tool_calls, narrative) = thread
+                        .turns
+                        .last()
+                        .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
+                        .unwrap_or_default();
+                    self.persist_tool_calls(
+                        thread_id,
+                        &message.channel,
+                        &message.user_id,
+                        turn_number,
+                        &tool_calls,
+                        narrative.as_deref(),
+                    )
+                    .await;
+                    self.persist_assistant_response(
+                        thread_id,
+                        &message.channel,
+                        &message.user_id,
+                        &instructions,
+                    )
+                    .await;
+                    self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
+                        .await;
+                    Ok(SubmissionResult::auth_pending())
+                }
                 Ok(AgenticLoopResult::Failed { error, turn_usage }) => {
                     self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                         .await;
@@ -1820,11 +1905,10 @@ impl Agent {
         session: &Arc<Mutex<Session>>,
         thread_id: Uuid,
         message: &IncomingMessage,
-        tool_result: &Result<String, Error>,
         ext_name: String,
         instructions: String,
+        auth_data: &ParsedAuthData,
     ) {
-        let auth_data = parse_auth_result(tool_result);
         {
             let mut sess = session.lock().await;
             if let Some(thread) = sess.threads.get_mut(&thread_id) {
@@ -1840,19 +1924,15 @@ impl Agent {
                 .await;
             }
         }
-        let _ = self
-            .channels
-            .send_status(
-                &message.channel,
-                StatusUpdate::AuthRequired {
-                    extension_name: ext_name,
-                    instructions: Some(instructions.clone()),
-                    auth_url: auth_data.auth_url,
-                    setup_url: auth_data.setup_url,
-                },
-                &message.metadata,
-            )
-            .await;
+        emit_auth_required_status(
+            &self.channels,
+            message,
+            ext_name,
+            Some(instructions),
+            auth_data.auth_url.clone(),
+            auth_data.setup_url.clone(),
+        )
+        .await;
     }
 
     async fn send_turn_cost_status(
@@ -1955,47 +2035,44 @@ impl Agent {
                         thread.enter_auth_mode(pending.extension_name.clone());
                     }
                 }
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::AuthRequired {
-                            extension_name: pending.extension_name.clone(),
-                            instructions: Some(result.message.clone()),
-                            auth_url: None,
-                            setup_url: None,
-                        },
-                        &message.metadata,
-                    )
-                    .await;
+                emit_auth_required_status(
+                    &self.channels,
+                    message,
+                    pending.extension_name.clone(),
+                    Some(result.message.clone()),
+                    None,
+                    None,
+                )
+                .await;
                 Ok(Some(result.message))
             }
             Err(e) => {
-                let msg = e.to_string();
                 // Token validation errors: re-enter auth mode and re-prompt
-                if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
+                if let Some(msg) = auth_retry_message_for_error(&e) {
+                    tracing::debug!(
+                        extension = %pending.extension_name,
+                        error = %e,
+                        "Rejected invalid auth token"
+                    );
                     {
                         let mut sess = session.lock().await;
                         if let Some(thread) = sess.threads.get_mut(&thread_id) {
                             thread.enter_auth_mode(pending.extension_name.clone());
                         }
                     }
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::AuthRequired {
-                                extension_name: pending.extension_name.clone(),
-                                instructions: Some(msg.clone()),
-                                auth_url: None,
-                                setup_url: None,
-                            },
-                            &message.metadata,
-                        )
-                        .await;
+                    emit_auth_required_status(
+                        &self.channels,
+                        message,
+                        pending.extension_name.clone(),
+                        Some(msg.clone()),
+                        None,
+                        None,
+                    )
+                    .await;
                     return Ok(Some(msg));
                 }
                 // Infrastructure errors
+                let msg = e.to_string();
                 let _ = self
                     .channels
                     .send_status(
@@ -2521,6 +2598,7 @@ mod tests {
             tool_call_id: "call_legacy".to_string(),
             context_messages: vec![],
             deferred_tool_calls: vec![],
+            selected_auth_prompt: None,
             user_timezone: None,
             allow_always: true,
         };
@@ -2605,6 +2683,17 @@ mod tests {
         let turn_usage = turn_usage_from_result(&result).expect("usage should be present");
         assert_eq!(turn_usage.usage.input_tokens, 7);
         assert_eq!(turn_usage.usage.output_tokens, 2);
+    }
+
+    #[test]
+    fn test_auth_retry_message_hides_validation_details() {
+        let err =
+            crate::extensions::ExtensionError::ValidationFailed("wrong format for API key".into());
+
+        assert_eq!(
+            auth_retry_message_for_error(&err).as_deref(),
+            Some("Invalid token. Please try again.")
+        );
     }
 
     #[test]
@@ -2858,6 +2947,7 @@ mod tests {
             tool_call_id: "call_0".to_string(),
             context_messages: vec![],
             deferred_tool_calls: vec![],
+            selected_auth_prompt: None,
             user_timezone: None,
             allow_always: false,
         };
@@ -2927,6 +3017,7 @@ mod tests {
             tool_call_id: "call_0".to_string(),
             context_messages: vec![],
             deferred_tool_calls: vec![],
+            selected_auth_prompt: None,
             user_timezone: None,
             allow_always: true,
         };
@@ -2994,6 +3085,7 @@ mod tests {
             tool_call_id: "call_0".to_string(),
             context_messages: vec![],
             deferred_tool_calls: vec![],
+            selected_auth_prompt: None,
             user_timezone: None,
             allow_always: true,
         });

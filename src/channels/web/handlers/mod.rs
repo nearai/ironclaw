@@ -12,6 +12,7 @@ pub mod secrets;
 pub mod skills;
 pub mod system_prompt;
 pub mod tokens;
+pub mod tool_policy;
 pub mod users;
 
 // Modules not yet wired into server.rs router -- suppress dead_code until
@@ -20,6 +21,7 @@ pub mod users;
 pub mod chat;
 #[allow(dead_code)]
 pub mod extensions;
+pub mod frontend;
 #[allow(dead_code)]
 pub mod settings;
 #[allow(dead_code)]
