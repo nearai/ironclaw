@@ -491,12 +491,14 @@ async def test_telegram_setup_and_dm_roundtrip(telegram_e2e_server):
     assert messages[-1]["chat_id"] == OWNER_USER_ID
 
 
-async def test_paired_telegram_user_lists_owner_routines(telegram_e2e_server):
+async def test_paired_telegram_user_lists_owner_routines(
+    telegram_e2e_server_with_routines,
+):
     """A paired Telegram guest should see routines created in owner scope."""
-    base_url = telegram_e2e_server["base_url"]
-    http_url = telegram_e2e_server["http_url"]
-    fake_tg_url = telegram_e2e_server["fake_tg_url"]
-    channels_dir = telegram_e2e_server["channels_dir"]
+    base_url = telegram_e2e_server_with_routines["base_url"]
+    http_url = telegram_e2e_server_with_routines["http_url"]
+    fake_tg_url = telegram_e2e_server_with_routines["fake_tg_url"]
+    channels_dir = telegram_e2e_server_with_routines["channels_dir"]
     routine_name = f"telegram-owner-{int(time.time())}"
 
     await activate_telegram(base_url, http_url, fake_tg_url, channels_dir)
