@@ -68,7 +68,7 @@ Skills pass through four stages before injection:
     | `patterns`           | Regex patterns. Each match adds significant weight — use for intent-specific phrases.           |
     | `tags`               | Short labels for broad domain matching (e.g. `blockchain`, `cli`).                             |
     | `exclude_keywords`   | Veto list — if any appear in the message, the skill scores zero regardless of other matches.    |
-    | `max_context_tokens` | Token budget this skill may consume per turn. Omitting it leaves the skill with a 1-token budget, effectively excluding it. |
+    | `max_context_tokens` | Token budget this skill may consume per turn. Omitting it leaves the skill with a 2000-token budget, effectively excluding it. |
 
     <Tip>
     If a skill appears in `ironclaw skills list` but the agent doesn't use it, the most common cause is a missing or empty `activation` block.
