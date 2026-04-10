@@ -2201,10 +2201,15 @@ impl Workspace {
                 );
                 return Ok(());
             }
-            Err(_) => {
+            Err(WorkspaceError::DocumentNotFound { .. }) => {
                 // Document was deleted while we were computing embeddings.
                 // Nothing to reindex.
                 return Ok(());
+            }
+            Err(e) => {
+                // Real DB error (transient connection issue, etc.) —
+                // propagate so the indexing failure is observable.
+                return Err(e);
             }
             _ => {}
         }
