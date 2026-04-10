@@ -4072,8 +4072,8 @@ mod tests {
             *lock.write().await = Some(state);
 
             let (agent, statuses) = make_test_agent_with_status_channel("tui").await;
-            let message = IncomingMessage::new("tui", "alice", "yes")
-                .with_thread(thread_id.to_string());
+            let message =
+                IncomingMessage::new("tui", "alice", "yes").with_thread(thread_id.to_string());
 
             let result = handle_with_engine_inner(&agent, &message, &message.content, 0)
                 .await

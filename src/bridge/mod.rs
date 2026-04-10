@@ -36,8 +36,8 @@ pub use router::{
     handle_interrupt,
     handle_new_thread,
     handle_with_engine,
-    has_pending_auth,
     has_pending_approval,
+    has_pending_auth,
     // Initialization
     init_engine,
     is_engine_v2_enabled,
