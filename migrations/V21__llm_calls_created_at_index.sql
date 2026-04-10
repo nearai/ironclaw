@@ -1,3 +1,12 @@
 -- Add index on llm_calls.created_at to speed up time-range aggregations
 -- used by the admin usage summary endpoint.
+--
+-- WARNING: This takes a full table lock on llm_calls. For large deployments
+-- with millions of rows, this could block writes for several seconds to
+-- minutes. Refinery wraps migrations in a transaction, which prevents
+-- using CREATE INDEX CONCURRENTLY. If this is a concern, apply the index
+-- manually outside the migration framework:
+--
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_llm_calls_created_at
+--       ON llm_calls(created_at);
 CREATE INDEX IF NOT EXISTS idx_llm_calls_created_at ON llm_calls(created_at);

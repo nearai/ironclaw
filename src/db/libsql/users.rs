@@ -722,6 +722,10 @@ impl UserStore for LibSqlBackend {
         Ok(stats)
     }
 
+    /// **Performance note:** The `total_cost` subquery scans the entire
+    /// `llm_calls` table (no time-range filter). On large deployments this
+    /// can become slow. Consider a materialised running total or pre-aggregation
+    /// table as a future optimisation.
     async fn admin_usage_summary(
         &self,
         since: DateTime<Utc>,
@@ -738,22 +742,19 @@ impl UserStore for LibSqlBackend {
                     (SELECT COUNT(*) FROM users WHERE role = 'admin') AS admin_users,
                     (SELECT COUNT(*) FROM agent_jobs) AS total_jobs,
                     (SELECT CAST(COALESCE(SUM(l.cost), 0) AS TEXT) FROM llm_calls l) AS total_cost,
-                    (SELECT COUNT(*) FROM llm_calls WHERE created_at >= ?1) AS llm_calls,
-                    (
-                        SELECT COALESCE(SUM(input_tokens), 0)
-                        FROM llm_calls
-                        WHERE created_at >= ?1
-                    ) AS input_tokens,
-                    (
-                        SELECT COALESCE(SUM(output_tokens), 0)
-                        FROM llm_calls
-                        WHERE created_at >= ?1
-                    ) AS output_tokens,
-                    (
-                        SELECT CAST(COALESCE(SUM(cost), 0) AS TEXT)
-                        FROM llm_calls
-                        WHERE created_at >= ?1
-                    ) AS usage_cost
+                    recent.llm_calls,
+                    recent.input_tokens,
+                    recent.output_tokens,
+                    recent.usage_cost
+                FROM (
+                    SELECT
+                        COUNT(*) AS llm_calls,
+                        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                        CAST(COALESCE(SUM(cost), 0) AS TEXT) AS usage_cost
+                    FROM llm_calls
+                    WHERE created_at >= ?1
+                ) recent
                 "#,
                 params![since_str],
             )

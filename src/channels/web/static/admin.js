@@ -1,5 +1,9 @@
 /* IronClaw Admin Panel */
 
+// TODO(#1968): Inline style attributes throughout this file bypass the
+// theme token system in admin.css. Migrate to CSS classes that reference
+// CSS custom properties (--space-*, --text-*, --accent, etc.).
+
 (function () {
   'use strict';
 
@@ -154,6 +158,11 @@
         showAccessDenied();
         return false;
       }
+      // Security note: sessionStorage is readable by any XSS payload running
+      // in this origin. We accept this risk because: (1) the token is session-
+      // scoped and cleared on tab close, (2) the admin panel already requires
+      // 'unsafe-inline' scripts, (3) migration to httpOnly cookies needs
+      // server-side session management (larger effort, tracked for follow-up).
       sessionStorage.setItem('ironclaw_token', t);
       showApp();
       route();
@@ -820,6 +829,17 @@
   // Modal
   // ---------------------------------------------------------------------------
 
+  /**
+   * Show a confirmation modal dialog.
+   *
+   * All string parameters are HTML-escaped via escapeHtml() before insertion
+   * into the DOM, so callers do not need to pre-sanitise user-supplied strings.
+   *
+   * @param {string} title - Dialog title (escaped before rendering).
+   * @param {string} message - Dialog body text (escaped before rendering).
+   * @param {string} confirmText - Text for the confirm button (escaped before rendering).
+   * @param {Function} onConfirm - Callback invoked when the user confirms.
+   */
   function showConfirmModal(title, message, confirmText, onConfirm) {
     var overlay = document.getElementById('modal-overlay');
     var content = document.getElementById('modal-content');

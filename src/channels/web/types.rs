@@ -527,6 +527,14 @@ pub struct AdminUserCreateResponse {
     pub created_by: Option<String>,
 }
 
+/// Admin user detail with full profile information.
+///
+/// Uses `#[serde(flatten)]` on `user` so `AdminUserInfo` fields appear at the
+/// top level of the JSON response (no nested `"user"` wrapper), keeping the
+/// API flat and backward-compatible.
+///
+/// **Collision risk:** If `AdminUserInfo` ever adds a field named `"metadata"`,
+/// it will collide with the explicit `metadata` field. Keep names disjoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminUserDetailResponse {
     #[serde(flatten)]

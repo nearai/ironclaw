@@ -2829,6 +2829,10 @@ impl Store {
         Ok(stats)
     }
 
+    /// **Performance note:** The `total_cost` subquery scans the entire
+    /// `llm_calls` table (no time-range filter). On large deployments this
+    /// can become slow. Consider a materialised running total or pre-aggregation
+    /// table as a future optimisation.
     pub async fn admin_usage_summary(
         &self,
         since: DateTime<Utc>,
@@ -2844,22 +2848,19 @@ impl Store {
                     (SELECT COUNT(*) FROM users WHERE role = 'admin') AS admin_users,
                     (SELECT COUNT(*) FROM agent_jobs) AS total_jobs,
                     (SELECT COALESCE(SUM(l.cost), 0::numeric) FROM llm_calls l) AS total_cost,
-                    (SELECT COUNT(*) FROM llm_calls WHERE created_at >= $1) AS llm_calls,
-                    (
-                        SELECT COALESCE(SUM(input_tokens), 0)
-                        FROM llm_calls
-                        WHERE created_at >= $1
-                    ) AS input_tokens,
-                    (
-                        SELECT COALESCE(SUM(output_tokens), 0)
-                        FROM llm_calls
-                        WHERE created_at >= $1
-                    ) AS output_tokens,
-                    (
-                        SELECT COALESCE(SUM(cost), 0::numeric)
-                        FROM llm_calls
-                        WHERE created_at >= $1
-                    ) AS usage_cost
+                    recent.llm_calls,
+                    recent.input_tokens,
+                    recent.output_tokens,
+                    recent.usage_cost
+                FROM (
+                    SELECT
+                        COUNT(*) AS llm_calls,
+                        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                        COALESCE(SUM(cost), 0::numeric) AS usage_cost
+                    FROM llm_calls
+                    WHERE created_at >= $1
+                ) recent
                 "#,
                 &[&since],
             )
@@ -2944,6 +2945,16 @@ mod tests {
             };
             assert_eq!(summary.channel, ch);
         }
+    }
+
+    // TODO: Add full PG integration test for admin_usage_summary.
+    // The libSQL equivalent is tested in src/db/libsql/users.rs —
+    // this stub tracks the parity gap.
+    #[test]
+    fn admin_usage_summary_pg_parity_tracked() {
+        // Placeholder: see src/db/libsql/users.rs::test_admin_usage_summary_aggregates_in_db
+        // for the libSQL version. A full PG test requires a running database and
+        // should be gated behind #[cfg(feature = "integration")].
     }
 
     /// Regression test: save_job must persist user_id and get_job must return it.
