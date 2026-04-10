@@ -40,7 +40,7 @@ impl Role {
             "admin" => Ok(Self::Admin),
             "owner" => Ok(Self::Owner),
             _ => Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::FORBIDDEN,
                 format!("Unknown workspace role '{role}'"),
             )),
         }

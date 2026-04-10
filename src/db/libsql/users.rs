@@ -1026,4 +1026,48 @@ mod tests {
         let gpt35 = stats.iter().find(|s| s.model == "gpt-3.5").unwrap();
         assert_eq!(gpt35.call_count, 1);
     }
+
+    /// Verify that the migration-18 backfill SQL (`UPDATE users SET
+    /// is_superadmin = 1 WHERE role = 'admin'`) correctly promotes existing
+    /// admin users.  We simulate the pre-migration state by inserting an
+    /// admin user with `is_superadmin = false`, then executing the backfill
+    /// UPDATE and asserting the flag flipped.
+    #[tokio::test]
+    async fn test_migration_backfill_sets_superadmin_for_admin_role() {
+        let (db, _dir) = setup().await;
+
+        // Create admin user with is_superadmin = false (simulates a user that
+        // existed before migration 18).
+        let mut admin = test_user("admin1");
+        admin.role = "admin".to_string();
+        admin.is_superadmin = false;
+        db.create_user(&admin).await.unwrap();
+
+        // Also create a regular member to ensure they are NOT promoted.
+        let member = test_user("member1");
+        db.create_user(&member).await.unwrap();
+
+        // Run the backfill SQL (same statement from migration 18).
+        let conn = db.connect().await.unwrap();
+        conn.execute(
+            "UPDATE users SET is_superadmin = 1 WHERE role = 'admin'",
+            (),
+        )
+        .await
+        .unwrap();
+
+        // Admin should now be superadmin.
+        let found_admin = db.get_user("admin1").await.unwrap().unwrap();
+        assert!(
+            found_admin.is_superadmin,
+            "admin user should have is_superadmin = true after backfill"
+        );
+
+        // Member should remain unchanged.
+        let found_member = db.get_user("member1").await.unwrap().unwrap();
+        assert!(
+            !found_member.is_superadmin,
+            "member user should still have is_superadmin = false after backfill"
+        );
+    }
 }

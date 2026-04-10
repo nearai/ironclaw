@@ -37,6 +37,8 @@ pub mod test_helpers;
 #[cfg(test)]
 mod tests;
 
+/// Re-exported for integration tests. The canonical definition lives in
+/// `handlers::workspaces` but that module is `pub(crate)`.
 pub use self::handlers::workspaces::workspace_scope_user_id;
 
 use std::net::SocketAddr;

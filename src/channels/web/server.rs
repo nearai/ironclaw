@@ -1675,6 +1675,9 @@ fn mime_to_ext(mime: &str) -> &str {
     }
 }
 
+// TODO: consolidate with handlers::chat::chat_send_handler — this is the
+// canonical version (has timezone header extraction, image attachments, and
+// detailed trace logging that the handlers::chat copy lacks).
 async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -1774,6 +1777,8 @@ async fn chat_send_handler(
     ))
 }
 
+// TODO: consolidate with handlers::chat::chat_approval_handler — this is the
+// canonical version (also called by chat_gate_resolve_handler below).
 async fn chat_approval_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,

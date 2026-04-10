@@ -1162,6 +1162,7 @@ CREATE INDEX IF NOT EXISTS idx_user_identities_email ON user_identities(email) W
         "users_superadmin",
         r#"
 ALTER TABLE users ADD COLUMN is_superadmin INTEGER NOT NULL DEFAULT 0;
+UPDATE users SET is_superadmin = 1 WHERE role = 'admin';
 "#,
     ),
 ];

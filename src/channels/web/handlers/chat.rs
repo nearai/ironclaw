@@ -22,6 +22,9 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
+// TODO: consolidate with crate::channels::web::server::chat_send_handler —
+// that copy is the canonical version used by route wiring and has timezone
+// header extraction, image attachments, and detailed trace logging.
 pub async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(identity): AuthenticatedUser,
@@ -98,6 +101,9 @@ pub async fn chat_send_handler(
     ))
 }
 
+// TODO: consolidate with crate::channels::web::server::chat_approval_handler —
+// that copy is the canonical version used by route wiring and called by
+// chat_gate_resolve_handler.
 pub async fn chat_approval_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(identity): AuthenticatedUser,
