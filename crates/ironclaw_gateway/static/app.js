@@ -96,6 +96,124 @@ let authFlowPending = false;
 let _ghostSuggestion = '';
 let currentSettingsSubtab = 'inference';
 
+// --- Hash-based URL Navigation ---
+//
+// Encodes navigation state in window.location.hash so refreshing
+// the page restores the current tab, thread, memory file, job detail, etc.
+//
+// Hash format: #/{tab}[/{detail}[/{subtab}]]
+//   #/chat                     → chat tab, assistant thread
+//   #/chat/{threadId}          → chat tab, specific thread
+//   #/memory                   → memory tab, tree root
+//   #/memory/{path/to/file}    → memory tab, specific file
+//   #/jobs                     → jobs list
+//   #/jobs/{jobId}             → job detail
+//   #/routines                 → routines list
+//   #/routines/{id}            → routine detail
+//   #/settings/{subtab}        → settings tab with specific sub-tab
+//   #/logs                     → logs tab
+
+/** Suppress hash-change handling while we're programmatically updating. */
+let _suppressHashChange = false;
+
+/** Update the URL hash to reflect current navigation state. */
+function updateHash() {
+  if (_suppressHashChange) return;
+  var parts = [currentTab];
+
+  switch (currentTab) {
+    case 'chat':
+      if (currentThreadId && currentThreadId !== assistantThreadId) {
+        parts.push(currentThreadId);
+      }
+      break;
+    case 'memory':
+      if (typeof currentMemoryPath === 'string' && currentMemoryPath) {
+        parts.push(currentMemoryPath);
+      }
+      break;
+    case 'jobs':
+      if (typeof currentJobId !== 'undefined' && currentJobId) {
+        parts.push(currentJobId);
+      }
+      break;
+    case 'routines':
+      if (typeof currentRoutineId !== 'undefined' && currentRoutineId) {
+        parts.push(currentRoutineId);
+      }
+      break;
+    case 'settings':
+      if (currentSettingsSubtab && currentSettingsSubtab !== 'inference') {
+        parts.push(currentSettingsSubtab);
+      }
+      break;
+  }
+
+  var hash = '#/' + parts.join('/');
+  if (window.location.hash !== hash) {
+    window.history.replaceState(null, '', hash);
+  }
+}
+
+/** Parse the current URL hash into navigation state. */
+function parseHash() {
+  var hash = window.location.hash || '';
+  if (!hash.startsWith('#/')) return null;
+  var parts = hash.substring(2).split('/');
+  return {
+    tab: parts[0] || 'chat',
+    detail: parts.slice(1).join('/') || null,
+  };
+}
+
+/**
+ * Restore navigation state from the URL hash.
+ * Called once after authentication and on hashchange events.
+ */
+function restoreFromHash() {
+  var state = parseHash();
+  if (!state) return;
+
+  // Suppress hash updates while restoring — switchTab/readMemoryFile/etc.
+  // each call updateHash(), which would overwrite the full hash before
+  // the detail part is restored.
+  _suppressHashChange = true;
+
+  // Switch tab
+  if (state.tab && state.tab !== currentTab) {
+    switchTab(state.tab);
+  }
+
+  // Restore detail state within the tab
+  if (state.detail) {
+    switch (state.tab) {
+      case 'chat':
+        // Defer thread switch until threads are loaded
+        window._pendingThreadRestore = state.detail;
+        break;
+      case 'memory':
+        readMemoryFile(state.detail);
+        break;
+      case 'jobs':
+        openJobDetail(state.detail);
+        break;
+      case 'routines':
+        openRoutineDetail(state.detail);
+        break;
+      case 'settings':
+        switchSettingsSubtab(state.detail);
+        break;
+    }
+  }
+
+  _suppressHashChange = false;
+}
+
+window.addEventListener('hashchange', function() {
+  if (_suppressHashChange) return;
+  restoreFromHash();
+});
+
 // --- Streaming Debounce State ---
 let _streamBuffer = '';
 let _streamDebounceTimer = null;
@@ -180,7 +298,7 @@ function initApp() {
   var urlLogLevel = cleaned.searchParams.get('log_level');
   cleaned.searchParams.delete('token');
   cleaned.searchParams.delete('log_level');
-  window.history.replaceState({}, '', cleaned.pathname + cleaned.search);
+  window.history.replaceState({}, '', cleaned.pathname + cleaned.search + cleaned.hash);
   connectSSE();
   connectLogSSE();
   startGatewayStatusPolling();
@@ -220,6 +338,8 @@ function initApp() {
   loadThreads();
   loadMemoryTree();
   loadJobs();
+  // Restore navigation state from URL hash (tab, thread, memory file, etc.)
+  restoreFromHash();
   // Apply URL log_level param if present, otherwise just sync the dropdown
   if (urlLogLevel) {
     setServerLogLevel(urlLogLevel);
@@ -664,6 +784,37 @@ function connectSSE(lastEventIdOverride) {
         }
       }, 3000);
     }
+  };
+
+  // Forward all SSE events to registered widget handlers.
+  // Wraps addEventListener to intercept every named event and dispatch
+  // to widget subscribers before the built-in handler runs.
+  // Must run before any addTrackedEventListener calls so the wrapper is in place.
+  //
+  // NOTE: Only NAMED events (those dispatched via `addEventListener('foo', …)`
+  // by the gateway, see `SseEvent` in `src/channels/web/types.rs`) are
+  // forwarded. The generic `eventSource.onmessage` handler is intentionally
+  // NOT wrapped because the IronClaw gateway never emits SSE frames without
+  // an `event:` field — every frame carries a typed name (`response`,
+  // `tool_started`, `gate_required`, etc.). Widget authors should subscribe
+  // to those typed events via `IronClaw.api.on('<event_type>', handler)`
+  // rather than relying on the generic message channel; if a widget needs
+  // an untyped stream it must open its own `EventSource`.
+  var _origAddEventListener = eventSource.addEventListener.bind(eventSource);
+  eventSource.addEventListener = function(type, listener, opts) {
+    _origAddEventListener(type, function(e) {
+      // Dispatch to widget handlers
+      if (IronClaw.api && e.data) {
+        try {
+          var parsed = JSON.parse(e.data);
+          IronClaw.api._dispatch(type, parsed);
+        } catch (parseErr) {
+          console.warn('[IronClaw] SSE parse error for event', type, parseErr);
+        }
+      }
+      // Call original handler
+      listener(e);
+    }, opts);
   };
 
   addTrackedEventListener('response', (e) => {
@@ -1329,6 +1480,299 @@ function sanitizeRenderedHtml(html) {
   }
   // DOMPurify not available (CDN unreachable) — return empty string rather than unsanitized HTML
   return '';
+}
+
+// ==================== Structured Data Rendering ====================
+//
+// Detects JSON objects and key-value data in assistant messages and
+// renders them as styled cards instead of raw text. Also supports
+// extensible chat renderers via IronClaw.registerChatRenderer().
+
+/**
+ * Post-process a .message-content element to upgrade structured data into cards.
+ * Runs registered chat renderers first, then falls back to built-in JSON detection.
+ */
+function upgradeStructuredData(contentEl) {
+  // 1. Run registered chat renderers.
+  //
+  // Each registered renderer receives the live `.message-content` element
+  // and the textContent. The renderer is allowed to mutate the element —
+  // attach event listeners, set data attributes, swap inner DOM — but any
+  // HTML it injects must still pass DOMPurify before it reaches the user.
+  // `renderMarkdown` already runs `sanitizeRenderedHtml` on the markdown
+  // output BEFORE this function is called, but a renderer that does
+  // `contentEl.innerHTML = '<form action="https://attacker">...'` would
+  // bypass that sanitization step entirely. Re-run the sanitizer on
+  // whatever the renderer leaves behind so the same HTML allowlist
+  // applies regardless of how the content got there.
+  //
+  // CSP already blocks `<script>` execution either way; this guards the
+  // form/iframe/object/clickjack-overlay vector that doesn't trip CSP.
+  var renderers = (window.IronClaw && IronClaw._chatRenderers) || [];
+  for (var i = 0; i < renderers.length; i++) {
+    try {
+      if (renderers[i].match(contentEl.textContent, contentEl)) {
+        renderers[i].render(contentEl, contentEl.textContent);
+        // Post-renderer sanitization — DOMPurify is idempotent on
+        // already-safe HTML, so the cost on the happy path is bounded
+        // by the sanitizer's own walk of the post-renderer subtree.
+        contentEl.innerHTML = sanitizeRenderedHtml(contentEl.innerHTML);
+        return; // First matching renderer wins
+      }
+    } catch (e) {
+      console.error('[IronClaw] Chat renderer "' + renderers[i].id + '" failed:', e);
+    }
+  }
+
+  // 2. Built-in: detect and upgrade inline JSON objects.
+  //
+  // Off by default — the bracket-counting heuristic false-positives on
+  // any prose containing balanced `{...}` (e.g. an assistant explaining
+  // "set the value to {x: 1, y: 2}"), and the rewrite then mangles the
+  // explanation into a styled card. Operators that pipe structured data
+  // through chat opt in via `chat.upgrade_inline_json` in
+  // `.system/gateway/layout.json`.
+  var layoutCfg = window.__IRONCLAW_LAYOUT__;
+  if (layoutCfg && layoutCfg.chat && layoutCfg.chat.upgrade_inline_json === true) {
+    upgradeInlineJson(contentEl);
+  }
+}
+
+/**
+ * Find JSON-like objects in text nodes and replace them with styled cards.
+ *
+ * Uses a linear bracket-counting scan instead of a regex with nested
+ * quantifiers — the old `/(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})/g` exhibited
+ * catastrophic backtracking on adversarial input. The current implementation
+ * is bounded by two caps:
+ *   - MAX_PARA_LEN: skip paragraphs larger than this entirely
+ *   - MAX_SCAN:     each `{` scan is capped at this many chars
+ *   - MAX_CANDIDATES per paragraph
+ */
+function upgradeInlineJson(contentEl) {
+  var MAX_PARA_LEN = 20000;
+  var paragraphs = contentEl.querySelectorAll('p');
+  if (paragraphs.length === 0) {
+    // No <p> tags — markdown might have produced bare text
+    paragraphs = [contentEl];
+  }
+
+  paragraphs.forEach(function(p) {
+    // Skip code blocks
+    if (p.closest('pre') || p.closest('code')) return;
+
+    var html = p.innerHTML;
+    if (!html.includes('{')) return; // Fast path: no braces at all
+    if (html.length > MAX_PARA_LEN) return; // Bail on very long content
+
+    var candidates = _findJsonCandidates(html);
+    if (candidates.length === 0) return;
+
+    // Apply replacements in reverse order so earlier-index positions stay valid.
+    var out = html;
+    for (var i = candidates.length - 1; i >= 0; i--) {
+      var c = candidates[i];
+      var card = buildDataCard(c.obj);
+      out = out.substring(0, c.start) + card + out.substring(c.end);
+    }
+    p.innerHTML = out;
+  });
+}
+
+/**
+ * Scan `html` once and return `{start, end, obj}` spans for every balanced
+ * `{...}` that parses as a JSON object (not array, not primitive). Positions
+ * inside `<code>…</code>` or `<pre>…</pre>` blocks are skipped.
+ *
+ * Linear in `html` length for typical input; bounded by MAX_SCAN and
+ * MAX_CANDIDATES for adversarial input.
+ * @private
+ */
+function _findJsonCandidates(html) {
+  var MAX_SCAN = 5000;
+  var MAX_CANDIDATES = 32;
+  var results = [];
+  var n = html.length;
+  var i = 0;
+  var lowerHtml = html.toLowerCase();
+
+  while (i < n && results.length < MAX_CANDIDATES) {
+    var ch = html.charCodeAt(i);
+
+    // Fast-skip past <code>...</code> and <pre>...</pre> regions — avoids
+    // counting braces that belong to rendered code samples.
+    if (ch === 60 /* < */) {
+      if (lowerHtml.substr(i, 5) === '<code') {
+        var codeEnd = lowerHtml.indexOf('</code>', i + 5);
+        i = codeEnd === -1 ? n : codeEnd + 7;
+        continue;
+      }
+      if (lowerHtml.substr(i, 4) === '<pre') {
+        var preEnd = lowerHtml.indexOf('</pre>', i + 4);
+        i = preEnd === -1 ? n : preEnd + 6;
+        continue;
+      }
+    }
+
+    if (ch !== 123 /* { */) {
+      i++;
+      continue;
+    }
+
+    // Scan forward with brace counting; respect string literals so that
+    // `"a}b"` inside an object doesn't prematurely end the scan.
+    var end = _findBalancedEnd(html, i, MAX_SCAN);
+    if (end === -1) {
+      i++;
+      continue;
+    }
+
+    var raw = html.substring(i, end);
+    // Normalize Python-style single quotes to double quotes so input like
+    // `{'k': 'v'}` parses as JSON. The naive `raw.replace(/'/g, '"')`
+    // mangled apostrophes inside already-double-quoted string values
+    // (e.g., `{"name": "it's"}` → `{"name": "it"s"}` → parse failure).
+    // Walk the candidate with the same string-state tracking as
+    // `_findBalancedEnd` and only rewrite single quotes that appear OUTSIDE
+    // a double-quoted string. This preserves apostrophes inside `"it's"`
+    // while still upgrading single-quoted JSON-like input.
+    var normalized = _normalizeJsonQuotes(raw);
+    try {
+      var obj = JSON.parse(normalized);
+      if (typeof obj === 'object' && obj !== null && !Array.isArray(obj)) {
+        results.push({ start: i, end: end, obj: obj });
+        i = end;
+        continue;
+      }
+    } catch (_e) { /* not valid JSON — leave as text */ }
+
+    i++;
+  }
+
+  return results;
+}
+
+/**
+ * Rewrite single quotes that act as string delimiters to double quotes,
+ * leaving single quotes that appear inside an already-double-quoted string
+ * untouched. Mirrors the string-state tracking in `_findBalancedEnd` so the
+ * upgrade is consistent with how the candidate was extracted.
+ *
+ * `{'k': 'v'}` → `{"k": "v"}`
+ * `{"name": "it's"}` → `{"name": "it's"}` (apostrophe preserved)
+ * `{'msg': "she said \"hi\""}` → `{"msg": "she said \"hi\""}`
+ * @private
+ */
+function _normalizeJsonQuotes(raw) {
+  var out = '';
+  var inString = null; // '"' | "'" | null
+  for (var k = 0; k < raw.length; k++) {
+    var c = raw[k];
+    if (inString) {
+      // Inside a string literal — copy verbatim, including any single
+      // quotes that happen to be apostrophes. Honor backslash escapes so
+      // `"\""` doesn't terminate the literal early.
+      if (c === '\\' && k + 1 < raw.length) {
+        out += c + raw[k + 1];
+        k++;
+        continue;
+      }
+      if (c === inString) {
+        // Closing quote: emit as `"` regardless of which quote opened the
+        // string, so a single-quoted literal becomes a double-quoted one.
+        out += '"';
+        inString = null;
+        continue;
+      }
+      out += c;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      // Opening quote: normalize to `"` and remember which character
+      // closes this literal so apostrophes inside `"it's"` are preserved.
+      inString = c;
+      out += '"';
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
+/**
+ * Return the index one past the matching `}` for the `{` at `start`, or -1
+ * if no balanced close is found within `maxLen` characters. Respects single
+ * and double-quoted string literals (with backslash escapes) so `"a}b"`
+ * doesn't terminate the scan.
+ * @private
+ */
+function _findBalancedEnd(html, start, maxLen) {
+  var depth = 0;
+  var inString = null; // '"' | "'" | null
+  var n = Math.min(html.length, start + maxLen);
+  for (var j = start; j < n; j++) {
+    var ch = html[j];
+    if (inString) {
+      if (ch === '\\') { j++; continue; } // skip escaped char
+      if (ch === inString) inString = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { inString = ch; continue; }
+    if (ch === '{') { depth++; continue; }
+    if (ch === '}') {
+      depth--;
+      if (depth === 0) return j + 1;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Build an HTML data card from a plain object.
+ */
+function buildDataCard(obj) {
+  var keys = Object.keys(obj);
+  if (keys.length === 0) return '';
+
+  var rows = '';
+  for (var i = 0; i < keys.length; i++) {
+    var key = keys[i];
+    var value = obj[key];
+    var displayKey = key.replace(/_/g, ' ');
+    var valueClass = 'data-card-value';
+    var valueHtml;
+
+    // Special rendering for known value types
+    if (key === 'status' || key === 'state') {
+      var badgeClass = 'status-badge';
+      var sv = String(value).toLowerCase();
+      if (sv === 'created' || sv === 'active' || sv === 'success' || sv === 'completed' || sv === 'ok' || sv === 'running') {
+        badgeClass += ' status-success';
+      } else if (sv === 'failed' || sv === 'error' || sv === 'cancelled' || sv === 'rejected') {
+        badgeClass += ' status-error';
+      } else if (sv === 'pending' || sv === 'waiting' || sv === 'queued') {
+        badgeClass += ' status-pending';
+      }
+      valueHtml = '<span class="' + badgeClass + '">' + escapeHtml(String(value)) + '</span>';
+    } else if (typeof value === 'object' && value !== null) {
+      valueHtml = '<code>' + escapeHtml(JSON.stringify(value)) + '</code>';
+    } else {
+      // Check if value looks like a UUID or ID
+      var strVal = String(value);
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(strVal)) {
+        valueHtml = '<code class="data-card-id">' + escapeHtml(strVal) + '</code>';
+      } else {
+        valueHtml = '<span>' + escapeHtml(strVal) + '</span>';
+      }
+    }
+
+    rows += '<div class="data-card-row">' +
+      '<span class="data-card-label">' + escapeHtml(displayKey) + '</span>' +
+      '<span class="' + valueClass + '">' + valueHtml + '</span>' +
+      '</div>';
+  }
+
+  return '<div class="data-card">' + rows + '</div>';
 }
 
 function copyCodeBlock(btn) {
@@ -2571,6 +3015,8 @@ function createMessageElement(role, content) {
   } else {
     div.setAttribute('data-raw', content);
     contentEl.innerHTML = renderMarkdown(content);
+    // Upgrade structured data (JSON objects, etc.) into styled cards
+    upgradeStructuredData(contentEl);
     // Syntax highlighting for code blocks
     if (typeof hljs !== 'undefined') {
       requestAnimationFrame(() => {
@@ -2759,6 +3205,19 @@ function loadThreads() {
       list.appendChild(item);
     }
 
+    // Restore thread from URL hash if pending (deferred from restoreFromHash)
+    if (window._pendingThreadRestore) {
+      var pendingId = window._pendingThreadRestore;
+      window._pendingThreadRestore = null;
+      // Verify the thread exists in the loaded list
+      var found = (pendingId === assistantThreadId) ||
+        threads.some(function(t) { return t.id === pendingId; });
+      if (found) {
+        switchThread(pendingId);
+        return;
+      }
+    }
+
     // Default to assistant thread on first load if no thread selected
     if (!currentThreadId && assistantThreadId) {
       switchToAssistant();
@@ -2798,6 +3257,7 @@ function switchToAssistant() {
   oldestTimestamp = null;
   loadHistory();
   loadThreads();
+  updateHash();
   if (window.innerWidth <= 768) {
     const sidebar = document.getElementById('thread-sidebar');
     sidebar.classList.remove('expanded-mobile');
@@ -2819,6 +3279,7 @@ function switchThread(threadId) {
   oldestTimestamp = null;
   loadHistory();
   loadThreads();
+  updateHash();
   if (window.innerWidth <= 768) {
     const sidebar = document.getElementById('thread-sidebar');
     sidebar.classList.remove('expanded-mobile');
@@ -2834,6 +3295,7 @@ function createNewThread() {
     showWelcomeCard();
     enableChatInput();
     loadThreads();
+    updateHash();
   }).catch((err) => {
     showToast(I18n.t('chat.threadCreateFailed', { message: err.message }), 'error');
   });
@@ -2997,6 +3459,15 @@ document.querySelectorAll('.tab-bar button[data-tab]').forEach((btn) => {
 
 function switchTab(tab) {
   currentTab = tab;
+  // NOTE: this function takes a `tab` argument that may originate from
+  // workspace-supplied `layout.tabs.default_tab`, so it must NOT be
+  // refactored into a `querySelector('[data-tab="' + tab + '"]')`
+  // shape. The current form does string equality on the
+  // `getAttribute('data-tab')` value of every button (the loop below)
+  // and on `p.id === 'tab-' + tab` for the panel — neither path
+  // interpolates `tab` into a CSS selector, so a hostile id can't
+  // alter the selector match. If a future change needs to look up a
+  // single button by id directly, wrap `tab` in `CSS.escape()` first.
   document.querySelectorAll('.tab-bar button[data-tab]').forEach((b) => {
     b.classList.toggle('active', b.getAttribute('data-tab') === tab);
   });
@@ -3005,7 +3476,11 @@ function switchTab(tab) {
   });
   applyAriaAttributes();
 
-  if (tab === 'memory') loadMemoryTree();
+  if (tab === 'memory') {
+    loadMemoryTree();
+    // Auto-open README.md on first visit (no file selected yet)
+    if (!currentMemoryPath) readMemoryFile('README.md');
+  }
   if (tab === 'jobs') loadJobs();
   if (tab === 'missions') loadMissions();
   if (tab === 'routines') loadRoutines();
@@ -3017,6 +3492,7 @@ function switchTab(tab) {
     stopPairingPoll();
   }
   updateTabIndicator();
+  updateHash();
 }
 
 function updateTabIndicator() {
@@ -3162,6 +3638,7 @@ function toggleExpand(node) {
 
 function readMemoryFile(path) {
   currentMemoryPath = path;
+  updateHash();
   // Update breadcrumb
   document.getElementById('memory-breadcrumb-path').innerHTML = buildBreadcrumb(path);
   document.getElementById('memory-edit-btn').style.display = 'inline-block';
@@ -4700,6 +5177,7 @@ function restartJob(jobId) {
 function openJobDetail(jobId) {
   currentJobId = jobId;
   currentJobSubTab = 'activity';
+  updateHash();
   apiFetch('/api/jobs/' + jobId).then((job) => {
     renderJobDetail(job);
   }).catch((err) => {
@@ -4712,6 +5190,7 @@ function closeJobDetail() {
   currentJobId = null;
   jobFilesTreeState = null;
   loadJobs();
+  updateHash();
 }
 
 function renderJobDetail(job) {
@@ -5214,6 +5693,7 @@ function renderRoutinesList(routines) {
 
 function openRoutineDetail(id) {
   currentRoutineId = id;
+  updateHash();
   apiFetch('/api/routines/' + id).then((routine) => {
     renderRoutineDetail(routine);
   }).catch((err) => {
@@ -5224,6 +5704,7 @@ function openRoutineDetail(id) {
 function closeRoutineDetail() {
   currentRoutineId = null;
   loadRoutines();
+  updateHash();
 }
 
 function renderRoutineDetail(routine) {
@@ -6578,6 +7059,7 @@ function switchSettingsSubtab(subtab) {
     document.querySelector('.settings-layout').classList.add('settings-detail-active');
   }
   loadSettingsSubtab(subtab);
+  updateHash();
 }
 
 function settingsBack() {
@@ -7806,7 +8288,6 @@ document.getElementById('settings-search-input').addEventListener('input', funct
   }
 });
 
-
 // --- Config Tab ---
 
 // Like apiFetch but for endpoints that return 204 No Content
@@ -8382,3 +8863,358 @@ document.getElementById('provider-name').addEventListener('input', (e) => {
 document.getElementById('provider-id').addEventListener('input', (e) => {
   e.target.dataset.edited = e.target.value ? '1' : '';
 });
+
+// ==================== Widget Extension System ====================
+//
+// Provides a registration API for frontend widgets. Widgets are self-contained
+// components that plug into named slots in the UI (tabs, sidebar, status bar, etc.).
+//
+// Widget authors call IronClaw.registerWidget({ id, name, slot, init, ... })
+// from their module script. The init() function receives a container DOM element
+// and the IronClaw.api object for authenticated fetch, event subscription, etc.
+
+// Define `window.IronClaw` as a non-writable, non-configurable property
+// rather than `window.IronClaw = window.IronClaw || {}`. The `|| {}` form
+// would honor any pre-existing value on `window.IronClaw`, which in
+// principle could be set by an inline script that ran before app.js — a
+// hostile pre-init could install a fake `registerWidget` trap and
+// intercept every widget registration. In practice the gateway HTML
+// loads app.js before any deferred `type="module"` widget script and
+// has no inline scripts that touch `window.IronClaw`, so this is
+// defense-in-depth against future template changes (or a stray browser
+// extension), not a fix for an exploitable bug. Using
+// `Object.defineProperty` with `writable: false` / `configurable: false`
+// also locks the binding so a hostile widget can't replace the entire
+// `IronClaw` object after the fact — its only path is to mutate properties
+// on the fixed object, which is the same authority every other widget has.
+Object.defineProperty(window, 'IronClaw', {
+  value: {},
+  writable: false,
+  configurable: false,
+  enumerable: true,
+});
+IronClaw.widgets = new Map();
+IronClaw._widgetInitQueue = [];
+IronClaw._chatRenderers = [];
+
+/**
+ * Register a widget component.
+ * @param {Object} def - Widget definition
+ * @param {string} def.id - Unique widget identifier
+ * @param {string} def.name - Display name
+ * @param {string} def.slot - Target slot ('tab', 'chat_header', etc.)
+ * @param {string} [def.icon] - Icon identifier
+ * @param {Function} def.init - Called with (container, api) when widget activates
+ * @param {Function} [def.activate] - Called when widget becomes visible
+ * @param {Function} [def.deactivate] - Called when widget is hidden
+ * @param {Function} [def.destroy] - Called when widget is removed
+ */
+IronClaw.registerWidget = function(def) {
+  if (!def.id || !def.init) {
+    console.error('[IronClaw] Widget registration requires id and init:', def);
+    return;
+  }
+  IronClaw.widgets.set(def.id, def);
+
+  if (def.slot === 'tab') {
+    _addWidgetTab(def);
+  }
+};
+
+/**
+ * Register a chat renderer for custom inline rendering of structured data.
+ *
+ * Chat renderers run against each assistant message. The first renderer
+ * whose `match()` returns true gets to transform the content.
+ *
+ * @param {Object} def - Renderer definition
+ * @param {string} def.id - Unique identifier
+ * @param {Function} def.match - (textContent, element) => boolean
+ * @param {Function} def.render - (element, textContent) => void (mutate element in place)
+ * @param {number} [def.priority=0] - Higher priority runs first
+ */
+IronClaw.registerChatRenderer = function(def) {
+  if (!def.id || !def.match || !def.render) {
+    console.error('[IronClaw] Chat renderer requires id, match, and render:', def);
+    return;
+  }
+  IronClaw._chatRenderers.push(def);
+  // Sort by priority (higher first)
+  IronClaw._chatRenderers.sort(function(a, b) {
+    return (b.priority || 0) - (a.priority || 0);
+  });
+};
+
+/**
+ * API object exposed to widgets for safe interaction with the app.
+ */
+IronClaw.api = {
+  /**
+   * Authenticated fetch wrapper — injects the session token.
+   *
+   * **Same-origin enforcement.** The session token is injected into the
+   * `Authorization` header on every call, so a cross-origin URL would
+   * leak the token to an attacker-controlled host. Resolve the requested
+   * path against the page's own origin and reject anything that lands on
+   * a different origin. Site-relative paths (`/api/foo`) and same-origin
+   * absolute URLs are still allowed; everything else (`https://evil.example/...`,
+   * protocol-relative `//evil.example/...`, `javascript:`, `data:`) is
+   * rejected with a clear `TypeError` so the widget author sees the
+   * misuse at the offending call site instead of having the request fly
+   * silently to a hostile host.
+   */
+  fetch: function(path, opts) {
+    var resolved;
+    try {
+      resolved = new URL(path, window.location.origin);
+    } catch (e) {
+      return Promise.reject(
+        new TypeError('IronClaw.api.fetch: invalid URL ' + JSON.stringify(path))
+      );
+    }
+    if (resolved.origin !== window.location.origin) {
+      return Promise.reject(
+        new TypeError(
+          'IronClaw.api.fetch: cross-origin requests are not allowed (got ' +
+          resolved.origin + ', expected ' + window.location.origin +
+          '). Use a relative path or a same-origin absolute URL.'
+        )
+      );
+    }
+    opts = opts || {};
+    opts.headers = Object.assign({}, opts.headers || {}, {
+      'Authorization': 'Bearer ' + token
+    });
+    return fetch(resolved.toString(), opts);
+  },
+
+  /** Subscribe to an SSE/WebSocket event type. Returns an unsubscribe function. */
+  subscribe: function(eventType, handler) {
+    if (!window._widgetEventHandlers) window._widgetEventHandlers = {};
+    if (!window._widgetEventHandlers[eventType]) window._widgetEventHandlers[eventType] = [];
+    window._widgetEventHandlers[eventType].push(handler);
+    return function() {
+      var handlers = window._widgetEventHandlers[eventType];
+      if (handlers) {
+        var idx = handlers.indexOf(handler);
+        if (idx !== -1) handlers.splice(idx, 1);
+      }
+    };
+  },
+
+  /**
+   * Dispatch an SSE event to registered widget handlers.
+   * Called internally by SSE event listeners — not for widget use.
+   * @private
+   */
+  _dispatch: function(eventType, data) {
+    var handlers = window._widgetEventHandlers && window._widgetEventHandlers[eventType];
+    if (!handlers || handlers.length === 0) return;
+    for (var i = 0; i < handlers.length; i++) {
+      try { handlers[i](data); } catch (e) {
+        console.error('[IronClaw] Widget event handler error (' + eventType + '):', e);
+      }
+    }
+  },
+
+  /** Current theme information. */
+  theme: {
+    get current() { return document.documentElement.dataset.theme || 'dark'; }
+  },
+
+  /** Internationalization helper. */
+  i18n: {
+    t: function(key) { return (window.I18n && window.I18n.t) ? window.I18n.t(key) : key; }
+  },
+
+  /** Navigate to a tab by ID. */
+  navigate: function(tabId) {
+    if (typeof switchTab === 'function') switchTab(tabId);
+  }
+};
+
+/**
+ * Add a widget as a new tab in the tab bar.
+ * @private
+ */
+function _addWidgetTab(def) {
+  var tabBar = document.querySelector('.tab-bar');
+  // Tab panels live as siblings of `.tab-bar` inside `#app`. Earlier
+  // versions of this code looked for a dedicated `.tab-content` /
+  // `#tab-content` element that the gateway HTML never actually shipped,
+  // so widget tabs were silently queued forever. Use the parent of the
+  // first existing `.tab-panel` (falling back to `#app`) so widgets mount
+  // into the same container as the built-in tabs.
+  var existingPanel = document.querySelector('.tab-panel');
+  var tabContent = (existingPanel && existingPanel.parentNode)
+    || document.querySelector('.tab-content')
+    || document.getElementById('tab-content')
+    || document.getElementById('app');
+  if (!tabBar || !tabContent) {
+    // DOM not ready yet — queue for later
+    IronClaw._widgetInitQueue.push(def);
+    return;
+  }
+
+  // Create tab button
+  var btn = document.createElement('button');
+  btn.className = 'tab-btn';
+  btn.dataset.tab = def.id;
+  btn.textContent = def.name;
+  if (def.icon) {
+    btn.dataset.icon = def.icon;
+  }
+  btn.addEventListener('click', function() {
+    if (typeof switchTab === 'function') switchTab(def.id);
+  });
+  // Insert before the settings tab (last built-in tab) or at the end
+  var settingsBtn = tabBar.querySelector('[data-tab="settings"]');
+  if (settingsBtn) {
+    tabBar.insertBefore(btn, settingsBtn);
+  } else {
+    tabBar.appendChild(btn);
+  }
+
+  // Create container panel (id must match switchTab's `p.id === 'tab-' + tab`)
+  var panel = document.createElement('div');
+  panel.id = 'tab-' + def.id;
+  panel.className = 'tab-panel';
+  panel.dataset.tab = def.id;
+  panel.dataset.widget = def.id;
+  tabContent.appendChild(panel);
+
+  // Initialize the widget
+  try {
+    def.init(panel, IronClaw.api);
+  } catch (e) {
+    console.error('[IronClaw] Widget "' + def.id + '" init failed:', e);
+    // Escape both the widget id and the thrown message before injecting
+    // them into the error banner. CSP blocks the script vector here, but
+    // every other branch in this file routes user-controlled strings
+    // through escapeHtml(), and an unescaped innerHTML write is a
+    // discipline regression that future readers shouldn't have to
+    // re-litigate. textContent would also work, but innerHTML lets the
+    // styled <div> survive without an extra wrapper element.
+    panel.innerHTML = '<div style="padding:2rem;color:var(--color-error,red);">Widget "' +
+      escapeHtml(def.id) + '" failed to load: ' +
+      escapeHtml(String(e && e.message ? e.message : e)) + '</div>';
+  }
+}
+
+// Apply layout config if injected by the server
+if (window.__IRONCLAW_LAYOUT__) {
+  (function() {
+    var layout = window.__IRONCLAW_LAYOUT__;
+
+    // Apply branding title
+    if (layout.branding && layout.branding.title) {
+      var titleEl = document.querySelector('.app-title');
+      if (titleEl) titleEl.textContent = layout.branding.title;
+    }
+
+    // Apply tab visibility — hide specified tabs.
+    //
+    // The selector must match BOTH built-in tab buttons (rendered in
+    // `index.html` as plain `<button data-tab="…">`, no class) and
+    // widget-injected tab buttons (created by `_addWidgetTab` with
+    // `class="tab-btn"`). The earlier `.tab-btn[data-tab=…]` form only
+    // matched widget tabs, so `tabs.hidden: ["routines"]` (a built-in)
+    // silently no-opped. Scope the selector to `.tab-bar` so a stray
+    // `<button data-tab>` elsewhere on the page can't be hidden by
+    // accident, then accept any descendant button.
+    if (layout.tabs && layout.tabs.hidden) {
+      layout.tabs.hidden.forEach(function(tabId) {
+        // CSS.escape() the workspace-supplied tab id before
+        // interpolation. The endpoint that writes layout.json is now
+        // admin-only (PR #1725 P-H9 fix), so the realistic exploit is
+        // admin-on-self — but a one-line `CSS.escape` removes the
+        // attribute-selector breakout vector entirely. An admin who
+        // pastes a workspace doc fragment into `layout.json` shouldn't
+        // be able to footgun themselves into a side-channel CSS probe.
+        // CSS.escape is a stable browser API since 2015 and ships in
+        // every gateway-supported browser; no fallback needed.
+        var safe = (typeof CSS !== 'undefined' && CSS.escape)
+          ? CSS.escape(tabId)
+          : tabId;
+        var btn = document.querySelector(
+          '.tab-bar button[data-tab="' + safe + '"]'
+        );
+        if (btn) btn.style.display = 'none';
+      });
+    }
+
+    // Apply tab ordering — reorder tab buttons in the tab bar
+    if (layout.tabs && layout.tabs.order && layout.tabs.order.length > 0) {
+      var tabBar = document.querySelector('.tab-bar');
+      if (tabBar) {
+        var order = layout.tabs.order;
+        // Sort existing buttons by the specified order
+        var buttons = Array.from(tabBar.querySelectorAll('button[data-tab]'));
+        var orderIndex = {};
+        order.forEach(function(id, i) { orderIndex[id] = i; });
+        buttons.sort(function(a, b) {
+          var ai = orderIndex[a.getAttribute('data-tab')];
+          var bi = orderIndex[b.getAttribute('data-tab')];
+          if (ai === undefined) ai = 999;
+          if (bi === undefined) bi = 999;
+          return ai - bi;
+        });
+        buttons.forEach(function(btn) { tabBar.appendChild(btn); });
+        updateTabIndicator();
+      }
+    }
+
+    // NOTE: `default_tab` is intentionally applied *after* the widget
+    // queue drains below — see the post-drain block. Applying it here
+    // would silently no-op for any widget-provided tab id, because
+    // `switchTab()` looks up `#tab-{id}` and the widget panel hasn't
+    // been mounted yet.
+
+    // Apply chat config
+    if (layout.chat) {
+      if (layout.chat.suggestions === false) {
+        var chips = document.getElementById('suggestion-chips');
+        if (chips) chips.style.display = 'none';
+      }
+      if (layout.chat.image_upload === false) {
+        // The visible affordance is `#attach-btn` (the paperclip in the
+        // composer); the file input it triggers is `#image-file-input`.
+        // Hide the button AND disable the input — hiding the button alone
+        // wouldn't stop a programmatic `document.getElementById('image-file-input').click()`,
+        // and operators that flip this flag almost always want the
+        // capability gone, not just the chrome.
+        var attachBtn = document.getElementById('attach-btn');
+        if (attachBtn) attachBtn.style.display = 'none';
+        var imgInput = document.getElementById('image-file-input');
+        if (imgInput) imgInput.disabled = true;
+      }
+    }
+  })();
+}
+
+// Drain any widgets that were registered before the DOM was ready.
+// _addWidgetTab queues them in _widgetInitQueue when tab-bar doesn't exist yet.
+if (IronClaw._widgetInitQueue && IronClaw._widgetInitQueue.length > 0) {
+  IronClaw._widgetInitQueue.forEach(function(def) {
+    _addWidgetTab(def);
+  });
+  IronClaw._widgetInitQueue = [];
+}
+
+// Apply `default_tab` after the widget queue has drained.
+//
+// If a layout sets `tabs.default_tab` to a widget-provided id (say
+// "dashboard"), the corresponding `#tab-dashboard` panel does not exist
+// until `_addWidgetTab` runs. Calling `switchTab("dashboard")` from
+// inside the layout IIFE above (which runs first) used to silently
+// no-op — the user landed on the default built-in tab instead and the
+// `default_tab` setting appeared broken.
+//
+// Hash navigation still wins (so `#chat` deep-links survive a
+// customized default_tab) and we only switch if a layout was injected.
+if (window.__IRONCLAW_LAYOUT__
+    && window.__IRONCLAW_LAYOUT__.tabs
+    && window.__IRONCLAW_LAYOUT__.tabs.default_tab
+    && !window.location.hash) {
+  switchTab(window.__IRONCLAW_LAYOUT__.tabs.default_tab);
+}
