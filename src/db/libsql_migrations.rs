@@ -986,7 +986,7 @@ ALTER TABLE agent_jobs ADD COLUMN restart_params TEXT;
 "#,
     ),
     (
-        23,
+        24,
         "llm_calls_created_at_index",
         r#"
 CREATE INDEX IF NOT EXISTS idx_llm_calls_created_at ON llm_calls(created_at);
