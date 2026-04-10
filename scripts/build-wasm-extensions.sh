@@ -43,7 +43,7 @@ build_extension() {
     fi
 
     echo "  BUILD $name ($crate_name) from $source_dir"
-    if ! cargo component build --release --manifest-path "$source_dir/Cargo.toml" 2>&1; then
+    if ! cargo component build --release --target wasm32-wasip2 --manifest-path "$source_dir/Cargo.toml" 2>&1; then
         echo "  FAIL $name"
         FAILED+=("$name")
         return 1

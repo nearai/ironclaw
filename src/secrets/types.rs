@@ -222,6 +222,13 @@ pub struct CredentialMapping {
     pub location: CredentialLocation,
     /// Host patterns this credential applies to (glob syntax).
     pub host_patterns: Vec<String>,
+    /// When `true`, the tool may run without this credential — the host
+    /// is allowed to skip the mapping if the secret cannot be resolved.
+    /// **Defaults to `false` (required)** so a tool that simply declares
+    /// a credential without explicitly opting into "optional" cannot be
+    /// silently downgraded to an unauthenticated request.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 impl CredentialMapping {
@@ -230,6 +237,7 @@ impl CredentialMapping {
             secret_name: secret_name.into(),
             location: CredentialLocation::AuthorizationBearer,
             host_patterns: vec![host_pattern.into()],
+            optional: false,
         }
     }
 
@@ -245,6 +253,7 @@ impl CredentialMapping {
                 prefix: None,
             },
             host_patterns: vec![host_pattern.into()],
+            optional: false,
         }
     }
 }

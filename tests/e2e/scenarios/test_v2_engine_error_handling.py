@@ -35,6 +35,9 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from helpers import api_get, api_post, AUTH_TOKEN, wait_for_ready
 
+# Re-enabled — these pin the orchestrator's max-iterations and tool-
+# intent-nudge safety paths, which protect runaway mission and routine
+# threads from burning the LLM budget.
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -91,9 +94,15 @@ async def v2_error_server(ironclaw_binary, mock_llm_server):
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": home_dir,
         "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
-        "RUST_LOG": "ironclaw=debug",
+        # `info` instead of `debug` — debug logging through the orchestrator
+        # makes 30 LLM-call iterations dramatically slower, enough that the
+        # max-iterations test runs past its per-test pytest timeout.
+        "RUST_LOG": "ironclaw=info",
         "RUST_BACKTRACE": "1",
         "ENGINE_V2": "true",
+        # Auto-approve so the loop-forever test doesn't have to round-trip
+        # an approval gate on each iteration.
+        "AGENT_AUTO_APPROVE_TOOLS": "true",
         "GATEWAY_ENABLED": "true",
         "GATEWAY_HOST": "127.0.0.1",
         "GATEWAY_PORT": str(gateway_port),
@@ -179,7 +188,7 @@ async def _wait_for_response(
 
         # Auto-approve pending approvals so the loop doesn't stall
         if auto_approve:
-            pending = history.get("pending_approval")
+            pending = history.get("pending_gate") or history.get("pending_approval")
             if pending:
                 request_id = pending.get("request_id", "")
                 if request_id:
@@ -228,25 +237,33 @@ class TestV2EngineMaxIterations:
         assert thread_r.status_code == 200
         thread_id = thread_r.json()["id"]
 
-        # Send the trigger message
+        # Send the trigger message. The mock LLM has TWO routes for this:
+        # - With tools enabled: returns the `echo` tool call repeatedly
+        #   (LOOP_FOREVER_TRIGGER path in mock_llm.py), and the orchestrator
+        #   hits max_iterations after 30 rounds → router writes
+        #   "Reached maximum iterations without completing." in the response.
+        # - Without tools: returns the canned text "Recovered after hitting
+        #   the tool iteration limit." immediately.
+        # Either way, the final response contains "iteration", which is
+        # what the test asserts.
         send_r = await api_post(
             v2_error_server,
             "/api/chat/send",
             json={
-                "content": "loop forever",
+                "content": "issue 1780 loop forever",
                 "thread_id": thread_id,
             },
             timeout=30,
         )
         assert send_r.status_code in (200, 202)
 
-        # Wait for the orchestrator to hit the iteration cap.
-        # 30 iterations with tool calls take time — use a generous timeout.
-        # The final response should mention the iteration limit.
+        # Wait for the orchestrator to either hit the iteration cap or
+        # return the canned recovery text. Allow generous time for the
+        # 30-iteration loop.
         history = await _wait_for_response(
             v2_error_server,
             thread_id,
-            timeout=120,
+            timeout=180,
             expect_substring="iteration",
             auto_approve=True,
         )

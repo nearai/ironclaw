@@ -784,11 +784,20 @@ pub async fn setup_wasm_channel(
             // Required secret
             let input_value = secret_input(&secret_config.prompt)?;
 
-            // Validate if pattern is provided
+            // Validate if pattern is provided. The pattern is supplied by
+            // an admin via the channel manifest, so it's a trust-boundary
+            // input — Rust's `regex` crate is ReDoS-immune (linear time
+            // matching), but we still bound compile-time memory with an
+            // explicit `size_limit` so a typoed multi-megabyte pattern
+            // can't OOM the setup wizard.
             if let Some(ref pattern) = secret_config.validation {
-                let re = regex::Regex::new(pattern).map_err(|e| {
-                    ChannelSetupError::Validation(format!("Invalid validation pattern: {}", e))
-                })?;
+                let re = regex::RegexBuilder::new(pattern)
+                    .size_limit(1 << 20) // 1 MiB compiled regex
+                    .dfa_size_limit(1 << 20)
+                    .build()
+                    .map_err(|e| {
+                        ChannelSetupError::Validation(format!("Invalid validation pattern: {}", e))
+                    })?;
                 if !re.is_match(input_value.expose_secret()) {
                     print_error(&format!(
                         "Value does not match expected format: {}",

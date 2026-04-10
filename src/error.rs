@@ -324,6 +324,17 @@ pub enum WorkspaceError {
 
     #[error("Patch failed for '{path}': {reason}")]
     PatchFailed { path: String, reason: String },
+
+    #[error("Schema validation failed for '{path}': {}", errors.join("; "))]
+    SchemaValidation { path: String, errors: Vec<String> },
+
+    /// A user-supplied path or key was rejected by structural validation
+    /// (path-traversal, character set, length). Distinct from
+    /// `SchemaValidation` so callers can tell "your *content* is wrong"
+    /// from "your *key/path* is wrong" without string-matching error
+    /// messages.
+    #[error("Invalid path '{path}': {reason}")]
+    InvalidPath { path: String, reason: String },
 }
 
 /// Orchestrator errors (internal API, container management).
@@ -343,6 +354,9 @@ pub enum OrchestratorError {
 
     #[error("Docker error: {reason}")]
     Docker { reason: String },
+
+    #[error("{mode} mode is not enabled")]
+    ModeDisabled { mode: String },
 }
 
 /// Worker errors (container-side execution).

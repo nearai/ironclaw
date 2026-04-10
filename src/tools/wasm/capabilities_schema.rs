@@ -367,6 +367,13 @@ pub struct CredentialMappingSchema {
     /// Host patterns this credential applies to.
     #[serde(default)]
     pub host_patterns: Vec<String>,
+
+    /// When `true`, the host may run the tool without resolving this
+    /// credential (graceful degradation). Defaults to `false` (required) so
+    /// a tool that simply declares a credential cannot be silently
+    /// downgraded to an unauthenticated request.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 impl CredentialMappingSchema {
@@ -375,6 +382,7 @@ impl CredentialMappingSchema {
             secret_name: self.secret_name.clone(),
             location: self.location.to_credential_location(),
             host_patterns: self.host_patterns.clone(),
+            optional: self.optional,
         }
     }
 }
@@ -651,6 +659,13 @@ pub struct OAuthConfigSchema {
     #[serde(default)]
     pub extra_params: std::collections::HashMap<String, String>,
 
+    /// Optional guidance shown alongside the auth URL while the OAuth flow is pending.
+    ///
+    /// Use this for provider-specific recovery instructions such as alternate
+    /// client setup, consent quirks, or hosted deployment notes.
+    #[serde(default)]
+    pub pending_instructions: Option<String>,
+
     /// Field name in token response containing the access token.
     /// Defaults to "access_token".
     #[serde(default = "default_access_token_field")]
@@ -738,9 +753,6 @@ pub struct ToolFieldSetupSchema {
     /// `selected_model`.
     #[serde(default)]
     pub setting_path: Option<String>,
-    /// Whether changing this field requires a restart to fully apply.
-    #[serde(default)]
-    pub restart_required: bool,
 }
 
 /// Input widget type for a setup field.
@@ -1259,8 +1271,7 @@ mod tests {
                     {
                         "name": "llm_backend",
                         "prompt": "LLM Provider",
-                        "setting_path": "llm_backend",
-                        "restart_required": true
+                        "setting_path": "llm_backend"
                     },
                     {
                         "name": "selected_model",
@@ -1286,7 +1297,6 @@ mod tests {
             setup.required_fields[0].setting_path.as_deref(),
             Some("llm_backend")
         );
-        assert!(setup.required_fields[0].restart_required);
         assert_eq!(
             setup.required_fields[0].input_type,
             crate::tools::wasm::capabilities_schema::ToolSetupFieldInputType::Text
