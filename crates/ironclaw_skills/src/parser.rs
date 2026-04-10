@@ -45,6 +45,62 @@ pub struct ParsedSkill {
 /// You are a helpful assistant that...
 /// ```
 pub fn parse_skill_md(content: &str) -> Result<ParsedSkill, SkillParseError> {
+    parse_skill_md_impl(content, true)
+}
+
+/// Parse a SKILL.md file for install recovery without validating the `name` field.
+///
+/// Used by install paths that need to recover from invalid published names by
+/// rewriting them to a safe internal identifier before persisting to disk.
+///
+/// This is intentionally crate-private and should remain limited to the
+/// install-recovery path. Normal discovery/loading must keep using
+/// [`parse_skill_md`] so invalid names are rejected.
+pub(crate) fn parse_skill_md_for_install_recovery(
+    content: &str,
+) -> Result<ParsedSkill, SkillParseError> {
+    parse_skill_md_impl(content, false)
+}
+
+/// Split a SKILL.md file into its raw YAML frontmatter and prompt body without
+/// deserializing into a typed [`SkillManifest`].
+///
+/// Used by install recovery to mutate a single field (`name`) while preserving
+/// any unknown YAML keys that the typed `SkillManifest` would otherwise drop.
+pub(crate) fn split_skill_md_frontmatter(
+    content: &str,
+) -> Result<(String, String), SkillParseError> {
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    let stripped = normalized.strip_prefix('\u{feff}').unwrap_or(&normalized);
+
+    let trimmed = stripped.trim_start_matches(['\n', '\r']);
+    if !trimmed.starts_with("---") {
+        return Err(SkillParseError::MissingFrontmatter);
+    }
+
+    let after_first = &trimmed[3..];
+    let after_first_line = match after_first.find('\n') {
+        Some(pos) => &after_first[pos + 1..],
+        None => return Err(SkillParseError::MissingFrontmatter),
+    };
+
+    let yaml_end =
+        find_closing_delimiter(after_first_line).ok_or(SkillParseError::MissingFrontmatter)?;
+    let yaml_str = after_first_line[..yaml_end].to_string();
+
+    let after_yaml = &after_first_line[yaml_end..];
+    let prompt_start = after_yaml
+        .find('\n')
+        .map(|p| p + 1)
+        .unwrap_or(after_yaml.len());
+    let prompt_content = after_yaml[prompt_start..]
+        .trim_start_matches('\n')
+        .to_string();
+
+    Ok((yaml_str, prompt_content))
+}
+
+fn parse_skill_md_impl(content: &str, validate_name: bool) -> Result<ParsedSkill, SkillParseError> {
     // Normalize line endings before parsing to handle CRLF (callers may not
     // have pre-normalized). This also makes `find_closing_delimiter`'s byte
     // offset arithmetic correct since it assumes single-byte `\n` separators.
@@ -78,7 +134,7 @@ pub fn parse_skill_md(content: &str) -> Result<ParsedSkill, SkillParseError> {
         serde_yml::from_str(yaml_str).map_err(|e| SkillParseError::InvalidYaml(e.to_string()))?;
 
     // Validate skill name
-    if !validate_skill_name(&manifest.name) {
+    if validate_name && !validate_skill_name(&manifest.name) {
         return Err(SkillParseError::InvalidName {
             name: manifest.name.clone(),
         });

@@ -186,7 +186,7 @@ LLM_API_KEY=sk-or-...
 LLM_MODEL=anthropic/claude-sonnet-4
 ```
 
-详见 [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md) 获取完整的提供商指南。
+详见 [docs/capabilities/llm-providers.md](docs/capabilities/llm-providers.md) 获取完整的提供商指南。
 
 ## 安全机制
 
@@ -309,7 +309,7 @@ cargo test
 cargo test test_name
 ```
 
-- **Telegram 渠道**：参见 [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md) 了解设置和私信配对。
+- **渠道**：参见 [docs/channels/overview.mdx](docs/channels/overview.mdx) 了解 Telegram、Discord 和其他渠道的设置。
 - **修改渠道源码**：在 `cargo build` 之前运行 `./channels-src/telegram/build.sh` 以便打包更新后的 WASM。
 
 ## OpenClaw 传承

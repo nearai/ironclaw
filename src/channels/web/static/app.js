@@ -107,8 +107,20 @@ let _connectionLostAt = null;
 let _reconnectAttempts = 0;
 let _lastSseEventId = null;
 
+// --- Turn Response Tracking State ---
+// Safety net for lost SSE response events (see #2079): tracks whether we
+// received a `response` event for the current turn so that a "Done" status
+// arriving without one can trigger a history reload.
+const DONE_WITHOUT_RESPONSE_TIMEOUT_MS = 1500;
+// Single-thread tracking is intentional: background thread events are already
+// filtered out by `isCurrentThread`, so only the active thread's turn state
+// matters here. Per-thread state is unnecessary.
+let _turnResponseReceived = false;
+let _doneWithoutResponseTimer = null;
+
 // --- Send Cooldown State ---
 let _sendCooldown = false;
+let _recentLocalPairingApprovals = new Map();
 
 // --- Slash Commands ---
 
@@ -585,6 +597,12 @@ function connectSSE(lastEventIdOverride) {
     var statusEl = document.getElementById('sse-status');
     if (statusEl) statusEl.textContent = I18n.t('status.connected');
     _reconnectAttempts = 0;
+    // Clear stale turn-tracking state from before the disconnect
+    _turnResponseReceived = false;
+    if (_doneWithoutResponseTimer) {
+      clearTimeout(_doneWithoutResponseTimer);
+      _doneWithoutResponseTimer = null;
+    }
 
     // Dismiss connection-lost banner and show reconnected flash
     if (_connectionLostTimer) {
@@ -670,6 +688,11 @@ function connectSSE(lastEventIdOverride) {
     const streamingMsg = document.querySelector('.message.assistant[data-streaming="true"]');
     if (streamingMsg) streamingMsg.removeAttribute('data-streaming');
 
+    _turnResponseReceived = true;
+    if (_doneWithoutResponseTimer) {
+      clearTimeout(_doneWithoutResponseTimer);
+      _doneWithoutResponseTimer = null;
+    }
     finalizeActivityGroup();
     addMessage('assistant', data.content);
     enableChatInput();
@@ -737,6 +760,10 @@ function connectSSE(lastEventIdOverride) {
     }
     if (lastAssistant) lastAssistant.setAttribute('data-streaming', 'true');
 
+    // Mark turn as having received content so the Done safety net
+    // does not trigger a spurious loadHistory() for streaming responses.
+    _turnResponseReceived = true;
+
     // Accumulate chunks and debounce rendering at 50ms intervals
     _streamBuffer += data.content;
     // Force flush when buffer exceeds 10K chars to prevent memory buildup
@@ -767,6 +794,19 @@ function connectSSE(lastEventIdOverride) {
     if (data.message === 'Done' || data.message === 'Awaiting approval') {
       finalizeActivityGroup();
       enableChatInput();
+      // Safety net (#2079): if "Done" arrives but we never received a
+      // `response` event for this turn, the message may have been lost
+      // (broadcast lag, proxy buffering, brief SSE disconnect). Reload
+      // history after a short delay so the user sees the answer.
+      if (!_turnResponseReceived && data.message === 'Done') {
+        if (!_doneWithoutResponseTimer) {
+          _doneWithoutResponseTimer = setTimeout(() => {
+            _doneWithoutResponseTimer = null;
+            if (currentThreadId) loadHistory();
+          }, DONE_WITHOUT_RESPONSE_TIMEOUT_MS);
+        }
+      }
+      _turnResponseReceived = false;
     }
   });
 
@@ -799,6 +839,16 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('auth_completed', (e) => {
     const data = JSON.parse(e.data);
     handleAuthCompleted(data);
+  });
+
+  addTrackedEventListener('pairing_required', (e) => {
+    const data = JSON.parse(e.data);
+    handlePairingRequired(data);
+  });
+
+  addTrackedEventListener('pairing_completed', (e) => {
+    const data = JSON.parse(e.data);
+    handlePairingCompleted(data);
   });
 
   addTrackedEventListener('gate_required', (e) => {
@@ -930,6 +980,11 @@ function clearSuggestionChips() {
 function sendMessage() {
   clearSuggestionChips();
   removeWelcomeCard();
+  _turnResponseReceived = false;
+  if (_doneWithoutResponseTimer) {
+    clearTimeout(_doneWithoutResponseTimer);
+    _doneWithoutResponseTimer = null;
+  }
   const input = document.getElementById('chat-input');
   if (authFlowPending) {
     showToast(I18n.t('chat.authRequiredBeforeSend'), 'info');
@@ -944,6 +999,37 @@ function sendMessage() {
   if (_sendCooldown) return;
   const content = input.value.trim();
   if (!content && stagedImages.length === 0) return;
+
+  // Intercept approval keywords when an unresolved approval card is pending.
+  // Find the most recent unresolved card for the current thread (resolved cards
+  // linger 1.5s before removal; cards from other threads must not be matched).
+  const approvalCards = Array.from(document.querySelectorAll('.approval-card'));
+  const approvalCard = approvalCards.reverse().find(card => {
+    if (card.querySelector('.approval-resolved')) return false;
+    const cardThreadId = card.getAttribute('data-thread-id');
+    return !cardThreadId || cardThreadId === currentThreadId;
+  });
+  if (approvalCard && content) {
+    const lower = content.toLowerCase();
+    let action = null;
+    if (['yes', 'y', 'approve', 'ok', '/approve', '/yes', '/y'].includes(lower)) {
+      action = 'approve';
+    } else if (['always', 'a', 'yes always', 'approve always', '/always', '/a'].includes(lower)) {
+      action = 'always';
+    } else if (['no', 'n', 'deny', 'reject', 'cancel', '/deny', '/no', '/n'].includes(lower)) {
+      action = 'deny';
+    }
+    if (action) {
+      input.value = '';
+      autoResizeTextarea(input);
+      input.focus();
+      const requestId = approvalCard.getAttribute('data-request-id');
+      if (requestId) {
+        sendApprovalAction(requestId, action);
+      }
+      return;
+    }
+  }
 
   const userMsg = addMessage('user', content || '(images attached)');
   input.value = '';
@@ -1585,8 +1671,7 @@ function humanizeToolName(rawName) {
 }
 
 function shouldShowChannelConnectedMessage(extensionName, success) {
-  if (!success || !extensionName) return false;
-  return String(extensionName).toLowerCase().includes('telegram');
+  return false;
 }
 
 function showApproval(data) {
@@ -1598,6 +1683,10 @@ function showApproval(data) {
   const card = document.createElement('div');
   card.className = 'approval-card';
   card.setAttribute('data-request-id', data.request_id);
+  const cardThreadId = data.thread_id || currentThreadId;
+  if (cardThreadId) {
+    card.setAttribute('data-thread-id', cardThreadId);
+  }
 
   const header = document.createElement('div');
   header.className = 'approval-header';
@@ -1788,6 +1877,7 @@ function showJobCard(data) {
     browseBtn.className = 'job-card-browse';
     browseBtn.href = data.browse_url;
     browseBtn.target = '_blank';
+    browseBtn.rel = 'noopener noreferrer';
     browseBtn.textContent = I18n.t('jobs.browse');
     card.appendChild(browseBtn);
   }
@@ -1798,23 +1888,55 @@ function showJobCard(data) {
 
 // --- Auth card ---
 
-function handleAuthRequired(data) {
+async function handleAuthRequired(data) {
   if (data.thread_id && !isCurrentThread(data.thread_id)) {
     unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
     debouncedLoadThreads();
     return;
   }
+  if (data.extension_name && getConfigureOverlay(data.extension_name)) {
+    setAuthFlowPending(true, data.instructions);
+    return;
+  }
+  const existingCard = data.extension_name ? getAuthCard(data.extension_name) : getAuthCard();
+  if (existingCard && !data.request_id) {
+    const existingRequestId = existingCard.getAttribute('data-request-id');
+    const existingThreadId = existingCard.getAttribute('data-thread-id');
+    const incomingThreadId = data.thread_id || currentThreadId || null;
+    if (existingRequestId && (!existingThreadId || !incomingThreadId || existingThreadId === incomingThreadId)) {
+      return;
+    }
+  }
+  if (!data.request_id) {
+    const threadId = data.thread_id || currentThreadId || null;
+    if (threadId) {
+      try {
+        const history = await apiFetch('/api/chat/history?thread_id=' + encodeURIComponent(threadId));
+        const pendingGate = history && history.pending_gate;
+        if (pendingGate && pendingGate.request_id) {
+          const resumeKind = parseGateResumeKind(pendingGate.resume_kind);
+          if (resumeKind && resumeKind.type === 'authentication') {
+            handleGateRequired({
+              ...pendingGate,
+              thread_id: pendingGate.thread_id || threadId,
+            });
+            return;
+          }
+        }
+      } catch (_) {
+        // Fall through to the legacy card when pending-gate hydration fails.
+      }
+    }
+  }
   setAuthFlowPending(true, data.instructions);
-  if (data.auth_url || data.instructions) {
+  if (data.auth_url) {
     // Token paste flow (with optional OAuth button): show the global auth
     // prompt card. This handles both OAuth credentials (auth_url present)
     // and skill-based credentials (instructions present, no auth_url).
     showAuthCard(data);
   } else {
-    // Extension setup flow: fetch the extension's credential schema and show
-    // the multi-field configure modal (Extensions tab "Setup" button UI).
     if (getConfigureOverlay(data.extension_name)) return;
-    showConfigureModal(data.extension_name);
+    showSetupCardForExtension(data);
   }
 }
 
@@ -1862,8 +1984,12 @@ function handleGateResolved(data) {
     return;
   }
   document.querySelectorAll('.approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]').forEach((el) => el.remove());
-  if (data.resolution === 'credential_provided' || data.resolution === 'cancelled') {
-    removeAuthCard(data.tool_name);
+  if (
+    data.resolution === 'credential_provided'
+    || data.resolution === 'cancelled'
+    || data.resolution === 'external_callback'
+  ) {
+    removeAuthCard();
     enableChatInput();
   }
 }
@@ -1876,6 +2002,7 @@ function handleAuthCompleted(data) {
   showToast(data.message, data.success ? 'success' : 'error');
   // Dismiss only the matching extension's UI so stale prompts are cleared.
   removeAuthCard(data.extension_name);
+  removeSetupCard(data.extension_name);
   closeConfigureModal(data.extension_name);
   if (!data.success) {
     setAuthFlowPending(false);
@@ -1889,6 +2016,29 @@ function handleAuthCompleted(data) {
   }
   if (currentTab === 'settings') refreshCurrentSettingsTab();
   enableChatInput();
+}
+
+function handlePairingRequired(data) {
+  if (data.thread_id && !isCurrentThread(data.thread_id)) {
+    unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
+    debouncedLoadThreads();
+    return;
+  }
+  showPairingCard(data);
+}
+
+function handlePairingCompleted(data) {
+  if (data.thread_id && !isCurrentThread(data.thread_id)) {
+    debouncedLoadThreads();
+    return;
+  }
+  removePairingCard(data.channel);
+  const recentApprovalAt = _recentLocalPairingApprovals.get(data.channel);
+  if (!recentApprovalAt || Date.now() - recentApprovalAt > 5000) {
+    showToast(data.message, data.success ? 'success' : 'error');
+  }
+  _recentLocalPairingApprovals.delete(data.channel);
+  if (currentTab === 'settings') refreshCurrentSettingsTab();
 }
 
 function queryByDataAttribute(selector, attributeName, attributeValue) {
@@ -1915,8 +2065,52 @@ function getAuthCard(extensionName) {
   return queryByDataAttribute('.auth-card', 'data-extension-name', extensionName);
 }
 
+function getPairingCard(channel) {
+  return queryByDataAttribute('.pairing-card', 'data-channel', channel);
+}
+
 function getConfigureOverlay(extensionName) {
   return queryByDataAttribute('.configure-overlay', 'data-extension-name', extensionName);
+}
+
+function removeSetupCard(extensionName) {
+  removeAuthCard(extensionName);
+}
+
+function buildSetupFields(form, extensionName, secrets, submitFn) {
+  const fields = [];
+  (secrets || []).forEach((secret) => {
+    const field = document.createElement('label');
+    field.className = 'setup-field';
+
+    const label = document.createElement('span');
+    label.className = 'setup-label';
+    label.textContent = secret.prompt;
+    field.appendChild(label);
+
+    const inputRow = document.createElement('div');
+    inputRow.className = 'setup-input-row';
+
+    const input = document.createElement('input');
+    input.className = 'setup-input';
+    input.type = 'password';
+    input.name = secret.name;
+    input.placeholder = secret.provided ? I18n.t('config.alreadySet') : secret.prompt;
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitFn();
+    });
+    inputRow.appendChild(input);
+    field.appendChild(inputRow);
+    form.appendChild(field);
+    fields.push({ name: secret.name, input });
+  });
+  return fields;
+}
+
+function showSetupCardForExtension(data) {
+  // Dedup: don't open if a configure modal is already showing for this extension
+  if (getConfigureOverlay(data.extension_name)) return;
+  showConfigureModal(data.extension_name, { authData: data });
 }
 
 function showAuthCard(data) {
@@ -1958,21 +2152,30 @@ function showAuthCard(data) {
   links.className = 'auth-links';
 
   if (data.auth_url) {
-    const oauthBtn = document.createElement('button');
-    oauthBtn.className = 'auth-oauth';
-    oauthBtn.textContent = I18n.t('authRequired.authenticateWith', {name: data.extension_name});
-    oauthBtn.addEventListener('click', () => {
-      openOAuthUrl(data.auth_url);
-    });
-    links.appendChild(oauthBtn);
+    const parsedAuthUrl = parseHttpsOAuthUrl(data.auth_url);
+    if (parsedAuthUrl) {
+      const oauthLink = document.createElement('a');
+      oauthLink.className = 'auth-oauth';
+      oauthLink.href = parsedAuthUrl.href;
+      oauthLink.target = '_blank';
+      // Match the other external links: include `noreferrer` so the
+      // OAuth provider does not see the in-app Referer header.
+      oauthLink.rel = 'noopener noreferrer';
+      oauthLink.textContent = I18n.t('authRequired.authenticateWith', {name: data.extension_name});
+      links.appendChild(oauthLink);
+    }
   }
 
   if (data.setup_url) {
-    const setupLink = document.createElement('a');
-    setupLink.href = data.setup_url;
-    setupLink.target = '_blank';
-    setupLink.textContent = I18n.t('authRequired.getToken');
-    links.appendChild(setupLink);
+    const parsedSetupUrl = parseHttpsExternalUrl(data.setup_url, 'setup');
+    if (parsedSetupUrl) {
+      const setupLink = document.createElement('a');
+      setupLink.href = parsedSetupUrl.href;
+      setupLink.target = '_blank';
+      setupLink.rel = 'noopener noreferrer';
+      setupLink.textContent = I18n.t('authRequired.getToken');
+      links.appendChild(setupLink);
+    }
   }
 
   if (links.children.length > 0) {
@@ -1986,7 +2189,6 @@ function showAuthCard(data) {
   const tokenInput = document.createElement('input');
   tokenInput.type = 'password';
   tokenInput.placeholder = data.instructions
-    || I18n.t('auth.extensionTokenPlaceholder')
     || I18n.t('auth.tokenPlaceholder');
   tokenInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') submitAuthToken(data.extension_name, tokenInput.value);
@@ -2035,6 +2237,123 @@ function removeAuthCard(extensionName) {
     if (parentOverlay) parentOverlay.remove();
     else card.remove();
   }
+}
+
+function showPairingCard(data) {
+  if (data.thread_id && !isCurrentThread(data.thread_id)) return;
+  removePairingCard(data.channel);
+
+  const container = document.getElementById('chat-messages');
+  const card = document.createElement('div');
+  card.className = 'auth-card pairing-card';
+  card.setAttribute('data-channel', data.channel);
+  if (data.thread_id) {
+    card.setAttribute('data-thread-id', data.thread_id);
+  }
+
+  const header = document.createElement('div');
+  header.className = 'auth-header';
+  header.textContent = (data.onboarding && data.onboarding.pairing_title) || ('Claim ownership for ' + data.channel);
+  card.appendChild(header);
+
+  const instr = document.createElement('div');
+  instr.className = 'auth-instructions';
+  instr.textContent = (data.onboarding && data.onboarding.pairing_instructions)
+    || data.instructions
+    || ('Paste the pairing code from ' + data.channel + '.');
+  card.appendChild(instr);
+
+  if (data.onboarding && data.onboarding.restart_instructions) {
+    const restart = document.createElement('div');
+    restart.className = 'setup-next-step pairing-restart';
+    restart.textContent = data.onboarding.restart_instructions;
+    card.appendChild(restart);
+  }
+
+  const inputRow = document.createElement('div');
+  inputRow.className = 'auth-token-input';
+
+  const codeInput = document.createElement('input');
+  codeInput.type = 'text';
+  codeInput.placeholder = I18n.t('extensions.pairingCodePlaceholder');
+  codeInput.autocomplete = 'off';
+  codeInput.spellcheck = false;
+  codeInput.autocapitalize = 'characters';
+  codeInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') submitPairingCode(data.channel, codeInput.value, card);
+  });
+  inputRow.appendChild(codeInput);
+  card.appendChild(inputRow);
+
+  const errorEl = document.createElement('div');
+  errorEl.className = 'auth-error';
+  errorEl.style.display = 'none';
+  card.appendChild(errorEl);
+
+  const actions = document.createElement('div');
+  actions.className = 'auth-actions';
+
+  const submitBtn = document.createElement('button');
+  submitBtn.className = 'auth-submit pairing-submit';
+  submitBtn.textContent = I18n.t('approval.approve');
+  submitBtn.addEventListener('click', () => submitPairingCode(data.channel, codeInput.value, card));
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'auth-cancel pairing-cancel';
+  cancelBtn.textContent = I18n.t('btn.cancel');
+  cancelBtn.addEventListener('click', () => cancelPairingCard(data.channel, data.onboarding));
+
+  actions.appendChild(submitBtn);
+  actions.appendChild(cancelBtn);
+  card.appendChild(actions);
+
+  container.appendChild(card);
+  container.scrollTop = container.scrollHeight;
+  codeInput.focus();
+}
+
+function cancelPairingCard(channel, onboarding) {
+  removePairingCard(channel);
+  showToast(
+    (onboarding && onboarding.restart_instructions) || I18n.t('extensions.pairingRestartHint'),
+    'info'
+  );
+}
+
+function removePairingCard(channel) {
+  const card = getPairingCard(channel);
+  if (card) card.remove();
+}
+
+function showPairingCardError(channel, message) {
+  const card = getPairingCard(channel);
+  if (!card) return;
+  card.querySelectorAll('button').forEach((btn) => {
+    btn.disabled = false;
+  });
+  const errorEl = card.querySelector('.auth-error');
+  if (errorEl) {
+    errorEl.textContent = message;
+    errorEl.style.display = 'block';
+  }
+}
+
+function submitPairingCode(channel, codeValue, cardEl) {
+  approvePairing(channel, codeValue, {
+    skipSuccessToast: true,
+    skipRefresh: true,
+    onSuccess: function() {
+      removePairingCard(channel);
+    },
+    onError: function(message) {
+      showPairingCardError(channel, message);
+      const card = cardEl || getPairingCard(channel);
+      if (card) {
+        const input = card.querySelector('.auth-token-input input');
+        if (input) input.focus();
+      }
+    }
+  });
 }
 
 function submitAuthToken(extensionName, tokenValue) {
@@ -2489,6 +2808,11 @@ function switchToAssistant() {
 function switchThread(threadId) {
   clearSuggestionChips();
   finalizeActivityGroup();
+  _turnResponseReceived = false;
+  if (_doneWithoutResponseTimer) {
+    clearTimeout(_doneWithoutResponseTimer);
+    _doneWithoutResponseTimer = null;
+  }
   currentThreadId = threadId;
   unreadThreads.delete(threadId);
   hasMore = false;
@@ -2604,19 +2928,53 @@ chatInput.addEventListener('blur', () => {
   setTimeout(hideSlashAutocomplete, 150);
 });
 
-// Infinite scroll: load older messages when scrolled near the top
+// Infinite scroll: load older messages when scrolled near the top.
+// Also toggles the scroll-to-bottom button when the user has scrolled up.
+// The handler is rAF-throttled so rapid scroll events coalesce into at most
+// one layout read per frame.
+let _scrollRafPending = false;
 document.getElementById('chat-messages').addEventListener('scroll', function () {
-  if (this.scrollTop < 100 && hasMore && !loadingOlder) {
+  const container = this;
+  if (container.scrollTop < 100 && hasMore && !loadingOlder) {
     loadingOlder = true;
     // Show spinner at top
     const spinner = document.createElement('div');
     spinner.id = 'scroll-load-spinner';
     spinner.className = 'scroll-load-spinner';
     spinner.innerHTML = '<div class="spinner"></div> Loading older messages...';
-    this.insertBefore(spinner, this.firstChild);
+    container.insertBefore(spinner, container.firstChild);
     loadHistory(oldestTimestamp);
   }
+  if (_scrollRafPending) return;
+  _scrollRafPending = true;
+  requestAnimationFrame(() => {
+    _scrollRafPending = false;
+    const btn = document.getElementById('scroll-to-bottom-btn');
+    if (!btn) return;
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    btn.style.display = distanceFromBottom > 200 ? 'flex' : 'none';
+  });
 });
+
+document.getElementById('scroll-to-bottom-btn').addEventListener('click', () => {
+  const container = document.getElementById('chat-messages');
+  container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+});
+
+// Keep the scroll-to-bottom button anchored just above the chat input,
+// even when the textarea grows to multiple lines.
+(() => {
+  const input = document.querySelector('.chat-container .chat-input');
+  const container = document.querySelector('.chat-container');
+  if (!input || !container || typeof ResizeObserver === 'undefined') return;
+  const ro = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      const h = entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
+      container.style.setProperty('--chat-input-height', `${Math.ceil(h)}px`);
+    }
+  });
+  ro.observe(input);
+})();
 
 function autoResizeTextarea(el) {
   const prev = el.offsetHeight;
@@ -3286,10 +3644,12 @@ function renderExtensionCard(ext) {
   const card = document.createElement('div');
   var stateClass = 'state-inactive';
   if (ext.kind === 'wasm_channel') {
-    var s = ext.activation_status || 'installed';
+    var s = ext.onboarding_state || ext.activation_status || 'installed';
     if (s === 'active') stateClass = 'state-active';
+    else if (s === 'ready') stateClass = 'state-active';
     else if (s === 'failed') stateClass = 'state-error';
     else if (s === 'pairing') stateClass = 'state-pairing';
+    else if (s === 'pairing_required') stateClass = 'state-pairing';
   } else if (ext.active) {
     stateClass = 'state-active';
   }
@@ -3366,14 +3726,14 @@ function renderExtensionCard(ext) {
 
   if (ext.kind === 'wasm_channel') {
     // WASM channels: state-based buttons (no generic Activate)
-    var status = ext.activation_status || 'installed';
-    if (status === 'active') {
+    var status = ext.onboarding_state || ext.activation_status || 'installed';
+    if (status === 'active' || status === 'ready') {
       var activeLabel = document.createElement('span');
       activeLabel.className = 'ext-active-label';
       activeLabel.textContent = I18n.t('ext.active');
       actions.appendChild(activeLabel);
       actions.appendChild(createReconfigureButton(ext.name));
-    } else if (status === 'pairing') {
+    } else if (status === 'pairing' || status === 'pairing_required') {
       var pairingLabel = document.createElement('span');
       pairingLabel.className = 'ext-pairing-label';
       pairingLabel.textContent = I18n.t('status.awaitingPairing');
@@ -3382,12 +3742,11 @@ function renderExtensionCard(ext) {
     } else if (status === 'failed') {
       actions.appendChild(createReconfigureButton(ext.name));
     } else {
-      // installed or configured: show Setup button
-      var setupBtn = document.createElement('button');
-      setupBtn.className = 'btn-ext configure';
-      setupBtn.textContent = I18n.t('ext.setup');
-      setupBtn.addEventListener('click', function() { showConfigureModal(ext.name); });
-      actions.appendChild(setupBtn);
+      var reconfigureBtn = document.createElement('button');
+      reconfigureBtn.className = 'btn-ext configure';
+      reconfigureBtn.textContent = I18n.t('extensions.reconfigure');
+      reconfigureBtn.addEventListener('click', function() { showConfigureModal(ext.name); });
+      actions.appendChild(reconfigureBtn);
     }
   } else {
     // WASM tools / MCP servers
@@ -3428,21 +3787,130 @@ function renderExtensionCard(ext) {
 
   // For WASM channels, check for pending pairing requests.
   if (ext.kind === 'wasm_channel') {
-    if (currentUserIsAdmin()) {
+    if ((ext.onboarding_state || ext.activation_status || 'installed') === 'setup_required') {
+      const setupSection = document.createElement('div');
+      setupSection.className = 'ext-onboarding';
+      card.appendChild(setupSection);
+      loadInlineChannelSetup(ext, setupSection);
+    }
+    if ((ext.onboarding_state || ext.activation_status || 'installed') === 'pairing_required'
+      || (ext.onboarding_state || ext.activation_status || 'installed') === 'pairing') {
       const pairingSection = document.createElement('div');
       pairingSection.className = 'ext-pairing';
       pairingSection.setAttribute('data-channel', ext.name);
+      pairingSection.__onboarding = ext.onboarding || null;
       card.appendChild(pairingSection);
-      loadPairingRequests(ext.name, pairingSection);
-    } else if ((ext.activation_status || 'installed') === 'pairing') {
-      const pairingSection = document.createElement('div');
-      pairingSection.className = 'ext-pairing';
-      card.appendChild(pairingSection);
-      renderMemberPairingClaim(ext, pairingSection);
+      if (currentUserIsAdmin()) {
+        loadPairingRequests(ext.name, pairingSection, ext.onboarding || null);
+      } else {
+        renderMemberPairingClaim(ext, pairingSection, ext.onboarding || null);
+      }
     }
   }
 
   return card;
+}
+
+function loadInlineChannelSetup(ext, container) {
+  apiFetch('/api/extensions/' + encodeURIComponent(ext.name) + '/setup')
+    .then((setup) => {
+      const onboarding = setup.onboarding || ext.onboarding || {};
+      const secrets = Array.isArray(setup.secrets) ? setup.secrets : [];
+      if (secrets.length === 0) {
+        container.innerHTML = '';
+        return;
+      }
+
+      container.innerHTML = '';
+
+      const title = document.createElement('div');
+      title.className = 'ext-onboarding-title';
+      title.textContent = onboarding.credential_title || ('Configure credentials for ' + (ext.display_name || ext.name));
+      container.appendChild(title);
+
+      if (onboarding.credential_instructions) {
+        const text = document.createElement('div');
+        text.className = 'ext-onboarding-text';
+        text.textContent = onboarding.credential_instructions;
+        container.appendChild(text);
+      }
+
+      if (onboarding.setup_url) {
+        // Strict HTTPS validation via shared helper.
+        const parsedSetupUrl2 = parseHttpsExternalUrl(onboarding.setup_url, 'setup');
+        if (parsedSetupUrl2) {
+          const links = document.createElement('div');
+          links.className = 'auth-links';
+          const link = document.createElement('a');
+          link.href = parsedSetupUrl2.href;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          link.textContent = I18n.t('authRequired.getToken');
+          links.appendChild(link);
+          container.appendChild(links);
+        }
+      }
+
+      const form = document.createElement('div');
+      form.className = 'setup-form inline';
+      container.appendChild(form);
+
+      let fields = [];
+      const submit = () => submitInlineChannelSetup(ext.name, fields, container);
+      fields = buildSetupFields(form, ext.name, secrets, submit);
+
+      if (onboarding.credential_next_step) {
+        const nextStep = document.createElement('div');
+        nextStep.className = 'setup-next-step';
+        nextStep.textContent = onboarding.credential_next_step;
+        container.appendChild(nextStep);
+      }
+
+      const actions = document.createElement('div');
+      actions.className = 'ext-actions';
+      const submitBtn = document.createElement('button');
+      submitBtn.className = 'btn-ext activate';
+      submitBtn.textContent = I18n.t('config.save');
+      submitBtn.addEventListener('click', submit);
+      actions.appendChild(submitBtn);
+      container.appendChild(actions);
+    })
+    .catch(() => {
+      container.innerHTML = '';
+    });
+}
+
+function submitInlineChannelSetup(name, fields, container) {
+  const secrets = {};
+  (fields || []).forEach((field) => {
+    const value = (field.input.value || '').trim();
+    if (value) secrets[field.name] = value;
+  });
+
+  const buttons = container.querySelectorAll('button');
+  buttons.forEach((btn) => { btn.disabled = true; });
+
+  apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup', {
+    method: 'POST',
+    body: { secrets, fields: {} },
+  }).then((res) => {
+    if (!res.success) {
+      showToast(res.message || 'Configuration failed', 'error');
+      buttons.forEach((btn) => { btn.disabled = false; });
+      return;
+    }
+    if (res.onboarding_state === 'pairing_required') {
+      showPairingCard({
+        channel: name,
+        instructions: res.onboarding && res.onboarding.pairing_instructions,
+        onboarding: res.onboarding || null,
+      });
+    }
+    refreshCurrentSettingsTab();
+  }).catch((err) => {
+    buttons.forEach((btn) => { btn.disabled = false; });
+    showToast(I18n.t('extensions.configFailed', { message: err.message }), 'error');
+  });
 }
 
 function refreshCurrentSettingsTab() {
@@ -3500,31 +3968,58 @@ function removeExtension(name) {
   }, I18n.t('common.remove'), 'btn-danger');
 }
 
-function showConfigureModal(name) {
+function showConfigureModal(name, options) {
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup')
     .then((setup) => {
       const secrets = Array.isArray(setup.secrets) ? setup.secrets : [];
       const setupFields = Array.isArray(setup.fields) ? setup.fields : [];
       const interactiveLogin = setup.interactive_login || null;
+      const onboarding = setup.onboarding || null;
       if (secrets.length === 0 && setupFields.length === 0 && !interactiveLogin) {
-        showToast(I18n.t('extensions.noConfigNeeded', { name: name }), 'info');
+        if (options && options.authData) {
+          showAuthCard(options.authData);
+        } else {
+          showToast(I18n.t('extensions.noConfigNeeded', { name: name }), 'info');
+        }
         return;
       }
-      renderConfigureModal(name, secrets, setupFields, interactiveLogin);
+      renderConfigureModal(name, secrets, setupFields, interactiveLogin, onboarding, options);
     })
-    .catch((err) => showToast(I18n.t('extensions.setupLoadFailed', { message: err.message }), 'error'));
+    .catch((err) => {
+      showToast(I18n.t('extensions.setupLoadFailed', { message: err.message }), 'error');
+      if (options && options.authData) {
+        showAuthCard(options.authData);
+      }
+    });
 }
 
-function renderConfigureModal(name, secrets, setupFields, interactiveLogin) {
-  closeConfigureModal();
+function renderConfigureModal(name, secrets, setupFields, interactiveLogin, onboarding, options) {
+  // Cancel any existing auth-flow overlay before replacing it.
+  // Remove directly (don't clear authFlowPending) since a new overlay is about to be appended.
+  var existingOverlay = document.querySelector('.configure-overlay');
+  if (existingOverlay && existingOverlay.getAttribute('data-auth-flow')) {
+    var extName = existingOverlay.getAttribute('data-auth-extension') || existingOverlay.getAttribute('data-extension-name');
+    apiFetch('/api/chat/auth-cancel', { method: 'POST', body: { extension_name: extName } }).catch(function() {});
+    existingOverlay.remove();
+  } else {
+    closeConfigureModal();
+  }
   const overlay = document.createElement('div');
   overlay.className = 'configure-overlay';
   overlay.setAttribute('data-extension-name', name);
-  overlay.dataset.telegramVerificationState = 'idle';
+  if (options && options.authData) {
+    overlay.setAttribute('data-auth-flow', 'true');
+    overlay.setAttribute('data-auth-extension', options.authData.extension_name || name);
+    if (options.authData.request_id) overlay.setAttribute('data-request-id', options.authData.request_id);
+    if (options.authData.thread_id) overlay.setAttribute('data-thread-id', options.authData.thread_id);
+  }
   overlay.addEventListener('click', (e) => {
     if (e.target !== overlay) return;
-    if (name === 'telegram' && overlay.dataset.telegramVerificationState === 'waiting') return;
-    closeConfigureModal();
+    if (overlay.getAttribute('data-auth-flow')) {
+      cancelAuthFromConfigureModal(overlay);
+    } else {
+      closeConfigureModal();
+    }
   });
 
   const modal = document.createElement('div');
@@ -3534,10 +4029,10 @@ function renderConfigureModal(name, secrets, setupFields, interactiveLogin) {
   header.textContent = I18n.t('config.title', { name: name });
   modal.appendChild(header);
 
-  if (name === 'telegram') {
+  if (onboarding && onboarding.credential_instructions) {
     const hint = document.createElement('div');
     hint.className = 'configure-hint';
-    hint.textContent = I18n.t('config.telegramOwnerHint');
+    hint.textContent = onboarding.credential_instructions;
     modal.appendChild(hint);
   }
 
@@ -3650,11 +4145,6 @@ function renderConfigureModal(name, secrets, setupFields, interactiveLogin) {
   error.style.display = 'none';
   modal.appendChild(error);
 
-  const status = document.createElement('div');
-  status.className = 'configure-inline-status';
-  status.style.display = 'none';
-  modal.appendChild(status);
-
   const actions = document.createElement('div');
   actions.className = 'configure-actions';
 
@@ -3679,7 +4169,13 @@ function renderConfigureModal(name, secrets, setupFields, interactiveLogin) {
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn-ext remove';
   cancelBtn.textContent = I18n.t('config.cancel');
-  cancelBtn.addEventListener('click', closeConfigureModal);
+  cancelBtn.addEventListener('click', function() {
+    if (overlay.getAttribute('data-auth-flow')) {
+      cancelAuthFromConfigureModal(overlay);
+    } else {
+      closeConfigureModal();
+    }
+  });
   actions.appendChild(cancelBtn);
 
   modal.appendChild(actions);
@@ -3894,67 +4390,6 @@ function pollInteractiveLogin(name, overlay, sessionId) {
     });
 }
 
-function renderTelegramVerificationChallenge(overlay, verification) {
-  if (!overlay || !verification) return;
-  const modal = overlay.querySelector('.configure-modal');
-  if (!modal) return;
-  const telegramField = modal.querySelector('.configure-field[data-secret-name="telegram_bot_token"]');
-
-  let panel = modal.querySelector('.configure-verification');
-  if (!panel) {
-    panel = document.createElement('div');
-    panel.className = 'configure-verification';
-  }
-  if (telegramField && telegramField.parentNode) {
-    telegramField.insertAdjacentElement('afterend', panel);
-  } else {
-    modal.insertBefore(
-      panel,
-      modal.querySelector('.configure-inline-error') || modal.querySelector('.configure-actions')
-    );
-  }
-
-  panel.innerHTML = '';
-
-  const title = document.createElement('div');
-  title.className = 'configure-verification-title';
-  title.textContent = I18n.t('config.telegramChallengeTitle');
-  panel.appendChild(title);
-
-  const instructions = document.createElement('div');
-  instructions.className = 'configure-verification-instructions';
-  instructions.textContent = verification.instructions;
-  panel.appendChild(instructions);
-
-  const commandLabel = document.createElement('div');
-  commandLabel.className = 'configure-verification-instructions';
-  commandLabel.textContent = I18n.t('config.telegramCommandLabel');
-  panel.appendChild(commandLabel);
-
-  const command = document.createElement('code');
-  command.className = 'configure-verification-code';
-  command.textContent = '/start ' + verification.code;
-  panel.appendChild(command);
-
-  if (verification.deep_link) {
-    const link = document.createElement('a');
-    link.className = 'configure-verification-link';
-    link.href = verification.deep_link;
-    link.target = '_blank';
-    link.rel = 'noreferrer noopener';
-    link.textContent = I18n.t('config.telegramOpenBot');
-    panel.appendChild(link);
-  }
-}
-
-function getConfigurePrimaryButton(overlay) {
-  return overlay && overlay.querySelector('.configure-actions button.btn-ext.activate');
-}
-
-function getConfigureCancelButton(overlay) {
-  return overlay && overlay.querySelector('.configure-actions button.btn-ext.remove');
-}
-
 function setConfigureInlineError(overlay, message) {
   const error = overlay && overlay.querySelector('.configure-inline-error');
   if (!error) return;
@@ -3964,36 +4399,6 @@ function setConfigureInlineError(overlay, message) {
 
 function clearConfigureInlineError(overlay) {
   setConfigureInlineError(overlay, '');
-}
-
-function setConfigureInlineStatus(overlay, message) {
-  const status = overlay && overlay.querySelector('.configure-inline-status');
-  if (!status) return;
-  status.textContent = message || '';
-  status.style.display = message ? 'block' : 'none';
-}
-
-function setTelegramConfigureState(overlay, fields, state) {
-  if (!overlay) return;
-  overlay.dataset.telegramVerificationState = state;
-
-  const primaryBtn = getConfigurePrimaryButton(overlay);
-  const cancelBtn = getConfigureCancelButton(overlay);
-  const waiting = state === 'waiting';
-  const retry = state === 'retry';
-
-  setConfigureInlineStatus(overlay, waiting ? I18n.t('config.telegramOwnerWaiting') : '');
-
-  if (primaryBtn) {
-    primaryBtn.style.display = waiting ? 'none' : '';
-    primaryBtn.disabled = false;
-    primaryBtn.textContent = retry ? I18n.t('config.telegramStartOver') : I18n.t('config.save');
-  }
-  if (cancelBtn) cancelBtn.disabled = waiting;
-}
-
-function startTelegramAutoVerify(name, fields) {
-  window.setTimeout(() => submitConfigureModal(name, fields, { telegramAutoVerify: true }), 0);
 }
 
 function submitConfigureModal(name, fields, options) {
@@ -4013,15 +4418,11 @@ function submitConfigureModal(name, fields, options) {
   }
 
   const overlay = getConfigureOverlay(name) || document.querySelector('.configure-overlay');
-  const isTelegram = name === 'telegram';
   clearConfigureInlineError(overlay);
 
   // Disable buttons to prevent double-submit
   var btns = overlay ? overlay.querySelectorAll('.configure-actions button') : [];
   btns.forEach(function(b) { b.disabled = true; });
-  if (overlay && isTelegram) {
-    setTelegramConfigureState(overlay, fields, 'waiting');
-  }
 
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup', {
     method: 'POST',
@@ -4029,23 +4430,9 @@ function submitConfigureModal(name, fields, options) {
   })
     .then((res) => {
       if (res.success) {
-        if (res.verification && isTelegram) {
-          renderTelegramVerificationChallenge(overlay, res.verification);
-          fields.forEach(function(f) { f.input.value = ''; });
-          setTelegramConfigureState(overlay, fields, 'waiting');
-          // Once the verification challenge is rendered inline, the global auth lock
-          // should not keep the chat composer disabled for this setup-driven flow.
-          setAuthFlowPending(false);
-          enableChatInput();
-          if (!options.telegramAutoVerify) {
-            startTelegramAutoVerify(name, fields);
-            return;
-          }
-          setTelegramConfigureState(overlay, fields, 'retry');
-          setConfigureInlineError(overlay, I18n.t('config.telegramStartOverHint'));
-          return;
-        }
-
+        // Strip auth-flow flag before closing so closeConfigureModal
+        // does not trigger a spurious auth-cancel API call.
+        if (overlay) overlay.removeAttribute('data-auth-flow');
         closeConfigureModal();
         if (res.auth_url) {
           showAuthCard({
@@ -4055,8 +4442,15 @@ function submitConfigureModal(name, fields, options) {
           showToast(I18n.t('extensions.openingOAuth', { name: name }), 'info');
           openOAuthUrl(res.auth_url);
           refreshCurrentSettingsTab();
-        } else if (res.needs_restart) {
-          showToast(I18n.t('extensions.configuredRestart', { name: name }), 'info');
+        }
+        // Transition to pairing if the channel requires it.
+        if (res.onboarding_state === 'pairing_required') {
+          showPairingCard({
+            channel: name,
+            instructions: res.onboarding && res.onboarding.pairing_instructions,
+            onboarding: res.onboarding || null,
+          });
+          refreshCurrentSettingsTab();
         }
         // For non-OAuth success: the server always broadcasts auth_completed SSE,
         // which will show the toast and refresh extensions — no need to do it here too.
@@ -4064,28 +4458,12 @@ function submitConfigureModal(name, fields, options) {
         // Keep modal open so the user can correct their input and retry.
         btns.forEach(function(b) { b.disabled = false; });
         setConfigureInlineError(overlay, res.message || 'Configuration failed');
-        if (isTelegram) {
-          const hasVerification = overlay && overlay.querySelector('.configure-verification');
-          if (options.telegramAutoVerify || hasVerification) {
-            setTelegramConfigureState(overlay, fields, 'retry');
-          } else {
-            setTelegramConfigureState(overlay, fields, 'idle');
-          }
-        }
         showToast(res.message || 'Configuration failed', 'error');
       }
     })
     .catch((err) => {
       btns.forEach(function(b) { b.disabled = false; });
       setConfigureInlineError(overlay, 'Configuration failed: ' + err.message);
-      if (isTelegram) {
-        const hasVerification = overlay && overlay.querySelector('.configure-verification');
-        if (options.telegramAutoVerify || hasVerification) {
-          setTelegramConfigureState(overlay, fields, 'retry');
-        } else {
-          setTelegramConfigureState(overlay, fields, 'idle');
-        }
-      }
       showToast(I18n.t('extensions.configFailed', { message: err.message }), 'error');
     });
 }
@@ -4100,6 +4478,21 @@ function closeConfigureModal(extensionName) {
   }
 }
 
+function cancelAuthFromConfigureModal(overlay) {
+  var extName = overlay.getAttribute('data-auth-extension') || overlay.getAttribute('data-extension-name');
+  var requestId = overlay.getAttribute('data-request-id');
+  var threadId = overlay.getAttribute('data-thread-id');
+  var request = requestId
+    ? apiFetch('/api/chat/gate/resolve', { method: 'POST', body: { request_id: requestId, thread_id: threadId || currentThreadId || undefined, resolution: 'cancelled' } })
+    : apiFetch('/api/chat/auth-cancel', { method: 'POST', body: { extension_name: extName, thread_id: threadId || currentThreadId || undefined } });
+  request.catch(function() {});
+  overlay.remove();
+  if (!document.querySelector('.configure-overlay') && !document.querySelector('.auth-card')) {
+    setAuthFlowPending(false);
+    enableChatInput();
+  }
+}
+
 function currentUserIsAdmin() {
   return !!(window._currentUser && window._currentUser.role === 'admin');
 }
@@ -4108,7 +4501,7 @@ function currentUserIsAdmin() {
 // Rejects javascript:, data:, and other non-HTTPS schemes to prevent URL-injection.
 // Uses the URL constructor to safely parse and validate the scheme, which also
 // handles non-string values (objects, null, etc.) that would throw on .startsWith().
-function openOAuthUrl(url) {
+function parseHttpsExternalUrl(url, label) {
   let parsed;
   try {
     parsed = new URL(url);
@@ -4116,27 +4509,112 @@ function openOAuthUrl(url) {
       throw new Error('non-HTTPS protocol: ' + parsed.protocol);
     }
   } catch (e) {
-    console.warn('Blocked invalid/non-HTTPS OAuth URL:', url, e.message);
+    console.warn(`Blocked invalid/non-HTTPS ${label} URL:`, url, e.message);
     showToast(I18n.t('extensions.invalidOAuthUrl'), 'error');
-    return;
+    return null;
   }
-  window.open(parsed.href, '_blank', 'width=600,height=700');
+  return parsed;
+}
+
+function parseHttpsOAuthUrl(url) {
+  return parseHttpsExternalUrl(url, 'OAuth');
+}
+
+function openOAuthUrl(url) {
+  const parsed = parseHttpsOAuthUrl(url);
+  if (!parsed) return;
+  // `noopener,noreferrer` defends against tabnabbing — without these the
+  // OAuth provider page can read `window.opener` and reach back into the
+  // app tab. `noreferrer` also strips the Referer header.
+  const opened = window.open(
+    parsed.href,
+    '_blank',
+    'width=600,height=700,noopener,noreferrer',
+  );
+  // Some browsers ignore the noopener feature flag in window.open's third
+  // argument when the window is non-null; explicitly null the opener as a
+  // belt-and-suspenders defense.
+  if (opened) {
+    try {
+      opened.opener = null;
+    } catch (_) {
+      /* opener may already be null in cross-origin contexts */
+    }
+  }
 }
 
 // --- Pairing ---
 
-function loadPairingRequests(channel, container) {
+function loadPairingRequests(channel, container, onboarding) {
   if (!currentUserIsAdmin()) return;
 
   apiFetch('/api/pairing/' + encodeURIComponent(channel))
     .then(data => {
       container.innerHTML = '';
-      if (!data.requests || data.requests.length === 0) return;
+
+      const info = onboarding || {};
 
       const heading = document.createElement('div');
       heading.className = 'pairing-heading';
-      heading.textContent = I18n.t('extensions.pendingPairing');
+      heading.textContent = info.pairing_title || I18n.t('extensions.claimPairing');
       container.appendChild(heading);
+
+      const help = document.createElement('div');
+      help.className = 'pairing-help';
+      help.textContent = info.pairing_instructions || I18n.t('extensions.claimPairingHelp');
+      container.appendChild(help);
+
+      const manual = document.createElement('div');
+      manual.className = 'pairing-row pairing-manual';
+
+      const input = document.createElement('input');
+      input.className = 'pairing-manual-input';
+      input.type = 'text';
+      input.placeholder = I18n.t('extensions.pairingCodePlaceholder');
+      input.autocomplete = 'off';
+      input.spellcheck = false;
+      input.autocapitalize = 'characters';
+      input.maxLength = 64;
+      input.addEventListener('keydown', function(event) {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          approvePairing(channel, input.value, {
+            onSuccess: function() {
+              input.value = '';
+              loadPairingRequests(channel, container, onboarding);
+            }
+          });
+        }
+      });
+      manual.appendChild(input);
+
+      const manualBtn = document.createElement('button');
+      manualBtn.className = 'btn-ext activate pairing-manual-submit';
+      manualBtn.textContent = I18n.t('approval.approve');
+      manualBtn.addEventListener('click', function() {
+        approvePairing(channel, input.value, {
+          onSuccess: function() {
+            input.value = '';
+            loadPairingRequests(channel, container, onboarding);
+          }
+        });
+      });
+      manual.appendChild(manualBtn);
+      container.appendChild(manual);
+
+      if (info.restart_instructions) {
+        const restart = document.createElement('div');
+        restart.className = 'pairing-help pairing-restart';
+        restart.textContent = info.restart_instructions;
+        container.appendChild(restart);
+      }
+
+      if (!data.requests || data.requests.length === 0) return;
+
+      const pendingHeading = document.createElement('div');
+      pendingHeading.className = 'pairing-heading';
+      pendingHeading.textContent = I18n.t('extensions.pendingPairing');
+      container.appendChild(pendingHeading);
 
       data.requests.forEach(req => {
         const row = document.createElement('div');
@@ -4158,7 +4636,7 @@ function loadPairingRequests(channel, container) {
         btn.addEventListener('click', function() {
           approvePairing(channel, req.code, {
             onSuccess: function() {
-              loadPairingRequests(channel, container);
+              loadPairingRequests(channel, container, onboarding);
             }
           });
         });
@@ -4170,15 +4648,16 @@ function loadPairingRequests(channel, container) {
     .catch(() => {});
 }
 
-function renderMemberPairingClaim(ext, container) {
+function renderMemberPairingClaim(ext, container, onboarding) {
+  const info = onboarding || {};
   const heading = document.createElement('div');
   heading.className = 'pairing-heading';
-  heading.textContent = I18n.t('extensions.claimPairing');
+  heading.textContent = info.pairing_title || I18n.t('extensions.claimPairing');
   container.appendChild(heading);
 
   const help = document.createElement('div');
   help.className = 'pairing-help';
-  help.textContent = I18n.t('extensions.claimPairingHelp');
+  help.textContent = info.pairing_instructions || I18n.t('extensions.claimPairingHelp');
   container.appendChild(help);
 
   const row = document.createElement('div');
@@ -4213,29 +4692,62 @@ function renderMemberPairingClaim(ext, container) {
   });
 
   container.appendChild(row);
+
+  if (info.restart_instructions) {
+    const restart = document.createElement('div');
+    restart.className = 'pairing-help pairing-restart';
+    restart.textContent = info.restart_instructions;
+    container.appendChild(restart);
+  }
 }
 
 function approvePairing(channel, code, options) {
   options = options || {};
-  apiFetch('/api/pairing/' + encodeURIComponent(channel) + '/approve', {
+  const normalizedCode = (code || '').trim().toUpperCase();
+  if (!normalizedCode) {
+    const message = I18n.t('extensions.pairingCodeRequired');
+    if (typeof options.onError === 'function') {
+      options.onError(message);
+    } else {
+      showToast(message, 'error');
+    }
+    return Promise.resolve();
+  }
+
+  return apiFetch('/api/pairing/' + encodeURIComponent(channel) + '/approve', {
     method: 'POST',
-    body: { code },
+    body: { code: normalizedCode },
   }).then(res => {
     if (res.success) {
-      showToast(I18n.t('extensions.pairingApproved'), 'success');
+      _recentLocalPairingApprovals.set(channel, Date.now());
+      if (!options.skipSuccessToast) {
+        showToast(I18n.t('extensions.pairingApproved'), 'success');
+      }
       if (typeof options.onSuccess === 'function') options.onSuccess(res);
-      refreshCurrentSettingsTab();
+      if (!options.skipRefresh && currentTab === 'settings') refreshCurrentSettingsTab();
     } else {
-      showToast(res.message || I18n.t('extensions.approveFailed'), 'error');
+      const message = res.message || I18n.t('extensions.approveFailed');
+      if (typeof options.onError === 'function') {
+        options.onError(message);
+      } else {
+        showToast(message, 'error');
+      }
     }
-  }).catch(err => showToast(I18n.t('extensions.pairingError', { message: err.message }), 'error'));
+  }).catch(err => {
+    const message = I18n.t('extensions.pairingError', { message: err.message });
+    if (typeof options.onError === 'function') {
+      options.onError(message);
+    } else {
+      showToast(message, 'error');
+    }
+  });
 }
 
 function startPairingPoll() {
   stopPairingPoll();
   pairingPollInterval = setInterval(function() {
     document.querySelectorAll('.ext-pairing[data-channel]').forEach(function(el) {
-      loadPairingRequests(el.getAttribute('data-channel'), el);
+      loadPairingRequests(el.getAttribute('data-channel'), el, el.__onboarding || null);
     });
   }, 10000);
 }
@@ -4253,19 +4765,20 @@ function renderWasmChannelStepper(ext) {
   var stepper = document.createElement('div');
   stepper.className = 'ext-stepper';
 
-  var status = ext.activation_status || 'installed';
+  var status = ext.onboarding_state || ext.activation_status || 'installed';
+  var requiresPairing = !!(ext.onboarding && ext.onboarding.requires_pairing);
 
   var steps = [
-    { label: I18n.t('missions.stepInstalled'), key: 'installed' },
-    { label: I18n.t('missions.stepConfigured'), key: 'configured' },
-    { label: status === 'pairing' ? I18n.t('missions.stepAwaitingPairing') : I18n.t('missions.stepActive'), key: 'active' },
+    { label: I18n.t('missions.stepConfigured'), key: 'setup_required' },
+    { label: requiresPairing ? I18n.t('missions.stepAwaitingPairing') : I18n.t('extensions.activate'), key: 'pairing_required' },
+    { label: I18n.t('missions.stepActive'), key: 'ready' },
   ];
 
   var reachedIdx;
-  if (status === 'active') reachedIdx = 2;
-  else if (status === 'pairing') reachedIdx = 2;
+  if (status === 'active' || status === 'ready') reachedIdx = 2;
+  else if (status === 'pairing' || status === 'pairing_required') reachedIdx = 1;
   else if (status === 'failed') reachedIdx = 2;
-  else if (status === 'configured') reachedIdx = 1;
+  else if (status === 'configured' || status === 'activation_in_progress') reachedIdx = 1;
   else reachedIdx = 0;
 
   for (var i = 0; i < steps.length; i++) {
@@ -4282,9 +4795,11 @@ function renderWasmChannelStepper(ext) {
     } else if (i === reachedIdx) {
       if (status === 'failed') {
         stepState = 'failed';
-      } else if (status === 'pairing') {
+      } else if (status === 'pairing' || status === 'pairing_required' || status === 'activation_in_progress') {
         stepState = 'in-progress';
-      } else if (status === 'active' || status === 'configured' || status === 'installed') {
+      } else if (status === 'setup_required') {
+        stepState = 'in-progress';
+      } else if (status === 'active' || status === 'ready' || status === 'configured' || status === 'installed') {
         stepState = 'completed';
       } else {
         stepState = 'pending';
@@ -4449,7 +4964,7 @@ function renderJobDetail(job) {
     headerHtml += '<button class="btn-restart" data-action="restart-job" data-id="' + escapeHtml(job.id) + '">Retry</button>';
   }
   if (job.browse_url) {
-    headerHtml += '<a class="btn-browse" href="' + escapeHtml(job.browse_url) + '" target="_blank">Browse Files</a>';
+    headerHtml += '<a class="btn-browse" href="' + escapeHtml(job.browse_url) + '" target="_blank" rel="noopener noreferrer">Browse Files</a>';
   }
 
   header.innerHTML = headerHtml;
@@ -5132,7 +5647,7 @@ function renderMissionsList(missions) {
     return '<tr class="mission-row" data-action="open-mission" data-id="' + escapeHtml(m.id) + '">'
       + '<td>' + escapeHtml(m.name) + '</td>'
       + '<td class="truncate">' + escapeHtml(m.goal) + '</td>'
-      + '<td>' + escapeHtml(m.cadence_type) + '</td>'
+      + '<td>' + escapeHtml(m.cadence_description || m.cadence_type) + '</td>'
       + '<td>' + m.thread_count + '</td>'
       + '<td><span class="badge ' + statusClass + '">' + escapeHtml(m.status) + '</span></td>'
       + '<td>'
@@ -5182,7 +5697,7 @@ function renderMissionDetail(m) {
     + '<div class="job-description-body">' + renderMarkdown(m.goal) + '</div></div>';
 
   html += '<div class="job-meta-grid">'
-    + metaItem(I18n.t('missions.cadence'), m.cadence_type)
+    + metaItem(I18n.t('missions.cadence'), m.cadence_description || m.cadence_type)
     + metaItem(I18n.t('missions.status'), m.status)
     + metaItem(I18n.t('missions.threadsToday'), m.threads_today + ' / ' + (m.max_threads_per_day || '∞'))
     + metaItem(I18n.t('missions.totalThreads'), m.thread_count)
@@ -5912,7 +6427,7 @@ function renderCatalogSkillCard(entry, installedNames) {
   name.textContent = entry.name || entry.slug;
   name.href = 'https://clawhub.ai/skills/' + encodeURIComponent(entry.slug);
   name.target = '_blank';
-  name.rel = 'noopener';
+  name.rel = 'noopener noreferrer';
   name.style.textDecoration = 'none';
   name.style.color = 'inherit';
   name.title = I18n.t('skills.viewOnClawHub');
@@ -5985,7 +6500,8 @@ function renderCatalogSkillCard(entry, installedNames) {
   actions.className = 'ext-actions';
 
   var slug = entry.slug || entry.name;
-  var isInstalled = installedNames[entry.name] || installedNames[slug];
+  var slugSuffix = slug.indexOf('/') >= 0 ? slug.split('/').pop() : slug;
+  var isInstalled = entry.installed || installedNames[entry.name] || installedNames[slug] || installedNames[slugSuffix];
 
   if (isInstalled) {
     var label = document.createElement('span');
@@ -5996,14 +6512,14 @@ function renderCatalogSkillCard(entry, installedNames) {
     var installBtn = document.createElement('button');
     installBtn.className = 'btn-ext install';
     installBtn.textContent = I18n.t('extensions.install');
-    installBtn.addEventListener('click', (function(s, btn) {
+    installBtn.addEventListener('click', (function(displayName, slugValue, btn) {
       return function() {
-        if (!confirm(I18n.t('skills.confirmInstallHub', { name: s }))) return;
+        if (!confirm(I18n.t('skills.confirmInstallHub', { name: displayName }))) return;
         btn.disabled = true;
         btn.textContent = I18n.t('extensions.installing');
-        installSkill(s, null, btn);
+        installSkill(displayName, null, btn, slugValue);
       };
-    })(slug, installBtn));
+    })(entry.name || slug, slug, installBtn));
     actions.appendChild(installBtn);
   }
 
@@ -6032,8 +6548,9 @@ function formatTimeAgo(epochMs) {
   return Math.floor(months / 12) + 'y ago';
 }
 
-function installSkill(nameOrSlug, url, btn) {
-  var body = { name: nameOrSlug, slug: nameOrSlug };
+function installSkill(name, url, btn, slug) {
+  var body = { name: name };
+  if (slug) body.slug = slug;
   if (url) body.url = url;
 
   apiFetch('/api/skills/install', {
@@ -6042,12 +6559,19 @@ function installSkill(nameOrSlug, url, btn) {
     body: body,
   }).then(function(res) {
     if (res.success) {
-      showToast(I18n.t('skills.installedSuccess', {name: nameOrSlug}), 'success');
+      showToast(I18n.t('skills.installedSuccess', {name: name}), 'success');
+      if (btn && btn.parentNode) {
+        var label = document.createElement('span');
+        label.className = 'ext-active-label';
+        label.textContent = I18n.t('status.installed');
+        btn.parentNode.innerHTML = '';
+        btn.parentNode.appendChild(label);
+      }
     } else {
       showToast(I18n.t('extensions.installFailed', { message: res.message || 'unknown error' }), 'error');
     }
     loadSkills();
-    if (btn) { btn.disabled = false; btn.textContent = I18n.t('extensions.install'); }
+    if (btn && !res.success) { btn.disabled = false; btn.textContent = I18n.t('extensions.install'); }
   }).catch(function(err) {
     showToast(I18n.t('extensions.installFailed', { message: err.message }), 'error');
     if (btn) { btn.disabled = false; btn.textContent = I18n.t('extensions.install'); }

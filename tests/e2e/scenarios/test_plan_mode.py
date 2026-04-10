@@ -59,17 +59,22 @@ async def test_plan_approve_changes_status(page):
     await chat_input.fill("/plan approve test-plan-001")
     await chat_input.press("Enter")
 
-    # Wait for status to change to "executing"
-    await page.wait_for_function(
-        """() => {
-            const badges = document.querySelectorAll('.plan-status-badge');
-            for (const b of badges) {
-                if (b.textContent.toLowerCase().includes('executing')) return true;
-            }
-            return false;
-        }""",
-        timeout=15000,
-    )
+    execution_started = """() => {
+        const badges = document.querySelectorAll('.plan-status-badge');
+        for (const b of badges) {
+            if (b.textContent.toLowerCase().includes('executing')) return true;
+        }
+        return document.querySelectorAll('.plan-step[data-status="in_progress"]').length >= 1;
+    }"""
+
+    # Approval may kick off execution asynchronously without an immediate
+    # checklist refresh, so fall back to an explicit status refresh.
+    try:
+        await page.wait_for_function(execution_started, timeout=5000)
+    except Exception:
+        await chat_input.fill("/plan status test-plan-001")
+        await chat_input.press("Enter")
+        await page.wait_for_function(execution_started, timeout=15000)
 
     # Verify at least one step is in_progress
     running = page.locator(SEL["plan_step_running"])
