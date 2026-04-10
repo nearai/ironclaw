@@ -20,6 +20,7 @@ use axum::{
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
 use tower_http::cors::{AllowHeaders, CorsLayer};
@@ -1807,6 +1808,21 @@ fn mime_to_ext(mime: &str) -> &str {
     }
 }
 
+fn authenticate_reconfigure_token(state: &GatewayState, token: &str) -> bool {
+    if state
+        .standby_control
+        .as_ref()
+        .map(|control| control.authenticate(token))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    std::env::var("GATEWAY_AUTH_TOKEN")
+        .ok()
+        .is_some_and(|configured| configured.as_bytes().ct_eq(token.as_bytes()).into())
+}
+
 async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -1961,13 +1977,7 @@ async fn reconfigure_handler(
     let token = bearer_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "missing bearer token".to_string()))?;
 
-    // Authenticate: check standby token first, then fall back to gateway auth middleware token
-    let authed = state
-        .standby_control
-        .as_ref()
-        .map(|c| c.authenticate(token))
-        .unwrap_or(false);
-    if !authed {
+    if !authenticate_reconfigure_token(&state, token) {
         return Err((StatusCode::UNAUTHORIZED, "invalid bearer token".to_string()));
     }
 
@@ -3875,6 +3885,7 @@ mod tests {
             .route("/api/health", get(health_handler))
             .route("/api/standby/status", get(standby_status_handler))
             .route("/api/configure", post(configure_handler))
+            .route("/api/reconfigure", post(reconfigure_handler))
             .with_state(state)
     }
 
@@ -4067,6 +4078,35 @@ mod tests {
             .await
             .expect("second response");
         assert_eq!(second_resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_reconfigure_accepts_gateway_auth_token() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let _env_guard = crate::config::helpers::lock_env();
+        let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-test-token"));
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let control = crate::standby::StandbyControl::new("standby-test-token", tx);
+        let app = test_configure_router(test_standby_state(control));
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/reconfigure")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header(axum::http::header::AUTHORIZATION, "Bearer gateway-test-token")
+            .body(Body::from(
+                serde_json::to_vec(&sample_configure_request()).expect("serialize request"),
+            ))
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
