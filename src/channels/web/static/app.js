@@ -3069,19 +3069,53 @@ chatInput.addEventListener('blur', () => {
   setTimeout(hideSlashAutocomplete, 150);
 });
 
-// Infinite scroll: load older messages when scrolled near the top
+// Infinite scroll: load older messages when scrolled near the top.
+// Also toggles the scroll-to-bottom button when the user has scrolled up.
+// The handler is rAF-throttled so rapid scroll events coalesce into at most
+// one layout read per frame.
+let _scrollRafPending = false;
 document.getElementById('chat-messages').addEventListener('scroll', function () {
-  if (this.scrollTop < 100 && hasMore && !loadingOlder) {
+  const container = this;
+  if (container.scrollTop < 100 && hasMore && !loadingOlder) {
     loadingOlder = true;
     // Show spinner at top
     const spinner = document.createElement('div');
     spinner.id = 'scroll-load-spinner';
     spinner.className = 'scroll-load-spinner';
     spinner.innerHTML = '<div class="spinner"></div> Loading older messages...';
-    this.insertBefore(spinner, this.firstChild);
+    container.insertBefore(spinner, container.firstChild);
     loadHistory(oldestTimestamp);
   }
+  if (_scrollRafPending) return;
+  _scrollRafPending = true;
+  requestAnimationFrame(() => {
+    _scrollRafPending = false;
+    const btn = document.getElementById('scroll-to-bottom-btn');
+    if (!btn) return;
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    btn.style.display = distanceFromBottom > 200 ? 'flex' : 'none';
+  });
 });
+
+document.getElementById('scroll-to-bottom-btn').addEventListener('click', () => {
+  const container = document.getElementById('chat-messages');
+  container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+});
+
+// Keep the scroll-to-bottom button anchored just above the chat input,
+// even when the textarea grows to multiple lines.
+(() => {
+  const input = document.querySelector('.chat-container .chat-input');
+  const container = document.querySelector('.chat-container');
+  if (!input || !container || typeof ResizeObserver === 'undefined') return;
+  const ro = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      const h = entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
+      container.style.setProperty('--chat-input-height', `${Math.ceil(h)}px`);
+    }
+  });
+  ro.observe(input);
+})();
 
 function autoResizeTextarea(el) {
   const prev = el.offsetHeight;

@@ -9,8 +9,9 @@ license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 
-[package.metadata.dist]
-dist = false
+[features]
+default = ["clipboard"]
+clipboard = ["dep:arboard", "dep:image"]
 
 [dependencies]
 ratatui = { version = "0.29", features = ["crossterm"] }
@@ -23,8 +24,8 @@ unicode-width = "0.2"
 pulldown-cmark = { version = "0.12", default-features = false }
 thiserror = "2"
 tracing = "0.1"
-arboard = "3"
-image = { version = "0.25", default-features = false, features = ["png"] }
+arboard = { version = "3", optional = true }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

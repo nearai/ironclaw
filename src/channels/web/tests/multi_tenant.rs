@@ -925,6 +925,364 @@ mod admin_role_enforcement {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Admin Tool Policy Tests
+// ═══════════════════════════════════════════════════════════════════════
+
+mod admin_tool_policy {
+    use super::*;
+    use crate::channels::web::handlers::tool_policy::{
+        tool_policy_get_handler, tool_policy_put_handler,
+    };
+
+    /// Build a `GatewayState` with `workspace_pool` set (multi-tenant mode).
+    #[cfg(feature = "libsql")]
+    fn build_multi_tenant_state(db: Arc<dyn crate::db::Database>) -> Arc<GatewayState> {
+        let pool = WorkspacePool::new(
+            Arc::clone(&db),
+            None,
+            crate::workspace::EmbeddingCacheConfig::default(),
+            crate::config::WorkspaceSearchConfig::default(),
+            crate::config::WorkspaceConfig::default(),
+        );
+        Arc::new(GatewayState {
+            msg_tx: tokio::sync::RwLock::new(None),
+            sse: Arc::new(SseManager::new()),
+            workspace: None,
+            workspace_pool: Some(Arc::new(pool)),
+            session_manager: None,
+            log_broadcaster: None,
+            log_level_handle: None,
+            extension_manager: None,
+            tool_registry: None,
+            store: Some(db),
+            job_manager: None,
+            prompt_queue: None,
+            owner_id: "test".to_string(),
+            shutdown_tx: tokio::sync::RwLock::new(None),
+            ws_tracker: None,
+            llm_provider: None,
+            skill_registry: None,
+            skill_catalog: None,
+            scheduler: None,
+            chat_rate_limiter: PerUserRateLimiter::new(30, 60),
+            oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
+            webhook_rate_limiter: RateLimiter::new(10, 60),
+            registry_entries: Vec::new(),
+            cost_guard: None,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+            startup_time: std::time::Instant::now(),
+            active_config: ActiveConfigSnapshot::default(),
+            secrets_store: None,
+            db_auth: None,
+            pairing_store: None,
+            oauth_providers: None,
+            oauth_state_store: None,
+            oauth_base_url: None,
+            oauth_allowed_domains: Vec::new(),
+            near_nonce_store: None,
+            near_rpc_url: None,
+            near_network: None,
+            oauth_sweep_shutdown: None,
+            auth_manager: None,
+            tool_dispatcher: None,
+        })
+    }
+
+    /// Build a router for tool policy endpoints (single-user mode: workspace_pool=None).
+    fn tool_policy_router() -> Router {
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "tok-admin".to_string(),
+            UserIdentity {
+                user_id: "admin-user".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: vec![],
+            },
+        );
+        tokens.insert(
+            "tok-member".to_string(),
+            UserIdentity {
+                user_id: "member-user".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: vec![],
+            },
+        );
+        let auth = MultiAuthState::multi(tokens);
+        let state = build_state(None, None);
+
+        Router::new()
+            .route(
+                "/api/admin/tool-policy",
+                get(tool_policy_get_handler).put(tool_policy_put_handler),
+            )
+            .layer(middleware::from_fn_with_state(
+                crate::channels::web::auth::CombinedAuthState::from(auth),
+                auth_middleware,
+            ))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn test_tool_policy_rejects_member() {
+        let app = tool_policy_router();
+
+        // GET should be 403 for member
+        let req = Request::builder()
+            .uri("/api/admin/tool-policy")
+            .header("Authorization", "Bearer tok-member")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // PUT should be 403 for member
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/api/admin/tool-policy")
+            .header("Authorization", "Bearer tok-member")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"disabled_tools":[]}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_tool_policy_returns_404_in_single_user_mode() {
+        let app = tool_policy_router();
+
+        let req = Request::builder()
+            .uri("/api/admin/tool-policy")
+            .header("Authorization", "Bearer tok-admin")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_tool_policy_crud_with_db() {
+        let (db, _dir) = test_db().await;
+        let state = build_multi_tenant_state(db);
+
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "tok-admin".to_string(),
+            UserIdentity {
+                user_id: "admin-user".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: vec![],
+            },
+        );
+        let auth = MultiAuthState::multi(tokens);
+
+        let app = Router::new()
+            .route(
+                "/api/admin/tool-policy",
+                get(tool_policy_get_handler).put(tool_policy_put_handler),
+            )
+            .layer(middleware::from_fn_with_state(
+                crate::channels::web::auth::CombinedAuthState::from(auth),
+                auth_middleware,
+            ))
+            .with_state(state);
+
+        // GET should return empty default policy
+        let req = Request::builder()
+            .uri("/api/admin/tool-policy")
+            .header("Authorization", "Bearer tok-admin")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let policy: crate::tools::permissions::AdminToolPolicy =
+            serde_json::from_slice(&body).unwrap();
+        assert!(policy.is_empty());
+
+        // PUT a policy
+        let new_policy = serde_json::json!({
+            "disabled_tools": ["build_software", "tool_install"],
+            "user_disabled_tools": {"alice": ["shell"]}
+        });
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/api/admin/tool-policy")
+            .header("Authorization", "Bearer tok-admin")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_string(&new_policy).unwrap()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // GET should return persisted policy
+        let req = Request::builder()
+            .uri("/api/admin/tool-policy")
+            .header("Authorization", "Bearer tok-admin")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let policy: crate::tools::permissions::AdminToolPolicy =
+            serde_json::from_slice(&body).unwrap();
+        assert!(policy.disabled_tools.contains("build_software"));
+        assert!(policy.disabled_tools.contains("tool_install"));
+        assert!(policy.is_tool_disabled("shell", "alice"));
+        assert!(!policy.is_tool_disabled("shell", "bob"));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_tool_policy_put_validates_tool_names() {
+        let (db, _dir) = test_db().await;
+        let state = build_multi_tenant_state(db);
+
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "tok-admin".to_string(),
+            UserIdentity {
+                user_id: "admin-user".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: vec![],
+            },
+        );
+        let auth = MultiAuthState::multi(tokens);
+
+        let app = Router::new()
+            .route(
+                "/api/admin/tool-policy",
+                get(tool_policy_get_handler).put(tool_policy_put_handler),
+            )
+            .layer(middleware::from_fn_with_state(
+                crate::channels::web::auth::CombinedAuthState::from(auth),
+                auth_middleware,
+            ))
+            .with_state(state);
+
+        // Empty tool name should be rejected
+        let bad_policy = serde_json::json!({
+            "disabled_tools": [""]
+        });
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/api/admin/tool-policy")
+            .header("Authorization", "Bearer tok-admin")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_string(&bad_policy).unwrap()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Path-like tool names should also be rejected.
+        let bad_policy = serde_json::json!({
+            "disabled_tools": ["../shell"]
+        });
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/api/admin/tool-policy")
+            .header("Authorization", "Bearer tok-admin")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_string(&bad_policy).unwrap()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_tool_policy_put_validates_user_disabled_tool_keys() {
+        let (db, _dir) = test_db().await;
+        let state = build_multi_tenant_state(db);
+
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "tok-admin".to_string(),
+            UserIdentity {
+                user_id: "admin-user".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: vec![],
+            },
+        );
+        let auth = MultiAuthState::multi(tokens);
+
+        let app = Router::new()
+            .route(
+                "/api/admin/tool-policy",
+                get(tool_policy_get_handler).put(tool_policy_put_handler),
+            )
+            .layer(middleware::from_fn_with_state(
+                crate::channels::web::auth::CombinedAuthState::from(auth),
+                auth_middleware,
+            ))
+            .with_state(state);
+
+        let bad_policy = serde_json::json!({
+            "user_disabled_tools": {
+                "../member-user": ["shell"]
+            }
+        });
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/api/admin/tool-policy")
+            .header("Authorization", "Bearer tok-admin")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_string(&bad_policy).unwrap()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_tool_policy_put_rejects_oversized_policy() {
+        let (db, _dir) = test_db().await;
+        let state = build_multi_tenant_state(db);
+
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "tok-admin".to_string(),
+            UserIdentity {
+                user_id: "admin-user".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: vec![],
+            },
+        );
+        let auth = MultiAuthState::multi(tokens);
+
+        let app = Router::new()
+            .route(
+                "/api/admin/tool-policy",
+                get(tool_policy_get_handler).put(tool_policy_put_handler),
+            )
+            .layer(middleware::from_fn_with_state(
+                crate::channels::web::auth::CombinedAuthState::from(auth),
+                auth_middleware,
+            ))
+            .with_state(state);
+
+        let oversized_tools: Vec<String> = (0..5_000).map(|i| format!("tool_{i}")).collect();
+        let bad_policy = serde_json::json!({
+            "disabled_tools": oversized_tools
+        });
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/api/admin/tool-policy")
+            .header("Authorization", "Bearer tok-admin")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_string(&bad_policy).unwrap()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // DbAuthenticator Cache Bounded Tests
 // ═══════════════════════════════════════════════════════════════════════
 
