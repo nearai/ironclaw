@@ -1129,7 +1129,15 @@ fn classify_trap_error(error: wasmtime::Error, limits: &ResourceLimits) -> WasmE
     {
         return WasmError::FuelExhausted { limit: limits.fuel };
     }
-    if error_str.contains("unreachable") {
+    // Match wasmtime's actual Display string for UnreachableCodeReached.
+    // A bare `contains("unreachable")` would false-positive on HTTP errors
+    // like "endpoint was unreachable" or "server unreachable: connection
+    // refused", replacing the real diagnostic with a misleading generic
+    // "unreachable code executed" message.
+    if error_str.contains("unreachable code")
+        || error_str.contains("UnreachableCodeReached")
+        || error_str.contains("wasm trap: unreachable")
+    {
         return WasmError::Trapped("unreachable code executed".to_string());
     }
 

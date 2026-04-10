@@ -1198,6 +1198,13 @@ pub async fn is_authenticated(
             // Fall back to legacy (pre-hyphen-normalization) secret name
             // so existing users with tokens stored under hyphenated server
             // names are not forced to re-authenticate after upgrade.
+            //
+            // Intentionally uses bare `get_decrypted` (no refresh) — the
+            // legacy path is transitional. Users whose token is expired
+            // will re-auth once and get migrated to the canonical name.
+            // Wiring `resolve_access_token_string_with_refresh` through the
+            // legacy naming scheme adds complexity for a path that
+            // self-heals after one re-auth cycle.
             if let Some(legacy_name) = server_config.legacy_token_secret_name() {
                 secrets.get_decrypted(user_id, &legacy_name).await.is_ok()
             } else {

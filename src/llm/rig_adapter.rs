@@ -301,6 +301,22 @@ fn merge_top_level_variant_properties(schema: &JsonValue) -> serde_json::Map<Str
     merged
 }
 
+/// Cheaply estimate the number of nodes in a `serde_json::Value` tree.
+///
+/// Used by `flatten_top_level` to gate the `serde_json::to_string` call:
+/// serializing a many-MB schema (from a malicious or extremely verbose MCP
+/// server) would allocate proportionally even though we only keep 1500 bytes
+/// of the output. This recursive walk counts every leaf and container node
+/// and returns early once it exceeds the caller's budget (no full traversal
+/// needed for the rejection case).
+fn count_json_nodes(value: &JsonValue) -> usize {
+    match value {
+        JsonValue::Array(arr) => 1 + arr.iter().map(count_json_nodes).sum::<usize>(),
+        JsonValue::Object(map) => 1 + map.values().map(count_json_nodes).sum::<usize>(),
+        _ => 1,
+    }
+}
+
 /// Replace `parameters` with a permissive object envelope and append the
 /// original schema to `description` as advisory text. Truncates the hint on a
 /// char boundary if the original schema is too large to fit in a reasonable
@@ -319,27 +335,39 @@ fn flatten_top_level(parameters: &mut JsonValue, description: &mut String) {
     // typical MCP dispatcher schema and still leaves room for the original
     // tool description above it.
     const SCHEMA_HINT_MAX_BYTES: usize = 1500;
+    // Defense against malicious MCP servers: cap how large a schema we're
+    // willing to serialize into a string. `serde_json::to_string` allocates
+    // the full output before we can truncate, so a many-MB schema would
+    // cause a proportional allocation even though we only keep 1500 bytes.
+    // We estimate the node count first (cheap recursive walk, no alloc) and
+    // skip the serialization entirely if it's too large.
+    const MAX_SCHEMA_NODES: usize = 5_000;
 
     let detected = detect_forbidden_top_level(parameters);
     let merged_properties = merge_top_level_variant_properties(parameters);
 
-    if let Ok(original_text) = serde_json::to_string(parameters)
-        && !original_text.is_empty()
-    {
-        let hint = if original_text.len() > SCHEMA_HINT_MAX_BYTES {
-            // Truncate on a char boundary to avoid splitting a multi-byte
-            // character. JSON output's structural characters are ASCII but
-            // string field values can be arbitrary unicode.
-            let mut end = SCHEMA_HINT_MAX_BYTES;
-            while end > 0 && !original_text.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!("{} ... (truncated)", &original_text[..end])
-        } else {
-            original_text
-        };
+    let node_count = count_json_nodes(parameters);
+    if node_count <= MAX_SCHEMA_NODES {
+        if let Ok(original_text) = serde_json::to_string(parameters)
+            && !original_text.is_empty()
+        {
+            let hint = if original_text.len() > SCHEMA_HINT_MAX_BYTES {
+                let mut end = SCHEMA_HINT_MAX_BYTES;
+                while end > 0 && !original_text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{} ... (truncated)", &original_text[..end])
+            } else {
+                original_text
+            };
+            description.push_str(schema_flatten_hint_intro(detected));
+            description.push_str(&hint);
+        }
+    } else {
         description.push_str(schema_flatten_hint_intro(detected));
-        description.push_str(&hint);
+        description.push_str(&format!(
+            "(schema too large to inline: ~{node_count} nodes. See upstream MCP server for the full schema.)"
+        ));
     }
 
     *parameters = serde_json::json!({
