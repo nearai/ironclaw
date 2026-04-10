@@ -3174,4 +3174,97 @@ mod tests {
         assert_eq!(result.action_call_id.as_deref(), Some("call_xyz"));
         assert_eq!(result.action_name.as_deref(), Some("notion_notion_search"));
     }
+
+    /// Regression for the gate-resume / bootstrap path: when a thread
+    /// resumes after approval or auth, `build_orchestrator_inputs`
+    /// serializes `thread.internal_messages` into the bootstrap context
+    /// that Python reads into `working_messages`. If `action_calls` is
+    /// serialized with canonical `ActionCall` field names (`action_name`,
+    /// `id`, `parameters`) instead of the Python interchange names
+    /// (`name`, `call_id`, `params`), the next `__llm_complete__` call
+    /// passes them back through `json_to_thread_messages` which fails
+    /// with "missing field `name`" and orphans every subsequent tool
+    /// result.
+    ///
+    /// This test simulates the full round-trip: build a `ThreadMessage`
+    /// with action_calls → serialize through `build_orchestrator_inputs`'s
+    /// exact serialization pattern → parse back through
+    /// `json_to_thread_messages` → assert the calls survive. If anyone
+    /// adds a THIRD serialization path in the future and uses canonical
+    /// names, this test documents the pattern they should follow.
+    #[test]
+    fn bootstrap_context_action_calls_round_trip_through_python_interchange() {
+        // Build a thread message the way the engine does: an assistant
+        // message with action_calls in canonical ActionCall format (the
+        // shape stored in the DB / internal_messages).
+        let msg = ThreadMessage::assistant_with_actions(
+            Some("I'll search for that".to_string()),
+            vec![ActionCall {
+                id: "call_resume_test".to_string(),
+                action_name: "google_drive_tool".to_string(),
+                parameters: serde_json::json!({"query": "budget"}),
+            }],
+        );
+
+        // Serialize through the SAME pattern `build_orchestrator_inputs`
+        // uses. This is the exact code path that was broken before the
+        // fix — it was using `"action_calls": m.action_calls` which
+        // produced canonical field names.
+        let calls_json = msg
+            .action_calls
+            .as_ref()
+            .map(|calls| serde_json::Value::Array(action_calls_to_python_json(calls)));
+        let serialized = serde_json::json!([{
+            "role": "Assistant",
+            "content": msg.content,
+            "action_name": msg.action_name,
+            "action_call_id": msg.action_call_id,
+            "action_calls": calls_json,
+        }]);
+
+        // Parse back through the same path Python's working_messages
+        // takes when it calls __llm_complete__.
+        let parsed = json_to_thread_messages(&serialized).expect("must parse");
+        assert_eq!(parsed.len(), 1);
+
+        let assistant = &parsed[0];
+        let calls = assistant.action_calls.as_ref().expect(
+            "bootstrap context action_calls must survive the round-trip. \
+                 If this fails, a serialization path is using canonical ActionCall \
+                 field names instead of PythonActionCall interchange names.",
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_resume_test");
+        assert_eq!(calls[0].action_name, "google_drive_tool");
+        assert_eq!(calls[0].parameters, serde_json::json!({"query": "budget"}));
+    }
+
+    /// Negative regression: verify that canonical ActionCall field names
+    /// do NOT round-trip. If this test ever PASSES, it means someone
+    /// added `#[serde(rename)]` to ActionCall or changed the parser to
+    /// accept both formats — which is fine, but the PythonActionCall
+    /// interchange type can then be removed. This test documents the
+    /// current contract: canonical names are rejected by the parser.
+    #[test]
+    fn canonical_action_call_field_names_do_not_round_trip() {
+        let serialized_with_canonical_names = serde_json::json!([{
+            "role": "Assistant",
+            "content": "",
+            "action_calls": [{
+                "action_name": "search",
+                "id": "call_x",
+                "parameters": {}
+            }],
+        }]);
+        let parsed =
+            json_to_thread_messages(&serialized_with_canonical_names).expect("messages parse");
+        // The assistant message should have NO action_calls because the
+        // parser rejects canonical field names.
+        assert!(
+            parsed[0].action_calls.is_none(),
+            "canonical ActionCall field names must NOT parse as action_calls. \
+             If this assertion fails, the PythonActionCall interchange type \
+             is no longer needed — either remove it or update the contract."
+        );
+    }
 }
