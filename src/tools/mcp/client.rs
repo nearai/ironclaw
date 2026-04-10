@@ -68,12 +68,12 @@ impl McpClient {
     /// Create a new simple MCP client (no authentication).
     ///
     /// Use this for local development servers or servers that don't require auth.
-    pub fn new(server_url: impl Into<String>) -> Self {
+    pub fn new(server_url: impl Into<String>) -> Result<Self, ToolError> {
         let url: String = server_url.into();
         let name = extract_server_name(&url);
-        let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.clone()));
+        let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.clone())?);
 
-        Self {
+        Ok(Self {
             transport,
             server_url: url,
             server_name: name,
@@ -87,18 +87,21 @@ impl McpClient {
             server_config: None,
             custom_headers: HashMap::new(),
             initialized: tokio::sync::OnceCell::new(),
-        }
+        })
     }
 
     /// Create a new simple MCP client with a specific name.
     ///
     /// Use this when you have a configured server name but no authentication.
-    pub fn new_with_name(server_name: impl Into<String>, server_url: impl Into<String>) -> Self {
+    pub fn new_with_name(
+        server_name: impl Into<String>,
+        server_url: impl Into<String>,
+    ) -> Result<Self, ToolError> {
         let name: String = server_name.into();
         let url: String = server_url.into();
-        let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.clone()));
+        let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.clone())?);
 
-        Self {
+        Ok(Self {
             transport,
             server_url: url,
             server_name: name,
@@ -112,7 +115,7 @@ impl McpClient {
             server_config: None,
             custom_headers: HashMap::new(),
             initialized: tokio::sync::OnceCell::new(),
-        }
+        })
     }
 
     /// Create a new simple MCP client from an HTTP server configuration (no authentication).
@@ -136,7 +139,7 @@ impl McpClient {
                     .to_string(),
             ));
         }
-        let transport = Arc::new(HttpMcpTransport::new(
+        let transport = Arc::new(HttpMcpTransport::new_unchecked(
             config.url.clone(),
             config.name.clone(),
         ));
@@ -166,15 +169,15 @@ impl McpClient {
         session_manager: Arc<McpSessionManager>,
         secrets: Arc<dyn SecretsStore + Send + Sync>,
         user_id: impl Into<String>,
-    ) -> Self {
+    ) -> Result<Self, ToolError> {
         let transport = Arc::new(
-            HttpMcpTransport::new(config.url.clone(), config.name.clone())
+            HttpMcpTransport::new(config.url.clone(), config.name.clone())?
                 .with_session_manager(session_manager.clone()),
         );
 
         let custom_headers = config.headers.clone();
 
-        Self {
+        Ok(Self {
             transport,
             server_url: config.url.clone(),
             server_name: config.name.clone(),
@@ -185,6 +188,57 @@ impl McpClient {
             user_id: user_id.into(),
             server_config: Some(config),
             custom_headers,
+            initialized: tokio::sync::OnceCell::new(),
+        })
+    }
+
+    /// Create a new simple MCP client without IP validation.
+    ///
+    /// Only available in tests — allows connecting to localhost servers.
+    #[cfg(test)]
+    pub fn new_unchecked(server_url: impl Into<String>) -> Self {
+        let url: String = server_url.into();
+        let name = extract_server_name(&url);
+        let transport = Arc::new(HttpMcpTransport::new_unchecked(url.clone(), name.clone()));
+
+        Self {
+            transport,
+            server_url: url,
+            server_name: name,
+            next_id: AtomicU64::new(1),
+            tools_cache: RwLock::new(None),
+            session_manager: None,
+            secrets: None,
+            user_id: "<unset>".to_string(),
+            server_config: None,
+            custom_headers: HashMap::new(),
+            initialized: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    /// Create a new simple MCP client with a specific name, without IP validation.
+    ///
+    /// Only available in tests — allows connecting to localhost servers.
+    #[cfg(test)]
+    pub fn new_with_name_unchecked(
+        server_name: impl Into<String>,
+        server_url: impl Into<String>,
+    ) -> Self {
+        let name: String = server_name.into();
+        let url: String = server_url.into();
+        let transport = Arc::new(HttpMcpTransport::new_unchecked(url.clone(), name.clone()));
+
+        Self {
+            transport,
+            server_url: url,
+            server_name: name,
+            next_id: AtomicU64::new(1),
+            tools_cache: RwLock::new(None),
+            session_manager: None,
+            secrets: None,
+            user_id: "<unset>".to_string(),
+            server_config: None,
+            custom_headers: HashMap::new(),
             initialized: tokio::sync::OnceCell::new(),
         }
     }
@@ -727,7 +781,7 @@ mod tests {
 
     #[test]
     fn test_simple_client_creation() {
-        let client = McpClient::new("http://localhost:8080");
+        let client = McpClient::new_unchecked("http://localhost:8080");
         assert_eq!(client.server_url(), "http://localhost:8080");
         assert!(client.session_manager.is_none());
         assert!(client.secrets.is_none());
@@ -775,7 +829,7 @@ mod tests {
 
     #[test]
     fn test_new_defaults() {
-        let client = McpClient::new("http://localhost:9999");
+        let client = McpClient::new_unchecked("http://localhost:9999");
         assert_eq!(client.server_url(), "http://localhost:9999");
         assert_eq!(client.server_name(), "localhost");
         assert!(client.session_manager.is_none());
@@ -785,7 +839,7 @@ mod tests {
 
     #[test]
     fn test_new_with_name_uses_custom_name() {
-        let client = McpClient::new_with_name("my-server", "http://localhost:8080");
+        let client = McpClient::new_with_name_unchecked("my-server", "http://localhost:8080");
         assert_eq!(client.server_name(), "my-server");
         assert_eq!(client.server_url(), "http://localhost:8080");
         assert_eq!(client.user_id, "<unset>");
@@ -795,20 +849,21 @@ mod tests {
 
     #[test]
     fn test_server_name_accessor() {
-        let client = McpClient::new("https://tools.example.org/mcp");
+        let client = McpClient::new_unchecked("https://tools.example.org/mcp");
         assert_eq!(client.server_name(), "tools_example_org");
     }
 
     #[test]
     fn test_server_url_accessor() {
         let url = "https://tools.example.org/mcp?v=2";
-        let client = McpClient::new(url);
+        let client = McpClient::new_unchecked(url);
         assert_eq!(client.server_url(), url);
     }
 
     #[test]
     fn test_clone_preserves_fields() {
-        let client = McpClient::new_with_name("cloned-server", "http://localhost:5555");
+        let client =
+            McpClient::new_with_name_unchecked("cloned-server", "http://localhost:5555");
         client.next_request_id();
         client.next_request_id();
         let cloned = client.clone();
@@ -820,7 +875,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_clone_resets_tools_cache() {
-        let client = McpClient::new("http://localhost:5555");
+        let client = McpClient::new_unchecked("http://localhost:5555");
         let cloned = client.clone();
         let cache = cloned.tools_cache.read().await;
         assert!(cache.is_none());
@@ -855,7 +910,7 @@ mod tests {
 
     #[test]
     fn test_with_session_manager() {
-        let client = McpClient::new("http://localhost:8080");
+        let client = McpClient::new_unchecked("http://localhost:8080");
         assert!(!client.has_session_manager());
 
         let session_manager = Arc::new(McpSessionManager::new());
@@ -866,7 +921,7 @@ mod tests {
 
     #[test]
     fn test_next_request_id_monotonically_increasing() {
-        let client = McpClient::new("http://localhost:1234");
+        let client = McpClient::new_unchecked("http://localhost:1234");
         assert_eq!(client.next_request_id(), 1);
         assert_eq!(client.next_request_id(), 2);
         assert_eq!(client.next_request_id(), 3);
@@ -1060,7 +1115,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_transport_supports_http_features_accessor() {
-        let http_transport = HttpMcpTransport::new("http://localhost:8080", "test");
+        let http_transport = HttpMcpTransport::new_unchecked("http://localhost:8080", "test");
         assert!(http_transport.supports_http_features());
         let mock_non_http = MockTransport::new(false, vec![]);
         assert!(!mock_non_http.supports_http_features());
@@ -1273,7 +1328,7 @@ mod tests {
 
     #[test]
     fn test_mcp_tool_wrapper_name_is_prefixed() {
-        let client = Arc::new(McpClient::new("http://localhost:8080"));
+        let client = Arc::new(McpClient::new_unchecked("http://localhost:8080"));
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(false),
             prefixed_name: "mcp__myserver__do_thing".to_string(),
@@ -1284,7 +1339,7 @@ mod tests {
 
     #[test]
     fn test_mcp_tool_wrapper_description() {
-        let client = Arc::new(McpClient::new("http://localhost:8080"));
+        let client = Arc::new(McpClient::new_unchecked("http://localhost:8080"));
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(false),
             prefixed_name: "mcp__s__do_thing".to_string(),
@@ -1295,7 +1350,7 @@ mod tests {
 
     #[test]
     fn test_mcp_tool_wrapper_parameters_schema() {
-        let client = Arc::new(McpClient::new("http://localhost:8080"));
+        let client = Arc::new(McpClient::new_unchecked("http://localhost:8080"));
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(false),
             prefixed_name: "mcp__s__do_thing".to_string(),
@@ -1308,7 +1363,7 @@ mod tests {
 
     #[test]
     fn test_mcp_tool_wrapper_requires_sanitization() {
-        let client = Arc::new(McpClient::new("http://localhost:8080"));
+        let client = Arc::new(McpClient::new_unchecked("http://localhost:8080"));
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(false),
             prefixed_name: "mcp__s__do_thing".to_string(),
@@ -1322,7 +1377,7 @@ mod tests {
 
     #[test]
     fn test_mcp_tool_wrapper_approval_destructive() {
-        let client = Arc::new(McpClient::new("http://localhost:8080"));
+        let client = Arc::new(McpClient::new_unchecked("http://localhost:8080"));
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(true),
             prefixed_name: "mcp__s__do_thing".to_string(),
@@ -1334,7 +1389,7 @@ mod tests {
 
     #[test]
     fn test_mcp_tool_wrapper_approval_non_destructive() {
-        let client = Arc::new(McpClient::new("http://localhost:8080"));
+        let client = Arc::new(McpClient::new_unchecked("http://localhost:8080"));
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(false),
             prefixed_name: "mcp__s__do_thing".to_string(),
@@ -1400,7 +1455,8 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(EmptyTokenStore);
 
-        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user");
+        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user")
+            .unwrap();
 
         let headers = client.build_request_headers().await.unwrap(); // safety: test
         assert!(
@@ -1465,7 +1521,8 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(PaddedTokenStore);
 
-        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user");
+        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user")
+            .unwrap();
 
         let headers = client.build_request_headers().await.unwrap(); // safety: test
         assert_eq!(

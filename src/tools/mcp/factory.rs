@@ -21,6 +21,8 @@ pub enum McpFactoryError {
     UnixNotSupported { name: String },
     #[error("Invalid configuration for MCP server '{name}': {reason}")]
     InvalidConfig { name: String, reason: String },
+    #[error("{0}")]
+    Transport(#[from] crate::tools::tool::ToolError),
 }
 
 /// Create an `McpClient` from a server configuration, dispatching on the
@@ -90,7 +92,7 @@ pub async fn create_client_from_config(
                         Arc::clone(session_manager),
                         Arc::clone(secrets),
                         user_id,
-                    ));
+                    )?);
                 }
             }
 
@@ -99,7 +101,7 @@ pub async fn create_client_from_config(
             // the client (via `with_session_manager`) is not enough — the
             // transport must know about it to read/write the header.
             let transport = Arc::new(
-                HttpMcpTransport::new(server.url.clone(), server.name.clone())
+                HttpMcpTransport::new(server.url.clone(), server.name.clone())?
                     .with_session_manager(Arc::clone(session_manager)),
             );
             Ok(McpClient::new_with_transport(

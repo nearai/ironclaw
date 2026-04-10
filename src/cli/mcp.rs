@@ -516,6 +516,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
     let client = if has_tokens {
         // We have stored tokens, use authenticated client
         McpClient::new_authenticated(server.clone(), session_manager.clone(), secrets, user_id)
+            .map_err(|e| anyhow::anyhow!("{}", e))?
     } else if server.has_custom_auth_header() {
         let process_manager = Arc::new(McpProcessManager::new());
         create_client_from_config(
