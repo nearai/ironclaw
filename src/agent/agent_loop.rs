@@ -1345,14 +1345,11 @@ impl Agent {
             && !message.content.trim().starts_with('/')
         {
             let has_pending = crate::bridge::has_pending_auth(&message.user_id).await
-                || crate::bridge::get_engine_pending_gate(
+                || crate::bridge::has_any_pending_gate(
                     &message.user_id,
                     message.conversation_scope(),
                 )
-                .await
-                .ok()
-                .flatten()
-                .is_some();
+                .await;
             if !has_pending {
                 submission = Submission::UserInput {
                     content: message.content.clone(),

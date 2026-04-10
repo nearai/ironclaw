@@ -608,14 +608,16 @@ async def test_bare_yes_treated_as_chat_when_no_approval_pending_api(ironclaw_se
     # The LLM should process it as a regular message and produce a response.
     # The mock LLM returns "I understand your request." for unrecognized input.
     # Critically, the response must NOT be "No pending approval for this thread."
+    # Wait for a non-null response (not just turn existence) to avoid flakiness.
     history = await _wait_for_history(
         ironclaw_server,
         thread_id,
         turn_count_at_least=1,
+        response_fragment="",  # any non-null response
         timeout=15.0,
     )
 
-    response_text = history["turns"][-1].get("response", "")
+    response_text = history["turns"][-1].get("response") or ""
     assert "No pending approval" not in response_text, (
         f"Bare 'yes' was intercepted as approval instead of chat input. Got: {response_text!r}"
     )
@@ -632,10 +634,11 @@ async def test_bare_no_treated_as_chat_when_no_approval_pending_api(ironclaw_ser
         ironclaw_server,
         thread_id,
         turn_count_at_least=1,
+        response_fragment="",  # any non-null response
         timeout=15.0,
     )
 
-    response_text = history["turns"][-1].get("response", "")
+    response_text = history["turns"][-1].get("response") or ""
     assert "No pending approval" not in response_text, (
         f"Bare 'no' was intercepted as approval instead of chat input. Got: {response_text!r}"
     )
