@@ -134,10 +134,14 @@ impl LlmConfig {
             );
         }
 
-        // Session config (used by NearAI provider for OAuth/session-token auth)
+        // Session config (used by NearAI provider for OAuth/session-token auth).
+        // Only validate (DNS-resolve) the auth URL when nearai is the active
+        // backend — otherwise startup fails if the hostname is unreachable (#1826).
         let nearai_auth_url = optional_env("NEARAI_AUTH_URL")?
             .unwrap_or_else(|| "https://private.near.ai".to_string());
-        validate_base_url(&nearai_auth_url, "NEARAI_AUTH_URL")?;
+        if is_nearai {
+            validate_base_url(&nearai_auth_url, "NEARAI_AUTH_URL")?;
+        }
         let session = SessionConfig {
             auth_base_url: nearai_auth_url,
             session_path: optional_env("NEARAI_SESSION_PATH")?
@@ -172,7 +176,10 @@ impl LlmConfig {
         } else {
             "https://private.near.ai".to_string()
         };
-        validate_base_url(&nearai_base_url, "NEARAI_BASE_URL")?;
+        // Only DNS-resolve the base URL when nearai is active (#1826).
+        if is_nearai {
+            validate_base_url(&nearai_base_url, "NEARAI_BASE_URL")?;
+        }
         let nearai = NearAiConfig {
             model: nearai_model,
             cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
@@ -2155,6 +2162,40 @@ mod tests {
             cfg.nearai.base_url, "https://cloud-api.near.ai",
             "With API key, should default to cloud-api.near.ai"
         );
+    }
+
+    /// Regression test for #1826: when the backend is NOT nearai, config
+    /// resolution must succeed even if NEARAI_AUTH_URL points to an
+    /// unresolvable hostname (no DNS lookup should be attempted).
+    #[test]
+    fn non_nearai_backend_skips_nearai_url_validation() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            // Point auth/base URLs at a hostname that will never resolve.
+            std::env::set_var("NEARAI_AUTH_URL", "https://does-not-exist.invalid");
+            std::env::set_var("NEARAI_BASE_URL", "https://also-unresolvable.invalid");
+            std::env::remove_var("NEARAI_API_KEY");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai".to_string()),
+            ..Default::default()
+        };
+
+        // Must not fail — the unreachable NEARAI URLs should be ignored.
+        let cfg = LlmConfig::resolve(&settings).expect(
+            "resolve must succeed when nearai is not the backend, \
+             even with unreachable NEARAI_AUTH_URL (#1826)",
+        );
+        assert_eq!(cfg.backend, "openai");
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("NEARAI_AUTH_URL");
+            std::env::remove_var("NEARAI_BASE_URL");
+        }
     }
 
     #[test]
