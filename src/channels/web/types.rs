@@ -438,8 +438,24 @@ pub struct ExtensionInfo {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ExtensionReadinessInfo {
+    pub name: String,
+    pub kind: String,
+    pub phase: String,
+    pub authenticated: bool,
+    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ExtensionListResponse {
     pub extensions: Vec<ExtensionInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExtensionReadinessResponse {
+    pub extensions: Vec<ExtensionReadinessInfo>,
 }
 
 #[derive(Debug, Serialize)]

@@ -959,6 +959,34 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
+}
+
+.scroll-to-bottom-btn {
+  position: absolute;
+  right: var(--space-4);
+  bottom: calc(var(--chat-input-height, 72px) + var(--space-3));
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-muted, var(--text));
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  opacity: 0.55;
+  transition: opacity 150ms ease, transform 150ms ease, color 150ms ease;
+}
+
+.scroll-to-bottom-btn:hover {
+  opacity: 1;
+  color: var(--text);
+  transform: translateY(2px);
 }
 
 .chat-messages {

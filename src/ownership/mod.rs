@@ -49,6 +49,25 @@ pub enum UserRole {
     Member,
 }
 
+impl UserRole {
+    /// Parse a role string persisted in the users table.
+    ///
+    /// Unknown values are treated as `Member` for a safe, least-privilege
+    /// fallback.
+    pub fn from_db_role(role: &str) -> Self {
+        if role.eq_ignore_ascii_case("admin") {
+            Self::Admin
+        } else {
+            Self::Member
+        }
+    }
+
+    /// Returns `true` when the role has admin privileges.
+    pub fn is_admin(&self) -> bool {
+        matches!(self, Self::Admin)
+    }
+}
+
 /// Scope of a tool or skill. Extension point — nothing sets `Global` yet.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResourceScope {
@@ -128,6 +147,16 @@ mod tests {
         let id = Identity::new("alice", UserRole::Admin);
         assert_eq!(id.owner_id.as_str(), "alice");
         assert_eq!(id.role, UserRole::Admin);
+    }
+
+    #[test]
+    fn test_user_role_from_db_role() {
+        assert_eq!(UserRole::from_db_role("admin"), UserRole::Admin);
+        assert_eq!(UserRole::from_db_role("ADMIN"), UserRole::Admin);
+        assert_eq!(UserRole::from_db_role("member"), UserRole::Member);
+        assert_eq!(UserRole::from_db_role("owner"), UserRole::Member);
+        assert!(UserRole::Admin.is_admin());
+        assert!(!UserRole::Member.is_admin());
     }
 
     // --- Owned trait tests ---

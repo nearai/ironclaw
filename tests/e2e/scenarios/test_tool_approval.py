@@ -2,7 +2,7 @@
 
 import asyncio
 
-from helpers import SEL, api_get, api_post
+from helpers import SEL, api_get, api_post, send_chat_and_wait_for_terminal_message
 
 
 INJECT_APPROVAL_JS = """
@@ -587,3 +587,108 @@ async def test_text_approval_resolves_real_tool_call(page):
 
     # Card should be removed after brief delay
     await card.wait_for(state="hidden", timeout=5000)
+
+
+# -- Regression: bare keywords without pending approval ----------------------
+
+
+async def test_bare_yes_treated_as_chat_when_no_approval_pending_api(ironclaw_server):
+    """Sending 'yes' via API when no approval is pending should reach the LLM.
+
+    Regression test for the bug where SubmissionParser unconditionally converted
+    bare keywords like 'yes'/'no'/'always' into ApprovalResponse, causing the
+    backend to return 'No pending approval for this thread.' instead of routing
+    the message as normal user input.
+    """
+    thread_id = await _create_thread(ironclaw_server)
+
+    # Send "yes" with no prior approval pending
+    await _send_chat_message(ironclaw_server, thread_id, "yes")
+
+    # The LLM should process it as a regular message and produce a response.
+    # The mock LLM returns "I understand your request." for unrecognized input.
+    # Critically, the response must NOT be "No pending approval for this thread."
+    # Wait for a non-null response (not just turn existence) to avoid flakiness.
+    history = await _wait_for_history(
+        ironclaw_server,
+        thread_id,
+        turn_count_at_least=1,
+        response_fragment="",  # any non-null response
+        timeout=15.0,
+    )
+
+    response_text = history["turns"][-1].get("response") or ""
+    assert "No pending approval" not in response_text, (
+        f"Bare 'yes' was intercepted as approval instead of chat input. Got: {response_text!r}"
+    )
+    assert response_text, "Expected an LLM response for bare 'yes' input"
+
+
+async def test_bare_no_treated_as_chat_when_no_approval_pending_api(ironclaw_server):
+    """Sending 'no' via API when no approval is pending should reach the LLM."""
+    thread_id = await _create_thread(ironclaw_server)
+
+    await _send_chat_message(ironclaw_server, thread_id, "no")
+
+    history = await _wait_for_history(
+        ironclaw_server,
+        thread_id,
+        turn_count_at_least=1,
+        response_fragment="",  # any non-null response
+        timeout=15.0,
+    )
+
+    response_text = history["turns"][-1].get("response") or ""
+    assert "No pending approval" not in response_text, (
+        f"Bare 'no' was intercepted as approval instead of chat input. Got: {response_text!r}"
+    )
+    assert response_text, "Expected an LLM response for bare 'no' input"
+
+
+async def test_bare_yes_treated_as_chat_in_browser_when_no_card(page):
+    """Typing 'yes' in the browser when no approval card exists should send as chat.
+
+    Regression: the frontend sendMessage() used to check for any .approval-card
+    in the DOM without verifying it belonged to the current thread. With no cards
+    at all, the backend's SubmissionParser would still convert 'yes' into an
+    ApprovalResponse. After the fix, 'yes' should reach the LLM as normal input.
+    """
+    result = await send_chat_and_wait_for_terminal_message(page, "yes", timeout=15000)
+
+    assert result["role"] == "assistant", (
+        f"Expected assistant response, got {result['role']}: {result['text']!r}"
+    )
+    assert "No pending approval" not in result["text"], (
+        f"Bare 'yes' was intercepted as approval instead of chat input. Got: {result['text']!r}"
+    )
+
+
+async def test_approval_card_from_other_thread_not_intercepted(page):
+    """An approval card stamped with a different thread_id must not intercept 'yes'."""
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+
+    # Inject an approval card tagged with a DIFFERENT thread ID
+    await page.evaluate("""
+        showApproval({
+            request_id: 'test-other-thread',
+            thread_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+            tool_name: 'http',
+            description: 'From another thread',
+        })
+    """)
+
+    card = page.locator('.approval-card[data-request-id="test-other-thread"]')
+    await card.wait_for(state="visible", timeout=5000)
+
+    # Type "yes" — should NOT be intercepted because the card belongs to a
+    # different thread. It should go through as a normal chat message.
+    result = await send_chat_and_wait_for_terminal_message(page, "yes", timeout=15000)
+
+    assert result["role"] == "assistant", (
+        f"Expected assistant response, got {result['role']}: {result['text']!r}"
+    )
+    # The approval card should still be unresolved
+    assert await card.locator(".approval-resolved").count() == 0, (
+        "Approval card from another thread should NOT be resolved"
+    )

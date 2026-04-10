@@ -33,7 +33,7 @@ IronClaw operates across four trust boundaries:
 | Web Gateway | 3000 | `127.0.0.1` | Bearer token (constant-time) | `GATEWAY_HOST`, `GATEWAY_PORT`, `GATEWAY_AUTH_TOKEN` | `server.rs` — `start_server()` |
 | HTTP Webhook Server | 8080 | `0.0.0.0` | Shared secret (body field) | `HTTP_HOST`, `HTTP_PORT`, `HTTP_WEBHOOK_SECRET` | `webhook_server.rs` — `start()` |
 | Orchestrator Internal API | 50051 | `127.0.0.1` (macOS/Win) / `0.0.0.0` (Linux) | Per-job bearer token (constant-time) | `ORCHESTRATOR_PORT` | `api.rs` — `OrchestratorApi::start()` |
-| OAuth Callback Listener | 9876 | `127.0.0.1` | None (ephemeral, 5-min timeout) | N/A (hardcoded) | `oauth_defaults.rs` — `bind_callback_listener()` |
+| OAuth Callback Listener | 9876 | `127.0.0.1` | None (ephemeral, 5-min timeout) | N/A (hardcoded) | `src/auth/oauth.rs` — `bind_callback_listener()` |
 | Sandbox HTTP Proxy | OS-assigned (ephemeral) | `127.0.0.1` | None (loopback only) | N/A (auto-assigned) | `proxy/http.rs` — `SandboxProxy::start()` |
 
 ---
@@ -260,7 +260,7 @@ The orchestrator can grant per-job access to specific secrets from the encrypted
 
 ## 4. OAuth Callback Listener
 
-**Source:** `src/cli/oauth_defaults.rs`
+**Source:** `src/auth/oauth.rs`
 
 ### Bind Address
 
@@ -268,7 +268,7 @@ Always binds to **loopback only**: `127.0.0.1:9876`. Falls back to `[::1]:9876` 
 
 Both IPv4 and IPv6 loopback addresses are security-equivalent — they are only reachable from the local machine.
 
-**Reference:** `src/cli/oauth_defaults.rs` — `OAUTH_CALLBACK_PORT` constant, `bind_callback_listener()`
+**Reference:** `src/auth/oauth.rs` / `src/llm/oauth_helpers.rs` — `OAUTH_CALLBACK_PORT`, `bind_callback_listener()`
 
 ### Lifecycle
 
@@ -278,7 +278,7 @@ The listener is **ephemeral** — it is started only when an OAuth flow is initi
 
 **5-minute timeout** (`Duration::from_secs(300)`). If the user does not complete the OAuth flow in the browser within 5 minutes, the listener shuts down.
 
-**Reference:** `src/cli/oauth_defaults.rs` — `tokio::time::timeout(Duration::from_secs(300), ...)`
+**Reference:** `src/auth/oauth.rs` — `tokio::time::timeout(Duration::from_secs(300), ...)`
 
 ### Security Controls
 
@@ -286,19 +286,19 @@ The listener is **ephemeral** — it is started only when an OAuth flow is initi
 - **Error parameter checking**: The handler checks for `error=` in the callback query string before extracting the auth code
 - **URL decoding**: Callback parameters are URL-decoded safely
 
-**Reference:** `src/cli/oauth_defaults.rs` — `html_escape()`
+**Reference:** `src/auth/oauth.rs` / `src/llm/oauth_helpers.rs` — `html_escape()`
 
 ### Built-in OAuth Credentials
 
 Google OAuth client ID and secret are compiled into the binary (with compile-time override via `IRONCLAW_GOOGLE_CLIENT_ID` / `IRONCLAW_GOOGLE_CLIENT_SECRET`). As noted in the source, Google Desktop App client secrets are [not actually secret](https://developers.google.com/identity/protocols/oauth2/native-app) per Google's documentation.
 
-**Reference:** `src/cli/oauth_defaults.rs` — `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` constants
+**Reference:** `src/auth/providers.rs` — `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` constants
 
 ### Graceful Shutdown
 
 Implicit. The listener is a raw `TcpListener` (not axum) inside a `tokio::time::timeout` future. Once the authorization code or error is received, the future returns and the `TcpListener` is dropped, closing the port. No explicit shutdown signal is needed.
 
-**Reference:** `src/cli/oauth_defaults.rs` — `wait_for_callback()`
+**Reference:** `src/auth/oauth.rs` / `src/llm/oauth_helpers.rs` — `wait_for_callback()`
 
 ---
 
@@ -449,7 +449,7 @@ Sandbox containers route all HTTP traffic through the proxy, which enforces a do
 | Gateway bearer token | Yes | Web gateway (header + query) | `src/channels/web/auth.rs` — `auth_middleware()` |
 | Webhook shared secret | Yes | HTTP webhook (`ct_eq` comparison) | `src/channels/http.rs` — `webhook_handler()` |
 | Per-job bearer token | Yes | Orchestrator worker API | `src/orchestrator/auth.rs` — `TokenStore::validate()` |
-| OAuth callback | N/A | CLI OAuth flow (no auth, loopback-only) | `src/cli/oauth_defaults.rs` — `bind_callback_listener()` |
+| OAuth callback | N/A | CLI OAuth flow (no auth, loopback-only) | `src/auth/oauth.rs` — `bind_callback_listener()` |
 | Sandbox proxy | N/A | No auth (loopback-only, ephemeral) | `src/sandbox/proxy/http.rs` — `SandboxProxy::start()` |
 
 ---

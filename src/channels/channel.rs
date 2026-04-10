@@ -96,6 +96,25 @@ pub struct IncomingMessage {
     /// monitor) and must bypass the normal user-input pipeline. This field is
     /// not settable via metadata, so external channels cannot spoof it.
     pub(crate) is_internal: bool,
+    /// `true` when this message represents an *agent broadcast* echoing
+    /// back through the channel — e.g. an outbound bot message that the
+    /// channel adapter (Slack, Discord, etc.) re-delivers as an inbound
+    /// event. Mission `OnEvent` firing skips messages with this flag set
+    /// to avoid self-recursion: a mission whose pattern matches its own
+    /// output would otherwise re-trigger forever.
+    ///
+    /// Channel adapters that have echo behavior MUST set this when
+    /// re-emitting the agent's own outbound text. Adapters without echo
+    /// behavior (CLI, REPL, web gateway) leave it `false`.
+    pub is_agent_broadcast: bool,
+    /// When set, this message was produced as a side effect of a mission
+    /// firing — typically the mission's notification text re-entering
+    /// through a channel adapter. Mission `OnEvent` firing skips messages
+    /// tagged with a `triggering_mission_id` to bound chain-recursion
+    /// across distinct missions (mission A → notification → mission B →
+    /// notification → mission C → ...). The string is the originating
+    /// `MissionId` for diagnostics.
+    pub triggering_mission_id: Option<String>,
 }
 
 impl IncomingMessage {
@@ -120,7 +139,24 @@ impl IncomingMessage {
             timezone: None,
             attachments: Vec::new(),
             is_internal: false,
+            is_agent_broadcast: false,
+            triggering_mission_id: None,
         }
+    }
+
+    /// Mark this message as an agent broadcast echo. Channel adapters that
+    /// re-emit the agent's own outbound text as an inbound event MUST call
+    /// this so mission `OnEvent` firing skips it.
+    pub fn with_agent_broadcast(mut self) -> Self {
+        self.is_agent_broadcast = true;
+        self
+    }
+
+    /// Mark this message as having been produced by a mission firing.
+    /// Used for chain-recursion guards across distinct missions.
+    pub fn with_triggering_mission(mut self, mission_id: impl Into<String>) -> Self {
+        self.triggering_mission_id = Some(mission_id.into());
+        self
     }
 
     /// Set the thread ID.
