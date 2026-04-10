@@ -1478,10 +1478,16 @@ impl Agent {
         // target an already-loaded owned thread by UUID across channels so the
         // web approval UI can approve work that originated from HTTP/other
         // owner-scoped channels.
-        let approval_thread_uuid = if matches!(
-            submission,
-            Submission::ExecApproval { .. } | Submission::ApprovalResponse { .. }
-        ) {
+        //
+        // For bare-keyword ApprovalResponse ("yes", "no", "always"), only use
+        // the UUID targeting path when the keyword is an explicit slash command
+        // (e.g. /approve, /deny). Bare keywords may be downgraded to UserInput
+        // by `should_route_as_approval` later, and the pending_approval check
+        // below would reject them prematurely.
+        let is_explicit_approval = matches!(submission, Submission::ExecApproval { .. })
+            || (matches!(submission, Submission::ApprovalResponse { .. })
+                && message.content.trim().starts_with('/'));
+        let approval_thread_uuid = if is_explicit_approval {
             message
                 .conversation_scope()
                 .and_then(|thread_id| Uuid::parse_str(thread_id).ok())
