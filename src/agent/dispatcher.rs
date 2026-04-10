@@ -583,16 +583,25 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             .into());
         }
 
-        // Apply per-user model override from settings (first iteration only
+        // Apply per-user overrides from settings (first iteration only
         // to avoid repeated DB lookups within the same agentic loop).
-        // Uses "selected_model" — the same key the /model command persists to
-        // via SettingsStore (per-user scoped via TenantScope).
         if iteration == 0
             && let Some(store) = self.tenant.store()
-            && let Ok(Some(value)) = store.get_setting("selected_model").await
-            && let Some(model) = selected_model_override(&value)
         {
-            reason_ctx.model_override = Some(model);
+            // Model override: "selected_model" — the same key the /model command
+            // persists to via SettingsStore (per-user scoped via TenantScope).
+            if let Ok(Some(value)) = store.get_setting("selected_model").await
+                && let Some(model) = selected_model_override(&value)
+            {
+                reason_ctx.model_override = Some(model);
+            }
+
+            // Temperature override from user settings.
+            if let Ok(Some(value)) = store.get_setting("temperature").await
+                && let Some(t) = value.as_f64()
+            {
+                reason_ctx.temperature = Some(t as f32);
+            }
         }
 
         let output = match reasoning.respond_with_tools(reason_ctx).await {
