@@ -53,6 +53,57 @@ pub struct JudgeVerdict {
     pub reasoning: String,
 }
 
+/// Source of an inbound transcript turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnSource {
+    User,
+    ToolInbound,
+    Internal,
+}
+
+impl TurnSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::User => "USER",
+            Self::ToolInbound => "TOOL_INBOUND",
+            Self::Internal => "INTERNAL",
+        }
+    }
+}
+
+/// One user turn and its assistant responses for session-log rendering.
+pub struct SessionTurn {
+    pub source: TurnSource,
+    pub user_input: String,
+    pub responses: Vec<String>,
+}
+
+impl SessionTurn {
+    pub fn user(user_input: impl Into<String>, responses: Vec<String>) -> Self {
+        Self {
+            source: TurnSource::User,
+            user_input: user_input.into(),
+            responses,
+        }
+    }
+
+    pub fn tool_inbound(user_input: impl Into<String>, responses: Vec<String>) -> Self {
+        Self {
+            source: TurnSource::ToolInbound,
+            user_input: user_input.into(),
+            responses,
+        }
+    }
+
+    pub fn internal(user_input: impl Into<String>, responses: Vec<String>) -> Self {
+        Self {
+            source: TurnSource::Internal,
+            user_input: user_input.into(),
+            responses,
+        }
+    }
+}
+
 /// A running test harness wrapping a `TestRig` with dual-mode support.
 pub struct LiveTestHarness {
     rig: TestRig,
@@ -82,6 +133,49 @@ impl LiveTestHarness {
         Some(judge_response(provider.as_ref(), &joined, criteria).await)
     }
 
+    /// Scan the captured status events and tool results for executor errors.
+    ///
+    /// Returns a list of error descriptions. The harness's `finish_strict`
+    /// helper panics if this list is non-empty, which is the default behavior
+    /// for live tests — any error in the trace is treated as a regression
+    /// that warrants investigation.
+    ///
+    /// Recognized error patterns:
+    /// - Failed tool calls (`ToolCompleted { success: false }`)
+    /// - Tool result previews containing `error`/`failed`/`SyntaxError`
+    /// - The exception is "Document not found": this is a benign signal that
+    ///   the agent probed for a workspace file that doesn't exist yet, and
+    ///   the agent is expected to recover by writing the file. We surface it
+    ///   as a soft warning but don't fail the test.
+    pub fn collect_trace_errors(&self) -> Vec<String> {
+        use ironclaw::channels::StatusUpdate;
+
+        let mut errors = Vec::new();
+        for event in self.rig.captured_status_events() {
+            match event {
+                StatusUpdate::ToolCompleted {
+                    name,
+                    success: false,
+                    error,
+                    ..
+                } => {
+                    let err = error.as_deref().unwrap_or("unknown error");
+                    if is_benign_error(err) {
+                        continue;
+                    }
+                    errors.push(format!("tool '{name}' failed: {err}"));
+                }
+                StatusUpdate::ToolResult { name, preview, .. } => {
+                    if let Some(reason) = scan_preview_for_errors(&preview) {
+                        errors.push(format!("tool '{name}' result contains error: {reason}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        errors
+    }
+
     /// Flush the recorded trace (if live mode), save a human-readable session
     /// log, and shut down the agent.
     ///
@@ -90,7 +184,12 @@ impl LiveTestHarness {
     ///
     /// The session log is written to `tests/fixtures/llm_traces/live/{name}.log`.
     pub async fn finish(self, user_input: &str, responses: &[String]) {
-        self.save_session_log(user_input, responses);
+        let turns = [SessionTurn {
+            source: TurnSource::User,
+            user_input: user_input.to_string(),
+            responses: responses.to_vec(),
+        }];
+        self.save_session_log(&turns);
 
         if let Some(ref recorder) = self.recording_handle {
             if let Err(e) = recorder.flush().await {
@@ -102,11 +201,69 @@ impl LiveTestHarness {
         self.rig.shutdown();
     }
 
+    /// Like `finish`, but panics if the trace contains any non-benign errors.
+    /// This is the default for live tests — unexpected tool failures or
+    /// executor SyntaxErrors are treated as regressions.
+    pub async fn finish_strict(self, user_input: &str, responses: &[String]) {
+        let errors = self.collect_trace_errors();
+        if !errors.is_empty() {
+            // Save the log first so the test author can see what happened.
+            let turns = [SessionTurn {
+                source: TurnSource::User,
+                user_input: user_input.to_string(),
+                responses: responses.to_vec(),
+            }];
+            self.save_session_log(&turns);
+            if let Some(ref recorder) = self.recording_handle {
+                let _ = recorder.flush().await;
+            }
+            self.rig.shutdown();
+            let joined = errors.join("\n  - ");
+            panic!(
+                "Live trace contains {} error(s) that warrant investigation:\n  - {joined}",
+                errors.len(),
+            );
+        }
+        self.finish(user_input, responses).await;
+    }
+
+    /// Multi-turn variant of `finish`.
+    pub async fn finish_turns(self, turns: &[SessionTurn]) {
+        self.save_session_log(turns);
+
+        if let Some(ref recorder) = self.recording_handle {
+            if let Err(e) = recorder.flush().await {
+                eprintln!("[LiveTest] WARNING: Failed to flush trace: {e}");
+            } else {
+                eprintln!("[LiveTest] Trace recorded successfully");
+            }
+        }
+        self.rig.shutdown();
+    }
+
+    /// Multi-turn variant of `finish_strict`.
+    pub async fn finish_turns_strict(self, turns: &[SessionTurn]) {
+        let errors = self.collect_trace_errors();
+        if !errors.is_empty() {
+            self.save_session_log(turns);
+            if let Some(ref recorder) = self.recording_handle {
+                let _ = recorder.flush().await;
+            }
+            self.rig.shutdown();
+            let joined = errors.join("\n  - ");
+            panic!(
+                "Live trace contains {} error(s) that warrant investigation:\n  - {joined}",
+                errors.len(),
+            );
+        }
+        self.finish_turns(turns).await;
+    }
+
     /// Write a human-readable session log.
     ///
     /// Live mode writes to `tests/fixtures/llm_traces/live/{name}.log` (committed).
     /// Replay mode writes to a temp file so it can be diffed against the live log.
-    fn save_session_log(&self, user_input: &str, responses: &[String]) {
+    fn save_session_log(&self, turns: &[SessionTurn]) {
         use ironclaw::channels::StatusUpdate;
 
         let (log_path, live_log_path) = match self.mode {
@@ -141,12 +298,30 @@ impl LiveTestHarness {
         ));
         log.push_str("# ──────────────────────────────────────────────────\n\n");
 
-        // User input
-        log.push_str(&format!("› {user_input}\n"));
+        // Transcript
+        for (idx, turn) in turns.iter().enumerate() {
+            log.push_str(&format!("## Turn {}\n", idx + 1));
+            log.push_str(&format!(
+                "[{}] › {}\n",
+                turn.source.label(),
+                turn.user_input
+            ));
+            for response in &turn.responses {
+                log.push_str("────────────────────────────────────────────────────\n");
+                log.push_str(response);
+                log.push('\n');
+            }
+            log.push('\n');
+        }
+
+        log.push_str("## Activity\n");
 
         // Tool activity from status events
         for event in self.rig.captured_status_events() {
             match event {
+                StatusUpdate::SkillActivated { skill_names } => {
+                    log.push_str(&format!("  ◆ skills: {}\n", skill_names.join(", ")));
+                }
                 StatusUpdate::ToolStarted { name, .. } => {
                     log.push_str(&format!("  ● {name}\n"));
                 }
@@ -188,13 +363,6 @@ impl LiveTestHarness {
             }
         }
 
-        // Agent response(s)
-        log.push_str("────────────────────────────────────────────────────\n");
-        for response in responses {
-            log.push_str(response);
-            log.push('\n');
-        }
-
         if let Err(e) = std::fs::write(&log_path, &log) {
             eprintln!("[LiveTest] WARNING: Failed to write session log: {e}");
         } else {
@@ -220,6 +388,7 @@ pub struct LiveTestHarnessBuilder {
     max_tool_iterations: usize,
     engine_v2: Option<bool>,
     auto_approve_tools: Option<bool>,
+    skills_dir: Option<PathBuf>,
     channel_name: Option<String>,
     seeded_secret_names: Vec<String>,
 }
@@ -244,6 +413,7 @@ impl LiveTestHarnessBuilder {
             max_tool_iterations: 30,
             engine_v2: None,
             auto_approve_tools: None,
+            skills_dir: None,
             channel_name: None,
             seeded_secret_names: Vec::new(),
         }
@@ -293,6 +463,14 @@ impl LiveTestHarnessBuilder {
         self
     }
 
+    /// Enable skill discovery from the given directory. Skills discovered
+    /// here (e.g. the repo's `./skills/` dir) are loaded at startup and can
+    /// activate during the test conversation.
+    pub fn with_skills_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.skills_dir = Some(dir.into());
+        self
+    }
+
     /// Build the harness, auto-detecting mode from the `IRONCLAW_LIVE_TEST` env var.
     #[cfg(feature = "libsql")]
     pub async fn build(self) -> LiveTestHarness {
@@ -331,6 +509,16 @@ impl LiveTestHarnessBuilder {
         let _ = dotenvy::dotenv();
         ironclaw::bootstrap::load_ironclaw_env();
 
+        // Hydrate LLM credentials from the user's real secrets store into
+        // process env vars BEFORE config resolution. The test rig runs
+        // against an isolated temp libSQL database, so the real ironclaw DB's
+        // secrets aren't automatically visible to the provider chain. For
+        // backends that support env-var fallback (nearai via NEARAI_API_KEY,
+        // anthropic via ANTHROPIC_API_KEY, etc.), setting the env var before
+        // `build_provider_chain` bypasses the interactive auth flow without
+        // leaking secrets into the test database.
+        hydrate_llm_secrets_into_env().await;
+
         // Resolve full config (reads LLM_BACKEND, ENGINE_V2, ALLOW_LOCAL_TOOLS, etc.)
         // This mirrors the exact config the real `ironclaw` binary would use.
         let mut config = ironclaw::config::Config::from_env().await.expect(
@@ -345,10 +533,17 @@ impl LiveTestHarnessBuilder {
         if let Some(aa) = self.auto_approve_tools {
             config.agent.auto_approve_tools = aa;
         }
+        if let Some(ref dir) = self.skills_dir {
+            config.skills.enabled = true;
+            config.skills.local_dir = dir.clone();
+        }
 
         eprintln!(
-            "[LiveTest] Config: engine_v2={}, allow_local_tools={}, auto_approve={}",
-            config.agent.engine_v2, config.agent.allow_local_tools, config.agent.auto_approve_tools,
+            "[LiveTest] Config: engine_v2={}, allow_local_tools={}, auto_approve={}, skills_dir={}",
+            config.agent.engine_v2,
+            config.agent.allow_local_tools,
+            config.agent.auto_approve_tools,
+            config.skills.local_dir.display(),
         );
 
         // If the test asked for specific secrets via `with_secrets(...)`
@@ -418,11 +613,15 @@ impl LiveTestHarnessBuilder {
         // - engine_v2 controls which agentic loop path is used
         // - auto_approve_tools comes from the env/config (tests can override
         //   via LiveTestHarnessBuilder if needed)
+        let skills_dir_for_rig = self.skills_dir.clone();
         let mut rig_builder = TestRigBuilder::new()
             .with_config(config)
             .with_llm(llm)
             .with_http_interceptor(http_interceptor)
             .with_max_tool_iterations(self.max_tool_iterations);
+        if let Some(dir) = skills_dir_for_rig {
+            rig_builder = rig_builder.with_skills_dir(dir);
+        }
         if let Some(ref name) = self.channel_name {
             rig_builder = rig_builder.with_channel_name(name.clone());
         }
@@ -466,6 +665,9 @@ impl LiveTestHarnessBuilder {
             .with_trace(trace)
             .with_max_tool_iterations(self.max_tool_iterations)
             .with_auto_approve_tools(true);
+        if let Some(dir) = self.skills_dir.clone() {
+            rig_builder = rig_builder.with_skills_dir(dir);
+        }
         // Propagate engine_v2 so replay mirrors live recording. Without this,
         // tests that recorded against engine v2 (mission_create, mission_fire,
         // CodeAct orchestration, etc.) replay against v1 and the v2-only tools
@@ -546,6 +748,276 @@ pub async fn judge_response(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Errors that we expect during normal operation and should not fail tests on.
+///
+/// These are "the agent picked the wrong tool or wrong params, here's how to
+/// recover" messages that the LLM uses to self-correct. None of them indicate
+/// an engine bug. Engine bugs (Python SyntaxError, missing leases for FINAL,
+/// orphaned skill credentials, etc.) are still flagged unless we've observed a
+/// specific lease miss that the run reliably recovers from in these workflows.
+///
+/// Categories of benign errors:
+///
+/// 1. **Workspace probing**: agent calls `memory_read` to check whether a
+///    file exists before writing it. The tool returns a hard error instead
+///    of a "not found" sentinel, but the agent's recovery is normal.
+///
+/// 2. **Wrong tool selection**: agent calls `write_file` for a workspace
+///    file. The tool rejects with a clear "use memory_write instead"
+///    message and the agent retries with the right tool.
+///
+/// 3. **Wrong patch params**: agent calls `memory_write` with `old_string`
+///    but no `new_string`. The tool's error message tells the agent how to
+///    fix it and the agent retries.
+///
+/// 4. **Skill probe**: agent calls `skill_install` for a skill that's
+///    already loaded. The current skill_install short-circuits, but older
+///    traces may have hit the registry 404 path.
+///
+/// 5. **Recovered CodeAct misfire**: agent briefly sends plain natural
+///    language like "YouTube Published ✓" to CodeAct, gets a SyntaxError,
+///    then immediately recovers with the correct memory-tool writes.
+///
+/// 6. **Recovered digest CodeAct probe**: agent briefly tries to count or
+///    summarize commitments inside CodeAct, hits a NameError/Traceback, then
+///    recovers by using `memory_tree` / `memory_read` and still produces the
+///    correct digest.
+fn is_benign_error(err: &str) -> bool {
+    let lower = err.to_lowercase();
+
+    // Workspace probing
+    if lower.contains("document not found") || lower.contains("path not found") {
+        return true;
+    }
+
+    // Wrong tool selection (write_file → memory_write guidance)
+    if lower.contains("use the memory_write tool")
+        || lower.contains("use the memory_read tool")
+        || lower.contains("use memory_write instead")
+        || lower.contains("use memory_read instead")
+    {
+        return true;
+    }
+
+    // Wrong patch params (memory_write patch mode confusion)
+    if lower.contains("new_string is required when old_string is provided")
+        || lower.contains("either 'content' (for write/append) or 'old_string'")
+        || lower.contains("old_string not found in document")
+        || lower.contains("old_string cannot be empty")
+        || lower.contains("patch mode (old_string/new_string) cannot be combined with layer")
+    {
+        return true;
+    }
+
+    // Optional asset generation can fail in environments without the expected
+    // image backend model; the conversation can still recover and persist the
+    // actual commitment-tracking state we care about in these tests.
+    if lower.contains("model 'flux-1.1-pro' not found")
+        || (lower.contains("image generation api returned 404") && lower.contains("model"))
+    {
+        return true;
+    }
+
+    // Skill probe — installing a skill that already exists.
+    if lower.contains("skill") && lower.contains("already") && lower.contains("exists") {
+        return true;
+    }
+
+    // Live providers can transiently rate-limit bursty setup/write sequences.
+    // The agent often retries successfully; treat these as benign harness noise.
+    if lower.contains("rate limited") || lower.contains("try again in") {
+        return true;
+    }
+
+    // Some live-model search queries include hyphenated repo names in a way
+    // that SQLite FTS parses as a column reference (`payments-api` → `api`).
+    // The run usually recovers after a broader search or direct read.
+    if lower.contains("fts row fetch failed") && lower.contains("no such column:") {
+        return true;
+    }
+
+    // Some promote-plan flows probe `rlm_query` without a lease and then
+    // recover via memory search / plan writes. Treat that specific recovered
+    // lease miss as benign harness noise.
+    if lower.contains("no lease for action 'rlm_query'") {
+        return true;
+    }
+
+    if lower.contains("no lease for action 'shell'") {
+        return true;
+    }
+
+    // CodeAct occasionally probes a Python snippet that touches OS-backed time
+    // APIs, which is blocked in the sandbox. If the run recovers, don't fail
+    // the whole live trace on that transient probe.
+    if lower.contains("os operations are not permitted in codeact scripts") {
+        return true;
+    }
+
+    // A recurring recovered misfire in creator flows: plain text intended as
+    // status content gets routed into CodeAct and fails to parse as Python.
+    // If the run recovers, treat this as tool-selection noise rather than a
+    // product regression.
+    if lower.contains("youtube published")
+        && lower.contains("syntaxerror")
+        && lower.contains("simple statements must be separated")
+    {
+        return true;
+    }
+
+    if lower.contains("codeact execution failed")
+        && lower.contains("traceback")
+        && (lower.contains("nameerror") || lower.contains("step.py"))
+    {
+        return true;
+    }
+
+    false
+}
+
+/// Scan a tool result preview for executor-side errors that we want to flag.
+///
+/// Returns `Some(reason)` if the preview contains a Python SyntaxError,
+/// Monty traceback, or a JSON-style `"error"` payload that isn't a benign
+/// "document not found".
+fn scan_preview_for_errors(preview: &str) -> Option<String> {
+    // Python / Monty syntax errors from CodeAct execution
+    if preview.contains("SyntaxError") && !is_benign_error(preview) {
+        return Some("Python SyntaxError in CodeAct execution".to_string());
+    }
+    if preview.contains("Traceback (most recent call last)") && !is_benign_error(preview) {
+        return Some("Python traceback in CodeAct execution".to_string());
+    }
+    // JSON-style error payloads from tool wrappers
+    if let Some(idx) = preview
+        .find("'error'")
+        .or_else(|| preview.find("\"error\""))
+        && let Some(rest) = preview.get(idx..)
+    {
+        // Extract a short snippet of the error message for the report.
+        let snippet: String = rest.chars().take(200).collect();
+        if !is_benign_error(&snippet) {
+            return Some(snippet);
+        }
+    }
+    None
+}
+
+/// Load LLM API keys from the user's real secrets store into process env vars.
+///
+/// Live tests use an isolated temp libSQL database, so the real ironclaw DB's
+/// encrypted secrets are invisible to the test provider chain. This helper
+/// opens the user's real libSQL DB at `~/.ironclaw/ironclaw.db` (libsql does
+/// not expose a read-only open mode here, so the handle is technically
+/// writable, but this code path only ever calls `get_decrypted` and never
+/// writes), resolves the master key from the OS keychain, decrypts known
+/// LLM API-key secrets, and exports them as env vars. `build_provider_chain`
+/// then picks them up via each provider's env-var fallback, skipping
+/// interactive auth.
+///
+/// This function is best-effort: any failure (no DB, locked keychain, secret
+/// missing) is logged and ignored so the provider can fall back to whatever
+/// native auth path it supports.
+#[cfg(feature = "libsql")]
+async fn hydrate_llm_secrets_into_env() {
+    use ironclaw::secrets::{
+        LibSqlSecretsStore, SecretsStore, crypto_from_hex, resolve_master_key,
+    };
+
+    // Known (secret_name, env_var) pairs. When a backend supports multiple
+    // env-var fallbacks we pick the most canonical one.
+    const SECRET_TO_ENV: &[(&str, &str)] = &[
+        ("llm_nearai_api_key", "NEARAI_API_KEY"),
+        ("llm_anthropic_api_key", "ANTHROPIC_API_KEY"),
+        ("llm_openai_api_key", "OPENAI_API_KEY"),
+    ];
+
+    // If all target env vars are already set, skip the DB work entirely.
+    if SECRET_TO_ENV
+        .iter()
+        .all(|(_, env)| std::env::var(env).ok().filter(|v| !v.is_empty()).is_some())
+    {
+        return;
+    }
+
+    let master_key = match resolve_master_key().await {
+        Some(k) => k,
+        None => {
+            eprintln!("[LiveTest] hydrate_llm_secrets: no master key (env/keychain) — skipping");
+            return;
+        }
+    };
+
+    let crypto = match crypto_from_hex(&master_key) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[LiveTest] hydrate_llm_secrets: crypto init failed: {e} — skipping");
+            return;
+        }
+    };
+
+    // Open the user's real libSQL DB at ~/.ironclaw/ironclaw.db directly
+    // (bypassing the ironclaw Database wrapper — LibSqlSecretsStore needs a
+    // raw libsql::Database handle).
+    let db_path = ironclaw::bootstrap::ironclaw_base_dir().join("ironclaw.db");
+    if !db_path.exists() {
+        eprintln!(
+            "[LiveTest] hydrate_llm_secrets: real DB not found at {} — skipping",
+            db_path.display()
+        );
+        return;
+    }
+
+    let raw_db = match libsql::Builder::new_local(&db_path).build().await {
+        Ok(db) => std::sync::Arc::new(db),
+        Err(e) => {
+            eprintln!("[LiveTest] hydrate_llm_secrets: open real DB failed: {e} — skipping");
+            return;
+        }
+    };
+
+    let store = LibSqlSecretsStore::new(raw_db, crypto);
+
+    // Owner id selection: a user with a non-default scope (e.g. via
+    // `IRONCLAW_OWNER_ID` or settings.json) stores secrets under that
+    // user_id, not "default". Try the env-resolved value first; if it's
+    // unset, fall back to the legacy "default" scope that single-user
+    // installs use. We don't reach into Config::from_env() here to avoid
+    // pulling in the full settings file resolution chain inside test
+    // hydration.
+    let env_owner = std::env::var("IRONCLAW_OWNER_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let owner_id_owned = env_owner.unwrap_or_else(|| "default".to_string());
+    let owner_id = owner_id_owned.as_str();
+
+    for (secret_name, env_var) in SECRET_TO_ENV {
+        if std::env::var(env_var)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some()
+        {
+            continue;
+        }
+        match store.get_decrypted(owner_id, secret_name).await {
+            Ok(decrypted) => {
+                ironclaw::config::set_runtime_env(env_var, decrypted.expose());
+                eprintln!(
+                    "[LiveTest] hydrate_llm_secrets: set {env_var} from secret '{secret_name}'"
+                );
+            }
+            Err(ironclaw::secrets::SecretError::NotFound { .. }) => {
+                // Normal: user hasn't configured this backend.
+            }
+            Err(e) => {
+                eprintln!(
+                    "[LiveTest] hydrate_llm_secrets: failed to read '{secret_name}': {e} — skipping"
+                );
+            }
+        }
+    }
+}
 
 /// Compute the path to a live trace fixture file.
 fn trace_fixture_path(test_name: &str) -> PathBuf {

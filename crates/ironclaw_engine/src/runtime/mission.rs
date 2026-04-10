@@ -3777,8 +3777,7 @@ mod tests {
     #[tokio::test]
     async fn shared_mission_management_is_open_at_engine_layer() {
         // Contract pinned by this test (matches the doc-comment on
-        // Contract pinned (matches doc-comment on `resume_mission` and the
-        // ownership tightening in PR #2126/#2130):
+        // `resume_mission` and the ownership tightening in PR #2126/#2130):
         //
         //     "Shared missions can only be managed by shared owners
         //      (system user)."
