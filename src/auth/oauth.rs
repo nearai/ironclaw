@@ -32,6 +32,52 @@ pub use crate::llm::oauth_helpers::{
 
 // ── Shared OAuth flow steps ─────────────────────────────────────────
 
+/// Only allow `https://` URLs for auth/setup links to prevent scheme injection
+/// (e.g. `javascript:`, `file://`). Host validation is explicitly out of scope:
+/// the URL source is a trusted local extension tool result, and display-side
+/// rendering controls where the user is actually navigated.
+///
+/// Both the v1 dispatcher (`src/agent/dispatcher.rs`) and the v2 effect adapter
+/// (`src/bridge/effect_adapter.rs`) call this on every `auth_url` extracted
+/// from `tool_activate`/`tool_auth` output before surfacing it to the client.
+/// Keeping the helper in one place ensures the v1/v2 invariants stay symmetric.
+pub(crate) fn sanitize_auth_url(url: Option<&str>) -> Option<String> {
+    url.map(str::trim)
+        .filter(|u| u.starts_with("https://"))
+        .map(ToOwned::to_owned)
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::sanitize_auth_url;
+
+    #[test]
+    fn rejects_non_https_schemes() {
+        assert!(sanitize_auth_url(Some("javascript:alert(1)")).is_none());
+        assert!(sanitize_auth_url(Some("file:///etc/passwd")).is_none());
+        assert!(sanitize_auth_url(Some("http://example.com")).is_none());
+        assert!(sanitize_auth_url(Some("data:text/html,<h1>")).is_none());
+        assert!(sanitize_auth_url(Some("")).is_none());
+        assert!(sanitize_auth_url(None).is_none());
+    }
+
+    #[test]
+    fn allows_https() {
+        assert_eq!(
+            sanitize_auth_url(Some("https://accounts.google.com/o/oauth2/auth")),
+            Some("https://accounts.google.com/o/oauth2/auth".to_string())
+        );
+    }
+
+    #[test]
+    fn trims_whitespace_before_validating_scheme() {
+        assert_eq!(
+            sanitize_auth_url(Some("  https://example.com/auth  ")),
+            Some("https://example.com/auth".to_string())
+        );
+    }
+}
+
 /// Truncate `body` to at most `max_bytes` UTF-8 bytes, walking back to the
 /// nearest char boundary so the result is always a valid `&str`. Appends
 /// `"..."` when truncation actually happens. Used to bound any
