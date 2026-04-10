@@ -118,6 +118,22 @@ impl LeaseManager {
         Ok(())
     }
 
+    /// Update the granted actions for an existing lease in place.
+    pub async fn update_granted_actions(
+        &self,
+        lease_id: LeaseId,
+        granted_actions: GrantedActions,
+    ) -> Result<CapabilityLease, EngineError> {
+        let mut leases = self.active.write().await;
+        let lease = leases
+            .get_mut(&lease_id)
+            .ok_or_else(|| EngineError::LeaseNotFound {
+                lease_id: format!("{lease_id:?}"),
+            })?;
+        lease.granted_actions = granted_actions;
+        Ok(lease.clone())
+    }
+
     /// Revoke a lease by ID with a reason for audit trail.
     pub async fn revoke(&self, lease_id: LeaseId, reason: &str) {
         let mut leases = self.active.write().await;

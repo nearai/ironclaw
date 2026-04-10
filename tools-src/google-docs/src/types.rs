@@ -1,9 +1,14 @@
 //! Types for Google Docs API requests and responses.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Input parameters for the Google Docs tool.
-#[derive(Debug, Deserialize)]
+///
+/// `JsonSchema` is derived so the advertised tool schema mirrors the
+/// serde-enforced contract: each variant becomes a `oneOf` entry with
+/// its own `required` array.
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum GoogleDocsAction {
     /// Create a new document.

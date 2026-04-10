@@ -1,9 +1,8 @@
 //! OAuth callback infrastructure used by the NEAR AI session login flow.
 //!
 //! These utilities (callback server, landing pages, hostname detection) were
-//! originally in `cli/oauth_defaults.rs` and are moved here so the `llm`
-//! module is self-contained. `cli/oauth_defaults` re-exports everything for
-//! backward compatibility.
+//! originally in the old CLI OAuth module and are moved here so the `llm`
+//! module is self-contained.
 
 use std::collections::HashMap;
 use std::time::Duration;

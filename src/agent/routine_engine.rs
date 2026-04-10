@@ -2468,6 +2468,8 @@ mod tests {
             timezone: None,
             attachments: vec![],
             is_internal: false,
+            is_agent_broadcast: false,
+            triggering_mission_id: None,
         }
     }
 

@@ -103,7 +103,9 @@ impl ConversationStore for LibSqlBackend {
             r#"
                 INSERT INTO conversations (id, channel, user_id, thread_id, source_channel, started_at, last_activity)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
-                ON CONFLICT (id) DO UPDATE SET last_activity = excluded.last_activity
+                ON CONFLICT (id) DO UPDATE SET
+                    last_activity = excluded.last_activity,
+                    source_channel = COALESCE(conversations.source_channel, excluded.source_channel)
                 WHERE conversations.user_id = excluded.user_id
                   AND conversations.channel = excluded.channel
                 "#,
@@ -894,6 +896,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_source_channel_backfilled_when_legacy_row_is_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_source_channel_backfill.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conv_id = Uuid::new_v4();
+        let user_id = "user-backfill";
+
+        backend
+            .ensure_conversation(conv_id, "gateway", user_id, None, None)
+            .await
+            .unwrap();
+
+        backend
+            .ensure_conversation(conv_id, "gateway", user_id, None, Some("gateway"))
+            .await
+            .unwrap();
+
+        let source = backend
+            .get_conversation_source_channel(conv_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            source.as_deref(),
+            Some("gateway"),
+            "upsert should backfill source_channel when the existing row is legacy NULL"
+        );
+    }
+
+    #[tokio::test]
     async fn test_assistant_conversation_sets_source_channel() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test_assistant_source_channel.db");
@@ -917,31 +950,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_assistant_conversation_backfills_missing_source_channel() {
+    async fn test_get_or_create_assistant_conversation_backfills_legacy_source_channel() {
         let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("test_assistant_backfill_source_channel.db");
+        let db_path = dir.path().join("test_assistant_source_channel_backfill.db");
         let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
         backend.run_migrations().await.unwrap();
 
         let conv_id = Uuid::new_v4();
+        let user_id = "assistant-backfill";
         let now = fmt_ts(&Utc::now());
         let metadata = serde_json::json!({"thread_type": "assistant", "title": "Assistant"});
+
         let conn = backend.connect().await.unwrap();
         conn.execute(
             "INSERT INTO conversations (id, channel, user_id, metadata, started_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-            params![conv_id.to_string(), "gateway", "assistant-user", metadata.to_string(), now],
+            params![conv_id.to_string(), "gateway", user_id, metadata.to_string(), now],
         )
         .await
         .unwrap();
 
-        let loaded_id = backend
-            .get_or_create_assistant_conversation("assistant-user", "gateway")
+        let found = backend
+            .get_or_create_assistant_conversation(user_id, "gateway")
             .await
             .unwrap();
-        assert_eq!(
-            loaded_id, conv_id,
-            "existing assistant thread should be reused"
-        );
+        assert_eq!(found, conv_id);
 
         let source = backend
             .get_conversation_source_channel(conv_id)
@@ -950,7 +982,7 @@ mod tests {
         assert_eq!(
             source.as_deref(),
             Some("gateway"),
-            "existing assistant conversation should be backfilled with source_channel"
+            "assistant thread lookup should backfill a legacy NULL source_channel"
         );
     }
 }

@@ -13,9 +13,10 @@ use crate::agent::SessionManager as AgentSessionManager;
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::config::Config;
 use crate::context::ContextManager;
-use crate::db::Database;
+use crate::db::{Database, UserStore};
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
+use crate::llm::recording::HttpInterceptor;
 use crate::llm::{LlmProvider, RecordingLlm, SessionManager};
 use crate::secrets::SecretsStore;
 use crate::tools::ToolRegistry;
@@ -40,6 +41,14 @@ pub struct AppComponents {
     pub tools: Arc<ToolRegistry>,
     pub embeddings: Option<Arc<dyn EmbeddingProvider>>,
     pub workspace: Option<Arc<Workspace>>,
+    /// Workspace-backed `SettingsStore` adapter that dual-writes settings to
+    /// both the legacy `settings` table and `.system/settings/**` workspace
+    /// documents. Populated when both `db` and `workspace` are available.
+    /// Consumers that only need a `SettingsStore` (permission tools, the
+    /// SIGHUP reload handler) should prefer this over the raw `db` so that
+    /// runtime settings writes flow through the workspace and pick up schema
+    /// validation.
+    pub settings_store: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
     pub mcp_session_manager: Arc<McpSessionManager>,
     pub mcp_process_manager: Arc<McpProcessManager>,
@@ -53,6 +62,7 @@ pub struct AppComponents {
     pub skill_catalog: Option<Arc<SkillCatalog>>,
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
     pub recording_handle: Option<Arc<RecordingLlm>>,
+    pub http_interceptor: Option<Arc<dyn HttpInterceptor>>,
     pub session: Arc<SessionManager>,
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
@@ -136,8 +146,31 @@ impl AppBuilder {
     }
 
     /// Inject a pre-created database, skipping `init_database()`.
+    ///
+    /// **Warning:** this leaves `self.handles` as `None`, which means
+    /// `init_secrets()` cannot construct a real `SecretsStore` (the store
+    /// needs a backend-specific handle, not the generic `Arc<dyn Database>`).
+    /// Tests that need credentials/OAuth/encrypted secrets must use
+    /// [`AppBuilder::with_database_and_handles`] instead so the secrets
+    /// path stays wired.
     pub fn with_database(&mut self, db: Arc<dyn Database>) {
         self.db = Some(db);
+    }
+
+    /// Inject a pre-created database **and** the matching backend-specific
+    /// handles, skipping `init_database()`.
+    ///
+    /// Use this whenever the test will exercise code paths that touch
+    /// `SecretsStore` (OAuth, encrypted credentials, secrets-backed WASM
+    /// tools). For libSQL backends the handles are constructed via
+    /// `LibSqlBackend::shared_db()`; for PostgreSQL via `PgBackend::pool()`.
+    pub fn with_database_and_handles(
+        &mut self,
+        db: Arc<dyn Database>,
+        handles: crate::db::DatabaseHandles,
+    ) {
+        self.db = Some(db);
+        self.handles = Some(handles);
     }
 
     /// Inject a pre-created LLM provider, skipping `init_llm()`.
@@ -342,6 +375,7 @@ impl AppBuilder {
             Option<Arc<Workspace>>,
             Option<Arc<dyn crate::tools::SoftwareBuilder>>,
             Arc<SharedCredentialRegistry>,
+            Option<Arc<dyn HttpInterceptor>>,
         ),
         anyhow::Error,
     > {
@@ -356,12 +390,27 @@ impl AppBuilder {
             crate::tools::EngineVersion::V1
         };
         let mut registry = ToolRegistry::new().with_engine_version(engine_version);
+        if let Some(ref db) = self.db {
+            registry = registry.with_database(Arc::clone(db));
+        }
         if let Some(ref ss) = self.secrets_store {
             registry = registry.with_credentials(Arc::clone(&credential_registry), Arc::clone(ss));
+        }
+        // Test-only HTTP host remapping. Gated to debug/test builds so a stray
+        // `IRONCLAW_TEST_HTTP_REMAP` env var on a release deployment cannot
+        // silently redirect outbound HTTP from production to a test endpoint.
+        let http_interceptor = if cfg!(any(test, debug_assertions)) {
+            crate::http_intercept::remap_from_env()
+        } else {
+            None
+        };
+        if let Some(ref interceptor) = http_interceptor {
+            registry = registry.with_http_interceptor(Arc::clone(interceptor));
         }
         let tools = Arc::new(registry);
         tools.register_builtin_tools();
         tools.register_tool_info();
+        tools.register_system_tools();
 
         if let Some(ref ss) = self.secrets_store {
             tools.register_secrets_tools(Arc::clone(ss));
@@ -504,6 +553,7 @@ impl AppBuilder {
             workspace,
             builder,
             credential_registry,
+            http_interceptor,
         ))
     }
 
@@ -512,6 +562,7 @@ impl AppBuilder {
         &self,
         tools: &Arc<ToolRegistry>,
         hooks: &Arc<HookRegistry>,
+        settings_store_override: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
     ) -> Result<
         (
             Arc<McpSessionManager>,
@@ -546,6 +597,7 @@ impl AppBuilder {
             let secrets_store = self.secrets_store.clone();
             let tools = Arc::clone(tools);
             let wasm_config = self.config.wasm.clone();
+            let db = self.db.clone();
             async move {
                 let mut dev_loaded_tool_names: Vec<String> = Vec::new();
 
@@ -553,6 +605,10 @@ impl AppBuilder {
                     let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&tools));
                     if let Some(ref secrets) = secrets_store {
                         loader = loader.with_secrets_store(Arc::clone(secrets));
+                    }
+                    if let Some(ref db) = db {
+                        let role_lookup: Arc<dyn UserStore> = db.clone();
+                        loader = loader.with_role_lookup(role_lookup);
                     }
 
                     match loader.load_from_dir(&wasm_config.tools_dir).await {
@@ -751,11 +807,7 @@ impl AppBuilder {
         // Load registry catalog entries for extension discovery
         let mut catalog_entries = match crate::registry::RegistryCatalog::load_or_embedded() {
             Ok(catalog) => {
-                let entries: Vec<_> = catalog
-                    .all()
-                    .iter()
-                    .filter_map(|m| m.to_registry_entry())
-                    .collect();
+                let entries = catalog.discovery_entries();
                 tracing::debug!(
                     count = entries.len(),
                     "Loaded registry catalog entries for extension discovery"
@@ -809,11 +861,16 @@ impl AppBuilder {
             tools.register_extension_tools(Arc::clone(&manager));
 
             // Register permission management tool and upgrade tool_list with
-            // builtin registry support.
+            // builtin registry support. Prefer the workspace-backed adapter
+            // when the caller provides one (production wiring) so settings
+            // writes flow through schema validation; fall back to the raw db
+            // for test harnesses that don't have a workspace.
             let settings_store_for_perms: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>> =
-                self.db
-                    .as_ref()
-                    .map(|db| Arc::clone(db) as Arc<dyn crate::db::SettingsStore + Send + Sync>);
+                settings_store_override.clone().or_else(|| {
+                    self.db
+                        .as_ref()
+                        .map(|db| Arc::clone(db) as Arc<dyn crate::db::SettingsStore + Send + Sync>)
+                });
             tools.register_permission_tools(settings_store_for_perms.clone());
             tools.upgrade_tool_list(Arc::clone(&manager), settings_store_for_perms);
 
@@ -900,13 +957,35 @@ impl AppBuilder {
         } else {
             self.init_llm().await?
         };
-        let (safety, tools, embeddings, workspace, builder, credential_registry) =
+        let (safety, tools, embeddings, workspace, builder, credential_registry, http_interceptor) =
             self.init_tools(&llm).await?;
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
         let agent_session_manager =
             Arc::new(AgentSessionManager::new().with_hooks(Arc::clone(&hooks)));
+
+        // Build the workspace-backed `SettingsStore` BEFORE init_extensions so
+        // tools registered there (`register_permission_tools`,
+        // `upgrade_tool_list`) can be wired with the adapter from the start.
+        // The same adapter instance is then exposed on `AppComponents.settings_store`
+        // and reused by main.rs (e.g. for the SIGHUP reload handler).
+        let settings_store: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>> =
+            match (&workspace, &self.db) {
+                (Some(ws), Some(db)) => {
+                    let adapter = Arc::new(crate::workspace::WorkspaceSettingsAdapter::new(
+                        Arc::clone(ws),
+                        Arc::clone(db),
+                    ));
+                    if let Err(e) = adapter.ensure_system_config().await {
+                        tracing::debug!(
+                            "WorkspaceSettingsAdapter eager seed failed (lazy seed will retry): {e}"
+                        );
+                    }
+                    Some(adapter as Arc<dyn crate::db::SettingsStore + Send + Sync>)
+                }
+                _ => None,
+            };
 
         let (
             mcp_session_manager,
@@ -915,7 +994,9 @@ impl AppBuilder {
             extension_manager,
             catalog_entries,
             dev_loaded_tool_names,
-        ) = self.init_extensions(&tools, &hooks).await?;
+        ) = self
+            .init_extensions(&tools, &hooks, settings_store.clone())
+            .await?;
 
         // Load bootstrap-completed flag from settings so that existing users
         // who already completed onboarding don't re-get bootstrap injection.
@@ -992,6 +1073,14 @@ impl AppBuilder {
             // Register credential mappings from skill frontmatter into the
             // shared registry so the HTTP tool can auto-inject credentials.
             crate::skills::register_skill_credentials(registry.skills(), &credential_registry);
+            if let Some(db) = self.db.as_ref() {
+                crate::skills::persist_skill_auth_descriptors(
+                    registry.skills(),
+                    Some(db.as_ref()),
+                    &self.config.owner_id,
+                )
+                .await;
+            }
 
             let registry = Arc::new(std::sync::RwLock::new(registry));
             let catalog = ironclaw_skills::catalog::shared_catalog();
@@ -1030,6 +1119,7 @@ impl AppBuilder {
             tools,
             embeddings,
             workspace,
+            settings_store,
             extension_manager,
             mcp_session_manager,
             mcp_process_manager,
@@ -1042,6 +1132,7 @@ impl AppBuilder {
             skill_catalog,
             cost_guard,
             recording_handle,
+            http_interceptor,
             session: self.session,
             catalog_entries,
             dev_loaded_tool_names,

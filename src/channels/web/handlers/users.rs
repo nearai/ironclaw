@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::channels::web::auth::{AdminUser, AuthenticatedUser};
 use crate::channels::web::server::GatewayState;
 use crate::db::{Database, UserRecord};
+use crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
 
 /// Check whether `user_id` is the sole active admin. Returns true if demoting,
 /// suspending, or deleting this user would leave zero admins.
@@ -22,7 +23,7 @@ async fn is_last_admin(store: &dyn Database, user_id: &str) -> Result<bool, Stri
         .list_users(Some("active"))
         .await
         .map_err(|e| e.to_string())?;
-    let active_admins: Vec<_> = users.iter().filter(|u| u.role == "admin").collect();
+    let active_admins: Vec<_> = users.iter().filter(|u| u.is_admin()).collect();
     Ok(active_admins.len() == 1 && active_admins[0].id == user_id)
 }
 
@@ -67,6 +68,12 @@ pub async fn users_create_handler(
     }
 
     let user_id = Uuid::new_v4().to_string();
+    if user_id == ADMIN_SETTINGS_USER_ID {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Generated user id collided with reserved admin settings scope".to_string(),
+        ));
+    }
 
     let now = chrono::Utc::now();
     let user_record = UserRecord {
@@ -252,7 +259,7 @@ pub async fn users_update_handler(
         }
         if role != existing.role {
             // Prevent demoting the last admin.
-            if existing.role == "admin"
+            if existing.is_admin()
                 && role == "member"
                 && is_last_admin(store.as_ref(), &id)
                     .await
@@ -343,6 +350,12 @@ pub async fn users_suspend_handler(
         ps.evict_user(&id);
     }
 
+    // Drop the suspended user's auth-descriptor cache entry so any
+    // in-flight credential resolution falls back to the live store
+    // (which now sees the user as suspended) instead of serving stale
+    // metadata until the 60s TTL expires.
+    crate::auth::invalidate_auth_descriptor_cache(&id).await;
+
     Ok(Json(serde_json::json!({
         "id": id,
         "status": "suspended",
@@ -421,6 +434,12 @@ pub async fn users_delete_handler(
     if let Some(ref ps) = state.pairing_store {
         ps.evict_user(&id);
     }
+
+    // Drop the deleted user's auth-descriptor cache entry. The 60s TTL
+    // would otherwise let the in-process cache keep serving the deleted
+    // user's credential metadata until expiry, even though the underlying
+    // rows are gone.
+    crate::auth::invalidate_auth_descriptor_cache(&id).await;
 
     Ok(Json(serde_json::json!({
         "id": id,

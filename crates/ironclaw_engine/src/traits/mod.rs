@@ -6,3 +6,4 @@
 pub mod effect;
 pub mod llm;
 pub mod store;
+pub mod workspace;
