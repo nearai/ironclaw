@@ -1381,6 +1381,16 @@ impl Agent {
                             .await
                             .map(HandleOutcome::from_legacy);
                     }
+
+                    // If no approval is pending, treat short approvals like "yes"
+                    // as normal user input instead of returning a bridge error.
+                    if !crate::bridge::has_pending_approval(&message.user_id).await {
+                        let content = &message.content;
+                        return crate::bridge::handle_with_engine(self, message, content)
+                            .await
+                            .map(HandleOutcome::from_legacy);
+                    }
+
                     return crate::bridge::handle_approval(self, message, *approved, *always)
                         .await
                         .map(HandleOutcome::from_legacy);

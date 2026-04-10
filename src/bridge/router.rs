@@ -1750,6 +1750,29 @@ pub async fn has_pending_auth(user_id: &str) -> bool {
         })
 }
 
+pub async fn has_pending_approval(user_id: &str) -> bool {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return false;
+    };
+    let Ok(guard) = lock.try_read() else {
+        return false;
+    };
+    let Some(state) = guard.as_ref() else {
+        return false;
+    };
+    state
+        .pending_gates
+        .list_for_user(user_id)
+        .await
+        .into_iter()
+        .any(|gate| {
+            matches!(
+                gate.resume_kind,
+                ironclaw_engine::ResumeKind::Approval { .. }
+            )
+        })
+}
+
 /// Get pending auth info for a user (credential name + instructions).
 ///
 /// Used by the history endpoint to include auth state in the response,
@@ -3718,6 +3741,64 @@ mod tests {
         *lock.write().await = None;
     }
 
+    #[tokio::test]
+    async fn has_pending_approval_only_returns_true_for_approval_gates() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store);
+        let auth_thread_id = ironclaw_engine::ThreadId::new();
+        let approval_thread_id = ironclaw_engine::ThreadId::new();
+
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+        *lock.write().await = Some(state);
+
+        assert!(!has_pending_approval("alice").await);
+
+        {
+            let guard = lock.read().await;
+            if let Some(state) = guard.as_ref() {
+                state
+                    .pending_gates
+                    .insert(sample_pending_gate(
+                        "alice",
+                        auth_thread_id,
+                        ironclaw_engine::ResumeKind::Authentication {
+                            credential_name: "github_token".into(),
+                            instructions: "paste token".into(),
+                            auth_url: None,
+                        },
+                    ))
+                    .await
+                    .expect("insert auth gate");
+            } else {
+                panic!("engine state not initialized");
+            }
+        }
+
+        assert!(!has_pending_approval("alice").await);
+
+        {
+            let guard = lock.read().await;
+            if let Some(state) = guard.as_ref() {
+                state
+                    .pending_gates
+                    .insert(sample_pending_gate(
+                        "alice",
+                        approval_thread_id,
+                        ironclaw_engine::ResumeKind::Approval { allow_always: true },
+                    ))
+                    .await
+                    .expect("insert approval gate");
+            } else {
+                panic!("engine state not initialized");
+            }
+        }
+
+        assert!(has_pending_approval("alice").await);
+        *lock.write().await = None;
+    }
+
     // ── /expected command tests ─────────────────────────────────
 
     /// Build a minimal EngineState backed by a TestStore for /expected tests.
@@ -3936,6 +4017,99 @@ mod tests {
 
         *lock.write().await = None;
         outcome.expect("router approval re-emit test");
+    }
+
+    #[tokio::test]
+    async fn handle_with_engine_yes_without_pending_approval_goes_through_llm() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let state = make_expected_test_state(store);
+            *lock.write().await = Some(state);
+
+            let (agent, _statuses) = make_test_agent_with_status_channel("tui").await;
+            let message = IncomingMessage::new("tui", "alice", "yes");
+
+            let result = handle_with_engine_inner(&agent, &message, &message.content, 0)
+                .await
+                .expect("handle with engine");
+
+            let text = result.expect("llm response");
+            assert_eq!(text, "done");
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("router yes fallback test");
+    }
+
+    #[tokio::test]
+    async fn handle_with_engine_yes_with_pending_approval_still_prompts_for_approval() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let state = make_expected_test_state(store);
+            let thread_id = ironclaw_engine::ThreadId::new();
+            let pending = sample_pending_gate(
+                "alice",
+                thread_id,
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            );
+            state
+                .pending_gates
+                .insert(pending.clone())
+                .await
+                .expect("insert pending gate");
+
+            *lock.write().await = Some(state);
+
+            let (agent, statuses) = make_test_agent_with_status_channel("tui").await;
+            let message = IncomingMessage::new("tui", "alice", "yes")
+                .with_thread(thread_id.to_string());
+
+            let result = handle_with_engine_inner(&agent, &message, &message.content, 0)
+                .await
+                .expect("handle with engine");
+
+            let text = result.expect("waiting message");
+            assert!(
+                text.contains("requires approval"),
+                "expected approval guidance, got: {text}"
+            );
+
+            let statuses = statuses.lock().expect("poisoned").clone();
+            assert!(
+                statuses.iter().any(|status| matches!(
+                    status,
+                    StatusUpdate::ApprovalNeeded {
+                        request_id,
+                        tool_name,
+                        description,
+                        parameters,
+                        allow_always,
+                    } if request_id == &pending.request_id.to_string()
+                        && tool_name == "shell"
+                        && description == "pending gate"
+                        && parameters == &serde_json::json!({"cmd": "ls"})
+                        && *allow_always
+                )),
+                "expected approval status to be re-emitted, got: {statuses:?}"
+            );
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("router yes pending approval test");
     }
 
     /// find_most_recent_thread returns the active thread when one exists.
