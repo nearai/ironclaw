@@ -207,8 +207,20 @@ fn needs_top_level_flatten(schema: &JsonValue) -> bool {
     match schema {
         JsonValue::Object(map) => {
             let has_forbidden = FORBIDDEN_TOP_LEVEL.iter().any(|k| map.contains_key(*k));
-            let bad_type = !matches!(map.get("type"), Some(JsonValue::String(s)) if s == "object");
-            has_forbidden || bad_type
+            // Accept both `"type": "object"` and `"type": ["object", "null"]`
+            // (or any array containing "object"). The array form is valid
+            // JSON Schema for a nullable object and some upstream providers
+            // / `make_nullable` produce it. Treating it as bad_type would
+            // silently flatten a schema that OpenAI might actually accept,
+            // discarding all its properties.
+            let is_object_type = match map.get("type") {
+                Some(JsonValue::String(s)) => s == "object",
+                Some(JsonValue::Array(arr)) => arr
+                    .iter()
+                    .any(|v| matches!(v, JsonValue::String(s) if s == "object")),
+                _ => false,
+            };
+            has_forbidden || !is_object_type
         }
         // Schema isn't even a JSON object — definitely not OpenAI-compatible.
         _ => true,
@@ -1185,6 +1197,33 @@ mod tests {
         assert_eq!(result["type"], "object");
         assert!(result["properties"].is_object());
         assert_eq!(result["additionalProperties"], true);
+    }
+
+    #[test]
+    fn test_normalize_schema_strict_does_not_flatten_nullable_object_type() {
+        // `"type": ["object", "null"]` is valid JSON Schema for a nullable
+        // object. Some upstream providers and `make_nullable` produce this
+        // form. The previous check only matched `JsonValue::String("object")`
+        // and would have flattened this schema, discarding all properties.
+        let input = serde_json::json!({
+            "type": ["object", "null"],
+            "properties": {
+                "query": { "type": "string" }
+            },
+            "required": ["query"]
+        });
+        let mut description = "nullable tool".to_string();
+        let result = normalize_schema_strict(&input, &mut description);
+
+        // Should NOT flatten — the schema is a valid object type.
+        assert!(
+            result["properties"]["query"].is_object(),
+            "properties must be preserved for nullable object type, got: {result}"
+        );
+        assert_eq!(
+            description, "nullable tool",
+            "description must be untouched (no flatten hint appended)"
+        );
     }
 
     #[test]
