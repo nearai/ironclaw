@@ -197,8 +197,21 @@ async fn register_channel(
                 .as_ref()
                 .and_then(|f| f.config.get("owner_id"))
                 .and_then(|v| match v {
-                    serde_json::Value::String(s) => Some(s.clone()),
-                    serde_json::Value::Number(n) => Some(n.to_string()),
+                    serde_json::Value::String(s) => {
+                        let trimmed = s.trim();
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed.to_string())
+                        }
+                    },
+                    serde_json::Value::Number(n) => {
+                        if n.is_i64() || n.is_u64() {
+                            Some(n.to_string())
+                        } else {
+                            None
+                        }
+                    },
                     _ => None,
                 })
         });
