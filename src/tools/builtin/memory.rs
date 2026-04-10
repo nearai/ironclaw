@@ -95,6 +95,17 @@ fn map_write_err(e: crate::error::WorkspaceError) -> ToolError {
     }
 }
 
+/// Non-empty patch `old_string` from params, or `None` if patch mode is off.
+///
+/// Empty and whitespace-only strings are treated as absent so payloads such as
+/// `"old_string": ""` do not force patch mode when writing or appending `content`.
+fn memory_write_patch_old_string(params: &serde_json::Value) -> Option<&str> {
+    params
+        .get("old_string")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+}
+
 /// Tool for searching workspace memory.
 ///
 /// Performs hybrid search (FTS + semantic) across all memory documents.
@@ -263,7 +274,7 @@ impl Tool for MemoryWriteTool {
                 },
                 "old_string": {
                     "type": "string",
-                    "description": "When present, switches to patch mode: finds and replaces this exact string in the document. Works with any target including 'memory' and custom paths."
+                    "description": "When non-empty, switches to patch mode: finds and replaces this exact string in the document. Empty or whitespace-only values are ignored (use write/append via content). Works with any target including 'memory' and custom paths."
                 },
                 "new_string": {
                     "type": "string",
@@ -297,7 +308,8 @@ impl Tool for MemoryWriteTool {
         let allows_empty_content = target == "bootstrap";
 
         // At least one mode must be provided: content for write/append, or old_string for patch.
-        let is_patch_mode = params.get("old_string").and_then(|v| v.as_str()).is_some();
+        let patch_old_string = memory_write_patch_old_string(&params);
+        let is_patch_mode = patch_old_string.is_some();
         let has_content = !content.trim().is_empty();
         if !is_patch_mode && !has_content && !allows_empty_content {
             return Err(ToolError::InvalidParameters(
@@ -418,14 +430,8 @@ impl Tool for MemoryWriteTool {
             }
         }
 
-        // Patch mode: if old_string is provided, do search-and-replace instead of write/append.
-        let old_string = params.get("old_string").and_then(|v| v.as_str());
-        if let Some(old_str) = old_string {
-            if old_str.is_empty() {
-                return Err(ToolError::InvalidParameters(
-                    "old_string cannot be empty".to_string(),
-                ));
-            }
+        // Patch mode: non-empty old_string does search-and-replace instead of write/append.
+        if let Some(old_str) = patch_old_string {
             if layer.is_some() {
                 return Err(ToolError::InvalidParameters(
                     "patch mode (old_string/new_string) cannot be combined with layer".to_string(),
@@ -896,6 +902,31 @@ mod tests {
         assert!(!looks_like_filesystem_path("MEMORY.md"));
         assert!(!looks_like_filesystem_path("daily/2026-03-11.md"));
         assert!(!looks_like_filesystem_path("projects/alpha/notes.md"));
+    }
+
+    #[test]
+    fn memory_write_patch_old_string_ignores_empty_placeholders() {
+        assert_eq!(memory_write_patch_old_string(&serde_json::json!({})), None);
+        assert_eq!(
+            memory_write_patch_old_string(&serde_json::json!({ "old_string": "" })),
+            None
+        );
+        assert_eq!(
+            memory_write_patch_old_string(&serde_json::json!({ "old_string": "   " })),
+            None
+        );
+        assert_eq!(
+            memory_write_patch_old_string(&serde_json::json!({ "old_string": null })),
+            None
+        );
+        assert_eq!(
+            memory_write_patch_old_string(&serde_json::json!({ "old_string": "foo" })),
+            Some("foo")
+        );
+        assert_eq!(
+            memory_write_patch_old_string(&serde_json::json!({ "old_string": "  bar  " })),
+            Some("  bar  ")
+        );
     }
 
     #[cfg(feature = "postgres")]
