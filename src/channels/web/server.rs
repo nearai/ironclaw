@@ -4262,7 +4262,8 @@ mod tests {
         use tokio::time::{Duration, timeout};
         use tower::ServiceExt;
 
-        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir, _db_dir) = test_ext_mgr_with_db().await;
+        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir, secrets, _db_dir) =
+            test_ext_mgr_with_db().await;
 
         std::fs::write(wasm_channels_dir.path().join("wechat.wasm"), b"\0asm fake")
             .expect("write fake wechat wasm");
@@ -4584,6 +4585,7 @@ mod tests {
             tools: Vec::new(),
             needs_setup: false,
             has_auth: true,
+            requires_binding: false,
             installed: true,
             activation_error: Some("boom".to_string()),
             version: None,
@@ -4628,7 +4630,8 @@ mod tests {
         // developer's real `~/.ironclaw/mcp-servers.json` (which would
         // panic with `AlreadyInstalled("notion")` on dev machines that
         // already have a notion entry configured).
-        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir, _db_dir) = test_ext_mgr_with_db().await;
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir, _secrets, _db_dir) =
+            test_ext_mgr_with_db().await;
         let mut server =
             crate::tools::mcp::McpServerConfig::new("notion", "https://mcp.notion.com/mcp");
         server.description = Some("Notion".to_string());
@@ -5915,9 +5918,11 @@ mod tests {
         Arc<ExtensionManager>,
         tempfile::TempDir,
         tempfile::TempDir,
+        Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
         tempfile::TempDir,
     ) {
         let secrets = test_secrets_store();
+        let secrets_store: Arc<dyn crate::secrets::SecretsStore + Send + Sync> = secrets.clone();
         let tool_registry = Arc::new(ToolRegistry::new());
         let mcp_sm = Arc::new(crate::tools::mcp::session::McpSessionManager::new());
         let mcp_pm = Arc::new(crate::tools::mcp::process::McpProcessManager::new());
@@ -5945,7 +5950,13 @@ mod tests {
             Some(db),
             vec![],
         ));
-        (ext_mgr, wasm_tools_dir, wasm_channels_dir, db_dir)
+        (
+            ext_mgr,
+            wasm_tools_dir,
+            wasm_channels_dir,
+            secrets_store,
+            db_dir,
+        )
     }
 
     #[cfg(feature = "libsql")]

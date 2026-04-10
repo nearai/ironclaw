@@ -29,11 +29,11 @@ use crate::extensions::wechat_login::{
     purge_expired_logins as purge_expired_wechat_logins, start_login as start_wechat_login,
 };
 use crate::extensions::{
-    ActivateResult, AuthResult, ConfigureResult, ExtensionError, ExtensionKind, ExtensionSource,
-    InstallResult, InstalledExtension, InteractiveLoginInfo, InteractiveLoginPollResult,
-    InteractiveLoginStartResult, RegistryEntry, ResultSource, SearchResult, ToolAuthState,
-    UpgradeOutcome, UpgradeResult,
-    EnsureReadyIntent, EnsureReadyOutcome, ExtensionPhase, LatentProviderAction,
+    ActivateResult, AuthResult, ConfigureResult, EnsureReadyIntent, EnsureReadyOutcome,
+    ExtensionError, ExtensionKind, ExtensionPhase, ExtensionSource, InstallResult,
+    InstalledExtension, InteractiveLoginInfo, InteractiveLoginPollResult,
+    InteractiveLoginStartResult, LatentProviderAction, RegistryEntry, ResultSource, SearchResult,
+    ToolAuthState, UpgradeOutcome, UpgradeResult,
     naming::{canonicalize_extension_name, legacy_extension_alias},
 };
 use crate::hooks::HookRegistry;
@@ -7979,9 +7979,8 @@ mod tests {
         WechatLoginPollOutcome,
     };
     use crate::extensions::{
-        ExtensionError, ExtensionKind, ExtensionSource, InstallResult, InteractiveLoginStartResult,
-        AuthHint, RegistryEntry,
-        ToolAuthState, VerificationChallenge,
+        AuthHint, ExtensionError, ExtensionKind, ExtensionSource, InstallResult,
+        InteractiveLoginStartResult, RegistryEntry, ToolAuthState, VerificationChallenge,
     };
     use crate::pairing::PairingStore;
     use crate::secrets::CreateSecretParams;

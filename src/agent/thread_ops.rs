@@ -2340,7 +2340,6 @@ mod tests {
     use crate::channels::{
         Channel, ChannelManager, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
     };
-    use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
     use crate::context::ContextManager;
     use crate::error::ChannelError;
     use crate::hooks::HookRegistry;
