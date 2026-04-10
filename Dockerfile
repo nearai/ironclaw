@@ -8,7 +8,7 @@
 # database reopen), so we use glibc.
 #
 # Build:
-#   docker build --platform linux/amd64 -t ironclaw:latest .
+#   docker build --platform linux/amd64 --target runtime -t ironclaw:latest .
 #
 # Run:
 #   docker run --env-file .env -p 3000:3000 ironclaw:latest
