@@ -12,7 +12,7 @@
 //!
 //! Enable by setting `IRONCLAW_RECORD_TRACE=1` at runtime.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -258,6 +258,315 @@ impl HttpInterceptor for ReplayingHttpInterceptor {
     }
 }
 
+/// Truncate a message to a stable prefix suitable for use as a replay hint.
+///
+/// The goal is to keep the part of the message that uniquely identifies the
+/// LLM call across runs, while dropping the part that changes (UUIDs,
+/// timestamps, mission IDs from prior tool calls). For tool result messages
+/// of the form `[Tool \`name\` returned: <json>]`, this truncates right
+/// after the colon, keeping the tool name. For other messages, it caps at
+/// 80 bytes on a UTF-8 char boundary.
+fn stable_hint_prefix(content: &str) -> String {
+    // Tool-result messages: keep everything up to and including the `:` so
+    // the tool name is preserved but the variable JSON payload is dropped.
+    // Both NEAR-AI's `[Tool \`name\` returned: ...]` and the safety-layer
+    // rewrite produced by `sanitize_tool_messages` follow this shape.
+    if content.starts_with("[Tool ")
+        && let Some(colon) = content.find(':')
+    {
+        // Include the colon so the hint stays unique vs other patterns.
+        return safe_truncate(content, colon + 1);
+    }
+    // Default: 80-byte cap on a char boundary.
+    safe_truncate(content, 80)
+}
+
+/// Truncate `content` to at most `max_bytes` bytes, snapping back to the
+/// nearest UTF-8 char boundary.
+fn safe_truncate(content: &str, max_bytes: usize) -> String {
+    if content.len() <= max_bytes {
+        return content.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    content[..end].to_string()
+}
+
+// ── Tool-call argument parameterization ────────────────────────────
+//
+// Recorded tool calls often reference IDs returned by *prior* tool calls
+// (e.g. `mission_fire(<mission_id from mission_create>)`). If we serialize
+// the literal ID into the fixture, replay-time mission_create will produce
+// a fresh ID and the recorded mission_fire will fail with "not found".
+//
+// Solution: at recording time, scan the prior conversation's tool result
+// messages, build a `{call_id: {field: value}}` lookup, and rewrite any
+// matching literal value in the new tool call's arguments as a template
+// `{{call_id.field}}`. The replay engine's `substitute_templates` already
+// resolves those templates against the *current* tool result values.
+
+/// Build a `{key: {field: stringified_value}}` lookup of every prior tool
+/// result in the conversation, used to parameterize subsequent tool-call
+/// arguments at recording time.
+///
+/// The recorder must handle two shapes of "prior tool result":
+///
+/// 1. **Native `Role::Tool` messages** — keyed by their `tool_call_id`.
+///    Used by providers that pass tool results through unmodified.
+/// 2. **Sanitized user messages** — `sanitize_tool_messages` rewrites
+///    orphaned tool results as `Role::User` content of the form
+///    `[Tool \`name\` returned: <json>]`. These have no call_id, so we key
+///    them by `tool:<name>` instead. The replay engine resolves both forms
+///    via the same `{{key.field}}` template syntax.
+///
+/// In both cases, only top-level scalar fields of the JSON content are
+/// indexed (string, number, bool). Nested objects and arrays are skipped —
+/// they're rarely useful as parameterization keys and would inflate the
+/// lookup with noise.
+fn build_prior_tool_lookup(messages: &[ChatMessage]) -> HashMap<String, HashMap<String, String>> {
+    let mut lookup: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for msg in messages {
+        // ── Shape 1: native Role::Tool with structured content. ──
+        if msg.role == Role::Tool {
+            let Some(call_id) = msg.tool_call_id.as_deref() else {
+                continue;
+            };
+            let content = unwrap_tool_output(&msg.content);
+            index_json_into(&mut lookup, call_id, &content);
+            continue;
+        }
+        // ── Shape 2: Role::User rewrite of orphaned tool results. ──
+        if msg.role == Role::User
+            && let Some((tool_name, payload)) = parse_user_tool_result(&msg.content)
+        {
+            // Key as `tool:<name>` so it doesn't collide with call_ids
+            // and stays unique across multiple tool invocations.
+            let key = format!("tool:{tool_name}");
+            index_json_into(&mut lookup, &key, payload);
+        }
+    }
+    lookup
+}
+
+/// Parse a JSON object literal out of `content` and merge its top-level
+/// scalar fields into `lookup[key]`. If `content` is not valid JSON, falls
+/// back to a Python-dict-repr coercion (the engine v2 orchestrator emits
+/// tool results as `str(dict)` which uses single quotes and Python keyword
+/// literals — see [`coerce_python_repr_to_json`]).
+fn index_json_into(
+    lookup: &mut HashMap<String, HashMap<String, String>>,
+    key: &str,
+    content: &str,
+) {
+    let parsed: Option<serde_json::Value> = serde_json::from_str(content).ok().or_else(|| {
+        coerce_python_repr_to_json(content).and_then(|s| serde_json::from_str(&s).ok())
+    });
+    let Some(json) = parsed else { return };
+    let Some(obj) = json.as_object() else {
+        return;
+    };
+    let entry = lookup.entry(key.to_string()).or_default();
+    for (k, v) in obj {
+        if let Some(s) = json_value_as_scalar_string(v) {
+            entry.insert(k.clone(), s);
+        }
+    }
+}
+
+/// Best-effort coercion of a Python `repr(dict)` string into valid JSON.
+///
+/// The engine v2 Python orchestrator stringifies tool results with
+/// `str(output)`, which produces:
+///   * single-quoted strings instead of double-quoted ones
+///   * Python keyword literals: `True` / `False` / `None`
+///
+/// This helper walks the string character by character, tracking string
+/// state, and rewrites those into JSON form. It handles values that don't
+/// embed unescaped quote characters of the opposite kind — adequate for the
+/// shapes the orchestrator currently emits (UUIDs, names, statuses, ints).
+/// Returns `None` if the input is empty.
+fn coerce_python_repr_to_json(content: &str) -> Option<String> {
+    if content.is_empty() {
+        return None;
+    }
+    // ASCII-only fast path. The orchestrator's `str(output)` repr that this
+    // helper targets is structurally ASCII (UUIDs, names, statuses, ints).
+    // Multi-byte UTF-8 (CJK characters, emoji, etc.) would be corrupted by
+    // the byte-as-char casts below — each individual byte of a multi-byte
+    // sequence would be widened to a `char`, producing mojibake. Bail
+    // early instead and let the caller fall through to its raw-content
+    // path.
+    if !content.is_ascii() {
+        return None;
+    }
+    let mut out = String::with_capacity(content.len());
+    let bytes = content.as_bytes();
+    // 0 = outside string, 1 = inside single-quoted string, 2 = inside double-quoted string
+    let mut state: u8 = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match state {
+            0 => match c {
+                b'\'' => {
+                    out.push('"');
+                    state = 1;
+                }
+                b'"' => {
+                    out.push('"');
+                    state = 2;
+                }
+                b'T' if bytes.get(i..i + 4) == Some(b"True") => {
+                    out.push_str("true");
+                    i += 4;
+                    continue;
+                }
+                b'F' if bytes.get(i..i + 5) == Some(b"False") => {
+                    out.push_str("false");
+                    i += 5;
+                    continue;
+                }
+                b'N' if bytes.get(i..i + 4) == Some(b"None") => {
+                    out.push_str("null");
+                    i += 4;
+                    continue;
+                }
+                _ => out.push(c as char),
+            },
+            1 => match c {
+                b'\\' if i + 1 < bytes.len() => {
+                    out.push('\\');
+                    out.push(bytes[i + 1] as char);
+                    i += 2;
+                    continue;
+                }
+                b'"' => {
+                    // Escape stray double quotes inside the original
+                    // single-quoted string so the JSON output stays valid.
+                    out.push('\\');
+                    out.push('"');
+                }
+                b'\'' => {
+                    out.push('"');
+                    state = 0;
+                }
+                _ => out.push(c as char),
+            },
+            2 => match c {
+                b'\\' if i + 1 < bytes.len() => {
+                    out.push('\\');
+                    out.push(bytes[i + 1] as char);
+                    i += 2;
+                    continue;
+                }
+                b'"' => {
+                    out.push('"');
+                    state = 0;
+                }
+                _ => out.push(c as char),
+            },
+            _ => unreachable!(),
+        }
+        i += 1;
+    }
+    if state != 0 {
+        // Unterminated string — probably not actually Python repr.
+        return None;
+    }
+    Some(out)
+}
+
+/// Parse the sanitize-rewrite format `[Tool \`name\` returned: <payload>]`.
+///
+/// Returns the tool name and the payload string (without the wrapping
+/// brackets and trailing `]`). Tolerates both backtick-quoted and bare names.
+fn parse_user_tool_result(content: &str) -> Option<(String, &str)> {
+    // Required prefix: `[Tool ` (literal `[` then word `Tool ` with a space).
+    let rest = content.strip_prefix("[Tool ")?;
+    // Optional opening backtick around the name.
+    let (name_start, after_name_quote) = if let Some(stripped) = rest.strip_prefix('`') {
+        (stripped, true)
+    } else {
+        (rest, false)
+    };
+    // Find the closing of the name. With a backtick, look for the closing
+    // backtick; without, look for the next space.
+    let (name, after_name) = if after_name_quote {
+        let close = name_start.find('`')?;
+        (&name_start[..close], &name_start[close + 1..])
+    } else {
+        let close = name_start.find(' ')?;
+        (&name_start[..close], &name_start[close..])
+    };
+    // After the name we expect ` returned: ` then the payload, then a final `]`.
+    let after_returned = after_name.trim_start().strip_prefix("returned:")?;
+    let payload = after_returned.trim_start();
+    let payload = payload.strip_suffix(']').unwrap_or(payload);
+    Some((name.to_string(), payload.trim()))
+}
+
+/// Strip the `<tool_output name="...">…</tool_output>` wrapper that the
+/// safety layer adds, returning the inner JSON if present.
+fn unwrap_tool_output(content: &str) -> std::borrow::Cow<'_, str> {
+    if let Some(body) = ironclaw_safety::SafetyLayer::unwrap_tool_output(content) {
+        std::borrow::Cow::Owned(body)
+    } else {
+        std::borrow::Cow::Borrowed(content)
+    }
+}
+
+/// Render a JSON value as a string only when it is a *scalar* (string,
+/// number, bool). Returns `None` for arrays/objects/null — those are too
+/// noisy to be useful as parameterization keys.
+fn json_value_as_scalar_string(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// Walk a JSON value and replace any string that exactly matches a value in
+/// the lookup with a `{{call_id.field}}` template. Operates in place.
+///
+/// We only do *full-string* replacement (not substring) to avoid corrupting
+/// strings that incidentally contain a UUID; the replay's
+/// `substitute_templates` is symmetric and resolves the template back to the
+/// current value.
+fn parameterize_value(
+    value: &mut serde_json::Value,
+    lookup: &HashMap<String, HashMap<String, String>>,
+) {
+    match value {
+        serde_json::Value::String(s) => {
+            // Look for a (call_id, field) pair whose value exactly matches `s`.
+            // Use the first match — duplicates are pathological and rare.
+            for (call_id, fields) in lookup {
+                for (field, recorded) in fields {
+                    if recorded == s {
+                        *s = format!("{{{{{call_id}.{field}}}}}");
+                        return;
+                    }
+                }
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for v in map.values_mut() {
+                parameterize_value(v, lookup);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                parameterize_value(v, lookup);
+            }
+        }
+        _ => {}
+    }
+}
+
 // ── RecordingLlm ───────────────────────────────────────────────────
 
 /// LLM provider decorator that records interactions into a trace file.
@@ -430,21 +739,24 @@ impl RecordingLlm {
 
         *prev_count = current_count;
 
-        // Build request hint from last user message
+        // Build request hint from last user message.
+        //
+        // The hint is used by `TraceLlm` for replay matching: a step is a
+        // candidate when the *current* request's last user message contains
+        // the hint as a substring. So the hint must be (a) distinctive enough
+        // to identify the step and (b) free of values that change between
+        // runs (UUIDs, timestamps, mission IDs from prior tool calls).
+        //
+        // Strategy: truncate at the first JSON-content boundary so we keep
+        // the stable prefix (e.g. "[Tool `mission_create` returned:") and
+        // drop the volatile payload (mission UUIDs, etc.). The fallback is
+        // a hard cap at 80 bytes on a UTF-8 char boundary.
         let hint = messages
             .iter()
             .rev()
             .find(|m| m.role == Role::User)
             .map(|msg| {
-                let hint_text = if msg.content.len() > 80 {
-                    let mut end = 80;
-                    while end > 0 && !msg.content.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    msg.content[..end].to_string()
-                } else {
-                    msg.content.clone()
-                };
+                let hint_text = stable_hint_prefix(&msg.content);
                 RequestHint {
                     last_user_message_contains: Some(hint_text),
                     min_message_count: Some(current_count),
@@ -495,6 +807,14 @@ impl LlmProvider for RecordingLlm {
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         let (hint, tool_results) = self.capture_new_messages(&request.messages).await;
+        // Parameterize tool call arguments BEFORE the request is consumed.
+        // We need access to the prior conversation's tool results (Role::Tool
+        // messages) so we can rewrite literal IDs/values that came from a
+        // previous tool's output as `{{call_id.field}}` templates. The replay
+        // engine resolves these templates at lookup time using the *current*
+        // tool result values, so non-deterministic IDs (mission UUIDs, etc.)
+        // don't bake the recording-time values into the fixture.
+        let prior_tool_lookup = build_prior_tool_lookup(&request.messages);
         let response = self.inner.complete_with_tools(request).await?;
 
         let step = if response.tool_calls.is_empty() {
@@ -514,10 +834,14 @@ impl LlmProvider for RecordingLlm {
                     tool_calls: response
                         .tool_calls
                         .iter()
-                        .map(|tc| TraceToolCall {
-                            id: tc.id.clone(),
-                            name: tc.name.clone(),
-                            arguments: tc.arguments.clone(),
+                        .map(|tc| {
+                            let mut args = tc.arguments.clone();
+                            parameterize_value(&mut args, &prior_tool_lookup);
+                            TraceToolCall {
+                                id: tc.id.clone(),
+                                name: tc.name.clone(),
+                                arguments: args,
+                            }
                         })
                         .collect(),
                     input_tokens: response.input_tokens,
@@ -956,5 +1280,28 @@ mod tests {
         assert!(trace.memory_snapshot.is_empty());
         assert!(trace.http_exchanges.is_empty());
         assert!(trace.steps[0].expected_tool_results.is_empty());
+    }
+
+    #[test]
+    fn coerce_python_repr_to_json_handles_ascii() {
+        let input = "{'name': 'alice', 'count': 3, 'active': True, 'note': None}";
+        let out = coerce_python_repr_to_json(input).expect("ascii input should coerce");
+        // Round-trip through serde to confirm it's now valid JSON.
+        let value: serde_json::Value = serde_json::from_str(&out).expect("must be valid JSON");
+        assert_eq!(value["name"], "alice");
+        assert_eq!(value["count"], 3);
+        assert_eq!(value["active"], true);
+        assert!(value["note"].is_null());
+    }
+
+    #[test]
+    fn coerce_python_repr_to_json_bails_on_non_ascii() {
+        // Multi-byte UTF-8 (CJK + emoji) must NOT be coerced — the byte-level
+        // walker would mojibake the input. Bailing is the correct outcome;
+        // the caller falls through to its raw-content path.
+        assert_eq!(coerce_python_repr_to_json("{'name': '日本語'}"), None);
+        assert_eq!(coerce_python_repr_to_json("{'flag': '🚀'}"), None);
+        // Sanity: an empty string still returns None for an unrelated reason.
+        assert_eq!(coerce_python_repr_to_json(""), None);
     }
 }

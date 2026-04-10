@@ -17,6 +17,18 @@ CANNED_RESPONSES = [
     (re.compile(r"empty routine response", re.IGNORECASE), ""),
     (re.compile(r"hello|hi|hey", re.IGNORECASE), "Hello! How can I help you today?"),
     (re.compile(r"2\s*\+\s*2|two plus two", re.IGNORECASE), "The answer is 4."),
+    (
+        re.compile(r"Tool `gmail` returned:.*Quarterly update", re.IGNORECASE | re.DOTALL),
+        "You have one unread Gmail message from ceo@example.com: Quarterly update.",
+    ),
+    (
+        re.compile(r"Tool `http` returned:.*Budget Q1\.xlsx", re.IGNORECASE | re.DOTALL),
+        "I found these Google Drive files: Budget Q1.xlsx and Roadmap.md.",
+    ),
+    (
+        re.compile(r"Tool `mock_mcp_mock_search` returned:", re.IGNORECASE | re.DOTALL),
+        "Mock MCP search completed successfully.",
+    ),
     (re.compile(r"skill|install", re.IGNORECASE), "I can help you with skills management."),
     (re.compile(r"html.?test|injection.?test", re.IGNORECASE),
      'Here is some content: <script>alert("xss")</script> and <img src=x onerror="alert(1)">'
@@ -26,8 +38,13 @@ CANNED_RESPONSES = [
     # For tool intent nudge test: first response expresses intent without tool call
     (re.compile(r"search intent", re.IGNORECASE),
      "Let me search for that information now."),
-    # After nudge message, summarize the tool result
-    (re.compile(r"You expressed intent", re.IGNORECASE),
+    # After the orchestrator sends its nudge, recover with a final completion.
+    # The exact nudge prefix is "You said you would perform an action..." —
+    # see `signals_tool_intent` + the nudge append in
+    # `crates/ironclaw_engine/orchestrator/default.py`. Match either the new
+    # phrasing or the legacy "You expressed intent" so older deployments
+    # still work.
+    (re.compile(r"You said you would perform an action|You expressed intent", re.IGNORECASE),
      "I found the information you requested."),
 ]
 DEFAULT_RESPONSE = "I understand your request."
@@ -66,8 +83,16 @@ TOOL_CALL_PATTERNS = [
         },
     ),
     (
+        re.compile(r"fetch latest news|latest news", re.IGNORECASE),
+        "web-search",
+        lambda _: {
+            "query": "latest news",
+            "count": 5,
+        },
+    ),
+    (
         re.compile(r"check mock mcp|mock mcp search", re.IGNORECASE),
-        "mock-mcp_mock_search",
+        "mock_mcp_mock_search",
         lambda _: {"query": "refresh-check"},
     ),
     (re.compile(r"what time|current time", re.IGNORECASE), "time", lambda _: {"operation": "now"}),
@@ -248,6 +273,7 @@ TOOL_CALL_PATTERNS = [
 # Runtime-configurable mock API URL for github tool call tests.
 # Set via POST /__mock/set_github_api_url with {"url": "http://..."}
 _github_api_url: str = "https://api.github.com"
+_last_chat_request: dict | None = None
 
 
 def _new_oauth_state() -> dict:
@@ -273,6 +299,30 @@ def _last_user_content(messages: list[dict]) -> str:
         if msg.get("role") == "user":
             return _message_text(msg)
     return ""
+
+
+def _extract_resumed_action_result(last_user: str) -> tuple[str, str] | None:
+    prefix = "The pending action '"
+    marker = "Continue from this result:\n"
+    if not last_user.startswith(prefix) or marker not in last_user:
+        return None
+    rest = last_user[len(prefix):]
+    action_name, _, tail = rest.partition("' has already been executed.")
+    if not action_name or not tail:
+        return None
+    _, _, rendered = last_user.partition(marker)
+    rendered = rendered.strip()
+    if not rendered:
+        return None
+    return action_name, rendered
+
+
+def _resumed_action_summary(messages: list[dict]) -> str | None:
+    resumed = _extract_resumed_action_result(_last_user_content(messages))
+    if not resumed:
+        return None
+    action_name, rendered = resumed
+    return f"The {action_name} tool returned: {rendered}"
 
 def _conversation_has_user_trigger(messages: list[dict], pattern: re.Pattern[str]) -> bool:
     for msg in messages:
@@ -381,6 +431,9 @@ def match_job_response(messages: list[dict], has_tools: bool) -> dict | None:
 
 def match_response(messages: list[dict]) -> str:
     content = _last_user_content(messages)
+    resumed = _resumed_action_summary(messages)
+    if resumed:
+        return resumed
     for pattern, response in CANNED_RESPONSES:
         if pattern.search(content):
             return response
@@ -521,7 +574,9 @@ async def _dispatch_special_response(
 
 async def chat_completions(request: web.Request) -> web.StreamResponse:
     """Handle POST /v1/chat/completions and /chat/completions."""
+    global _last_chat_request
     body = await request.json()
+    _last_chat_request = body
     messages = body.get("messages", [])
     stream = body.get("stream", False)
     has_tools = bool(body.get("tools"))
@@ -553,6 +608,12 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
         if not stream:
             return _text_response(cid, text)
         return await _stream_text(request, cid, text)
+
+    resumed_text = _resumed_action_summary(messages)
+    if resumed_text:
+        if not stream:
+            return _text_response(cid, resumed_text)
+        return await _stream_text(request, cid, resumed_text)
 
     if special:
         return await _dispatch_special_response(request, cid, stream, special)
@@ -927,8 +988,12 @@ def main():
     async def get_github_api_url(request: web.Request) -> web.Response:
         return web.json_response({"url": _github_api_url})
 
+    async def get_last_chat_request(request: web.Request) -> web.Response:
+        return web.json_response(_last_chat_request or {})
+
     app.router.add_post("/__mock/set_github_api_url", set_github_api_url)
     app.router.add_get("/__mock/github_api_url", get_github_api_url)
+    app.router.add_get("/__mock/last_chat_request", get_last_chat_request)
     # Mock MCP server endpoints
     app.router.add_post("/mcp", mcp_endpoint)
     app.router.add_post("/mcp-400", mcp_endpoint_400)

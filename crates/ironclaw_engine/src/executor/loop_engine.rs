@@ -617,8 +617,8 @@ mod tests {
         let outcome = exec.run().await.unwrap();
         assert!(matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "Done!"));
         assert_eq!(exec.thread.step_count, 2);
-        // Should have: system(nudge not counted), assistant+actions, action_result, assistant
-        assert!(exec.thread.messages.len() >= 3);
+        // Orchestrator stores working messages in internal_messages
+        assert!(exec.thread.internal_messages.len() >= 3);
     }
 
     #[tokio::test]
@@ -735,10 +735,10 @@ mod tests {
             matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "The answer is 42")
         );
         assert_eq!(exec.thread.step_count, 2);
-        // Should have nudge system message
+        // Nudge is stored in orchestrator's working messages (internal transcript)
         assert!(
             exec.thread
-                .messages
+                .internal_messages
                 .iter()
                 .any(|m| m.content.contains("did not include any tool calls"))
         );
@@ -833,7 +833,7 @@ mod tests {
             matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "got result")
         );
         // Should have at least 1 action result recorded
-        assert!(!exec.thread.messages.is_empty());
+        assert!(!exec.thread.internal_messages.is_empty());
     }
 
     #[tokio::test]
@@ -873,10 +873,10 @@ mod tests {
             matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "done, x was 30")
         );
         assert_eq!(exec.thread.step_count, 2);
-        // The output metadata from first step should be in messages
+        // The output metadata from first step should be in internal messages
         assert!(
             exec.thread
-                .messages
+                .internal_messages
                 .iter()
                 .any(|m| m.content.contains("x = 30"))
         );
@@ -904,7 +904,7 @@ mod tests {
         // First step should have error in output metadata
         assert!(
             exec.thread
-                .messages
+                .internal_messages
                 .iter()
                 .any(|m| { m.content.contains("NameError") || m.content.contains("Error") })
         );

@@ -22,6 +22,18 @@ _TELEGRAM_INSTALLED = {
     "tools": [],
     "activation_status": "installed",
     "activation_error": None,
+    "onboarding_state": "setup_required",
+    "onboarding": {
+        "state": "setup_required",
+        "requires_pairing": True,
+        "credential_title": "Configure credentials for Telegram",
+        "credential_instructions": "Enter your Telegram Bot API token from @BotFather. After you save it, IronClaw will start the bot in polling mode and wait for you to claim ownership.",
+        "credential_next_step": "Next: open your Telegram bot, send it any message, wait for the pairing code reply, then paste that code into IronClaw.",
+        "setup_url": "https://t.me/BotFather",
+        "pairing_title": "Claim ownership for Telegram",
+        "pairing_instructions": "Open your Telegram bot, send it any message such as hi or /start, wait for the pairing code reply, then paste that code into IronClaw. Telegram bots cannot message you first.",
+        "restart_instructions": "If you close this claim step, send another message in the channel to get a new pairing code.",
+    },
 }
 
 _TELEGRAM_ACTIVE = {
@@ -30,6 +42,15 @@ _TELEGRAM_ACTIVE = {
     "authenticated": True,
     "needs_setup": False,
     "activation_status": "active",
+    "onboarding_state": "ready",
+    "onboarding": {**_TELEGRAM_INSTALLED["onboarding"], "state": "ready"},
+}
+
+_TELEGRAM_PAIRING = {
+    **_TELEGRAM_ACTIVE,
+    "activation_status": "pairing",
+    "onboarding_state": "pairing_required",
+    "onboarding": {**_TELEGRAM_INSTALLED["onboarding"], "state": "pairing_required"},
 }
 
 
@@ -92,7 +113,7 @@ async def wait_for_toast(page, text: str, *, timeout: int = 5000):
     )
 
 
-async def test_telegram_setup_modal_shows_bot_token_field(page):
+async def test_telegram_setup_card_shows_bot_token_field(page):
     async def handle_ext_list(route):
         await route.fulfill(
             status=200,
@@ -106,6 +127,8 @@ async def test_telegram_setup_modal_shows_bot_token_field(page):
             content_type="application/json",
             body=json.dumps(
                 {
+                    "name": "telegram",
+                    "kind": "wasm_channel",
                     "secrets": [
                         {
                             "name": "telegram_bot_token",
@@ -114,7 +137,10 @@ async def test_telegram_setup_modal_shows_bot_token_field(page):
                             "optional": False,
                             "auto_generate": False,
                         }
-                    ]
+                    ],
+                    "fields": [],
+                    "onboarding_state": "setup_required",
+                    "onboarding": _TELEGRAM_INSTALLED["onboarding"],
                 }
             ),
         )
@@ -124,29 +150,23 @@ async def test_telegram_setup_modal_shows_bot_token_field(page):
     await go_to_channels(page)
 
     card = page.locator(SEL["channels_ext_card"], has_text="Telegram")
-    await card.locator(SEL["ext_configure_btn"], has_text="Setup").click()
-
-    modal = page.locator(SEL["configure_modal"])
-    await modal.wait_for(state="visible", timeout=5000)
-    assert "Telegram Bot API token" in await modal.text_content()
-    assert "IronClaw will show a one-time code" in (
-        await modal.text_content()
-    )
-    input_el = modal.locator(_CONFIGURE_SECRET_INPUT)
-    assert await input_el.count() == 1
+    await card.locator(SEL["ext_onboarding"]).wait_for(state="visible", timeout=5000)
+    assert "Telegram Bot API token" in await card.locator(SEL["ext_onboarding"]).text_content()
+    assert "pairing code" in await card.locator(SEL["ext_onboarding"]).text_content()
+    assert await card.locator(SEL["setup_input"]).count() == 1
+    assert await card.locator(SEL["setup_next_step"]).count() == 1
+    link = card.locator(SEL["ext_onboarding"]).locator("a", has_text="Get your token")
+    assert await link.count() == 1
 
 
-async def test_telegram_hot_activation_transitions_installed_to_active(page):
+async def test_telegram_hot_activation_transitions_installed_to_pairing(page):
     phase = {"value": "installed"}
     captured_setup_payloads = []
-    post_count = {"value": 0}
-    second_request_started = asyncio.Event()
-    allow_second_response = asyncio.Event()
 
     async def handle_ext_list(route):
         extensions = {
             "installed": [_TELEGRAM_INSTALLED],
-            "active": [_TELEGRAM_ACTIVE],
+            "pairing": [_TELEGRAM_PAIRING],
         }[phase["value"]]
         await route.fulfill(
             status=200,
@@ -161,6 +181,8 @@ async def test_telegram_hot_activation_transitions_installed_to_active(page):
                 content_type="application/json",
                 body=json.dumps(
                     {
+                        "name": "telegram",
+                        "kind": "wasm_channel",
                         "secrets": [
                             {
                                 "name": "telegram_bot_token",
@@ -169,7 +191,10 @@ async def test_telegram_hot_activation_transitions_installed_to_active(page):
                                 "optional": False,
                                 "auto_generate": False,
                             }
-                        ]
+                        ],
+                        "fields": [],
+                        "onboarding_state": "setup_required",
+                        "onboarding": _TELEGRAM_INSTALLED["onboarding"],
                     }
                 ),
             )
@@ -177,82 +202,221 @@ async def test_telegram_hot_activation_transitions_installed_to_active(page):
 
         payload = json.loads(route.request.post_data or "{}")
         captured_setup_payloads.append(payload)
-        post_count["value"] += 1
         await asyncio.sleep(0.05)
-        if post_count["value"] == 1:
-            await route.fulfill(
-                status=200,
-                content_type="application/json",
-                body=json.dumps(
-                    {
-                        "success": True,
-                        "activated": False,
-                        "message": "Configuration saved for 'telegram'. Send `/start iclaw-7qk2m9` to @test_hot_bot in Telegram. IronClaw will finish setup automatically.",
-                        "verification": {
-                            "code": "iclaw-7qk2m9",
-                            "instructions": "Send `/start iclaw-7qk2m9` to @test_hot_bot in Telegram. IronClaw will finish setup automatically.",
-                            "deep_link": "https://t.me/test_hot_bot?start=iclaw-7qk2m9",
-                        },
-                    }
-                ),
-            )
-        else:
-            second_request_started.set()
-            await allow_second_response.wait()
-            await route.fulfill(
-                status=200,
-                content_type="application/json",
-                body=json.dumps(
-                    {
-                        "success": True,
-                        "activated": True,
-                        "message": "Configuration saved, Telegram owner verified, and 'telegram' activated. Hot-activated WASM channel",
-                    }
-                ),
-            )
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "success": True,
+                    "activated": True,
+                    "message": "Configuration saved and 'telegram' activated. Credentials are saved, but ownership is still required before the channel is ready. Open your Telegram bot, send it any message such as hi or /start, wait for the pairing code reply, then paste that code into IronClaw. Telegram bots cannot message you first.",
+                    "onboarding_state": "pairing_required",
+                    "onboarding": _TELEGRAM_PAIRING["onboarding"],
+                }
+            ),
+        )
 
     await mock_extension_lists(page, handle_ext_list)
     await page.route("**/api/extensions/telegram/setup", handle_setup)
     await go_to_channels(page)
 
     card = page.locator(SEL["channels_ext_card"], has_text="Telegram")
-    await card.locator(SEL["ext_configure_btn"], has_text="Setup").click()
+    input_el = card.locator(SEL["setup_input"])
+    await input_el.wait_for(state="visible", timeout=5000)
+    await input_el.fill("123456789:ABCdefGhI")
+    await card.locator(".ext-onboarding .btn-ext.activate", has_text="Save").click()
 
-    modal = page.locator(SEL["configure_modal"])
-    await modal.wait_for(state="visible", timeout=5000)
-    await modal.locator(_CONFIGURE_SECRET_INPUT).fill("123456789:ABCdefGhI")
-    await modal.locator(_CONFIGURE_SAVE_BUTTON).click()
-    await second_request_started.wait()
-    await modal.locator(".configure-inline-status", has_text="Waiting for Telegram owner verification...").wait_for(
-        state="visible", timeout=5000
-    )
-    assert "iclaw-7qk2m9" in (await modal.text_content())
-    assert "/start iclaw-7qk2m9" in (await modal.text_content())
-    assert await modal.locator(".configure-verification-link").count() == 1
-    await modal.locator(_CONFIGURE_SAVE_BUTTON).wait_for(state="hidden", timeout=5000)
-
-    await page.locator(SEL["configure_overlay"]).click(position={"x": 1, "y": 1})
-    assert await page.locator(SEL["configure_overlay"]).is_visible()
-
-    allow_second_response.set()
-    await page.locator(SEL["configure_overlay"]).wait_for(state="hidden", timeout=5000)
-
-    phase["value"] = "active"
+    phase["value"] = "pairing"
     await page.evaluate(
         """
         handleAuthCompleted({
           extension_name: 'telegram',
           success: true,
-          message: "Configuration saved, Telegram owner verified, and 'telegram' activated. Hot-activated WASM channel",
+          message: "Configuration saved and 'telegram' activated. Credentials are saved, but ownership is still required before the channel is ready. Open your Telegram bot, send it any message such as hi or /start, wait for the pairing code reply, then paste that code into IronClaw. Telegram bots cannot message you first.",
+        });
+        handlePairingRequired({
+          channel: 'telegram',
+          instructions: 'Open your Telegram bot, send it any message such as hi or /start, wait for the pairing code reply, then paste that code here. Telegram bots cannot message you first.',
+          onboarding: {
+            state: 'pairing_required',
+            requires_pairing: true,
+            pairing_title: 'Claim ownership for Telegram',
+            pairing_instructions: 'Open your Telegram bot, send it any message such as hi or /start, wait for the pairing code reply, then paste that code into IronClaw. Telegram bots cannot message you first.',
+            restart_instructions: 'If you close this claim step, send another message in the channel to get a new pairing code.'
+          },
         });
         """
     )
 
-    await wait_for_toast(page, "Telegram owner verified")
-    await card.locator(SEL["ext_active_label"]).wait_for(state="visible", timeout=5000)
-    assert await card.locator(SEL["ext_pairing_label"]).count() == 0
+    await page.locator(SEL["pairing_card"]).wait_for(state="attached", timeout=5000)
+    await card.locator(SEL["ext_pairing_label"]).wait_for(state="visible", timeout=5000)
+    assert await card.locator(SEL["pairing_help"]).count() >= 1
+    assert await page.locator(SEL["pairing_restart"]).count() >= 1
 
     assert captured_setup_payloads == [
-        {"secrets": {"telegram_bot_token": "123456789:ABCdefGhI"}, "fields": {}},
-        {"secrets": {}, "fields": {}},
+        {"secrets": {"telegram_bot_token": "123456789:ABCdefGhI"}, "fields": {}}
+    ]
+
+
+async def test_telegram_auth_required_shows_configure_modal_and_can_cancel(page):
+    setup_hits = {"count": 0}
+    cancel_hits = {"count": 0}
+
+    async def handle_setup(route):
+        setup_hits["count"] += 1
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "name": "telegram",
+                    "kind": "wasm_channel",
+                    "secrets": [
+                        {
+                            "name": "telegram_bot_token",
+                            "prompt": "Enter your Telegram Bot API token (from @BotFather)",
+                            "provided": False,
+                            "optional": False,
+                            "auto_generate": False,
+                        }
+                    ],
+                    "fields": [],
+                    "onboarding_state": "setup_required",
+                    "onboarding": _TELEGRAM_INSTALLED["onboarding"],
+                }
+            ),
+        )
+
+    async def handle_cancel(route):
+        cancel_hits["count"] += 1
+        await route.fulfill(status=200, content_type="application/json", body="{}")
+
+    await page.route("**/api/extensions/telegram/setup", handle_setup)
+    await page.route("**/api/chat/auth-cancel", handle_cancel)
+
+    await page.evaluate(
+        """
+        handleAuthRequired({
+          extension_name: 'telegram',
+          instructions: 'Enter your Telegram Bot API token (from @BotFather)',
+          auth_url: null,
+        });
+        """
+    )
+
+    # Auth-required now opens the unified configure modal, not the old setup card
+    modal = page.locator(SEL["configure_overlay"])
+    await modal.wait_for(state="visible", timeout=5000)
+    assert "Telegram Bot API token" in await modal.text_content()
+    assert await modal.locator(SEL["configure_input"]).count() == 1
+    assert await page.locator(SEL["setup_card"]).count() == 0
+
+    await modal.locator(".btn-ext.remove").click()
+    await modal.wait_for(state="hidden", timeout=5000)
+    assert cancel_hits["count"] == 1
+
+    await page.evaluate(
+        """
+        handleAuthRequired({
+          extension_name: 'telegram',
+          instructions: 'Enter your Telegram Bot API token (from @BotFather)',
+          auth_url: null,
+        });
+        """
+    )
+    await page.locator(SEL["configure_overlay"]).wait_for(state="visible", timeout=5000)
+    assert setup_hits["count"] == 2
+
+
+async def test_telegram_configure_modal_submit_then_cancel_pairing_and_restart(page):
+    setup_payloads = []
+
+    async def handle_setup(route):
+        if route.request.method == "GET":
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "name": "telegram",
+                        "kind": "wasm_channel",
+                        "secrets": [
+                            {
+                                "name": "telegram_bot_token",
+                                "prompt": "Enter your Telegram Bot API token (from @BotFather)",
+                                "provided": False,
+                                "optional": False,
+                                "auto_generate": False,
+                            }
+                        ],
+                        "fields": [],
+                        "onboarding_state": "setup_required",
+                        "onboarding": _TELEGRAM_INSTALLED["onboarding"],
+                    }
+                ),
+            )
+            return
+
+        setup_payloads.append(json.loads(route.request.post_data or "{}"))
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "success": True,
+                    "activated": True,
+                    "message": "Configuration saved and 'telegram' activated. Credentials are saved, but ownership is still required before the channel is ready.",
+                    "onboarding_state": "pairing_required",
+                    "onboarding": _TELEGRAM_PAIRING["onboarding"],
+                }
+            ),
+        )
+
+    await page.route("**/api/extensions/telegram/setup", handle_setup)
+
+    await page.evaluate(
+        """
+        handleAuthRequired({
+          extension_name: 'telegram',
+          instructions: 'Enter your Telegram Bot API token (from @BotFather)',
+          auth_url: null,
+        });
+        """
+    )
+
+    # Auth-required now opens the unified configure modal
+    modal = page.locator(SEL["configure_overlay"])
+    await modal.wait_for(state="visible", timeout=5000)
+    await modal.locator(SEL["configure_input"]).fill("123456789:ABCdefGhI")
+    await modal.locator(".btn-ext.activate").click()
+    await modal.wait_for(state="hidden", timeout=5000)
+
+    pairing_card = page.locator(SEL["pairing_card"])
+    await pairing_card.wait_for(state="visible", timeout=5000)
+    assert "pairing code" in await pairing_card.text_content()
+    assert await pairing_card.locator(SEL["pairing_restart"]).count() == 1
+
+    await pairing_card.locator(SEL["pairing_cancel_btn"]).click()
+    await pairing_card.wait_for(state="hidden", timeout=5000)
+    await wait_for_toast(page, "send another message in the channel to get a new pairing code")
+
+    await page.evaluate(
+        """
+        handlePairingRequired({
+          channel: 'telegram',
+          instructions: 'Open your Telegram bot, send it any message such as hi or /start, wait for the pairing code reply, then paste that code here.',
+          onboarding: {
+            state: 'pairing_required',
+            requires_pairing: true,
+            pairing_title: 'Claim ownership for Telegram',
+            pairing_instructions: 'Open your Telegram bot, send it any message such as hi or /start, wait for the pairing code reply, then paste that code into IronClaw. Telegram bots cannot message you first.',
+            restart_instructions: 'If you close this claim step, send another message in the channel to get a new pairing code.'
+          }
+        });
+        """
+    )
+    await page.locator(SEL["pairing_card"]).wait_for(state="visible", timeout=5000)
+    assert setup_payloads == [
+        {"secrets": {"telegram_bot_token": "123456789:ABCdefGhI"}, "fields": {}}
     ]

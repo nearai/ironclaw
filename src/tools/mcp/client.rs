@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
+use crate::auth::resolve_access_token_string_with_refresh;
 use crate::context::JobContext;
 use crate::secrets::SecretsStore;
 use crate::tools::mcp::auth::refresh_access_token;
@@ -21,6 +22,30 @@ use crate::tools::mcp::protocol::{
 use crate::tools::mcp::session::McpSessionManager;
 use crate::tools::mcp::transport::McpTransport;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput};
+
+/// Tag identifying which constructor produced an `McpClient`.
+///
+/// Test-only: lets caller-level tests assert that `create_client_from_config`
+/// chose the right path (auth vs non-auth) given a server config. The client's
+/// runtime behavior is otherwise nearly identical between paths, so without
+/// this tag, the factory's path-selection logic is unobservable from outside.
+///
+/// See `.claude/rules/testing.md` ("Test Through the Caller, Not Just the
+/// Helper") for the rule motivating this hook.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum McpClientConstructor {
+    /// `McpClient::new` — bare unauthenticated client.
+    Plain,
+    /// `McpClient::new_with_name` — bare unauthenticated client with explicit name.
+    PlainNamed,
+    /// `McpClient::new_with_config` — test-only HTTP client from a config.
+    FromConfig,
+    /// `McpClient::new_authenticated` — OAuth-aware client.
+    Authenticated,
+    /// `McpClient::new_with_transport` — generic client with externally built transport.
+    WithTransport,
+}
 
 /// MCP client for communicating with MCP servers.
 ///
@@ -62,6 +87,11 @@ pub struct McpClient {
     /// Uses `OnceCell` to serialize concurrent callers so only one
     /// actually sends the request; subsequent calls return immediately.
     initialized: tokio::sync::OnceCell<InitializeResult>,
+
+    /// Test-only marker recording which constructor produced this client.
+    /// Used by caller-level tests to assert the factory chose the correct path.
+    #[cfg(test)]
+    constructor_kind: McpClientConstructor,
 }
 
 impl McpClient {
@@ -87,6 +117,8 @@ impl McpClient {
             server_config: None,
             custom_headers: HashMap::new(),
             initialized: tokio::sync::OnceCell::new(),
+            #[cfg(test)]
+            constructor_kind: McpClientConstructor::Plain,
         })
     }
 
@@ -115,6 +147,8 @@ impl McpClient {
             server_config: None,
             custom_headers: HashMap::new(),
             initialized: tokio::sync::OnceCell::new(),
+            #[cfg(test)]
+            constructor_kind: McpClientConstructor::PlainNamed,
         })
     }
 
@@ -158,6 +192,8 @@ impl McpClient {
             custom_headers: config.headers.clone(),
             initialized: tokio::sync::OnceCell::new(),
             server_config: Some(config),
+            #[cfg(test)]
+            constructor_kind: McpClientConstructor::FromConfig,
         })
     }
 
@@ -189,6 +225,8 @@ impl McpClient {
             server_config: Some(config),
             custom_headers,
             initialized: tokio::sync::OnceCell::new(),
+            #[cfg(test)]
+            constructor_kind: McpClientConstructor::Authenticated,
         })
     }
 
@@ -213,6 +251,8 @@ impl McpClient {
             server_config: None,
             custom_headers: HashMap::new(),
             initialized: tokio::sync::OnceCell::new(),
+            #[cfg(test)]
+            constructor_kind: McpClientConstructor::Plain,
         }
     }
 
@@ -240,6 +280,8 @@ impl McpClient {
             server_config: None,
             custom_headers: HashMap::new(),
             initialized: tokio::sync::OnceCell::new(),
+            #[cfg(test)]
+            constructor_kind: McpClientConstructor::PlainNamed,
         }
     }
 
@@ -276,6 +318,8 @@ impl McpClient {
             server_config,
             custom_headers,
             initialized: tokio::sync::OnceCell::new(),
+            #[cfg(test)]
+            constructor_kind: McpClientConstructor::WithTransport,
         }
     }
 
@@ -313,6 +357,15 @@ impl McpClient {
         &self.transport
     }
 
+    /// Which constructor produced this client (test-only).
+    ///
+    /// Used by caller-level tests to verify that path-selecting helpers like
+    /// `mcp::factory::create_client_from_config` chose the correct branch.
+    #[cfg(test)]
+    pub(crate) fn constructor_kind(&self) -> McpClientConstructor {
+        self.constructor_kind
+    }
+
     /// Get the next request ID.
     fn next_request_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::SeqCst)
@@ -329,44 +382,20 @@ impl McpClient {
         let Some(ref config) = self.server_config else {
             return Ok(None);
         };
-        match secrets
-            .get_decrypted(&self.user_id, &config.token_secret_name())
-            .await
-        {
-            Ok(token) => Ok(Some(token.expose().to_string())),
-            Err(crate::secrets::SecretError::NotFound(_)) => Ok(None),
-            Err(crate::secrets::SecretError::Expired) => {
-                // Token expired — attempt refresh before failing.
-                tracing::info!(
-                    server = %self.server_name,
-                    "Access token expired, attempting refresh"
-                );
-                match refresh_access_token(config, secrets, &self.user_id).await {
-                    Ok(new_token) => {
-                        tracing::info!(
-                            server = %self.server_name,
-                            "Access token refreshed successfully"
-                        );
-                        Ok(Some(new_token.access_token))
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            server = %self.server_name,
-                            "Token refresh failed: {}", e
-                        );
-                        Err(ToolError::ExternalService(format!(
-                            "Failed to get access token: Secret has expired \
-                             and refresh failed: {}",
-                            e
-                        )))
-                    }
-                }
-            }
-            Err(e) => Err(ToolError::ExternalService(format!(
-                "Failed to get access token: {}",
-                e
-            ))),
-        }
+        resolve_access_token_string_with_refresh(
+            secrets.as_ref(),
+            &self.user_id,
+            &config.token_secret_name(),
+            &self.server_name,
+            || async {
+                refresh_access_token(config, secrets, &self.user_id)
+                    .await
+                    .map(|token| token.access_token)
+                    .map_err(|e| format!("Token refresh failed: {}", e))
+            },
+        )
+        .await
+        .map_err(|e| ToolError::ExternalService(format!("Failed to get access token: {}", e)))
     }
 
     /// Build the headers map for a request (auth, session-id, custom headers).
@@ -632,6 +661,7 @@ impl McpClient {
                 Arc::new(McpToolWrapper {
                     tool: t,
                     prefixed_name,
+                    provider_extension: self.server_name.clone(),
                     client: client.clone(),
                 }) as Arc<dyn Tool>
             })
@@ -665,6 +695,8 @@ impl Clone for McpClient {
             server_config: self.server_config.clone(),
             custom_headers: self.custom_headers.clone(),
             initialized: tokio::sync::OnceCell::new(),
+            #[cfg(test)]
+            constructor_kind: self.constructor_kind,
         }
     }
 }
@@ -682,6 +714,7 @@ fn extract_server_name(url: &str) -> String {
 struct McpToolWrapper {
     tool: McpTool,
     prefixed_name: String,
+    provider_extension: String,
     client: Arc<McpClient>,
 }
 
@@ -695,6 +728,10 @@ impl Tool for McpToolWrapper {
     }
     fn parameters_schema(&self) -> serde_json::Value {
         self.tool.input_schema.clone()
+    }
+
+    fn provider_extension(&self) -> Option<&str> {
+        Some(&self.provider_extension)
     }
 
     async fn execute(
@@ -1332,6 +1369,7 @@ mod tests {
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(false),
             prefixed_name: "mcp__myserver__do_thing".to_string(),
+            provider_extension: "myserver".to_string(),
             client,
         };
         assert_eq!(wrapper.name(), "mcp__myserver__do_thing");
@@ -1343,6 +1381,7 @@ mod tests {
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(false),
             prefixed_name: "mcp__s__do_thing".to_string(),
+            provider_extension: "s".to_string(),
             client,
         };
         assert_eq!(wrapper.description(), "Does a thing");
@@ -1354,6 +1393,7 @@ mod tests {
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(false),
             prefixed_name: "mcp__s__do_thing".to_string(),
+            provider_extension: "s".to_string(),
             client,
         };
         let schema = wrapper.parameters_schema();
@@ -1367,6 +1407,7 @@ mod tests {
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(false),
             prefixed_name: "mcp__s__do_thing".to_string(),
+            provider_extension: "s".to_string(),
             client,
         };
         assert!(
@@ -1381,6 +1422,7 @@ mod tests {
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(true),
             prefixed_name: "mcp__s__do_thing".to_string(),
+            provider_extension: "s".to_string(),
             client,
         };
         let approval = wrapper.requires_approval(&serde_json::json!({}));
@@ -1393,6 +1435,7 @@ mod tests {
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(false),
             prefixed_name: "mcp__s__do_thing".to_string(),
+            provider_extension: "s".to_string(),
             client,
         };
         let approval = wrapper.requires_approval(&serde_json::json!({}));
