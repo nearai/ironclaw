@@ -135,7 +135,8 @@
                   {
                     "group": "How to host IronClaw on...",
                     "pages": [
-                      "infrastructure/droplet"
+                      "infrastructure/droplet",
+                      "infrastructure/google"
                     ]
                   }
                 ]
@@ -262,7 +263,8 @@
                   {
                     "group": "在以下平台托管 IronClaw",
                     "pages": [
-                      "zh/infrastructure/droplet"
+                      "zh/infrastructure/droplet",
+                      "zh/infrastructure/google"
                     ]
                   }
                 ]
