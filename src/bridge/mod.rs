@@ -43,8 +43,8 @@ pub use router::{
     handle_interrupt,
     handle_new_thread,
     handle_with_engine,
-    has_pending_approval,
     has_any_pending_gate,
+    has_pending_approval,
     has_pending_auth,
     // Initialization
     init_engine,
