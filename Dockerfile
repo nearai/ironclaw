@@ -68,10 +68,8 @@ RUN cargo build --profile dist --bin ironclaw
 
 # Stage 4b: Build all WASM extensions from source (only used by runtime-staging)
 FROM builder AS wasm-builder
-ARG CACHE_BUST
 
 RUN apt-get update && apt-get install -y --no-install-recommends jq && rm -rf /var/lib/apt/lists/*
-RUN echo "cache-bust=${CACHE_BUST}"
 
 RUN set -eux; \
     mkdir -p /app/wasm-bundles/tools /app/wasm-bundles/channels; \
@@ -133,12 +131,14 @@ ENV RUST_LOG=ironclaw=info
 
 ENTRYPOINT ["ironclaw"]
 
-# Stage 5b: Staging runtime (with pre-built WASM extensions)
+# Stage 5b: Production runtime (no pre-bundled extensions)
+FROM runtime-base AS runtime
+USER ironclaw
+
+# Stage 5c: Staging runtime (with pre-built WASM extensions)
+# Last stage = default target. Railway doesn't support --target, so this
+# must be last for Railway deploys. CI uses explicit --target flags.
 FROM runtime-base AS runtime-staging
 COPY --from=wasm-builder --chown=ironclaw:ironclaw /app/wasm-bundles/tools/ /home/ironclaw/.ironclaw/tools/
 COPY --from=wasm-builder --chown=ironclaw:ironclaw /app/wasm-bundles/channels/ /home/ironclaw/.ironclaw/channels/
-USER ironclaw
-
-# Stage 5c: Production runtime (default — no pre-bundled extensions)
-FROM runtime-base AS runtime
 USER ironclaw
