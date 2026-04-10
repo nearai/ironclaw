@@ -1399,7 +1399,6 @@ async fn run_agent_with_config(
         )),
     };
 
-    let channels_for_warnings = Arc::clone(&channels);
     let mut agent = Agent::new(
         config.agent.clone(),
         deps,
@@ -1606,25 +1605,11 @@ async fn run_agent_with_config(
         });
     }
 
-    // Notify user if sandbox is unavailable (Docker missing/not running)
+    // Log sandbox warning but don't broadcast to channels — in containerized
+    // deployments Docker is never available inside the agent container, and
+    // sending a warning message pollutes the chat on every startup.
     if let Some(warning) = docker_user_warning {
-        let channels_ref = Arc::clone(&channels_for_warnings);
-        tokio::spawn(async move {
-            // Delay to let channels finish connecting before sending the warning.
-            // 5s is generous but avoids the message being lost on slow startups.
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            tracing::debug!("Sending sandbox-unavailable warning to connected channels");
-            let response = ironclaw::channels::OutgoingResponse {
-                content: format!("Warning: {warning}"),
-                thread_id: None,
-                attachments: Vec::new(),
-                metadata: serde_json::json!({
-                    "source": "system",
-                    "type": "warning",
-                }),
-            };
-            let _ = channels_ref.broadcast_all("default", response).await;
-        });
+        tracing::warn!("{}", warning);
     }
 
     agent.run().await?;
