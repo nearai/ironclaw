@@ -50,11 +50,11 @@ In the left sidebar, click **Security**. Scroll down to **VM access → Add manu
 ![GCE instance configuration](/images/infrastructure/google/google-ssh.png)
 You can generate one locally:
 ```bash
-ssh-keygen -t rsa -b 4096
-cat ~/.ssh/id_rsa.pub   # copy this value into the Console
+ssh-keygen -t ed25519 -C "your-email@example.com"
+cat ~/.ssh/id_ed25519.pub   # copy this value into the Console
 ```
 
-The key must follow the format `ssh-rsa AAAA... username`. GCE adds it to the instance automatically.
+The key should be in OpenSSH public key format: `<type> <base64-encoded-key> [comment]` (for example, `ssh-ed25519 AAAA... your-email@example.com`). GCE accepts multiple key types and adds the key to the instance automatically.
 
 <Note>
 You could also log in with a password, but using SSH keys is more secure and recommended. Make sure to keep your private key safe and do not share it with anyone.
@@ -88,7 +88,7 @@ The GCE console only exposes checkboxes for HTTP (80) and HTTPS (443) during ins
 | `allow-webhook` | Ingress | All instances | `0.0.0.0/0` | TCP 8080 |
 
 <Note>
-Restricting SSH to your IP prevents brute-force attacks from the internet. You can update the source range later if your IP changes. Port `8080` is required for webhooks (e.g. Telegram) to deliver events to IronClaw. All other IronClaw listeners bind to `127.0.0.1` — GCE's default deny-all policy blocks everything else.
+Restricting SSH to your IP prevents brute-force attacks from the internet. You can update the source range later if your IP changes. Port `8080` is required for webhooks (e.g. Telegram) to deliver events to IronClaw. On Linux, the orchestrator internal API listens on port `50051` and binds to `0.0.0.0`; unless you add a firewall rule for it, GCE's default deny-all ingress policy will still block external access. Other IronClaw listeners bind to `127.0.0.1`.
 </Note>
 
 ---

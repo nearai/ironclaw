@@ -3,7 +3,7 @@ title: Google Compute Engine
 description: 在 Google Compute Engine 虚拟机上托管 IronClaw
 ---
 
-Google Compute Engine（GCE）让您可以在 Google 的基础设施上运行虚拟机，提供灵活的定价方式和慷慨的免费额度。本指南将带您创建一个 GCE 虚拟机实例，并对其进行安全配置，以便运行 IronClaw 并将其暴露到互联网。
+Google Compute Engine（GCE）让您在 Google 基础设施上运行虚拟机，提供灵活的定价和慷慨的免费套餐。本指南将带您创建一个 GCE 虚拟机实例，并对其进行安全配置，以便运行 IronClaw 并将其暴露到互联网。
 
 <Tip>
 如果您不想自己搭建基础设施，也可以在 [agent.near.ai](https://agent.near.ai) 上点几下就安装好 IronClaw。
@@ -20,42 +20,40 @@ Google Compute Engine（GCE）让您可以在 Google 的基础设施上运行虚
 填写项目详情：
 
 - **项目名称**：选择一个描述性名称（例如 `ironclaw`）
-- **组织**：个人账号保持默认即可，除非您属于某个 Google Workspace 组织
+- **组织**：除非您的账号属于 Google Workspace 组织，否则保持默认
 - **位置**：个人账号保持默认即可
 
-点击**创建**。Google 会用几秒钟时间完成项目的初始化。
+点击**创建**。Google 需要几秒钟来配置项目。
 
-创建完成后，请确认顶部项目选择器中已**切换到新项目**，后续所有资源都将归属于当前选中的项目。
+创建完成后，在继续操作之前，请确保在项目选择器中**选中**新项目——所有后续创建的资源都归属于当前活跃项目。
 
 ---
 
 ## 创建虚拟机实例
 
-进入 **Compute Engine → 虚拟机实例**。如果是第一次使用 Compute Engine，系统会提示您启用 Compute Engine API，点击**启用**并稍等片刻。
+导航到 **Compute Engine → 虚拟机实例**。如果是第一次使用 Compute Engine，系统会提示您启用 Compute Engine API——点击**启用**并稍等片刻。
 
-![GCE 虚拟机实例列表页面](/images/infrastructure/google/google-vm.png)
+![GCE 虚拟机实例页面](/images/infrastructure/google/google-vm.png)
 
-点击**创建实例**，并配置以下内容：
+点击**创建实例**并进行如下配置：
 
 - **名称**：选择一个描述性名称（例如 `ironclaw`）
-- **区域 / 可用区**：选择距离您的用户最近的区域
-- **机器类型**：`e2-micro`（免费套餐可用）适合大多数使用场景，`e2-small` 提供更多余量
+- **区域 / 可用区**：选择离您用户最近的区域
+- **机器类型**：`e2-micro`（符合免费套餐资格）足以满足大多数使用场景，或选择 `e2-small` 以获得更多余量
 - **启动磁盘**：Ubuntu 24.04 LTS，至少 10 GB
 - **防火墙**：勾选**允许 HTTP 流量**和**允许 HTTPS 流量**
 
-内置勾选项仅覆盖端口 80 和 443，其余规则需在实例创建后单独添加（参见下方[配置防火墙规则](#配置防火墙规则)）。
+内置复选框仅涵盖 80 和 443 端口。其余规则需在实例创建后添加（请参阅下方[配置防火墙规则](#配置防火墙规则)）。
 
-在左侧边栏中点击**安全**，向下滚动到 **VM 访问权限 → 手动添加 SSH 密钥**，点击 **+ 添加项目**，然后粘贴您的公钥。
+在左侧边栏中，点击**安全**。向下滚动至 **虚拟机访问权限 → 手动添加生成的 SSH 密钥**，点击 **+ 添加项**，然后粘贴您的 SSH 公钥。
 ![GCE 实例配置](/images/infrastructure/google/google-ssh.png)
-
 您可以在本地生成一对密钥：
-
 ```bash
-ssh-keygen -t rsa -b 4096
-cat ~/.ssh/id_rsa.pub   # 将此内容粘贴到控制台
+ssh-keygen -t ed25519 -C "your-email@example.com"
+cat ~/.ssh/id_ed25519.pub   # 将此内容复制到控制台
 ```
 
-密钥格式必须为 `ssh-rsa AAAA... 用户名`，GCE 会自动将其添加到实例中。
+密钥应为 OpenSSH 公钥格式：`<类型> <base64编码密钥> [注释]`（例如 `ssh-ed25519 AAAA... your-email@example.com`）。GCE 支持多种密钥类型，并会自动将密钥添加到实例中。
 
 <Note>
 您也可以使用密码登录，但使用 SSH 密钥会更安全，也更推荐。请妥善保管私钥，不要与他人共享。
@@ -69,37 +67,36 @@ cat ~/.ssh/id_rsa.pub   # 将此内容粘贴到控制台
 
 ![GCE 实例 IP 地址](/images/infrastructure/google/google-ip.png)
 
-点击实例旁边的 **SSH** 按钮，可以直接在浏览器中打开终端，无需本地配置。
+点击实例旁边的 **SSH** 按钮，即可打开基于浏览器的终端——无需本地配置。
 
-也可以通过本地终端使用 IP 地址连接：
+要从您自己的终端使用 IP 地址连接：
 
 ```bash
 # 将 <IP_ADDRESS> 和 <USERNAME> 替换为实际值
 ssh <USERNAME>@<IP_ADDRESS>
 ```
-
 ---
 
 ## 配置防火墙规则
 
-GCE 控制台在创建实例时只提供 HTTP（80）和 HTTPS（443）的勾选项。要添加其余规则，请在左侧边栏进入 **VPC 网络 → 防火墙**，点击**创建防火墙规则**，为以下每条规则分别创建：
+GCE 控制台在创建实例时仅提供 HTTP（80）和 HTTPS（443）的复选框。要添加其余规则，请在左侧边栏导航到 **VPC 网络 → 防火墙**，然后为以下每条规则点击**创建防火墙规则**：
 
 | 规则名称 | 方向 | 目标 | 来源 IP 范围 | 协议 / 端口 |
-|---------|------|------|------------|------------|
+|----------|------|------|-------------|------------|
 | `allow-ssh-myip` | 入站 | 所有实例 | 您的公网 IP（例如 `203.0.113.10/32`） | TCP 22 |
 | `allow-webhook` | 入站 | 所有实例 | `0.0.0.0/0` | TCP 8080 |
 
 <Note>
-将 SSH 限制为您的 IP 可以防止来自互联网的暴力破解攻击。如果您的 IP 发生变化，可以随时更新来源范围。端口 `8080` 是 Webhook（例如 Telegram）向 IronClaw 推送事件所必需的。其他 IronClaw 监听器均绑定在 `127.0.0.1`，GCE 的默认拒绝策略已覆盖其余所有端口。
+将 SSH 限制为您的 IP 可以防止来自互联网的暴力破解攻击。如果您的 IP 发生变化，可以随时更新来源范围。Webhook（例如 Telegram）需要 `8080` 端口来向 IronClaw 发送事件。在 Linux 上，编排器内部 API 监听 `50051` 端口并绑定到 `0.0.0.0`；除非您为其添加防火墙规则，GCE 的默认拒绝所有入站流量策略仍会阻止外部访问。其他 IronClaw 监听器绑定到 `127.0.0.1`。
 </Note>
 
 ---
 
 ## 加固您的实例
 
-拥有实例访问权限后，在安装 IronClaw 之前先对服务器进行加固。
+获得访问权限后，在安装 IronClaw 之前先对虚拟机进行安全加固。
 
-### 更新系统
+### 更新和升级
 
 确保系统处于最新状态：
 
@@ -109,29 +106,29 @@ sudo apt update && sudo apt upgrade -y
 
 ### 创建新用户
 
-良好的实践是创建一个具备 sudo 权限的专用用户，而不是直接使用默认账户。您可以创建一个新用户（例如 `ironclaw`）并将其加入 sudo 组：
+良好的实践是创建一个具备 sudo 权限的专用用户，而不是依赖默认账号。您可以创建一个新用户（例如 `ironclaw`），并将其加入 sudo 组：
 
 ```bash
 sudo adduser ironclaw
 sudo usermod -aG sudo ironclaw
 ```
 
-将当前用户的 SSH 密钥复制到新用户，以便后续登录：
+将 SSH 密钥从当前用户复制到新用户，以便您能够登录：
 
 ```bash
 # 为新用户创建 .ssh 目录
 sudo mkdir -p /home/ironclaw/.ssh
 
-# 复制当前用户的 authorized_keys
+# 从当前用户复制 authorized_keys
 sudo cp ~/.ssh/authorized_keys /home/ironclaw/.ssh/authorized_keys
 
-# 设置正确的权限（非常关键，否则 SSH 会忽略这些文件）
+# 设置正确的权限（非常关键——否则 SSH 会忽略该文件）
 sudo chown -R ironclaw:ironclaw /home/ironclaw/
 sudo chmod 700 /home/ironclaw/.ssh
 sudo chmod 600 /home/ironclaw/.ssh/authorized_keys
 ```
 
-打开一个新的终端窗口，确认可以用新用户登录后再继续：
+打开一个新的终端窗口，确认可以成功登录后再继续：
 
 ```bash
 ssh ironclaw@<IP_ADDRESS>
@@ -141,44 +138,6 @@ ssh ironclaw@<IP_ADDRESS>
 在确认新用户可以成功登录之前，不要继续后续步骤。如果在没有其他可用用户的情况下失去访问权限，您将需要重新创建虚拟机。
 </Warning>
 
-### 加固 SSH 访问
-
-禁用密码认证，并可选择更改默认 SSH 端口以减少自动扫描：
-
-```bash
-sudo nano /etc/ssh/sshd_config
-```
-
-设置以下参数：
-
-```bash
-PasswordAuthentication no   # 只允许基于密钥的认证
-PermitRootLogin no          # 禁用 root 直接登录
-Port 2222                   # 更改默认端口（可选，但有帮助）
-```
-
-重启 SSH，并在关闭当前会话前验证新端口仍可连接：
-
-```bash
-sudo systemctl restart ssh
-ssh -p 2222 ironclaw@<IP_ADDRESS>
-```
-
-### 网络端口说明
-
-IronClaw 会监听以下端口。了解各端口的绑定地址，有助于您编写精准的防火墙规则，避免内部服务意外暴露。
-
-| 监听器 | 默认端口 | 默认绑定地址 | 认证机制 | 配置环境变量 |
-|-------|---------|------------|--------|------------|
-| Web 网关 | 3000 | `127.0.0.1` | Bearer token（常量时间比较） | `GATEWAY_HOST`, `GATEWAY_PORT`, `GATEWAY_AUTH_TOKEN` |
-| HTTP Webhook 服务器 | 8080 | `0.0.0.0` | 共享密钥（请求体字段） | `HTTP_HOST`, `HTTP_PORT`, `HTTP_WEBHOOK_SECRET` |
-| Orchestrator 内部 API | 50051 | `127.0.0.1`（macOS/Win）/ `0.0.0.0`（Linux） | 每任务 Bearer token（常量时间比较） | `ORCHESTRATOR_PORT` |
-| OAuth 回调监听器 | 9876 | `127.0.0.1` | 无（临时，5 分钟超时） | N/A（硬编码） |
-| 沙箱 HTTP 代理 | 系统分配（临时） | `127.0.0.1` | 无（仅回环） | N/A（自动分配） |
-
-<Note>
-在 Linux 上，Orchestrator 默认绑定到 `0.0.0.0`。由于 GCE 的 VPC 防火墙对未列出的端口默认拒绝，端口 `50051` 已被外部封锁，无需额外规则。
-</Note>
 
 ---
 
@@ -204,8 +163,8 @@ ironclaw
 
 ## 下一步
 
-接下来可以阅读[快速开始指南](/quickstart)，创建您的第一个智能体，把它连接到 Telegram，并开始探索 IronClaw 的能力。
+阅读我们的[快速开始指南](/quickstart)，创建您的第一个智能体，把它连接到 Telegram，并开始探索 IronClaw 的能力。
 
-如果您希望通过消息应用与智能体对话，请查看[频道](/channels/overview)文档，了解如何完成接入。
+想通过消息应用与您的智能体对话？请查看[**频道**](/channels/overview)文档，了解如何完成接入。
 
-如果您需要让智能体执行依赖多个工具的复杂任务，请查看[扩展](/extensions/overview)文档。
+需要让智能体执行依赖多个工具的复杂任务？请查看[**扩展**](/extensions/overview)文档。
