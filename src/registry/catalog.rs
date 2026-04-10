@@ -155,7 +155,7 @@ impl RegistryCatalog {
     }
 
     /// Try to load from disk; if a valid `registry` cannot be found,
-    // fall back to manifests embedded into the binary at compile time.
+    /// fall back to manifests embedded into the binary at compile time.
     pub fn load_or_embedded() -> Result<Self, RegistryError> {
         if let Some(dir) = Self::find_dir() {
             return Self::load(&dir);
