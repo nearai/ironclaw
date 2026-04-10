@@ -393,7 +393,31 @@ fn normalize_schema_recursive(schema: &mut JsonValue) {
         }
     }
 
-    // Recurse into array items
+    // Recurse into array items. OpenAI strict mode requires `items` to be
+    // a JSON Schema object for every array-typed property. Schema generators
+    // (schemars, serde_json) produce `"items": true` or omit `items`
+    // entirely for `Vec<serde_json::Value>` (meaning "accept any item"),
+    // which OpenAI rejects with:
+    //   "array schema items is not an object"
+    // Ensure `items` exists and is an object before recursing.
+    let is_array = obj
+        .get("type")
+        .map(|t| {
+            t.as_str() == Some("array")
+                || t.as_array()
+                    .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some("array")))
+        })
+        .unwrap_or(false);
+    if is_array {
+        let needs_fix = match obj.get("items") {
+            None => true,                        // missing entirely
+            Some(JsonValue::Object(_)) => false, // already a schema object
+            _ => true,                           // bool, string, array, etc.
+        };
+        if needs_fix {
+            obj.insert("items".to_string(), serde_json::json!({}));
+        }
+    }
     if let Some(items) = obj.get_mut("items") {
         normalize_schema_recursive(items);
     }
@@ -1251,6 +1275,60 @@ mod tests {
         assert_eq!(
             description, "nullable tool",
             "description must be untouched (no flatten hint appended)"
+        );
+    }
+
+    /// Regression: OpenAI rejects `"items": true` and missing `items` on
+    /// array-typed properties with "array schema items is not an object".
+    /// Schema generators (schemars) produce this for `Vec<serde_json::Value>`.
+    /// The normalizer must ensure `items` is a JSON Schema object.
+    #[test]
+    fn test_normalize_schema_strict_fixes_array_items_not_object() {
+        // Case 1: items missing entirely (Vec<Value> → {"type": "array"})
+        let input = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "requests": { "type": "array" }
+            },
+            "required": ["requests"]
+        });
+        let mut description = "batch".to_string();
+        let result = normalize_schema_strict(&input, &mut description);
+        assert!(
+            result["properties"]["requests"]["items"].is_object(),
+            "missing items must be filled with an object: {}",
+            result["properties"]["requests"]
+        );
+
+        // Case 2: items is boolean true (valid JSON Schema, rejected by OpenAI)
+        let input = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "data": { "type": "array", "items": true }
+            },
+            "required": ["data"]
+        });
+        let mut description = "bool items".to_string();
+        let result = normalize_schema_strict(&input, &mut description);
+        assert!(
+            result["properties"]["data"]["items"].is_object(),
+            "boolean items must be replaced with an object: {}",
+            result["properties"]["data"]
+        );
+
+        // Case 3: items is already an object (should not be clobbered)
+        let input = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tags": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["tags"]
+        });
+        let mut description = "ok".to_string();
+        let result = normalize_schema_strict(&input, &mut description);
+        assert_eq!(
+            result["properties"]["tags"]["items"]["type"], "string",
+            "well-formed items must be preserved"
         );
     }
 
