@@ -541,8 +541,8 @@ mod tests {
         let md = no_metadata();
         let filtered = config.filter_tool_defs("hacked-channel", &md, tools);
         let names: Vec<&str> = filtered.iter().map(|t| t.name.as_str()).collect();
-        assert!(!names.contains(&"Archon_list_tasks")); // MCP blocked
-        assert!(names.contains(&"shell")); // built-in allowed
+        assert!(!names.contains(&"Archon_list_tasks")); // safety: test assertion in #[test] function
+        assert!(names.contains(&"shell")); // safety: test assertion in #[test] function
     }
 
     #[test]
