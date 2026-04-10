@@ -131,6 +131,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           if [[ "${EVENT_NAME}" == "workflow_call" && -n "${VERSION}" ]]; then
@@ -138,7 +139,7 @@ jobs:
               --method POST \
               -f event_type="ironclaw_image_published" \
               -f client_payload[version]="${VERSION}"
-          else
+          elif [[ "${EVENT_NAME}" == "schedule" ]] || [[ "${INPUT_TAG}" == "staging" ]]; then
             gh api repos/nearai/ironclaw-dind/dispatches \
               --method POST \
               -f event_type="ironclaw_image_published"
