@@ -39,6 +39,7 @@ fn parse_cadence(s: &str) -> MissionCadence {
     } else if let Some(pattern) = trimmed.strip_prefix("event:") {
         MissionCadence::OnEvent {
             event_pattern: pattern.trim().to_string(),
+            channel: None,
         }
     } else if let Some(path) = trimmed.strip_prefix("webhook:") {
         MissionCadence::Webhook {
@@ -676,7 +677,7 @@ mod tests {
     #[test]
     fn test_parse_cadence_event() {
         match parse_cadence("event:price_alert") {
-            MissionCadence::OnEvent { event_pattern } => {
+            MissionCadence::OnEvent { event_pattern, .. } => {
                 assert_eq!(event_pattern, "price_alert");
             }
             other => panic!("expected OnEvent, got {other:?}"),

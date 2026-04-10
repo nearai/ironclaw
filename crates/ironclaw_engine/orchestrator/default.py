@@ -16,6 +16,9 @@
 #   __retrieve_docs__(goal, max_docs)            -> list of doc dicts
 #   __check_budget__()                           -> budget dict
 #   __get_actions__()                            -> list of action dicts
+#   __list_skills__()                            -> list of skill dicts
+#   __record_skill_usage__(doc_id, success)      -> None
+#   __regex_match__(pattern, text)               -> bool
 #
 # Context variables (injected by Rust before execution):
 #   context  - list of prior messages [{role, content}]
@@ -182,6 +185,14 @@ def format_docs(docs):
     return "\n".join(parts)
 
 
+# Conservative fallback heuristic matching the old Rust-side estimator.
+# These MUST be defined before `estimate_context_tokens` (and therefore
+# before the `FINAL(result)` entry-point call below). Moving them after the
+# entry point is a latent NameError every time `compact_if_needed` runs.
+CHARS_PER_TOKEN = 4
+MESSAGE_OVERHEAD_CHARS = 4
+
+
 def estimate_context_tokens(messages):
     """Estimate token count for a transcript using a rough chars/token heuristic."""
     total_chars = 0
@@ -268,8 +279,15 @@ def compact_if_needed(state, config):
 # ── Skill selection and injection (self-modifiable) ────────
 
 
-def score_skill(skill, message_lower):
-    """Score a skill against a user message. Returns 0 if vetoed."""
+def score_skill(skill, message_lower, message_original):
+    """Score a skill against a user message. Returns 0 if vetoed.
+
+    Scoring is aligned with the v1 `ironclaw_skills::selector::score_skill`:
+      - exclude_keyword veto: any match => score 0
+      - keyword: exact word = 10, substring = 5 (cap 30)
+      - tag: substring = 3 (cap 15)
+      - regex pattern: each match = 20 (cap 40)
+    """
     meta = skill.get("metadata", {})
     activation = meta.get("activation", {})
 
@@ -282,7 +300,11 @@ def score_skill(skill, message_lower):
 
     # Keyword scoring: exact word = 10, substring = 5 (cap 30)
     kw_score = 0
-    words = message_lower.split()
+    words = []
+    for word in message_lower.split():
+        trimmed = word.strip(".,!?;:'\"()[]{}<>`~@#$%^&*-_=+/\\|")
+        if trimmed:
+            words.append(trimmed)
     for kw in activation.get("keywords", []):
         kw_lower = kw.lower()
         if kw_lower in words:
@@ -297,6 +319,14 @@ def score_skill(skill, message_lower):
         if tag.lower() in message_lower:
             tag_score += 3
     score += min(tag_score, 15)
+
+    # Regex pattern scoring: each match = 20 (cap 40). Monty has no `re`
+    # module, so we call out to a host function that uses Rust's regex crate.
+    rx_score = 0
+    for pat in activation.get("patterns", []):
+        if __regex_match__(str(pat), message_original):
+            rx_score += 20
+    score += min(rx_score, 40)
 
     # Confidence factor for extracted skills
     source = meta.get("source", "authored")
@@ -316,9 +346,10 @@ def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
         return []
 
     message_lower = goal.lower()
+    message_original = goal
     scored = []
     for skill in skills:
-        s = score_skill(skill, message_lower)
+        s = score_skill(skill, message_lower, message_original)
         if s > 0:
             scored.append((s, skill))
 
@@ -657,22 +688,56 @@ def run_loop(context, goal, actions, state, config):
             # NOTE: consecutive_nudges is NOT reset here (V1 semantics).
             # Only non-intent text responses reset the counter.
             calls = response.get("calls", [])
+
+            # Handle FINAL emitted as a structured tool call. FINAL is a
+            # CodeAct sentinel for completion — when the LLM tries to call
+            # it via tool_calls instead of inside a code block, the engine's
+            # action executor has no lease for it and the call fails. If FINAL
+            # is co-emitted with other calls, execute the non-FINAL calls first
+            # so persistence side effects are not silently dropped.
+            final_call = None
+            duplicate_finals_dropped = 0
+            executable_calls = []
+            for c in calls:
+                if c.get("name", "") == "FINAL":
+                    # First FINAL wins; any extras are dropped (not appended
+                    # to executable_calls) so they don't try to run as a
+                    # normal action and fail with a lease error.
+                    if final_call is None:
+                        final_call = c
+                    else:
+                        duplicate_finals_dropped += 1
+                    continue
+                executable_calls.append(c)
+
+            if duplicate_finals_dropped > 0:
+                # Surface the drop so traces show why fewer FINALs were
+                # executed than the LLM emitted.
+                __emit_event__(
+                    "duplicate_final_dropped",
+                    count=duplicate_finals_dropped,
+                )
+
+            # Append the assistant message with only the executable calls.
+            # FINAL is filtered out of `action_calls` so the message history
+            # does not record a FINAL action with no matching ActionResult,
+            # which would confuse context replay on resume.
             append_message(
                 working_messages,
                 "Assistant",
                 response.get("content", "") or "",
-                action_calls=calls,
+                action_calls=executable_calls,
             )
 
             # Execute all tool calls in parallel via the batch host function.
             # Rust handles preflight (lease/policy), parallel execution via
             # JoinSet, and event emission in call order.
-            results = __execute_actions_parallel__(calls)
+            results = __execute_actions_parallel__(executable_calls)
             for idx in range(len(results)):
                 r = results[idx]
                 if r is None:
                     continue
-                call = calls[idx] if idx < len(calls) else {}
+                call = executable_calls[idx] if idx < len(executable_calls) else {}
                 call_id = call.get("call_id", "")
                 action_name = r.get("action_name", call.get("name", ""))
                 output = r.get("output")
@@ -699,7 +764,7 @@ def run_loop(context, goal, actions, state, config):
                     })
                     gate = r
                     # Get action info from the original call or the result
-                    orig_call = calls[r_idx] if r_idx < len(calls) else {}
+                    orig_call = executable_calls[r_idx] if r_idx < len(executable_calls) else {}
                     __transition_to__("waiting", "gate paused: " + gate.get("gate_name", "unknown"))
                     return {
                         "outcome": "gate_paused",
@@ -742,6 +807,48 @@ def run_loop(context, goal, actions, state, config):
                         "parameters": r.get("parameters", {}),
                     }
 
+            if final_call is not None:
+                raw_params = final_call.get("params", {})
+                # Some LLMs pass FINAL with the answer as a positional string
+                # argument instead of a named param dict. Handle that case so
+                # the answer is not silently dropped.
+                if isinstance(raw_params, str):
+                    answer = raw_params
+                else:
+                    params = raw_params or {}
+                    answer = (
+                        params.get("answer")
+                        or params.get("result")
+                        or params.get("value")
+                        or params.get("content")
+                        or params.get("text")
+                    )
+                    if not answer:
+                        # Fall back to the assistant's content text. This may
+                        # contain the model's full explanation rather than the
+                        # intended terse answer — truncate aggressively so we
+                        # don't ship thousands of tokens of reasoning as the
+                        # final answer, and emit a trace event so the
+                        # ambiguity is visible.
+                        fallback_content = response.get("content", "") or ""
+                        FINAL_FALLBACK_MAX_CHARS = 500
+                        truncated = False
+                        if len(fallback_content) > FINAL_FALLBACK_MAX_CHARS:
+                            fallback_content = (
+                                fallback_content[:FINAL_FALLBACK_MAX_CHARS]
+                                + "… [truncated by orchestrator: FINAL was emitted with no recognizable answer param]"
+                            )
+                            truncated = True
+                        answer = fallback_content
+                        __emit_event__(
+                            "final_fallback",
+                            reason="no recognizable answer param on FINAL",
+                            truncated=truncated,
+                            original_length=len(response.get("content", "") or ""),
+                        )
+                __transition_to__("completed", "FINAL via tool_calls")
+                return complete_result(state, "completed", str(answer))
+
             __save_checkpoint__(state, {
                 "nudge_count": consecutive_nudges,
                 "consecutive_errors": consecutive_errors,
@@ -756,6 +863,3 @@ def run_loop(context, goal, actions, state, config):
 # Entry point: call run_loop with injected context variables
 result = run_loop(context, goal, actions, state, config)
 FINAL(result)
-# Conservative fallback heuristic matching the old Rust-side estimator.
-CHARS_PER_TOKEN = 4
-MESSAGE_OVERHEAD_CHARS = 4

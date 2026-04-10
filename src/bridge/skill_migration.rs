@@ -146,7 +146,7 @@ mod tests {
                 },
                 credentials: vec![],
                 terminal_actions: vec![],
-                metadata: None,
+                requires: ironclaw_skills::GatingRequirements::default(),
             },
             prompt_content: content.to_string(),
             trust: SkillTrust::Trusted,

@@ -4,7 +4,11 @@ mod abound;
 mod echo;
 pub mod extension_tools;
 mod file;
+pub mod file_edit_guard;
+pub mod file_history;
 pub(crate) mod forex;
+mod glob_tool;
+mod grep_tool;
 mod http;
 mod job;
 mod json;
@@ -18,6 +22,7 @@ pub mod routine;
 pub mod secrets_tools;
 pub(crate) mod shell;
 pub mod skill_tools;
+pub mod system;
 mod time;
 mod tool_info;
 
@@ -31,7 +36,11 @@ pub use extension_tools::{
     ToolPermissionSetTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
 };
 pub use file::{ApplyPatchTool, ListDirTool, ReadFileTool, WriteFileTool};
+pub use file_edit_guard::{SharedReadFileState, shared_read_file_state};
+pub use file_history::{FileHistory, FileUndoTool, SharedFileHistory, shared_file_history};
 pub use forex::{AnalyzeTransferTool, ForexHistoricalDataTool, ValidateTransferTargetTool};
+pub use glob_tool::GlobTool;
+pub use grep_tool::GrepTool;
 pub use http::{HttpTool, extract_host_from_params};
 pub use job::{
     CancelJobTool, CreateJobTool, JobEventsTool, JobPromptTool, JobStatusTool, ListJobsTool,
@@ -53,6 +62,7 @@ pub use routine::{
 pub use secrets_tools::{SecretDeleteTool, SecretListTool};
 pub use shell::ShellTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
+pub use system::{SystemToolsListTool, SystemVersionTool};
 pub use time::TimeTool;
 pub use tool_info::ToolInfoTool;
 mod html_converter;

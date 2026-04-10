@@ -29,6 +29,7 @@ pub(crate) mod helpers;
 mod hygiene;
 pub(crate) mod llm;
 pub mod oauth;
+pub mod profile;
 pub mod relay;
 mod routines;
 mod safety;
@@ -127,6 +128,27 @@ pub struct Config {
     pub relay: Option<RelayConfig>,
 }
 
+/// Generate a fresh random AES-256-GCM master key for `Config::for_testing`.
+///
+/// Returns a hex-encoded 32-byte key (64 hex chars), satisfying the length
+/// check in `SecretsConfig::resolve`. Each call returns a different value —
+/// tests don't need cross-process determinism (each test builds a fresh
+/// secrets store on top of a fresh temp DB), and committing a constant
+/// master key into the source tree would mean every developer who built
+/// with `--features libsql` had a publicly-known key in their process.
+#[cfg(feature = "libsql")]
+fn generate_test_master_key() -> secrecy::SecretString {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let mut hex = String::with_capacity(64);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(hex, "{:02x}", b);
+    }
+    secrecy::SecretString::from(hex)
+}
+
 impl Config {
     /// Create a full Config for integration tests without reading env vars.
     ///
@@ -175,7 +197,24 @@ impl Config {
                 enabled: false,
                 ..WasmConfig::default()
             },
-            secrets: SecretsConfig::default(),
+            // Test config gets a freshly-generated random master key so
+            // the secrets store is wired up out of the box. Without this,
+            // every replay-mode test that touches credentials would have
+            // to either build its own SecretsStore or skip the secrets
+            // path entirely. The key is generated per call (NOT a
+            // hardcoded constant) — `Config::for_testing` is `pub` so
+            // anything in the crate or downstream tests can call it, and
+            // committing a known master key into the source tree would
+            // mean every developer who built with `--features libsql`
+            // had a publicly-known AES-256-GCM key sitting in their
+            // process. Tests don't need cross-process determinism here:
+            // each test creates its own temp DB, so the secrets store
+            // is born fresh on every call anyway.
+            secrets: SecretsConfig {
+                master_key: Some(generate_test_master_key()),
+                enabled: true,
+                source: crate::settings::KeySource::Env,
+            },
             builder: BuilderModeConfig {
                 enabled: false,
                 ..BuilderModeConfig::default()
@@ -216,28 +255,42 @@ impl Config {
         store: &(dyn crate::db::SettingsStore + Sync),
         user_id: &str,
     ) -> Result<Self, ConfigError> {
-        Self::from_db_with_toml(store, user_id, None).await
+        // Existing call sites pass the workspace owner_id, which is the
+        // operator/admin scope.
+        Self::from_db_with_toml(store, user_id, None, true).await
     }
 
     /// Load from DB with an optional TOML config file overlay.
     ///
     /// Priority: DB/TOML > env > default. TOML is loaded as the base,
     /// then DB values are merged on top. See module docs for exceptions.
+    ///
+    /// `is_operator` controls defense-in-depth filtering of admin-only LLM
+    /// setting keys (`llm_builtin_overrides`, `llm_custom_providers`,
+    /// `ollama_base_url`, `openai_compatible_base_url`). When `false`, those
+    /// keys are stripped from the DB overlay so a non-admin user (or a
+    /// pre-existing legacy DB row) cannot reactivate a private/loopback
+    /// provider endpoint via per-user settings.
     pub async fn from_db_with_toml(
         store: &(dyn crate::db::SettingsStore + Sync),
         user_id: &str,
         toml_path: Option<&std::path::Path>,
+        is_operator: bool,
     ) -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
         crate::bootstrap::load_ironclaw_env();
 
-        // Start with TOML config as a base (lowest priority among the two).
+        // Start with defaults, apply deployment profile, then TOML overlay.
         let mut settings = Settings::default();
+        profile::apply_profile(&mut settings)?;
         Self::apply_toml_overlay(&mut settings, toml_path)?;
 
         // Overlay DB settings on top so DB values win over TOML.
         match store.get_all_settings(user_id).await {
-            Ok(map) => {
+            Ok(mut map) => {
+                if !is_operator {
+                    crate::config::helpers::strip_admin_only_llm_keys(&mut map);
+                }
                 let db_settings = Settings::from_db_map(&map);
                 settings.merge_from(&db_settings);
             }
@@ -321,29 +374,40 @@ impl Config {
         user_id: &str,
         toml_path: Option<&std::path::Path>,
     ) -> Result<(), ConfigError> {
-        self.re_resolve_llm_with_secrets(store, user_id, toml_path, None)
+        let is_operator = user_id == self.owner_id;
+        self.re_resolve_llm_with_secrets(store, user_id, toml_path, None, is_operator)
             .await
     }
 
     /// Re-resolve LLM config, hydrating API keys from the secrets store.
+    ///
+    /// `is_operator` controls defense-in-depth filtering of admin-only LLM
+    /// setting keys; see [`Config::from_db_with_toml`] for details.
     pub async fn re_resolve_llm_with_secrets(
         &mut self,
         store: Option<&(dyn crate::db::SettingsStore + Sync)>,
         user_id: &str,
         toml_path: Option<&std::path::Path>,
         secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
+        is_operator: bool,
     ) -> Result<(), ConfigError> {
         let mut settings = if let Some(store) = store {
-            // TOML as base, then DB on top (DB wins).
+            // Profile as base, then TOML, then DB on top (DB wins).
             let mut s = Settings::default();
+            profile::apply_profile(&mut s)?;
             Self::apply_toml_overlay(&mut s, toml_path)?;
-            if let Ok(map) = store.get_all_settings(user_id).await {
+            if let Ok(mut map) = store.get_all_settings(user_id).await {
+                if !is_operator {
+                    crate::config::helpers::strip_admin_only_llm_keys(&mut map);
+                }
                 let db_settings = Settings::from_db_map(&map);
                 s.merge_from(&db_settings);
             }
             s
         } else {
-            Settings::default()
+            let mut s = Settings::default();
+            profile::apply_profile(&mut s)?;
+            s
         };
 
         // Hydrate API keys from encrypted secrets store into the settings
@@ -407,7 +471,8 @@ pub(crate) fn load_bootstrap_settings(
     let _ = dotenvy::dotenv();
     crate::bootstrap::load_ironclaw_env();
 
-    let mut settings = Settings::load();
+    let mut settings = Settings::default();
+    profile::apply_profile(&mut settings)?;
     Config::apply_toml_overlay(&mut settings, toml_path)?;
     Ok(settings)
 }
@@ -811,6 +876,192 @@ mod tests {
             Some("gsk-custom"),
             "custom provider api_key should be hydrated from secrets store"
         );
+    }
+
+    /// Minimal in-memory `SettingsStore` for unit tests.
+    ///
+    /// Only the methods exercised by the resolve path are wired up; the
+    /// rest return errors so unintended use during a test is loud.
+    struct FakeSettingsStore {
+        rows: tokio::sync::RwLock<
+            std::collections::HashMap<String, std::collections::HashMap<String, serde_json::Value>>,
+        >,
+    }
+
+    impl FakeSettingsStore {
+        fn new() -> Self {
+            Self {
+                rows: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+            }
+        }
+
+        async fn seed(&self, user_id: &str, key: &str, value: serde_json::Value) {
+            let mut rows = self.rows.write().await;
+            rows.entry(user_id.to_string())
+                .or_default()
+                .insert(key.to_string(), value);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::db::SettingsStore for FakeSettingsStore {
+        async fn get_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+        ) -> Result<Option<serde_json::Value>, crate::error::DatabaseError> {
+            let rows = self.rows.read().await;
+            Ok(rows.get(user_id).and_then(|m| m.get(key).cloned()))
+        }
+
+        async fn get_setting_full(
+            &self,
+            _user_id: &str,
+            _key: &str,
+        ) -> Result<Option<crate::history::SettingRow>, crate::error::DatabaseError> {
+            Err(crate::error::DatabaseError::Query(
+                "FakeSettingsStore::get_setting_full not implemented".into(),
+            ))
+        }
+
+        async fn set_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+            value: &serde_json::Value,
+        ) -> Result<(), crate::error::DatabaseError> {
+            self.seed(user_id, key, value.clone()).await;
+            Ok(())
+        }
+
+        async fn delete_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+        ) -> Result<bool, crate::error::DatabaseError> {
+            let mut rows = self.rows.write().await;
+            Ok(rows
+                .get_mut(user_id)
+                .map(|m| m.remove(key).is_some())
+                .unwrap_or(false))
+        }
+
+        async fn list_settings(
+            &self,
+            _user_id: &str,
+        ) -> Result<Vec<crate::history::SettingRow>, crate::error::DatabaseError> {
+            Err(crate::error::DatabaseError::Query(
+                "FakeSettingsStore::list_settings not implemented".into(),
+            ))
+        }
+
+        async fn get_all_settings(
+            &self,
+            user_id: &str,
+        ) -> Result<std::collections::HashMap<String, serde_json::Value>, crate::error::DatabaseError>
+        {
+            let rows = self.rows.read().await;
+            Ok(rows.get(user_id).cloned().unwrap_or_default())
+        }
+
+        async fn set_all_settings(
+            &self,
+            user_id: &str,
+            settings: &std::collections::HashMap<String, serde_json::Value>,
+        ) -> Result<(), crate::error::DatabaseError> {
+            let mut rows = self.rows.write().await;
+            rows.insert(user_id.to_string(), settings.clone());
+            Ok(())
+        }
+
+        async fn has_settings(&self, user_id: &str) -> Result<bool, crate::error::DatabaseError> {
+            let rows = self.rows.read().await;
+            Ok(rows.get(user_id).is_some_and(|m| !m.is_empty()))
+        }
+    }
+
+    fn member_settings_with_private_endpoint() -> serde_json::Value {
+        // A leftover DB row written by a non-admin user before the
+        // admin-only restriction landed: points the openai backend at a
+        // private LAN address that would normally fail SSRF validation.
+        serde_json::json!({
+            "openai": {
+                "base_url": "http://192.168.1.50:11434",
+                "model": "leak-bait"
+            }
+        })
+    }
+
+    fn config_for_owner(owner_id: &str) -> Config {
+        let tmp = std::env::temp_dir().join(format!("ironclaw-resolve-test-{owner_id}"));
+        let mut cfg = Config::for_testing(tmp.clone(), tmp.clone(), tmp);
+        cfg.owner_id = owner_id.to_string();
+        cfg
+    }
+
+    #[tokio::test]
+    async fn re_resolve_llm_strips_admin_only_keys_for_non_operator_user() {
+        use crate::db::SettingsStore;
+
+        let store = FakeSettingsStore::new();
+        // Seed a non-admin user's per-user settings with an admin-only key
+        // that points at a private endpoint.
+        store
+            .seed(
+                "member-user",
+                "llm_builtin_overrides",
+                member_settings_with_private_endpoint(),
+            )
+            .await;
+
+        let mut cfg = config_for_owner("operator-user");
+        cfg.re_resolve_llm_with_secrets(
+            Some(&store as &(dyn crate::db::SettingsStore + Sync)),
+            "member-user",
+            None,
+            None,
+            false, // <- non-operator: admin-only keys must be stripped
+        )
+        .await
+        .expect("resolve should not fail");
+
+        // Re-load via the store and apply the same filter the resolver
+        // uses, to assert the helper actually drops the poisoned key.
+        let mut filtered = store.get_all_settings("member-user").await.unwrap();
+        crate::config::helpers::strip_admin_only_llm_keys(&mut filtered);
+        assert!(
+            !filtered.contains_key("llm_builtin_overrides"),
+            "filter helper must remove the admin-only key"
+        );
+    }
+
+    #[tokio::test]
+    async fn re_resolve_llm_keeps_admin_only_keys_for_operator() {
+        let store = FakeSettingsStore::new();
+        store
+            .seed(
+                "operator-user",
+                "llm_builtin_overrides",
+                serde_json::json!({
+                    "openai": {
+                        "model": "gpt-4o"
+                    }
+                }),
+            )
+            .await;
+
+        let mut cfg = config_for_owner("operator-user");
+        // is_operator=true: admin/operator may legitimately configure
+        // builtin overrides, so the resolve path must keep them.
+        cfg.re_resolve_llm_with_secrets(
+            Some(&store as &(dyn crate::db::SettingsStore + Sync)),
+            "operator-user",
+            None,
+            None,
+            true,
+        )
+        .await
+        .expect("resolve should succeed for operator");
     }
 
     #[tokio::test]

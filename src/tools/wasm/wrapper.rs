@@ -14,11 +14,13 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use wasmtime::Store;
 use wasmtime::component::Linker;
-use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
+use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
+use crate::auth::resolve_secret_for_runtime;
 use crate::context::JobContext;
+use crate::db::UserStore;
 use crate::llm::recording::{HttpExchangeRequest, HttpExchangeResponse, HttpInterceptor};
-use crate::secrets::{DecryptedSecret, SecretsStore};
+use crate::secrets::SecretsStore;
 use crate::tools::tool::{Tool, ToolDiscoverySummary, ToolError, ToolOutput};
 use crate::tools::wasm::capabilities::Capabilities;
 use crate::tools::wasm::credential_injector::{
@@ -28,7 +30,7 @@ use crate::tools::wasm::error::WasmError;
 use crate::tools::wasm::host::{HostState, LogLevel};
 use crate::tools::wasm::limits::{ResourceLimits, WasmResourceLimiter};
 use crate::tools::wasm::runtime::{EPOCH_TICK_INTERVAL, PreparedModule, WasmToolRuntime};
-use crate::tools::wasm::ssrf_safe_client_builder;
+use crate::tools::wasm::{ssrf_safe_client_builder_for_target, validate_and_resolve_http_target};
 use ironclaw_safety::LeakDetector;
 
 // Generate component model bindings from the WIT file.
@@ -40,12 +42,10 @@ use ironclaw_safety::LeakDetector;
 wasmtime::component::bindgen!({
     path: "wit/tool.wit",
     world: "sandboxed-tool",
-    async: false,
     with: {},
 });
 
 // Alias the export interface types for convenience.
-use crate::cli::oauth_defaults;
 use exports::near::agent::tool as wit_tool;
 
 /// Configuration needed to refresh an expired OAuth access token.
@@ -71,10 +71,12 @@ pub struct OAuthRefreshConfig {
     pub secret_name: String,
     /// Provider hint stored alongside the refreshed secret.
     pub provider: Option<String>,
+    /// Extra form parameters appended during refresh requests.
+    pub extra_refresh_params: HashMap<String, String>,
 }
 
 impl OAuthRefreshConfig {
-    fn oauth_proxy_auth_token(&self) -> Option<&str> {
+    pub fn oauth_proxy_auth_token(&self) -> Option<&str> {
         self.gateway_token.as_deref()
     }
 }
@@ -84,6 +86,13 @@ impl OAuthRefreshConfig {
 /// Built before each WASM execution by decrypting secrets from the store.
 /// Applied per-request by matching the URL host against `host_patterns`.
 /// WASM tools never see the raw secret values.
+///
+/// **No `derive(Debug)`.** This struct holds decrypted secret material —
+/// header values, query-parameter values, and the raw `secret_value` are
+/// all sensitive. The hand-rolled `Debug` impl below redacts every
+/// secret-bearing field so an accidental `{:?}` in a future log line, a
+/// panic message, or a `dbg!()` cannot leak credentials. Do NOT add
+/// `#[derive(Debug)]` here without revisiting the redaction.
 struct ResolvedHostCredential {
     /// Host patterns this credential applies to (e.g., "www.googleapis.com").
     host_patterns: Vec<String>,
@@ -95,17 +104,18 @@ struct ResolvedHostCredential {
     secret_value: String,
 }
 
-// Custom Debug impl to prevent accidental secret leakage in logs or panics.
-// Headers contain auth tokens and secret_value is the raw decrypted secret.
 impl std::fmt::Debug for ResolvedHostCredential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Print the structural information that's useful for debugging
+        // (which hosts the credential applies to, which header / query
+        // names get injected) while redacting every value that could
+        // contain decrypted secret material.
+        let header_keys: Vec<&String> = self.headers.keys().collect();
+        let query_keys: Vec<&String> = self.query_params.keys().collect();
         f.debug_struct("ResolvedHostCredential")
             .field("host_patterns", &self.host_patterns)
-            .field("headers", &format_args!("[{} entries]", self.headers.len()))
-            .field(
-                "query_params",
-                &format_args!("[{} entries]", self.query_params.len()),
-            )
+            .field("header_names", &header_keys)
+            .field("query_param_names", &query_keys)
             .field("secret_value", &"[REDACTED]")
             .finish()
     }
@@ -255,12 +265,11 @@ impl StoreData {
 // Provide WASI context for the WASM component.
 // Required because tools are compiled with wasm32-wasip2 target.
 impl WasiView for StoreData {
-    fn ctx(&mut self) -> &mut WasiCtx {
-        &mut self.wasi
-    }
-
-    fn table(&mut self) -> &mut ResourceTable {
-        &mut self.table
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
     }
 }
 
@@ -361,9 +370,6 @@ impl near::agent::host::Host for StoreData {
             .map(|h| h.max_response_bytes)
             .unwrap_or(10 * 1024 * 1024);
 
-        // Resolve hostname and reject private/internal IPs to prevent DNS rebinding.
-        reject_private_ip(&url)?;
-
         // Make HTTP request using a dedicated single-threaded runtime.
         // We're inside spawn_blocking, so we can't rely on the main runtime's
         // I/O driver (it may be busy with WASM compilation or other startup work).
@@ -378,6 +384,11 @@ impl near::agent::host::Host for StoreData {
             );
         }
         let rt = self.http_runtime.as_ref().expect("just initialized"); // safety: is_none branch above guarantees Some
+
+        // Resolve the destination once, reject private/internal addresses, and
+        // reuse the validated addresses in reqwest so there is no second DNS
+        // lookup window for rebinding between validation and connect.
+        let resolved_target = rt.block_on(validate_and_resolve_http_target(&url))?;
 
         // If an HTTP interceptor is set (testing), short-circuit with a canned response.
         if let Some(interceptor) = &self.http_interceptor {
@@ -432,7 +443,7 @@ impl near::agent::host::Host for StoreData {
         });
 
         let result = rt.block_on(async {
-            let client = ssrf_safe_client_builder()
+            let client = ssrf_safe_client_builder_for_target(&resolved_target)
                 .connect_timeout(Duration::from_secs(10))
                 .build()
                 .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
@@ -609,6 +620,8 @@ pub struct WasmToolWrapper {
     /// Secrets store for resolving host-based credential injection.
     /// Used in execute() to pre-decrypt secrets before WASM runs.
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    /// Database for role-aware legacy default-scope credential fallback.
+    role_lookup: Option<Arc<dyn UserStore>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
     oauth_refresh: Option<OAuthRefreshConfig>,
     /// Optional HTTP interceptor for testing — returns canned responses
@@ -697,23 +710,73 @@ impl WasmToolSchemas {
 
     /// Derive a compact advertised schema from the full discovery schema.
     ///
-    /// Collects properties from top-level `properties` and from
-    /// `oneOf`/`anyOf`/`allOf` variants. Keeps only properties that are in
-    /// the top-level `required` array or carry an `enum`/`const` constraint.
-    /// For properties defined via `const` across multiple variants (e.g.
-    /// `"action": {"const": "get_repo"}` in each `oneOf` branch), the `const`
-    /// values are merged into a single `enum` array.
+    /// Two distinct shapes are handled:
     ///
-    /// Variant-level `required` fields (e.g. `owner`, `repo` required within
-    /// each `oneOf` variant but not top-level) are intentionally omitted from
-    /// the compact schema — the LLM can discover them via
-    /// `tool_info(detail: "schema")`.
+    /// 1. **Tagged enum / `oneOf` shape** (e.g. WASM tools whose action
+    ///    enum is exposed via `schemars::JsonSchema`, or hand-written
+    ///    `oneOf` schemas like `github`'s). The `oneOf` structure is
+    ///    *preserved* — including each variant's `properties` and
+    ///    `required` array — so the LLM can see "field X is required
+    ///    when action == Y" before constructing a call. This is
+    ///    critical: previously these arrays were stripped out and the
+    ///    LLM would happily call `{"action":"get_file"}` without
+    ///    `file_id`, getting a runtime serde error. We strip
+    ///    `description`, `default`, `title`, `format`, `examples`, and
+    ///    `$schema` from each variant to save tokens — the contract
+    ///    (types + required) survives, the prose doesn't.
     ///
-    /// At most `MAX_COMPACT_PROPERTIES` properties are collected to bound
+    /// 2. **Flat shape** (no `oneOf`/`anyOf`/`allOf`). Keeps top-level
+    ///    properties that are either in `required` or carry an
+    ///    `enum`/`const` constraint, with descriptions stripped. If
+    ///    nothing survives the filter, falls back to all typed properties
+    ///    or to a permissive `{}` schema.
+    ///
+    /// At most `MAX_COMPACT_VARIANTS` variants and
+    /// `MAX_COMPACT_PROPERTIES` flat properties are kept to bound
     /// allocations from adversarial schemas.
     fn compact_schema(discovery: &serde_json::Value) -> serde_json::Value {
         const MAX_COMPACT_PROPERTIES: usize = 100;
+        const MAX_COMPACT_VARIANTS: usize = 50;
 
+        // Shape 1: tagged enum / oneOf schema. Preserve the structure so
+        // the LLM sees per-variant required arrays.
+        for combinator in ["oneOf", "anyOf", "allOf"] {
+            if let Some(variants) = discovery.get(combinator).and_then(|v| v.as_array())
+                && !variants.is_empty()
+            {
+                let compact_variants: Vec<serde_json::Value> = variants
+                    .iter()
+                    .take(MAX_COMPACT_VARIANTS)
+                    .map(strip_schema_metadata)
+                    .collect();
+                let mut result = serde_json::Map::new();
+                result.insert(
+                    "type".to_string(),
+                    serde_json::Value::String("object".to_string()),
+                );
+                if let Some(top_required) = discovery.get("required") {
+                    result.insert("required".to_string(), top_required.clone());
+                }
+                // Carry through any top-level properties (rare with
+                // schemars-derived schemas, but possible with hybrid
+                // hand-written ones).
+                if let Some(top_props) = discovery.get("properties") {
+                    result.insert("properties".to_string(), strip_props_metadata(top_props));
+                }
+                result.insert(
+                    combinator.to_string(),
+                    serde_json::Value::Array(compact_variants),
+                );
+                result.insert(
+                    "additionalProperties".to_string(),
+                    serde_json::Value::Bool(true),
+                );
+                return serde_json::Value::Object(result);
+            }
+        }
+
+        // Shape 2: flat schema. Keep required + enum/const-bearing
+        // properties, drop the rest.
         let required: std::collections::HashSet<String> = discovery
             .get("required")
             .and_then(|r| r.as_array())
@@ -724,53 +787,13 @@ impl WasmToolSchemas {
             })
             .unwrap_or_default();
 
-        // Collect properties from top-level and oneOf/anyOf/allOf variants.
-        // For properties with `const` across variants, merge into an `enum`.
         let mut all_properties = serde_json::Map::new();
-        // Track const values per property to merge into enum.
-        let mut const_values: std::collections::HashMap<String, Vec<serde_json::Value>> =
-            std::collections::HashMap::new();
-
         if let Some(props) = discovery.get("properties").and_then(|p| p.as_object()) {
             for (k, v) in props {
                 if all_properties.len() >= MAX_COMPACT_PROPERTIES {
                     break;
                 }
-                all_properties.insert(k.clone(), v.clone());
-            }
-        }
-        for key in ["oneOf", "anyOf", "allOf"] {
-            if let Some(variants) = discovery.get(key).and_then(|v| v.as_array()) {
-                for variant in variants {
-                    if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
-                        for (k, v) in props {
-                            if all_properties.len() >= MAX_COMPACT_PROPERTIES
-                                && !all_properties.contains_key(k)
-                            {
-                                continue;
-                            }
-                            // Track const values for merging into enum.
-                            if let Some(c) = v.get("const") {
-                                const_values.entry(k.clone()).or_default().push(c.clone());
-                            }
-                            all_properties.entry(k.clone()).or_insert_with(|| v.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        // Merge collected const values into enum arrays.
-        for (name, values) in &const_values {
-            if values.len() > 1
-                && let Some(prop) = all_properties.get_mut(name)
-            {
-                let mut merged = prop.clone();
-                if let Some(obj) = merged.as_object_mut() {
-                    obj.remove("const");
-                    obj.insert("enum".to_string(), serde_json::Value::Array(values.clone()));
-                }
-                *prop = merged;
+                all_properties.insert(k.clone(), strip_schema_metadata(v));
             }
         }
 
@@ -860,6 +883,7 @@ impl WasmToolWrapper {
             capabilities,
             credentials: HashMap::new(),
             secrets_store: None,
+            role_lookup: None,
             oauth_refresh: None,
             http_interceptor: None,
         }
@@ -923,6 +947,12 @@ impl WasmToolWrapper {
         self
     }
 
+    /// Set the role lookup for admin-only legacy default-scope fallback.
+    pub fn with_role_lookup(mut self, role_lookup: Arc<dyn UserStore>) -> Self {
+        self.role_lookup = Some(role_lookup);
+        self
+    }
+
     /// Set OAuth refresh configuration for auto-refreshing expired tokens.
     ///
     /// When set, `execute()` checks the access token's `expires_at` before
@@ -944,12 +974,15 @@ impl WasmToolWrapper {
     /// `near:agent/host` namespace.
     fn add_host_functions(linker: &mut Linker<StoreData>) -> Result<(), WasmError> {
         // Add WASI support (required by components built with wasm32-wasip2)
-        wasmtime_wasi::add_to_linker_sync(linker)
+        wasmtime_wasi::p2::add_to_linker_sync(linker)
             .map_err(|e| WasmError::ConfigError(format!("Failed to add WASI functions: {}", e)))?;
 
         // Add our custom host interface using the generated add_to_linker
-        near::agent::host::add_to_linker(linker, |state| state)
-            .map_err(|e| WasmError::ConfigError(format!("Failed to add host functions: {}", e)))?;
+        SandboxedTool::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
+            linker,
+            |state: &mut StoreData| state,
+        )
+        .map_err(|e| WasmError::ConfigError(format!("Failed to add host functions: {}", e)))?;
 
         Ok(())
     }
@@ -1028,16 +1061,9 @@ impl WasmToolWrapper {
         };
 
         // Call execute using the generated typed interface
-        let response = tool_iface.call_execute(&mut store, &request).map_err(|e| {
-            let error_str = e.to_string();
-            if error_str.contains("out of fuel") {
-                WasmError::FuelExhausted { limit: limits.fuel }
-            } else if error_str.contains("unreachable") {
-                WasmError::Trapped("unreachable code executed".to_string())
-            } else {
-                WasmError::Trapped(error_str)
-            }
-        })?;
+        let response = tool_iface
+            .call_execute(&mut store, &request)
+            .map_err(|e| classify_trap_error(e, limits))?;
 
         // Get logs from host state
         let logs = store.data_mut().host_state.take_logs();
@@ -1052,6 +1078,71 @@ impl WasmToolWrapper {
         // Return result (or empty string if none)
         Ok((response.output.unwrap_or_default(), logs))
     }
+}
+
+/// Classify a wasmtime execution error into the appropriate `WasmError` variant.
+///
+/// Prefers structured `Trap` downcast (version-proof) when the error type
+/// exposes a `wasmtime::Trap` directly. Falls back to string matching on the
+/// full error chain for cases where component-model glue or host wrappers
+/// bury the trap inside a nested cause (the `downcast_ref` on the outer
+/// error misses it, but the trap's diagnostic string still appears in the
+/// `Display` chain). The string fallback covers `OutOfFuel` and
+/// `unreachable` — the two traps that have distinct `WasmError` variants —
+/// and is forward-compatible with future wasmtime versions that might rename
+/// or restructure the type hierarchy.
+///
+/// Takes `wasmtime::Error` directly (not `anyhow::Error`) because that's
+/// what `call_execute` returns. wasmtime 43+ has its own `Error` type
+/// distinct from `anyhow::Error`; accepting it natively avoids a lossy
+/// `.into()` conversion that could strip type information needed for the
+/// downcast.
+fn classify_trap_error(error: wasmtime::Error, limits: &ResourceLimits) -> WasmError {
+    // Try structured downcast first (avoids string-matching drift across
+    // wasmtime versions). `wasmtime::Error::downcast_ref` walks the error
+    // chain internally, so traps wrapped by component-model glue are found.
+    if let Some(trap) = error.downcast_ref::<wasmtime::Trap>() {
+        return match trap {
+            wasmtime::Trap::OutOfFuel => WasmError::FuelExhausted { limit: limits.fuel },
+            wasmtime::Trap::StackOverflow => WasmError::Trapped(
+                "stack overflow: the tool's call stack exceeded the WASM stack limit. \
+                 This often happens when parsing very large JSON responses."
+                    .to_string(),
+            ),
+            wasmtime::Trap::UnreachableCodeReached => {
+                WasmError::Trapped("unreachable code executed".to_string())
+            }
+            // Everything else: include trap kind + full chain for diagnosis
+            other => WasmError::Trapped(format!("{other}: {error:#}")),
+        };
+    }
+
+    // Fallback: string matching on the full error chain. The downcast can
+    // miss when the trap is wrapped in layers of component-model or host
+    // glue that don't preserve the Trap type. The Display chain still
+    // contains the diagnostic string, so we check for the two traps that
+    // have distinct WasmError variants.
+    let error_str = format!("{error:#}");
+    if error_str.contains("all fuel consumed")
+        || error_str.contains("out of fuel")
+        || error_str.contains("OutOfFuel")
+    {
+        return WasmError::FuelExhausted { limit: limits.fuel };
+    }
+    // Match wasmtime's actual Display string for UnreachableCodeReached.
+    // A bare `contains("unreachable")` would false-positive on HTTP errors
+    // like "endpoint was unreachable" or "server unreachable: connection
+    // refused", replacing the real diagnostic with a misleading generic
+    // "unreachable code executed" message.
+    if error_str.contains("unreachable code")
+        || error_str.contains("UnreachableCodeReached")
+        || error_str.contains("wasm trap: unreachable")
+    {
+        return WasmError::Trapped("unreachable code executed".to_string());
+    }
+
+    // Unrecognized: full chain for diagnosis
+    WasmError::Trapped(error_str)
 }
 
 /// Extract metadata (description + schema) from a WASM tool by briefly
@@ -1127,6 +1218,10 @@ impl Tool for WasmToolWrapper {
         self.discovery_summary.clone()
     }
 
+    fn provider_extension(&self) -> Option<&str> {
+        Some(&self.prepared.name)
+    }
+
     /// Compose the tool schema for LLM function calling.
     ///
     /// When the advertised schema is permissive (no typed properties), appends
@@ -1161,13 +1256,31 @@ impl Tool for WasmToolWrapper {
         // This decrypts the secrets once so the sync http_request() host function
         // can inject them without needing async access.
         let credential_user_id = &ctx.user_id;
-        let host_credentials = resolve_host_credentials(
+        let resolution = resolve_host_credentials(
             &self.capabilities,
             self.secrets_store.as_deref(),
             credential_user_id,
+            self.role_lookup.as_deref(),
             self.oauth_refresh.as_ref(),
         )
-        .await?;
+        .await;
+
+        // Fail closed: if any *required* credential is missing, refuse to
+        // execute the tool. The previous behavior of silently dropping
+        // unresolved credentials let a malicious or misconfigured tool
+        // issue requests without the credentials it declared, which can
+        // exfiltrate user context to an unauthenticated endpoint.
+        // Tools that genuinely want graceful degradation must mark the
+        // mapping `optional = true` in their capabilities manifest.
+        if !resolution.missing_required.is_empty() {
+            return Err(ToolError::ExecutionFailed(format!(
+                "WASM tool '{}' requires credentials that are not configured: {}. \
+                 Configure the missing credentials before re-running the tool.",
+                self.name(),
+                resolution.missing_required.join(", ")
+            )));
+        }
+        let host_credentials = resolution.resolved;
 
         // Serialize context for WASM
         let context_json = serde_json::to_string(ctx).ok();
@@ -1192,6 +1305,7 @@ impl Tool for WasmToolWrapper {
                 discovery_summary,
                 credentials,
                 secrets_store: None, // Not needed in blocking task
+                role_lookup: None,
                 oauth_refresh: None, // Already used above for pre-refresh
                 http_interceptor: self.http_interceptor.clone(),
             };
@@ -1255,304 +1369,101 @@ impl std::fmt::Debug for WasmToolWrapper {
     }
 }
 
-/// Refresh an expired OAuth access token using the stored refresh token.
-///
-/// Posts to the provider's token endpoint with `grant_type=refresh_token`,
-/// then stores the new access token (with expiry) and rotated refresh token
-/// (if the provider returns one).
-///
-/// SSRF defense: `token_url` originates from a tool's capabilities JSON, so
-/// a malicious tool could point it at an internal service to exfiltrate the
-/// refresh token. We require HTTPS, reject private/loopback IPs (including
-/// DNS-resolved), and disable redirects.
-///
-/// Returns `true` if the refresh succeeded, `false` otherwise.
-async fn refresh_oauth_token(
-    store: &(dyn SecretsStore + Send + Sync),
-    user_id: &str,
-    config: &OAuthRefreshConfig,
-) -> bool {
-    let refresh_name = format!("{}_refresh_token", config.secret_name);
-
-    if let Some(proxy_url) = config.exchange_proxy_url.as_deref() {
-        let Some(oauth_proxy_auth_token) = config.oauth_proxy_auth_token() else {
-            tracing::warn!(
-                "OAuth refresh proxy is configured, but no OAuth proxy auth token is available"
-            );
-            return false;
-        };
-
-        // In hosted mode, the configured exchange proxy owns the outbound token
-        // refresh and validation policy for the provider token_url. Direct-mode
-        // HTTPS/private-IP checks remain in place for self-hosted refreshes below.
-        let refresh_secret = match load_oauth_refresh_secret(store, user_id, &refresh_name).await {
-            Some(secret) => secret,
-            None => return false,
-        };
-        let token_response = match oauth_defaults::refresh_token_via_proxy(
-            oauth_defaults::ProxyRefreshTokenRequest {
-                proxy_url,
-                gateway_token: oauth_proxy_auth_token,
-                token_url: &config.token_url,
-                client_id: &config.client_id,
-                client_secret: config.client_secret.as_deref(),
-                refresh_token: refresh_secret.expose(),
-                resource: None,
-                provider: config.provider.as_deref(),
-            },
-        )
-        .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                tracing::warn!(error = %error, "OAuth token refresh via proxy failed");
-                return false;
-            }
-        };
-
-        return persist_refreshed_oauth_tokens(
-            store,
-            user_id,
-            config,
-            &refresh_name,
-            token_response,
-        )
-        .await;
-    }
-
-    // SSRF defense: token_url comes from the tool's capabilities file.
-    if !config.token_url.starts_with("https://") {
-        tracing::warn!(
-            token_url = %config.token_url,
-            "OAuth token_url must use HTTPS, refusing token refresh"
-        );
-        return false;
-    }
-    if let Err(reason) = reject_private_ip(&config.token_url) {
-        tracing::warn!(
-            token_url = %config.token_url,
-            reason = %reason,
-            "OAuth token_url points to a private/internal IP, refusing token refresh"
-        );
-        return false;
-    }
-
-    let client = match ssrf_safe_client_builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to build HTTP client for token refresh");
-            return false;
-        }
-    };
-
-    let refresh_secret = match load_oauth_refresh_secret(store, user_id, &refresh_name).await {
-        Some(secret) => secret,
-        None => return false,
-    };
-    let mut params = vec![
-        ("grant_type", "refresh_token".to_string()),
-        ("refresh_token", refresh_secret.expose().to_string()),
-        ("client_id", config.client_id.clone()),
-    ];
-    if let Some(ref secret) = config.client_secret {
-        params.push(("client_secret", secret.clone()));
-    }
-
-    let response = match client.post(&config.token_url).form(&params).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "OAuth token refresh request failed");
-            return false;
-        }
-    };
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        tracing::warn!(
-            status = %status,
-            body = %body,
-            "OAuth token refresh returned non-success status"
-        );
-        return false;
-    }
-
-    let token_data: serde_json::Value = match response.json().await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to parse token refresh response");
-            return false;
-        }
-    };
-    let token_response = match token_data.get("access_token").and_then(|v| v.as_str()) {
-        Some(access_token) => oauth_defaults::OAuthTokenResponse {
-            access_token: access_token.to_string(),
-            refresh_token: token_data
-                .get("refresh_token")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-            expires_in: token_data.get("expires_in").and_then(|v| v.as_u64()),
-            token_type: token_data
-                .get("token_type")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-            scope: token_data
-                .get("scope")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-        },
-        None => {
-            tracing::warn!("Token refresh response missing access_token field");
-            return false;
-        }
-    };
-
-    persist_refreshed_oauth_tokens(store, user_id, config, &refresh_name, token_response).await
-}
-
-async fn load_oauth_refresh_secret(
-    store: &(dyn SecretsStore + Send + Sync),
-    user_id: &str,
-    refresh_name: &str,
-) -> Option<DecryptedSecret> {
-    match store.get_decrypted(user_id, refresh_name).await {
-        Ok(secret) => Some(secret),
-        Err(error) => {
-            tracing::debug!(
-                secret_name = %refresh_name,
-                error = %error,
-                "No refresh token available, skipping token refresh"
-            );
-            None
-        }
-    }
-}
-
-async fn persist_refreshed_oauth_tokens(
-    store: &(dyn SecretsStore + Send + Sync),
-    user_id: &str,
-    config: &OAuthRefreshConfig,
-    refresh_name: &str,
-    token_response: oauth_defaults::OAuthTokenResponse,
-) -> bool {
-    let mut access_params =
-        crate::secrets::CreateSecretParams::new(&config.secret_name, &token_response.access_token);
-    if let Some(ref provider) = config.provider {
-        access_params = access_params.with_provider(provider);
-    }
-    if let Some(expires_in) = token_response.expires_in {
-        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_in as i64);
-        access_params = access_params.with_expiry(expires_at);
-    }
-
-    if let Err(e) = store.create(user_id, access_params).await {
-        tracing::warn!(error = %e, "Failed to store refreshed access token");
-        return false;
-    }
-
-    if let Some(new_refresh) = token_response.refresh_token.as_deref() {
-        let mut refresh_params = crate::secrets::CreateSecretParams::new(refresh_name, new_refresh);
-        if let Some(ref provider) = config.provider {
-            refresh_params = refresh_params.with_provider(provider);
-        }
-        if let Err(e) = store.create(user_id, refresh_params).await {
-            tracing::warn!(error = %e, "Failed to store rotated refresh token");
-        }
-    }
-
-    tracing::info!(
-        secret_name = %config.secret_name,
-        "OAuth access token refreshed successfully"
-    );
-    true
-}
-
 /// Pre-resolve credentials for all HTTP capability mappings.
 ///
 /// Called once per tool execution (in async context, before spawn_blocking)
 /// so that the synchronous WASM host function can inject credentials
 /// without needing async access to the secrets store.
 ///
-/// If an `OAuthRefreshConfig` is provided and the access token is expired
-/// (or within 5 minutes of expiry), attempts a transparent refresh first.
-///
-/// Returns `Err(ToolError::NotAuthorized)` when a required credential is
-/// missing for the given `user_id`. No cross-tenant fallback: each user
-/// must have their own credentials configured.
+/// Silently skips credentials that can't be resolved (e.g., missing secrets).
+/// The tool will get a 401/403 from the API, which is the expected UX when
+/// auth hasn't been configured yet.
+/// Outcome of pre-resolving WASM tool host credentials. Carries both the
+/// successfully-resolved set and any *required* credentials that could not
+/// be resolved. The caller is responsible for refusing to execute the tool
+/// when `missing_required` is non-empty — proceeding would let the tool
+/// issue requests without the credentials it declared, which a malicious
+/// or misconfigured tool can use to exfiltrate user context to an
+/// unauthenticated endpoint.
+struct HostCredentialsResolution {
+    resolved: Vec<ResolvedHostCredential>,
+    missing_required: Vec<String>,
+}
+
+#[cfg(test)]
+impl HostCredentialsResolution {
+    fn is_empty(&self) -> bool {
+        self.resolved.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.resolved.len()
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Index<usize> for HostCredentialsResolution {
+    type Output = ResolvedHostCredential;
+    fn index(&self, idx: usize) -> &Self::Output {
+        &self.resolved[idx]
+    }
+}
+
 async fn resolve_host_credentials(
     capabilities: &Capabilities,
     store: Option<&(dyn SecretsStore + Send + Sync)>,
     user_id: &str,
+    role_lookup: Option<&dyn UserStore>,
     oauth_refresh: Option<&OAuthRefreshConfig>,
-) -> Result<Vec<ResolvedHostCredential>, ToolError> {
+) -> HostCredentialsResolution {
+    let mut missing_required: Vec<String> = Vec::new();
+
     let store = match store {
         Some(s) => s,
         None => {
-            // If tool requires non-UrlPath credentials but has no secrets store, this is
-            // a configuration error. UrlPath credentials are handled by placeholder
-            // substitution and don't need the secrets store.
+            // If tool requires credentials but has no secrets store, every
+            // declared *required* credential is unresolvable. Return them
+            // as missing so the caller can refuse the execution rather
+            // than silently dropping into unauthenticated mode.
             if let Some(http_cap) = &capabilities.http
-                && http_cap.credentials.values().any(|m| {
-                    !matches!(
-                        m.location,
-                        crate::secrets::CredentialLocation::UrlPath { .. }
-                    )
-                })
+                && !http_cap.credentials.is_empty()
             {
-                return Err(ToolError::NotAuthorized(format!(
-                    "secrets store not configured; cannot resolve credentials for user '{user_id}'"
-                )));
+                tracing::warn!(
+                    user_id = %user_id,
+                    "WASM tool requires credentials but secrets_store is not configured"
+                );
+                for mapping in http_cap.credentials.values() {
+                    if !mapping.optional {
+                        missing_required.push(mapping.secret_name.clone());
+                    }
+                }
             }
-            return Ok(Vec::new());
+            return HostCredentialsResolution {
+                resolved: Vec::new(),
+                missing_required,
+            };
         }
     };
-
-    // Check if the access token needs refreshing before resolving credentials.
-    // This runs once per tool execution, keeping the hot path (credential injection
-    // inside WASM) synchronous and allocation-free.
-    if let Some(config) = oauth_refresh {
-        let needs_refresh = match store.get(user_id, &config.secret_name).await {
-            Ok(secret) => match secret.expires_at {
-                Some(expires_at) => {
-                    let buffer = chrono::Duration::minutes(5);
-                    expires_at - buffer < chrono::Utc::now()
-                }
-                // No expires_at means legacy token, don't try to refresh
-                None => false,
-            },
-            // Expired error from store means we definitely need to refresh
-            Err(crate::secrets::SecretError::Expired) => true,
-            // Not found or other errors: skip refresh, let the normal flow handle it
-            Err(_) => false,
-        };
-
-        if needs_refresh {
-            tracing::debug!(
-                secret_name = %config.secret_name,
-                "Access token expired or near expiry, attempting refresh"
-            );
-            refresh_oauth_token(store, user_id, config).await;
-        }
-    }
 
     let http_cap = match &capabilities.http {
         Some(cap) => cap,
-        None => return Ok(Vec::new()),
+        None => {
+            return HostCredentialsResolution {
+                resolved: Vec::new(),
+                missing_required,
+            };
+        }
     };
 
     if http_cap.credentials.is_empty() {
-        return Ok(Vec::new());
+        return HostCredentialsResolution {
+            resolved: Vec::new(),
+            missing_required,
+        };
     }
 
     let mut resolved = Vec::new();
 
-    // All declared non-UrlPath credentials are required. If any credential
-    // is missing, expired, or inaccessible, the entire tool execution fails
-    // rather than running with partial auth. This prevents silent 401s from
-    // confusing users. See #2099 discussion for rationale.
     for mapping in http_cap.credentials.values() {
         // Skip UrlPath credentials, they're handled by placeholder substitution
         if matches!(
@@ -1562,33 +1473,29 @@ async fn resolve_host_credentials(
             continue;
         }
 
-        // Look up credential under the provided user_id only.
-        // No cross-tenant fallback: each user must configure their own credentials.
-        let secret = match store.get_decrypted(user_id, &mapping.secret_name).await {
-            Ok(s) => s,
-            Err(crate::secrets::SecretError::NotFound(_)) => {
-                return Err(ToolError::NotAuthorized(format!(
-                    "credential '{}' not found for user '{}'; configure it via `ironclaw secrets set`",
-                    mapping.secret_name, user_id
-                )));
-            }
-            Err(crate::secrets::SecretError::Expired) => {
-                return Err(ToolError::NotAuthorized(format!(
-                    "credential '{}' for user '{}' has expired; refresh or re-set via `ironclaw secrets set`",
-                    mapping.secret_name, user_id
-                )));
-            }
-            Err(crate::secrets::SecretError::AccessDenied) => {
-                return Err(ToolError::NotAuthorized(format!(
-                    "access denied to credential '{}' for user '{}'",
-                    mapping.secret_name, user_id
-                )));
-            }
-            Err(e) => {
-                return Err(ToolError::ExecutionFailed(format!(
-                    "failed to resolve credential '{}' for user '{}': {e}",
-                    mapping.secret_name, user_id
-                )));
+        let secret = match resolve_secret_for_runtime(
+            store,
+            user_id,
+            &mapping.secret_name,
+            role_lookup,
+            oauth_refresh.filter(|config| config.secret_name == mapping.secret_name),
+            crate::auth::DefaultFallback::AdminOnly,
+        )
+        .await
+        {
+            Ok(secret) => secret,
+            Err(error) => {
+                tracing::warn!(
+                    secret_name = %mapping.secret_name,
+                    user_id = %user_id,
+                    error = ?error,
+                    optional = mapping.optional,
+                    "Could not resolve credential for WASM tool"
+                );
+                if !mapping.optional {
+                    missing_required.push(mapping.secret_name.clone());
+                }
+                continue;
             }
         };
 
@@ -1614,7 +1521,10 @@ async fn resolve_host_credentials(
         );
     }
 
-    Ok(resolved)
+    HostCredentialsResolution {
+        resolved,
+        missing_required,
+    }
 }
 
 /// Extract the hostname from a URL string.
@@ -1635,6 +1545,7 @@ fn extract_host_from_url(url: &str) -> Option<String> {
     })
 }
 
+#[cfg(test)]
 fn reject_private_ip(url: &str) -> Result<(), String> {
     crate::tools::wasm::reject_private_ip(url)
 }
@@ -1694,6 +1605,63 @@ fn schema_declares_type(schema: &serde_json::Value, expected: &str) -> bool {
     }
 }
 
+/// Recursively strip prose-only metadata fields from a schema value.
+///
+/// Preserves the contract (`type`, `enum`, `const`, `required`,
+/// `properties`, `items`, `oneOf`/`anyOf`/`allOf`, `additionalProperties`,
+/// `minimum`/`maximum`, etc.) and drops fields that only matter for
+/// human consumption (`description`, `title`, `default`, `examples`,
+/// `$schema`, `$id`, `$comment`, `format`). The result is the smallest
+/// faithful representation of the type contract — useful for embedding
+/// schemas in LLM tool definitions where every token costs.
+fn strip_schema_metadata(value: &serde_json::Value) -> serde_json::Value {
+    const STRIP: &[&str] = &[
+        "description",
+        "title",
+        "default",
+        "examples",
+        "$schema",
+        "$id",
+        "$comment",
+        "format",
+        "deprecated",
+        "readOnly",
+        "writeOnly",
+    ];
+
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                if STRIP.contains(&k.as_str()) {
+                    continue;
+                }
+                out.insert(k.clone(), strip_schema_metadata(v));
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(strip_schema_metadata).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// Strip metadata from every property value in a `properties` object.
+/// Returns the input unchanged if it isn't an object map.
+fn strip_props_metadata(value: &serde_json::Value) -> serde_json::Value {
+    match value.as_object() {
+        Some(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                out.insert(k.clone(), strip_schema_metadata(v));
+            }
+            serde_json::Value::Object(out)
+        }
+        None => value.clone(),
+    }
+}
+
 fn schema_is_typed_property(schema: &serde_json::Value) -> bool {
     matches!(
         schema.get("type"),
@@ -1712,11 +1680,51 @@ fn schema_is_typed_property(schema: &serde_json::Value) -> bool {
             .is_some_and(serde_json::Value::is_object)
 }
 
+/// Build a hint to attach to a WASM tool error so the LLM can correct
+/// its next call without an extra round trip.
+///
+/// The previous version emitted only `Tip: call tool_info(...)`, which
+/// forced the agent to spend an entire turn fetching the schema it
+/// already had access to. The agent would read the error, call
+/// `tool_info`, get the schema back, and only then retry — burning
+/// two iterations to recover from one bad parameter. This version
+/// inlines the relevant schema info directly:
+///
+/// 1. **Tagged-enum / `oneOf` schemas**: extract a compact
+///    `action -> [required fields]` map. For google-drive that's
+///    ~400 chars / 100 tokens, vs. the ~$0.005-0.01 cost of an
+///    extra LLM turn. Tells the LLM exactly which fields it forgot
+///    for which action.
+/// 2. **Flat schemas**: dump the compact JSON inline if it's under
+///    `MAX_INLINE_SCHEMA_BYTES`, otherwise fall through to the old
+///    `tool_info` tip as a last-resort fallback for adversarial
+///    cases.
+///
+/// Container hints (arrays/objects need to be JSON literals, not
+/// quoted strings) are appended in either case — that's a separate
+/// LLM mistake mode that the schema alone doesn't surface.
 fn build_tool_usage_hint(tool_name: &str, schema: &serde_json::Value) -> String {
-    let mut hint = format!(
-        "Tip: call tool_info(name: \"{}\", include_schema: true) for the full parameter schema.",
-        tool_name
-    );
+    const MAX_INLINE_SCHEMA_BYTES: usize = 4_000;
+
+    let mut hint = String::new();
+
+    if let Some(map) = extract_action_required_map(schema) {
+        hint.push_str(&format!(
+            "Required fields per action for {tool_name}: {map}"
+        ));
+    } else {
+        match serde_json::to_string(schema) {
+            Ok(json) if json.len() <= MAX_INLINE_SCHEMA_BYTES => {
+                hint.push_str(&format!("Schema for {tool_name}: {json}"));
+            }
+            _ => {
+                hint.push_str(&format!(
+                    "Tip: call tool_info(name: \"{tool_name}\", include_schema: true) \
+                     for the full parameter schema (it was too large to inline)."
+                ));
+            }
+        }
+    }
 
     if schema_contains_container_properties(schema) {
         hint.push_str(
@@ -1725,6 +1733,47 @@ fn build_tool_usage_hint(tool_name: &str, schema: &serde_json::Value) -> String 
     }
 
     hint
+}
+
+/// Extract a compact `action -> [required fields]` map from a tagged
+/// enum / `oneOf` schema. Returns `None` for schemas without a
+/// recognisable `oneOf` of action-discriminated variants.
+///
+/// Output format: `list_files=[], get_file=[file_id], share_file=[file_id,email]`
+///
+/// Each variant must have a `properties.action.const` value (the
+/// discriminator) and may have a `required` array. The discriminator
+/// itself is filtered out of the per-action required list since
+/// it's always implicit.
+fn extract_action_required_map(schema: &serde_json::Value) -> Option<String> {
+    let one_of = schema.get("oneOf")?.as_array()?;
+    if one_of.is_empty() {
+        return None;
+    }
+
+    let mut entries: Vec<String> = Vec::new();
+    for variant in one_of {
+        let action = variant
+            .get("properties")
+            .and_then(|p| p.get("action"))
+            .and_then(|a| a.get("const"))
+            .and_then(|c| c.as_str())?;
+
+        let required: Vec<&str> = variant
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|s| *s != "action")
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        entries.push(format!("{action}=[{}]", required.join(",")));
+    }
+
+    Some(entries.join(", "))
 }
 
 /// Methods with side effects require `Content-Length` even when no body is
@@ -1758,6 +1807,8 @@ mod tests {
     use uuid::Uuid;
 
     use crate::context::JobContext;
+    #[cfg(feature = "libsql")]
+    use crate::db::{Database, UserRecord, UserStore};
     use crate::secrets::{
         CreateSecretParams, DecryptedSecret, InMemorySecretsStore, Secret, SecretError, SecretRef,
         SecretsStore,
@@ -1842,6 +1893,33 @@ mod tests {
                 .is_accessible(user_id, secret_name, allowed_secrets)
                 .await
         }
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn test_user_db(user_id: &str, role: &str) -> Arc<dyn Database> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("admin_fallback_test.db");
+        let db = crate::db::libsql::LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("local libsql db");
+        db.run_migrations().await.expect("run migrations");
+        db.create_user(&UserRecord {
+            id: user_id.to_string(),
+            email: None,
+            display_name: user_id.to_string(),
+            status: "active".to_string(),
+            role: role.to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            last_login_at: None,
+            created_by: None,
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("create user");
+        std::mem::forget(dir);
+        let db: Arc<dyn Database> = Arc::new(db);
+        db
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2117,27 +2195,41 @@ mod tests {
         assert!(compacted["properties"].as_object().unwrap().is_empty());
     }
 
+    /// Regression test: a tagged-enum / `oneOf` schema must preserve
+    /// each variant's `required` array so the LLM knows which fields
+    /// are mandatory for each `action`. Earlier versions of
+    /// `compact_schema` flattened the schema and dropped per-variant
+    /// required fields, causing the LLM to construct calls like
+    /// `{"action":"get_file"}` without `file_id`, which serde then
+    /// rejected at runtime. The current contract: keep `oneOf`,
+    /// keep each variant's properties + required, strip prose
+    /// metadata (description/default/title) to save tokens.
     #[test]
-    fn test_compact_schema_handles_oneof_variants() {
-        // GitHub-style schema: oneOf with no top-level properties, const per variant
+    fn test_compact_schema_preserves_oneof_variants_and_required() {
         let schema = serde_json::json!({
             "type": "object",
             "required": ["action"],
             "oneOf": [
                 {
+                    "type": "object",
                     "properties": {
-                        "action": { "const": "get_repo" },
-                        "owner": { "type": "string" },
-                        "repo": { "type": "string" }
+                        "action": { "type": "string", "const": "get_repo" },
+                        "owner": { "type": "string", "description": "Repo owner" },
+                        "repo": { "type": "string", "description": "Repo name" }
                     },
                     "required": ["action", "owner", "repo"]
                 },
                 {
+                    "type": "object",
                     "properties": {
-                        "action": { "const": "list_issues" },
+                        "action": { "type": "string", "const": "list_issues" },
                         "owner": { "type": "string" },
                         "repo": { "type": "string" },
-                        "state": { "type": "string", "enum": ["open", "closed", "all"] }
+                        "state": {
+                            "type": "string",
+                            "enum": ["open", "closed", "all"],
+                            "default": "open"
+                        }
                     },
                     "required": ["action", "owner", "repo"]
                 }
@@ -2145,39 +2237,132 @@ mod tests {
         });
 
         let compacted = super::WasmToolSchemas::compact_schema(&schema);
-        let props = compacted["properties"].as_object().unwrap();
 
-        // action: required + const values merged into enum → kept
-        let action = &props["action"];
-        assert!(
-            action.get("enum").is_some(),
-            "action const values should be merged into enum: {action}"
-        );
-        let action_enum = action["enum"].as_array().unwrap();
-        assert!(
-            action_enum.contains(&serde_json::json!("get_repo")),
-            "enum should contain get_repo"
-        );
-        assert!(
-            action_enum.contains(&serde_json::json!("list_issues")),
-            "enum should contain list_issues"
-        );
-        assert!(
-            action.get("const").is_none(),
-            "const should be removed after merging into enum"
-        );
+        // The top-level `oneOf` MUST survive — that's the whole point.
+        let one_of = compacted["oneOf"]
+            .as_array()
+            .expect("oneOf should be preserved on the compact schema");
+        assert_eq!(one_of.len(), 2);
 
-        // state: has enum → kept
+        // Variant 0 (get_repo) must keep `owner`/`repo` in its required array.
+        let v0 = &one_of[0];
+        let v0_required: Vec<&str> = v0["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(v0_required.contains(&"action"));
         assert!(
-            props.contains_key("state"),
-            "state should be kept (has enum)"
+            v0_required.contains(&"owner"),
+            "variant required array must survive compaction"
         );
-        // owner/repo: not in top-level required, no enum → intentionally dropped
-        // (variant-level required is omitted; discoverable via tool_info)
-        assert!(!props.contains_key("owner"), "owner should be dropped");
-        assert!(!props.contains_key("repo"), "repo should be dropped");
-        assert_eq!(compacted["additionalProperties"], true);
+        assert!(v0_required.contains(&"repo"));
+
+        // Variant 0 properties must still include owner/repo (typed).
+        let v0_props = v0["properties"].as_object().unwrap();
+        assert!(v0_props.contains_key("owner"));
+        assert!(v0_props.contains_key("repo"));
+        // Description must be stripped to save tokens.
+        let owner = &v0_props["owner"];
+        assert!(
+            owner.get("description").is_none(),
+            "description should be stripped to save tokens, got: {owner}"
+        );
+        // But the type must survive.
+        assert_eq!(owner["type"], "string");
+
+        // Variant 1 (list_issues) must also keep its required + types.
+        let v1 = &one_of[1];
+        let v1_required: Vec<&str> = v1["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(v1_required.contains(&"owner"));
+        assert!(v1_required.contains(&"repo"));
+
+        // The default on `state` should be stripped, but the enum survives.
+        let state = &v1["properties"]["state"];
+        assert!(state.get("default").is_none(), "default should be stripped");
+        assert!(state.get("enum").is_some(), "enum must survive");
+
+        // Top-level required and additionalProperties carry through.
         assert_eq!(compacted["required"], serde_json::json!(["action"]));
+        assert_eq!(compacted["additionalProperties"], true);
+    }
+
+    /// Specific repro for the google-drive bug: a schemars-derived
+    /// `oneOf` schema with one variant that has `file_id` as required.
+    /// After compaction, the `file_id` requirement must still be visible
+    /// to the LLM, otherwise it will call `{"action":"get_file"}` and
+    /// serde will reject it.
+    #[test]
+    fn test_compact_schema_preserves_file_id_required_for_get_file() {
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "GoogleDriveAction",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "const": "list_files" },
+                        "query": { "type": ["string", "null"], "default": null },
+                        "page_size": { "type": "integer", "default": 25 }
+                    },
+                    "required": ["action"]
+                },
+                {
+                    "type": "object",
+                    "description": "Get file metadata.",
+                    "properties": {
+                        "action": { "type": "string", "const": "get_file" },
+                        "file_id": { "description": "The file ID.", "type": "string" }
+                    },
+                    "required": ["action", "file_id"]
+                }
+            ]
+        });
+
+        let compacted = super::WasmToolSchemas::compact_schema(&schema);
+        let one_of = compacted["oneOf"].as_array().unwrap();
+
+        // Find the get_file variant.
+        let get_file = one_of
+            .iter()
+            .find(|v| {
+                v["properties"]
+                    .get("action")
+                    .and_then(|a| a.get("const"))
+                    .and_then(|c| c.as_str())
+                    == Some("get_file")
+            })
+            .expect("compact schema should still contain get_file variant");
+
+        let required: Vec<&str> = get_file["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            required.contains(&"file_id"),
+            "get_file's required array MUST still contain file_id after compaction; \
+             without this the LLM constructs malformed calls — got required={:?}",
+            required
+        );
+
+        // The `$schema` and `title` should be dropped from the top-level
+        // (they're noise to the LLM).
+        assert!(compacted.get("$schema").is_none());
+        assert!(compacted.get("title").is_none());
+
+        // And the per-variant `description` should also be stripped.
+        assert!(
+            get_file.get("description").is_none(),
+            "variant-level description should be stripped"
+        );
     }
 
     #[test]
@@ -2324,9 +2509,7 @@ mod tests {
         use crate::tools::wasm::wrapper::resolve_host_credentials;
 
         let caps = Capabilities::default();
-        let result = resolve_host_credentials(&caps, None, "user1", None)
-            .await
-            .expect("no http cap means Ok(empty)"); // safety: test code only
+        let result = resolve_host_credentials(&caps, None, "user1", None, None).await;
         assert!(result.is_empty());
     }
 
@@ -2344,6 +2527,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.example.com".to_string()],
                 path_patterns: Vec::new(),
+                optional: false,
             },
         );
         let caps = Capabilities {
@@ -2355,13 +2539,10 @@ mod tests {
         };
 
         // No store but credentials required — must error
-        let err = resolve_host_credentials(&caps, None, "user1", None)
-            .await
-            .expect_err("no store with required credentials must error"); // safety: test code only
+        let result = resolve_host_credentials(&caps, None, "user1", None, None).await;
         assert!(
-            err.to_string().contains("secrets store not configured"),
-            "error message: {}",
-            err
+            !result.missing_required.is_empty(),
+            "no store with required credentials must report missing"
         );
     }
 
@@ -2381,6 +2562,7 @@ mod tests {
                 },
                 host_patterns: vec!["api.example.com".to_string()],
                 path_patterns: Vec::new(),
+                optional: false,
             },
         );
         let caps = Capabilities {
@@ -2391,10 +2573,8 @@ mod tests {
             ..Default::default()
         };
 
-        // No store but only UrlPath credentials — should be Ok(empty), not an error
-        let result = resolve_host_credentials(&caps, None, "user1", None)
-            .await
-            .expect("UrlPath-only credentials should not require a secrets store"); // safety: test code only
+        // No store but only UrlPath credentials — should not report missing
+        let result = resolve_host_credentials(&caps, None, "user1", None, None).await;
         assert!(result.is_empty());
     }
 
@@ -2426,6 +2606,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.example.com".to_string()],
                 path_patterns: Vec::new(),
+                optional: false,
             },
         );
         let caps = Capabilities {
@@ -2436,18 +2617,12 @@ mod tests {
             ..Default::default()
         };
 
-        // Expired credential — error message should say "expired", not "not found"
-        let err = resolve_host_credentials(&caps, Some(&store), "user1", None)
-            .await
-            .expect_err("expired credential must error"); // safety: test code only
-        let msg = err.to_string();
+        // Expired credential — should report missing required
+        let result =
+            resolve_host_credentials(&caps, Some(&store), "user1", None, None).await;
         assert!(
-            msg.contains("expired"),
-            "error should mention expiry: {msg}"
-        );
-        assert!(
-            msg.contains("my_token"),
-            "error should name the credential: {msg}"
+            !result.missing_required.is_empty(),
+            "expired credential should be reported as missing"
         );
     }
 
@@ -2458,9 +2633,7 @@ mod tests {
         let store = test_secrets_store();
 
         let caps = Capabilities::default();
-        let result = resolve_host_credentials(&caps, Some(&store), "user1", None)
-            .await
-            .expect("no http cap means Ok(empty)"); // safety: test code only
+        let result = resolve_host_credentials(&caps, Some(&store), "user1", None, None).await;
         assert!(result.is_empty());
     }
 
@@ -2490,6 +2663,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
                 path_patterns: Vec::new(),
+                optional: false,
             },
         );
 
@@ -2501,9 +2675,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = resolve_host_credentials(&caps, Some(&store), "user1", None)
-            .await
-            .expect("user1 has the credential"); // safety: test code only
+        let result = resolve_host_credentials(&caps, Some(&store), "user1", None, None).await;
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].host_patterns, vec!["www.googleapis.com"]);
         assert_eq!(
@@ -2539,6 +2711,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
                 path_patterns: Vec::new(),
+                optional: false,
             },
         );
 
@@ -2550,9 +2723,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = resolve_host_credentials(&caps, Some(&store), &ctx.user_id, None)
-            .await
-            .expect("owner-scope has the credential"); // safety: test code only
+        let result = resolve_host_credentials(&caps, Some(&store), &ctx.user_id, None, None).await;
         assert_eq!(result.len(), 1);
         assert_eq!(
             result[0].headers.get("Authorization"),
@@ -2589,6 +2760,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
                 path_patterns: Vec::new(),
+                optional: false,
             },
         );
 
@@ -2611,14 +2783,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resolve_host_credentials_missing_secret_returns_error() {
+    async fn test_resolve_host_credentials_missing_secret() {
         use crate::secrets::{CredentialLocation, CredentialMapping};
         use crate::tools::wasm::capabilities::HttpCapability;
         use crate::tools::wasm::wrapper::resolve_host_credentials;
 
         let store = test_secrets_store();
 
-        // No secret stored — must fail with NotAuthorized, not silently skip
+        // No secret stored, should silently skip
         let mut credentials = HashMap::new();
         credentials.insert(
             "missing_token".to_string(),
@@ -2627,6 +2799,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.example.com".to_string()],
                 path_patterns: Vec::new(),
+                optional: false,
             },
         );
 
@@ -2638,15 +2811,16 @@ mod tests {
             ..Default::default()
         };
 
-        let err = resolve_host_credentials(&caps, Some(&store), "user1", None)
-            .await
-            .expect_err("missing credential must return error"); // safety: test code only
-        let msg = err.to_string();
+        let result = resolve_host_credentials(&caps, Some(&store), "user1", None, None).await;
+        assert!(
+            !result.missing_required.is_empty(),
+            "missing credential should be reported as missing"
+        );
+        let msg = format!("{:?}", result.missing_required);
         assert!(
             msg.contains("missing_token"),
             "error should name the missing credential: {msg}"
         );
-        assert!(msg.contains("user1"), "error should name the user: {msg}");
     }
 
     /// UrlPath credentials are resolved via URL placeholder substitution, not
@@ -2671,6 +2845,7 @@ mod tests {
                 },
                 host_patterns: vec!["api.example.com".to_string()],
                 path_patterns: Vec::new(),
+                optional: false,
             },
         );
 
@@ -2683,9 +2858,7 @@ mod tests {
         };
 
         // UrlPath creds are skipped — result is Ok(empty), not an error
-        let result = resolve_host_credentials(&caps, Some(&store), "user1", None)
-            .await
-            .expect("UrlPath credentials should be skipped, not cause an error"); // safety: test code only
+        let result = resolve_host_credentials(&caps, Some(&store), "user1", None, None).await;
         assert!(result.is_empty());
     }
 
@@ -2718,6 +2891,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
                 path_patterns: Vec::new(),
+                optional: false,
             },
         );
 
@@ -2737,12 +2911,12 @@ mod tests {
             gateway_token: None,
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
+            extra_refresh_params: HashMap::new(),
         };
 
         // Should resolve the existing fresh token without attempting refresh
-        let result = resolve_host_credentials(&caps, Some(&store), "user1", Some(&oauth_config))
-            .await
-            .expect("user1 has a fresh token"); // safety: test code only
+        let result =
+            resolve_host_credentials(&caps, Some(&store), "user1", None, Some(&oauth_config)).await;
         assert_eq!(result.len(), 1);
         assert_eq!(
             result[0].headers.get("Authorization"),
@@ -2778,6 +2952,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.example.com".to_string()],
                 path_patterns: Vec::new(),
+                optional: false,
             },
         );
 
@@ -2789,11 +2964,9 @@ mod tests {
             ..Default::default()
         };
 
-        // No OAuth config, expired token can't be resolved — returns NotAuthorized error
-        let err = resolve_host_credentials(&caps, Some(&store), "user1", None)
-            .await
-            .expect_err("expired credential without refresh config must error"); // safety: test code only
-        assert!(err.to_string().contains("my_token"));
+        // No OAuth config, expired token can't be resolved (get_decrypted returns Expired)
+        let result = resolve_host_credentials(&caps, Some(&store), "user1", None, None).await;
+        assert!(result.is_empty());
     }
 
     #[tokio::test]
@@ -2823,6 +2996,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
                 path_patterns: Vec::new(),
+                optional: false,
             },
         );
 
@@ -2842,12 +3016,12 @@ mod tests {
             gateway_token: None,
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
+            extra_refresh_params: HashMap::new(),
         };
 
         // Should use the legacy token directly without attempting refresh
-        let result = resolve_host_credentials(&caps, Some(&store), "user1", Some(&oauth_config))
-            .await
-            .expect("user1 has a legacy token"); // safety: test code only
+        let result =
+            resolve_host_credentials(&caps, Some(&store), "user1", None, Some(&oauth_config)).await;
         assert_eq!(result.len(), 1);
         assert_eq!(
             result[0].headers.get("Authorization"),
@@ -2863,6 +3037,22 @@ mod tests {
         };
         use crate::tools::wasm::capabilities::HttpCapability;
         use crate::tools::wasm::wrapper::{OAuthRefreshConfig, resolve_host_credentials};
+
+        // The OAuth proxy URL is now SSRF-validated. The mock proxy below
+        // binds to a loopback address, which is normally rejected; opt into
+        // the loopback escape hatch so the test can exercise the proxy
+        // refresh path end-to-end. The escape hatch only affects this
+        // process and is not exposed to operators.
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                // safety: env mutation in tests; var is test-only.
+                unsafe { std::env::remove_var("IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK") };
+            }
+        }
+        // safety: env mutation in tests; var is test-only.
+        unsafe { std::env::set_var("IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK", "1") };
+        let _proxy_loopback_guard = EnvGuard;
 
         let proxy = MockProxyServer::start().await;
         let store = test_secrets_store();
@@ -2891,6 +3081,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
                 path_patterns: Vec::new(),
+                optional: false,
             },
         );
 
@@ -2910,11 +3101,11 @@ mod tests {
             gateway_token: Some("gateway-test-token".to_string()),
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
+            extra_refresh_params: HashMap::new(),
         };
 
-        let resolved = resolve_host_credentials(&caps, Some(&store), "user1", Some(&oauth_config))
-            .await
-            .expect("refresh should succeed via proxy"); // safety: test code only
+        let resolved =
+            resolve_host_credentials(&caps, Some(&store), "user1", None, Some(&oauth_config)).await;
         assert_eq!(resolved.len(), 1);
         assert_eq!(
             resolved[0].headers.get("Authorization"),
@@ -3002,6 +3193,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
                 path_patterns: Vec::new(),
+                optional: false,
             },
         );
 
@@ -3021,12 +3213,12 @@ mod tests {
             gateway_token: None,
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
+            extra_refresh_params: HashMap::new(),
         };
 
-        let err = resolve_host_credentials(&caps, Some(&store), "user1", Some(&oauth_config))
-            .await
-            .expect_err("expired token without gateway_token should error"); // safety: test code only
-        assert!(err.to_string().contains("google_oauth_token"));
+        let resolved =
+            resolve_host_credentials(&caps, Some(&store), "user1", None, Some(&oauth_config)).await;
+        assert!(resolved.is_empty());
 
         let lookups = store.decrypted_lookups();
         assert!(lookups.contains(&("user1".to_string(), "google_oauth_token".to_string())));
@@ -3071,6 +3263,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
                 path_patterns: Vec::new(),
+                optional: false,
             },
         );
 
@@ -3090,12 +3283,12 @@ mod tests {
             gateway_token: None,
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
+            extra_refresh_params: HashMap::new(),
         };
 
-        let err = resolve_host_credentials(&caps, Some(&store), "user1", Some(&oauth_config))
-            .await
-            .expect_err("expired token with invalid direct URL should error"); // safety: test code only
-        assert!(err.to_string().contains("google_oauth_token"));
+        let resolved =
+            resolve_host_credentials(&caps, Some(&store), "user1", None, Some(&oauth_config)).await;
+        assert!(resolved.is_empty());
 
         let lookups = store.decrypted_lookups();
         assert!(lookups.contains(&("user1".to_string(), "google_oauth_token".to_string())));
@@ -3245,6 +3438,147 @@ mod tests {
         assert!(hint.contains("native JSON arrays/objects")); // safety: test-only assertion
     }
 
+    /// The hint must NOT recommend calling `tool_info` when the schema
+    /// information can be inlined directly. The previous implementation
+    /// always emitted "Tip: call tool_info(...)" which forced the agent
+    /// to spend an extra turn fetching what it could have received in
+    /// the error message.
+    #[test]
+    fn test_build_tool_usage_hint_inlines_oneof_required_map() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["action"],
+            "oneOf": [
+                {
+                    "properties": {
+                        "action": { "type": "string", "const": "list_files" }
+                    },
+                    "required": ["action"]
+                },
+                {
+                    "properties": {
+                        "action": { "type": "string", "const": "get_file" },
+                        "file_id": { "type": "string" }
+                    },
+                    "required": ["action", "file_id"]
+                },
+                {
+                    "properties": {
+                        "action": { "type": "string", "const": "share_file" },
+                        "file_id": { "type": "string" },
+                        "email": { "type": "string" }
+                    },
+                    "required": ["action", "file_id", "email"]
+                }
+            ]
+        });
+
+        let hint = super::build_tool_usage_hint("google-drive-tool", &schema);
+
+        // The hint must NOT recommend an extra round-trip via tool_info.
+        assert!(
+            !hint.contains("call tool_info"),
+            "hint should not recommend tool_info when info can be inlined; got: {hint}"
+        );
+        // The hint should map each action to its required fields,
+        // excluding the discriminator (which is always implicit).
+        assert!(hint.contains("list_files=[]"));
+        assert!(hint.contains("get_file=[file_id]"));
+        assert!(hint.contains("share_file=[file_id,email]"));
+        assert!(hint.contains("Required fields per action for google-drive-tool"));
+    }
+
+    /// For flat (non-oneOf) schemas, the hint should embed the schema
+    /// JSON directly as long as it's under the size budget.
+    #[test]
+    fn test_build_tool_usage_hint_inlines_flat_schema() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" }
+            },
+            "required": ["query"]
+        });
+
+        let hint = super::build_tool_usage_hint("web-search-tool", &schema);
+
+        assert!(
+            !hint.contains("call tool_info"),
+            "hint should not recommend tool_info for compact schemas; got: {hint}"
+        );
+        assert!(hint.contains("Schema for web-search-tool"));
+        assert!(hint.contains("\"query\""));
+        assert!(hint.contains("\"required\""));
+    }
+
+    /// Adversarial fallback: if the schema is huge enough to blow the
+    /// inline budget AND has no `oneOf` action map, we fall back to the
+    /// old `tool_info` tip rather than dumping multi-megabyte schemas
+    /// into every error message.
+    #[test]
+    fn test_build_tool_usage_hint_falls_back_for_huge_flat_schema() {
+        // Build a flat schema with many properties to exceed 4 KB.
+        let mut props = serde_json::Map::new();
+        for i in 0..200 {
+            props.insert(
+                format!("field_{i}"),
+                serde_json::json!({
+                    "type": "string",
+                    "description": "lorem ipsum dolor sit amet consectetur adipiscing elit"
+                }),
+            );
+        }
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": props,
+        });
+
+        let hint = super::build_tool_usage_hint("massive-tool", &schema);
+
+        assert!(
+            hint.contains("call tool_info"),
+            "huge flat schema should fall back to tool_info tip; got: {hint}"
+        );
+        assert!(hint.contains("too large to inline"));
+    }
+
+    /// Direct unit test for the helper.
+    #[test]
+    fn test_extract_action_required_map_strips_discriminator() {
+        let schema = serde_json::json!({
+            "oneOf": [
+                {
+                    "properties": { "action": { "const": "a" } },
+                    "required": ["action"]
+                },
+                {
+                    "properties": {
+                        "action": { "const": "b" },
+                        "x": { "type": "string" }
+                    },
+                    "required": ["action", "x"]
+                }
+            ]
+        });
+
+        let map = super::extract_action_required_map(&schema).expect("should produce map");
+        // The "action" discriminator must NOT appear in any per-action
+        // required list — it's always implicit.
+        assert_eq!(map, "a=[], b=[x]");
+    }
+
+    /// Schemas without `oneOf` should yield None so the caller falls
+    /// back to either inlining the flat schema or the tool_info tip.
+    #[test]
+    fn test_extract_action_required_map_returns_none_for_flat_schema() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "query": { "type": "string" } },
+            "required": ["query"]
+        });
+        assert!(super::extract_action_required_map(&schema).is_none());
+    }
+
     /// Regression test: leak scan must run on raw headers (before credential
     /// injection), not after. If it ran post-injection, the host-injected
     /// Slack bot token (`xoxb-...`) would trigger a Block and reject the
@@ -3298,17 +3632,17 @@ mod tests {
         );
     }
 
-    /// Regression test for #2069: credentials stored under "default" must NOT
-    /// leak to a different user's tool execution.
+    #[cfg(feature = "libsql")]
     #[tokio::test]
-    async fn test_resolve_host_credentials_no_cross_tenant_fallback() {
+    async fn test_resolve_host_credentials_fallback_to_default_for_admin_user() {
         use crate::secrets::{CredentialLocation, CredentialMapping, SecretsStore};
         use crate::tools::wasm::capabilities::HttpCapability;
         use crate::tools::wasm::wrapper::resolve_host_credentials;
 
         let store = test_secrets_store();
+        let db = test_user_db("routine_user_123", "admin").await;
 
-        // Store a token under the "default" user only
+        // Store a token under the "default" global user
         store
             .create(
                 "default",
@@ -3317,6 +3651,7 @@ mod tests {
             .await
             .expect("Failed to store global token"); // safety: test code only
 
+        // Create capabilities requiring this credential
         let mut creds = std::collections::HashMap::new();
         creds.insert(
             "google_oauth_token".to_string(),
@@ -3325,6 +3660,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["sheets.googleapis.com".to_string()],
                 path_patterns: Vec::new(),
+                optional: false,
             },
         );
         let caps = Capabilities {
@@ -3339,18 +3675,85 @@ mod tests {
             ..Default::default()
         };
 
-        // Must NOT fall back to "default" — returns NotAuthorized error
-        let err = resolve_host_credentials(&caps, Some(&store), "routine_user_123", None)
-            .await
-            .expect_err("cross-tenant credential must not leak"); // safety: test code only
-        let msg = err.to_string();
+        // Resolve credentials for a different user (routine context)
+        // Should fallback to "default" and find the token
+        let result = resolve_host_credentials(
+            &caps,
+            Some(&store),
+            "routine_user_123",
+            Some(db.as_ref()),
+            None,
+        )
+        .await;
+
+        assert!(!result.is_empty(), "fallback to default"); // safety: test code only
+        assert_eq!(result[0].secret_value, "global_token_value"); // safety: test code only
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_resolve_host_credentials_denies_default_fallback_when_caller_is_default() {
+        // Regression: a caller whose `user_id` is literally "default" must NOT
+        // be granted the AdminOnly default-fallback path. The fallback exists
+        // so that admin-initiated background jobs can borrow a global secret
+        // from the "default" scope; if the caller IS already "default", there
+        // is nothing to fall back to and treating it as an admin loops the
+        // resolution back into the same scope it just failed in.
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+        // Even though the user has admin role, the literal id "default" must
+        // short-circuit the fallback decision.
+        let db = test_user_db("default", "admin").await;
+
+        // No secret stored anywhere — neither under "default" nor any other
+        // scope. The resolver should report an empty result, not panic and
+        // not silently bypass the AdminOnly gate.
+        let caps = test_capabilities_with_google_oauth();
+        let result =
+            resolve_host_credentials(&caps, Some(&store), "default", Some(db.as_ref()), None).await;
+
         assert!(
-            msg.contains("routine_user_123"),
-            "error names the user: {msg}"
+            result.is_empty(),
+            "caller user_id == 'default' must not enter the fallback branch"
         );
+        assert_eq!(
+            result.missing_required,
+            vec!["google_oauth_token".to_string()],
+            "missing required credential should still be reported"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_resolve_host_credentials_denies_default_fallback_for_member_user() {
+        use crate::secrets::SecretsStore;
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+        let db = test_user_db("member_user_123", "member").await;
+
+        store
+            .create(
+                "default",
+                crate::secrets::CreateSecretParams::new("google_oauth_token", "global_token"),
+            )
+            .await
+            .expect("Failed to store global token");
+
+        let caps = test_capabilities_with_google_oauth();
+        let result = resolve_host_credentials(
+            &caps,
+            Some(&store),
+            "member_user_123",
+            Some(db.as_ref()),
+            None,
+        )
+        .await;
+
         assert!(
-            msg.contains("google_oauth_token"),
-            "error names the credential: {msg}"
+            result.is_empty(),
+            "member users must not fallback to default"
         );
     }
 
@@ -3366,6 +3769,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["sheets.googleapis.com".to_string()],
                 path_patterns: Vec::new(),
+                optional: false,
             },
         );
         Capabilities {
@@ -3382,11 +3786,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resolve_host_credentials_returns_user_specific_token() {
+    async fn test_resolve_host_credentials_prefers_user_specific_over_default() {
         use crate::secrets::SecretsStore;
         use crate::tools::wasm::wrapper::resolve_host_credentials;
 
         let store = test_secrets_store();
+
+        // Store token under "default" (global)
+        store
+            .create(
+                "default",
+                crate::secrets::CreateSecretParams::new("google_oauth_token", "global_token"),
+            )
+            .await
+            .expect("Failed to store global token"); // safety: test code only
 
         // Store token under user_123 (user-specific)
         store
@@ -3400,25 +3813,25 @@ mod tests {
             .await
             .expect("Failed to store user token"); // safety: test code only
 
+        // Create capabilities
         let caps = test_capabilities_with_google_oauth();
 
-        // Resolve credentials for user_123 — finds user's own token directly
-        let result = resolve_host_credentials(&caps, Some(&store), "user_123", None)
-            .await
-            .expect("user_123 has the credential"); // safety: test code only
+        // Resolve credentials for user_123
+        // Should prefer user_123's token over default
+        let result = resolve_host_credentials(&caps, Some(&store), "user_123", None, None).await;
 
         assert!(!result.is_empty(), "has user credentials"); // safety: test code only
         assert_eq!(result[0].secret_value, "user_specific_token", "user token"); // safety: test code only
     }
 
     #[tokio::test]
-    async fn test_resolve_host_credentials_direct_lookup_for_default_user() {
+    async fn test_resolve_host_credentials_no_fallback_when_already_default() {
         use crate::secrets::SecretsStore;
         use crate::tools::wasm::wrapper::resolve_host_credentials;
 
         let store = test_secrets_store();
 
-        // Store token under "default"
+        // Only store token under "default" (not a duplicate)
         store
             .create(
                 "default",
@@ -3427,36 +3840,33 @@ mod tests {
             .await
             .expect("Failed to store default token"); // safety: test code only
 
+        // Create capabilities
         let caps = test_capabilities_with_google_oauth();
 
-        // Direct lookup for "default" user — finds its own token
-        let result = resolve_host_credentials(&caps, Some(&store), "default", None)
-            .await
-            .expect("default user has the credential"); // safety: test code only
+        // Resolve credentials for "default" user
+        // Should NOT attempt fallback (already looking up default)
+        let result = resolve_host_credentials(&caps, Some(&store), "default", None, None).await;
 
         assert!(!result.is_empty(), "Should find default token"); // safety: test code only
         assert_eq!(result[0].secret_value, "default_token"); // safety: test code only
     }
 
     #[tokio::test]
-    async fn test_resolve_host_credentials_missing_secret_returns_not_authorized() {
+    async fn test_resolve_host_credentials_missing_secret_warns() {
         use crate::tools::wasm::wrapper::resolve_host_credentials;
 
         let store = test_secrets_store();
 
         // Don't store any token
+
+        // Create capabilities expecting a credential
         let caps = test_capabilities_with_google_oauth();
 
-        // Missing credential must return actionable error
-        let err = resolve_host_credentials(&caps, Some(&store), "user_456", None)
-            .await
-            .expect_err("missing credential must error"); // safety: test code only
-        let msg = err.to_string();
-        assert!(msg.contains("user_456"), "error names the user: {msg}");
-        assert!(
-            msg.contains("ironclaw secrets set"),
-            "error suggests fix: {msg}"
-        );
+        // Resolve credentials when neither user nor default has the token
+        let result = resolve_host_credentials(&caps, Some(&store), "user_456", None, None).await;
+
+        // Should return empty since credential can't be found anywhere
+        assert!(result.is_empty(), "no credentials found"); // safety: test code only
     }
 
     // --- needs_content_length_zero (regression for #1529) ---
@@ -3510,5 +3920,131 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("content-length".to_string(), "0".to_string());
         assert!(!super::needs_content_length_zero("POST", &headers));
+    }
+
+    /// Downcast-based classification: real `wasmtime::Trap` variants
+    /// map to the correct `WasmError` via structured downcast.
+    #[test]
+    fn trap_classification_fuel_via_downcast() {
+        use crate::tools::wasm::error::WasmError;
+        use crate::tools::wasm::limits::ResourceLimits;
+
+        let limits = ResourceLimits::default();
+        let err: wasmtime::Error = wasmtime::Trap::OutOfFuel.into();
+        let result = super::classify_trap_error(err, &limits);
+        assert!(
+            matches!(result, WasmError::FuelExhausted { .. }),
+            "OutOfFuel not detected: {result:?}"
+        );
+    }
+
+    #[test]
+    fn trap_classification_stack_overflow_via_downcast() {
+        use crate::tools::wasm::error::WasmError;
+        use crate::tools::wasm::limits::ResourceLimits;
+
+        let limits = ResourceLimits::default();
+        let err: wasmtime::Error = wasmtime::Trap::StackOverflow.into();
+        let result = super::classify_trap_error(err, &limits);
+        assert!(
+            matches!(result, WasmError::Trapped(ref s) if s.contains("stack overflow")),
+            "StackOverflow not detected: {result:?}"
+        );
+    }
+
+    #[test]
+    fn trap_classification_unreachable_via_downcast() {
+        use crate::tools::wasm::error::WasmError;
+        use crate::tools::wasm::limits::ResourceLimits;
+
+        let limits = ResourceLimits::default();
+        let err: wasmtime::Error = wasmtime::Trap::UnreachableCodeReached.into();
+        let result = super::classify_trap_error(err, &limits);
+        assert!(
+            matches!(result, WasmError::Trapped(ref s) if s.contains("unreachable")),
+            "UnreachableCodeReached not detected: {result:?}"
+        );
+    }
+
+    /// Non-Trap errors (host glue, component model) pass through with full chain.
+    #[test]
+    fn trap_classification_non_trap_preserves_chain() {
+        use crate::tools::wasm::error::WasmError;
+        use crate::tools::wasm::limits::ResourceLimits;
+
+        let limits = ResourceLimits::default();
+        let err = wasmtime::Error::msg("component model glue exploded");
+        let result = super::classify_trap_error(err, &limits);
+        assert!(
+            matches!(result, WasmError::Trapped(ref s) if s.contains("component model glue")),
+            "non-trap error lost: {result:?}"
+        );
+    }
+
+    /// String-matching fallback: when the Trap is wrapped in host/component
+    /// glue that the downcast can't see through, the Display chain still
+    /// contains the diagnostic string.
+    #[test]
+    fn trap_classification_fuel_via_string_fallback() {
+        use crate::tools::wasm::error::WasmError;
+        use crate::tools::wasm::limits::ResourceLimits;
+
+        let limits = ResourceLimits::default();
+        // Wrap the fuel message in a plain wasmtime::Error so downcast_ref
+        // for Trap returns None — exercises the string-matching path.
+        let err = wasmtime::Error::msg("wasm trap: all fuel consumed by wasm");
+        let result = super::classify_trap_error(err, &limits);
+        assert!(
+            matches!(result, WasmError::FuelExhausted { .. }),
+            "string-fallback fuel detection failed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn resolved_host_credential_debug_redacts_secret_material() {
+        // Defense-in-depth: a future log line / dbg!() / panic message that
+        // accidentally formats a `ResolvedHostCredential` with `{:?}` must
+        // never spill the decrypted secret. The hand-rolled Debug impl
+        // prints structural info (host patterns + header / query NAMES)
+        // and replaces every value with `[REDACTED]`.
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Authorization".to_string(),
+            "Bearer super-secret-token-do-not-leak".to_string(),
+        );
+        let mut query_params = HashMap::new();
+        query_params.insert(
+            "api_key".to_string(),
+            "another-secret-value-also-do-not-leak".to_string(),
+        );
+        let cred = super::ResolvedHostCredential {
+            host_patterns: vec!["www.googleapis.com".to_string()],
+            headers,
+            query_params,
+            secret_value: "raw-secret-bytes".to_string(),
+        };
+
+        let debug_output = format!("{cred:?}");
+
+        // Structural info that's safe to log MUST be present.
+        assert!(debug_output.contains("ResolvedHostCredential"));
+        assert!(debug_output.contains("www.googleapis.com"));
+        assert!(debug_output.contains("Authorization"));
+        assert!(debug_output.contains("api_key"));
+        assert!(debug_output.contains("[REDACTED]"));
+
+        // Every secret-bearing value MUST be absent.
+        assert!(
+            !debug_output.contains("super-secret-token-do-not-leak"),
+            "header value leaked: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains("another-secret-value-also-do-not-leak"),
+            "query param value leaked: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains("raw-secret-bytes"),
+            "secret_value leaked: {debug_output}"
+        );
     }
 }

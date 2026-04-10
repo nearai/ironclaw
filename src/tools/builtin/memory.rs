@@ -222,12 +222,15 @@ impl Tool for MemoryWriteTool {
 
     fn description(&self) -> &str {
         "Write to persistent memory (database-backed, NOT the local filesystem). \
-         Use for important facts, decisions, preferences, or lessons learned that should \
-         be remembered across sessions. Targets: 'memory' for curated long-term facts, \
-         'daily_log' for timestamped session notes, 'heartbeat' for the periodic \
-         checklist (HEARTBEAT.md), 'bootstrap' to clear the first-run ritual file, \
-         or provide a custom workspace path for arbitrary file creation. \
-         Never pass absolute filesystem paths like '/Users/...' or 'C:\\...'."
+         Use for important facts, decisions, preferences, workflow docs, or other \
+         workspace files that should live in memory rather than on disk. Targets: \
+         'memory' for curated long-term facts, 'daily_log' for timestamped session \
+         notes, 'heartbeat' for the periodic checklist (HEARTBEAT.md), 'bootstrap' \
+         to clear the first-run ritual file, or a custom workspace path like \
+         'projects/alpha/notes.md'. Prefer normal writes with 'content' unless you \
+         have just read the file and know the exact text to patch with \
+         'old_string'/'new_string'. Never pass absolute filesystem paths like \
+         '/Users/...' or 'C:\\...'."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -236,11 +239,11 @@ impl Tool for MemoryWriteTool {
             "properties": {
                 "content": {
                     "type": "string",
-                    "description": "The content to write to memory. Be concise but include relevant context."
+                    "description": "Full content to write. Prefer this for new files or full rewrites. Be concise but include relevant context."
                 },
                 "target": {
                     "type": "string",
-                    "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, 'bootstrap' to clear BOOTSTRAP.md (content is ignored; the file is always cleared), or a path like 'projects/alpha/notes.md'",
+                    "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, 'bootstrap' to clear BOOTSTRAP.md (content is ignored; the file is always cleared), or an exact workspace path like 'projects/alpha/notes.md'. Use the path family expected by the active skill or workflow; do not pass filesystem paths.",
                     "default": "daily_log"
                 },
                 "append": {
@@ -263,11 +266,11 @@ impl Tool for MemoryWriteTool {
                 },
                 "old_string": {
                     "type": "string",
-                    "description": "When present, switches to patch mode: finds and replaces this exact string in the document. Works with any target including 'memory' and custom paths."
+                    "description": "When present, switches to patch mode: finds and replaces this exact string in the document. Use only when you have just read the target and know the exact existing text. Cannot be empty."
                 },
                 "new_string": {
                     "type": "string",
-                    "description": "Replacement string (required when old_string is present)."
+                    "description": "Replacement string for patch mode. Required when old_string is present."
                 },
                 "replace_all": {
                     "type": "boolean",
@@ -619,10 +622,12 @@ impl Tool for MemoryReadTool {
 
     fn description(&self) -> &str {
         "Read a file from the workspace memory (database-backed storage). \
-         Use this to read files shown by memory_tree. NOT for local filesystem files \
-         (use read_file for those). Do not pass absolute paths like '/Users/...' or 'C:\\...'. \
-         Works with identity files, heartbeat checklist, \
-         memory, daily logs, or any custom workspace path."
+         Use this to read files shown by memory_tree or to inspect a document \
+         before patching it with memory_write. NOT for local filesystem files \
+         (use read_file for those). If a workspace file does not exist yet, \
+         expect a not-found error and then create it with memory_write. Do not \
+         pass absolute paths like '/Users/...' or 'C:\\...'. Works with identity \
+         files, heartbeat checklist, memory, daily logs, or any custom workspace path."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -631,7 +636,7 @@ impl Tool for MemoryReadTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to the file (e.g., 'MEMORY.md', 'daily/2024-01-15.md', 'projects/alpha/notes.md')"
+                    "description": "Workspace path to the file (e.g., 'MEMORY.md', 'daily/2024-01-15.md', 'projects/alpha/notes.md'). Not a local filesystem path."
                 },
                 "version": {
                     "type": "integer",
@@ -823,8 +828,9 @@ impl Tool for MemoryTreeTool {
 
     fn description(&self) -> &str {
         "View the workspace memory structure as a tree (database-backed storage). \
-         Use memory_read to read files shown here, NOT read_file. \
-         The workspace is separate from the local filesystem."
+         Use this to discover valid workspace paths before calling memory_read or \
+         memory_write. The workspace is separate from the local filesystem; use \
+         memory_read for files shown here, NOT read_file."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
