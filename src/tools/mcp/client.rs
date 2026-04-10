@@ -593,9 +593,45 @@ impl McpClient {
     }
 
     /// Create Tool implementations for all MCP tools.
+    ///
+    /// `mcp_tool_id` normalizes every non-`[A-Za-z0-9_]` character to `_`,
+    /// which is necessary for the registry key to survive LLM tool-name
+    /// normalization but introduces a collision hazard: two MCP tools whose
+    /// names differ only by `-` vs `_` (or `.` vs `_`, etc.) — e.g.
+    /// `search-all` and `search_all` — produce the same registry key. The
+    /// second `ToolRegistry::register` call would silently shadow the first
+    /// with no signal at all, leaving operators debugging an unreachable
+    /// tool with zero breadcrumb. We detect collisions here, where we still
+    /// have both the original name and the normalized id, and emit a
+    /// `warn!` log so the shadowing is observable. Behaviour is unchanged —
+    /// the second tool still wins on register, matching what the LLM would
+    /// emit anyway since it normalizes both names to the same string.
     pub async fn create_tools(&self) -> Result<Vec<Arc<dyn Tool>>, ToolError> {
         let mcp_tools = self.list_tools().await?;
         let client = Arc::new(self.clone());
+
+        // Detect post-normalization collisions before registering. This is
+        // a single linear pass; the n is small (a typical MCP server lists
+        // a few dozen tools).
+        let mut seen_ids: HashMap<String, String> = HashMap::new();
+        for t in &mcp_tools {
+            let id = mcp_tool_id(&self.server_name, &t.name);
+            match seen_ids.get(&id) {
+                Some(prev) if prev != &t.name => {
+                    tracing::warn!(
+                        normalized_id = %id,
+                        first_name = %prev,
+                        colliding_name = %t.name,
+                        server = %self.server_name,
+                        "MCP tool name collision after normalization — second tool will shadow the first in the registry. Operators: rename one of the upstream tools to differ in more than just '-' vs '_' (or '.' vs '_')."
+                    );
+                }
+                _ => {
+                    seen_ids.insert(id, t.name.clone());
+                }
+            }
+        }
+
         Ok(mcp_tools
             .into_iter()
             .map(|t| {
@@ -1554,6 +1590,77 @@ mod tests {
             // check that the wrapper is wired up correctly.
             assert!(tool.parameters_schema().is_object());
         }
+    }
+
+    /// Regression test for the post-normalization collision case: an MCP
+    /// server returning two tools whose names differ only by `-` vs `_`
+    /// (`search-all` and `search_all`) produces the same registry key. The
+    /// helper must NOT crash, must produce a wrapper for each tool, and the
+    /// shadowing must be observable via the warn log emitted in
+    /// `create_tools` (the test asserts the structural outcome — the warn
+    /// itself is a side effect we don't capture without `tracing-test`).
+    #[tokio::test]
+    async fn test_create_tools_handles_post_normalization_collision() {
+        let init_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(1),
+            result: Some(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "1.0"}
+            })),
+            error: None,
+        };
+        let notification_ack = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            result: None,
+            error: None,
+        };
+        let list_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(2),
+            result: Some(serde_json::json!({
+                "tools": [
+                    { "name": "search-all", "description": "first",  "inputSchema": {"type": "object"} },
+                    { "name": "search_all", "description": "second", "inputSchema": {"type": "object"} }
+                ]
+            })),
+            error: None,
+        };
+
+        let transport = Arc::new(MockTransport::new(
+            false,
+            vec![init_response, notification_ack, list_response],
+        ));
+        let client =
+            McpClient::new_with_transport("demo", transport.clone(), None, None, "default", None);
+
+        let tools = client
+            .create_tools()
+            .await
+            .expect("create_tools should succeed even with collisions");
+
+        // Both wrappers are produced and both have the same normalized
+        // registry key — this is the collision the warn log calls out.
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].name(), "demo_search_all");
+        assert_eq!(tools[1].name(), "demo_search_all");
+
+        // Register both into a real ToolRegistry: the second wins (this is
+        // the documented shadowing behaviour). Without the warn log there
+        // would be no signal that the first tool became unreachable.
+        let registry = crate::tools::registry::ToolRegistry::new();
+        for tool in tools {
+            registry.register(tool).await;
+        }
+        let resolved = registry.get("demo_search_all").await;
+        assert!(resolved.is_some(), "second tool must be registered");
+        assert_eq!(
+            resolved.unwrap().description(),
+            "second",
+            "the later-registered tool wins on shadow (last-write); operators see the warn log to know it happened"
+        );
     }
 
     /// Regression test (caller level): the canonicalized identifier produced
