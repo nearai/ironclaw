@@ -321,30 +321,27 @@ impl ToolRegistry {
 
     /// Resolve a caller-provided action/tool name to the registered tool id.
     ///
-    /// The runtime is converging on `snake_case` names. Hyphenated names remain
-    /// accepted here only as a compatibility alias for older installed tools.
+    /// Tries exact match first, then hyphen→underscore (LLM normalization),
+    /// then underscore→hyphen (legacy WASM extensions).
     pub async fn resolve_name(&self, name: &str) -> Option<String> {
         let tools = self.tools.read().await;
-        if tools.contains_key(name) {
-            return Some(name.to_string());
-        }
-        crate::extensions::naming::legacy_extension_alias(name)
-            .filter(|alias| tools.contains_key(alias))
+        Self::resolve_key(&tools, name)
     }
 
     pub async fn get_resolved(&self, name: &str) -> Option<(String, Arc<dyn Tool>)> {
-        let resolved = self.resolve_name(name).await?;
-        let tool = self.get(&resolved).await?;
-        Some((resolved, tool))
+        let tools = self.tools.read().await;
+        let key = Self::resolve_key(&tools, name)?;
+        let tool = tools.get(&key).map(Arc::clone)?;
+        Some((key, tool))
     }
 
     /// Resolve a tool/action name to its owning provider extension, when the
     /// action is extension-backed.
     pub async fn provider_extension_for_tool(&self, name: &str) -> Option<String> {
-        let resolved = self.resolve_name(name).await?;
         let tools = self.tools.read().await;
+        let key = Self::resolve_key(&tools, name)?;
         tools
-            .get(&resolved)
+            .get(&key)
             .and_then(|tool| tool.provider_extension().map(ToOwned::to_owned))
     }
 
@@ -430,7 +427,10 @@ impl ToolRegistry {
         let tools = self.tools.read().await;
         names
             .iter()
-            .filter_map(|name| tools.get(*name).map(Self::tool_definition))
+            .filter_map(|name| {
+                let key = Self::resolve_key(&tools, name)?;
+                tools.get(&key).map(Self::tool_definition)
+            })
             .collect()
     }
 
@@ -1652,5 +1652,74 @@ mod tests {
         assert!(registry.get("my-old-tool").await.is_some());
         // Underscored variant resolves via legacy alias
         assert!(registry.get("my_old_tool").await.is_some());
+    }
+
+    /// Regression test: get_resolved must use resolve_key so that dispatch,
+    /// approval gate, and effect adapter all resolve hyphenated names.
+    #[tokio::test]
+    async fn get_resolved_hyphen_to_underscore() {
+        let registry = ToolRegistry::new();
+
+        struct UnderscoreTool;
+        #[async_trait::async_trait]
+        impl Tool for UnderscoreTool {
+            fn name(&self) -> &str {
+                "notion_notion_search"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+        registry.register(Arc::new(UnderscoreTool)).await;
+
+        let (key, _) = registry
+            .get_resolved("notion_notion-search")
+            .await
+            .expect("get_resolved must resolve hyphenated name to underscore registration");
+        assert_eq!(key, "notion_notion_search");
+    }
+
+    /// Regression test: unregister with alias resolution.
+    #[tokio::test]
+    async fn unregister_resolves_hyphen_alias() {
+        let registry = ToolRegistry::new();
+
+        struct TestTool;
+        #[async_trait::async_trait]
+        impl Tool for TestTool {
+            fn name(&self) -> &str {
+                "my_mcp_search"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+        registry.register(Arc::new(TestTool)).await;
+        assert!(registry.has("my_mcp_search").await);
+
+        // Unregister using hyphenated alias
+        let removed = registry.unregister("my-mcp-search").await;
+        assert!(removed.is_some(), "unregister must resolve hyphen alias");
+        assert!(!registry.has("my_mcp_search").await, "tool should be gone");
     }
 }

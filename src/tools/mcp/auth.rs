@@ -1194,7 +1194,16 @@ pub async fn is_authenticated(
     .await
     {
         Ok(Some(_)) => true,
-        Ok(None) => false,
+        Ok(None) => {
+            // Fall back to legacy (pre-hyphen-normalization) secret name
+            // so existing users with tokens stored under hyphenated server
+            // names are not forced to re-authenticate after upgrade.
+            if let Some(legacy_name) = server_config.legacy_token_secret_name() {
+                secrets.get_decrypted(user_id, &legacy_name).await.is_ok()
+            } else {
+                false
+            }
+        }
         Err(error) => {
             tracing::warn!(server = %server_config.name, error = %error, "Failed to read access token");
             false

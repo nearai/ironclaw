@@ -701,7 +701,7 @@ pub async fn discover_tools(dir: &Path) -> Result<HashMap<String, DiscoveredTool
         }
 
         let name = match path.file_stem().and_then(|s| s.to_str()) {
-            Some(n) => n.to_string(),
+            Some(n) => n.replace('-', "_"),
             None => continue,
         };
 
@@ -887,11 +887,11 @@ mod tests {
         // If build artifacts exist, they should be discovered.
         let tools = super::discover_dev_tools().await.unwrap();
 
-        // If any tools have been built, they should appear with "-tool" suffix
+        // If any tools have been built, they should appear with "_tool" suffix
         for (name, discovered) in &tools {
             assert!(
-                name.ends_with("-tool"),
-                "Dev tool name should end with -tool: {}",
+                name.ends_with("_tool"),
+                "Dev tool name should end with _tool: {}",
                 name
             );
             assert!(

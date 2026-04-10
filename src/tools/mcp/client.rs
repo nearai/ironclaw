@@ -126,7 +126,7 @@ impl McpClient {
     ///
     /// Use this when you have a configured server name but no authentication.
     pub fn new_with_name(server_name: impl Into<String>, server_url: impl Into<String>) -> Self {
-        let name: String = server_name.into();
+        let name: String = server_name.into().replace('-', "_");
         let url: String = server_url.into();
         let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.clone()));
 
@@ -819,7 +819,7 @@ mod tests {
     #[test]
     fn test_new_with_name_uses_custom_name() {
         let client = McpClient::new_with_name("my-server", "http://localhost:8080");
-        assert_eq!(client.server_name(), "my-server");
+        assert_eq!(client.server_name(), "my_server");
         assert_eq!(client.server_url(), "http://localhost:8080");
         assert_eq!(client.user_id, "<unset>");
         assert!(client.session_manager.is_none());
@@ -846,7 +846,7 @@ mod tests {
         client.next_request_id();
         let cloned = client.clone();
         assert_eq!(cloned.server_url(), "http://localhost:5555");
-        assert_eq!(cloned.server_name(), "cloned-server");
+        assert_eq!(cloned.server_name(), "cloned_server");
         assert_eq!(cloned.user_id, "<unset>");
         assert_eq!(cloned.next_id.load(Ordering::SeqCst), 3);
     }
