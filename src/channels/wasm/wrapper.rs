@@ -844,11 +844,7 @@ async fn resolve_message_scope_with_pairing(
     }
 
     match pairing_store.resolve_identity(channel_name, sender_id).await {
-        Ok(Some(identity)) => {
-            let resolved_user_id = identity.owner_id.to_string();
-            let is_owner_sender = resolved_user_id == owner_scope_id;
-            (resolved_user_id, is_owner_sender)
-        }
+        Ok(Some(identity)) => (identity.owner_id.to_string(), false),
         Ok(None) => (sender_id.to_string(), false),
         Err(error) => {
             tracing::warn!(
@@ -6262,8 +6258,7 @@ mod tests {
         assert_eq!(msg.user_id, "owner-scope");
         assert_eq!(msg.sender_id, "guest-77");
         assert_eq!(msg.conversation_scope(), Some("777"));
-        let stored_metadata = last_broadcast_metadata.read().await.clone();
-        assert_eq!(stored_metadata.as_deref(), Some(r#"{"chat_id":777}"#));
+        assert!(last_broadcast_metadata.read().await.is_none());
     }
 
     #[tokio::test]
