@@ -288,7 +288,10 @@ fn char_to_byte_idx(s: &str, char_idx: usize) -> Option<usize> {
     s.char_indices().nth(char_idx).map(|(idx, _)| idx)
 }
 
-fn map_normalized_char_to_original_byte(original: &str, normalized_char_idx: usize) -> Option<usize> {
+fn map_normalized_char_to_original_byte(
+    original: &str,
+    normalized_char_idx: usize,
+) -> Option<usize> {
     if normalized_char_idx == 0 {
         return Some(0);
     }

@@ -159,22 +159,22 @@ impl FileHistory {
 
         match &snapshot.content_before {
             Some(content) => {
-                tokio::fs::write(&snapshot.path, content).await.map_err(|e| {
-                    ToolError::ExecutionFailed(format!("Failed to restore file: {}", e))
-                })?;
+                tokio::fs::write(&snapshot.path, content)
+                    .await
+                    .map_err(|e| {
+                        ToolError::ExecutionFailed(format!("Failed to restore file: {}", e))
+                    })?;
             }
-            None => {
-                match tokio::fs::remove_file(&snapshot.path).await {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => {
-                        return Err(ToolError::ExecutionFailed(format!(
-                            "Failed to remove file during restore: {}",
-                            e
-                        )));
-                    }
+            None => match tokio::fs::remove_file(&snapshot.path).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(ToolError::ExecutionFailed(format!(
+                        "Failed to remove file during restore: {}",
+                        e
+                    )));
                 }
-            }
+            },
         }
 
         Ok(Some(snapshot))

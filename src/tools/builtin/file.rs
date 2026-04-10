@@ -828,7 +828,8 @@ impl Tool for ApplyPatchTool {
         let new_content = if replace_all {
             let mut matches = Vec::new();
             let mut search_offset = 0usize;
-            while let Some(m) = file_edit_guard::find_match_from(&content, old_string, search_offset)
+            while let Some(m) =
+                file_edit_guard::find_match_from(&content, old_string, search_offset)
             {
                 if m.end <= m.start {
                     return Err(ToolError::ExecutionFailed(
@@ -865,7 +866,8 @@ impl Tool for ApplyPatchTool {
                 ))
             })?;
 
-            let mut rebuilt = String::with_capacity(content.len() - m.actual.len() + new_string.len());
+            let mut rebuilt =
+                String::with_capacity(content.len() - m.actual.len() + new_string.len());
             rebuilt.push_str(&content[..m.start]);
             rebuilt.push_str(new_string);
             rebuilt.push_str(&content[m.end..]);
