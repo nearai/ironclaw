@@ -18,15 +18,17 @@ use crate::tools::wasm::limits::{FuelConfig, ResourceLimits};
 /// which causes any store with an expired epoch deadline to trap.
 pub const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Enable wasmtime's persistent compilation cache for a [`Config`].
+/// Enable Wasmtime's persistent compilation cache for a [`Config`].
 ///
-/// On Unix, this delegates to `cache_config_load_default()` which uses a
-/// shared cache directory. On Windows, each engine gets its own subdirectory
-/// (keyed by `label`) to avoid OS error 33 (`ERROR_LOCK_VIOLATION`) when
-/// multiple engines memory-map files in the same cache directory. See #448.
+/// If `explicit_dir` is `Some`, this writes a small cache TOML file pointing
+/// at that directory and loads it with [`Cache::from_file`].
 ///
-/// If `explicit_dir` is `Some`, it is used as the cache directory on all
-/// platforms, bypassing the default.
+/// If `explicit_dir` is `None`, we load Wasmtime's default cache configuration
+/// by calling `Cache::from_file(None)`.
+///
+/// On Windows, the caller typically passes an engine-specific directory keyed
+/// by `label` to avoid OS error 33 (`ERROR_LOCK_VIOLATION`) when multiple
+/// engines memory-map files in the same cache directory. See #448.
 pub fn enable_compilation_cache(
     wasmtime_config: &mut Config,
     label: &str,

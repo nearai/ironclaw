@@ -3203,7 +3203,6 @@ checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
 dependencies = [
  "ahash 0.8.12",
  "allocator-api2",
- "serde",
 ]
 
 [[package]]
@@ -3965,7 +3964,7 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
- "wasmparser 0.220.1",
+ "wasmparser 0.245.1",
  "wasmtime",
  "wasmtime-wasi",
  "webpki-roots 0.26.11",
@@ -8855,20 +8854,6 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
-]
-
-[[package]]
-name = "wasmparser"
-version = "0.220.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d07b6a3b550fefa1a914b6d54fc175dd11c3392da11eee604e6ffc759805d25"
-dependencies = [
- "ahash 0.8.12",
- "bitflags 2.11.0",
- "hashbrown 0.14.5",
- "indexmap 2.13.0",
- "semver",
- "serde",
 ]
 
 [[package]]

@@ -166,6 +166,7 @@ impl WasmValidator {
                             Ok(exp) => {
                                 let kind = match exp.kind {
                                     wasmparser::ExternalKind::Func => ExportKind::Function,
+                                    wasmparser::ExternalKind::FuncExact => ExportKind::Function,
                                     wasmparser::ExternalKind::Memory => ExportKind::Memory,
                                     wasmparser::ExternalKind::Table => ExportKind::Table,
                                     wasmparser::ExternalKind::Global => ExportKind::Global,
@@ -186,11 +187,12 @@ impl WasmValidator {
                     }
                 }
                 Ok(wasmparser::Payload::ImportSection(reader)) => {
-                    for import in reader {
+                    for import in reader.into_imports() {
                         match import {
                             Ok(imp) => {
                                 let kind = match imp.ty {
                                     wasmparser::TypeRef::Func(_) => ImportKind::Function,
+                                    wasmparser::TypeRef::FuncExact(_) => ImportKind::Function,
                                     wasmparser::TypeRef::Memory(_) => ImportKind::Memory,
                                     wasmparser::TypeRef::Table(_) => ImportKind::Table,
                                     wasmparser::TypeRef::Global(_) => ImportKind::Global,

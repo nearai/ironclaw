@@ -149,7 +149,7 @@ pgvector = { version = "0.4", features = ["postgres"], optional = true }
 # WASM sandbox for untrusted tool execution
 wasmtime = { version = "43.0.1", features = ["component-model"] }
 wasmtime-wasi = "43.0.1"  # WASI support for component model
-wasmparser = "0.220"  # WASM binary parsing for validation
+wasmparser = "0.245.1"  # WASM binary parsing for validation
 
 # Cryptography for secrets management
 aes-gcm = "0.10"
