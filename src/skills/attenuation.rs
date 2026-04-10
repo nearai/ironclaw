@@ -122,7 +122,7 @@ pub fn attenuate_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_skills::{ActivationCriteria, SkillManifest, SkillSource};
+    use ironclaw_skills::{ActivationCriteria, GatingRequirements, SkillManifest, SkillSource};
     use std::path::PathBuf;
 
     fn make_tool(name: &str) -> ToolDefinition {
@@ -141,7 +141,8 @@ mod tests {
                 description: String::new(),
                 activation: ActivationCriteria::default(),
                 credentials: vec![],
-                metadata: None,
+                terminal_actions: vec![],
+                requires: GatingRequirements::default(),
             },
             prompt_content: "test".to_string(),
             trust,

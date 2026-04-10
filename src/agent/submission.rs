@@ -178,13 +178,20 @@ impl SubmissionParser {
         // Try structured JSON approval (from web gateway's /api/chat/approval endpoint)
         if trimmed.starts_with('{')
             && let Ok(submission) = serde_json::from_str::<Submission>(trimmed)
-            && matches!(submission, Submission::ExecApproval { .. })
+            && matches!(
+                submission,
+                Submission::ExecApproval { .. } | Submission::ExternalCallback { .. }
+            )
         {
             return submission;
         }
 
-        // Approval responses (simple yes/no/always for pending approvals)
-        // These are short enough to check explicitly
+        // Approval responses (simple yes/no/always for pending approvals).
+        // The parser is stateless — it cannot check whether an approval is
+        // actually pending. The routing layer in agent_loop.rs downgrades bare
+        // keywords to UserInput when no approval is pending; slash-prefixed
+        // variants (e.g. /approve, /deny, /yes, /no, /always) always route
+        // as ApprovalResponse.
         match lower.as_str() {
             "yes" | "y" | "approve" | "ok" | "/approve" | "/yes" | "/y" => {
                 return Submission::ApprovalResponse {
@@ -291,6 +298,12 @@ pub enum Submission {
         approved: bool,
         /// If true, auto-approve this tool for the rest of the session.
         always: bool,
+    },
+
+    /// External system resolved a pending gate (for example an OAuth callback).
+    ExternalCallback {
+        /// ID of the pending gate request being resolved.
+        request_id: Uuid,
     },
 
     /// Simple approval response (yes/no/always) for the current pending approval.
@@ -516,6 +529,9 @@ pub enum SubmissionResult {
 
     /// Turn was interrupted.
     Interrupted,
+
+    /// Auth flow initiated — config card sent, no text response needed.
+    AuthPending,
 }
 
 impl SubmissionResult {
@@ -537,6 +553,11 @@ impl SubmissionResult {
         Self::Ok {
             message: Some(message.into()),
         }
+    }
+
+    /// Create an auth-pending result (suppresses text response).
+    pub fn auth_pending() -> Self {
+        Self::AuthPending
     }
 
     /// Create an error result.

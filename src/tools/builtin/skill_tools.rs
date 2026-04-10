@@ -3,16 +3,343 @@
 //! Four tools for discovering, installing, listing, and removing skills
 //! entirely through conversation, following the extension_tools pattern.
 
+use std::collections::{HashSet, VecDeque};
+use std::future::Future;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use thiserror::Error;
 
 use crate::context::JobContext;
 use crate::tools::tool::{
     ApprovalRequirement, EngineCompatibility, Tool, ToolError, ToolOutput, require_str,
 };
-use ironclaw_skills::catalog::SkillCatalog;
+use ironclaw_skills::catalog::{
+    SkillCatalog, catalog_entry_is_installed, resolve_catalog_slug_for_name,
+};
 use ironclaw_skills::registry::SkillRegistry;
+
+const MAX_CHAIN_DEPS: usize = 10;
+
+/// Hard cap on the chain-installer BFS queue to prevent unbounded growth
+/// from nested `requires.skills` fan-out. Even though we stop enqueueing
+/// once `attempted >= MAX_CHAIN_DEPS`, this is a defense-in-depth bound in
+/// case a future refactor (parallel fetching, retries) changes that
+/// invariant.
+const MAX_CHAIN_QUEUE: usize = MAX_CHAIN_DEPS * 10;
+
+#[derive(Debug, Clone, Error)]
+#[error("{message}")]
+pub(crate) struct SkillFetchError {
+    status: Option<u16>,
+    message: String,
+}
+
+impl SkillFetchError {
+    fn from_message(message: impl Into<String>) -> Self {
+        Self {
+            status: None,
+            message: message.into(),
+        }
+    }
+
+    fn from_http_status(status: u16, url: &str) -> Self {
+        Self {
+            status: Some(status),
+            message: format!("Skill fetch returned HTTP {status}: {url}"),
+        }
+    }
+
+    fn is_missing_dependency(&self) -> bool {
+        matches!(self.status, Some(404 | 410))
+    }
+}
+
+impl From<SkillFetchError> for ToolError {
+    fn from(value: SkillFetchError) -> Self {
+        ToolError::ExecutionFailed(value.to_string())
+    }
+}
+
+#[derive(Debug, Default)]
+struct ChainInstallReport {
+    installed: Vec<String>,
+    failed: Vec<String>,
+    missing: Vec<String>,
+    skipped: Vec<String>,
+    pending_explicit_install: Vec<String>,
+}
+
+impl ChainInstallReport {
+    fn has_warnings(&self) -> bool {
+        !self.failed.is_empty()
+            || !self.missing.is_empty()
+            || !self.skipped.is_empty()
+            || !self.pending_explicit_install.is_empty()
+    }
+}
+
+/// Acquire a read lock on the skill registry, recovering from poisoning.
+///
+/// `std::sync::RwLock` becomes "poisoned" if a writer panics while holding it,
+/// after which every subsequent `.read()` / `.write()` returns `Err`. The
+/// skill registry only ever holds replace-on-success state (commits happen
+/// after successful disk writes and validation), so a poisoned lock is safe
+/// to recover from — failing every future `skill_install` call is a worse
+/// outcome than ignoring the panic. We log loudly so the underlying panic
+/// stays visible.
+fn registry_read(
+    registry: &Arc<std::sync::RwLock<SkillRegistry>>,
+) -> std::sync::RwLockReadGuard<'_, SkillRegistry> {
+    registry.read().unwrap_or_else(|poison| {
+        tracing::error!(
+            "skill registry RwLock was poisoned (a previous writer panicked); \
+             recovering — skill state may be from before the panic"
+        );
+        poison.into_inner()
+    })
+}
+
+/// Acquire a write lock on the skill registry, recovering from poisoning.
+/// See [`registry_read`] for the rationale.
+fn registry_write(
+    registry: &Arc<std::sync::RwLock<SkillRegistry>>,
+) -> std::sync::RwLockWriteGuard<'_, SkillRegistry> {
+    registry.write().unwrap_or_else(|poison| {
+        tracing::error!(
+            "skill registry RwLock was poisoned (a previous writer panicked); \
+             recovering — skill state may be from before the panic"
+        );
+        poison.into_inner()
+    })
+}
+
+async fn install_missing_skill_dependencies<F, Fut>(
+    registry: &Arc<std::sync::RwLock<SkillRegistry>>,
+    registry_url: &str,
+    required_skills: Vec<String>,
+    fetcher: F,
+) -> Result<ChainInstallReport, ToolError>
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Result<String, SkillFetchError>>,
+{
+    let (user_dir, initial_missing) = {
+        let guard = registry_read(registry);
+        let missing = required_skills
+            .into_iter()
+            .filter(|name| !guard.has(name))
+            .collect::<Vec<_>>();
+        (guard.install_target_dir().to_path_buf(), missing)
+    };
+
+    let mut report = ChainInstallReport::default();
+    let mut queue: VecDeque<String> = initial_missing.into_iter().collect();
+    let mut queued_or_seen: HashSet<String> = queue.iter().cloned().collect();
+    let mut attempted = 0usize;
+
+    while let Some(dep_name) = queue.pop_front() {
+        if !ironclaw_skills::validate_skill_name(&dep_name) {
+            report
+                .failed
+                .push(format!("{}: invalid skill dependency name", dep_name));
+            continue;
+        }
+
+        // Check whether the dep was satisfied by an earlier iteration (or
+        // another concurrent install) BEFORE applying the cap, so already-
+        // installed deps don't count toward `skipped_dependencies`.
+        {
+            let guard = registry_read(registry);
+            if guard.has(&dep_name) {
+                continue;
+            }
+        }
+
+        if attempted >= MAX_CHAIN_DEPS {
+            report.skipped.push(dep_name);
+            continue;
+        }
+
+        attempted += 1;
+
+        let download_url = ironclaw_skills::catalog::skill_download_url(registry_url, &dep_name);
+        match fetcher(download_url).await {
+            Ok(dep_content) => {
+                let normalized = ironclaw_skills::normalize_line_endings(&dep_content);
+                match ironclaw_skills::registry::SkillRegistry::prepare_install_to_disk(
+                    &user_dir,
+                    &dep_name,
+                    &normalized,
+                )
+                .await
+                {
+                    Ok((name, skill)) => {
+                        // Dependency-confusion guard: the `name` returned
+                        // by `prepare_install_to_disk` comes from the
+                        // downloaded manifest, not from the `dep_name` we
+                        // requested. A hostile catalog entry could publish
+                        // a skill whose manifest declares a DIFFERENT name
+                        // (e.g., we asked for "dep-a" but the manifest says
+                        // `name: evil-skill`). Reject and clean up the
+                        // on-disk write — callers rely on the requested
+                        // dep name matching what gets installed.
+                        if name != dep_name {
+                            let orphan_dir = user_dir.join(&name);
+                            if let Err(cleanup_err) = tokio::fs::remove_dir_all(&orphan_dir).await {
+                                tracing::debug!(
+                                    "chain install: failed to clean up mismatched-name dir {}: {}",
+                                    orphan_dir.display(),
+                                    cleanup_err
+                                );
+                            }
+                            report.failed.push(format!(
+                                "{}: manifest declares name '{}' (dependency-confusion guard)",
+                                dep_name, name
+                            ));
+                            continue;
+                        }
+                        let nested_required = skill.manifest.requires.skills.clone();
+                        // Take the write lock in a tightly scoped block so the
+                        // (non-Send) RwLockWriteGuard is dropped before any
+                        // subsequent `.await`.
+                        enum CommitOutcome {
+                            Installed,
+                            Duplicate,
+                            Failed(String),
+                        }
+                        let outcome: CommitOutcome = {
+                            let mut guard = registry_write(registry);
+                            if guard.has(&name) {
+                                CommitOutcome::Duplicate
+                            } else {
+                                match guard.commit_install(&name, skill) {
+                                    Ok(()) => CommitOutcome::Installed,
+                                    Err(e) => CommitOutcome::Failed(e.to_string()),
+                                }
+                            }
+                        };
+                        match outcome {
+                            CommitOutcome::Installed => {
+                                report.installed.push(name);
+                                // Only enqueue nested deps if we still have
+                                // attempt budget left — otherwise we grow the
+                                // queue for items we'll never fetch, which a
+                                // malicious manifest could exploit to blow
+                                // out memory on `queued_or_seen`. Belt and
+                                // braces: also enforce MAX_CHAIN_QUEUE.
+                                if attempted < MAX_CHAIN_DEPS {
+                                    for nested_dep in nested_required {
+                                        if queue.len() >= MAX_CHAIN_QUEUE {
+                                            tracing::warn!(
+                                                "chain install: queue hit MAX_CHAIN_QUEUE={}; dropping further nested deps",
+                                                MAX_CHAIN_QUEUE
+                                            );
+                                            break;
+                                        }
+                                        if queued_or_seen.insert(nested_dep.clone()) {
+                                            queue.push_back(nested_dep);
+                                        }
+                                    }
+                                }
+                            }
+                            CommitOutcome::Duplicate => {
+                                // Another concurrent install committed first.
+                                // Clean up the on-disk skill dir we just wrote
+                                // so it doesn't become an orphan that
+                                // drift-monitors will flag later.
+                                let orphan_dir = user_dir.join(&name);
+                                if let Err(cleanup_err) =
+                                    tokio::fs::remove_dir_all(&orphan_dir).await
+                                {
+                                    tracing::debug!(
+                                        "chain install: failed to clean up orphan skill dir {}: {}",
+                                        orphan_dir.display(),
+                                        cleanup_err
+                                    );
+                                }
+                            }
+                            CommitOutcome::Failed(e) => {
+                                report.failed.push(format!("{}: {}", dep_name, e))
+                            }
+                        }
+                    }
+                    Err(e) => report.failed.push(format!("{}: {}", dep_name, e)),
+                }
+            }
+            Err(e) => {
+                if e.is_missing_dependency() {
+                    report.missing.push(dep_name);
+                } else {
+                    report.failed.push(format!("{}: {}", dep_name, e));
+                }
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+fn build_skill_install_output(
+    installed_name: &str,
+    report: &ChainInstallReport,
+) -> serde_json::Value {
+    let status = if report.has_warnings() {
+        "installed_with_warnings"
+    } else {
+        "installed"
+    };
+    let message = if report.has_warnings() {
+        format!(
+            "Skill '{}' installed with warnings. It will activate when matching keywords are detected.",
+            installed_name
+        )
+    } else {
+        format!(
+            "Skill '{}' installed successfully. It will activate when matching keywords are detected.",
+            installed_name
+        )
+    };
+
+    let mut output = serde_json::json!({
+        "name": installed_name,
+        "status": status,
+        "trust": "installed",
+        "message": message,
+    });
+
+    if !report.installed.is_empty() {
+        output["chain_installed"] = serde_json::json!(&report.installed);
+    }
+    if !report.failed.is_empty() {
+        output["chain_install_failed"] = serde_json::json!(&report.failed);
+    }
+    if !report.missing.is_empty() {
+        output["missing_dependencies"] = serde_json::json!(&report.missing);
+        output["missing_dependencies_message"] = serde_json::json!(format!(
+            "These required skills could not be found in the catalog and need manual installation: {}",
+            report.missing.join(", ")
+        ));
+    }
+    if !report.skipped.is_empty() {
+        output["skipped_dependencies"] = serde_json::json!(&report.skipped);
+        output["skipped_dependencies_message"] = serde_json::json!(format!(
+            "{} dependency chain hit the MAX_CHAIN_DEPS={} *attempt* cap (intentional bound on fetch time from large/malicious manifests). These deps were not attempted and must be installed manually with a follow-up `skill_install` call: {}",
+            report.skipped.len(),
+            MAX_CHAIN_DEPS,
+            report.skipped.join(", ")
+        ));
+    }
+    if !report.pending_explicit_install.is_empty() {
+        output["pending_dependency_install"] = serde_json::json!(&report.pending_explicit_install);
+        output["pending_dependency_install_message"] = serde_json::json!(format!(
+            "Companion skills were not installed automatically. Re-run skill_install with install_dependencies=true to approve installing: {}",
+            report.pending_explicit_install.join(", ")
+        ));
+    }
+
+    output
+}
 
 // ── skill_list ──────────────────────────────────────────────────────────
 
@@ -183,10 +510,8 @@ impl Tool for SkillSearchTool {
         let catalog_json: Vec<serde_json::Value> = catalog_entries
             .iter()
             .map(|entry| {
-                let is_installed = installed_names.iter().any(|n| {
-                    // Match by slug suffix or exact name
-                    entry.slug.ends_with(n.as_str()) || entry.name == *n
-                });
+                let is_installed =
+                    catalog_entry_is_installed(&entry.slug, &entry.name, &installed_names);
                 serde_json::json!({
                     "slug": entry.slug,
                     "name": entry.name,
@@ -261,6 +586,35 @@ impl SkillInstallTool {
     }
 }
 
+async fn resolve_catalog_download_key(
+    catalog: &SkillCatalog,
+    name: &str,
+    slug: Option<&str>,
+) -> Result<String, ToolError> {
+    if let Some(slug) = slug.filter(|s| !s.is_empty()) {
+        return Ok(slug.to_string());
+    }
+
+    if name.contains('/') {
+        return Ok(name.to_string());
+    }
+
+    let outcome = catalog.search(name).await;
+    match resolve_catalog_slug_for_name(name, &outcome.results) {
+        Ok(Some(resolved)) => Ok(resolved),
+        Ok(None) => {
+            let reason = outcome
+                .error
+                .unwrap_or_else(|| "no unique catalog match was found".to_string());
+            Err(ToolError::ExecutionFailed(format!(
+                "Could not resolve skill name '{}' to a catalog slug: {}",
+                name, reason
+            )))
+        }
+        Err(e) => Err(ToolError::ExecutionFailed(e.to_string())),
+    }
+}
+
 #[async_trait]
 impl Tool for SkillInstallTool {
     fn name(&self) -> &str {
@@ -279,6 +633,10 @@ impl Tool for SkillInstallTool {
                     "type": "string",
                     "description": "Skill name or slug (from search results)"
                 },
+                "slug": {
+                    "type": "string",
+                    "description": "Registry slug from catalog search results; preferred when installing from ClawHub"
+                },
                 "url": {
                     "type": "string",
                     "description": "Direct URL to a SKILL.md file"
@@ -286,6 +644,11 @@ impl Tool for SkillInstallTool {
                 "content": {
                     "type": "string",
                     "description": "Raw SKILL.md content to install directly"
+                },
+                "install_dependencies": {
+                    "type": "boolean",
+                    "description": "When true, also install companion skills declared in requires.skills. Defaults to false so dependency installs stay explicit in the approved tool call.",
+                    "default": false
                 }
             },
             "required": ["name"]
@@ -299,6 +662,42 @@ impl Tool for SkillInstallTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
         let name = require_str(&params, "name")?;
+        let install_dependencies = params
+            .get("install_dependencies")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let mut requested_identifier = params
+            .get("slug")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
+        // Idempotent: if a skill with this name is already loaded (from any
+        // source — local SKILL.md, bundled, previously installed), return
+        // success immediately without hitting the catalog. Without this
+        // shortcut, an agent that mis-interprets an active persona bundle
+        // as "needs to be installed" will trigger a 404 against the
+        // ClawHub registry for skills that exist only locally.
+        {
+            let guard = self
+                .registry
+                .read()
+                .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
+            if guard.has(name) {
+                return Ok(ToolOutput::success(
+                    serde_json::json!({
+                        "name": name,
+                        "status": "already_installed",
+                        "trust": "installed",
+                        "message": format!(
+                            "Skill '{}' is already active — no install needed.",
+                            name
+                        ),
+                    }),
+                    start.elapsed(),
+                ));
+            }
+        }
 
         let content = if let Some(raw) = params.get("content").and_then(|v| v.as_str()) {
             // Direct content provided
@@ -309,26 +708,40 @@ impl Tool for SkillInstallTool {
             .filter(|s| !s.is_empty())
         {
             // Fetch from explicit URL
-            fetch_skill_content(url).await?
+            fetch_skill_content(url).await.map_err(ToolError::from)?
         } else {
             // Look up in catalog and fetch
-            let download_url =
-                ironclaw_skills::catalog::skill_download_url(self.catalog.registry_url(), name);
-            fetch_skill_content(&download_url).await?
+            let download_key = resolve_catalog_download_key(
+                self.catalog.as_ref(),
+                name,
+                requested_identifier.as_deref(),
+            )
+            .await?;
+            requested_identifier = Some(download_key.clone());
+            let download_url = ironclaw_skills::catalog::skill_download_url(
+                self.catalog.registry_url(),
+                &download_key,
+            );
+            fetch_skill_content(&download_url)
+                .await
+                .map_err(ToolError::from)?
         };
 
+        let normalized = ironclaw_skills::normalize_line_endings(&content);
+
         // Check for duplicates and get install_dir under a brief read lock.
-        let (user_dir, skill_name_from_parse) = {
+        let (user_dir, skill_name_from_parse, install_content) = {
             let guard = self
                 .registry
                 .read()
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
 
-            // Parse to extract the name (cheap, in-memory)
-            let normalized = ironclaw_skills::normalize_line_endings(&content);
-            let parsed = ironclaw_skills::parser::parse_skill_md(&normalized)
+            let (skill_name, install_content) =
+                ironclaw_skills::registry::SkillRegistry::resolve_install_content(
+                    &normalized,
+                    requested_identifier.as_deref(),
+                )
                 .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
-            let skill_name = parsed.manifest.name.clone();
 
             if guard.has(&skill_name) {
                 return Err(ToolError::ExecutionFailed(format!(
@@ -337,7 +750,11 @@ impl Tool for SkillInstallTool {
                 )));
             }
 
-            (guard.install_target_dir().to_path_buf(), skill_name)
+            (
+                guard.install_target_dir().to_path_buf(),
+                skill_name,
+                install_content,
+            )
         };
 
         // Perform async I/O (write to disk, validate round-trip) with no lock held.
@@ -345,38 +762,115 @@ impl Tool for SkillInstallTool {
             ironclaw_skills::registry::SkillRegistry::prepare_install_to_disk(
                 &user_dir,
                 &skill_name_from_parse,
-                &ironclaw_skills::normalize_line_endings(&content),
+                &install_content,
             )
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
-        // Commit the in-memory addition under a brief write lock.
-        let installed_name = {
-            let mut guard = self
-                .registry
-                .write()
-                .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
-            guard
-                .commit_install(&skill_name, loaded_skill)
-                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
-            skill_name
+        // Commit the in-memory addition under a brief write lock. The
+        // earlier `guard.has()` check was under a released read lock with
+        // async I/O (prepare_install_to_disk) in between, so we MUST
+        // re-check under the write lock to close the TOCTOU window — a
+        // concurrent `skill_install` for the same name can finish during
+        // the window and leave us double-committing.
+        enum CommitResult {
+            Installed(String, Vec<String>),
+            AlreadyInstalled,
+        }
+        let commit_result: CommitResult = {
+            let mut guard = registry_write(&self.registry);
+            if guard.has(&skill_name) {
+                CommitResult::AlreadyInstalled
+            } else {
+                let reqs = loaded_skill.manifest.requires.clone();
+                guard
+                    .commit_install(&skill_name, loaded_skill)
+                    .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+                CommitResult::Installed(skill_name, reqs.skills)
+            }
         };
 
-        let output = serde_json::json!({
-            "name": installed_name,
-            "status": "installed",
-            "trust": "installed",
-            "message": format!(
-                "Skill '{}' installed successfully. It will activate when matching keywords are detected.",
-                installed_name
-            ),
-        });
+        let (installed_name, required_skills) = match commit_result {
+            CommitResult::Installed(name, skills) => (name, skills),
+            CommitResult::AlreadyInstalled => {
+                // A concurrent install won the race. Clean up the on-disk
+                // copy we wrote during `prepare_install_to_disk` so it
+                // doesn't become an orphan, then return the idempotent
+                // response.
+                let orphan_dir = user_dir.join(&skill_name_from_parse);
+                if let Err(cleanup_err) = tokio::fs::remove_dir_all(&orphan_dir).await {
+                    tracing::debug!(
+                        "skill_install: failed to clean up orphan skill dir {}: {}",
+                        orphan_dir.display(),
+                        cleanup_err
+                    );
+                }
+                return Ok(ToolOutput::success(
+                    serde_json::json!({
+                        "name": skill_name_from_parse,
+                        "status": "already_installed",
+                        "trust": "installed",
+                        "message": format!(
+                            "Skill '{}' was already installed by a concurrent call — no install needed.",
+                            skill_name_from_parse
+                        ),
+                    }),
+                    start.elapsed(),
+                ));
+            }
+        };
+
+        let chain_report = if required_skills.is_empty() {
+            ChainInstallReport::default()
+        } else if !install_dependencies {
+            let missing_required_skills = {
+                let guard = self
+                    .registry
+                    .read()
+                    .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
+                required_skills
+                    .into_iter()
+                    .filter(|skill| !guard.has(skill))
+                    .collect::<Vec<_>>()
+            };
+
+            ChainInstallReport {
+                pending_explicit_install: missing_required_skills,
+                ..Default::default()
+            }
+        } else {
+            install_missing_skill_dependencies(
+                &self.registry,
+                self.catalog.registry_url(),
+                required_skills,
+                |url| async move { fetch_skill_content(&url).await },
+            )
+            .await?
+        };
+
+        let output = build_skill_install_output(&installed_name, &chain_report);
 
         Ok(ToolOutput::success(output, start.elapsed()))
     }
 
-    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
-        ApprovalRequirement::UnlessAutoApproved
+    fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
+        // Chain installs pull up to MAX_CHAIN_DEPS additional skills, each
+        // with its own prompt-injection surface. When the LLM sets
+        // `install_dependencies=true` we force a per-call approval prompt
+        // instead of honoring the auto-approve allowlist — the single
+        // `skill_install` approval the user previously granted covered one
+        // skill, not an unbounded companion set. Single-skill installs
+        // retain the normal `UnlessAutoApproved` behavior so routine flows
+        // don't regress.
+        let install_deps = params
+            .get("install_dependencies")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if install_deps {
+            ApprovalRequirement::Always
+        } else {
+            ApprovalRequirement::UnlessAutoApproved
+        }
     }
 }
 
@@ -549,30 +1043,31 @@ fn is_link_local_ip(ip: &std::net::IpAddr) -> bool {
 /// `SKILL.md` and `_meta.json`. This function detects ZIP responses (by the
 /// `PK\x03\x04` magic bytes) and extracts `SKILL.md` automatically. Plain
 /// text responses are returned as-is.
-pub async fn fetch_skill_content(url: &str) -> Result<String, ToolError> {
-    let parsed = validate_fetch_url(url)?;
-    let client = build_safe_fetch_client(&parsed).await?;
+pub(crate) async fn fetch_skill_content(url: &str) -> Result<String, SkillFetchError> {
+    let parsed =
+        validate_fetch_url(url).map_err(|e| SkillFetchError::from_message(e.to_string()))?;
+    let client = build_safe_fetch_client(&parsed)
+        .await
+        .map_err(|e| SkillFetchError::from_message(e.to_string()))?;
 
     let response = client.get(parsed.clone()).send().await.map_err(|e| {
-        ToolError::ExecutionFailed(format!("Failed to fetch skill from {}: {}", url, e))
+        SkillFetchError::from_message(format!("Failed to fetch skill from {}: {}", url, e))
     })?;
 
     if !response.status().is_success() {
-        return Err(ToolError::ExecutionFailed(format!(
-            "Skill fetch returned HTTP {}: {}",
-            response.status(),
-            url
-        )));
+        return Err(SkillFetchError::from_http_status(
+            response.status().as_u16(),
+            url,
+        ));
     }
 
     // Limit download size to prevent memory exhaustion from large responses.
     const MAX_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024; // 10 MB
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read response body: {}", e)))?;
+    let bytes = response.bytes().await.map_err(|e| {
+        SkillFetchError::from_message(format!("Failed to read response body: {}", e))
+    })?;
     if bytes.len() > MAX_DOWNLOAD_BYTES {
-        return Err(ToolError::ExecutionFailed(format!(
+        return Err(SkillFetchError::from_message(format!(
             "Response too large: {} bytes (max {} bytes)",
             bytes.len(),
             MAX_DOWNLOAD_BYTES
@@ -581,16 +1076,16 @@ pub async fn fetch_skill_content(url: &str) -> Result<String, ToolError> {
 
     // Detect ZIP archive (PK\x03\x04 magic) and extract SKILL.md
     let content = if bytes.starts_with(b"PK\x03\x04") {
-        extract_skill_from_zip(&bytes)?
+        extract_skill_from_zip(&bytes).map_err(|e| SkillFetchError::from_message(e.to_string()))?
     } else {
         String::from_utf8(bytes.to_vec()).map_err(|e| {
-            ToolError::ExecutionFailed(format!("Response is not valid UTF-8: {}", e))
+            SkillFetchError::from_message(format!("Response is not valid UTF-8: {}", e))
         })?
     };
 
     // Basic size check
     if content.len() as u64 > ironclaw_skills::MAX_PROMPT_FILE_SIZE {
-        return Err(ToolError::ExecutionFailed(format!(
+        return Err(SkillFetchError::from_message(format!(
             "Skill content too large: {} bytes (max {} bytes)",
             content.len(),
             ironclaw_skills::MAX_PROMPT_FILE_SIZE
@@ -788,6 +1283,7 @@ impl Tool for SkillRemoveTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn test_registry() -> Arc<std::sync::RwLock<SkillRegistry>> {
         let dir = tempfile::tempdir().unwrap();
@@ -798,6 +1294,23 @@ mod tests {
 
     fn test_catalog() -> Arc<SkillCatalog> {
         Arc::new(SkillCatalog::with_url("http://127.0.0.1:1"))
+    }
+
+    fn skill_content(name: &str, required_skills: &[&str]) -> String {
+        let requires_block = if required_skills.is_empty() {
+            String::new()
+        } else {
+            let skills = required_skills
+                .iter()
+                .map(|skill| format!("    - {}", skill))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("requires:\n  skills:\n{}\n", skills)
+        };
+
+        format!(
+            "---\nname: {name}\ndescription: {name} description\n{requires_block}---\n\n#{name}\n"
+        )
     }
 
     #[test]
@@ -837,8 +1350,70 @@ mod tests {
         );
         let schema = tool.parameters_schema();
         assert!(schema["properties"].get("name").is_some());
+        assert!(schema["properties"].get("slug").is_some());
         assert!(schema["properties"].get("url").is_some());
         assert!(schema["properties"].get("content").is_some());
+    }
+
+    #[test]
+    fn test_find_catalog_slug_for_display_name() {
+        let entries = vec![ironclaw_skills::catalog::CatalogEntry {
+            slug: "finance/mortgage-calculator".to_string(),
+            name: "Mortgage Calculator".to_string(),
+            description: String::new(),
+            version: String::new(),
+            score: 1.0,
+            updated_at: None,
+            stars: None,
+            downloads: None,
+            installs_current: None,
+            owner: None,
+        }];
+
+        assert_eq!(
+            resolve_catalog_slug_for_name("Mortgage Calculator", &entries)
+                .unwrap()
+                .as_deref(),
+            Some("finance/mortgage-calculator")
+        );
+        assert_eq!(
+            resolve_catalog_slug_for_name("mortgage-calculator", &entries)
+                .unwrap()
+                .as_deref(),
+            Some("finance/mortgage-calculator")
+        );
+    }
+
+    #[test]
+    fn test_resolve_catalog_slug_for_display_name_is_ambiguous() {
+        let entries = vec![
+            ironclaw_skills::catalog::CatalogEntry {
+                slug: "alice/mortgage-calculator".to_string(),
+                name: "Mortgage Calculator".to_string(),
+                description: String::new(),
+                version: String::new(),
+                score: 1.0,
+                updated_at: None,
+                stars: None,
+                downloads: None,
+                installs_current: None,
+                owner: None,
+            },
+            ironclaw_skills::catalog::CatalogEntry {
+                slug: "bob/mortgage-calculator".to_string(),
+                name: "Mortgage Calculator".to_string(),
+                description: String::new(),
+                version: String::new(),
+                score: 0.9,
+                updated_at: None,
+                stars: None,
+                downloads: None,
+                installs_current: None,
+                owner: None,
+            },
+        ];
+
+        assert!(resolve_catalog_slug_for_name("Mortgage Calculator", &entries).is_err());
     }
 
     #[test]
@@ -1025,6 +1600,208 @@ mod tests {
 
         let result = super::extract_skill_from_zip(&zip).unwrap();
         assert_eq!(result, "---\nname: stored\n---\n# Stored\n");
+    }
+
+    #[tokio::test]
+    async fn test_chain_install_recurses_into_transitive_skill_dependencies() {
+        let registry = test_registry();
+        let registry_url = "https://clawhub.example";
+
+        let dep_a_url = ironclaw_skills::catalog::skill_download_url(registry_url, "dep-a");
+        let dep_b_url = ironclaw_skills::catalog::skill_download_url(registry_url, "dep-b");
+
+        let responses = Arc::new(HashMap::from([
+            (dep_a_url, skill_content("dep-a", &["dep-b"])),
+            (dep_b_url, skill_content("dep-b", &[])),
+        ]));
+
+        let report = install_missing_skill_dependencies(
+            &registry,
+            registry_url,
+            vec!["dep-a".to_string()],
+            {
+                let responses = Arc::clone(&responses);
+                move |url| {
+                    let responses = Arc::clone(&responses);
+                    async move {
+                        responses
+                            .get(&url)
+                            .cloned()
+                            .ok_or_else(|| SkillFetchError::from_http_status(404, &url))
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            report.installed,
+            vec!["dep-a".to_string(), "dep-b".to_string()]
+        );
+        assert!(report.failed.is_empty());
+        assert!(report.missing.is_empty());
+        assert!(report.skipped.is_empty());
+
+        let guard = registry.read().unwrap();
+        assert!(guard.has("dep-a"));
+        assert!(guard.has("dep-b"));
+    }
+
+    #[tokio::test]
+    async fn test_chain_install_round_trip_picks_up_pending_deps() {
+        // Regression test for PR #1736 review (serrrfirat, 3058525543):
+        // verify that the `install_dependencies=false` → `install_dependencies=true`
+        // two-step flow actually picks up the pending deps on the second
+        // call.
+        //
+        // Setup: a bundle skill `bundle` declaring two companions `dep-a`
+        // and `dep-b`. We install `bundle` itself into the registry first
+        // (simulating the outcome of the first `skill_install` call with
+        // `install_dependencies=false`, where the tool would record
+        // `pending_dependency_install=[dep-a, dep-b]`). We then call
+        // `install_missing_skill_dependencies` with that pending list — the
+        // same code path the second `skill_install(install_dependencies=true)`
+        // would take — and assert the deps are now installed.
+        let registry = test_registry();
+        let registry_url = "https://clawhub.example";
+
+        let (bundle_name, bundle_loaded) = {
+            let content = skill_content("bundle", &["dep-a", "dep-b"]);
+            let dir = registry.read().unwrap().install_target_dir().to_path_buf();
+            SkillRegistry::prepare_install_to_disk(&dir, "bundle", &content)
+                .await
+                .unwrap()
+        };
+        registry
+            .write()
+            .unwrap()
+            .commit_install(&bundle_name, bundle_loaded)
+            .unwrap();
+
+        // After the first "install" the bundle is present but the companions are not.
+        {
+            let guard = registry.read().unwrap();
+            assert!(guard.has("bundle"));
+            assert!(!guard.has("dep-a"));
+            assert!(!guard.has("dep-b"));
+        }
+
+        // Second "install": re-drive with the pending list via the helper
+        // that `SkillInstallTool::execute` uses when `install_dependencies=true`.
+        let dep_a_url = ironclaw_skills::catalog::skill_download_url(registry_url, "dep-a");
+        let dep_b_url = ironclaw_skills::catalog::skill_download_url(registry_url, "dep-b");
+        let responses = Arc::new(HashMap::from([
+            (dep_a_url, skill_content("dep-a", &[])),
+            (dep_b_url, skill_content("dep-b", &[])),
+        ]));
+
+        let report = install_missing_skill_dependencies(
+            &registry,
+            registry_url,
+            vec!["dep-a".to_string(), "dep-b".to_string()],
+            {
+                let responses = Arc::clone(&responses);
+                move |url| {
+                    let responses = Arc::clone(&responses);
+                    async move {
+                        responses
+                            .get(&url)
+                            .cloned()
+                            .ok_or_else(|| SkillFetchError::from_http_status(404, &url))
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            report.installed,
+            vec!["dep-a".to_string(), "dep-b".to_string()]
+        );
+        assert!(report.failed.is_empty());
+        assert!(report.missing.is_empty());
+        assert!(report.skipped.is_empty());
+        assert!(report.pending_explicit_install.is_empty());
+
+        let guard = registry.read().unwrap();
+        assert!(guard.has("bundle"));
+        assert!(guard.has("dep-a"));
+        assert!(guard.has("dep-b"));
+    }
+
+    #[tokio::test]
+    async fn test_chain_install_treats_http_404_as_missing_dependency() {
+        let registry = test_registry();
+        let report = install_missing_skill_dependencies(
+            &registry,
+            "https://clawhub.example",
+            vec!["missing-skill".to_string()],
+            |url| async move { Err(SkillFetchError::from_http_status(404, &url)) },
+        )
+        .await
+        .unwrap();
+
+        assert!(report.installed.is_empty());
+        assert!(report.failed.is_empty());
+        assert_eq!(report.missing, vec!["missing-skill".to_string()]);
+        assert!(report.skipped.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_chain_install_rejects_invalid_dependency_names() {
+        let registry = test_registry();
+        let report = install_missing_skill_dependencies(
+            &registry,
+            "https://clawhub.example",
+            vec!["../../escape".to_string()],
+            |_url| async move { Ok(String::new()) },
+        )
+        .await
+        .unwrap();
+
+        assert!(report.installed.is_empty());
+        assert!(report.missing.is_empty());
+        assert!(report.skipped.is_empty());
+        assert_eq!(
+            report.failed,
+            vec!["../../escape: invalid skill dependency name".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_build_skill_install_output_uses_warning_status_for_partial_failures() {
+        let report = ChainInstallReport {
+            installed: vec!["dep-a".to_string()],
+            failed: vec!["dep-b: network error".to_string()],
+            missing: vec!["dep-c".to_string()],
+            skipped: vec!["dep-d".to_string()],
+            pending_explicit_install: Vec::new(),
+        };
+
+        let output = build_skill_install_output("bundle", &report);
+
+        assert_eq!(output["status"], "installed_with_warnings");
+        assert_eq!(output["chain_installed"], serde_json::json!(["dep-a"]));
+        assert_eq!(output["missing_dependencies"], serde_json::json!(["dep-c"]));
+        assert_eq!(output["skipped_dependencies"], serde_json::json!(["dep-d"]));
+    }
+
+    #[test]
+    fn test_build_skill_install_output_reports_pending_dependency_install() {
+        let report = ChainInstallReport {
+            pending_explicit_install: vec!["dep-a".to_string(), "dep-b".to_string()],
+            ..Default::default()
+        };
+
+        let output = build_skill_install_output("bundle", &report);
+
+        assert_eq!(output["status"], "installed_with_warnings");
+        assert_eq!(
+            output["pending_dependency_install"],
+            serde_json::json!(["dep-a", "dep-b"])
+        );
     }
 
     #[test]

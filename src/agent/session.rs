@@ -147,7 +147,7 @@ pub enum ThreadState {
 /// Pending auth token request.
 ///
 /// Auth mode TTL — must stay in sync with
-/// `crate::cli::oauth_defaults::OAUTH_FLOW_EXPIRY` (5 minutes / 300 s).
+/// `crate::auth::oauth::OAUTH_FLOW_EXPIRY` (5 minutes / 300 s).
 /// Defined separately to avoid a session→cli module dependency.
 const AUTH_MODE_TTL_SECS: i64 = 300;
 const AUTH_MODE_TTL: TimeDelta = TimeDelta::seconds(AUTH_MODE_TTL_SECS);
@@ -169,6 +169,54 @@ impl PendingAuth {
     /// Returns `true` if this auth mode has exceeded the TTL.
     pub fn is_expired(&self) -> bool {
         Utc::now() - self.created_at > AUTH_MODE_TTL
+    }
+}
+
+/// Auth prompt captured during a tool turn and persisted if that turn pauses
+/// for approval before the prompt can be surfaced to the user.
+///
+/// Callers should use [`PendingAuthPrompt::new()`] which trims and validates
+/// that `extension_name` is non-empty. Fields are `pub(crate)` so external
+/// callers cannot bypass the constructor; serde still round-trips them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingAuthPrompt {
+    /// Extension name to authenticate (must be non-empty, trimmed).
+    pub(crate) extension_name: String,
+    /// Optional instructions shown alongside the auth prompt.
+    #[serde(default)]
+    pub(crate) instructions: Option<String>,
+    /// Optional OAuth/browser handoff URL.
+    #[serde(default)]
+    pub(crate) auth_url: Option<String>,
+    /// Optional extension setup URL.
+    #[serde(default)]
+    pub(crate) setup_url: Option<String>,
+    /// Whether the next user message should be intercepted as a token.
+    #[serde(default)]
+    pub(crate) awaiting_token: bool,
+}
+
+impl PendingAuthPrompt {
+    /// Create a new `PendingAuthPrompt`. Trims `extension_name` and returns
+    /// `None` if the trimmed value is empty.
+    pub(crate) fn new(
+        extension_name: String,
+        instructions: Option<String>,
+        auth_url: Option<String>,
+        setup_url: Option<String>,
+        awaiting_token: bool,
+    ) -> Option<Self> {
+        let extension_name = extension_name.trim().to_owned();
+        if extension_name.is_empty() {
+            return None;
+        }
+        Some(Self {
+            extension_name,
+            instructions,
+            auth_url,
+            setup_url,
+            awaiting_token,
+        })
     }
 }
 
@@ -195,6 +243,10 @@ pub struct PendingApproval {
     /// executed yet when approval was requested.
     #[serde(default)]
     pub deferred_tool_calls: Vec<ToolCall>,
+    /// First actionable auth prompt already discovered in this turn. Persisted
+    /// so approval pauses do not drop the prompt before it can be surfaced.
+    #[serde(default)]
+    pub selected_auth_prompt: Option<PendingAuthPrompt>,
     /// User timezone at the time the approval was requested, so it persists
     /// through the approval flow even if the approval message lacks timezone.
     #[serde(default)]
@@ -1313,6 +1365,7 @@ mod tests {
             tool_call_id: "call_123".to_string(),
             context_messages: vec![ChatMessage::user("do it")],
             deferred_tool_calls: vec![],
+            selected_auth_prompt: None,
             user_timezone: None,
             allow_always: false,
         };
@@ -1340,6 +1393,7 @@ mod tests {
             tool_call_id: "call_456".to_string(),
             context_messages: vec![],
             deferred_tool_calls: vec![],
+            selected_auth_prompt: None,
             user_timezone: None,
             allow_always: true,
         };
@@ -1978,6 +2032,7 @@ mod tests {
             tool_call_id: "call_1".to_string(),
             context_messages: vec![],
             deferred_tool_calls: vec![],
+            selected_auth_prompt: None,
             user_timezone: None,
             allow_always: true,
         });

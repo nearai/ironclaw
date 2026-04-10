@@ -367,6 +367,13 @@ pub struct CredentialMappingSchema {
     /// Host patterns this credential applies to.
     #[serde(default)]
     pub host_patterns: Vec<String>,
+
+    /// When `true`, the host may run the tool without resolving this
+    /// credential (graceful degradation). Defaults to `false` (required) so
+    /// a tool that simply declares a credential cannot be silently
+    /// downgraded to an unauthenticated request.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 impl CredentialMappingSchema {
@@ -376,6 +383,7 @@ impl CredentialMappingSchema {
             location: self.location.to_credential_location(),
             host_patterns: self.host_patterns.clone(),
             path_patterns: Vec::new(),
+            optional: self.optional,
         }
     }
 }
@@ -651,6 +659,13 @@ pub struct OAuthConfigSchema {
     /// Additional parameters to include in the authorization URL.
     #[serde(default)]
     pub extra_params: std::collections::HashMap<String, String>,
+
+    /// Optional guidance shown alongside the auth URL while the OAuth flow is pending.
+    ///
+    /// Use this for provider-specific recovery instructions such as alternate
+    /// client setup, consent quirks, or hosted deployment notes.
+    #[serde(default)]
+    pub pending_instructions: Option<String>,
 
     /// Field name in token response containing the access token.
     /// Defaults to "access_token".

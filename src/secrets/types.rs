@@ -227,6 +227,13 @@ pub struct CredentialMapping {
     /// must start with one of these prefixes for the credential to be injected.
     #[serde(default)]
     pub path_patterns: Vec<String>,
+    /// When `true`, the tool may run without this credential — the host
+    /// is allowed to skip the mapping if the secret cannot be resolved.
+    /// **Defaults to `false` (required)** so a tool that simply declares
+    /// a credential without explicitly opting into "optional" cannot be
+    /// silently downgraded to an unauthenticated request.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 impl CredentialMapping {
@@ -253,6 +260,7 @@ impl CredentialMapping {
             location: CredentialLocation::AuthorizationBearer,
             host_patterns: vec![host_pattern.into()],
             path_patterns: Vec::new(),
+            optional: false,
         }
     }
 
@@ -269,6 +277,7 @@ impl CredentialMapping {
             },
             host_patterns: vec![host_pattern.into()],
             path_patterns: Vec::new(),
+            optional: false,
         }
     }
 }

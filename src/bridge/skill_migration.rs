@@ -113,6 +113,7 @@ fn v1_skill_to_memory_doc(skill: &LoadedSkill, project_id: ProjectId) -> MemoryD
         revisions: vec![],
         repairs: vec![],
         content_hash: skill.content_hash.clone(),
+        terminal_actions: skill.manifest.terminal_actions.clone(),
     };
 
     let mut doc = MemoryDoc::new(
@@ -144,7 +145,8 @@ mod tests {
                     ..Default::default()
                 },
                 credentials: vec![],
-                metadata: None,
+                terminal_actions: vec![],
+                requires: ironclaw_skills::GatingRequirements::default(),
             },
             prompt_content: content.to_string(),
             trust: SkillTrust::Trusted,

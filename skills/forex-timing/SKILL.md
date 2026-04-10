@@ -25,11 +25,16 @@ activation:
     - "(?i)analyze.*transfer"
     - "(?i)validate.*rate"
     - "(?i)(hit rate|probability|cone|volatility).*forex"
+    - "(?i)(monitor|alert|check).*rate.*mission"
+    - "(?i)rate.*exceed|threshold"
   tags:
     - finance
     - trading
     - forex
   max_context_tokens: 1500
+terminal_actions:
+  - validate_transfer_target
+  - abound_send_wire
 credentials:
   - name: massive_api_key
     provider: massive
@@ -48,12 +53,22 @@ Use the built-in forex tools for USD/INR transfer analysis. Do NOT write Python 
 
 - **`analyze_transfer`** — Recommend whether to transfer USD→INR now or wait. Uses volatility regime, RSI(14), and DXY momentum. Returns a message, hit rate, target rate, and 3-day projection cone. Param: `amount` (optional, USD).
 - **`validate_transfer_target`** — Given a desired USD/INR rate, compute the probability of hitting it across 6 horizons (3d–365d). Param: `target_rate` (required).
+- **`abound_send_wire`** — Three-action wire transfer:
+  - Phase 1 (with params): runs timing analysis, returns `transfer_token` + analysis.
+  - `action='send'` (with `transfer_token`): executes the wire.
+  - `action='wait'` (with `transfer_token`): creates an hourly rate monitoring mission that alerts when the target rate is reached.
+  Do NOT call `analyze_transfer` separately — it's built into phase 1.
 - **`forex_historical_data`** — Fetch OHLCV bars for any currency pair. Params: `from_currency`, `to_currency`, `start_date`, `end_date` (optional).
 
 ## When to Use
 
-- User asks "should I send now?" or "is this a good time?" → call `analyze_transfer`
+**CRITICAL: If the user wants to SEND money, always use `abound_send_wire` — NEVER call `analyze_transfer` directly for send/transfer/wire requests.** `abound_send_wire` runs the timing analysis internally.
+
+- User asks "should I send now?" or "is this a good time?" (analysis only, no transfer) → call `analyze_transfer`
 - User asks "can I get 86 INR per dollar?" or names a target rate → call `validate_transfer_target`
+- User wants to send/transfer/wire money → call `abound_send_wire` (NOT `analyze_transfer`)
+- User says "send now" / confirms after seeing analysis → call `abound_send_wire(transfer_token=<token>, action="send")`
+- User says "wait" / declines → call `abound_send_wire(transfer_token=<token>, action="wait")` — this automatically creates an hourly rate monitoring mission using the target rate from the analysis. Present the tool's response message to the user.
 - User asks for historical data or charts → call `forex_historical_data`
 
 ## Presenting Results
@@ -75,8 +90,21 @@ Both `analyze_transfer` and `validate_transfer_target` return `{"message": "..."
 - Present the horizon table (which horizons have reasonable probability)
 - Highlight the recommended horizon if one exists
 
+## Missions & Recurring Monitoring
+
+When the user wants to **monitor exchange rates** or get alerts on rate thresholds, create a mission with `mission_create` and set the goal to use `abound_rate_alert`:
+
+- **`abound_rate_alert`** — Atomic check-and-notify tool. Fetches the current rate, compares against a threshold, and sends a notification if exceeded. All in one call — no parsing needed.
+  Params: `threshold` (required), `from_currency` (default USD), `to_currency` (default INR), `message_id` (default rate_alert).
+
+Example mission goal for rate monitoring:
+> "Call abound_rate_alert(threshold=90) each run. Report the result via FINAL()."
+
+**CRITICAL: For mission threads that monitor rates, always use `abound_rate_alert` — never chain `abound_exchange_rate` + `abound_create_notification` manually.** The single tool is deterministic and avoids parsing errors.
+
 ## Rules
 
+- **Never call `analyze_transfer` before `abound_send_wire`** — the analysis is built into `abound_send_wire` and runs automatically. Calling both wastes a step and breaks the flow.
 - `analyze_transfer` and `validate_transfer_target` are USD/INR only. Don't use them for other pairs.
 - `forex_historical_data` works for any Massive-supported pair.
 - Always uppercase currency codes (USD, INR, not usd, inr).

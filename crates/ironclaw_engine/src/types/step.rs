@@ -109,10 +109,16 @@ pub enum LlmResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionCall {
     /// Unique call identifier (echoed in the result).
+    ///
+    /// Alias "call_id" matches the Python orchestrator's working_messages format,
+    /// where `__llm_complete__` returns calls as `{call_id, name, params}`.
+    #[serde(alias = "call_id")]
     pub id: String,
     /// Action name (e.g. "web_fetch", "create_issue").
+    #[serde(alias = "name")]
     pub action_name: String,
     /// Action parameters as JSON.
+    #[serde(alias = "params")]
     pub parameters: serde_json::Value,
 }
 

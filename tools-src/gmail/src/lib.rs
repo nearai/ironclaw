@@ -50,61 +50,10 @@ impl exports::near::agent::tool::Guest for GmailTool {
     }
 
     fn schema() -> String {
-        r#"{
-            "type": "object",
-            "required": ["action"],
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["list_messages", "get_message", "send_message", "create_draft", "reply_to_message", "trash_message"],
-                    "description": "The Gmail operation to perform"
-                },
-                "query": {
-                    "type": "string",
-                    "description": "Gmail search query (same syntax as Gmail search box, e.g., 'is:unread', 'from:alice@example.com'). Used by: list_messages"
-                },
-                "max_results": {
-                    "type": "integer",
-                    "description": "Maximum number of messages to return (default: 20). Used by: list_messages",
-                    "default": 20
-                },
-                "label_ids": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Label IDs to filter by (e.g., 'INBOX', 'SENT', 'DRAFT'). Used by: list_messages"
-                },
-                "message_id": {
-                    "type": "string",
-                    "description": "Message ID. Required for: get_message, reply_to_message, trash_message"
-                },
-                "to": {
-                    "type": "string",
-                    "description": "Recipient email address(es), comma-separated. Required for: send_message, create_draft"
-                },
-                "subject": {
-                    "type": "string",
-                    "description": "Email subject. Required for: send_message, create_draft"
-                },
-                "body": {
-                    "type": "string",
-                    "description": "Email body (plain text). Required for: send_message, create_draft, reply_to_message"
-                },
-                "cc": {
-                    "type": "string",
-                    "description": "CC recipients, comma-separated. Used by: send_message, create_draft"
-                },
-                "bcc": {
-                    "type": "string",
-                    "description": "BCC recipients, comma-separated. Used by: send_message, create_draft"
-                },
-                "reply_all": {
-                    "type": "boolean",
-                    "description": "If true, reply to all recipients (default: false). Used by: reply_to_message",
-                    "default": false
-                }
-            }
-        }"#
-        .to_string()
+        // Derived from `GmailAction` via `schemars::JsonSchema` so the
+        // advertised schema can never drift from the serde contract.
+        let schema = schemars::schema_for!(types::GmailAction);
+        serde_json::to_string(&schema).expect("schema serialization is infallible")
     }
 
     fn description() -> String {
