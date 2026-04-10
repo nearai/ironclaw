@@ -1061,16 +1061,9 @@ impl WasmToolWrapper {
         };
 
         // Call execute using the generated typed interface
-        let response = tool_iface.call_execute(&mut store, &request).map_err(|e| {
-            let error_str = e.to_string();
-            if error_str.contains("out of fuel") {
-                WasmError::FuelExhausted { limit: limits.fuel }
-            } else if error_str.contains("unreachable") {
-                WasmError::Trapped("unreachable code executed".to_string())
-            } else {
-                WasmError::Trapped(error_str)
-            }
-        })?;
+        let response = tool_iface
+            .call_execute(&mut store, &request)
+            .map_err(|e| classify_trap_error(e, limits))?;
 
         // Get logs from host state
         let logs = store.data_mut().host_state.take_logs();
@@ -1085,6 +1078,33 @@ impl WasmToolWrapper {
         // Return result (or empty string if none)
         Ok((response.output.unwrap_or_default(), logs))
     }
+}
+
+/// Classify a wasmtime execution error into the appropriate `WasmError` variant.
+///
+/// Prefers structured `Trap` downcast (version-proof) over string matching.
+/// Falls back to string matching for forward-compat with future trap kinds.
+/// Includes the full error chain so a single log line is enough to diagnose.
+fn classify_trap_error(error: anyhow::Error, limits: &ResourceLimits) -> WasmError {
+    // Try structured downcast first (avoids string-matching drift across wasmtime versions)
+    if let Some(trap) = error.downcast_ref::<wasmtime::Trap>() {
+        return match trap {
+            wasmtime::Trap::OutOfFuel => WasmError::FuelExhausted { limit: limits.fuel },
+            wasmtime::Trap::StackOverflow => WasmError::Trapped(
+                "stack overflow: the tool's call stack exceeded the WASM stack limit. \
+                 This often happens when parsing very large JSON responses."
+                    .to_string(),
+            ),
+            wasmtime::Trap::UnreachableCodeReached => {
+                WasmError::Trapped("unreachable code executed".to_string())
+            }
+            // Everything else: include trap kind + full chain for diagnosis
+            other => WasmError::Trapped(format!("{other}: {error:#}")),
+        };
+    }
+
+    // No Trap downcast (host error, component-model glue, etc.): full chain
+    WasmError::Trapped(format!("{error:#}"))
 }
 
 /// Extract metadata (description + schema) from a WASM tool by briefly
@@ -3690,6 +3710,65 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("content-length".to_string(), "0".to_string());
         assert!(!super::needs_content_length_zero("POST", &headers));
+    }
+
+    /// Downcast-based classification: real `wasmtime::Trap` variants
+    /// map to the correct `WasmError` without string matching.
+    #[test]
+    fn trap_classification_fuel_via_downcast() {
+        use crate::tools::wasm::error::WasmError;
+        use crate::tools::wasm::limits::ResourceLimits;
+
+        let limits = ResourceLimits::default();
+        let err: anyhow::Error = wasmtime::Trap::OutOfFuel.into();
+        let result = super::classify_trap_error(err, &limits);
+        assert!(
+            matches!(result, WasmError::FuelExhausted { .. }),
+            "OutOfFuel not detected: {result:?}"
+        );
+    }
+
+    #[test]
+    fn trap_classification_stack_overflow_via_downcast() {
+        use crate::tools::wasm::error::WasmError;
+        use crate::tools::wasm::limits::ResourceLimits;
+
+        let limits = ResourceLimits::default();
+        let err: anyhow::Error = wasmtime::Trap::StackOverflow.into();
+        let result = super::classify_trap_error(err, &limits);
+        assert!(
+            matches!(result, WasmError::Trapped(ref s) if s.contains("stack overflow")),
+            "StackOverflow not detected: {result:?}"
+        );
+    }
+
+    #[test]
+    fn trap_classification_unreachable_via_downcast() {
+        use crate::tools::wasm::error::WasmError;
+        use crate::tools::wasm::limits::ResourceLimits;
+
+        let limits = ResourceLimits::default();
+        let err: anyhow::Error = wasmtime::Trap::UnreachableCodeReached.into();
+        let result = super::classify_trap_error(err, &limits);
+        assert!(
+            matches!(result, WasmError::Trapped(ref s) if s.contains("unreachable")),
+            "UnreachableCodeReached not detected: {result:?}"
+        );
+    }
+
+    /// Non-Trap errors (host glue, component model) pass through with full chain.
+    #[test]
+    fn trap_classification_non_trap_preserves_chain() {
+        use crate::tools::wasm::error::WasmError;
+        use crate::tools::wasm::limits::ResourceLimits;
+
+        let limits = ResourceLimits::default();
+        let err = anyhow::anyhow!("component model glue exploded");
+        let result = super::classify_trap_error(err, &limits);
+        assert!(
+            matches!(result, WasmError::Trapped(ref s) if s.contains("component model glue")),
+            "non-trap error lost: {result:?}"
+        );
     }
 
     #[test]

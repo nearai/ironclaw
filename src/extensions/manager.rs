@@ -1898,13 +1898,16 @@ impl ExtensionManager {
                             self.mcp_supports_auth(server).await
                         };
 
-                        // Get tool names if active
+                        // Get tool names if active. Use normalized prefix
+                        // so hyphenated server names match underscore-only
+                        // registry keys.
                         let tools = if active {
+                            let prefix = crate::tools::mcp::mcp_tool_id(&server.name, "");
                             self.tool_registry
                                 .list()
                                 .await
                                 .into_iter()
-                                .filter(|t| t.starts_with(&format!("{}_", server.name)))
+                                .filter(|t| t.starts_with(&prefix))
                                 .collect()
                         } else {
                             Vec::new()
@@ -2141,13 +2144,14 @@ impl ExtensionManager {
                     .collect_secret_cleanup_plan(&name, kind, user_id)
                     .await?;
 
-                // Unregister tools with this server's prefix
+                // Unregister tools with this server's normalized prefix.
+                let prefix = crate::tools::mcp::mcp_tool_id(&name, "");
                 let tool_names: Vec<String> = self
                     .tool_registry
                     .list()
                     .await
                     .into_iter()
-                    .filter(|t| t.starts_with(&format!("{}_", name)))
+                    .filter(|t| t.starts_with(&prefix))
                     .collect();
 
                 for tool_name in &tool_names {
@@ -5120,12 +5124,18 @@ impl ExtensionManager {
             let clients = self.mcp_clients.read().await;
             if clients.contains_key(name) {
                 // Already connected, just return the tool names
+                // Use the same normalization as `mcp_tool_id` for the
+                // prefix filter so hyphenated server names match the
+                // underscore-only keys in the registry. `mcp_tool_id(name, "")`
+                // produces `normalized_server_` which is exactly the prefix
+                // every tool registered by this server starts with.
+                let prefix = crate::tools::mcp::mcp_tool_id(name, "");
                 let tools: Vec<String> = self
                     .tool_registry
                     .list()
                     .await
                     .into_iter()
-                    .filter(|t| t.starts_with(&format!("{}_", name)))
+                    .filter(|t| t.starts_with(&prefix))
                     .collect();
 
                 return Ok(ActivateResult {
