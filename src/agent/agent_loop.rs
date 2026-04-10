@@ -2289,7 +2289,10 @@ mod tests {
 
         // ApprovalResponse should NOT be blocked (falls through to downgrade)
         let blocked = pending_approval.is_none()
-            && matches!(submission_approval_response, Submission::ExecApproval { .. });
+            && matches!(
+                submission_approval_response,
+                Submission::ExecApproval { .. }
+            );
         assert!(
             !blocked,
             "ApprovalResponse with no pending approval must not be early-rejected"
