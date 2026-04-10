@@ -2843,7 +2843,7 @@ mod tests {
         use crate::agent::session::{PendingApproval, Session, Thread};
         use uuid::Uuid;
 
-        let (agent, statuses) = make_thread_ops_test_agent().await;
+        let (agent, statuses) = make_test_agent_with_status_channel("test").await;
         let session_id = Uuid::new_v4();
         let thread_id = Uuid::new_v4();
         let mut thread = Thread::with_id(thread_id, session_id, Some("test"));
@@ -2865,7 +2865,7 @@ mod tests {
 
         let mut sess = Session::new("test-user");
         sess.threads.insert(thread_id, thread);
-        let session = Arc::new(TokioMutex::new(sess));
+        let session = Arc::new(tokio::sync::Mutex::new(sess));
         let message = IncomingMessage::new("test", "test-user", "still waiting?");
 
         let result = agent
@@ -2887,14 +2887,14 @@ mod tests {
             other => panic!("expected pending Ok message, got {other:?}"),
         }
 
-        let statuses = statuses.lock().await.clone();
+        let statuses = statuses.lock().expect("lock").clone();
         assert!(statuses.iter().any(|status| matches!(
             status,
             StatusUpdate::ApprovalNeeded {
                 request_id: status_request_id,
                 tool_name,
                 ..
-            } if status_request_id == &request_id && tool_name == "shell"
+            } if *status_request_id == request_id && tool_name == "shell"
         )));
     }
 
