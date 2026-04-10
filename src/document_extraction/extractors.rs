@@ -70,33 +70,54 @@ pub fn extract_text(data: &[u8], mime: &str, filename: Option<&str>) -> Result<S
 }
 
 /// Read a zip entry into a string with decompressed size limits.
-/// Checks the declared uncompressed size first, then uses `take()` as
-/// defense-in-depth against archives that lie about entry sizes.
+///
+/// Uses the declared header size as a fast pre-check, then tracks **actual
+/// bytes read** for the cumulative budget (ZIP headers can lie about sizes).
+/// The `take()` reader caps any single entry at `MAX_DECOMPRESSED_ENTRY`.
+/// If the reader hits that cap exactly we fail closed — the entry was
+/// truncated, meaning the real size exceeds the limit.
 fn bounded_read_zip_entry(
     file: &mut zip::read::ZipFile<'_>,
     total_decompressed: &mut u64,
 ) -> Result<String, String> {
-    let entry_size = file.size();
-    if entry_size > MAX_DECOMPRESSED_ENTRY {
+    // Fast pre-check using declared header size (untrusted, but cheap reject).
+    let declared_size = file.size();
+    if declared_size > MAX_DECOMPRESSED_ENTRY {
         return Err(format!(
-            "zip entry '{}' decompressed size {} exceeds limit {}",
+            "zip entry '{}' declared size {} exceeds per-entry limit {}",
             file.name(),
-            entry_size,
+            declared_size,
             MAX_DECOMPRESSED_ENTRY,
         ));
     }
-    *total_decompressed += entry_size;
+
+    let entry_name = file.name().to_string();
+    let mut bounded = file.take(MAX_DECOMPRESSED_ENTRY);
+    let mut xml = String::new();
+    bounded
+        .read_to_string(&mut xml)
+        .map_err(|e| format!("failed to read zip entry '{}': {e}", entry_name))?;
+
+    let actual_size = xml.len() as u64;
+
+    // Fail closed: if we read exactly the cap, the entry was truncated and
+    // the real decompressed size exceeds the per-entry limit.
+    if actual_size >= MAX_DECOMPRESSED_ENTRY {
+        return Err(format!(
+            "zip entry '{}' actual decompressed size reached per-entry limit {}",
+            entry_name, MAX_DECOMPRESSED_ENTRY,
+        ));
+    }
+
+    // Track cumulative budget using actual bytes, not header metadata.
+    *total_decompressed += actual_size;
     if *total_decompressed > MAX_DECOMPRESSED_TOTAL {
         return Err(format!(
             "total decompressed size {} exceeds limit {}",
             total_decompressed, MAX_DECOMPRESSED_TOTAL,
         ));
     }
-    let mut bounded = file.take(MAX_DECOMPRESSED_ENTRY);
-    let mut xml = String::new();
-    bounded
-        .read_to_string(&mut xml)
-        .map_err(|e| format!("failed to read zip entry '{}': {e}", file.name()))?;
+
     Ok(xml)
 }
 
@@ -549,46 +570,48 @@ mod tests {
         assert_eq!(strings, vec!["Name", "Age"]);
     }
 
-    /// Regression: bounded_read_zip_entry must reject entries whose declared
-    /// uncompressed size exceeds MAX_DECOMPRESSED_ENTRY, preventing zip bombs
-    /// that pass the compressed-size check but decompress to gigabytes.
+    /// Regression: bounded_read_zip_entry tracks actual bytes read (not header
+    /// metadata) and a small entry should succeed with correct accounting.
     #[test]
-    fn bounded_read_rejects_oversized_declared_entry() {
+    fn bounded_read_tracks_actual_bytes() {
         use std::io::{Cursor, Write};
-        // Create a minimal ZIP with a single entry
+        let content = b"<root>hello</root>";
         let buf = Vec::new();
         let cursor = Cursor::new(buf);
         let mut writer = zip::ZipWriter::new(cursor);
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored);
         writer.start_file("test.xml", options).unwrap();
-        writer.write_all(b"<root>hello</root>").unwrap();
+        writer.write_all(content).unwrap();
         let cursor = writer.finish().unwrap();
         let data = cursor.into_inner();
 
-        // The small entry should succeed
         let read_cursor = Cursor::new(&data);
         let mut archive = zip::ZipArchive::new(read_cursor).unwrap();
         let mut total: u64 = 0;
         let mut file = archive.by_index(0).unwrap();
         let result = bounded_read_zip_entry(&mut file, &mut total);
         assert!(result.is_ok(), "small entry should be readable");
-        assert_eq!(total, file.size());
+        // Total must reflect actual content length, not header-declared size.
+        assert_eq!(total, content.len() as u64);
     }
 
-    /// Regression: total decompressed tracking must accumulate across entries.
+    /// Regression: total decompressed tracking must accumulate actual bytes
+    /// across entries and equal the sum of real content sizes.
     #[test]
-    fn bounded_read_tracks_total_decompressed() {
+    fn bounded_read_accumulates_actual_bytes_across_entries() {
         use std::io::{Cursor, Write};
+        let content_a = b"<a>data</a>";
+        let content_b = b"<b>more data here</b>";
         let buf = Vec::new();
         let cursor = Cursor::new(buf);
         let mut writer = zip::ZipWriter::new(cursor);
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored);
         writer.start_file("a.xml", options).unwrap();
-        writer.write_all(b"<a/>").unwrap();
+        writer.write_all(content_a).unwrap();
         writer.start_file("b.xml", options).unwrap();
-        writer.write_all(b"<b/>").unwrap();
+        writer.write_all(content_b).unwrap();
         let cursor = writer.finish().unwrap();
         let data = cursor.into_inner();
 
@@ -600,6 +623,37 @@ mod tests {
         drop(f0);
         let mut f1 = archive.by_index(1).unwrap();
         bounded_read_zip_entry(&mut f1, &mut total).unwrap();
-        assert!(total > 0, "total should accumulate across entries");
+        let expected = (content_a.len() + content_b.len()) as u64;
+        assert_eq!(total, expected, "total must equal sum of actual content sizes");
+    }
+
+    /// Regression: bounded_read_zip_entry must reject when cumulative
+    /// decompressed bytes exceed MAX_DECOMPRESSED_TOTAL, even for small entries.
+    #[test]
+    fn bounded_read_rejects_when_total_budget_exhausted() {
+        use std::io::{Cursor, Write};
+        let buf = Vec::new();
+        let cursor = Cursor::new(buf);
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("small.xml", options).unwrap();
+        writer.write_all(b"<x/>").unwrap();
+        let cursor = writer.finish().unwrap();
+        let data = cursor.into_inner();
+
+        let read_cursor = Cursor::new(&data);
+        let mut archive = zip::ZipArchive::new(read_cursor).unwrap();
+        // Pre-fill the budget to just below the limit so even a tiny entry
+        // pushes it over.
+        let mut total: u64 = MAX_DECOMPRESSED_TOTAL - 1;
+        let mut file = archive.by_index(0).unwrap();
+        let result = bounded_read_zip_entry(&mut file, &mut total);
+        assert!(result.is_err(), "should reject when total budget is exceeded");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("total decompressed size"),
+            "error should mention total limit, got: {err}"
+        );
     }
 }
