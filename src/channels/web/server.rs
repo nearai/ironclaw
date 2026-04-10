@@ -1422,7 +1422,6 @@ async fn theme_init_handler() -> impl IntoResponse {
     )
 }
 
-
 async fn favicon_handler() -> impl IntoResponse {
     (
         [
