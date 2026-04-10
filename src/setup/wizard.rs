@@ -1074,6 +1074,8 @@ impl SetupWizard {
         {
             if let Ok(url) = std::env::var("DATABASE_URL") {
                 print_info("Using existing PostgreSQL configuration");
+                self.test_database_connection_postgres(&url).await?;
+                self.run_migrations_postgres().await?;
                 self.settings.database_backend = Some("postgres".to_string());
                 self.settings.database_url = Some(url);
                 return Ok(());
@@ -1085,6 +1087,8 @@ impl SetupWizard {
         #[cfg(feature = "postgres")]
         if let Ok(url) = std::env::var("DATABASE_URL") {
             print_info("Using existing PostgreSQL configuration");
+            self.test_database_connection_postgres(&url).await?;
+            self.run_migrations_postgres().await?;
             self.settings.database_backend = Some("postgres".to_string());
             self.settings.database_url = Some(url);
             return Ok(());
@@ -4513,5 +4517,36 @@ mod tests {
             config.nearai.base_url, "https://cloud-api.near.ai",
             "API key auth must use cloud-api base URL"
         );
+    }
+
+    /// Regression test for #846: auto_setup_database must establish a DB
+    /// connection and run migrations so that persist_settings succeeds.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_auto_setup_database_runs_migrations_with_existing_env() {
+        let _lock = lock_env();
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let _backend_guard = EnvGuard::set("DATABASE_BACKEND", "libsql");
+        let _path_guard = EnvGuard::set("LIBSQL_PATH", db_path.to_str().unwrap());
+        // Ensure no postgres env interferes
+        let _pg_guard = EnvGuard::clear("DATABASE_URL");
+
+        let mut wizard = SetupWizard::new();
+        wizard.config.quick = true;
+
+        wizard.auto_setup_database().await.unwrap();
+
+        // The wizard must have a live DB backend after auto_setup_database
+        assert!(
+            wizard.db_backend.is_some(),
+            "auto_setup_database must establish db_backend"
+        );
+
+        // persist_settings must succeed (proves migrations ran)
+        let saved = wizard.persist_settings().await.unwrap();
+        assert!(saved, "persist_settings must save to the database");
     }
 }
