@@ -337,20 +337,56 @@ fn merge_top_level_variant_properties(schema: &JsonValue) -> serde_json::Map<Str
     merged
 }
 
-/// Cheaply estimate the number of nodes in a `serde_json::Value` tree.
+/// Serialize a `serde_json::Value` into a string, stopping after `max_bytes`.
 ///
-/// Used by `flatten_top_level` to gate the `serde_json::to_string` call:
-/// serializing a many-MB schema (from a malicious or extremely verbose MCP
-/// server) would allocate proportionally even though we only keep 1500 bytes
-/// of the output. This recursive walk counts every leaf and container node
-/// and returns early once it exceeds the caller's budget (no full traversal
-/// needed for the rejection case).
-fn count_json_nodes(value: &JsonValue) -> usize {
-    match value {
-        JsonValue::Array(arr) => 1 + arr.iter().map(count_json_nodes).sum::<usize>(),
-        JsonValue::Object(map) => 1 + map.values().map(count_json_nodes).sum::<usize>(),
-        _ => 1,
+/// Returns `Ok(s)` where `s.len() <= max_bytes` (truncated on a char
+/// boundary if the serialized output exceeds the budget), or `Err(())` if
+/// serialization itself fails (shouldn't happen for well-formed `Value`s).
+///
+/// This bounds the actual heap allocation regardless of schema structure —
+/// it handles both many-node schemas (deep recursion) AND few-node schemas
+/// with multi-MB string values (the gap the previous `count_json_nodes`
+/// approach missed). The writer stops accepting bytes once the budget is
+/// reached, so the serde serializer does minimal work after that point.
+fn serialize_json_capped(value: &JsonValue, max_bytes: usize) -> Result<String, ()> {
+    use std::io::Write;
+
+    struct CappedWriter {
+        buf: Vec<u8>,
+        max: usize,
     }
+
+    impl Write for CappedWriter {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            let remaining = self.max.saturating_sub(self.buf.len());
+            if remaining == 0 {
+                // Accept the bytes (don't error) but don't store them.
+                // serde_json doesn't check for short writes so returning
+                // Ok(data.len()) is safe — it just thinks we consumed them.
+                return Ok(data.len());
+            }
+            let to_write = data.len().min(remaining);
+            self.buf.extend_from_slice(&data[..to_write]);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    // Allocate slightly over max to reduce the chance of a realloc on
+    // the last write when we're right at the boundary.
+    let writer = CappedWriter {
+        buf: Vec::with_capacity(max_bytes.min(8192)),
+        max: max_bytes,
+    };
+    let mut ser = serde_json::Serializer::new(writer);
+    serde::Serialize::serialize(value, &mut ser).map_err(|_| ())?;
+    let buf = ser.into_inner().buf;
+    // The buffer is guaranteed to be valid UTF-8 because serde_json only
+    // emits ASCII structural characters and JSON-escaped unicode.
+    String::from_utf8(buf).map_err(|_| ())
 }
 
 /// Replace `parameters` with a permissive object envelope and append the
@@ -371,39 +407,25 @@ fn flatten_top_level(parameters: &mut JsonValue, description: &mut String) {
     // typical MCP dispatcher schema and still leaves room for the original
     // tool description above it.
     const SCHEMA_HINT_MAX_BYTES: usize = 1500;
-    // Defense against malicious MCP servers: cap how large a schema we're
-    // willing to serialize into a string. `serde_json::to_string` allocates
-    // the full output before we can truncate, so a many-MB schema would
-    // cause a proportional allocation even though we only keep 1500 bytes.
-    // We estimate the node count first (cheap recursive walk, no alloc) and
-    // skip the serialization entirely if it's too large.
-    const MAX_SCHEMA_NODES: usize = 5_000;
 
     let detected = detect_forbidden_top_level(parameters);
     let merged_properties = merge_top_level_variant_properties(parameters);
 
-    let node_count = count_json_nodes(parameters);
-    if node_count <= MAX_SCHEMA_NODES {
-        if let Ok(original_text) = serde_json::to_string(parameters)
-            && !original_text.is_empty()
-        {
-            let hint = if original_text.len() > SCHEMA_HINT_MAX_BYTES {
-                let mut end = SCHEMA_HINT_MAX_BYTES;
-                while end > 0 && !original_text.is_char_boundary(end) {
-                    end -= 1;
-                }
-                format!("{} ... (truncated)", &original_text[..end])
-            } else {
-                original_text
-            };
-            description.push_str(schema_flatten_hint_intro(detected));
-            description.push_str(&hint);
-        }
-    } else {
+    // Size-capped serialization: bounds the heap allocation to
+    // SCHEMA_HINT_MAX_BYTES regardless of schema structure. Handles both
+    // many-node schemas (deep recursion) and few-node schemas with multi-MB
+    // string values. The writer silently discards bytes past the cap so the
+    // serde serializer does minimal useful work after that point.
+    if let Ok(capped_text) = serialize_json_capped(parameters, SCHEMA_HINT_MAX_BYTES)
+        && !capped_text.is_empty()
+    {
+        let hint = if capped_text.len() >= SCHEMA_HINT_MAX_BYTES {
+            format!("{capped_text} ... (truncated)")
+        } else {
+            capped_text
+        };
         description.push_str(schema_flatten_hint_intro(detected));
-        description.push_str(&format!(
-            "(schema too large to inline: ~{node_count} nodes. See upstream MCP server for the full schema.)"
-        ));
+        description.push_str(&hint);
     }
 
     *parameters = serde_json::json!({
