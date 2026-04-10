@@ -843,7 +843,10 @@ async fn resolve_message_scope_with_pairing(
         return (owner_scope_id.to_string(), true);
     }
 
-    match pairing_store.resolve_identity(channel_name, sender_id).await {
+    match pairing_store
+        .resolve_identity(channel_name, sender_id)
+        .await
+    {
         Ok(Some(identity)) => (identity.owner_id.to_string(), false),
         Ok(None) => (sender_id.to_string(), false),
         Err(error) => {
@@ -860,6 +863,17 @@ async fn resolve_message_scope_with_pairing(
 
 fn uses_owner_broadcast_target(user_id: &str, owner_scope_id: &str) -> bool {
     user_id == owner_scope_id
+}
+
+fn should_update_owner_broadcast_metadata(
+    user_id: &str,
+    sender_id: &str,
+    owner_scope_id: &str,
+    owner_actor_id: Option<&str>,
+) -> bool {
+    owner_actor_id.map_or(user_id == owner_scope_id, |owner_actor_id| {
+        sender_id == owner_actor_id
+    })
 }
 
 fn missing_routing_target_error(name: &str, reason: String) -> ChannelError {
@@ -3050,7 +3064,12 @@ impl Channel for WasmChannel {
         let metadata_json = serde_json::to_string(&msg.metadata).unwrap_or_default();
         // Store for owner-target routing (chat_id etc.) only when the configured
         // owner is the actor in this conversation.
-        if msg.user_id == self.owner_scope_id {
+        if should_update_owner_broadcast_metadata(
+            &msg.user_id,
+            &msg.sender_id,
+            &self.owner_scope_id,
+            self.owner_actor_id.as_deref(),
+        ) {
             self.update_broadcast_metadata(&metadata_json).await;
         }
         self.call_on_respond(
@@ -4140,6 +4159,7 @@ fn parse_test_http_rewrite_map(raw: &str) -> HashMap<String, String> {
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 fn rewrite_telegram_api_url_for_testing(url: &str) -> Option<String> {
     let override_base = std::env::var(TELEGRAM_TEST_API_BASE_ENV)
         .ok()
@@ -4163,6 +4183,11 @@ fn rewrite_telegram_api_url_for_testing(url: &str) -> Option<String> {
         rewritten.push_str(query);
     }
     Some(rewritten)
+}
+
+#[cfg(not(any(test, debug_assertions)))]
+fn rewrite_telegram_api_url_for_testing(_url: &str) -> Option<String> {
+    None
 }
 fn should_skip_response_leak_scan(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|parsed| {
@@ -5220,6 +5245,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_respond_paired_guest_does_not_overwrite_owner_broadcast_metadata() {
+        use crate::channels::IncomingMessage;
+
+        let channel = create_test_channel_with_owner_scope("owner-scope")
+            .with_owner_actor_id(Some("telegram-owner".to_string()));
+        let _stream = channel.start().await.expect("Channel should start");
+
+        *channel.last_broadcast_metadata.write().await = Some(r#"{"chat_id":12345}"#.to_string());
+
+        let msg = IncomingMessage::new("test", "owner-scope", "hello from guest")
+            .with_sender_id("guest-77")
+            .with_metadata(serde_json::json!({"chat_id": 777}));
+
+        channel
+            .respond(&msg, crate::channels::OutgoingResponse::text("response"))
+            .await
+            .expect("respond should succeed");
+
+        let stored_metadata = channel.last_broadcast_metadata.read().await.clone();
+        assert_eq!(stored_metadata.as_deref(), Some(r#"{"chat_id":12345}"#));
+
+        channel.shutdown().await.expect("Shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_respond_owner_actor_updates_owner_broadcast_metadata() {
+        use crate::channels::IncomingMessage;
+
+        let channel = create_test_channel_with_owner_scope("owner-scope")
+            .with_owner_actor_id(Some("telegram-owner".to_string()));
+        let _stream = channel.start().await.expect("Channel should start");
+
+        let msg = IncomingMessage::new("test", "owner-scope", "hello from owner")
+            .with_sender_id("telegram-owner")
+            .with_metadata(serde_json::json!({"chat_id": 12345}));
+
+        channel
+            .respond(&msg, crate::channels::OutgoingResponse::text("response"))
+            .await
+            .expect("respond should succeed");
+
+        let stored_metadata = channel.last_broadcast_metadata.read().await.clone();
+        assert_eq!(stored_metadata.as_deref(), Some(r#"{"chat_id":12345}"#));
+
+        channel.shutdown().await.expect("Shutdown should succeed");
+    }
+
+    #[tokio::test]
     async fn test_stream_chunk_is_noop() {
         let channel = create_test_channel();
         let _stream = channel.start().await.expect("Channel should start");
@@ -5921,7 +5994,10 @@ mod tests {
             Some(1_000),
         );
 
-        assert!(result.is_err(), "test rewrite should still attempt the request");
+        assert!(
+            result.is_err(),
+            "test rewrite should still attempt the request"
+        );
         assert!(
             !result.unwrap_err().contains("private/internal IP"),
             "test rewrite should bypass private IP guard"
