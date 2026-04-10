@@ -35,6 +35,7 @@ COPY channels-src/ channels-src/
 COPY tools-src/ tools-src/
 COPY wit/ wit/
 COPY providers.json providers.json
+COPY profiles/ profiles/
 
 RUN cargo chef prepare --recipe-path recipe.json
 
@@ -63,6 +64,7 @@ COPY channels-src/ channels-src/
 COPY tools-src/ tools-src/
 COPY wit/ wit/
 COPY providers.json providers.json
+COPY profiles/ profiles/
 
 RUN cargo build --profile dist --bin ironclaw
 
