@@ -140,7 +140,9 @@ impl DockerTransport {
         if guard.is_none() {
             **guard = Some(self.open_session().await?);
         }
-        Ok(guard.as_mut().expect("just inserted"))
+        guard.as_mut().ok_or_else(|| MountError::Backend {
+            reason: "session disappeared immediately after creation".into(),
+        })
     }
 }
 
