@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::channels::web::auth::{AdminUser, AuthenticatedUser};
 use crate::channels::web::server::GatewayState;
 use crate::db::{Database, UserRecord};
+use crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
 
 /// Check whether `user_id` is the sole active admin. Returns true if demoting,
 /// suspending, or deleting this user would leave zero admins.
@@ -67,6 +68,12 @@ pub async fn users_create_handler(
     }
 
     let user_id = Uuid::new_v4().to_string();
+    if user_id == ADMIN_SETTINGS_USER_ID {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Generated user id collided with reserved admin settings scope".to_string(),
+        ));
+    }
 
     let now = chrono::Utc::now();
     let user_record = UserRecord {

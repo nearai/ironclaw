@@ -124,7 +124,8 @@ fn turn_usage_from_result(result: &Result<AgenticLoopResult, Error>) -> Option<&
     match result {
         Ok(AgenticLoopResult::Response { turn_usage, .. })
         | Ok(AgenticLoopResult::NeedApproval { turn_usage, .. })
-        | Ok(AgenticLoopResult::Failed { turn_usage, .. }) => Some(turn_usage),
+        | Ok(AgenticLoopResult::Failed { turn_usage, .. })
+        | Ok(AgenticLoopResult::AuthPending { turn_usage, .. }) => Some(turn_usage),
         Err(_) => None,
     }
 }
@@ -758,6 +759,38 @@ impl Agent {
                     parameters,
                     allow_always,
                 })
+            }
+            Ok(AgenticLoopResult::AuthPending {
+                instructions,
+                turn_usage,
+            }) => {
+                // Auth-required status already sent by the dispatcher.
+                // Persist the turn to DB (like Response) but suppress the text SSE event.
+                thread.complete_turn(&instructions);
+                let (turn_number, tool_calls, narrative) = thread
+                    .turns
+                    .last()
+                    .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
+                    .unwrap_or_default();
+                self.persist_tool_calls(
+                    thread_id,
+                    &message.channel,
+                    &message.user_id,
+                    turn_number,
+                    &tool_calls,
+                    narrative.as_deref(),
+                )
+                .await;
+                self.persist_assistant_response(
+                    thread_id,
+                    &message.channel,
+                    &message.user_id,
+                    &instructions,
+                )
+                .await;
+                self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
+                    .await;
+                Ok(SubmissionResult::auth_pending())
             }
             Ok(AgenticLoopResult::Failed { error, turn_usage }) => {
                 self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
@@ -1674,7 +1707,7 @@ impl Agent {
                         &auth_data,
                     )
                     .await;
-                    return Ok(SubmissionResult::response(instructions));
+                    return Ok(SubmissionResult::auth_pending());
                 }
 
                 emit_auth_required_status(
@@ -1783,6 +1816,36 @@ impl Agent {
                         parameters,
                         allow_always,
                     })
+                }
+                Ok(AgenticLoopResult::AuthPending {
+                    instructions,
+                    turn_usage,
+                }) => {
+                    thread.complete_turn(&instructions);
+                    let (turn_number, tool_calls, narrative) = thread
+                        .turns
+                        .last()
+                        .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
+                        .unwrap_or_default();
+                    self.persist_tool_calls(
+                        thread_id,
+                        &message.channel,
+                        &message.user_id,
+                        turn_number,
+                        &tool_calls,
+                        narrative.as_deref(),
+                    )
+                    .await;
+                    self.persist_assistant_response(
+                        thread_id,
+                        &message.channel,
+                        &message.user_id,
+                        &instructions,
+                    )
+                    .await;
+                    self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
+                        .await;
+                    Ok(SubmissionResult::auth_pending())
                 }
                 Ok(AgenticLoopResult::Failed { error, turn_usage }) => {
                     self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
