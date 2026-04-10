@@ -1450,7 +1450,7 @@ fn oauth_base_url(host: &str, port: u16) -> String {
     let trimmed = host.trim_start_matches('[').trim_end_matches(']');
     let is_unspecified = trimmed
         .parse::<std::net::IpAddr>()
-        .map_or(false, |ip| ip.is_unspecified());
+        .is_ok_and(|ip| ip.is_unspecified());
     if is_unspecified {
         format!("http://localhost:{}", port)
     } else {
