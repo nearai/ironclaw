@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::RwLock;
-use wasmtime::{Config, Engine, OptLevel};
+use wasmtime::{Cache, Config, Engine, OptLevel};
 
 use crate::tools::wasm::error::WasmError;
 use crate::tools::wasm::limits::{FuelConfig, ResourceLimits};
@@ -60,11 +60,11 @@ pub fn enable_compilation_cache(
                 .replace('"', "\\\"");
             let toml_content = format!("[cache]\nenabled = true\ndirectory = \"{}\"\n", escaped);
             std::fs::write(&toml_path, toml_content)?;
-            wasmtime_config.cache_config_load(&toml_path)?;
+            wasmtime_config.cache(Some(Cache::from_file(Some(&toml_path))?));
             Ok(())
         }
         None => {
-            wasmtime_config.cache_config_load_default()?;
+            wasmtime_config.cache(Some(Cache::from_file(None)?));
             Ok(())
         }
     }
