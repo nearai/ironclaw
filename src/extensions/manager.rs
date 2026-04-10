@@ -7652,6 +7652,12 @@ mod tests {
     use async_trait::async_trait;
     use futures::stream;
 
+    /// Async mutex for tests that need exclusive `IRONCLAW_OAUTH_CALLBACK_URL`
+    /// access across `.await` boundaries.  Unlike `lock_env()` (`std::sync::Mutex`),
+    /// this is safe to hold across `.await` and cannot deadlock the tokio runtime
+    /// or block unrelated tests that also use `lock_env()`.
+    static OAUTH_CALLBACK_ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     use crate::channels::wasm::{
         ChannelCapabilities, LoadedChannel, PreparedChannelModule, WasmChannel, WasmChannelRouter,
         WasmChannelRuntime, WasmChannelRuntimeConfig, bot_username_setting_key,
@@ -8069,13 +8075,13 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn ensure_extension_ready_reports_needs_auth_for_wasm_channel() {
-        // Serialize against tests that mutate IRONCLAW_OAUTH_CALLBACK_URL
-        // (e.g. `auth_wasm_channel_status_uses_persisted_secret_oauth_descriptor`):
-        // without the env lock the auth path nondeterministically returns
-        // "awaiting_authorization" instead of "awaiting_token".
-        let _env_guard = crate::config::helpers::lock_env();
+        // Serialize against tests that mutate IRONCLAW_OAUTH_CALLBACK_URL.
+        // Uses a tokio::sync::Mutex instead of lock_env() (std::sync::Mutex)
+        // because this test holds the guard across .await — holding a
+        // std::sync::MutexGuard across .await deadlocks the tokio thread pool
+        // and blocks all other lock_env() callers.
+        let _env_guard = OAUTH_CALLBACK_ENV.lock().await;
         let dir = tempfile::tempdir().expect("temp dir");
         let (store, _db_dir) = make_test_store().await;
         let channels_dir = write_test_channel(
@@ -8178,9 +8184,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn auth_wasm_channel_status_uses_persisted_secret_oauth_descriptor() {
-        let _env_guard = crate::config::helpers::lock_env();
+        // See OAUTH_CALLBACK_ENV doc comment — tokio::sync::Mutex prevents
+        // deadlocking the std::sync ENV_MUTEX across .await points.
+        let _env_guard = OAUTH_CALLBACK_ENV.lock().await;
         unsafe {
             std::env::set_var(
                 "IRONCLAW_OAUTH_CALLBACK_URL",
