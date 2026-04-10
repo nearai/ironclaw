@@ -41,16 +41,25 @@ pub mod protocol;
 mod transport;
 pub mod workspace_path;
 
-/// Returns whether `ENGINE_V2_SANDBOX` is set to a truthy value.
+/// Returns whether the per-project sandbox is enabled.
 ///
-/// Accepts the same forms the rest of the codebase uses: `1`, `true`,
-/// `TRUE`, `yes`, `on`. Anything else (including unset / empty) means
-/// "use the host filesystem backend".
+/// Checks `SANDBOX_ENABLED` (same env var as the v1 sandbox) so a single
+/// flag governs sandbox behavior regardless of engine version. Also
+/// accepts `ENGINE_V2_SANDBOX` as an override for environments that
+/// want v1 sandbox off but v2 sandbox on (transitional). Either being
+/// truthy (`1`/`true`/`TRUE`/`yes`/`on`) is sufficient.
 pub fn engine_v2_sandbox_enabled() -> bool {
-    parse_engine_v2_sandbox(std::env::var("ENGINE_V2_SANDBOX").ok().as_deref())
+    parse_engine_v2_sandbox(
+        std::env::var("SANDBOX_ENABLED").ok().as_deref(),
+        std::env::var("ENGINE_V2_SANDBOX").ok().as_deref(),
+    )
 }
 
-fn parse_engine_v2_sandbox(value: Option<&str>) -> bool {
+fn parse_engine_v2_sandbox(sandbox_enabled: Option<&str>, engine_v2_sandbox: Option<&str>) -> bool {
+    is_truthy(sandbox_enabled) || is_truthy(engine_v2_sandbox)
+}
+
+fn is_truthy(value: Option<&str>) -> bool {
     matches!(value, Some("1" | "true" | "TRUE" | "yes" | "on"))
 }
 
@@ -72,13 +81,30 @@ mod env_tests {
     use super::parse_engine_v2_sandbox;
 
     #[test]
-    fn truthy_values_enable() {
+    fn sandbox_enabled_truthy_values() {
         for v in ["1", "true", "TRUE", "yes", "on"] {
             assert!(
-                parse_engine_v2_sandbox(Some(v)),
-                "expected '{v}' to enable sandbox"
+                parse_engine_v2_sandbox(Some(v), None),
+                "SANDBOX_ENABLED='{v}' should enable sandbox"
             );
         }
+    }
+
+    #[test]
+    fn engine_v2_sandbox_truthy_values() {
+        for v in ["1", "true", "TRUE", "yes", "on"] {
+            assert!(
+                parse_engine_v2_sandbox(None, Some(v)),
+                "ENGINE_V2_SANDBOX='{v}' should enable sandbox"
+            );
+        }
+    }
+
+    #[test]
+    fn either_flag_suffices() {
+        assert!(parse_engine_v2_sandbox(Some("true"), None));
+        assert!(parse_engine_v2_sandbox(None, Some("1")));
+        assert!(parse_engine_v2_sandbox(Some("1"), Some("true")));
     }
 
     #[test]
@@ -92,9 +118,10 @@ mod env_tests {
             Some("off"),
         ] {
             assert!(
-                !parse_engine_v2_sandbox(v),
+                !parse_engine_v2_sandbox(v, None),
                 "expected {v:?} to disable sandbox"
             );
         }
+        assert!(!parse_engine_v2_sandbox(None, None));
     }
 }

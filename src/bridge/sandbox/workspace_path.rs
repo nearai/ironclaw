@@ -23,19 +23,23 @@ pub const PROJECTS_SUBDIR: &str = "projects";
 /// Resolve the host-filesystem workspace path for a project.
 ///
 /// If the project has an explicit `workspace_path` override, that is returned
-/// verbatim. Otherwise the default is `~/.ironclaw/projects/<project_id>/`.
+/// verbatim. Otherwise the default is
+/// `~/.ironclaw/projects/<user_id>/<project_id>/` — namespaced by user so
+/// multi-tenant deployments never collide on disk.
 pub fn project_workspace_path(project: &Project) -> PathBuf {
     if let Some(ref explicit) = project.workspace_path {
         return explicit.clone();
     }
-    default_project_workspace_path(project.id.0)
+    default_project_workspace_path(&project.user_id, project.id.0)
 }
 
 /// Compute the default host workspace path for a project id, ignoring any
-/// override on the [`Project`] record.
-pub fn default_project_workspace_path(project_id: uuid::Uuid) -> PathBuf {
+/// override on the [`Project`] record. Namespaced by `user_id` for
+/// multi-tenant safety.
+pub fn default_project_workspace_path(user_id: &str, project_id: uuid::Uuid) -> PathBuf {
     ironclaw_base_dir()
         .join(PROJECTS_SUBDIR)
+        .join(user_id)
         .join(project_id.to_string())
 }
 
@@ -76,12 +80,30 @@ mod tests {
     }
 
     #[test]
-    fn default_path_is_under_base_dir() {
-        let project = Project::new("u", "test", "");
+    fn default_path_is_namespaced_by_user_and_project() {
+        let project = Project::new("alice", "test", "");
         let path = project_workspace_path(&project);
         let base = ironclaw_base_dir();
         assert!(path.starts_with(&base));
-        assert!(path.ends_with(project.id.0.to_string()));
+        // Path is `<base>/projects/alice/<project_id>`
+        let relative = path.strip_prefix(&base).unwrap();
+        let components: Vec<_> = relative
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(components[0], "projects");
+        assert_eq!(components[1], "alice");
+        assert_eq!(components[2], project.id.0.to_string());
+    }
+
+    #[test]
+    fn different_users_get_different_paths() {
+        let id = ironclaw_engine::ProjectId::new();
+        let p1 = default_project_workspace_path("alice", id.0);
+        let p2 = default_project_workspace_path("bob", id.0);
+        assert_ne!(p1, p2);
+        assert!(p1.to_string_lossy().contains("alice"));
+        assert!(p2.to_string_lossy().contains("bob"));
     }
 
     #[test]
