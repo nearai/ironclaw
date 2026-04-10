@@ -44,6 +44,7 @@ use crate::types::project::ProjectId;
 use crate::types::shared_owner_id;
 use crate::types::step::{StepId, TokenUsage};
 use crate::types::thread::{ActiveSkillProvenance, Thread, ThreadState};
+use ironclaw_common::ValidTimezone;
 
 use super::scripting::{execute_code, json_to_monty, monty_to_json, monty_to_string};
 
@@ -71,6 +72,15 @@ fn thread_source_channel(thread: &Thread) -> Option<String> {
         .get("source_channel")
         .and_then(|v| v.as_str())
         .map(String::from)
+}
+
+/// Extract and validate user_timezone from thread metadata (set by bridge router).
+fn thread_user_timezone(thread: &Thread) -> Option<ValidTimezone> {
+    thread
+        .metadata
+        .get("user_timezone")
+        .and_then(|v| v.as_str())
+        .and_then(ValidTimezone::parse)
 }
 
 fn normalize_pause_outcome(
@@ -708,6 +718,7 @@ async fn handle_execute_code_step(
         step_id: StepId::new(),
         current_call_id: None,
         source_channel: thread_source_channel(thread),
+        user_timezone: thread_user_timezone(thread),
     };
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
@@ -857,6 +868,7 @@ async fn handle_execute_action(
         step_id: StepId::new(),
         current_call_id: Some(call_id.clone()),
         source_channel: thread_source_channel(thread),
+        user_timezone: thread_user_timezone(thread),
     };
 
     // Helper: emit event only. The orchestrator owns transcript recording.
@@ -1397,6 +1409,7 @@ async fn handle_execute_actions_parallel(
             // silently dropped the gateway routing for any tool dispatched
             // through the parallel batch path.
             source_channel: thread_source_channel(thread),
+            user_timezone: thread_user_timezone(thread),
         };
         let ps = summarize_params(&pc.name, &pc.params);
         let (result_json, event, output) = execute_single_action(
@@ -1422,6 +1435,7 @@ async fn handle_execute_actions_parallel(
         // Capture once outside the loop — the thread's metadata is stable
         // for the duration of the parallel batch.
         let parallel_source_channel = thread_source_channel(thread);
+        let parallel_user_timezone = thread_user_timezone(thread);
 
         for (idx, lease) in runnable {
             let pc_name = parsed[idx].name.clone();
@@ -1438,6 +1452,7 @@ async fn handle_execute_actions_parallel(
                 current_call_id: Some(pc_call_id.clone()),
                 // See comment above — read from thread metadata, not None.
                 source_channel: parallel_source_channel.clone(),
+                user_timezone: parallel_user_timezone,
             };
             let ps = summarize_params(&pc_name, &pc_params);
 

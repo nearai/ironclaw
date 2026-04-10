@@ -340,6 +340,11 @@ async fn execute_pending_gate_action(
         step_id: ironclaw_engine::StepId::new(),
         current_call_id: Some(resolved_call_id.clone()),
         source_channel: Some(pending.source_channel.clone()),
+        user_timezone: thread
+            .metadata
+            .get("user_timezone")
+            .and_then(|v| v.as_str())
+            .and_then(ironclaw_engine::ValidTimezone::parse),
     };
 
     state.effect_adapter.reset_call_count();
@@ -2293,6 +2298,16 @@ async fn handle_with_engine_inner(
     let project_id =
         resolve_user_project(&state.store, &message.user_id, state.default_project_id).await?;
 
+    // Validate the channel-supplied timezone before passing it to the engine.
+    // ValidTimezone::parse rejects empty/invalid strings; we send the canonical
+    // IANA name (not the raw input) so downstream consumers see a known-good
+    // value. Must be passed *into* spawn — setting metadata after the thread
+    // starts is invisible to the in-memory executor on the first turn.
+    let validated_tz = message
+        .timezone
+        .as_deref()
+        .and_then(ironclaw_engine::ValidTimezone::parse);
+
     // Handle the message — spawns a new thread or injects into active one
     let thread_id = state
         .conversation_manager
@@ -2302,6 +2317,7 @@ async fn handle_with_engine_inner(
             project_id,
             &message.user_id,
             ThreadConfig::default(),
+            validated_tz.as_ref().map(|tz| tz.name()),
         )
         .await
         .map_err(|e| engine_err("thread error", e))?;

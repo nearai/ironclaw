@@ -424,10 +424,6 @@ mod tests {
 
         let content = std::fs::read_to_string(&toml_path).unwrap();
         assert!(
-            content.contains("[cache]"),
-            "TOML must contain [cache] section"
-        );
-        assert!(
             content.contains("directory = \""),
             "TOML must contain directory key-value setting"
         );

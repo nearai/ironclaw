@@ -227,6 +227,13 @@ impl EffectBridgeAdapter {
                     .or_else(|| params.get("_args").and_then(|a| a.get(2)))
                     .and_then(|v| v.as_str())
                     .unwrap_or("manual");
+                // Use explicit timezone param, fall back to user's channel timezone.
+                // ValidTimezone::parse filters empty/invalid strings.
+                let timezone = params
+                    .get("timezone")
+                    .and_then(|v| v.as_str())
+                    .and_then(ironclaw_engine::ValidTimezone::parse)
+                    .or(context.user_timezone);
                 // notify_channels: explicit array, or default to current channel
                 let notify_channels =
                     if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array()) {
@@ -244,7 +251,7 @@ impl EffectBridgeAdapter {
                         &context.user_id,
                         name,
                         goal,
-                        parse_cadence(cadence_str),
+                        parse_cadence(cadence_str, timezone),
                         notify_channels,
                     )
                     .await
@@ -411,7 +418,12 @@ impl EffectBridgeAdapter {
                             updates.goal = Some(goal.to_string());
                         }
                         if let Some(cadence) = params.get("cadence").and_then(|v| v.as_str()) {
-                            updates.cadence = Some(parse_cadence(cadence));
+                            let tz = params
+                                .get("timezone")
+                                .and_then(|v| v.as_str())
+                                .and_then(ironclaw_engine::ValidTimezone::parse)
+                                .or(context.user_timezone);
+                            updates.cadence = Some(parse_cadence(cadence, tz));
                         }
                         if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array())
                         {
@@ -1071,17 +1083,22 @@ impl EffectExecutor for EffectBridgeAdapter {
 }
 
 /// Parse a cadence string into a MissionCadence.
-fn parse_cadence(s: &str) -> ironclaw_engine::types::mission::MissionCadence {
+///
+/// When cadence is a cron expression, `timezone` is used as the scheduling
+/// timezone. This is typically the user's channel timezone, auto-injected
+/// from `ThreadExecutionContext::user_timezone`.
+fn parse_cadence(
+    s: &str,
+    timezone: Option<ironclaw_engine::ValidTimezone>,
+) -> ironclaw_engine::types::mission::MissionCadence {
     use ironclaw_engine::types::mission::MissionCadence;
     let trimmed = s.trim().to_lowercase();
+    // Check explicit prefixes BEFORE the cron heuristic. Otherwise an input
+    // like `event: a b c d e` matches `split_whitespace().count() >= 5` and
+    // is silently misclassified as a cron expression — the user said
+    // "event:..." and gets a Cron cadence with a parse error downstream.
     if trimmed == "manual" {
         MissionCadence::Manual
-    } else if trimmed.contains(' ') && trimmed.split_whitespace().count() >= 5 {
-        // Looks like a cron expression
-        MissionCadence::Cron {
-            expression: s.trim().to_string(),
-            timezone: None,
-        }
     } else if trimmed.starts_with("event:") {
         MissionCadence::OnEvent {
             event_pattern: trimmed
@@ -1099,6 +1116,13 @@ fn parse_cadence(s: &str) -> ironclaw_engine::types::mission::MissionCadence {
                 .trim()
                 .to_string(),
             secret: None,
+        }
+    } else if trimmed.split_whitespace().count() >= 5 {
+        // Looks like a cron expression (5+ fields). `split_whitespace` handles
+        // tabs and newlines, not just spaces.
+        MissionCadence::Cron {
+            expression: s.trim().to_string(),
+            timezone,
         }
     } else {
         // Default to manual if unrecognized
@@ -1385,10 +1409,15 @@ fn parse_routine_request(
                 .and_then(|v| v.as_str())
                 .unwrap_or("0 0 * * * *")
                 .to_string(),
+            // Validate the timezone string at the bridge boundary so an
+            // invalid value never enters the engine. An empty/invalid value
+            // is silently dropped (None) — the engine then resolves the
+            // schedule in UTC, matching the previous string-based behaviour
+            // for unknown zones.
             timezone: request
                 .and_then(|r| r.get("timezone"))
                 .and_then(|v| v.as_str())
-                .map(String::from),
+                .and_then(ironclaw_common::ValidTimezone::parse),
         },
         "message_event" => MissionCadence::OnEvent {
             event_pattern: request
@@ -1729,6 +1758,7 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: call_id.map(str::to_string),
             source_channel: None,
+            user_timezone: None,
         }
     }
 
@@ -2074,7 +2104,10 @@ mod tests {
                 timezone,
             } => {
                 assert_eq!(expression, "0 9 * * *");
-                assert_eq!(timezone.as_deref(), Some("America/New_York"));
+                assert_eq!(
+                    timezone.as_ref().map(|tz| tz.tz().name()),
+                    Some("America/New_York")
+                );
             }
             other => panic!("expected Cron cadence, got {:?}", other),
         }
@@ -2165,6 +2198,35 @@ mod tests {
             }
             other => panic!("expected Webhook cadence, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parse_cadence_event_prefix_with_multi_token_pattern() {
+        // Regression: `parse_cadence` previously checked the cron heuristic
+        // (`split_whitespace().count() >= 5`) BEFORE the explicit prefixes,
+        // so an `event:`-prefixed pattern containing 5+ tokens was silently
+        // misclassified as a Cron cadence with a parse error downstream.
+        let cadence = parse_cadence("event: a b c d e", None);
+        match cadence {
+            ironclaw_engine::types::mission::MissionCadence::OnEvent { event_pattern, .. } => {
+                assert_eq!(event_pattern, "a b c d e");
+            }
+            other => panic!("expected OnEvent, got {other:?}"),
+        }
+
+        // Same hazard for `webhook:` — verify the prefix wins.
+        let cadence = parse_cadence("webhook: a b c d e", None);
+        assert!(matches!(
+            cadence,
+            ironclaw_engine::types::mission::MissionCadence::Webhook { .. }
+        ));
+
+        // Sanity: a real cron expression still parses as cron.
+        let cadence = parse_cadence("0 9 * * *", None);
+        assert!(matches!(
+            cadence,
+            ironclaw_engine::types::mission::MissionCadence::Cron { .. }
+        ));
     }
 
     #[test]
@@ -2417,6 +2479,7 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
             source_channel: None,
+            user_timezone: None,
         };
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
@@ -2511,6 +2574,7 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: Some("call_123".to_string()),
             source_channel: None,
+            user_timezone: None,
         };
 
         let result = adapter

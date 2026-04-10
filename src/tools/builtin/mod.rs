@@ -3,6 +3,10 @@
 mod echo;
 pub mod extension_tools;
 mod file;
+pub mod file_edit_guard;
+pub mod file_history;
+mod glob_tool;
+mod grep_tool;
 mod http;
 mod job;
 mod json;
@@ -25,6 +29,10 @@ pub use extension_tools::{
     ToolPermissionSetTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
 };
 pub use file::{ApplyPatchTool, ListDirTool, ReadFileTool, WriteFileTool};
+pub use file_edit_guard::{SharedReadFileState, shared_read_file_state};
+pub use file_history::{FileHistory, FileUndoTool, SharedFileHistory, shared_file_history};
+pub use glob_tool::GlobTool;
+pub use grep_tool::GrepTool;
 pub use http::{HttpTool, extract_host_from_params};
 pub use job::{
     CancelJobTool, CreateJobTool, JobEventsTool, JobPromptTool, JobStatusTool, ListJobsTool,
