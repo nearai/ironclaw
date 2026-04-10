@@ -100,8 +100,16 @@ fn translate_messages(
                         })
                         .collect()
                 });
+                // Anthropic rejects empty text content blocks, so when the
+                // assistant message is purely tool calls (no text), set
+                // content to None instead of Some("").
+                let content = if msg.content.is_empty() && tool_calls.is_some() {
+                    None
+                } else {
+                    Some(msg.content.into())
+                };
                 ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
-                    content: Some(msg.content.into()),
+                    content,
                     tool_calls,
                     ..Default::default()
                 })
