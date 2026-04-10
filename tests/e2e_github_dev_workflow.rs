@@ -245,8 +245,8 @@ mod github_dev_workflow_test {
             if !status.is_success() {
                 return Err(format!("create_issue {status}: {body_text}"));
             }
-            let v: Value = serde_json::from_str(&body_text)
-                .map_err(|e| format!("create_issue parse: {e}"))?;
+            let v: Value =
+                serde_json::from_str(&body_text).map_err(|e| format!("create_issue parse: {e}"))?;
             let number = v
                 .get("number")
                 .and_then(|n| n.as_u64())
@@ -299,8 +299,7 @@ mod github_dev_workflow_test {
             issue_number: u64,
             body: &str,
         ) -> Result<(), String> {
-            let url =
-                format!("{GITHUB_API}/repos/{owner}/{repo}/issues/{issue_number}/comments");
+            let url = format!("{GITHUB_API}/repos/{owner}/{repo}/issues/{issue_number}/comments");
             let resp = client()
                 .post(&url)
                 .header("Accept", "application/vnd.github+json")
@@ -364,9 +363,7 @@ mod github_dev_workflow_test {
         {
             eprintln!("[cleanup] WARNING: failed to post final comment: {e}");
         }
-        if let Err(e) =
-            github_api::close_issue(token, REPO_OWNER, REPO_NAME, issue_number).await
-        {
+        if let Err(e) = github_api::close_issue(token, REPO_OWNER, REPO_NAME, issue_number).await {
             eprintln!("[cleanup] WARNING: failed to close issue #{issue_number}: {e}");
             eprintln!(
                 "[cleanup] Manual cleanup needed: \
@@ -478,15 +475,11 @@ mod github_dev_workflow_test {
 
         // Capture the comment count baseline so we can detect new
         // comments posted by the agent.
-        let baseline_comments = github_api::list_issue_comments(
-            &github_token,
-            REPO_OWNER,
-            REPO_NAME,
-            issue_number,
-        )
-        .await
-        .expect("baseline list_issue_comments")
-        .len();
+        let baseline_comments =
+            github_api::list_issue_comments(&github_token, REPO_OWNER, REPO_NAME, issue_number)
+                .await
+                .expect("baseline list_issue_comments")
+                .len();
         eprintln!("[live-test] baseline comment count: {baseline_comments}");
 
         // Wrap the rest of the test in a guard so cleanup runs even if
@@ -567,8 +560,7 @@ mod github_dev_workflow_test {
             }
         });
 
-        let test_outcome =
-            futures::FutureExt::catch_unwind(test_result).await;
+        let test_outcome = futures::FutureExt::catch_unwind(test_result).await;
 
         // ── Cleanup: always close the issue ──────────────────────────
         cleanup_issue(&github_token, issue_number).await;

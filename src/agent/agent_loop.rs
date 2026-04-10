@@ -566,8 +566,7 @@ impl Agent {
         // shouldn't hold a poisonable RwLock across an await point.
         let (available, distinct_markers) = match registry.read() {
             Ok(guard) => {
-                let skills_clone: Vec<ironclaw_skills::LoadedSkill> =
-                    guard.skills().to_vec();
+                let skills_clone: Vec<ironclaw_skills::LoadedSkill> = guard.skills().to_vec();
                 let mut markers: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
                 for s in &skills_clone {
@@ -588,8 +587,7 @@ impl Agent {
         // Without a workspace, we conservatively treat all markers as
         // unsatisfied (setup skills can still activate). Errors checking
         // a marker are logged and treated as unsatisfied.
-        let mut satisfied: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut satisfied: std::collections::HashSet<String> = std::collections::HashSet::new();
         if let Some(ws) = self.deps.workspace.as_ref() {
             for marker in &distinct_markers {
                 match ws.exists(marker).await {

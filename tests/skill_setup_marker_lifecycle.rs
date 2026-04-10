@@ -116,12 +116,7 @@ is selected.
         let skill_keyword = "xyzzy-lifecycle-onboard";
         let marker_path = "commitments/.lifecycle-setup-complete";
 
-        write_lifecycle_skill(
-            skills_root.path(),
-            skill_name,
-            skill_keyword,
-            marker_path,
-        );
+        write_lifecycle_skill(skills_root.path(), skill_name, skill_keyword, marker_path);
 
         let rig = build_rig(skills_root.path()).await;
 
@@ -135,9 +130,7 @@ is selected.
         // ── Phase 1: marker absent — skill should be selected ──────
         let message1 = format!("please handle {skill_keyword} for me");
         rig.send_message(&message1).await;
-        let _ = rig
-            .wait_for_responses(1, Duration::from_secs(15))
-            .await;
+        let _ = rig.wait_for_responses(1, Duration::from_secs(15)).await;
 
         let requests_after_turn1 = rig.captured_llm_requests();
         let phase1_count = marker_occurrences(&requests_after_turn1);
@@ -164,9 +157,7 @@ is selected.
         // ── Phase 3: same keyword, new message — skill MUST be excluded ──
         let message2 = format!("again, please handle {skill_keyword}");
         rig.send_message(&message2).await;
-        let _ = rig
-            .wait_for_responses(2, Duration::from_secs(15))
-            .await;
+        let _ = rig.wait_for_responses(2, Duration::from_secs(15)).await;
 
         let requests_after_turn2 = rig.captured_llm_requests();
         let phase2_count = marker_occurrences(&requests_after_turn2);

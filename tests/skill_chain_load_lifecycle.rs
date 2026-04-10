@@ -83,8 +83,7 @@ mod chain_load_lifecycle {
         let requires_yaml = if requires.is_empty() {
             String::new()
         } else {
-            let lines: Vec<String> =
-                requires.iter().map(|r| format!("    - {r}")).collect();
+            let lines: Vec<String> = requires.iter().map(|r| format!("    - {r}")).collect();
             format!("requires:\n  skills:\n{}\n", lines.join("\n"))
         };
         let content = format!(
@@ -290,8 +289,14 @@ absent, it wasn't.
             "v2: parent marker in {parent_count}/{} requests",
             requests.len()
         );
-        assert!(c1_count >= 1, "v2: companion-one marker in {c1_count} requests");
-        assert!(c2_count >= 1, "v2: companion-two marker in {c2_count} requests");
+        assert!(
+            c1_count >= 1,
+            "v2: companion-one marker in {c1_count} requests"
+        );
+        assert!(
+            c2_count >= 1,
+            "v2: companion-two marker in {c2_count} requests"
+        );
 
         rig.shutdown();
     }

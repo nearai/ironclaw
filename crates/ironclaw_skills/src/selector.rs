@@ -173,8 +173,7 @@ pub fn prefilter_skills<'a>(
 
     // Apply candidate limit and context budget.
     let mut result: Vec<&'a LoadedSkill> = Vec::new();
-    let mut selected_names: std::collections::HashSet<&'a str> =
-        std::collections::HashSet::new();
+    let mut selected_names: std::collections::HashSet<&'a str> = std::collections::HashSet::new();
     let mut budget_remaining = max_context_tokens;
 
     for entry in scored {
@@ -914,21 +913,12 @@ mod tests {
     fn test_setup_marker_other_marker_does_not_exclude() {
         // Sanity check: a satisfied marker for a DIFFERENT path must not
         // exclude this skill. Marker matching is exact-string.
-        let skills = vec![make_setup_skill(
-            "developer-setup",
-            "commitments/README.md",
-        )];
+        let skills = vec![make_setup_skill("developer-setup", "commitments/README.md")];
         let mut markers = HashSet::new();
         markers.insert("projects/foo/project.md".to_string());
         markers.insert("commitments/calibration.md".to_string());
 
-        let result = prefilter_skills(
-            "setup",
-            &skills,
-            5,
-            MAX_SKILL_CONTEXT_TOKENS,
-            &markers,
-        );
+        let result = prefilter_skills("setup", &skills, 5, MAX_SKILL_CONTEXT_TOKENS, &markers);
         assert_eq!(result.len(), 1, "marker mismatch should not exclude");
     }
 
@@ -940,13 +930,7 @@ mod tests {
         let mut markers = HashSet::new();
         markers.insert("anything".to_string());
 
-        let result = prefilter_skills(
-            "test",
-            &skills,
-            5,
-            MAX_SKILL_CONTEXT_TOKENS,
-            &markers,
-        );
+        let result = prefilter_skills("test", &skills, 5, MAX_SKILL_CONTEXT_TOKENS, &markers);
         assert_eq!(result.len(), 1);
     }
 
@@ -955,11 +939,7 @@ mod tests {
     // selection, bypassing their own score filter.
     // ───────────────────────────────────────────────────────────────────
 
-    fn make_skill_with_requires(
-        name: &str,
-        keywords: &[&str],
-        required: &[&str],
-    ) -> LoadedSkill {
+    fn make_skill_with_requires(name: &str, keywords: &[&str], required: &[&str]) -> LoadedSkill {
         let mut skill = make_skill(name, keywords, &[], &[]);
         skill.manifest.requires.skills = required.iter().map(|s| s.to_string()).collect();
         skill
@@ -982,12 +962,7 @@ mod tests {
             &[],
             &[],
         );
-        let companion2 = make_skill(
-            "tech-debt-tracker",
-            &["another-unrelated"],
-            &[],
-            &[],
-        );
+        let companion2 = make_skill("tech-debt-tracker", &["another-unrelated"], &[], &[]);
         let bystander = make_skill("unrelated-skill", &["nope"], &[], &[]);
 
         let skills = vec![parent, companion1, companion2, bystander];
@@ -1052,23 +1027,13 @@ mod tests {
     fn test_chain_load_respects_budget() {
         // Parent (3000 tok) plus companion (3000 tok) exceeds a 4000
         // budget. Parent selected; companion skipped.
-        let mut parent = make_skill_with_requires(
-            "big-setup",
-            &["setup"],
-            &["heavy-companion"],
-        );
+        let mut parent = make_skill_with_requires("big-setup", &["setup"], &["heavy-companion"]);
         parent.manifest.activation.max_context_tokens = 3000;
         let mut companion = make_skill("heavy-companion", &["x"], &[], &[]);
         companion.manifest.activation.max_context_tokens = 3000;
 
         let skills = vec![parent, companion];
-        let result = prefilter_skills(
-            "setup",
-            &skills,
-            10,
-            4000,
-            &HashSet::new(),
-        );
+        let result = prefilter_skills("setup", &skills, 10, 4000, &HashSet::new());
         let names: Vec<&str> = result.iter().map(|s| s.name()).collect();
         assert!(
             names.contains(&"big-setup"),
@@ -1085,31 +1050,17 @@ mod tests {
         // Companion has a setup_marker that's in the satisfied set.
         // Even though the parent requires it, chain-loading must
         // respect the marker exclusion — nothing for it to do.
-        let parent = make_skill_with_requires(
-            "parent-setup",
-            &["setup"],
-            &["nested-setup"],
-        );
+        let parent = make_skill_with_requires("parent-setup", &["setup"], &["nested-setup"]);
         let mut companion = make_skill("nested-setup", &["nothing"], &[], &[]);
-        companion.manifest.activation.setup_marker =
-            Some("marker/already-done".to_string());
+        companion.manifest.activation.setup_marker = Some("marker/already-done".to_string());
 
         let skills = vec![parent, companion];
         let mut markers = HashSet::new();
         markers.insert("marker/already-done".to_string());
 
-        let result = prefilter_skills(
-            "setup",
-            &skills,
-            10,
-            MAX_SKILL_CONTEXT_TOKENS,
-            &markers,
-        );
+        let result = prefilter_skills("setup", &skills, 10, MAX_SKILL_CONTEXT_TOKENS, &markers);
         let names: Vec<&str> = result.iter().map(|s| s.name()).collect();
-        assert!(
-            names.contains(&"parent-setup"),
-            "parent must be selected"
-        );
+        assert!(names.contains(&"parent-setup"), "parent must be selected");
         assert!(
             !names.contains(&"nested-setup"),
             "companion with satisfied marker must be skipped even via chain-load"
@@ -1150,11 +1101,8 @@ mod tests {
     fn test_chain_load_missing_companion_is_silent() {
         // Parent lists a required skill that isn't loaded in the
         // registry. Should not error — just skip with a debug log.
-        let parent = make_skill_with_requires(
-            "parent",
-            &["setup"],
-            &["does-not-exist", "also-missing"],
-        );
+        let parent =
+            make_skill_with_requires("parent", &["setup"], &["does-not-exist", "also-missing"]);
         let skills = vec![parent];
 
         let result = prefilter_skills(

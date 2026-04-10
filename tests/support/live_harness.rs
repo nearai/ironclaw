@@ -511,11 +511,7 @@ impl LiveTestHarnessBuilder {
     /// the test framework — pass any non-empty string. The test should
     /// not actually call the credentialed API; this just keeps the auth
     /// gate satisfied so the agent can complete its other tool calls.
-    pub fn with_secret(
-        mut self,
-        name: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Self {
+    pub fn with_secret(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.pre_seed_secrets.push((name.into(), value.into()));
         self
     }
