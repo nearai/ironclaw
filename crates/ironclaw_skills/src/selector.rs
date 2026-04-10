@@ -272,6 +272,7 @@ mod tests {
                     max_context_tokens: 1000,
                 },
                 credentials: vec![],
+                terminal_actions: vec![],
                 metadata: None,
             },
             prompt_content: "Test prompt".to_string(),

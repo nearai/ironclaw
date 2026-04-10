@@ -125,6 +125,11 @@ pub struct SkillManifest {
     /// Parsed at load time; values are never in the LLM context.
     #[serde(default)]
     pub credentials: Vec<SkillCredentialSpec>,
+    /// Actions whose output should be returned directly to the user without a
+    /// follow-up LLM call. Checked at tool execution time regardless of
+    /// whether this skill was keyword-activated.
+    #[serde(default)]
+    pub terminal_actions: Vec<String>,
     /// Optional OpenClaw metadata.
     #[serde(default)]
     pub metadata: Option<SkillMetadata>,
@@ -464,6 +469,7 @@ metadata:
                 description: String::new(),
                 activation: ActivationCriteria::default(),
                 credentials: vec![],
+                terminal_actions: vec![],
                 metadata: None,
             },
             prompt_content: "test prompt".to_string(),

@@ -171,6 +171,10 @@ pub struct V2SkillMetadata {
     /// SHA-256 hash of the prompt content.
     #[serde(default)]
     pub content_hash: String,
+    /// Actions whose output should be returned directly to the user without a
+    /// follow-up LLM call.
+    #[serde(default)]
+    pub terminal_actions: Vec<String>,
 }
 
 fn default_version() -> u32 {
@@ -263,6 +267,7 @@ mod tests {
                 repaired_at: None,
             }],
             content_hash: "sha256:abc".to_string(),
+            terminal_actions: vec!["my_tool".to_string()],
         };
 
         let json = serde_json::to_string(&meta).expect("serialize");

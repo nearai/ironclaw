@@ -30,6 +30,9 @@ activation:
     - trading
     - forex
   max_context_tokens: 1500
+terminal_actions:
+  - analyze_transfer
+  - validate_transfer_target
 credentials:
   - name: massive_api_key
     provider: massive

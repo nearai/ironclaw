@@ -240,6 +240,7 @@ mod tests {
             revisions: vec![],
             repairs: vec![],
             content_hash: String::new(),
+            terminal_actions: vec![],
         };
 
         let mut doc = MemoryDoc::new(

@@ -56,6 +56,7 @@ fn make_skill(
             description: format!("{} skill", name),
             activation: ActivationCriteria::default(),
             credentials,
+            terminal_actions: vec![],
             metadata: None,
         },
         prompt_content: prompt.to_string(),
