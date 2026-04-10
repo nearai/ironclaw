@@ -347,14 +347,25 @@ fn validate_base_url_with_policy(
             }
             _ => resolve(),
         };
-        lookup.map_err(|e| ConfigError::InvalidValue {
-            key: field_name.to_string(),
-            message: format!(
-                "failed to resolve hostname '{}': {}. \
-                 Base URLs must be resolvable at config time.",
-                host, e
-            ),
-        })?
+        match lookup {
+            Ok(ips) => ips,
+            Err(e) => {
+                // In test builds, allow callers to opt out of DNS validation
+                // when running in sandboxed environments without a resolver.
+                #[cfg(test)]
+                if std::env::var("IRONCLAW_SKIP_DNS_VALIDATION").is_ok() {
+                    return Ok(());
+                }
+                return Err(ConfigError::InvalidValue {
+                    key: field_name.to_string(),
+                    message: format!(
+                        "failed to resolve hostname '{}': {}. \
+                         Base URLs must be resolvable at config time.",
+                        host, e
+                    ),
+                });
+            }
+        }
     };
 
     if scheme == "http" {
@@ -735,6 +746,12 @@ mod tests {
 
     #[test]
     fn validate_base_url_rejects_dns_failure() {
+        let _guard = lock_env();
+        // Ensure the DNS-skip flag from other tests doesn't leak here.
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("IRONCLAW_SKIP_DNS_VALIDATION");
+        }
         if invalid_tld_resolves_locally() {
             eprintln!(
                 "skipping validate_base_url_rejects_dns_failure: \

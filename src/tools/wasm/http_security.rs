@@ -263,6 +263,7 @@ mod tests {
         };
 
         let client = super::ssrf_safe_client_builder_for_target(&target)
+            .no_proxy()
             .build()
             .unwrap();
         let response = client

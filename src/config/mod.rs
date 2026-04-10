@@ -956,8 +956,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env guard must span the entire test
     async fn re_resolve_llm_strips_admin_only_keys_for_non_operator_user() {
         use crate::db::SettingsStore;
+
+        let _guard = crate::config::helpers::lock_env();
+        // Stub NEARAI env vars to avoid DNS resolution in sandboxed test
+        // environments. resolve() validates these regardless of backend.
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("NEARAI_AUTH_URL", "http://127.0.0.1:1");
+            std::env::set_var("NEARAI_BASE_URL", "https://8.8.8.8");
+        }
 
         let store = FakeSettingsStore::new();
         // Seed a non-admin user's per-user settings with an admin-only key
@@ -992,7 +1002,17 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env guard must span the entire test
     async fn re_resolve_llm_keeps_admin_only_keys_for_operator() {
+        let _guard = crate::config::helpers::lock_env();
+        // Stub NEARAI env vars to avoid DNS resolution in sandboxed test
+        // environments. resolve() validates these regardless of backend.
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("NEARAI_AUTH_URL", "http://127.0.0.1:1");
+            std::env::set_var("NEARAI_BASE_URL", "https://8.8.8.8");
+        }
+
         let store = FakeSettingsStore::new();
         store
             .seed(

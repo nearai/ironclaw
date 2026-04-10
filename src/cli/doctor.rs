@@ -753,6 +753,13 @@ mod tests {
         }
 
         let _mutex = crate::config::helpers::lock_env();
+        // Stub NEARAI env vars to avoid DNS resolution in sandboxed test
+        // environments. resolve() validates these regardless of backend.
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("NEARAI_AUTH_URL", "http://127.0.0.1:1");
+            std::env::set_var("NEARAI_BASE_URL", "https://8.8.8.8");
+        }
         let prev = std::env::var("LLM_BACKEND").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
@@ -877,6 +884,10 @@ mod tests {
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
+            // Stub NEARAI env vars to avoid DNS resolution in sandboxed test
+            // environments. resolve() validates these regardless of backend.
+            std::env::set_var("NEARAI_AUTH_URL", "http://127.0.0.1:1");
+            std::env::set_var("NEARAI_BASE_URL", "https://8.8.8.8");
         }
         let settings = Settings::default();
         match check_llm_config(&settings) {
