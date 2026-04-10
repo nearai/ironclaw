@@ -404,8 +404,9 @@ fn serialize_json_capped(value: &JsonValue, max_bytes: usize) -> Result<String, 
             let valid_len = e.utf8_error().valid_up_to();
             let mut buf = e.into_bytes();
             buf.truncate(valid_len);
-            // valid_up_to guarantees the prefix is valid UTF-8
-            Ok(String::from_utf8(buf).expect("valid_up_to guarantees valid UTF-8"))
+            // safety: valid_up_to guarantees the prefix is valid UTF-8,
+            // so from_utf8_unchecked is sound here.
+            Ok(unsafe { String::from_utf8_unchecked(buf) })
         }
     }
 }
