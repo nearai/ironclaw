@@ -3536,6 +3536,7 @@ impl SetupWizard {
         let security_display = match self.settings.secrets_master_key_source {
             KeySource::Keychain => "OS keychain",
             KeySource::Env => "environment variable",
+            KeySource::File => "file (~/.ironclaw/master.key)",
             KeySource::None => "disabled",
         };
         println!(

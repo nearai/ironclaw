@@ -423,7 +423,11 @@ fn require_secrets_store(
     match state.secrets_store.as_ref() {
         Some(s) => Ok(Some(s)),
         None if has_real_keys => {
-            tracing::error!("Cannot store API keys: secrets store is not available");
+            tracing::error!(
+                "Cannot store API keys: secrets store is not available. \
+                 Set the SECRETS_MASTER_KEY environment variable or ensure a database \
+                 backend (PostgreSQL or libSQL) is configured."
+            );
             Err(StatusCode::SERVICE_UNAVAILABLE)
         }
         None => Ok(None),

@@ -245,6 +245,9 @@ pub enum KeySource {
     Keychain,
     /// User provides via SECRETS_MASTER_KEY env var.
     Env,
+    /// Auto-generated key stored in `~/.ironclaw/master.key` file
+    /// (fallback when OS keychain is unavailable).
+    File,
     /// Not configured (secrets features disabled).
     #[default]
     None,
