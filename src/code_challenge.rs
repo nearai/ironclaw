@@ -93,10 +93,10 @@ pub fn generate_code(len: usize, alphabet: &[u8]) -> String {
         return String::new();
     }
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     (0..len)
         .map(|_| {
-            let idx = rng.gen_range(0..alphabet.len());
+            let idx = rng.random_range(0..alphabet.len());
             alphabet[idx] as char
         })
         .collect()

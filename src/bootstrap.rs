@@ -518,7 +518,7 @@ impl PidLock {
 
     /// Acquire at a specific path (for testing).
     fn acquire_at(path: PathBuf) -> Result<Self, PidLockError> {
-        use fs4::FileExt;
+        use fs4::fs_std::FileExt;
         use std::fs::OpenOptions;
         use std::io::Write;
 

@@ -883,7 +883,7 @@ pub fn compute_hash(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
     let result = hasher.finalize();
-    format!("sha256:{:x}", result)
+    format!("sha256:{}", hex::encode(result))
 }
 
 /// Helper to check gating for a `GatingRequirements`. Useful for callers that

@@ -1033,13 +1033,12 @@ fn build_csp_with_nonce(nonce: &str) -> String {
 
 /// Generate a fresh per-response CSP nonce. 16 random bytes hex-encoded
 /// (32 chars) — well above the 128-bit minimum recommended for nonces and
-/// matching the `OsRng + hex` pattern used elsewhere in this module
+/// matching the `rand::rng() + hex` pattern used elsewhere in this module
 /// (see `tokens_create_handler`).
 fn generate_csp_nonce() -> String {
     use rand::RngCore;
-    use rand::rngs::OsRng;
     let mut bytes = [0u8; 16];
-    OsRng.fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     hex::encode(bytes)
 }
 

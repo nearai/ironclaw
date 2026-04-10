@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use rand::RngCore;
-use rand::rngs::OsRng;
 use tokio::sync::RwLock;
 
 use super::OAuthError;
@@ -36,7 +35,7 @@ impl NearNonceStore {
     /// Generate and store a random 32-byte nonce, returned as hex.
     pub async fn generate(&self) -> String {
         let mut bytes = [0u8; 32];
-        OsRng.fill_bytes(&mut bytes);
+        rand::rng().fill_bytes(&mut bytes);
         let nonce = hex::encode(bytes);
 
         let mut nonces = self.nonces.write().await;
@@ -261,7 +260,7 @@ mod tests {
         use ed25519_dalek::{Signer, SigningKey};
         let signing_key = SigningKey::from_bytes(&{
             let mut b = [0u8; 32];
-            OsRng.fill_bytes(&mut b);
+            rand::rng().fill_bytes(&mut b);
             b
         });
         let verifying_key = signing_key.verifying_key();
@@ -290,7 +289,7 @@ mod tests {
         use ed25519_dalek::{Signer, SigningKey};
         let signing_key = SigningKey::from_bytes(&{
             let mut b = [0u8; 32];
-            OsRng.fill_bytes(&mut b);
+            rand::rng().fill_bytes(&mut b);
             b
         });
         let verifying_key = signing_key.verifying_key();
@@ -320,7 +319,7 @@ mod tests {
         use ed25519_dalek::{Signer, SigningKey};
         let signing_key = SigningKey::from_bytes(&{
             let mut b = [0u8; 32];
-            OsRng.fill_bytes(&mut b);
+            rand::rng().fill_bytes(&mut b);
             b
         });
         let verifying_key = signing_key.verifying_key();
@@ -349,12 +348,12 @@ mod tests {
         use ed25519_dalek::{Signer, SigningKey};
         let signing_key = SigningKey::from_bytes(&{
             let mut b = [0u8; 32];
-            OsRng.fill_bytes(&mut b);
+            rand::rng().fill_bytes(&mut b);
             b
         });
         let wrong_key = SigningKey::from_bytes(&{
             let mut b = [0u8; 32];
-            OsRng.fill_bytes(&mut b);
+            rand::rng().fill_bytes(&mut b);
             b
         });
 

@@ -605,6 +605,8 @@ fn build_rig_request(
         max_tokens: max_tokens.map(|t| t as u64),
         tool_choice,
         additional_params,
+        model: None,
+        output_schema: None,
     })
 }
 
@@ -1603,6 +1605,8 @@ mod tests {
             max_tokens: None,
             tool_choice: None,
             additional_params,
+            model: None,
+            output_schema: None,
         }
     }
 

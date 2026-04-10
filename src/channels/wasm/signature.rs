@@ -69,7 +69,7 @@ pub fn verify_slack_signature(
     signature_header: &str,
     now_secs: i64,
 ) -> bool {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
 
     // 1. Parse and check staleness (5-minute window)
@@ -116,7 +116,7 @@ pub fn verify_hmac_sha256_prefixed(
     signature_header: &str,
     prefix: &str,
 ) -> bool {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
     use subtle::ConstantTimeEq;
 
@@ -427,7 +427,7 @@ mod tests {
 
     /// Helper: compute expected Slack signature for a given secret, timestamp, and body.
     fn sign_slack_message(signing_secret: &str, timestamp: &str, body: &[u8]) -> String {
-        use hmac::{Hmac, Mac};
+        use hmac::{Hmac, KeyInit, Mac};
         use sha2::Sha256;
 
         let mut basestring = Vec::new();
@@ -530,7 +530,7 @@ mod tests {
     fn test_hmac_sha256_prefixed_valid() {
         let secret = "github-secret";
         let body = br#"{"action":"opened"}"#;
-        use hmac::{Hmac, Mac};
+        use hmac::{Hmac, KeyInit, Mac};
         use sha2::Sha256;
         let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("hmac key");
         mac.update(body);

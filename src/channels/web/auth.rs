@@ -846,6 +846,7 @@ async fn validate_oidc_jwt(oidc: &OidcState, jwt: &str) -> Result<String, OidcEr
     // validation. Do not copy this pattern without the preceding
     // `verify_signature()` call.
     let mut validation = Validation::new(resolved_alg);
+    #[allow(deprecated)] // no replacement supports audience/issuer validation without signature
     validation.insecure_disable_signature_validation();
 
     // Build the set of required claims. `exp` is required by default.
@@ -886,6 +887,7 @@ async fn validate_oidc_jwt(oidc: &OidcState, jwt: &str) -> Result<String, OidcEr
 fn extract_oidc_email_claims(jwt: &str) -> (Option<String>, bool) {
     let normalized = normalize_jwt_for_claims(jwt);
     let mut validation = Validation::default();
+    #[allow(deprecated)] // no replacement supports claim extraction with custom validation
     validation.insecure_disable_signature_validation();
     validation.validate_aud = false;
     validation.validate_exp = false;
@@ -1642,6 +1644,7 @@ mod tests {
         // We can't easily mock HTTP, so test the claim extraction path directly:
         // build a Validation that skips signature check and verify `sub` is required.
         let mut validation = Validation::new(Algorithm::HS256);
+        #[allow(deprecated)]
         validation.insecure_disable_signature_validation();
         validation.validate_aud = false;
 
@@ -1668,6 +1671,7 @@ mod tests {
     fn test_issuer_validation_disabled_when_not_configured() {
         // When no issuer is configured, Validation should NOT require iss.
         let mut validation = Validation::new(Algorithm::HS256);
+        #[allow(deprecated)]
         validation.insecure_disable_signature_validation();
         validation.validate_aud = false;
 

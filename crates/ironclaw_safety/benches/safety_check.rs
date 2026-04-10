@@ -1,5 +1,6 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use ironclaw_safety::{LeakDetector, Sanitizer, Validator};
+use std::hint::black_box;
 
 fn bench_sanitizer(c: &mut Criterion) {
     let mut group = c.benchmark_group("sanitizer");

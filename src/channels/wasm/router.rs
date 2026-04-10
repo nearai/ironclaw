@@ -1402,7 +1402,7 @@ mod tests {
 
     /// Helper: compute expected Slack signature for testing.
     fn slack_signature(signing_secret: &str, timestamp: &str, body: &[u8]) -> String {
-        use hmac::{Hmac, Mac};
+        use hmac::{Hmac, KeyInit, Mac};
         use sha2::Sha256;
 
         let mut basestring = Vec::new();

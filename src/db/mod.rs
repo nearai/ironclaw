@@ -1134,9 +1134,9 @@ pub trait ChannelPairingStore: Send + Sync {
 pub fn generate_pairing_code() -> String {
     use rand::Rng;
     const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let mut rng = rand::rngs::OsRng;
+    let mut rng = rand::rng();
     (0..8)
-        .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
+        .map(|_| ALPHABET[rng.random_range(0..ALPHABET.len())] as char)
         .collect()
 }
 

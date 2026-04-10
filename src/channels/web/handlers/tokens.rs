@@ -8,7 +8,6 @@ use axum::{
     http::StatusCode,
 };
 use rand::RngCore;
-use rand::rngs::OsRng;
 use uuid::Uuid;
 
 use crate::channels::web::auth::AuthenticatedUser;
@@ -53,7 +52,7 @@ pub async fn tokens_create_handler(
     // Hash the hex-encoded plaintext (what the user sends as Bearer token),
     // NOT the raw bytes — must match hash_token() in auth.rs.
     let mut token_bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut token_bytes);
+    rand::rng().fill_bytes(&mut token_bytes);
     let plaintext_token = hex::encode(token_bytes);
     let hash = crate::channels::web::auth::hash_token(&plaintext_token);
 

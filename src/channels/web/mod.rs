@@ -102,9 +102,8 @@ impl GatewayChannel {
     pub fn new(config: GatewayConfig, owner_id: String) -> Self {
         let auth_token = config.auth_token.clone().unwrap_or_else(|| {
             use rand::RngCore;
-            use rand::rngs::OsRng;
             let mut bytes = [0u8; 32];
-            OsRng.fill_bytes(&mut bytes);
+            rand::rng().fill_bytes(&mut bytes);
             bytes.iter().map(|b| format!("{b:02x}")).collect()
         });
 

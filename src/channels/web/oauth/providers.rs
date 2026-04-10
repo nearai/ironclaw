@@ -145,6 +145,8 @@ impl OAuthProvider for GoogleProvider {
         // However, we MUST validate `aud` to prevent token substitution from
         // a different OAuth client.
         let mut validation = jsonwebtoken::Validation::default();
+        #[allow(deprecated)]
+        // no replacement supports audience/issuer validation without signature
         validation.insecure_disable_signature_validation();
         validation.set_audience(&[&self.client_id]);
         validation.set_issuer(&["https://accounts.google.com"]);
@@ -488,6 +490,8 @@ impl OAuthProvider for AppleProvider {
         // the token was received directly from Apple over TLS. We validate
         // `aud` to prevent token substitution.
         let mut validation = jsonwebtoken::Validation::default();
+        #[allow(deprecated)]
+        // no replacement supports audience/issuer validation without signature
         validation.insecure_disable_signature_validation();
         validation.set_audience(&[&self.client_id]);
         validation.set_issuer(&["https://appleid.apple.com"]);

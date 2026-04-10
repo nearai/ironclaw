@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use rand::RngCore;
-use rand::rngs::OsRng;
 use tokio::sync::RwLock;
 
 const STATE_TTL: Duration = Duration::from_secs(300); // 5 minutes
@@ -43,7 +42,7 @@ impl OAuthStateStore {
     /// Generate a PKCE code verifier (32 random bytes, base64url-encoded).
     pub fn generate_code_verifier() -> String {
         let mut bytes = [0u8; 32];
-        OsRng.fill_bytes(&mut bytes);
+        rand::rng().fill_bytes(&mut bytes);
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
     }
 
@@ -107,7 +106,7 @@ impl OAuthStateStore {
 /// Generate a 32-byte hex-encoded CSRF state token.
 fn generate_state_token() -> String {
     let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     hex::encode(bytes)
 }
 

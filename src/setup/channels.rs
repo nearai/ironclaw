@@ -1136,9 +1136,8 @@ fn validate_cloudflare_token_format(token: &str) -> bool {
 /// Generate a random secret of specified length (in bytes).
 fn generate_secret_with_length(length: usize) -> String {
     use rand::RngCore;
-    use rand::rngs::OsRng;
     let mut bytes = vec![0u8; length];
-    OsRng.fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 

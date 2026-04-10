@@ -18,6 +18,7 @@ use aes_gcm::{
     aead::{Aead, AeadCore, OsRng},
 };
 use hkdf::Hkdf;
+use rand::RngCore;
 use secrecy::{ExposeSecret, SecretString};
 use sha2::Sha256;
 
@@ -59,7 +60,7 @@ impl SecretsCrypto {
     /// Generate a random salt for a new secret.
     pub fn generate_salt() -> Vec<u8> {
         let mut salt = vec![0u8; SALT_SIZE];
-        rand::RngCore::fill_bytes(&mut OsRng, &mut salt);
+        rand::rng().fill_bytes(&mut salt);
         salt
     }
 

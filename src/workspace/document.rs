@@ -241,7 +241,7 @@ pub fn content_sha256(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
     let result = hasher.finalize();
-    format!("sha256:{:x}", result)
+    format!("sha256:{}", hex::encode(result))
 }
 
 /// Check if a path refers to a `.config` document.

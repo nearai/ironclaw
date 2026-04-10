@@ -667,7 +667,7 @@ fn verify_sha256(bytes: &[u8], expected: &str, url: &str) -> Result<(), Registry
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    let actual = format!("{:x}", hasher.finalize());
+    let actual = hex::encode(hasher.finalize());
 
     if actual != expected {
         return Err(RegistryError::ChecksumMismatch {
@@ -870,7 +870,7 @@ mod tests {
         let data = b"hello world";
         let mut hasher = Sha256::new();
         hasher.update(data);
-        let hash = format!("{:x}", hasher.finalize());
+        let hash = hex::encode(hasher.finalize());
         assert!(verify_sha256(data, &hash, "test://url").is_ok());
     }
 

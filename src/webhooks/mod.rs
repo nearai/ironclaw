@@ -590,7 +590,7 @@ mod tests {
 
     #[tokio::test]
     async fn accepts_with_valid_hmac_signature() {
-        use hmac::Mac;
+        use hmac::{KeyInit, Mac};
 
         let tools = Arc::new(ToolRegistry::new());
         tools.register(Arc::new(HmacWebhookTool)).await;

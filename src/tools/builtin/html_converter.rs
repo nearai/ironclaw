@@ -28,8 +28,12 @@ pub fn convert_html_to_markdown(html: &str, url: &str) -> Result<String, ToolErr
         ToolError::ExecutionFailed("no content extracted from article".to_string())
     })?;
 
-    let markdown = convert(&clean_html, None)
+    let result = convert(&clean_html, None)
         .map_err(|e| ToolError::ExecutionFailed(format!("HTML to markdown: {}", e)))?;
+
+    let markdown = result
+        .content
+        .ok_or_else(|| ToolError::ExecutionFailed("conversion produced no content".to_string()))?;
 
     Ok(markdown)
 }

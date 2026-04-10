@@ -168,7 +168,7 @@ fn cache_key(model: &str, request: &CompletionRequest) -> String {
         }
     }
 
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 #[async_trait]

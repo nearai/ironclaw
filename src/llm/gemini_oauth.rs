@@ -289,10 +289,10 @@ struct PKCEParams {
 fn generate_pkce_params() -> PKCEParams {
     use rand::Rng;
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let code_verifier: String = (0..64)
         .map(|_| {
-            let idx = rng.gen_range(0..PKCE_CHARSET.len());
+            let idx = rng.random_range(0..PKCE_CHARSET.len());
             PKCE_CHARSET[idx] as char
         })
         .collect();
@@ -304,7 +304,7 @@ fn generate_pkce_params() -> PKCEParams {
 
     let state: String = (0..32)
         .map(|_| {
-            let idx = rng.gen_range(0..STATE_CHARSET.len());
+            let idx = rng.random_range(0..STATE_CHARSET.len());
             STATE_CHARSET[idx] as char
         })
         .collect();

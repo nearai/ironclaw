@@ -5,7 +5,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use fs4::FileExt;
+use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::bootstrap::ironclaw_base_dir;

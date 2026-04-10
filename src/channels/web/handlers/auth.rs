@@ -13,7 +13,6 @@ use axum::{
 };
 use base64::Engine;
 use rand::RngCore;
-use rand::rngs::OsRng;
 use uuid::Uuid;
 
 use crate::channels::web::oauth::state_store::{OAuthStateStore, new_oauth_flow};
@@ -262,7 +261,7 @@ async fn handle_callback(
 
     // Generate an API token for the new session.
     let mut token_bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut token_bytes);
+    rand::rng().fill_bytes(&mut token_bytes);
     let plaintext_token = hex::encode(token_bytes);
     let token_hash = crate::channels::web::auth::hash_token(&plaintext_token);
     let token_prefix = &plaintext_token[..8]; // safety: hex-encoded 32 bytes = 64 ASCII chars
@@ -539,7 +538,7 @@ pub async fn near_verify_handler(
 
     // Issue API token.
     let mut token_bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut token_bytes);
+    rand::rng().fill_bytes(&mut token_bytes);
     let plaintext_token = hex::encode(token_bytes);
     let token_hash = crate::channels::web::auth::hash_token(&plaintext_token);
     let token_prefix = &plaintext_token[..8]; // safety: hex-encoded 32 bytes = 64 ASCII chars
