@@ -14,9 +14,16 @@ use serde_json::Value;
 /// Used by [`maybe_intercept`] and by `EffectBridgeAdapter` to advertise
 /// the sandbox-eligible tool surface. Keep in sync with the daemon's
 /// registered tool list (see `src/bin/sandbox_daemon.rs`).
+/// Includes both engine-v2 names (`file_read`/`file_write`) and the host's
+/// actual v1 tool registry names (`read_file`/`write_file`) so the
+/// interceptor catches calls regardless of which alias the agent uses. The
+/// daemon also accepts both on the container side, keeping the pair fully
+/// symmetric.
 pub const SANDBOX_TOOL_NAMES: &[&str] = &[
     "file_read",
     "file_write",
+    "read_file",
+    "write_file",
     "list_dir",
     "apply_patch",
     "shell",
@@ -77,7 +84,7 @@ pub async fn maybe_intercept(
     };
 
     let result = match action_name {
-        "file_read" => match backend.read(&rel_path).await {
+        "file_read" | "read_file" => match backend.read(&rel_path).await {
             Ok(bytes) => {
                 let content = String::from_utf8_lossy(&bytes).into_owned();
                 serde_json::json!({
@@ -89,7 +96,7 @@ pub async fn maybe_intercept(
             Err(MountError::Unsupported { .. }) => return Ok(InterceptOutcome::FellThrough),
             Err(e) => return Err(e),
         },
-        "file_write" => {
+        "file_write" | "write_file" => {
             let content = parameters
                 .get("content")
                 .and_then(|v| v.as_str())
@@ -180,14 +187,29 @@ pub async fn maybe_intercept(
 
 /// Extract the path argument for a sandbox tool, falling back to None when
 /// the parameter shape doesn't carry one.
+///
+/// Shell has a subtle default: when the sandbox is enabled and the caller
+/// doesn't supply a `workdir`, we default to `/project/` so the command
+/// always runs inside the container. Without this default, `shell(command:
+/// "git clone ...")` would fall through to host execution even though the
+/// whole point of enabling the sandbox is to keep shell work off the host.
+/// The agent can still override by passing an explicit `workdir` somewhere
+/// under `/project/`.
 fn extract_path_param(action_name: &str, params: &Value) -> Option<String> {
-    let key = match action_name {
-        // Most tools name the path arg `path`. shell uses `workdir` (optional).
-        "file_read" | "file_write" | "list_dir" | "apply_patch" => "path",
-        "shell" => "workdir",
-        _ => return None,
-    };
-    params.get(key).and_then(|v| v.as_str()).map(String::from)
+    match action_name {
+        "file_read" | "read_file" | "file_write" | "write_file" | "list_dir" | "apply_patch" => {
+            params
+                .get("path")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        }
+        "shell" => params
+            .get("workdir")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| Some("/project/".to_string())),
+        _ => None,
+    }
 }
 
 /// A path is mountable when it begins with `/` — that's the agent-facing
@@ -329,6 +351,41 @@ mod tests {
         assert!(matches!(outcome, InterceptOutcome::FellThrough));
     }
 
+    /// Regression test for the "shell escapes the sandbox" bug caught by the
+    /// live e2e test. When the sandbox is enabled and the agent invokes
+    /// `shell` without an explicit `workdir`, the call MUST still route
+    /// through the project mount — otherwise commands like
+    /// `git clone ... /project/repo` run on the host, hit permission denied
+    /// on `/project/`, and the agent silently works around by using host
+    /// paths. The fix defaults the shell workdir to `/project/`.
+    ///
+    /// Uses a counting backend that actually implements `shell` so the
+    /// interception reaches the backend (unlike `FilesystemBackend` which
+    /// returns `Unsupported` and falls through).
+    #[tokio::test]
+    async fn shell_without_workdir_routes_to_sandbox() {
+        let counter = Arc::new(CountingBackend::default());
+        let factory = CountingFactory {
+            backend: Arc::clone(&counter),
+        };
+        let mounts = WorkspaceMounts::new(Arc::new(factory));
+        let pid = ProjectId::new();
+
+        let params = serde_json::json!({"command": "echo hi"});
+        let outcome = maybe_intercept("shell", &params, pid, &mounts)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, InterceptOutcome::Handled(_)),
+            "shell without workdir must be handled by the sandbox, not fall through"
+        );
+        assert_eq!(
+            counter.shells.load(Ordering::Relaxed),
+            1,
+            "backend.shell() must be called exactly once"
+        );
+    }
+
     #[tokio::test]
     async fn unsupported_backend_op_falls_through() {
         // FilesystemBackend::shell returns Unsupported in Phase 1.
@@ -371,6 +428,7 @@ mod tests {
         reads: AtomicUsize,
         writes: AtomicUsize,
         lists: AtomicUsize,
+        shells: AtomicUsize,
     }
 
     #[async_trait]
@@ -402,8 +460,11 @@ mod tests {
             _: HashMap<String, String>,
             _: Option<&Path>,
         ) -> Result<ShellOutput, MountError> {
-            Err(MountError::Unsupported {
-                operation: "shell".into(),
+            self.shells.fetch_add(1, Ordering::Relaxed);
+            Ok(ShellOutput {
+                stdout: "counted".into(),
+                stderr: String::new(),
+                exit_code: 0,
             })
         }
     }

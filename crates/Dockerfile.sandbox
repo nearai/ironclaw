@@ -1,0 +1,95 @@
+# syntax=docker/dockerfile:1.6
+#
+# Per-project sandbox container image for IronClaw engine v2.
+#
+# This image is the running environment for one project's `/project/` mount.
+# It hosts the `sandbox_daemon` binary which speaks NDJSON over its stdin/
+# stdout to the host (`docker exec -i`). The container itself is started
+# once and kept alive across IronClaw restarts so installed dependencies
+# (cargo, npm, apt) and build caches accumulate over the project's lifetime.
+#
+# Build:
+#
+#   docker build -f crates/Dockerfile.sandbox -t ironclaw/sandbox:dev .
+#
+# Run (host):
+#
+#   ENGINE_V2=true ENGINE_V2_SANDBOX=true \
+#     IRONCLAW_SANDBOX_IMAGE=ironclaw/sandbox:dev \
+#     cargo run
+#
+# The host's `ProjectSandboxManager` (Phase 5) handles `docker create` /
+# `start` / `exec` lifecycle. PID 1 is `tini` so child processes (the
+# daemon, transient `cargo build`s, etc.) are reaped cleanly. The default
+# CMD just blocks on a fifo so the container stays alive without burning
+# CPU; the daemon is launched separately via `docker exec -i`.
+
+# ── Stage 1: build the sandbox_daemon binary ─────────────────────────
+#
+# We compile against the same Rust toolchain the host uses. Pinning to a
+# minor version keeps build-cache hit rates stable across reproducible
+# builds. Override at build time with `--build-arg RUST_VERSION=<v>`.
+ARG RUST_VERSION=1.92
+FROM rust:${RUST_VERSION}-slim-bookworm AS builder
+
+WORKDIR /build
+
+# Cache deps independently of source. Python is required at *build time*
+# because the `ironclaw` crate pulls in `monty` → `pyo3`, whose build script
+# probes for a Python 3 interpreter during compilation.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       pkg-config libssl-dev ca-certificates git build-essential \
+       python3 python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the workspace. We bind-mount the build context as the workspace
+# root because the sandbox_daemon binary lives at the workspace root and
+# imports from `crates/`. Everything is needed for cargo workspace
+# resolution; selectively copying would require shadowing every member.
+COPY . .
+
+# Build only the daemon binary. The rest of the workspace is unused at
+# runtime — this keeps the image small.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo build --release --bin sandbox_daemon \
+    && cp target/release/sandbox_daemon /sandbox_daemon
+
+# ── Stage 2: minimal runtime ─────────────────────────────────────────
+FROM debian:bookworm-slim AS runtime
+
+# tini reaps zombies (cargo/python often spawn helpers); the rest are the
+# common build/test toolchain that the LLM is likely to want for any
+# real-world project workspace.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       tini \
+       ca-certificates \
+       curl \
+       git \
+       jq \
+       openssh-client \
+       build-essential \
+       pkg-config \
+       libssl-dev \
+       python3 python3-pip python3-venv \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /sandbox_daemon /usr/local/bin/sandbox_daemon
+RUN chmod +x /usr/local/bin/sandbox_daemon
+
+# Project bind mount target.
+RUN mkdir -p /project
+WORKDIR /project
+
+# tini is PID 1; CMD blocks indefinitely so the container stays alive
+# without consuming CPU. The host launches the daemon via `docker exec -i`
+# whenever a new IronClaw session attaches to this project.
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["sleep", "infinity"]
+
+LABEL org.opencontainers.image.title="ironclaw-sandbox" \
+      org.opencontainers.image.description="Per-project sandbox container for IronClaw engine v2" \
+      org.opencontainers.image.source="https://github.com/nearai/ironclaw"

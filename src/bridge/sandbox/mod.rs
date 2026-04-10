@@ -30,6 +30,71 @@
 //! [`EffectBridgeAdapter`]: super::EffectBridgeAdapter
 //! [`WorkspaceMounts`]: ironclaw_engine::WorkspaceMounts
 
+mod containerized_backend;
+mod containerized_factory;
+mod docker_transport;
+mod filesystem_factory;
 mod intercept;
+mod lifecycle;
+mod manager;
+pub mod protocol;
+mod transport;
+pub mod workspace_path;
 
+/// Returns whether `ENGINE_V2_SANDBOX` is set to a truthy value.
+///
+/// Accepts the same forms the rest of the codebase uses: `1`, `true`,
+/// `TRUE`, `yes`, `on`. Anything else (including unset / empty) means
+/// "use the host filesystem backend".
+pub fn engine_v2_sandbox_enabled() -> bool {
+    parse_engine_v2_sandbox(std::env::var("ENGINE_V2_SANDBOX").ok().as_deref())
+}
+
+fn parse_engine_v2_sandbox(value: Option<&str>) -> bool {
+    matches!(value, Some("1" | "true" | "TRUE" | "yes" | "on"))
+}
+
+pub use containerized_backend::ContainerizedFilesystemBackend;
+pub use containerized_factory::ContainerizedMountFactory;
+pub use docker_transport::{DEFAULT_CALL_TIMEOUT, DockerTransport};
+pub use filesystem_factory::{FilesystemMountFactory, PROJECT_MOUNT_PREFIX, ProjectPathResolver};
 pub use intercept::{InterceptOutcome, SANDBOX_TOOL_NAMES, maybe_intercept};
+pub use lifecycle::{DEFAULT_IMAGE, container_name_for, sandbox_image};
+pub use manager::ProjectSandboxManager;
+pub use transport::SandboxTransport;
+pub use workspace_path::{
+    PROJECTS_SUBDIR, default_project_workspace_path, ensure_project_workspace_dir,
+    project_workspace_path,
+};
+
+#[cfg(test)]
+mod env_tests {
+    use super::parse_engine_v2_sandbox;
+
+    #[test]
+    fn truthy_values_enable() {
+        for v in ["1", "true", "TRUE", "yes", "on"] {
+            assert!(
+                parse_engine_v2_sandbox(Some(v)),
+                "expected '{v}' to enable sandbox"
+            );
+        }
+    }
+
+    #[test]
+    fn falsy_or_unset_disables() {
+        for v in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("no"),
+            Some("off"),
+        ] {
+            assert!(
+                !parse_engine_v2_sandbox(v),
+                "expected {v:?} to disable sandbox"
+            );
+        }
+    }
+}

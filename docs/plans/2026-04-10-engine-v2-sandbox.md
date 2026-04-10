@@ -237,7 +237,7 @@ Threads do not own containers. They use the project's container if it exists, la
 
 Each phase is independently shippable and reviewable.
 
-### Phase 1: Mount-backend abstraction (subset of #1894 Phase 1) — DONE
+### Phase 1: Mount-backend abstraction (subset of #1894 Phase 1) — DONE (#2211)
 
 - Create `crates/ironclaw_engine/src/workspace/mount.rs` with `MountBackend` trait, `WorkspaceMounts`, `MountError`, `DirEntry`, `ShellOutput`.
 - Create `src/bridge/sandbox/intercept.rs` with `maybe_intercept` and `SANDBOX_TOOL_NAMES`. (Originally planned as `src/bridge/workspace_filesystem.rs`; the actual location keeps the bridge-side glue colocated under `src/bridge/sandbox/`.)
@@ -246,7 +246,7 @@ Each phase is independently shippable and reviewable.
 - Tests: round-trip read/write via `FilesystemBackend`; mount resolution longest-prefix-match; `intercept_actually_dispatches_into_backend` (counting backend test); 5 integration tests in `tests/engine_v2_sandbox_integration.rs` driving `EffectBridgeAdapter::execute_action()` end-to-end per the "Test Through the Caller" rule.
 - This phase ships with no Docker dependency. It establishes the abstraction layer.
 
-### Phase 2: Project workspace folder concept
+### Phase 2: Project workspace folder concept — DONE
 
 - Add `workspace_path: Option<PathBuf>` to `crates/ironclaw_engine/src/types/project.rs`.
 - Add accessor that defaults to `~/.ironclaw/projects/<project_id>/`.
@@ -255,7 +255,7 @@ Each phase is independently shippable and reviewable.
 - Wire the per-project `FilesystemBackend(workspace_path)` into the mount table on thread spawn.
 - Tests: round-trip persistence, default path, idempotent dir creation.
 
-### Phase 3: Standalone daemon binary
+### Phase 3: Standalone daemon binary — DONE
 
 - Create `src/bin/sandbox_daemon.rs`.
 - Build a `ToolRegistry` containing only the five sandboxed tools, each with `base_dir=/project/` (configurable via env var for local testing).
@@ -264,13 +264,13 @@ Each phase is independently shippable and reviewable.
 - Test directly with `cargo run --bin sandbox_daemon` outside Docker — pipe JSON in via shell, verify output.
 - No Docker dependency yet.
 
-### Phase 4: Sandbox container image
+### Phase 4: Sandbox container image — DONE
 
 - Add `crates/Dockerfile.sandbox`.
 - Multi-stage build: stage 1 builds `sandbox_daemon` binary (Rust); stage 2 is `debian:stable-slim` + tini + common build tools + the binary.
 - Document the build command in `crates/Dockerfile.sandbox` header.
 
-### Phase 5: ProjectSandboxManager + ContainerizedFilesystemBackend
+### Phase 5: ProjectSandboxManager + ContainerizedFilesystemBackend — DONE
 
 - Implement `src/bridge/sandbox/{manager,handle,protocol,lifecycle,backend}.rs`.
 - `ContainerHandle::new(project_id, project_path)` does the create-if-missing → start → exec daemon dance and returns a handle with stdin/stdout streams.
@@ -278,7 +278,7 @@ Each phase is independently shippable and reviewable.
 - Integration test: programmatically create a real container, call `file_write` then `file_read`, verify roundtrip via the mount-backend → JSON-RPC → daemon path.
 - Idle-timeout background task lives in `ProjectSandboxManager::spawn_idle_reaper()`.
 
-### Phase 6: Wire into EffectBridgeAdapter and gate behind env var
+### Phase 6: Wire into EffectBridgeAdapter and gate behind env var — DONE
 
 - In `src/bridge/router.rs`, when `ENGINE_V2_SANDBOX=true`, register `ContainerizedFilesystemBackend(project_id)` for `/project/` instead of `FilesystemBackend`.
 - Surface IPC errors as `EngineError::ToolError` with `code=sandbox_error`.

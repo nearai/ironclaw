@@ -3,6 +3,8 @@
 //! A project is a persistent domain of work that scopes memory documents,
 //! threads, and missions. Examples: "IronClaw architecture", "deployment system".
 
+use std::path::PathBuf;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -35,6 +37,14 @@ pub struct Project {
     pub name: String,
     pub description: String,
     pub metadata: serde_json::Value,
+    /// Optional override for the host-filesystem directory bound into this
+    /// project's sandbox at `/project/`. When `None`, the host computes a
+    /// default path (see the bridge's `project_workspace_path` helper). The
+    /// engine crate intentionally stores only the override and not the
+    /// resolved default, because resolving the default depends on the host's
+    /// base directory (`~/.ironclaw`) which lives outside this crate.
+    #[serde(default)]
+    pub workspace_path: Option<PathBuf>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -52,9 +62,17 @@ impl Project {
             name: name.into(),
             description: description.into(),
             metadata: serde_json::Value::Object(serde_json::Map::new()),
+            workspace_path: None,
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// Set an explicit host-filesystem path for this project's `/project/`
+    /// mount, returning `self` for chaining at construction sites.
+    pub fn with_workspace_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.workspace_path = Some(path.into());
+        self
     }
 
     pub fn owner_id(&self) -> OwnerId<'_> {

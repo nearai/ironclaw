@@ -961,6 +961,69 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         }
     }
 
+    // Install the per-project workspace mount table on the effect adapter.
+    //
+    // Two factories share the same `ProjectPathResolver`: a default
+    // [`FilesystemMountFactory`] that points `/project/` at the host
+    // workspace directory, and a [`ContainerizedMountFactory`] (gated on
+    // `ENGINE_V2_SANDBOX=true`) that routes the same prefix into a
+    // per-project sandbox container via `ProjectSandboxManager`. The
+    // bridge interceptor does not care which factory is in play — Phase 1
+    // already routes any `/project/...` tool call through whichever
+    // backend the mount table returns.
+    {
+        use crate::bridge::sandbox::{
+            ContainerizedMountFactory, FilesystemMountFactory, ProjectPathResolver,
+            ProjectSandboxManager, ensure_project_workspace_dir,
+        };
+        use ironclaw_engine::{MountError, ProjectMountFactory, WorkspaceMounts};
+
+        let store_for_resolver = store_dyn.clone();
+        let resolver: ProjectPathResolver = Arc::new(move |pid| {
+            let store_for_resolver = store_for_resolver.clone();
+            Box::pin(async move {
+                match store_for_resolver.load_project(pid).await {
+                    Ok(Some(project)) => {
+                        ensure_project_workspace_dir(&project).map_err(|e| MountError::Backend {
+                            reason: format!("ensure_project_workspace_dir({pid}): {e}"),
+                        })
+                    }
+                    Ok(None) => Err(MountError::Backend {
+                        reason: format!("project {pid} not found"),
+                    }),
+                    Err(e) => Err(MountError::Backend {
+                        reason: format!("store load_project({pid}): {e}"),
+                    }),
+                }
+            })
+        });
+
+        let factory: Arc<dyn ProjectMountFactory> =
+            if crate::bridge::sandbox::engine_v2_sandbox_enabled() {
+                match crate::sandbox::container::connect_docker().await {
+                    Ok(docker) => {
+                        debug!(
+                            "engine v2: ENGINE_V2_SANDBOX=true — using containerized mount factory"
+                        );
+                        let manager = Arc::new(ProjectSandboxManager::new(docker));
+                        Arc::new(ContainerizedMountFactory::new(manager, resolver))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "engine v2: ENGINE_V2_SANDBOX=true but Docker is not reachable; \
+                             falling back to host filesystem mount factory"
+                        );
+                        Arc::new(FilesystemMountFactory::new(resolver))
+                    }
+                }
+            } else {
+                Arc::new(FilesystemMountFactory::new(resolver))
+            };
+        let mounts = Arc::new(WorkspaceMounts::new(factory));
+        effect_adapter.set_workspace_mounts(Some(mounts)).await;
+    }
+
     // Wire mission manager into effect adapter for mission_* function calls
     effect_adapter
         .set_mission_manager(Arc::clone(&mission_manager))

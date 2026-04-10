@@ -1,0 +1,106 @@
+//! Per-project host workspace directory resolution.
+//!
+//! Each engine v2 project gets a real directory on the host filesystem at
+//! `~/.ironclaw/projects/<project_id>/`. That's the directory the user can
+//! see, edit, and back up. It's also the bind-mount source for the
+//! per-project sandbox container's `/project/` mount in Phases 5+.
+//!
+//! [`Project::workspace_path`] can override the default; otherwise the helpers
+//! in this module compute and create the standard path. The engine crate
+//! intentionally doesn't know about `~/.ironclaw` — that's a host-side concept
+//! kept here so the engine stays portable.
+
+use std::io;
+use std::path::{Path, PathBuf};
+
+use ironclaw_engine::Project;
+
+use crate::bootstrap::ironclaw_base_dir;
+
+/// Subdirectory under [`ironclaw_base_dir`] that holds per-project workspaces.
+pub const PROJECTS_SUBDIR: &str = "projects";
+
+/// Resolve the host-filesystem workspace path for a project.
+///
+/// If the project has an explicit `workspace_path` override, that is returned
+/// verbatim. Otherwise the default is `~/.ironclaw/projects/<project_id>/`.
+pub fn project_workspace_path(project: &Project) -> PathBuf {
+    if let Some(ref explicit) = project.workspace_path {
+        return explicit.clone();
+    }
+    default_project_workspace_path(project.id.0)
+}
+
+/// Compute the default host workspace path for a project id, ignoring any
+/// override on the [`Project`] record.
+pub fn default_project_workspace_path(project_id: uuid::Uuid) -> PathBuf {
+    ironclaw_base_dir()
+        .join(PROJECTS_SUBDIR)
+        .join(project_id.to_string())
+}
+
+/// Create the project workspace directory if it does not exist, returning the
+/// resolved path. Idempotent. On Unix the directory is created with mode 0700
+/// so secrets accidentally written into the workspace are not world-readable.
+pub fn ensure_project_workspace_dir(project: &Project) -> io::Result<PathBuf> {
+    let path = project_workspace_path(project);
+    ensure_dir(&path)?;
+    Ok(path)
+}
+
+fn ensure_dir(path: &Path) -> io::Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Best-effort: tighten the leaf so even if create_dir_all already
+        // applied umask defaults we still end up at 0700.
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_engine::Project;
+
+    #[test]
+    fn override_path_is_returned_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = Project::new("u", "test", "").with_workspace_path(dir.path().to_path_buf());
+        assert_eq!(project_workspace_path(&project), dir.path());
+    }
+
+    #[test]
+    fn default_path_is_under_base_dir() {
+        let project = Project::new("u", "test", "");
+        let path = project_workspace_path(&project);
+        let base = ironclaw_base_dir();
+        assert!(path.starts_with(&base));
+        assert!(path.ends_with(project.id.0.to_string()));
+    }
+
+    #[test]
+    fn ensure_creates_idempotent() {
+        let parent = tempfile::tempdir().unwrap();
+        let project =
+            Project::new("u", "test", "").with_workspace_path(parent.path().join("proj-x"));
+
+        let p1 = ensure_project_workspace_dir(&project).unwrap();
+        assert!(p1.exists());
+        // second call: still ok, still exists
+        let p2 = ensure_project_workspace_dir(&project).unwrap();
+        assert_eq!(p1, p2);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&p1).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "workspace dir should be 0700");
+        }
+    }
+}
