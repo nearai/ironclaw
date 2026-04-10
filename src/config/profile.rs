@@ -71,6 +71,19 @@ pub fn apply_profile(settings: &mut Settings) -> Result<(), ConfigError> {
 
 /// Load a profile by name, checking user directory first, then built-ins.
 fn load_profile(name: &str) -> Result<Settings, ConfigError> {
+    // Reject names that could escape the profiles directory.
+    if name.contains('/') || name.contains('\\') || name.contains("..") || name.starts_with('.') {
+        return Err(ConfigError::InvalidValue {
+            key: "IRONCLAW_PROFILE".to_string(),
+            message: format!(
+                "invalid profile name '{name}': must not contain path separators or '..'"
+            ),
+        });
+    }
+
+    // Normalize to lowercase so built-in and user lookups are case-insensitive.
+    let name = name.to_ascii_lowercase();
+
     // 1. Check user-defined profiles directory.
     let user_path = user_profiles_dir().join(format!("{name}.toml"));
     if user_path.is_file() {
@@ -86,9 +99,8 @@ fn load_profile(name: &str) -> Result<Settings, ConfigError> {
     }
 
     // 2. Check built-in profiles.
-    let normalized = name.to_ascii_lowercase();
     for &(builtin_name, toml_content) in BUILTIN_PROFILES {
-        if builtin_name == normalized {
+        if builtin_name == name {
             let profile: Settings = toml::from_str(toml_content).map_err(|e| {
                 ConfigError::ParseError(format!(
                     "failed to parse built-in profile '{builtin_name}': {e}"
@@ -199,6 +211,26 @@ mod tests {
     }
 
     #[test]
+    fn path_traversal_rejected() {
+        let bad_names = &[
+            "../etc/passwd",
+            "foo/bar",
+            "foo\\bar",
+            ".hidden",
+            "..sneaky",
+        ];
+        for name in bad_names {
+            let result = load_profile(name);
+            assert!(result.is_err(), "profile name '{name}' should be rejected");
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("must not contain path separators"),
+                "error for '{name}' should mention path separators: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn local_profile_disables_gateway() {
         let _guard = lock_env();
         unsafe { std::env::set_var("IRONCLAW_PROFILE", "local") };
@@ -287,9 +319,18 @@ mod tests {
 
     #[test]
     fn user_profile_overrides_builtin() {
+        // NOTE: We cannot redirect `user_profiles_dir()` in tests because
+        // `ironclaw_base_dir()` is cached in a `LazyLock`. Instead we test the
+        // override *logic*: load a user TOML that shadows a built-in profile
+        // name and verify that `merge_from` makes the user values win.
         let _guard = lock_env();
 
-        // Create a temporary user profile.
+        // 1. Load the built-in "local" profile to get its baseline values.
+        let builtin = load_profile("local").expect("built-in 'local' should load");
+        // Built-in local profile uses libsql.
+        assert_eq!(builtin.database_backend.as_deref(), Some("libsql"));
+
+        // 2. Create a user TOML that overrides database_backend to postgres.
         let tmp = tempfile::TempDir::new().unwrap();
         let profile_path = tmp.path().join("local.toml");
         std::fs::write(
@@ -298,9 +339,29 @@ mod tests {
         )
         .unwrap();
 
-        // Load it directly via load_profile logic (simulating user dir).
-        let loaded: Settings = Settings::load_toml(&profile_path).unwrap().unwrap();
-        assert_eq!(loaded.database_backend.as_deref(), Some("postgres"));
-        assert!(loaded.heartbeat.enabled);
+        let user_profile: Settings = Settings::load_toml(&profile_path).unwrap().unwrap();
+
+        // 3. Start from defaults, apply built-in, then apply user override
+        //    (same layering that load_profile would do if the user dir matched).
+        let mut settings = Settings::default();
+        settings.merge_from(&builtin);
+        settings.merge_from(&user_profile);
+
+        // User values win over built-in.
+        assert_eq!(
+            settings.database_backend.as_deref(),
+            Some("postgres"),
+            "user profile should override built-in database_backend"
+        );
+        assert!(
+            settings.heartbeat.enabled,
+            "user profile should override built-in heartbeat.enabled"
+        );
+
+        // Built-in values that the user didn't override are preserved.
+        assert!(
+            !settings.channels.gateway_enabled,
+            "built-in gateway_enabled=false should survive user overlay"
+        );
     }
 }

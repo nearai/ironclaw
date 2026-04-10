@@ -433,7 +433,7 @@ pub(crate) fn load_bootstrap_settings(
     let _ = dotenvy::dotenv();
     crate::bootstrap::load_ironclaw_env();
 
-    let mut settings = Settings::load();
+    let mut settings = Settings::default();
     profile::apply_profile(&mut settings)?;
     Config::apply_toml_overlay(&mut settings, toml_path)?;
     Ok(settings)
