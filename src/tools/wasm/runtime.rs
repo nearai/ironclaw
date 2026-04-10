@@ -428,8 +428,8 @@ mod tests {
             "TOML must contain [cache] section"
         );
         assert!(
-            content.contains("directory"),
-            "TOML must contain directory setting"
+            content.contains("directory = \""),
+            "TOML must contain directory key-value setting"
         );
     }
 
