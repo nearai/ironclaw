@@ -51,16 +51,34 @@ fn gate_display_parameters(pending: &PendingGate) -> serde_json::Value {
         .unwrap_or_else(|| pending.parameters.clone())
 }
 
+/// Resolve the owning extension name for a tool action, falling back to a
+/// credential name when the action isn't extension-backed. This is the
+/// shared core of the auth-gate display + submit routing logic — the same
+/// `provider_extension_for_tool + unwrap_or_else(credential_name)` pattern
+/// fired in three different sites in this file before, each one with the
+/// same fallback rationale: the engine's `ResumeKind::Authentication` only
+/// carries `credential_name` (e.g. `google_oauth_token`), which is opaque
+/// to users AND fails when fed back into `submit_auth_token` for
+/// WASM-tool-backed credentials, while the owning extension name (e.g.
+/// `google-drive-tool`) is what both the user-facing UI and
+/// `submit_auth_token` actually want. For built-in tools, HTTP, and skill
+/// credentials there's no owning extension and the fallback is the right
+/// thing.
+async fn resolve_extension_for_action(
+    tools: &crate::tools::ToolRegistry,
+    action_name: &str,
+    credential_fallback: &str,
+) -> String {
+    tools
+        .provider_extension_for_tool(action_name)
+        .await
+        .unwrap_or_else(|| credential_fallback.to_string())
+}
+
 /// Resolve the user-facing name to use when surfacing an authentication
-/// gate to a channel. The engine's `ResumeKind::Authentication` only
-/// carries `credential_name` (e.g. `google_oauth_token`), which is
-/// opaque to the user and also fails when fed back into
-/// `submit_auth_token` for WASM-tool-backed credentials. We prefer the
-/// owning extension name (e.g. `google-drive-tool`) when the failing
-/// action belongs to one. For built-in tools, HTTP, and skill
-/// credentials there's no provider extension, so we fall back to the
-/// credential name (which IS the right thing to display in those
-/// cases).
+/// gate to a channel. Thin wrapper around `resolve_extension_for_action`
+/// that handles the non-Authentication ResumeKind variants by falling back
+/// to the action name (since they don't have a credential name to use).
 async fn resolve_auth_gate_display_name(
     tools: &crate::tools::ToolRegistry,
     pending: &PendingGate,
@@ -69,10 +87,7 @@ async fn resolve_auth_gate_display_name(
         credential_name, ..
     } = &pending.resume_kind
     {
-        tools
-            .provider_extension_for_tool(&pending.action_name)
-            .await
-            .unwrap_or_else(|| credential_name.clone())
+        resolve_extension_for_action(tools, &pending.action_name, credential_name).await
     } else {
         // Non-authentication gates don't use this string; return
         // something innocuous.
@@ -1611,27 +1626,15 @@ pub async fn resolve_gate(
                 // its first argument and uses `configure_token` to walk
                 // the extension's capabilities file for the actual
                 // secret name. The engine's `ResumeKind::Authentication`
-                // only carries `credential_name` (e.g.
-                // `google_oauth_token`), which is NOT an extension
-                // name. Passing it directly fails closed because
-                // neither `configure_token("google_oauth_token", ...)`
-                // nor `get_credential_spec("google_oauth_token")`
-                // match anything for a WASM tool — and the agent gets
-                // back the user-confusing "Extension not installed:
-                // google_oauth_token" message.
-                //
-                // Resolve the actual extension via the action that
-                // triggered the gate. For built-in tools, HTTP, and
-                // skill credentials there's no provider extension and
-                // we fall back to the credential name (the existing
-                // pre-fix behaviour for those callers — `submit_auth_token`
-                // then routes through the skill registry).
-                let submit_target = state
-                    .effect_adapter
-                    .tools()
-                    .provider_extension_for_tool(&pending.action_name)
-                    .await
-                    .unwrap_or_else(|| credential_name.clone());
+                // only carries `credential_name`, which fails closed
+                // when fed there for WASM-tool-backed credentials. See
+                // `resolve_extension_for_action` for the full rationale.
+                let submit_target = resolve_extension_for_action(
+                    state.effect_adapter.tools(),
+                    &pending.action_name,
+                    credential_name,
+                )
+                .await;
                 let display_name = submit_target.clone();
 
                 if let Some(ref sse) = state.sse {
@@ -2788,37 +2791,19 @@ async fn await_thread_outcome(
                     instructions,
                     auth_url,
                 } => {
-                    // The engine's `ResumeKind::Authentication` only
-                    // carries `credential_name` (e.g. "google_oauth_token"),
-                    // not the owning extension. For UI display and the
-                    // resume-time `submit_auth_token` call, we want the
-                    // actual extension name (e.g. "google-drive-tool")
-                    // because:
-                    //   * the channel UIs render `extension_name` as
-                    //     "Authentication required for 'X'", and a
-                    //     credential name like `google_oauth_token` is
-                    //     opaque to the user, while `google-drive-tool`
-                    //     is the integration they recognise.
-                    //   * `submit_auth_token` routes the *extension name*
-                    //     through `configure_token`, which loads the
-                    //     extension's capabilities file to find the
-                    //     correct secret name. Passing the credential
-                    //     name there fails closed with
-                    //     "Extension not installed: google_oauth_token".
-                    //
-                    // We derive the extension name from the action that
-                    // triggered the gate (`pending.action_name`) by
-                    // asking the tool registry which provider extension
-                    // owns it. For built-in tools, HTTP, and skill
-                    // credentials there's no owning extension and we
-                    // fall back to the credential name (the existing
-                    // pre-fix behaviour for those callers).
-                    let extension_for_display = state
-                        .effect_adapter
-                        .tools()
-                        .provider_extension_for_tool(&action_name)
-                        .await
-                        .unwrap_or_else(|| credential_name.clone());
+                    // Channel UIs render `extension_name` as "Authentication
+                    // required for 'X'", and `credential_name` (e.g.
+                    // `google_oauth_token`) is opaque to users, while the
+                    // owning extension name (e.g. `google-drive-tool`) is
+                    // the integration they recognise. See
+                    // `resolve_extension_for_action` for the full rationale
+                    // and the fallback semantics for non-WASM credentials.
+                    let extension_for_display = resolve_extension_for_action(
+                        state.effect_adapter.tools(),
+                        &action_name,
+                        credential_name,
+                    )
+                    .await;
 
                     let _ = agent
                         .channels
