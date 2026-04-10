@@ -2140,14 +2140,31 @@ impl From<PythonActionCall> for ActionCall {
 }
 
 /// Serialize a slice of `ActionCall`s into the Python interchange shape.
+///
+/// On serialization failure (essentially unreachable for `String + String +
+/// Value`, but still possible if the `serde_json::Value` parameters tree
+/// contains a key whose stringification fails), the entry is **dropped**
+/// from the output rather than replaced with `Value::Null`. The previous
+/// `unwrap_or_else(|_| Value::Null)` corrupted the array — Python's
+/// `default.py` accesses `c.get("name")` / `c.get("call_id")` /
+/// `c.get("params")` on each entry, so a `null` would crash with a Python
+/// `AttributeError` and lose the entire LLM step. `filter_map` produces a
+/// shorter array, which Python's tool-result loop handles correctly because
+/// it iterates `range(len(results))` against the shortened call list. The
+/// warn log is preserved so operators have a breadcrumb if it ever fires.
 fn action_calls_to_python_json(calls: &[ActionCall]) -> Vec<serde_json::Value> {
     calls
         .iter()
-        .map(|c| {
-            serde_json::to_value(PythonActionCall::from(c)).unwrap_or_else(|e| {
-                warn!("Failed to serialize ActionCall for Python: {e}");
-                serde_json::Value::Null
-            })
+        .filter_map(|c| match serde_json::to_value(PythonActionCall::from(c)) {
+            Ok(value) => Some(value),
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    action_name = %c.action_name,
+                    "Failed to serialize ActionCall for Python orchestrator — dropping entry"
+                );
+                None
+            }
         })
         .collect()
 }
