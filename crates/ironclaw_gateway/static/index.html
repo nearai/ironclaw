@@ -119,9 +119,14 @@
         <p class="restart-modal-description" data-i18n="restart.description">
           Are you sure you want to restart the IronClaw instance? This will gracefully restart the process.
         </p>
+        <p class="restart-modal-version" id="restart-version-info" style="display: none;"></p>
         <div class="restart-modal-warning">
           <span class="restart-modal-warning-icon">⚠️</span>
           <p data-i18n="restart.warning">Any in-progress jobs may be interrupted. The restart will complete within a few seconds.</p>
+        </div>
+        <div class="restart-modal-warning restart-modal-data-warning">
+          <span class="restart-modal-warning-icon">⚠️</span>
+          <p data-i18n="restart.dataWarning">If your deployment uses a mutable image tag (e.g. "latest"), restarting may change the running version. A version downgrade can cause data loss. Pin your image to a specific version tag to avoid this.</p>
         </div>
       </div>
       <div class="restart-modal-footer">

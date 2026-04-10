@@ -742,6 +742,17 @@ body {
   margin: 0;
 }
 
+.restart-modal-version {
+  color: var(--text-dimmed);
+  font-size: 0.8rem;
+  margin: 0.5rem 0 0 0;
+  font-family: var(--font-mono, monospace);
+}
+
+.restart-modal-data-warning {
+  font-size: 0.75rem;
+}
+
 .restart-modal-warning {
   margin-top: 1rem;
   background-color: var(--warning-bg);

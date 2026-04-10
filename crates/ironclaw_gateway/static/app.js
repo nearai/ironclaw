@@ -598,11 +598,19 @@ function apiFetch(path, options) {
 
 let isRestarting = false; // Track if we're currently restarting
 let restartEnabled = false; // Track if restart is available in this deployment
+let currentServerVersion = ''; // Track the server version for restart warnings
 
 function triggerRestart() {
   if (!currentThreadId) {
     alert(I18n.t('error.startConversation'));
     return;
+  }
+
+  // Show current version in the restart confirmation modal
+  var versionEl = document.getElementById('restart-version-info');
+  if (versionEl && currentServerVersion) {
+    versionEl.textContent = I18n.t('restart.currentVersion', { version: currentServerVersion });
+    versionEl.style.display = 'block';
   }
 
   // Show the confirmation modal
@@ -751,6 +759,21 @@ function connectSSE(lastEventIdOverride) {
       if (restartBtn) restartBtn.disabled = false;
       if (restartIcon) restartIcon.classList.remove('spinning');
       isRestarting = false;
+
+      // After restart, check if the server version changed
+      var preRestartVersion = currentServerVersion;
+      apiFetch('/api/gateway/status').then(function(statusData) {
+        if (statusData.version) {
+          currentServerVersion = statusData.version;
+          if (preRestartVersion && statusData.version !== preRestartVersion) {
+            var msg = I18n.t('restart.versionChanged', {
+              oldVersion: preRestartVersion,
+              newVersion: statusData.version
+            });
+            addMessage('system', msg);
+          }
+        }
+      }).catch(function() { /* ignore status fetch errors during reconnect */ });
     }
 
     if (sseHasConnectedBefore && currentThreadId) {
@@ -6329,6 +6352,11 @@ function fetchGatewayStatus() {
     // Update restart button visibility
     restartEnabled = data.restart_enabled || false;
     updateRestartButtonVisibility();
+
+    // Track server version for restart warnings
+    if (data.version) {
+      currentServerVersion = data.version;
+    }
 
     var popover = document.getElementById('gateway-popover');
     var html = '';

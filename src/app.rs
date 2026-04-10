@@ -208,6 +208,37 @@ impl AppBuilder {
             .attach_store(db.clone(), &self.config.owner_id)
             .await;
 
+        // Version tracking — detect upgrades / accidental downgrades.
+        match crate::version::check_and_record_version(db.as_ref()).await {
+            Ok(crate::version::VersionTransition::Fresh) => {
+                tracing::debug!(
+                    "First startup — recorded version {}",
+                    crate::version::CURRENT_VERSION
+                );
+            }
+            Ok(crate::version::VersionTransition::Unchanged) => {}
+            Ok(crate::version::VersionTransition::Upgraded { previous }) => {
+                tracing::warn!(
+                    "IronClaw upgraded from {} to {} — running migrations on newer schema",
+                    previous,
+                    crate::version::CURRENT_VERSION
+                );
+            }
+            Ok(crate::version::VersionTransition::Downgraded { previous }) => {
+                tracing::error!(
+                    "VERSION DOWNGRADE DETECTED: previous version was {}, \
+                     but this binary is {}. Data written by the newer version \
+                     may be incompatible. If this is unintentional, stop the process \
+                     and redeploy the correct version.",
+                    previous,
+                    crate::version::CURRENT_VERSION
+                );
+            }
+            Err(e) => {
+                tracing::warn!("Version check failed (non-fatal): {}", e);
+            }
+        }
+
         // Fire-and-forget housekeeping — no need to block startup.
         let db_cleanup = db.clone();
         tokio::spawn(async move {
