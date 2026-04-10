@@ -42,6 +42,10 @@ Create custom UI components in `.system/gateway/widgets/{id}/`. The directory na
 - `index.js` — widget code (calls `IronClaw.registerWidget()`)
 - `style.css` — optional scoped styles (auto-prefixed with `[data-widget="{id}"]`)
 
+**CSS scoping caveat:** Widget CSS is scoped via a brace-counting text transform, not a full CSS parser. Braces inside CSS comments (`/* } */`) or string literals (`content: "{"`) will confuse the scoper and produce malformed output. Avoid `{` / `}` in comments and string values — use Unicode escapes (`\7B` / `\7D`) if you need literal braces in `content:` properties.
+
+**Binary assets:** Widget files are served through the workspace text layer (`Workspace::read()`), which returns UTF-8 strings. Text-format assets (JS, CSS, JSON, SVG) work correctly. Binary assets (PNG, WOFF2, TTF, etc.) will be corrupted — host them externally or Base64-encode them into CSS/JS until a binary workspace read path is available.
+
 **Slot:** only `tab` is currently mounted by the browser runtime — `IronClaw.registerWidget({ slot: "tab", ... })` adds a new tab to the tab bar. For inline rendering of structured data in chat messages, use `IronClaw.registerChatRenderer({ id, match, render })` instead. Additional slot names may be accepted by the server but will not be mounted anywhere in the UI yet.
 
 ## API Endpoints

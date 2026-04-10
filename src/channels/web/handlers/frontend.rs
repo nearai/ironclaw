@@ -261,6 +261,13 @@ async fn read_widget_manifest(
 /// This is the single source of truth for widget loading; both the gateway's
 /// `/` handler and the `/api/frontend/widgets` handler delegate to it (the
 /// latter via [`load_widget_manifests`]).
+/// Per-widget size caps. Widget JS/CSS is inlined into every page response
+/// (and cached), so a single oversized file bloats every page load. The
+/// caps are generous enough for real-world widget bundles but stop a
+/// multi-MB file from ending up in the cached HTML.
+const MAX_WIDGET_JS_BYTES: usize = 512 * 1024; // 512 KB
+const MAX_WIDGET_CSS_BYTES: usize = 256 * 1024; // 256 KB
+
 pub(crate) async fn load_resolved_widgets(
     workspace: &Workspace,
     layout: &LayoutConfig,
@@ -297,13 +304,34 @@ pub(crate) async fn load_resolved_widgets(
             Ok(doc) => doc.content,
             Err(_) => continue,
         };
+        if js.len() > MAX_WIDGET_JS_BYTES {
+            tracing::warn!(
+                widget = name,
+                bytes = js.len(),
+                cap = MAX_WIDGET_JS_BYTES,
+                "skipping widget: index.js exceeds size cap"
+            );
+            continue;
+        }
 
         let css = workspace
             .read(&format!("{WIDGETS_DIR}{name}/style.css"))
             .await
             .ok()
             .map(|doc| doc.content)
-            .filter(|c| !c.trim().is_empty());
+            .filter(|c| !c.trim().is_empty())
+            .filter(|c| {
+                if c.len() > MAX_WIDGET_CSS_BYTES {
+                    tracing::warn!(
+                        widget = name,
+                        bytes = c.len(),
+                        cap = MAX_WIDGET_CSS_BYTES,
+                        "dropping oversized widget style.css"
+                    );
+                    return false;
+                }
+                true
+            });
 
         // Respect the layout's `enabled` flag; default is `true` when the
         // widget has no entry at all (see WidgetInstanceConfig::default).
@@ -414,11 +442,18 @@ pub async fn frontend_widget_file_handler(
         .map(|s| s.to_ascii_lowercase())
         .unwrap_or_default();
     let content_type = match ext.as_str() {
+        // Text formats — served correctly via `doc.content: String`.
         "js" | "mjs" => "application/javascript",
         "css" => "text/css",
         "json" => "application/json",
         "map" => "application/json",
         "svg" => "image/svg+xml",
+        // Binary formats — MIME types are mapped so the browser doesn't
+        // content-sniff, but `Workspace::read()` returns `String` (UTF-8
+        // text), so binary payloads will be silently corrupted until a
+        // `read_bytes()` workspace path exists. Widget authors should host
+        // binary assets externally or Base64-encode them into CSS/JS.
+        // TODO: support binary widget assets via a `read_bytes()` path.
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",

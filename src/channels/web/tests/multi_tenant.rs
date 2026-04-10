@@ -985,6 +985,7 @@ mod admin_tool_policy {
             near_network: None,
             oauth_sweep_shutdown: None,
             auth_manager: None,
+            frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
         })
     }

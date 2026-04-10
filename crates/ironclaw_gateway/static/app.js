@@ -808,7 +808,9 @@ function connectSSE(lastEventIdOverride) {
         try {
           var parsed = JSON.parse(e.data);
           IronClaw.api._dispatch(type, parsed);
-        } catch (_) {}
+        } catch (parseErr) {
+          console.warn('[IronClaw] SSE parse error for event', type, parseErr);
+        }
       }
       // Call original handler
       listener(e);
