@@ -3,7 +3,7 @@ title: Google Compute Engine
 description: Host IronClaw on a Google Compute Engine VM
 ---
 
-Google Compute Engine (GCE) lets you run virtual machines on Google's infrastructure with flexible pricing and a generous free tier. In this guide we will create a GCE VM instance and configure it securely so you can run IronClaw and expose it to the internet.
+Google Compute Engine (GCE) lets you run virtual machines on Google's infrastructure with flexible pricing and a generous free tier. In this guide we will create a GCE VM instance and configure it securely so you can run IronClaw and expose only the endpoints you actually need.
 
 <Tip>
 Do not feel like setting up your own infrastructure? You can install IronClaw with a few clicks on [agent.near.ai](https://agent.near.ai)
@@ -41,9 +41,9 @@ Click **Create Instance** and configure the following:
 - **Region / Zone**: pick a region close to your users
 - **Machine type**: `e2-micro` (free tier eligible) is sufficient for most use cases, or `e2-small` for more headroom
 - **Boot disk**: Ubuntu 24.04 LTS, at least 10 GB
-- **Firewall**: check **Allow HTTP traffic** and **Allow HTTPS traffic**
+- **Firewall**: leave **Allow HTTP traffic** and **Allow HTTPS traffic** unchecked for now
 
-The built-in checkboxes only cover ports 80 and 443. You will add the remaining rules after the instance is created (see [Configure Firewall Rules](#configure-firewall-rules) below).
+You will add explicit firewall rules after the instance is created (see [Configure Firewall Rules](#configure-firewall-rules) below).
 
 
 In the left sidebar, click **Security**. Scroll down to **VM access → Add manually generated SSH keys** and click **+ Add item**, then paste your public SSH key. 
@@ -80,15 +80,40 @@ ssh <USERNAME>@<IP_ADDRESS>
 
 ## Configure Firewall Rules
 
-The GCE console only exposes checkboxes for HTTP (80) and HTTPS (443) during instance creation. To add the remaining rules, navigate to **VPC Network → Firewall** in the left sidebar and click **Create Firewall Rule** for each of the following:
+IronClaw's Web Gateway defaults to `127.0.0.1:3000`, which means it is local-only by default and not directly reachable from the internet.
+
+Recommended exposure model:
+
+- Keep the Web Gateway bound to `127.0.0.1:3000`
+- Expose public traffic with a reverse proxy on `80/443` that forwards to `127.0.0.1:3000`
+- Or keep the gateway private and access it through SSH tunnel/VPN
+
+Navigate to **VPC Network → Firewall** in the left sidebar and create rules based on your model.
+
+Baseline rules (recommended for most setups):
 
 | Rule name | Direction | Targets | Source IP ranges | Protocols / Ports |
 |-----------|-----------|---------|-----------------|-------------------|
 | `allow-ssh-myip` | Ingress | All instances | Your public IP (e.g. `203.0.113.10/32`) | TCP 22 |
 | `allow-webhook` | Ingress | All instances | `0.0.0.0/0` | TCP 8080 |
 
+If you run a reverse proxy (recommended for public web access), also allow:
+
+| Rule name | Direction | Targets | Source IP ranges | Protocols / Ports |
+|-----------|-----------|---------|-----------------|-------------------|
+| `allow-http` | Ingress | All instances | `0.0.0.0/0` | TCP 80 |
+| `allow-https` | Ingress | All instances | `0.0.0.0/0` | TCP 443 |
+
+If you intentionally expose the gateway directly (generally not recommended), you must:
+
+1. Set `GATEWAY_HOST=0.0.0.0` (and optionally `GATEWAY_PORT=<port>` if not `3000`)
+2. Set `GATEWAY_AUTH_TOKEN=<strong-random-token>`
+3. Add a firewall rule for that gateway port, ideally restricted to trusted source IPs
+
+With SSH tunnel or VPN access, keep `GATEWAY_HOST` at the default (`127.0.0.1`) and do not open the gateway port in GCE firewall.
+
 <Note>
-Restricting SSH to your IP prevents brute-force attacks from the internet. You can update the source range later if your IP changes. Port `8080` is required for webhooks (e.g. Telegram) to deliver events to IronClaw. On Linux, the orchestrator internal API listens on port `50051` and binds to `0.0.0.0`; unless you add a firewall rule for it, GCE's default deny-all ingress policy will still block external access. Other IronClaw listeners bind to `127.0.0.1`.
+Restricting SSH to your IP prevents brute-force attacks from the internet. You can update the source range later if your IP changes. Port `8080` is required for webhooks (e.g. Telegram) to deliver events to IronClaw. On Linux, the orchestrator internal API listens on port `50051` and binds to `0.0.0.0`; unless you add a firewall rule for it, GCE's default deny-all ingress policy will still block external access. Other IronClaw listeners bind to `127.0.0.1` by default.
 </Note>
 
 ---
