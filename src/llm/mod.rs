@@ -285,7 +285,8 @@ fn create_openai_compat_from_registry(
 
     let mut builder = openai::Client::builder().api_key(&api_key);
     if !config.base_url.is_empty() {
-        builder = builder.base_url(&config.base_url);
+        let normalized = normalize_openai_base_url(&config.base_url);
+        builder = builder.base_url(&normalized);
     }
     if !extra_headers.is_empty() {
         builder = builder.http_headers(extra_headers);
@@ -707,6 +708,21 @@ pub fn create_gemini_oauth_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPro
     Ok(Arc::new(provider))
 }
 
+/// Normalize an OpenAI-compatible base URL to ensure it ends with `/v1`.
+///
+/// Local model servers (MLX, vLLM, llama.cpp) expect requests at `/v1/chat/completions`,
+/// but rig-core's openai client appends `/chat/completions` directly to the base URL.
+/// This function ensures the `/v1` path segment is present so requests reach the
+/// correct endpoint regardless of whether the user included it.
+fn normalize_openai_base_url(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    if trimmed.ends_with("/v1") {
+        trimmed.to_string()
+    } else {
+        format!("{}/v1", trimmed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -866,5 +882,61 @@ mod tests {
         // None when nothing configured
         let config = test_llm_config();
         assert_eq!(config.cheap_model_name(), None);
+    }
+
+    #[test]
+    fn test_normalize_openai_base_url_appends_v1_when_missing() {
+        assert_eq!(
+            normalize_openai_base_url("http://localhost:8080"),
+            "http://localhost:8080/v1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_openai_base_url_strips_trailing_slash_then_appends_v1() {
+        assert_eq!(
+            normalize_openai_base_url("http://localhost:8080/"),
+            "http://localhost:8080/v1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_openai_base_url_preserves_existing_v1() {
+        assert_eq!(
+            normalize_openai_base_url("http://localhost:8080/v1"),
+            "http://localhost:8080/v1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_openai_base_url_preserves_v1_with_trailing_slash() {
+        assert_eq!(
+            normalize_openai_base_url("http://localhost:8080/v1/"),
+            "http://localhost:8080/v1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_openai_base_url_with_path_prefix() {
+        assert_eq!(
+            normalize_openai_base_url("https://proxy.example.com/llm"),
+            "https://proxy.example.com/llm/v1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_openai_base_url_with_path_prefix_and_v1() {
+        assert_eq!(
+            normalize_openai_base_url("https://proxy.example.com/llm/v1"),
+            "https://proxy.example.com/llm/v1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_openai_base_url_multiple_trailing_slashes() {
+        assert_eq!(
+            normalize_openai_base_url("http://localhost:8080///"),
+            "http://localhost:8080/v1"
+        );
     }
 }
