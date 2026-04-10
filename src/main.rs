@@ -375,6 +375,7 @@ async fn async_main() -> anyhow::Result<()> {
         log_level_handle,
         None,
         false,
+        None,
     )
     .await
 }
@@ -413,7 +414,7 @@ async fn run_standby(
         .mark_startup_stage("standby.prewarm.start")
         .await;
     let prewarm_start = std::time::Instant::now();
-    prewarm_runtime_dependencies(toml_path, cli.no_db)
+    let prewarmed_db = prewarm_runtime_dependencies(toml_path, cli.no_db)
         .await
         .map_err(anyhow::Error::msg)?;
     ironclaw::bootstrap::log_startup_timing(
@@ -497,6 +498,7 @@ async fn run_standby(
         log_level_handle,
         Some((gateway, persona)),
         true,
+        prewarmed_db,
     ));
     let mut runtime_ready = std::pin::pin!(standby_control.wait_for_runtime_started());
 
@@ -566,6 +568,7 @@ async fn run_agent_with_config(
     log_level_handle: Arc<ironclaw::channels::web::log_layer::LogLevelHandle>,
     mut prestarted_gateway: Option<(GatewayChannel, ironclaw::standby::TidePoolConfigurePersona)>,
     standby_db_prewarmed: bool,
+    prewarmed_db: Option<Arc<dyn ironclaw::db::Database>>,
 ) -> anyhow::Result<()> {
     let standby_control = prestarted_gateway
         .as_ref()
@@ -590,16 +593,19 @@ async fn run_agent_with_config(
     let flags = AppBuilderFlags {
         no_db: cli.no_db,
         skip_db_migrations: standby_db_prewarmed,
+        skip_seed: standby_db_prewarmed,
     };
-    let components = AppBuilder::new(
+    let mut builder = AppBuilder::new(
         config,
         flags,
         toml_path.map(std::path::PathBuf::from),
         session.clone(),
         Arc::clone(&log_broadcaster),
-    )
-    .build_all()
-    .await?;
+    );
+    if let Some(db) = prewarmed_db {
+        builder.with_database(db);
+    }
+    let components = builder.build_all().await?;
 
     let config = components.config;
 

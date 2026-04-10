@@ -334,18 +334,18 @@ pub fn resolve_standby_gateway_config(
 pub async fn prewarm_runtime_dependencies(
     toml_path: Option<&Path>,
     no_db: bool,
-) -> Result<(), String> {
+) -> Result<Option<std::sync::Arc<dyn crate::db::Database>>, String> {
     if no_db {
-        return Ok(());
+        return Ok(None);
     }
 
     let config = Config::from_env_with_toml(toml_path)
         .await
         .map_err(|error| format!("failed to load config for standby prewarm: {error}"))?;
-    crate::db::connect_from_config(&config.database)
+    let db = crate::db::connect_from_config(&config.database)
         .await
         .map_err(|error| format!("failed to prewarm database for standby: {error}"))?;
-    Ok(())
+    Ok(Some(db))
 }
 
 pub async fn apply_runtime_config(request: &TidePoolConfigureRequest) -> Result<(), String> {

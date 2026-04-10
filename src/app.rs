@@ -68,6 +68,11 @@ pub struct AppComponents {
 pub struct AppBuilderFlags {
     pub no_db: bool,
     pub skip_db_migrations: bool,
+    /// When true, workspace seeds and tool permission defaults are assumed
+    /// to have been applied during a prior prewarm phase. Both functions are
+    /// idempotent (they check-before-write), so skipping them only avoids
+    /// redundant DB round-trips during the TidePool configure fast path.
+    pub skip_seed: bool,
 }
 
 /// Builder that orchestrates the 5 mechanical init phases.
@@ -1006,8 +1011,12 @@ impl AppBuilder {
             );
         }
 
-        // Seed workspace and backfill embeddings
-        if let Some(ref ws) = workspace {
+        // Seed workspace and backfill embeddings.
+        // When skip_seed is set (TidePool configure path), the prewarm phase
+        // already ran seed_if_empty + import, so we skip redundant DB checks.
+        if let Some(ref ws) = workspace
+            && !self.flags.skip_seed
+        {
             // Import workspace files from disk FIRST if WORKSPACE_IMPORT_DIR is set.
             // This lets Docker images / deployment scripts ship customized
             // workspace templates (e.g., AGENTS.md, TOOLS.md) that override
@@ -1112,8 +1121,12 @@ impl AppBuilder {
         // Seed per-user tool permission defaults into the database.
         // This runs after all tools (built-in, WASM, MCP) are registered so
         // that every tool name is known.  Existing entries are never overwritten.
+        // Skipped on TidePool configure path (prewarm already seeded; function
+        // is idempotent so skipping is safe).
         let seed_permissions_start = std::time::Instant::now();
-        seed_tool_permissions(&tools, self.db.as_ref(), &self.config.owner_id).await;
+        if !self.flags.skip_seed {
+            seed_tool_permissions(&tools, self.db.as_ref(), &self.config.owner_id).await;
+        }
         crate::bootstrap::log_startup_timing(
             "app_builder.seed_tool_permissions",
             seed_permissions_start.elapsed(),
