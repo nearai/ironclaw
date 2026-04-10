@@ -4884,15 +4884,14 @@ mod tests {
         PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
     use crate::channels::wasm::wrapper::{
-        EmitDispatchContext, HttpResponse, TELEGRAM_TEST_API_BASE_ENV, TEST_HTTP_REWRITE_MAP_ENV,
-        WasmChannel, WebsocketProtocolConfig, WebsocketRuntimeConfig,
-        build_discord_gateway_presence_update,
+        DiscordGatewayWebsocketConfig, EmitDispatchContext, HttpResponse,
+        TELEGRAM_TEST_API_BASE_ENV, TEST_HTTP_REWRITE_MAP_ENV, WasmChannel,
+        WebsocketProtocolConfig, WebsocketRuntimeConfig, build_discord_gateway_presence_update,
         build_websocket_identify_message, build_websocket_resume_message,
         build_wecom_aibot_ping_message, build_wecom_aibot_subscribe_message,
         discord_gateway_presence_status, drain_guest_logs, parse_websocket_invalid_session,
-        parse_websocket_ready_session, resolve_websocket_identify_message,
-        parse_wecom_aibot_frame, rewrite_http_url_for_testing,
-        should_warn_on_heartbeat_interval,
+        parse_websocket_ready_session, parse_wecom_aibot_frame, resolve_websocket_identify_message,
+        rewrite_http_url_for_testing, should_warn_on_heartbeat_interval,
         uses_owner_broadcast_target, websocket_heartbeat_sleep_duration,
         websocket_reconnect_backoff,
     };
