@@ -172,15 +172,28 @@ pub(crate) fn normalize_schema_strict(schema: &JsonValue, description: &mut Stri
     let mut schema = schema.clone();
 
     // Step 1: top-level flatten. If the schema has a forbidden top-level
-    // construct, there's no point recursing into the variants we're about to
-    // discard, so we short-circuit.
+    // construct, replace it with a permissive envelope whose properties are
+    // merged from the union variants.
     if needs_top_level_flatten(&schema) {
         flatten_top_level(&mut schema, description);
-        return schema;
+        // The flattened envelope is deliberately permissive
+        // (additionalProperties: true, required: []) so the LLM can
+        // send fields from any variant. Running normalize_schema_recursive
+        // on the ROOT would clobber that (force additionalProperties: false,
+        // required: all keys). But the individual merged properties still
+        // need normalization — e.g. array items must be objects, nested
+        // objects need strict-mode treatment. So we normalize each property
+        // individually without touching the top-level envelope.
+        if let Some(props) = schema.get_mut("properties").and_then(|v| v.as_object_mut()) {
+            for (_key, prop_schema) in props.iter_mut() {
+                normalize_schema_recursive(prop_schema);
+            }
+        }
+        // Fall through to the post-normalization validator (step 3).
+    } else {
+        // Step 2: recursive strict-mode normalization (non-flatten path).
+        normalize_schema_recursive(&mut schema);
     }
-
-    // Step 2: recursive strict-mode normalization.
-    normalize_schema_recursive(&mut schema);
 
     // Step 3: post-normalization validation. The normalizer handles the
     // rules it knows about, but OpenAI's strict-mode spec has more rules
@@ -1352,6 +1365,55 @@ mod tests {
         assert_eq!(
             result["properties"]["tags"]["items"]["type"], "string",
             "well-formed items must be preserved"
+        );
+    }
+
+    /// Regression for google_docs_tool: a tagged enum with a variant
+    /// containing `requests: Vec<serde_json::Value>` produces a top-level
+    /// `oneOf` (which we flatten) with a nested `{"type": "array"}` property
+    /// that has no `items`. The flatten path originally short-circuited
+    /// `normalize_schema_recursive`, so the merged `requests` property kept
+    /// its bare array schema and OpenAI rejected it with "array schema items
+    /// is not an object". After the fix, the flatten path normalizes each
+    /// merged property individually.
+    #[test]
+    fn test_normalize_schema_strict_flatten_normalizes_merged_array_items() {
+        let input = serde_json::json!({
+            "type": "object",
+            "oneOf": [
+                {
+                    "properties": {
+                        "action": { "const": "batch_update" },
+                        "document_id": { "type": "string" },
+                        "requests": { "type": "array" }
+                    },
+                    "required": ["action", "document_id", "requests"]
+                },
+                {
+                    "properties": {
+                        "action": { "const": "get" },
+                        "document_id": { "type": "string" }
+                    },
+                    "required": ["action", "document_id"]
+                }
+            ]
+        });
+        let mut description = "docs".to_string();
+        let result = normalize_schema_strict(&input, &mut description);
+
+        // The flatten happened (oneOf removed, properties merged).
+        assert!(result.get("oneOf").is_none());
+        let props = result["properties"].as_object().expect("properties");
+        assert!(props.contains_key("requests"));
+
+        // CRITICAL: the merged `requests` array property must have
+        // `items` as an object — not missing, not boolean, not null.
+        let requests = &result["properties"]["requests"];
+        assert_eq!(requests["type"], "array");
+        assert!(
+            requests["items"].is_object(),
+            "merged array property must have items as a JSON Schema object \
+             after flatten-path normalization; got: {requests}"
         );
     }
 

@@ -2260,8 +2260,14 @@ fn json_to_thread_messages(value: &serde_json::Value) -> Option<Vec<ThreadMessag
             .get("content")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
+        // Filter out null before calling the parser — `action_calls: null`
+        // is Python's legitimate "this message has no tool calls" signal (text
+        // response), not a parse error. Without this filter, the warn log in
+        // python_json_to_action_calls fires on every text-only assistant
+        // message with "invalid type: null, expected a sequence".
         let action_calls = item
             .get("action_calls")
+            .filter(|v| !v.is_null())
             .and_then(python_json_to_action_calls);
 
         let message = match role {
