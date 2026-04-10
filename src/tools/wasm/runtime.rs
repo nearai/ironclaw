@@ -60,7 +60,7 @@ pub fn enable_compilation_cache(
                 .to_string_lossy()
                 .replace('\\', "\\\\")
                 .replace('"', "\\\"");
-            let toml_content = format!("[cache]\nenabled = true\ndirectory = \"{}\"\n", escaped);
+            let toml_content = format!("[cache]\ndirectory = \"{}\"\n", escaped);
             std::fs::write(&toml_path, toml_content)?;
             wasmtime_config.cache(Some(Cache::from_file(Some(&toml_path))?));
             Ok(())
@@ -427,7 +427,10 @@ mod tests {
             content.contains("[cache]"),
             "TOML must contain [cache] section"
         );
-        assert!(content.contains("enabled = true"), "cache must be enabled");
+        assert!(
+            content.contains("directory"),
+            "TOML must contain directory setting"
+        );
     }
 
     /// Two engines with different labels must get independent cache directories
