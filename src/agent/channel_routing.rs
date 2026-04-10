@@ -8,6 +8,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::db::SettingsStore;
 use crate::llm::ToolDefinition;
 
 /// Channel-to-tool-group routing configuration.
@@ -85,6 +86,45 @@ impl ChannelRoutingConfig {
             }
             Err(e) => {
                 tracing::warn!("Failed to parse {}: {}", path.display(), e);
+                None
+            }
+        }
+    }
+
+    /// Load from database-backed SettingsStore.
+    ///
+    /// This provides hot-reload support — the settings system handles cache
+    /// invalidation and the web UI can modify the config without restarts.
+    pub async fn load_from_store(
+        store: &(dyn SettingsStore + Send + Sync),
+        user_id: &str,
+    ) -> Option<Self> {
+        match store.get_setting(user_id, "channel_routing").await {
+            Ok(Some(value)) => match serde_json::from_value::<Self>(value) {
+                Ok(mut config) => {
+                    if let Err(e) = config.validate() {
+                        tracing::warn!("Channel routing config from DB invalid: {}", e);
+                        return None;
+                    }
+                    config.precompute_prefixes();
+                    tracing::info!(
+                        groups = ?config.groups.keys().collect::<Vec<_>>(),
+                        channels = config.channels.len(),
+                        "Loaded channel routing config from database"
+                    );
+                    Some(config)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to parse channel routing from DB: {}", e);
+                    None
+                }
+            },
+            Ok(None) => {
+                tracing::debug!("No channel routing config in database");
+                None
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read channel routing from DB: {}", e);
                 None
             }
         }
