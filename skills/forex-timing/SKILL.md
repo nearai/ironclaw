@@ -53,7 +53,11 @@ Use the built-in forex tools for USD/INR transfer analysis. Do NOT write Python 
 
 - **`analyze_transfer`** — Recommend whether to transfer USD→INR now or wait. Uses volatility regime, RSI(14), and DXY momentum. Returns a message, hit rate, target rate, and 3-day projection cone. Param: `amount` (optional, USD).
 - **`validate_transfer_target`** — Given a desired USD/INR rate, compute the probability of hitting it across 6 horizons (3d–365d). Param: `target_rate` (required).
-- **`abound_send_wire`** — Two-phase wire transfer. First call (with params) runs timing analysis and returns a `transfer_token`. Second call (with just `transfer_token`) executes the wire. Do NOT call `analyze_transfer` separately.
+- **`abound_send_wire`** — Three-action wire transfer:
+  - Phase 1 (with params): runs timing analysis, returns `transfer_token` + analysis.
+  - `action='send'` (with `transfer_token`): executes the wire.
+  - `action='wait'` (with `transfer_token`): creates an hourly rate monitoring mission that alerts when the target rate is reached.
+  Do NOT call `analyze_transfer` separately — it's built into phase 1.
 - **`forex_historical_data`** — Fetch OHLCV bars for any currency pair. Params: `from_currency`, `to_currency`, `start_date`, `end_date` (optional).
 
 ## When to Use
@@ -63,8 +67,8 @@ Use the built-in forex tools for USD/INR transfer analysis. Do NOT write Python 
 - User asks "should I send now?" or "is this a good time?" (analysis only, no transfer) → call `analyze_transfer`
 - User asks "can I get 86 INR per dollar?" or names a target rate → call `validate_transfer_target`
 - User wants to send/transfer/wire money → call `abound_send_wire` (NOT `analyze_transfer`)
-- User says "send now" / confirms after seeing analysis → call `abound_send_wire` with only the `transfer_token` from the phase 1 response (pass it exactly as-is)
-- User says "wait" / declines → respond conversationally ("Got it, let's wait for a better rate")
+- User says "send now" / confirms after seeing analysis → call `abound_send_wire(transfer_token=<token>, action="send")`
+- User says "wait" / declines → call `abound_send_wire(transfer_token=<token>, action="wait")` — this automatically creates an hourly rate monitoring mission using the target rate from the analysis. Present the tool's response message to the user.
 - User asks for historical data or charts → call `forex_historical_data`
 
 ## Presenting Results

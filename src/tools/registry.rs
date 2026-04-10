@@ -152,7 +152,14 @@ pub struct ToolRegistry {
     /// Active engine version. Controls which tools are visible via
     /// `tool_definitions()`, `all()`, etc. Defaults to V1.
     engine_version: EngineVersion,
+    /// Shared slot for mission manager + project ID, filled after engine init.
+    /// Used by tools that need to create missions (e.g. abound_send_wire wait action).
+    pub(crate) mission_slot: MissionSlot,
 }
+
+/// Shared slot for deferred mission manager injection into tools.
+pub type MissionSlot =
+    Arc<tokio::sync::RwLock<Option<(Arc<ironclaw_engine::MissionManager>, ironclaw_engine::ProjectId)>>>;
 
 impl ToolRegistry {
     fn tool_definition(tool: &Arc<dyn Tool>) -> ToolDefinition {
@@ -178,6 +185,7 @@ impl ToolRegistry {
             rate_limiter: RateLimiter::new(),
             message_tool: RwLock::new(None),
             engine_version: EngineVersion::V1,
+            mission_slot: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
@@ -403,7 +411,10 @@ impl ToolRegistry {
             }
             register_or_warn!(AboundAccountInfoTool::new(Arc::clone(ss)));
             register_or_warn!(AboundExchangeRateTool::new(Arc::clone(ss)));
-            register_or_warn!(AboundSendWireTool::new(Arc::clone(ss)));
+            register_or_warn!(AboundSendWireTool::new(
+                Arc::clone(ss),
+                Arc::clone(&self.mission_slot),
+            ));
             register_or_warn!(AboundCreateNotificationTool::new(Arc::clone(ss)));
             register_or_warn!(AboundRateAlertTool::new(Arc::clone(ss)));
             register_or_warn!(ForexHistoricalDataTool::new(Arc::clone(ss)));
@@ -879,8 +890,14 @@ impl ToolRegistry {
         self.register_sync(Arc::new(MissionPauseTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(MissionResumeTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(MissionDeleteTool::new(Arc::clone(&manager))));
-        self.register_sync(Arc::new(MissionUpdateTool::new(manager)));
+        self.register_sync(Arc::new(MissionUpdateTool::new(Arc::clone(&manager))));
         tracing::debug!("Registered 7 mission management tools");
+
+        // Fill the shared mission slot so tools like abound_send_wire can create missions.
+        let slot = Arc::clone(&self.mission_slot);
+        tokio::spawn(async move {
+            *slot.write().await = Some((manager, project_id));
+        });
     }
 
     /// Register plan management tools.

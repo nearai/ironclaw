@@ -13,6 +13,7 @@ use serde_json::json;
 
 use crate::context::JobContext;
 use crate::secrets::SecretsStore;
+use crate::tools::registry::MissionSlot;
 use crate::tools::tool::{
     RiskLevel, Tool, ToolDomain, ToolError, ToolOutput, require_str,
 };
@@ -257,13 +258,18 @@ impl Tool for AboundExchangeRateTool {
 pub struct AboundSendWireTool {
     secrets: Arc<dyn SecretsStore + Send + Sync>,
     client: Client,
+    mission_slot: MissionSlot,
 }
 
 impl AboundSendWireTool {
-    pub fn new(secrets: Arc<dyn SecretsStore + Send + Sync>) -> Result<Self, ToolError> {
+    pub fn new(
+        secrets: Arc<dyn SecretsStore + Send + Sync>,
+        mission_slot: MissionSlot,
+    ) -> Result<Self, ToolError> {
         Ok(Self {
             secrets,
             client: shared_client()?,
+            mission_slot,
         })
     }
 }
@@ -275,8 +281,11 @@ impl Tool for AboundSendWireTool {
     }
 
     fn description(&self) -> &str {
-        "Send a wire transfer via Abound. Two-phase: first call runs timing analysis and \
-         returns a transfer_token. Second call with that transfer_token executes the wire."
+        "Send a wire transfer via Abound. Three actions:\n\
+         - Phase 1 (no transfer_token): runs timing analysis, returns transfer_token + options.\n\
+         - action='send' or omitted with transfer_token: executes the wire.\n\
+         - action='wait' with transfer_token: creates an hourly rate monitoring mission and \
+           notifies when the target rate is reached."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -301,7 +310,12 @@ impl Tool for AboundSendWireTool {
                 },
                 "transfer_token": {
                     "type": "string",
-                    "description": "Opaque token from phase 1 response. Pass this exactly as-is to confirm and execute the transfer."
+                    "description": "Opaque token from phase 1 response. Pass this exactly as-is."
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["send", "wait"],
+                    "description": "Action to take with the transfer_token. 'send' (default) executes the wire. 'wait' creates an hourly rate monitoring mission."
                 }
             },
             "required": []
@@ -315,8 +329,13 @@ impl Tool for AboundSendWireTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
 
-        // Phase 2: transfer_token present → decode params and execute wire.
-        if let Some(token) = params.get("transfer_token").and_then(|v| v.as_str()) {
+        // Phases 2/3: transfer_token present → decode and dispatch by action.
+        // Treat empty / "None" / '""' as absent (model sometimes hallucinates these).
+        if let Some(token) = params
+            .get("transfer_token")
+            .and_then(|v| v.as_str())
+            .filter(|t| !t.is_empty() && *t != "None" && *t != "null" && *t != "\"\"")
+        {
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(token)
                 .map_err(|e| {
@@ -327,9 +346,96 @@ impl Tool for AboundSendWireTool {
                     ToolError::InvalidParameters(format!("corrupt transfer_token: {e}"))
                 })?;
 
+            let action = params
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("send");
+
+            if action == "wait" {
+                // Phase 3: create rate monitoring mission.
+                let target_rate = pending
+                    .get("target_rate")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let current_rate = pending
+                    .get("current_rate")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+
+                if target_rate <= 0.0 {
+                    return Err(ToolError::ExecutionFailed(
+                        "transfer_token does not contain target_rate".into(),
+                    ));
+                }
+
+                let threshold = (target_rate * 10000.0).round() / 10000.0;
+
+                let slot = self.mission_slot.read().await;
+                if let Some((mgr, project_id)) = slot.as_ref() {
+                    let goal = format!(
+                        "Call abound_rate_alert(threshold={threshold}) each run. \
+                         Report the result via FINAL()."
+                    );
+                    let cadence =
+                        ironclaw_engine::types::mission::MissionCadence::Cron {
+                            expression: "0 * * * *".to_string(),
+                            timezone: None,
+                        };
+                    let notify_channels = ctx
+                        .metadata
+                        .get("notify_channel")
+                        .and_then(|v| v.as_str())
+                        .map(|ch| vec![ch.to_string()])
+                        .unwrap_or_default();
+
+                    match mgr
+                        .create_mission(
+                            *project_id,
+                            &ctx.user_id,
+                            "USD/INR Rate Monitor",
+                            &goal,
+                            cadence,
+                            notify_channels,
+                        )
+                        .await
+                    {
+                        Ok(mission_id) => {
+                            let result = json!({
+                                "phase": "wait_monitoring",
+                                "message": format!(
+                                    "Got it, holding off. I've set up hourly rate monitoring — \
+                                     you'll get a notification when USD/INR hits {threshold}. \
+                                     Current rate: {current_rate:.4}."
+                                ),
+                                "mission_id": mission_id.to_string(),
+                                "target_rate": threshold,
+                                "current_rate": current_rate,
+                            });
+                            return Ok(ToolOutput::success(result, start.elapsed()));
+                        }
+                        Err(e) => {
+                            return Err(ToolError::ExecutionFailed(format!(
+                                "failed to create monitoring mission: {e}"
+                            )));
+                        }
+                    }
+                } else {
+                    return Err(ToolError::ExecutionFailed(
+                        "mission manager not available yet".into(),
+                    ));
+                }
+            }
+
+            // Phase 2 (action="send" or default): execute the wire.
+            let wire_body = json!({
+                "funding_source_id": pending.get("funding_source_id"),
+                "beneficiary_ref_id": pending.get("beneficiary_ref_id"),
+                "amount": pending.get("amount"),
+                "payment_reason_key": pending.get("payment_reason_key"),
+            });
             let url = format!("{REMITTANCE_BASE}/send-wire");
             let wire_result =
-                abound_post(&self.client, &*self.secrets, &ctx.user_id, &url, &pending).await?;
+                abound_post(&self.client, &*self.secrets, &ctx.user_id, &url, &wire_body).await?;
 
             let status = wire_result
                 .get("status")
@@ -374,11 +480,27 @@ impl Tool for AboundSendWireTool {
         .await
         .ok();
 
+        // Extract target/current rate from analysis for the token
+        let target_rate = analysis
+            .as_ref()
+            .and_then(|a| a.get("plot"))
+            .and_then(|p| p.get("target_rate"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let current_rate = analysis
+            .as_ref()
+            .and_then(|a| a.get("plot"))
+            .and_then(|p| p.get("current_rate"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+
         let pending = json!({
             "funding_source_id": funding_source_id,
             "beneficiary_ref_id": beneficiary_ref_id,
             "amount": amount,
             "payment_reason_key": payment_reason_key,
+            "target_rate": target_rate,
+            "current_rate": current_rate,
         });
         let token = base64::engine::general_purpose::STANDARD
             .encode(serde_json::to_vec(&pending).unwrap_or_default());
