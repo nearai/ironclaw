@@ -17,6 +17,9 @@ ignore = [
     "RUSTSEC-2026-0021",
     # rustls-webpki CRL distributionPoint matching — 0.102.8 pinned by libsql transitive dep
     "RUSTSEC-2026-0049",
+    # rsa Marvin Attack timing sidechannel — transitive dep via jsonwebtoken v10 rust_crypto
+    # feature; used only for local JWT signing/verification, not network key exchange
+    "RUSTSEC-2023-0071",
 ]
 
 [licenses]
