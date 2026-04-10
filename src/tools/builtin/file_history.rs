@@ -84,12 +84,24 @@ impl FileHistory {
     /// Reads the file at `path` and stores its content. If the file does not
     /// exist, the snapshot records that absence so `file_undo` can remove the
     /// newly-created file.
+    ///
+    /// The path is canonicalized before storage so lookups from `file_undo`
+    /// (which goes through `validate_path` → `canonicalize()`) match even
+    /// when the caller passes a non-canonical path. On macOS, `/var` is a
+    /// symlink to `/private/var`, so a temp-dir path like
+    /// `/var/folders/.../code.rs` would mismatch the canonicalized
+    /// `/private/var/folders/.../code.rs` without this normalization.
     pub async fn snapshot(
         &mut self,
         job_id: Uuid,
         path: &Path,
         tool_name: &str,
     ) -> Result<Option<Uuid>, ToolError> {
+        // Canonicalize early so the stored path matches what validate_path
+        // will produce during undo lookup.
+        let path = Self::canonical(path);
+        let path = path.as_path();
+
         // Check file size before reading — skip snapshot for very large files
         // to prevent memory exhaustion (up to 50 snapshots × 10MB = 500MB worst case).
         match tokio::fs::metadata(path).await {
@@ -141,8 +153,29 @@ impl FileHistory {
         Ok(Some(id))
     }
 
+    /// Canonicalize a path for consistent snapshot comparison. When the
+    /// file itself doesn't exist (write_file's "new file" case, or a
+    /// snapshot taken before creation), canonicalize the parent directory
+    /// and join the filename. On macOS, `/var` → `/private/var` symlink
+    /// means temp-dir paths differ between the original and resolved
+    /// forms, causing lookup mismatches if we fall back to the raw path.
+    fn canonical(path: &Path) -> PathBuf {
+        if let Ok(p) = path.canonicalize() {
+            return p;
+        }
+        if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+            parent
+                .canonicalize()
+                .unwrap_or_else(|_| parent.to_path_buf())
+                .join(name)
+        } else {
+            path.to_path_buf()
+        }
+    }
+
     /// Get the most recent snapshot for a file path within a specific job.
     pub fn latest_snapshot_for(&self, job_id: Uuid, path: &Path) -> Option<&FileSnapshot> {
+        let path = Self::canonical(path);
         self.snapshots
             .iter()
             .rev()
@@ -151,6 +184,7 @@ impl FileHistory {
 
     /// Get all snapshots for a file path within a specific job, newest first.
     pub fn snapshots_for(&self, job_id: Uuid, path: &Path) -> Vec<&FileSnapshot> {
+        let path = Self::canonical(path);
         let mut result: Vec<_> = self
             .snapshots
             .iter()
@@ -168,6 +202,7 @@ impl FileHistory {
         job_id: Uuid,
         path: &Path,
     ) -> Result<Option<FileSnapshot>, ToolError> {
+        let path = Self::canonical(path);
         let idx = self
             .snapshots
             .iter()

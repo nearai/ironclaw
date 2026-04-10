@@ -275,6 +275,21 @@ impl McpServerConfig {
         format!("{}_refresh_token", self.token_secret_name())
     }
 
+    /// Legacy secret name for access tokens (pre-hyphen-normalization).
+    ///
+    /// Before the factory normalised server names (hyphens→underscores),
+    /// tokens were stored under the original hyphenated name.  Used as a
+    /// fallback during lookup to avoid forcing re-auth on existing users.
+    /// Returns `None` when the name contains no underscores (nothing to
+    /// reverse).
+    pub fn legacy_token_secret_name(&self) -> Option<String> {
+        let hyphenated = self.name.replace('_', "-");
+        if hyphenated == self.name {
+            return None;
+        }
+        Some(format!("mcp_{}_access_token", hyphenated))
+    }
+
     /// Legacy secret name for refresh tokens (pre-v0.22).
     ///
     /// Earlier versions stored refresh tokens as `mcp_{name}_refresh_token`
