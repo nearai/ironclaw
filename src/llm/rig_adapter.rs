@@ -181,6 +181,29 @@ pub(crate) fn normalize_schema_strict(schema: &JsonValue, description: &mut Stri
 
     // Step 2: recursive strict-mode normalization.
     normalize_schema_recursive(&mut schema);
+
+    // Step 3: post-normalization validation. The normalizer handles the
+    // rules it knows about, but OpenAI's strict-mode spec has more rules
+    // than any single normalizer pass is likely to cover perfectly —
+    // and new rules appear without notice. Running the CI validator as a
+    // debug-level post-check catches anything the normalizer missed so
+    // we get a local diagnostic instead of a runtime HTTP 400.
+    //
+    // This is deliberately `debug!` (not `warn!`) because the schema
+    // still goes through — the tool remains usable, and the LLM provider
+    // will surface the 400 if OpenAI actually rejects it. The diagnostic
+    // value is for developers adding new tools or modifying the normalizer.
+    if let Err(violations) =
+        crate::tools::schema_validator::validate_strict_schema(&schema, "<post-normalize>")
+    {
+        tracing::debug!(
+            violations = ?violations,
+            "normalize_schema_strict output has {} strict-mode violation(s) — \
+             the tool is still usable but the LLM provider may reject the schema",
+            violations.len()
+        );
+    }
+
     schema
 }
 
