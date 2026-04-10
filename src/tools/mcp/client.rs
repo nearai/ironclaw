@@ -625,6 +625,9 @@ impl McpClient {
                         server = %self.server_name,
                         "MCP tool name collision after normalization — second tool will shadow the first in the registry. Operators: rename one of the upstream tools to differ in more than just '-' vs '_' (or '.' vs '_')."
                     );
+                    // Update so a 3rd collision reports against the most
+                    // recent shadow, not the original entry.
+                    seen_ids.insert(id, t.name.clone());
                 }
                 _ => {
                     seen_ids.insert(id, t.name.clone());
