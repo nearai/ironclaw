@@ -405,6 +405,10 @@ impl JobStore for PgBackend {
             .update_estimation_actuals(id, actual_cost, actual_time_secs, actual_value)
             .await
     }
+
+    async fn create_system_job(&self, user_id: &str, source: &str) -> Result<Uuid, DatabaseError> {
+        self.store.create_system_job(user_id, source).await
+    }
 }
 
 // ==================== SandboxStore ====================
@@ -946,12 +950,13 @@ impl UserStore for PgBackend {
     }
 
     async fn get_or_create_user(&self, user: UserRecord) -> Result<(), DatabaseError> {
-        let client = self
+        let mut client = self
             .pool()
             .get()
             .await
             .map_err(|e| DatabaseError::Pool(e.to_string()))?;
-        client
+        let tx = client.transaction().await?;
+        let rows = tx
             .execute(
                 "INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -971,6 +976,10 @@ impl UserStore for PgBackend {
             )
             .await
             .map_err(|e| DatabaseError::Query(format!("get_or_create_user: {e}")))?;
+        if rows > 0 {
+            Store::seed_initial_assistant_thread(&tx, &user.id, user.created_at).await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1523,6 +1532,8 @@ impl IdentityStore for PgBackend {
             &[&user.id],
         )
         .await?;
+
+        Store::seed_initial_assistant_thread(&tx, &user.id, user.created_at).await?;
 
         tx.commit().await?;
         Ok(())

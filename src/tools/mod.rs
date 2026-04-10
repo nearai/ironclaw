@@ -11,6 +11,7 @@ mod autonomy;
 pub mod builder;
 pub mod builtin;
 mod coercion;
+pub mod dispatch;
 pub mod execute;
 pub mod mcp;
 pub mod permissions;

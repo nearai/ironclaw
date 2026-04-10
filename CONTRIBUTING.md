@@ -133,3 +133,33 @@ IronClaw uses dual-backend persistence (PostgreSQL + libSQL). All new persistenc
 ## Adding Dependencies
 
 Run `cargo deny check` before adding new dependencies to verify license compatibility and check for known advisories.
+
+## Document your Changes
+
+- The folder `/docs` contains user-facing documentation for technical savvy users, developers and operators. It is built with Mintlify and rendered on the website.
+- For features, update the relevant capability doc in `docs/capabilities/`
+- For channels, update the relevant channel doc in `docs/channels/`
+- For extensions / tools, update the relevant doc in `docs/extensions/`
+- Core features live in `docs/capabilities`
+
+In case you want to document the library itself (i.e. reference documentation) for other core contributors, use the `docs/internal/` folder
+
+If you use your Claude Code to "plan" and want to leave a record of it, use the `docs/plans` folder.
+
+### Skills
+Read the `.claude/skills/mintlify-docs` for guidelines on how to generate documentation with mintlify.
+
+### Test the Docs
+To make sure the documentation still works, do:
+
+```bash
+cd docs
+mint dev
+```
+
+To make sure you did not break any internal links, do:
+
+```bash
+cd docs
+mint broken-links
+```
