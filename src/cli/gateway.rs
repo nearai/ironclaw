@@ -339,9 +339,9 @@ fn restrict_windows_file_permissions(path: &Path) {
     }
 }
 
-/// Open the gateway log file in append mode. On Unix, restrict to owner-only
-/// (0600) because the auth token is printed to stdout which lands in this file
-/// when `gateway start` redirects output.
+/// On Unix, restrict to owner-only (0600) as a defensive measure — stdout
+/// and stderr are redirected here by `gateway start`, and sensitive startup
+/// output (e.g., early tracing) should not be world-readable.
 fn open_log_file(path: &Path) -> std::io::Result<std::fs::File> {
     #[cfg(unix)]
     {
@@ -443,7 +443,7 @@ async fn cmd_start(config_path: Option<&Path>) -> anyhow::Result<()> {
         }
     }
 
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to spawn gateway process: {e}"))?;
 
@@ -465,12 +465,20 @@ async fn cmd_start(config_path: Option<&Path>) -> anyhow::Result<()> {
     while std::time::Instant::now() < deadline {
         tokio::time::sleep(START_HEALTH_POLL).await;
 
-        // Also verify the child hasn't crashed.
-        if !is_process_alive(child_pid) {
-            anyhow::bail!(
-                "Gateway process exited unexpectedly. Check logs: {}",
-                log_path.display()
-            );
+        // Also verify the child hasn't crashed. Use try_wait() instead of
+        // kill(pid, 0) because we own the Child handle and try_wait() correctly
+        // detects zombies (which kill-0 does not).
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                anyhow::bail!(
+                    "Gateway process exited with {status}. Check logs: {}",
+                    log_path.display()
+                );
+            }
+            Ok(None) => {} // still running
+            Err(e) => {
+                tracing::warn!("Failed to check child process status: {e}");
+            }
         }
 
         if probe_health(&http_client, &health_url)
@@ -495,7 +503,10 @@ async fn cmd_start(config_path: Option<&Path>) -> anyhow::Result<()> {
                 println!("Web UI: {base_url}/?token={token}");
             }
         } else {
-            println!("Auth token: see {}", log_path.display());
+            println!(
+                "Auth token: could not read {}; the gateway may still be starting",
+                token_path.display()
+            );
         }
     } else {
         println!(
@@ -610,7 +621,7 @@ async fn cmd_status(config_path: Option<&Path>) -> anyhow::Result<()> {
         match std::fs::read_to_string(&pid_path) {
             Ok(pid_str) => match pid_str.trim().parse::<u32>() {
                 Ok(pid) => {
-                    if is_process_alive(pid) {
+                    if is_process_alive(pid) && is_pid_lock_held(&pid_path) {
                         println!("Gateway is running (PID {pid}).");
                     } else {
                         println!("Gateway is not running (stale PID {pid}).");
