@@ -714,7 +714,7 @@ mod tests {
     fn test_is_config_path() {
         assert!(is_config_path(".config"));
         assert!(is_config_path("daily/.config"));
-        assert!(is_config_path("frontend/widgets/.config"));
+        assert!(is_config_path(".system/gateway/widgets/.config"));
         assert!(!is_config_path("daily/2024-01-15.md"));
         assert!(!is_config_path("MEMORY.md"));
         assert!(!is_config_path(".config.bak"));

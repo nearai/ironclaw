@@ -46,6 +46,11 @@ pub(super) enum AgenticLoopResult {
         error: Error,
         turn_usage: TurnUsageSummary,
     },
+    /// Auth flow initiated — config card already sent, suppress text response.
+    AuthPending {
+        instructions: String,
+        turn_usage: TurnUsageSummary,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -238,6 +243,7 @@ impl Agent {
             user_tz,
             turn_usage: std::sync::Mutex::new(TurnUsageSummary::default()),
             cached_tool_permissions: std::sync::Mutex::new(None),
+            cached_admin_tool_policy: tokio::sync::OnceCell::new(),
         };
 
         // If /skill-name mentions were expanded, rewrite the last user message
@@ -313,6 +319,10 @@ impl Agent {
                 pending,
                 turn_usage,
             }),
+            Ok(LoopOutcome::AuthPending(instructions)) => Ok(AgenticLoopResult::AuthPending {
+                instructions,
+                turn_usage,
+            }),
             Err(error) => Ok(AgenticLoopResult::Failed { error, turn_usage }),
         }
     }
@@ -350,6 +360,7 @@ struct ChatDelegate<'a> {
     turn_usage: std::sync::Mutex<TurnUsageSummary>,
     cached_tool_permissions:
         std::sync::Mutex<Option<std::collections::HashMap<String, PermissionState>>>,
+    cached_admin_tool_policy: crate::tools::permissions::AdminToolPolicyCache,
 }
 
 impl ChatDelegate<'_> {
@@ -421,6 +432,22 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         } else {
             tool_defs
         };
+
+        // Apply admin tool policy first so admin-disabled tools are removed
+        // before per-user permission filtering and session auto-approval.
+        let is_admin = self.tenant.identity().role.is_admin();
+        let admin_policy = crate::tools::permissions::load_cached_admin_tool_policy(
+            self.agent.store(),
+            &self.cached_admin_tool_policy,
+        )
+        .await;
+        let tool_defs = crate::tools::permissions::filter_admin_disabled_tools(
+            tool_defs,
+            self.agent.config.multi_tenant,
+            is_admin,
+            self.tenant.user_id(),
+            admin_policy,
+        );
 
         // Apply per-user tool permission filtering.
         //
@@ -1229,7 +1256,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     auth_data.setup_url,
                 )
                 .await;
-                return Ok(Some(LoopOutcome::Response(instructions)));
+                return Ok(Some(LoopOutcome::AuthPending(instructions)));
             }
 
             emit_auth_required_status(
@@ -1288,15 +1315,7 @@ fn normalize_extension_name(value: Option<&str>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-/// Only allow `https://` URLs for auth/setup links to prevent scheme injection
-/// (e.g. `javascript:`, `file://`). Host validation is explicitly out of scope:
-/// the URL source is a trusted local extension tool result, and display-side
-/// rendering controls where the user is actually navigated.
-fn sanitize_auth_url(url: Option<&str>) -> Option<String> {
-    url.map(str::trim)
-        .filter(|u| u.starts_with("https://"))
-        .map(ToOwned::to_owned)
-}
+pub(super) use crate::auth::oauth::sanitize_auth_url;
 
 pub(super) fn auth_instructions_or_default(instructions: Option<&str>) -> String {
     instructions
@@ -1674,8 +1693,7 @@ mod tests {
 
     use super::{
         capture_auth_prompt, check_auth_required, extract_auth_prompt, parse_auth_result,
-        persist_selected_auth_prompt, restore_selected_auth_prompt, sanitize_auth_url,
-        selected_model_override,
+        persist_selected_auth_prompt, restore_selected_auth_prompt, selected_model_override,
     };
     use crate::agent::session::PendingAuthPrompt;
 
@@ -2297,6 +2315,9 @@ mod tests {
             super::AgenticLoopResult::Failed { .. } => {
                 panic!("expected NeedApproval, got Failed")
             }
+            super::AgenticLoopResult::AuthPending { .. } => {
+                panic!("expected NeedApproval, got AuthPending")
+            }
         };
 
         assert_eq!(pending.tool_name, "approval_tool");
@@ -2395,23 +2416,9 @@ mod tests {
         assert!(extract_auth_prompt("tool_activate", &result).is_none());
     }
 
-    #[test]
-    fn test_sanitize_auth_url_rejects_non_https_schemes() {
-        assert!(sanitize_auth_url(Some("javascript:alert(1)")).is_none());
-        assert!(sanitize_auth_url(Some("file:///etc/passwd")).is_none());
-        assert!(sanitize_auth_url(Some("http://example.com")).is_none());
-        assert!(sanitize_auth_url(Some("data:text/html,<h1>")).is_none());
-        assert!(sanitize_auth_url(Some("")).is_none());
-        assert!(sanitize_auth_url(None).is_none());
-    }
-
-    #[test]
-    fn test_sanitize_auth_url_allows_https() {
-        assert_eq!(
-            sanitize_auth_url(Some("https://accounts.google.com/o/oauth2/auth")),
-            Some("https://accounts.google.com/o/oauth2/auth".to_string())
-        );
-    }
+    // Helper-level sanitize_auth_url tests live alongside the helper itself
+    // in `crate::auth::oauth`. The test below covers the parse_auth_result
+    // wiring (i.e. that the helper is actually applied at the call site).
 
     #[test]
     fn test_parse_auth_result_strips_non_https_urls() {
@@ -3110,6 +3117,56 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingToolsProvider {
+        seen_tools: std::sync::Mutex<Vec<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for RecordingToolsProvider {
+        fn model_name(&self) -> &str {
+            "recording-tools"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            Ok(CompletionResponse {
+                content: "ok".to_string(),
+                input_tokens: 0,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
+            let names: Vec<String> = request.tools.iter().map(|t| t.name.clone()).collect();
+            self.seen_tools
+                .lock()
+                .expect("recording tools mutex poisoned")
+                .push(names);
+            Ok(ToolCompletionResponse {
+                content: Some("ok".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 0,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
     /// Helper to build a test Agent with a custom LLM provider and
     /// `max_tool_iterations` override.
     fn make_test_agent_with_llm(llm: Arc<dyn LlmProvider>, max_tool_iterations: usize) -> Agent {
@@ -3221,6 +3278,158 @@ mod tests {
             inner.is_ok(),
             "Dispatcher returned an error: {:?}",
             inner.err()
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_admin_policy_filter_happens_before_auto_approval_and_llm_call() {
+        use crate::agent::session::Session;
+        use crate::channels::IncomingMessage;
+        use crate::llm::ChatMessage;
+        use crate::tools::builtin::{EchoTool, TimeTool};
+        use crate::tools::permissions::{ADMIN_SETTINGS_USER_ID, ADMIN_TOOL_POLICY_KEY};
+        use tokio::sync::Mutex;
+
+        let (db, _tmp_dir) = crate::testing::test_db().await;
+        db.set_setting(
+            "member-user",
+            "tool_permissions",
+            &serde_json::json!({
+                "echo": "always_allow",
+                "time": "always_allow"
+            }),
+        )
+        .await
+        .expect("failed to seed member tool permissions");
+        db.set_setting(
+            ADMIN_SETTINGS_USER_ID,
+            ADMIN_TOOL_POLICY_KEY,
+            &serde_json::json!({
+                "disabled_tools": ["echo"]
+            }),
+        )
+        .await
+        .expect("failed to seed admin tool policy");
+
+        let llm = Arc::new(RecordingToolsProvider::default());
+        let llm_for_assert = Arc::clone(&llm);
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register_sync(Arc::new(EchoTool));
+        tools.register_sync(Arc::new(TimeTool));
+
+        let deps = AgentDeps {
+            owner_id: "default".to_string(),
+            store: Some(db),
+            llm: llm as Arc<dyn LlmProvider>,
+            cheap_llm: None,
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+            })),
+            tools,
+            workspace: None,
+            extension_manager: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skills_config: SkillsConfig::default(),
+            hooks: Arc::new(HookRegistry::new()),
+            cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            sse_tx: None,
+            http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
+            auth_manager: None,
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            builder: None,
+            llm_backend: "nearai".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+        };
+
+        let agent = Agent::new(
+            AgentConfig {
+                name: "test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_cost_per_user_per_day_cents: None,
+                max_tool_iterations: 5,
+                auto_approve_tools: true,
+                default_timezone: "UTC".to_string(),
+                max_jobs_per_user: None,
+                max_tokens_per_job: 0,
+                multi_tenant: true,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
+                engine_v2: false,
+            },
+            deps,
+            Arc::new(ChannelManager::new()),
+            None,
+            None,
+            None,
+            Some(Arc::new(ContextManager::new(1))),
+            None,
+        );
+
+        let session = Arc::new(Mutex::new(Session::new("member-user")));
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread(Some("admin-policy")).id
+        };
+        let tenant = agent.tenant_ctx("member-user").await;
+        let message = IncomingMessage::new("test", "member-user", "hello");
+        let initial_messages = vec![ChatMessage::user("hello")];
+
+        let result = agent
+            .run_agentic_loop(
+                &message,
+                tenant,
+                Arc::clone(&session),
+                thread_id,
+                initial_messages,
+            )
+            .await;
+        assert!(result.is_ok(), "dispatcher run failed");
+
+        // admin-disabled tools must not remain auto-approved in session
+        let sess = session.lock().await;
+        assert!(
+            !sess.is_tool_auto_approved("echo"),
+            "echo is admin-disabled and must not be auto-approved"
+        );
+        assert!(
+            sess.is_tool_auto_approved("time"),
+            "time should remain auto-approved"
+        );
+        drop(sess);
+
+        // LLM should never see admin-disabled tools in available_tools.
+        let calls = llm_for_assert
+            .seen_tools
+            .lock()
+            .expect("recording tools mutex poisoned")
+            .clone();
+        assert!(
+            !calls.is_empty(),
+            "LLM should have been called at least once"
+        );
+        assert!(
+            !calls[0].iter().any(|name| name == "echo"),
+            "admin-disabled tool leaked into LLM tool list: {:?}",
+            calls[0]
+        );
+        assert!(
+            calls[0].iter().any(|name| name == "time"),
+            "expected non-disabled tool to remain available: {:?}",
+            calls[0]
         );
     }
 
@@ -3348,6 +3557,9 @@ mod tests {
             super::AgenticLoopResult::Failed { error, .. } => {
                 panic!("Expected text response, got Failed: {error}");
             }
+            super::AgenticLoopResult::AuthPending { .. } => {
+                panic!("Expected text response, got AuthPending");
+            }
         }
     }
 
@@ -3392,6 +3604,9 @@ mod tests {
                 }
                 super::AgenticLoopResult::Failed { error, .. } => {
                     panic!("expected a text response, got Failed: {error}");
+                }
+                super::AgenticLoopResult::AuthPending { .. } => {
+                    panic!("expected a text response, got AuthPending");
                 }
             }
         }

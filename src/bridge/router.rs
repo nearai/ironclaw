@@ -1053,6 +1053,27 @@ pub async fn get_engine_pending_gate(
     }
 }
 
+/// Check whether the user has *any* pending gate (resolved, ambiguous, or
+/// otherwise). Unlike `get_engine_pending_gate` which returns `None` for
+/// ambiguous resolutions, this returns `true` whenever at least one gate
+/// exists — suitable for deciding whether a bare keyword should be treated
+/// as an approval response vs. regular user input.
+pub async fn has_any_pending_gate(user_id: &str, thread_id: Option<&str>) -> bool {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return false;
+    };
+    let Ok(guard) = lock.try_read() else {
+        return false;
+    };
+    let Some(state) = guard.as_ref() else {
+        return false;
+    };
+    !matches!(
+        resolve_pending_gate_for_user(&state.pending_gates, user_id, thread_id).await,
+        PendingGateResolution::None
+    )
+}
+
 pub enum AuthCallbackContinuation {
     None,
     ResolveGateExternal {
