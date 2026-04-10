@@ -1278,8 +1278,10 @@ impl TestRig {
     /// Used by live tests that exercise the auth gate flow — they
     /// delete a credential to simulate "not yet authenticated", then
     /// re-insert it after the gate fires to simulate "user completed
-    /// OAuth and the token was stored". Returns `None` when the rig
-    /// was built without a master key (most non-live tests).
+    /// OAuth and the token was stored". Returns `None` only when a
+    /// config override explicitly disables secrets or omits a master
+    /// key. Most test rigs now have a working secrets store because
+    /// `Config::for_testing()` generates a random master key per call.
     #[cfg(feature = "libsql")]
     pub fn secrets_store(&self) -> Option<&Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>> {
         self.secrets_store.as_ref()
