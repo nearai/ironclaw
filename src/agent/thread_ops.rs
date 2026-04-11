@@ -1293,16 +1293,23 @@ impl Agent {
             if let Some((ext_name, instructions)) =
                 check_auth_required(&pending.tool_name, &tool_result)
             {
-                self.handle_auth_intercept(
-                    &session,
-                    thread_id,
-                    message,
-                    &tool_result,
-                    ext_name,
-                    instructions.clone(),
-                )
-                .await;
-                return Ok(SubmissionResult::response(instructions));
+                let intercepted = self
+                    .handle_auth_intercept(
+                        &session,
+                        thread_id,
+                        message,
+                        &tool_result,
+                        ext_name,
+                        instructions.clone(),
+                    )
+                    .await;
+                return if intercepted {
+                    Ok(SubmissionResult::response(instructions))
+                } else {
+                    Ok(SubmissionResult::error(
+                        "Internal error: thread no longer exists",
+                    ))
+                };
             }
 
             context_messages.push(ChatMessage::tool_result(
@@ -1500,6 +1507,7 @@ impl Agent {
             // Process all results before any conditional return so every
             // tool result is recorded in the session audit trail.
             let mut deferred_auth: Option<String> = None;
+            let mut deferred_auth_failed = false;
 
             for (tc, deferred_result) in exec_results {
                 if let Ok(ref output) = deferred_result {
@@ -1559,16 +1567,24 @@ impl Agent {
                     if let Some((ext_name, instructions)) =
                         check_auth_required(&tc.name, &deferred_result)
                     {
-                        self.handle_auth_intercept(
-                            &session,
-                            thread_id,
-                            message,
-                            &deferred_result,
-                            ext_name,
-                            instructions.clone(),
-                        )
-                        .await;
-                        deferred_auth = Some(instructions);
+                        let intercepted = self
+                            .handle_auth_intercept(
+                                &session,
+                                thread_id,
+                                message,
+                                &deferred_result,
+                                ext_name,
+                                instructions.clone(),
+                            )
+                            .await;
+                        if intercepted {
+                            deferred_auth = Some(instructions);
+                        } else {
+                            // Thread disappeared — record the error so the
+                            // caller below returns an error instead of auth
+                            // instructions for a dead thread.
+                            deferred_auth_failed = true;
+                        }
                     }
                 }
 
@@ -1576,6 +1592,11 @@ impl Agent {
             }
 
             // Return auth response after all results are recorded
+            if deferred_auth_failed {
+                return Ok(SubmissionResult::error(
+                    "Internal error: thread no longer exists",
+                ));
+            }
             if let Some(instructions) = deferred_auth {
                 return Ok(SubmissionResult::response(instructions));
             }
@@ -1806,6 +1827,9 @@ impl Agent {
     /// Enters auth mode on the thread, completes + persists the turn,
     /// and sends the AuthRequired status to the channel.
     /// Returns the instructions string for the caller to wrap in a response.
+    /// Returns `true` if the thread was found and auth mode was entered,
+    /// `false` if the thread had already disappeared (caller should not
+    /// return auth instructions to the user in that case).
     async fn handle_auth_intercept(
         &self,
         session: &Arc<Mutex<Session>>,
@@ -1814,7 +1838,7 @@ impl Agent {
         tool_result: &Result<String, Error>,
         ext_name: String,
         instructions: String,
-    ) {
+    ) -> bool {
         let auth_data = parse_auth_result(tool_result);
         let thread_exists = {
             let mut sess = session.lock().await;
@@ -1856,6 +1880,7 @@ impl Agent {
                 )
                 .await;
         }
+        thread_exists
     }
 
     async fn send_turn_cost_status(
@@ -1945,66 +1970,74 @@ impl Agent {
                 Ok(Some(result.message))
             }
             Ok(result) => {
-                {
+                let thread_exists = {
                     let mut sess = session.lock().await;
                     match sess.threads.get_mut(&thread_id) {
                         Some(thread) => {
                             thread.enter_auth_mode(pending.extension_name.clone());
+                            true
                         }
                         None => {
                             tracing::error!(
                                 %thread_id,
                                 "Thread disappeared while re-entering auth mode"
                             );
+                            false
                         }
                     }
-                }
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::AuthRequired {
-                            extension_name: pending.extension_name.clone(),
-                            instructions: Some(result.message.clone()),
-                            auth_url: None,
-                            setup_url: None,
-                        },
-                        &message.metadata,
-                    )
-                    .await;
-                Ok(Some(result.message))
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                // Token validation errors: re-enter auth mode and re-prompt
-                if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
-                    {
-                        let mut sess = session.lock().await;
-                        match sess.threads.get_mut(&thread_id) {
-                            Some(thread) => {
-                                thread.enter_auth_mode(pending.extension_name.clone());
-                            }
-                            None => {
-                                tracing::error!(
-                                    %thread_id,
-                                    "Thread disappeared while re-entering auth mode after validation failure"
-                                );
-                            }
-                        }
-                    }
+                };
+                if thread_exists {
                     let _ = self
                         .channels
                         .send_status(
                             &message.channel,
                             StatusUpdate::AuthRequired {
                                 extension_name: pending.extension_name.clone(),
-                                instructions: Some(msg.clone()),
+                                instructions: Some(result.message.clone()),
                                 auth_url: None,
                                 setup_url: None,
                             },
                             &message.metadata,
                         )
                         .await;
+                }
+                Ok(Some(result.message))
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                // Token validation errors: re-enter auth mode and re-prompt
+                if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
+                    let thread_exists = {
+                        let mut sess = session.lock().await;
+                        match sess.threads.get_mut(&thread_id) {
+                            Some(thread) => {
+                                thread.enter_auth_mode(pending.extension_name.clone());
+                                true
+                            }
+                            None => {
+                                tracing::error!(
+                                    %thread_id,
+                                    "Thread disappeared while re-entering auth mode after validation failure"
+                                );
+                                false
+                            }
+                        }
+                    };
+                    if thread_exists {
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::AuthRequired {
+                                    extension_name: pending.extension_name.clone(),
+                                    instructions: Some(msg.clone()),
+                                    auth_url: None,
+                                    setup_url: None,
+                                },
+                                &message.metadata,
+                            )
+                            .await;
+                    }
                     return Ok(Some(msg));
                 }
                 // Infrastructure errors
