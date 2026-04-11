@@ -625,8 +625,17 @@ impl DashboardWidget {
     // ── Missions (full width, bottom) ────────────────────
 
     fn render_missions_panel(&self, area: Rect, buf: &mut Buffer, state: &AppState) {
+        let missions: Vec<&super::EngineThreadInfo> = state
+            .engine_threads
+            .iter()
+            .filter(|t| t.thread_type == "Mission")
+            .collect();
+
         let block = Block::default()
-            .title(Span::styled(" Missions ", self.theme.bold_accent_style()))
+            .title(Span::styled(
+                format!(" Missions ({}) ", missions.len()),
+                self.theme.bold_accent_style(),
+            ))
             .borders(Borders::ALL)
             .border_style(self.theme.border_style());
 
@@ -637,45 +646,38 @@ impl DashboardWidget {
             return;
         }
 
-        let routines = if !state.dashboard.routines.is_empty() {
-            &state.dashboard.routines
-        } else {
-            &state.routines
-        };
-
         let mut lines: Vec<Line> = Vec::new();
+        let now = chrono::Utc::now();
+        let max_goal = (inner.width as usize).saturating_sub(20).max(4);
 
-        if routines.is_empty() {
+        if missions.is_empty() {
             lines.push(Line::from(Span::styled(
-                " No missions configured",
+                " No active missions",
                 self.theme.dim_style(),
             )));
         } else {
-            for r in routines.iter().take(inner.height as usize) {
-                let icon = if r.enabled { "▶" } else { "⏸" };
-                let icon_style = if r.enabled {
-                    self.theme.success_style()
-                } else {
-                    self.theme.dim_style()
+            for thread in missions.iter().take(inner.height as usize) {
+                let icon = thread_icon(thread.status);
+                let style = match thread.status {
+                    ThreadStatus::Active => self.theme.accent_style(),
+                    ThreadStatus::Idle => self.theme.dim_style(),
+                    ThreadStatus::Completed => self.theme.success_style(),
+                    ThreadStatus::Failed => self.theme.error_style(),
                 };
-                let mut spans = vec![
-                    Span::styled(format!(" {icon} "), icon_style),
-                    Span::styled(format!("{:<20}", r.name), self.theme.accent_style()),
-                    Span::styled(format!(" {:<12}", r.trigger_type), self.theme.dim_style()),
-                ];
-                if let Some(ref next) = r.next_fire {
-                    spans.push(Span::styled(
-                        format!(" next: {next}"),
-                        self.theme.dim_style(),
-                    ));
-                }
-                if let Some(ref last) = r.last_run {
-                    spans.push(Span::styled(
-                        format!(" last: {last}"),
-                        self.theme.dim_style(),
-                    ));
-                }
-                lines.push(Line::from(spans));
+                let goal = truncate(&thread.goal, max_goal);
+                let uptime = thread
+                    .started_at
+                    .map(
+                        |s| format_uptime(now.signed_duration_since(s).num_seconds().max(0) as u64),
+                    )
+                    .unwrap_or_else(|| "?".to_string());
+
+                lines.push(Line::from(vec![
+                    Span::styled(format!(" {icon} "), style),
+                    Span::styled("[M] ", self.theme.dim_style()),
+                    Span::styled(goal, self.theme.bold_style()),
+                    Span::styled(format!("  {uptime}"), self.theme.dim_style()),
+                ]));
             }
         }
 
@@ -1631,46 +1633,51 @@ impl DashboardWidget {
         lines
     }
 
-    fn expanded_missions_lines(&self, state: &AppState, _inner: Rect) -> Vec<Line<'static>> {
-        let routines = if !state.dashboard.routines.is_empty() {
-            &state.dashboard.routines
-        } else {
-            &state.routines
-        };
+    fn expanded_missions_lines(&self, state: &AppState, inner: Rect) -> Vec<Line<'static>> {
+        let missions: Vec<&super::EngineThreadInfo> = state
+            .engine_threads
+            .iter()
+            .filter(|t| t.thread_type == "Mission")
+            .collect();
 
         let mut lines: Vec<Line> = Vec::new();
+        let now = chrono::Utc::now();
+        let max_goal = (inner.width as usize).saturating_sub(20).max(4);
 
-        if routines.is_empty() {
+        if missions.is_empty() {
             lines.push(Line::from(Span::styled(
-                " No missions configured",
+                " No active missions",
                 self.theme.dim_style(),
             )));
         } else {
-            for r in routines {
-                let icon = if r.enabled { "\u{25B6}" } else { "\u{23F8}" };
-                let icon_style = if r.enabled {
-                    self.theme.success_style()
-                } else {
-                    self.theme.dim_style()
+            for thread in &missions {
+                let icon = thread_icon(thread.status);
+                let style = match thread.status {
+                    ThreadStatus::Active => self.theme.accent_style(),
+                    ThreadStatus::Idle => self.theme.dim_style(),
+                    ThreadStatus::Completed => self.theme.success_style(),
+                    ThreadStatus::Failed => self.theme.error_style(),
                 };
-                let mut spans = vec![
-                    Span::styled(format!(" {icon} "), icon_style),
-                    Span::styled(format!("{:<20}", r.name), self.theme.accent_style()),
-                    Span::styled(format!(" {:<12}", r.trigger_type), self.theme.dim_style()),
-                ];
-                if let Some(ref next) = r.next_fire {
-                    spans.push(Span::styled(
-                        format!(" next: {next}"),
+                let goal = truncate(&thread.goal, max_goal);
+                let uptime = thread
+                    .started_at
+                    .map(
+                        |s| format_uptime(now.signed_duration_since(s).num_seconds().max(0) as u64),
+                    )
+                    .unwrap_or_else(|| "?".to_string());
+                let tokens = format_tokens(thread.total_tokens);
+
+                lines.push(Line::from(vec![
+                    Span::styled(format!(" {icon} "), style),
+                    Span::styled("[M] ", self.theme.dim_style()),
+                    Span::styled(goal, self.theme.bold_style()),
+                    Span::styled(format!("  {uptime}"), self.theme.dim_style()),
+                    Span::styled(format!("  {tokens}"), self.theme.dim_style()),
+                    Span::styled(
+                        format!("  {} steps", thread.step_count),
                         self.theme.dim_style(),
-                    ));
-                }
-                if let Some(ref last) = r.last_run {
-                    spans.push(Span::styled(
-                        format!(" last: {last}"),
-                        self.theme.dim_style(),
-                    ));
-                }
-                lines.push(Line::from(spans));
+                    ),
+                ]));
             }
         }
 
