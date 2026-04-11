@@ -3512,6 +3512,7 @@ function handleGateResolved(data) {
     data.resolution === 'credential_provided'
     || data.resolution === 'cancelled'
     || data.resolution === 'external_callback'
+    || data.resolution === 'expired'
   ) {
     removeAuthCard();
     enableChatInput();

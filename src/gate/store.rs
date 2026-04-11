@@ -215,6 +215,43 @@ impl PendingGateStore {
             .collect()
     }
 
+    /// Remove all gates for a given thread, regardless of user.
+    ///
+    /// Returns the gates that were removed. Used when a thread is deleted or
+    /// becomes unreachable while gates are still pending — prevents orphaned
+    /// gates that can never be resolved.
+    pub async fn discard_for_thread(
+        &self,
+        thread_id: ironclaw_engine::ThreadId,
+    ) -> Vec<PendingGate> {
+        let removed = {
+            let mut inner = self.inner.lock().await;
+            let keys: Vec<PendingGateKey> = inner
+                .by_key
+                .iter()
+                .filter(|(k, _)| k.thread_id == thread_id)
+                .map(|(k, _)| k.clone())
+                .collect();
+            let mut gates = Vec::with_capacity(keys.len());
+            for key in &keys {
+                if let Some(gate) = inner.by_key.remove(key) {
+                    inner.by_request_id.remove(&gate.request_id);
+                    gates.push(gate);
+                }
+            }
+            (keys, gates)
+        };
+        let (keys, gates) = removed;
+        if let Some(ref persistence) = self.persistence {
+            for key in &keys {
+                if let Err(e) = persistence.remove(key).await {
+                    tracing::debug!(error = %e, "failed to remove orphaned gate from persistence");
+                }
+            }
+        }
+        gates
+    }
+
     /// Remove a gate by key without verification.
     ///
     /// Used for cleanup paths like conversation clears or explicit cancel flows.
@@ -666,6 +703,52 @@ mod tests {
             thread_id: tid_expired,
         };
         assert!(store.peek(&key_expired).await.is_none());
+    }
+
+    // ── Thread-scoped bulk discard ──────────────────────────
+
+    #[tokio::test]
+    async fn test_discard_for_thread_removes_all_gates() {
+        // Regression: #2323 — orphaned gates when thread deleted
+        let store = PendingGateStore::in_memory();
+        let orphan_tid = ThreadId::new();
+        let other_tid = ThreadId::new();
+
+        // Two gates on the orphan thread (different users)
+        let g1 = sample_gate_with("alice", orphan_tid, "web", 300);
+        let g2 = sample_gate_with("bob", orphan_tid, "telegram", 300);
+        // One gate on a different thread
+        let g3 = sample_gate_with("alice", other_tid, "web", 300);
+
+        store.insert(g1).await.unwrap();
+        store.insert(g2).await.unwrap();
+        store.insert(g3).await.unwrap();
+
+        let removed = store.discard_for_thread(orphan_tid).await;
+        assert_eq!(removed.len(), 2, "should remove both gates for the thread");
+
+        // Orphan thread gates are gone
+        assert!(
+            store
+                .list_all()
+                .await
+                .iter()
+                .all(|g| g.thread_id != orphan_tid)
+        );
+
+        // Other thread gate still present
+        let key = PendingGateKey {
+            user_id: "alice".into(),
+            thread_id: other_tid,
+        };
+        assert!(store.peek(&key).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_discard_for_thread_returns_empty_when_no_gates() {
+        let store = PendingGateStore::in_memory();
+        let removed = store.discard_for_thread(ThreadId::new()).await;
+        assert!(removed.is_empty());
     }
 
     // ── Reserved channel names ───────────────────────────────
