@@ -37,9 +37,21 @@ activation:
 You can query multiple LLM models with the same prompt directly from CodeAct
 using the built-in `llm_query()` and `llm_query_batched()` functions. Both
 accept a `model=` (or `models=`) keyword that overrides the configured model
-for that call. Providers that support per-request model overrides (NEAR AI,
-Anthropic OAuth, GitHub Copilot, Bedrock) honor it; others fall back to their
-configured model.
+for that call.
+
+Per-request model override support varies by backend:
+
+| Backend            | Honors `model=`? | Cross-vendor routing? |
+|--------------------|------------------|-----------------------|
+| NEAR AI            | Yes              | Yes (aggregator — hosts models from many vendors) |
+| Anthropic OAuth    | Yes              | No (Anthropic models only) |
+| GitHub Copilot     | Yes              | No (Copilot-exposed models only) |
+| Bedrock            | **No**           | — (model fixed at construction) |
+| OpenAI / Ollama / Tinfoil via rig | No (silent fallback with warning log) | — |
+
+A genuine *cross-vendor* council (Anthropic + Google + OpenAI in one batch)
+therefore only works on an aggregator backend like NEAR AI. On single-vendor
+backends, use a lineup of models available within that vendor.
 
 ## When to use a council
 
@@ -51,8 +63,11 @@ configured model.
 
 ## Default council line-up
 
-Unless the user requests something specific, use this 4-model council:
+Check the configured backend first (e.g. from `LLM_BACKEND` or the user's
+settings) before picking a lineup. Unless the user requests specific models,
+use the matching default below.
 
+**NEAR AI (aggregator — default council):**
 ```python
 COUNCIL = [
     "anthropic/claude-opus-4-6",
@@ -61,9 +76,32 @@ COUNCIL = [
     "openai/gpt-5.4",
 ]
 ```
+This 4-model lineup spans the major frontier providers and reasoning styles.
+It **only works on NEAR AI** (or another aggregator) — the prefixed model
+names route inside NEAR AI to the respective vendors.
 
-These four span the major frontier providers and reasoning styles. If the
-user names specific models, use those instead.
+**Anthropic OAuth** (Anthropic-only, no cross-vendor routing):
+```python
+COUNCIL = [
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5",
+]
+```
+Use different Anthropic tiers for diversity of reasoning depth vs. speed.
+
+**GitHub Copilot** (whatever Copilot exposes):
+```python
+COUNCIL = ["gpt-5.4", "claude-opus-4-6", "gemini-3-pro"]
+```
+Copilot's available models shift over time — call `llm_query` with the
+user's configured default if you're unsure which are reachable.
+
+**Bedrock / OpenAI / Ollama / Tinfoil:** per-request `model=` is not honored
+by these backends. A council is not possible without switching backends —
+tell the user and fall back to a single-model answer.
+
+If the user names specific models, always use those instead of the defaults.
 
 ## API
 

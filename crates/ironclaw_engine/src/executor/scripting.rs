@@ -1028,8 +1028,17 @@ async fn handle_llm_query_batched(
         }
     };
 
-    // Optional context kwarg
-    let context_arg = extract_string_arg(&[], kwargs, "context", usize::MAX);
+    // Positional/keyword layout (matches the documented signature
+    // `llm_query_batched(prompts, context=None, model=None, models=None)`):
+    //   arg 0 = prompts   (already extracted above)
+    //   arg 1 = context
+    //   arg 2 = model
+    //   arg 3 = models
+    // All three of context/model/models can also be passed by keyword.
+    let context_arg = match extract_optional_string_kwarg(args, kwargs, "context", 1) {
+        Ok(v) => v,
+        Err(err) => return err,
+    };
 
     // Optional model overrides:
     //   - `model="..."` applies the same model to every prompt
@@ -1041,17 +1050,20 @@ async fn handle_llm_query_batched(
     //     does NOT fill those slots, since mixing the two would be surprising.
     // See note in handle_llm_query: `model` must be parsed explicitly so that
     // `model=None` doesn't become the literal string "None".
-    let single_model = match extract_optional_string_kwarg(&[], kwargs, "model", usize::MAX) {
+    let single_model = match extract_optional_string_kwarg(args, kwargs, "model", 2) {
         Ok(v) => v,
         Err(err) => return err,
     };
-    let models_kwarg = kwargs.iter().find_map(|(k, v)| match k {
-        MontyObject::String(key) if key == "models" => Some(v),
-        _ => None,
-    });
+    let models_kwarg = kwargs
+        .iter()
+        .find_map(|(k, v)| match k {
+            MontyObject::String(key) if key == "models" => Some(v),
+            _ => None,
+        })
+        .or_else(|| args.get(3));
 
     let models_list: Option<Vec<Option<String>>> = match models_kwarg {
-        None => None,
+        None | Some(MontyObject::None) => None,
         Some(MontyObject::List(items)) => {
             let mut out = Vec::with_capacity(items.len());
             for item in items {
@@ -2535,6 +2547,96 @@ FINAL(str(x))
         let calls = llm.calls.lock().await;
         assert_eq!(calls.len(), 2);
         assert!(calls.iter().all(|(m, _)| m.is_none()));
+    }
+
+    #[tokio::test]
+    async fn llm_query_batched_honors_positional_context_and_model() {
+        // Regression: `context`, `model`, and `models` used to be kwarg-only.
+        // A positional call matching the documented signature
+        // `llm_query_batched(prompts, context=None, model=None, models=None)`
+        // silently dropped the model, violating the preamble.
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let result = handle_llm_query_batched(
+            &[
+                MontyObject::List(vec![
+                    MontyObject::String("a".into()),
+                    MontyObject::String("b".into()),
+                ]),
+                MontyObject::String("shared context".into()), // position 1: context
+                MontyObject::String("gpt-4o".into()),         // position 2: model
+            ],
+            &[],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        match result {
+            ExtFunctionResult::Return(MontyObject::List(items)) => assert_eq!(items.len(), 2),
+            other => panic!("expected list return, got {other:?}"),
+        }
+
+        let calls = llm.calls.lock().await;
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|(m, _)| m.as_deref() == Some("gpt-4o")));
+    }
+
+    #[tokio::test]
+    async fn llm_query_batched_honors_positional_models_list() {
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let result = handle_llm_query_batched(
+            &[
+                MontyObject::List(vec![
+                    MontyObject::String("q".into()),
+                    MontyObject::String("q".into()),
+                ]),
+                MontyObject::None, // position 1: context = None
+                MontyObject::None, // position 2: model = None
+                MontyObject::List(vec![
+                    // position 3: models
+                    MontyObject::String("gpt-4o".into()),
+                    MontyObject::String("claude-sonnet-4-6".into()),
+                ]),
+            ],
+            &[],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        assert!(matches!(result, ExtFunctionResult::Return(_)));
+        let mut calls = llm.calls.lock().await;
+        calls.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(calls[1].0.as_deref(), Some("gpt-4o"));
+    }
+
+    #[tokio::test]
+    async fn llm_query_batched_positional_none_for_models_is_no_override() {
+        // `llm_query_batched(prompts, None, None, None)` should run with no
+        // model overrides, not error on the positional None at slot 3.
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let result = handle_llm_query_batched(
+            &[
+                MontyObject::List(vec![MontyObject::String("a".into())]),
+                MontyObject::None,
+                MontyObject::None,
+                MontyObject::None,
+            ],
+            &[],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        assert!(matches!(result, ExtFunctionResult::Return(_)));
+        let calls = llm.calls.lock().await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, None);
     }
 
     #[tokio::test]
