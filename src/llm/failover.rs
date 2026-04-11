@@ -18,12 +18,11 @@ use async_trait::async_trait;
 use rust_decimal::Decimal;
 
 use crate::llm::error::LlmError;
+use crate::llm::error_classification::classify_llm_error;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamingChunkSender,
     ToolCompletionRequest, ToolCompletionResponse,
 };
-
-use crate::llm::retry::is_retryable;
 
 /// Configuration for per-provider cooldown behavior.
 ///
@@ -97,11 +96,12 @@ impl ProviderCooldown {
 }
 
 /// An LLM provider that wraps multiple providers and tries each in sequence
-/// on transient failures.
+/// on retryable or provider-isolated failures.
 ///
 /// The first provider in the list is the primary. If it fails with a retryable
-/// error, the next provider is tried, and so on. Non-retryable errors
-/// (e.g. `AuthFailed`, `ContextLengthExceeded`) propagate immediately.
+/// error, or a non-retryable error that is specific to that provider
+/// (e.g. auth failure, billing exhaustion, missing model), the next provider
+/// is tried. Request-shape failures such as context overflow still propagate.
 ///
 /// Providers that repeatedly fail with retryable errors are temporarily
 /// placed in cooldown and skipped, reducing latency.
@@ -249,12 +249,15 @@ impl FailoverProvider {
                     return Ok((i, response));
                 }
                 Err(err) => {
-                    if !is_retryable(&err) {
+                    let classification = classify_llm_error(&err);
+                    if !classification.should_failover {
                         return Err(err);
                     }
 
-                    // Increment failure count; activate cooldown if threshold reached.
-                    if self.cooldowns[i].record_failure(self.cooldown_config.failure_threshold) {
+                    // Only transient backend failures should drive cooldowns.
+                    if classification.counts_as_transient
+                        && self.cooldowns[i].record_failure(self.cooldown_config.failure_threshold)
+                    {
                         let nanos = self.now_nanos();
                         self.cooldowns[i].activate_cooldown(nanos);
                         tracing::warn!(
@@ -271,7 +274,8 @@ impl FailoverProvider {
                             provider = %provider.model_name(),
                             error = %err,
                             next_provider = %self.providers[next_i].model_name(),
-                            "Provider failed with retryable error, trying next provider"
+                            retryable = classification.retryable,
+                            "Provider failed, trying next provider"
                         );
                     }
                     last_error = Some(err);
@@ -367,11 +371,14 @@ impl FailoverProvider {
                         return Err(err);
                     }
 
-                    if !is_retryable(&err) {
+                    let classification = classify_llm_error(&err);
+                    if !classification.should_failover {
                         return Err(err);
                     }
 
-                    if self.cooldowns[i].record_failure(self.cooldown_config.failure_threshold) {
+                    if classification.counts_as_transient
+                        && self.cooldowns[i].record_failure(self.cooldown_config.failure_threshold)
+                    {
                         let nanos = self.now_nanos();
                         self.cooldowns[i].activate_cooldown(nanos);
                     }
@@ -382,6 +389,7 @@ impl FailoverProvider {
                             provider = %provider.model_name(),
                             error = %err,
                             next_provider = %self.providers[next_i].model_name(),
+                            retryable = classification.retryable,
                             "Streaming provider failed, trying next provider"
                         );
                     }
@@ -536,6 +544,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::llm::provider::{CompletionResponse, FinishReason, ToolCompletionResponse};
+    use crate::llm::retry::is_retryable;
 
     /// A mock LLM provider that returns a predetermined result.
     struct MockProvider {
@@ -732,21 +741,16 @@ mod tests {
         }
     }
 
-    // Test 4: Non-retryable error fails immediately, no failover.
+    // Test 4: Auth failure is failover-worthy even though it is not retryable.
     #[tokio::test]
-    async fn non_retryable_error_fails_immediately() {
+    async fn auth_failure_fails_over_to_next_provider() {
         let primary = Arc::new(MockProvider::failing_non_retryable("primary"));
         let fallback = Arc::new(MockProvider::succeeding("fallback", "fallback response"));
 
         let failover = FailoverProvider::new(vec![primary, fallback]).unwrap();
 
-        let err = failover.complete(make_request()).await.unwrap_err();
-        match err {
-            LlmError::AuthFailed { provider } => {
-                assert_eq!(provider, "primary");
-            }
-            other => panic!("expected AuthFailed, got: {other:?}"),
-        }
+        let resp = failover.complete(make_request()).await.unwrap();
+        assert_eq!(resp.content, "fallback response");
     }
 
     // Test 5: Three providers, first two fail (retryable), third succeeds.
@@ -1181,9 +1185,9 @@ mod tests {
         assert_eq!(p1.call_count(), prev); // not called
     }
 
-    // Cooldown test 6: Non-retryable error returns immediately, no failure bump.
+    // Cooldown test 6: Auth failure can fail over, but still should not poison cooldown state.
     #[tokio::test]
-    async fn non_retryable_does_not_increment_cooldown() {
+    async fn auth_failure_does_not_increment_cooldown() {
         let config = CooldownConfig {
             cooldown_duration: Duration::from_secs(300),
             failure_threshold: 1,
@@ -1194,14 +1198,12 @@ mod tests {
         let failover =
             FailoverProvider::with_cooldown(vec![p1.clone(), p2.clone()], config).unwrap();
 
-        // Non-retryable error should return immediately.
-        let err = failover.complete(make_request()).await.unwrap_err();
-        assert!(matches!(err, LlmError::AuthFailed { .. }));
+        let resp = failover.complete(make_request()).await.unwrap();
+        assert_eq!(resp.content, "p2 ok");
         assert_eq!(p1.call_count(), 1);
-        // p2 should NOT have been called (non-retryable = no failover).
-        assert_eq!(p2.call_count(), 0);
+        assert_eq!(p2.call_count(), 1);
 
-        // p1 should NOT be in cooldown (non-retryable doesn't bump count).
+        // p1 should NOT be in cooldown (auth failures do not count as transient).
         let nanos = failover.now_nanos();
         let cooldown_nanos = failover.cooldown_config.cooldown_duration.as_nanos() as u64;
         assert!(!failover.cooldowns[0].is_in_cooldown(nanos, cooldown_nanos));
@@ -1273,6 +1275,10 @@ mod tests {
         assert!(!is_retryable(&LlmError::ModelNotAvailable {
             provider: "p".into(),
             model: "m".into(),
+        }));
+        assert!(!is_retryable(&LlmError::RequestFailed {
+            provider: "openai".into(),
+            reason: "HTTP 401 Unauthorized".into(),
         }));
     }
 
@@ -1524,16 +1530,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streaming_non_retryable_fails_immediately() {
+    async fn streaming_auth_failure_fails_over() {
         let primary = Arc::new(MockProvider::failing_non_retryable("primary"));
         let fallback = Arc::new(MockProvider::succeeding("fallback", "fallback ok"));
         let failover = FailoverProvider::new(vec![primary, fallback]).unwrap();
 
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        let err = failover
+        let resp = failover
             .complete_streaming(make_request(), tx)
             .await
-            .unwrap_err();
-        assert!(matches!(err, LlmError::AuthFailed { .. }));
+            .unwrap();
+        assert_eq!(resp.content, "fallback ok");
     }
 }

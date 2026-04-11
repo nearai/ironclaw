@@ -18,8 +18,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::llm::{
-    ChatMessage, CompletionRequest, FinishReason, Role, ToolCall, ToolCompletionRequest,
-    ToolDefinition,
+    ChatMessage, CompletionRequest, FinishReason, LlmFailureReason, Role, ToolCall,
+    ToolCompletionRequest, ToolDefinition, classify_llm_error,
 };
 
 use super::server::GatewayState;
@@ -313,27 +313,48 @@ fn normalize_tool_choice(val: &serde_json::Value) -> Option<String> {
 }
 
 fn map_llm_error(err: crate::error::LlmError) -> (StatusCode, Json<OpenAiErrorResponse>) {
-    let (status, error_type, code) = match &err {
-        crate::error::LlmError::AuthFailed { .. }
-        | crate::error::LlmError::SessionExpired { .. } => (
+    let classification = classify_llm_error(&err);
+    let (status, error_type, code) = match classification.reason {
+        LlmFailureReason::AuthRecoverable | LlmFailureReason::AuthPermanent => (
             StatusCode::UNAUTHORIZED,
             "authentication_error",
             "auth_error",
         ),
-        crate::error::LlmError::RateLimited { .. } => (
+        LlmFailureReason::Billing => (
+            StatusCode::PAYMENT_REQUIRED,
+            "billing_error",
+            "insufficient_quota",
+        ),
+        LlmFailureReason::RateLimit => (
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limit_error",
             "rate_limit",
         ),
-        crate::error::LlmError::ContextLengthExceeded { .. } => (
+        LlmFailureReason::ContextOverflow => (
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
             "context_length_exceeded",
         ),
-        crate::error::LlmError::ModelNotAvailable { .. } => (
+        LlmFailureReason::PayloadTooLarge => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "invalid_request_error",
+            "payload_too_large",
+        ),
+        LlmFailureReason::ModelNotAvailable => (
             StatusCode::NOT_FOUND,
             "invalid_request_error",
             "model_not_found",
+        ),
+        LlmFailureReason::Timeout => (StatusCode::GATEWAY_TIMEOUT, "server_error", "timeout"),
+        LlmFailureReason::Overloaded | LlmFailureReason::ServerError => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "provider_unavailable",
+        ),
+        LlmFailureReason::FormatError => (
+            StatusCode::BAD_GATEWAY,
+            "server_error",
+            "invalid_upstream_response",
         ),
         _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1117,5 +1138,29 @@ mod tests {
     #[test]
     fn test_validate_model_name_accepts_normal_name() {
         assert!(validate_model_name("gpt-4").is_ok());
+    }
+
+    #[test]
+    fn test_map_llm_error_classifies_hidden_rate_limit() {
+        let err = crate::error::LlmError::RequestFailed {
+            provider: "openai".into(),
+            reason: "HTTP 429 Too Many Requests".into(),
+        };
+
+        let (status, body) = map_llm_error(err);
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body.error.code.as_deref(), Some("rate_limit"));
+    }
+
+    #[test]
+    fn test_map_llm_error_classifies_hidden_context_overflow() {
+        let err = crate::error::LlmError::RequestFailed {
+            provider: "openai".into(),
+            reason: "HTTP 400: maximum context length exceeded".into(),
+        };
+
+        let (status, body) = map_llm_error(err);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body.error.code.as_deref(), Some("context_length_exceeded"));
     }
 }

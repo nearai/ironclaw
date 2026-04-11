@@ -20,6 +20,7 @@ use rust_decimal::Decimal;
 use tokio::sync::Mutex;
 
 use crate::llm::error::LlmError;
+use crate::llm::error_classification::classify_llm_error;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamingChunkSender,
     ToolCompletionRequest, ToolCompletionResponse,
@@ -229,17 +230,7 @@ impl CircuitBreakerProvider {
 /// See also `retry::is_retryable()` which answers a different question:
 /// "could retrying this exact request succeed?"
 fn is_transient(err: &LlmError) -> bool {
-    matches!(
-        err,
-        LlmError::RequestFailed { .. }
-            | LlmError::RateLimited { .. }
-            | LlmError::InvalidResponse { .. }
-            | LlmError::EmptyResponse { .. }
-            | LlmError::SessionExpired { .. }
-            | LlmError::SessionRenewalFailed { .. }
-            | LlmError::Http(_)
-            | LlmError::Io(_)
-    )
+    classify_llm_error(err).counts_as_transient
 }
 
 #[async_trait]
@@ -608,6 +599,10 @@ mod tests {
         assert!(!is_transient(&LlmError::Json(
             serde_json::from_str::<String>("bad").unwrap_err()
         )));
+        assert!(!is_transient(&LlmError::RequestFailed {
+            provider: "openai".into(),
+            reason: "HTTP 401 Unauthorized".into(),
+        }));
     }
 
     // -- Passthrough delegation tests --
@@ -826,7 +821,9 @@ mod tests {
 
         for _ in 0..2 {
             let (tx, _rx) = tokio::sync::mpsc::channel(16);
-            let _ = cb.complete_with_tools_streaming(make_tool_request(), tx).await;
+            let _ = cb
+                .complete_with_tools_streaming(make_tool_request(), tx)
+                .await;
         }
         assert_eq!(cb.circuit_state().await, CircuitState::Open);
     }

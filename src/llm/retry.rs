@@ -15,6 +15,7 @@ use rand::Rng;
 use rust_decimal::Decimal;
 
 use crate::llm::error::LlmError;
+use crate::llm::error_classification::classify_llm_error;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamingChunkSender,
     ToolCompletionRequest, ToolCompletionResponse,
@@ -44,16 +45,7 @@ pub(crate) const MAX_RETRY_AFTER_SECS: u64 = 3600;
 /// See also `circuit_breaker::is_transient()` which answers a different
 /// question: "does this error indicate the backend is degraded?"
 pub(crate) fn is_retryable(err: &LlmError) -> bool {
-    matches!(
-        err,
-        LlmError::RequestFailed { .. }
-            | LlmError::RateLimited { .. }
-            | LlmError::InvalidResponse { .. }
-            | LlmError::EmptyResponse { .. }
-            | LlmError::SessionRenewalFailed { .. }
-            | LlmError::Http(_)
-            | LlmError::Io(_)
-    )
+    classify_llm_error(err).retryable
 }
 
 /// Calculate exponential backoff delay with random jitter.
@@ -150,17 +142,21 @@ impl RetryProvider {
             match op().await {
                 Ok(resp) => return Ok(resp),
                 Err(err) => {
-                    if !is_retryable(&err) || attempt == self.config.max_retries {
+                    let classification = classify_llm_error(&err);
+                    if !classification.retryable || attempt == self.config.max_retries {
                         return Err(err);
                     }
 
-                    let delay = match &err {
-                        LlmError::RateLimited {
-                            retry_after: Some(duration),
-                            ..
-                        } => *duration,
-                        _ => retry_backoff_delay(attempt),
-                    };
+                    let delay = classification
+                        .retry_after
+                        .or_else(|| match &err {
+                            LlmError::RateLimited {
+                                retry_after: Some(duration),
+                                ..
+                            } => Some(*duration),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| retry_backoff_delay(attempt));
 
                     tracing::warn!(
                         provider = %self.inner.model_name(),
@@ -236,17 +232,21 @@ impl RetryProvider {
                         return Err(err);
                     }
 
-                    if !is_retryable(&err) || attempt == self.config.max_retries {
+                    let classification = classify_llm_error(&err);
+                    if !classification.retryable || attempt == self.config.max_retries {
                         return Err(err);
                     }
 
-                    let delay = match &err {
-                        LlmError::RateLimited {
-                            retry_after: Some(duration),
-                            ..
-                        } => *duration,
-                        _ => retry_backoff_delay(attempt),
-                    };
+                    let delay = classification
+                        .retry_after
+                        .or_else(|| match &err {
+                            LlmError::RateLimited {
+                                retry_after: Some(duration),
+                                ..
+                            } => Some(*duration),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| retry_backoff_delay(attempt));
 
                     tracing::warn!(
                         provider = %self.inner.model_name(),
@@ -472,6 +472,14 @@ mod tests {
         assert!(!is_retryable(&LlmError::ModelNotAvailable {
             provider: "p".into(),
             model: "m".into(),
+        }));
+        assert!(is_retryable(&LlmError::RequestFailed {
+            provider: "github_copilot".into(),
+            reason: "HTTP 401 Unauthorized".into(),
+        }));
+        assert!(!is_retryable(&LlmError::RequestFailed {
+            provider: "openai".into(),
+            reason: "HTTP 401 Unauthorized".into(),
         }));
     }
 
@@ -741,7 +749,10 @@ mod tests {
         let retry = RetryProvider::new(provider.clone(), fast_config(3));
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-        let err = retry.complete_streaming(make_request(), tx).await.unwrap_err();
+        let err = retry
+            .complete_streaming(make_request(), tx)
+            .await
+            .unwrap_err();
         assert!(matches!(err, LlmError::RequestFailed { .. }));
         // Must be called only once — no retry after chunk was forwarded
         assert_eq!(provider.calls(), 1);
@@ -756,7 +767,10 @@ mod tests {
         let retry = RetryProvider::new(stub.clone(), fast_config(3));
 
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        let err = retry.complete_streaming(make_request(), tx).await.unwrap_err();
+        let err = retry
+            .complete_streaming(make_request(), tx)
+            .await
+            .unwrap_err();
         assert!(matches!(err, LlmError::ContextLengthExceeded { .. }));
         assert_eq!(stub.calls(), 1);
     }

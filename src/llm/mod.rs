@@ -17,6 +17,7 @@ mod codex_chatgpt;
 pub mod config;
 pub mod costs;
 pub mod error;
+pub mod error_classification;
 pub mod failover;
 pub mod gemini_oauth;
 mod github_copilot;
@@ -52,11 +53,13 @@ pub use config::{
     RegistryProviderConfig,
 };
 pub use error::LlmError;
+pub use error_classification::{LlmErrorClassification, LlmFailureReason, classify_llm_error};
 pub use failover::{CooldownConfig, FailoverProvider};
 pub use gemini_oauth::GeminiOauthProvider;
 pub use nearai_chat::{DEFAULT_MODEL, ModelInfo, NearAiChatProvider, default_models};
 pub use openai_codex_provider::OpenAiCodexProvider;
 pub use openai_codex_session::{OpenAiCodexSession, OpenAiCodexSessionManager};
+pub use openai_compatible_streaming::OpenAiCompatibleStreamingProvider;
 pub(crate) use provider::sanitize_tool_messages;
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
@@ -72,7 +75,6 @@ pub use recording::RecordingLlm;
 pub use registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
 pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use retry::{RetryConfig, RetryProvider};
-pub use openai_compatible_streaming::OpenAiCompatibleStreamingProvider;
 pub use rig_adapter::RigAdapter;
 pub use session::{SessionConfig, SessionManager, create_session_manager};
 pub use smart_routing::{SmartRoutingConfig, SmartRoutingProvider, TaskComplexity};

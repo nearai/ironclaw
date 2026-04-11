@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use crate::agent::agentic_loop::{
     AgenticLoopConfig, LoopDelegate, LoopOutcome, LoopSignal, TextAction,
 };
-use crate::llm::{ChatMessage, Reasoning, ReasoningContext, TokenUsage};
+use crate::llm::{ChatMessage, Reasoning, ReasoningContext, TokenUsage, classify_llm_error};
 use crate::tools::permissions::{PermissionState, effective_permission};
 use crate::tools::redact_params;
 
@@ -629,11 +629,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         let consumer = tokio::spawn(async move {
             while let Some(chunk) = chunk_rx.recv().await {
                 let _ = channels
-                    .send_status(
-                        &channel_name,
-                        StatusUpdate::StreamChunk(chunk),
-                        &metadata,
-                    )
+                    .send_status(&channel_name, StatusUpdate::StreamChunk(chunk), &metadata)
                     .await;
             }
         });
@@ -643,13 +639,29 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             .await
         {
             Ok(output) => output,
-            Err(crate::error::LlmError::ContextLengthExceeded { used, limit }) => {
-                tracing::warn!(
-                    used,
-                    limit,
-                    iteration,
-                    "Context length exceeded, compacting messages and retrying"
-                );
+            Err(err) => {
+                let classification = classify_llm_error(&err);
+                if !classification.should_compact_context {
+                    return Err(err.into());
+                }
+
+                match &err {
+                    crate::error::LlmError::ContextLengthExceeded { used, limit } => {
+                        tracing::warn!(
+                            used,
+                            limit,
+                            iteration,
+                            "Context length exceeded, compacting messages and retrying"
+                        );
+                    }
+                    _ => {
+                        tracing::warn!(
+                            iteration,
+                            error = %err,
+                            "LLM error classified as context overflow, compacting messages and retrying"
+                        );
+                    }
+                }
 
                 // Compact messages in place and retry (non-streaming fallback
                 // for the retry — streaming state is gone after the first error)
@@ -665,15 +677,13 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     .await
                     .map_err(|retry_err| {
                         tracing::error!(
-                            original_used = used,
-                            original_limit = limit,
+                            original_error = %err,
                             retry_error = %retry_err,
                             "Retry after auto-compaction also failed"
                         );
                         crate::error::Error::from(retry_err)
                     })?
             }
-            Err(e) => return Err(e.into()),
         };
 
         // Wait for the consumer to drain all buffered chunks before we
