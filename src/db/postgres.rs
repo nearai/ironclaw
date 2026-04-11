@@ -26,8 +26,8 @@ use crate::history::{
     LlmCallRecord, SandboxJobRecord, SandboxJobSummary, SettingRow, Store,
 };
 use crate::workspace::{
-    DocumentVersion, MemoryChunk, MemoryDocument, Repository, SearchConfig, SearchResult,
-    VersionSummary, WorkspaceEntry,
+    ChunkWrite, DocumentVersion, MemoryChunk, MemoryDocument, Repository, SearchConfig,
+    SearchResult, VersionSummary, WorkspaceEntry,
 };
 
 /// PostgreSQL database backend.
@@ -798,6 +798,14 @@ impl WorkspaceStore for PgBackend {
         self.repo
             .insert_chunk(document_id, chunk_index, content, embedding)
             .await
+    }
+
+    async fn replace_chunks(
+        &self,
+        document_id: Uuid,
+        chunks: &[ChunkWrite],
+    ) -> Result<(), WorkspaceError> {
+        self.repo.replace_chunks(document_id, chunks).await
     }
 
     async fn update_chunk_embedding(
