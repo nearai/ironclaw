@@ -118,7 +118,9 @@ pub use runtime::{PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeC
 pub use schema::{
     ChannelCapabilitiesFile, ChannelConfig, SecretSetupSchema, SetupSchema, WebhookSchema,
 };
+#[cfg(feature = "wasm-sandbox")]
 pub(crate) use setup::is_reserved_wasm_channel_name;
+#[cfg(feature = "wasm-sandbox")]
 pub use setup::{WasmChannelSetup, inject_channel_credentials, setup_wasm_channels};
 #[cfg(feature = "wasm-sandbox")]
 pub(crate) use telegram_host_config::{TELEGRAM_CHANNEL_NAME, bot_username_setting_key};
@@ -137,6 +139,7 @@ mod stubs {
 
     use super::capabilities::ChannelCapabilities;
     use super::error::WasmChannelError;
+    use super::schema::ChannelConfig;
     use crate::tools::wasm::ResourceLimits;
 
     pub const TELEGRAM_CHANNEL_NAME: &str = "telegram";
@@ -145,18 +148,14 @@ mod stubs {
         String::new()
     }
 
-    /// Stub runtime config.
-    #[derive(Debug, Clone)]
-    pub struct WasmChannelRuntimeConfig {
-        pub default_limits: ResourceLimits,
+    pub(crate) fn is_reserved_wasm_channel_name(_name: &str) -> bool {
+        false
     }
 
-    impl Default for WasmChannelRuntimeConfig {
-        fn default() -> Self {
-            Self {
-                default_limits: ResourceLimits::default(),
-            }
-        }
+    /// Stub runtime config.
+    #[derive(Debug, Clone, Default)]
+    pub struct WasmChannelRuntimeConfig {
+        pub default_limits: ResourceLimits,
     }
 
     impl WasmChannelRuntimeConfig {
@@ -189,10 +188,16 @@ mod stubs {
             _runtime: Arc<WasmChannelRuntime>,
             _pairing_store: Arc<crate::pairing::PairingStore>,
             _settings_store: Option<Arc<dyn crate::db::SettingsStore>>,
-            _secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
             _owner_scope_id: String,
         ) -> Self {
             Self
+        }
+
+        pub fn with_secrets_store(
+            self,
+            _store: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
+        ) -> Self {
+            self
         }
 
         pub async fn load_from_dir(
@@ -232,26 +237,23 @@ mod stubs {
     /// Stub loaded channel.
     pub struct LoadedChannel {
         pub name: String,
-        pub channel: Arc<WasmChannel>,
+        pub channel: WasmChannel,
     }
 
     impl LoadedChannel {
         pub fn name(&self) -> &str {
             &self.name
         }
-        pub fn webhook_path(&self) -> Option<&str> {
-            None
-        }
         pub fn webhook_secret_header(&self) -> Option<&str> {
             None
         }
-        pub fn webhook_secret_name(&self) -> Option<&str> {
+        pub fn webhook_secret_name(&self) -> String {
+            format!("{}_webhook_secret", self.name)
+        }
+        pub fn signature_key_secret_name(&self) -> Option<String> {
             None
         }
-        pub fn signature_key_secret_name(&self) -> Option<&str> {
-            None
-        }
-        pub fn hmac_secret_name(&self) -> Option<&str> {
+        pub fn hmac_secret_name(&self) -> Option<String> {
             None
         }
     }
@@ -260,12 +262,22 @@ mod stubs {
     pub struct WasmChannel;
 
     impl WasmChannel {
-        pub fn set_credential(&self, _key: &str, _value: &str) {}
+        pub async fn set_credential(&self, _name: &str, _value: String) {}
         pub fn capabilities(&self) -> ChannelCapabilities {
             ChannelCapabilities::default()
         }
-        pub fn update_config(&self, _config: serde_json::Value) {}
-        pub async fn call_on_start(&self) {}
+        pub async fn update_config(&self, _updates: HashMap<String, serde_json::Value>) {}
+        pub async fn call_on_start(&self) -> Result<ChannelConfig, WasmChannelError> {
+            Err(WasmChannelError::Compilation(
+                "wasm-sandbox feature not enabled".to_string(),
+            ))
+        }
+        pub fn with_owner_actor_id(self, _owner_actor_id: Option<String>) -> Self {
+            self
+        }
+        pub fn channel_name(&self) -> &str {
+            ""
+        }
     }
 
     /// Stub shared WASM channel.
@@ -313,6 +325,7 @@ mod stubs {
     }
 
     /// Stub channel router.
+    #[derive(Default)]
     pub struct WasmChannelRouter;
 
     impl WasmChannelRouter {
@@ -324,11 +337,24 @@ mod stubs {
             None
         }
 
-        pub async fn register(&self, _endpoint: RegisteredEndpoint, _channel: Arc<WasmChannel>) {}
+        pub async fn register(
+            &self,
+            _channel: Arc<WasmChannel>,
+            _endpoints: Vec<RegisteredEndpoint>,
+            _secret: Option<String>,
+            _secret_header: Option<String>,
+        ) {
+        }
 
-        pub async fn register_signature_key(&self, _path: &str, _key: &str) {}
-        pub async fn register_hmac_secret(&self, _path: &str, _secret: &str) {}
-        pub async fn update_secret(&self, _path: &str, _secret: &str) {}
+        pub async fn register_signature_key(
+            &self,
+            _channel_name: &str,
+            _public_key_hex: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        pub async fn register_hmac_secret(&self, _channel_name: &str, _secret: &str) {}
+        pub async fn update_secret(&self, _channel_name: &str, _secret: String) {}
     }
 
     /// Stub HTTP response.
@@ -375,18 +401,16 @@ mod stubs {
 
     pub async fn setup_wasm_channels(
         _config: &crate::config::Config,
-        _db: Option<Arc<dyn crate::db::Database>>,
-        _secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
-    ) -> Result<WasmChannelSetup, anyhow::Error> {
-        let pairing_store = Arc::new(crate::pairing::PairingStore::new());
-        Ok(WasmChannelSetup {
-            channels: Vec::new(),
-            channel_names: Vec::new(),
-            webhook_routes: None,
-            wasm_channel_runtime: Arc::new(WasmChannelRuntime),
-            pairing_store,
-            wasm_channel_router: Arc::new(WasmChannelRouter),
-        })
+        _secrets_store: &Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+        _extension_manager: Option<&Arc<crate::extensions::ExtensionManager>>,
+        _database: Option<&Arc<dyn crate::db::Database>>,
+        _registered_channel_names: &[String],
+        _ownership_cache: Arc<crate::ownership::OwnershipCache>,
+    ) -> Option<WasmChannelSetup> {
+        tracing::warn!(
+            "WASM channels are disabled (wasm-sandbox feature not enabled); skipping setup"
+        );
+        None
     }
 
     pub async fn inject_channel_credentials(
@@ -399,3 +423,5 @@ mod stubs {
 
 #[cfg(not(feature = "wasm-sandbox"))]
 pub use stubs::*;
+#[cfg(not(feature = "wasm-sandbox"))]
+pub(crate) use stubs::is_reserved_wasm_channel_name;

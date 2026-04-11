@@ -177,23 +177,12 @@ mod stubs {
     use super::limits::{FuelConfig, ResourceLimits};
 
     /// Stub runtime configuration (no wasmtime available).
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Default)]
     pub struct WasmRuntimeConfig {
         pub default_limits: ResourceLimits,
         pub fuel_config: FuelConfig,
         pub cache_compiled: bool,
         pub cache_dir: Option<PathBuf>,
-    }
-
-    impl Default for WasmRuntimeConfig {
-        fn default() -> Self {
-            Self {
-                default_limits: ResourceLimits::default(),
-                fuel_config: FuelConfig::default(),
-                cache_compiled: false,
-                cache_dir: None,
-            }
-        }
     }
 
     impl WasmRuntimeConfig {
@@ -257,10 +246,18 @@ mod stubs {
     pub struct OAuthRefreshConfig {
         pub token_url: String,
         pub client_id: String,
-        pub client_secret_name: String,
-        pub refresh_token_name: String,
-        pub access_token_name: String,
-        pub scope: Option<String>,
+        pub client_secret: Option<String>,
+        pub exchange_proxy_url: Option<String>,
+        pub gateway_token: Option<String>,
+        pub secret_name: String,
+        pub provider: Option<String>,
+        pub extra_refresh_params: HashMap<String, String>,
+    }
+
+    impl OAuthRefreshConfig {
+        pub fn oauth_proxy_auth_token(&self) -> Option<&str> {
+            self.gateway_token.as_deref()
+        }
     }
 
     /// Stub WASM tool wrapper (not constructible).
@@ -337,6 +334,13 @@ mod stubs {
         pub fn with_secrets_store(
             self,
             _store: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
+        ) -> Self {
+            self
+        }
+
+        pub fn with_role_lookup(
+            self,
+            _store: Arc<dyn crate::db::UserStore>,
         ) -> Self {
             self
         }
