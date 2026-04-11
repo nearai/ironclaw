@@ -453,7 +453,16 @@ fn apply_channel_env(channels: &[TidePoolConfigureChannel]) -> Result<(), String
 async fn write_mcp_config(servers: &[TidePoolConfigureMcpServer]) -> Result<(), String> {
     let mut file = McpServersFile::default();
     for server in servers {
-        file.upsert(resolve_mcp_server(&server.name)?);
+        match resolve_mcp_server(&server.name) {
+            Ok(config) => file.upsert(config),
+            Err(e) => {
+                tracing::warn!(
+                    server_name = %server.name,
+                    error = %e,
+                    "Skipping unknown MCP server during configure (not in embedded catalog)"
+                );
+            }
+        }
     }
     save_mcp_servers(&file)
         .await

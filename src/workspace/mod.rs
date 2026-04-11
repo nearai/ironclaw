@@ -40,11 +40,11 @@
 //! 3. **Self-documenting**: Use README.md files to describe directory structure
 //! 4. **Hybrid search**: Vector similarity + BM25 full-text via RRF
 
+pub mod card_metadata;
 mod chunker;
 mod document;
 mod embedding_cache;
 mod embeddings;
-pub mod card_metadata;
 pub mod hygiene;
 pub mod layer;
 pub mod privacy;
@@ -2332,6 +2332,28 @@ impl Workspace {
             let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
+
+            // Skip identity files — in platform-managed mode, these are seeded
+            // by the platform via HTTP API after the health check. Importing them
+            // from the filesystem would overwrite the platform's persona with
+            // stale data from a previous deployment.
+            const IDENTITY_SKIP_LIST: &[&str] = &[
+                "SOUL.md",
+                "AGENTS.md",
+                "IDENTITY.md",
+                "USER.md",
+                "CAPABILITIES.md",
+            ];
+            if IDENTITY_SKIP_LIST
+                .iter()
+                .any(|f| file_name.eq_ignore_ascii_case(f))
+            {
+                tracing::debug!(
+                    "Skipping identity file during filesystem import: {}",
+                    file_name
+                );
+                continue;
+            }
 
             // Skip if already exists in DB (never overwrite user edits)
             match self.read(file_name).await {
