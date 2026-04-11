@@ -128,6 +128,27 @@ pub struct Config {
     pub relay: Option<RelayConfig>,
 }
 
+/// Generate a fresh random AES-256-GCM master key for `Config::for_testing`.
+///
+/// Returns a hex-encoded 32-byte key (64 hex chars), satisfying the length
+/// check in `SecretsConfig::resolve`. Each call returns a different value —
+/// tests don't need cross-process determinism (each test builds a fresh
+/// secrets store on top of a fresh temp DB), and committing a constant
+/// master key into the source tree would mean every developer who built
+/// with `--features libsql` had a publicly-known key in their process.
+#[cfg(feature = "libsql")]
+fn generate_test_master_key() -> secrecy::SecretString {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let mut hex = String::with_capacity(64);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(hex, "{:02x}", b);
+    }
+    secrecy::SecretString::from(hex)
+}
+
 impl Config {
     /// Create a full Config for integration tests without reading env vars.
     ///
@@ -176,7 +197,24 @@ impl Config {
                 enabled: false,
                 ..WasmConfig::default()
             },
-            secrets: SecretsConfig::default(),
+            // Test config gets a freshly-generated random master key so
+            // the secrets store is wired up out of the box. Without this,
+            // every replay-mode test that touches credentials would have
+            // to either build its own SecretsStore or skip the secrets
+            // path entirely. The key is generated per call (NOT a
+            // hardcoded constant) — `Config::for_testing` is `pub` so
+            // anything in the crate or downstream tests can call it, and
+            // committing a known master key into the source tree would
+            // mean every developer who built with `--features libsql`
+            // had a publicly-known AES-256-GCM key sitting in their
+            // process. Tests don't need cross-process determinism here:
+            // each test creates its own temp DB, so the secrets store
+            // is born fresh on every call anyway.
+            secrets: SecretsConfig {
+                master_key: Some(generate_test_master_key()),
+                enabled: true,
+                source: crate::settings::KeySource::Env,
+            },
             builder: BuilderModeConfig {
                 enabled: false,
                 ..BuilderModeConfig::default()

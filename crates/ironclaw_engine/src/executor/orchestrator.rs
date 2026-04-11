@@ -42,7 +42,7 @@ use crate::types::event::{EventKind, ThreadEvent, summarize_params};
 use crate::types::message::ThreadMessage;
 use crate::types::project::ProjectId;
 use crate::types::shared_owner_id;
-use crate::types::step::{StepId, TokenUsage};
+use crate::types::step::{ActionCall, StepId, TokenUsage};
 use crate::types::thread::{ActiveSkillProvenance, Thread, ThreadState};
 use ironclaw_common::ValidTimezone;
 
@@ -657,16 +657,9 @@ async fn handle_llm_complete(
                     serde_json::json!({"type": "code", "code": code, "usage": usage})
                 }
                 LlmResponse::ActionCalls { calls, content } => {
-                    let calls_json: Vec<serde_json::Value> = calls
-                        .iter()
-                        .map(|c| {
-                            serde_json::json!({
-                                "name": c.action_name,
-                                "call_id": c.id,
-                                "params": c.parameters,
-                            })
-                        })
-                        .collect();
+                    // Single source of truth for the Python interchange
+                    // shape — must round-trip via `python_json_to_action_calls`.
+                    let calls_json = action_calls_to_python_json(&calls);
                     serde_json::json!({
                         "type": "actions",
                         "content": content,
@@ -2067,12 +2060,27 @@ fn build_orchestrator_inputs(
     let context: Vec<serde_json::Value> = bootstrap_messages
         .iter()
         .map(|m| {
+            // Serialize action_calls through the Python interchange shape
+            // (`{name, call_id, params}`) so the bootstrap context is
+            // round-trip compatible with `python_json_to_action_calls`.
+            // Using bare `m.action_calls` here produces the canonical Rust
+            // serde format (`{action_name, id, parameters}`), which the
+            // Python orchestrator passes back verbatim on the next
+            // `__llm_complete__` call — and `python_json_to_action_calls`
+            // then fails with "missing field `name`", orphaning every
+            // subsequent tool result. This is the SECOND code path (after
+            // `handle_llm_complete`) that feeds action_calls into the
+            // Python working transcript; both must use the same shape.
+            let calls_json = m
+                .action_calls
+                .as_ref()
+                .map(|calls| serde_json::Value::Array(action_calls_to_python_json(calls)));
             serde_json::json!({
                 "role": format!("{:?}", m.role),
                 "content": m.content,
                 "action_name": m.action_name,
                 "action_call_id": m.action_call_id,
-                "action_calls": m.action_calls,
+                "action_calls": calls_json,
             })
         })
         .collect();
@@ -2104,6 +2112,164 @@ fn build_orchestrator_inputs(
     (names, values)
 }
 
+/// JSON shape used to interchange `ActionCall`s with the Python orchestrator.
+///
+/// This is the *single* place that defines the field naming convention used
+/// across the Python boundary. It is intentionally separate from the
+/// canonical `ActionCall` type because:
+///
+/// - `ActionCall` uses Rust-idiomatic field names (`id`, `action_name`,
+///   `parameters`) and is also persisted into Step records and ThreadEvents.
+///   Renaming its serde fields would invalidate every existing row.
+/// - The Python orchestrator uses friendlier names (`call_id`, `name`,
+///   `params`) that read naturally in CodeAct prompts and `default.py`.
+///
+/// Without this type, the round-trip is asymmetric: Rust → Python uses one
+/// shape, Python → Rust used `serde_json::from_value::<Vec<ActionCall>>`
+/// which silently fails (`.ok()` swallows the error) and produces `None`,
+/// which means assistant messages came back without `action_calls`. The
+/// downstream effect is that every tool result looks orphaned to
+/// `sanitize_tool_messages` and gets rewritten as a user message — losing
+/// the assistant ↔ tool_result linkage the LLM needs to reason about prior
+/// tool calls.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct PythonActionCall {
+    name: String,
+    call_id: String,
+    params: serde_json::Value,
+}
+
+impl From<&ActionCall> for PythonActionCall {
+    fn from(c: &ActionCall) -> Self {
+        Self {
+            name: c.action_name.clone(),
+            call_id: c.id.clone(),
+            params: c.parameters.clone(),
+        }
+    }
+}
+
+impl From<PythonActionCall> for ActionCall {
+    fn from(p: PythonActionCall) -> Self {
+        Self {
+            id: p.call_id,
+            action_name: p.name,
+            parameters: p.params,
+        }
+    }
+}
+
+/// Serialize a slice of `ActionCall`s into the Python interchange shape.
+///
+/// On serialization failure (essentially unreachable for `String + String +
+/// Value`, but still possible if the `serde_json::Value` parameters tree
+/// contains a key whose stringification fails), the entry is **dropped**
+/// from the output rather than replaced with `Value::Null`. The previous
+/// `unwrap_or_else(|_| Value::Null)` corrupted the array — Python's
+/// `default.py` accesses `c.get("name")` / `c.get("call_id")` /
+/// `c.get("params")` on each entry, so a `null` would crash with a Python
+/// `AttributeError` and lose the entire LLM step. `filter_map` produces a
+/// shorter array, which Python's tool-result loop handles correctly because
+/// it iterates `range(len(results))` against the shortened call list. The
+/// warn log is preserved so operators have a breadcrumb if it ever fires.
+fn action_calls_to_python_json(calls: &[ActionCall]) -> Vec<serde_json::Value> {
+    calls
+        .iter()
+        .filter_map(|c| match serde_json::to_value(PythonActionCall::from(c)) {
+            Ok(value) => Some(value),
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    action_name = %c.action_name,
+                    "Failed to serialize ActionCall for Python orchestrator — dropping entry"
+                );
+                None
+            }
+        })
+        .collect()
+}
+
+/// Build a PII-safe summary of an `action_calls` JSON value for log output.
+///
+/// The action_calls payload contains tool parameters, which can carry user
+/// PII (search queries, file names, email content, conversation text).
+/// Dumping the full value into a `warn!` log would leak that PII to log
+/// aggregation systems (Datadog, CloudWatch, Sentry) the moment the parser
+/// fails — and the parser only fails when the Python ↔ Rust shape drifts,
+/// which is exactly when an operator is most likely to be grepping logs.
+///
+/// We emit only the structural information operators actually need to
+/// debug a shape drift: array length and the keys of the first entry. The
+/// keys themselves are not user data — they're field names like
+/// `name`/`call_id`/`params` that are static across all calls.
+fn summarize_action_calls_for_log(value: &serde_json::Value) -> String {
+    match value.as_array() {
+        Some(arr) if arr.is_empty() => "empty array".to_string(),
+        Some(arr) => {
+            let first_keys = arr
+                .first()
+                .and_then(|v| v.as_object())
+                .map(|obj| {
+                    let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+                    keys.sort_unstable();
+                    keys.join(",")
+                })
+                .unwrap_or_else(|| "<not an object>".to_string());
+            format!(
+                "array of {} entries; first entry keys: [{}]",
+                arr.len(),
+                first_keys
+            )
+        }
+        None => format!("non-array value of type {}", json_value_type_name(value)),
+    }
+}
+
+/// Cheap type-name string for a `serde_json::Value`. Used by
+/// `summarize_action_calls_for_log` to surface the wrong-shape case
+/// (e.g. Python passed a string instead of an array) without leaking the
+/// actual contents.
+fn json_value_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+/// Deserialize an `action_calls` JSON array (in Python interchange shape)
+/// back into canonical `ActionCall`s.
+///
+/// Logs a warning on failure rather than swallowing silently. The whole
+/// commit that introduced this helper exists to undo a `.ok()` swallow that
+/// dropped action_calls without any signal — replacing it with another
+/// `.ok()?` would re-introduce the same trap, just one layer deeper. If the
+/// shape ever drifts again (Python orchestrator field rename, extra
+/// required field, partial migration), the warning is the operator-visible
+/// breadcrumb that explains why subsequent tool results suddenly look
+/// orphaned to `sanitize_tool_messages`.
+///
+/// The warn log emits a structural summary (`summarize_action_calls_for_log`)
+/// instead of the raw value because tool parameters can contain user PII.
+fn python_json_to_action_calls(value: &serde_json::Value) -> Option<Vec<ActionCall>> {
+    match serde_json::from_value::<Vec<PythonActionCall>>(value.clone()) {
+        Ok(parsed) => Some(parsed.into_iter().map(ActionCall::from).collect()),
+        Err(e) => {
+            warn!(
+                error = %e,
+                shape = %summarize_action_calls_for_log(value),
+                "Failed to parse action_calls from Python orchestrator — \
+                 assistant message will lose tool_call linkage and downstream \
+                 tool results will be rewritten as user messages"
+            );
+            None
+        }
+    }
+}
+
 fn json_to_thread_messages(value: &serde_json::Value) -> Option<Vec<ThreadMessage>> {
     let arr = value.as_array()?;
     let mut messages = Vec::with_capacity(arr.len());
@@ -2114,9 +2280,15 @@ fn json_to_thread_messages(value: &serde_json::Value) -> Option<Vec<ThreadMessag
             .get("content")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
+        // Filter out null before calling the parser — `action_calls: null`
+        // is Python's legitimate "this message has no tool calls" signal (text
+        // response), not a parse error. Without this filter, the warn log in
+        // python_json_to_action_calls fires on every text-only assistant
+        // message with "invalid type: null, expected a sequence".
         let action_calls = item
             .get("action_calls")
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
+            .filter(|v| !v.is_null())
+            .and_then(python_json_to_action_calls);
 
         let message = match role {
             "System" | "system" => ThreadMessage::system(content),
@@ -2927,5 +3099,386 @@ mod tests {
         let captured = concrete.captured.lock().await;
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0], None);
+    }
+
+    // ── Python ↔ Rust ActionCall round-trip ───────────────────────────────
+    //
+    // Regression tests for the orphaned-tool-result bug. The Python
+    // orchestrator stores `action_calls` on assistant messages using the
+    // shape `{name, call_id, params}`, but the canonical Rust `ActionCall`
+    // uses `{action_name, id, parameters}`. Without the explicit
+    // `PythonActionCall` interchange type, `serde_json::from_value` would
+    // silently fail (`.ok()` swallows the error) and the Python-shaped
+    // assistant message would be parsed back as a plain assistant message
+    // with no tool calls, causing every subsequent ActionResult to be
+    // detected as orphaned by `sanitize_tool_messages` in the host crate.
+
+    #[test]
+    fn python_action_call_round_trips_through_serde() {
+        let original = ActionCall {
+            id: "call_abc123".to_string(),
+            action_name: "google_drive_tool".to_string(),
+            parameters: serde_json::json!({"query": "expenses"}),
+        };
+
+        let python_json = serde_json::to_value(PythonActionCall::from(&original))
+            .expect("PythonActionCall must serialize");
+        // Python-friendly field names — match what default.py reads.
+        assert_eq!(python_json["name"], "google_drive_tool");
+        assert_eq!(python_json["call_id"], "call_abc123");
+        assert_eq!(
+            python_json["params"],
+            serde_json::json!({"query": "expenses"})
+        );
+
+        let parsed: PythonActionCall =
+            serde_json::from_value(python_json).expect("must deserialize");
+        let round_tripped: ActionCall = parsed.into();
+        assert_eq!(round_tripped.id, original.id);
+        assert_eq!(round_tripped.action_name, original.action_name);
+        assert_eq!(round_tripped.parameters, original.parameters);
+    }
+
+    #[test]
+    fn action_calls_to_python_json_uses_python_field_names() {
+        let calls = vec![
+            ActionCall {
+                id: "call_1".to_string(),
+                action_name: "notion_notion_search".to_string(),
+                parameters: serde_json::json!({"query": "name"}),
+            },
+            ActionCall {
+                id: "call_2".to_string(),
+                action_name: "google_drive_tool".to_string(),
+                parameters: serde_json::json!({"action": "list"}),
+            },
+        ];
+        let json = action_calls_to_python_json(&calls);
+        assert_eq!(json.len(), 2);
+        assert_eq!(json[0]["name"], "notion_notion_search");
+        assert_eq!(json[0]["call_id"], "call_1");
+        assert_eq!(json[1]["name"], "google_drive_tool");
+        assert_eq!(json[1]["call_id"], "call_2");
+    }
+
+    #[test]
+    fn python_json_to_action_calls_parses_python_field_names() {
+        // The exact shape default.py produces (and stores on assistant
+        // messages via `append_message(..., action_calls=calls)`).
+        let python_json = serde_json::json!([
+            {"name": "notion_notion_search", "call_id": "call_xyz", "params": {"q": "foo"}},
+            {"name": "google_drive_tool", "call_id": "call_abc", "params": {"action": "list"}},
+        ]);
+        let parsed = python_json_to_action_calls(&python_json).expect("must parse");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].action_name, "notion_notion_search");
+        assert_eq!(parsed[0].id, "call_xyz");
+        assert_eq!(parsed[0].parameters, serde_json::json!({"q": "foo"}));
+        assert_eq!(parsed[1].action_name, "google_drive_tool");
+        assert_eq!(parsed[1].id, "call_abc");
+    }
+
+    #[test]
+    fn python_json_to_action_calls_rejects_canonical_field_names() {
+        // Sanity check: the parser is strict about Python field names.
+        // If `default.py` ever changes the shape, the test must catch it.
+        let canonical_json = serde_json::json!([
+            {"action_name": "search", "id": "call_x", "parameters": {}}
+        ]);
+        // Missing "name", "call_id", "params" → returns None.
+        assert!(python_json_to_action_calls(&canonical_json).is_none());
+    }
+
+    #[test]
+    fn summarize_action_calls_for_log_does_not_leak_user_pii() {
+        // The whole point of this helper is that the warn log path on a
+        // shape-drift failure must NOT dump tool parameters (which can
+        // contain user PII like search queries, file names, email content)
+        // into log aggregation systems. The summary should expose only
+        // structural information: array length and the keys of the first
+        // entry. The keys themselves are static (`name`, `call_id`,
+        // `params`), not user data.
+        let pii_value = serde_json::json!([
+            {
+                "name": "google_drive_tool",
+                "call_id": "call_xyz",
+                "params": {
+                    "query": "salary spreadsheet for joe",
+                    "secret_token": "very-sensitive-token-do-not-log"
+                }
+            },
+            {
+                "name": "gmail",
+                "call_id": "call_abc",
+                "params": {
+                    "subject": "private message about layoffs"
+                }
+            }
+        ]);
+        let summary = summarize_action_calls_for_log(&pii_value);
+
+        // Structural info present.
+        assert!(summary.contains("array of 2 entries"));
+        assert!(summary.contains("call_id"));
+        assert!(summary.contains("name"));
+        assert!(summary.contains("params"));
+
+        // PII fields and their values must NOT appear.
+        assert!(
+            !summary.contains("salary"),
+            "summary must not leak user PII from params: {summary}"
+        );
+        assert!(
+            !summary.contains("very-sensitive-token"),
+            "summary must not leak credential-shaped values: {summary}"
+        );
+        assert!(
+            !summary.contains("layoffs"),
+            "summary must not leak free-text content: {summary}"
+        );
+        assert!(
+            !summary.contains("google_drive_tool"),
+            "summary must not leak the tool name itself (could expose intent): {summary}"
+        );
+    }
+
+    #[test]
+    fn summarize_action_calls_for_log_handles_edge_cases() {
+        assert_eq!(
+            summarize_action_calls_for_log(&serde_json::json!([])),
+            "empty array"
+        );
+        assert!(
+            summarize_action_calls_for_log(&serde_json::json!("not an array")).contains("string")
+        );
+        assert!(
+            summarize_action_calls_for_log(&serde_json::json!({"foo": "bar"})).contains("object")
+        );
+        assert!(summarize_action_calls_for_log(&serde_json::json!(null)).contains("null"));
+    }
+
+    /// Caller-level regression test: feeds `json_to_thread_messages` the
+    /// exact JSON shape that `default.py` produces for an assistant message
+    /// with tool calls followed by tool results, and asserts that the
+    /// resulting `ThreadMessage`s preserve the `action_calls` ↔
+    /// `action_call_id` linkage. Without the `PythonActionCall` parser the
+    /// assistant message would come back with `action_calls = None` and
+    /// every following ActionResult would look orphaned to the bridge.
+    #[test]
+    fn json_to_thread_messages_preserves_action_calls_from_python_orchestrator() {
+        // This is the literal shape `default.py` writes into
+        // `state["working_messages"]` after a Tier 0 step:
+        //
+        //   append_message(working_messages, "Assistant", "...", action_calls=calls)
+        //   append_message(working_messages, "ActionResult", "...", action_name=..., action_call_id=...)
+        //
+        // where `calls` came from the LLM response and has shape
+        // `[{"name": ..., "call_id": ..., "params": ...}]`.
+        let working_messages = serde_json::json!([
+            {"role": "User", "content": "search in notion for my name"},
+            {
+                "role": "Assistant",
+                "content": "",
+                "action_calls": [
+                    {
+                        "name": "notion_notion_search",
+                        "call_id": "call_xyz",
+                        "params": {"query": "Illia"}
+                    }
+                ]
+            },
+            {
+                "role": "ActionResult",
+                "content": "found 3 results",
+                "action_name": "notion_notion_search",
+                "action_call_id": "call_xyz"
+            }
+        ]);
+
+        let messages = json_to_thread_messages(&working_messages).expect("must parse");
+        assert_eq!(messages.len(), 3);
+
+        // The assistant message MUST have action_calls populated, with
+        // matching call_id. If this assertion fails, the bridge layer
+        // will treat the following ActionResult as orphaned and rewrite
+        // it as a user message — losing the model's ability to reason
+        // about prior tool output.
+        let assistant = &messages[1];
+        assert_eq!(
+            assistant.role,
+            crate::types::message::MessageRole::Assistant
+        );
+        let calls = assistant
+            .action_calls
+            .as_ref()
+            .expect("assistant message must carry action_calls after round-trip");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_xyz");
+        assert_eq!(calls[0].action_name, "notion_notion_search");
+        assert_eq!(calls[0].parameters, serde_json::json!({"query": "Illia"}));
+
+        // The ActionResult must reference the same call_id so the bridge
+        // can pair them.
+        let result = &messages[2];
+        assert_eq!(
+            result.role,
+            crate::types::message::MessageRole::ActionResult
+        );
+        assert_eq!(result.action_call_id.as_deref(), Some("call_xyz"));
+        assert_eq!(result.action_name.as_deref(), Some("notion_notion_search"));
+    }
+
+    /// Regression for the gate-resume / bootstrap path: when a thread
+    /// resumes after approval or auth, `build_orchestrator_inputs`
+    /// serializes `thread.internal_messages` into the bootstrap context
+    /// that Python reads into `working_messages`. If `action_calls` is
+    /// serialized with canonical `ActionCall` field names (`action_name`,
+    /// `id`, `parameters`) instead of the Python interchange names
+    /// (`name`, `call_id`, `params`), the next `__llm_complete__` call
+    /// passes them back through `json_to_thread_messages` which fails
+    /// with "missing field `name`" and orphans every subsequent tool
+    /// result.
+    ///
+    /// This test simulates the full round-trip: build a `ThreadMessage`
+    /// with action_calls → serialize through `build_orchestrator_inputs`'s
+    /// exact serialization pattern → parse back through
+    /// `json_to_thread_messages` → assert the calls survive. If anyone
+    /// adds a THIRD serialization path in the future and uses canonical
+    /// names, this test documents the pattern they should follow.
+    #[test]
+    fn bootstrap_context_action_calls_round_trip_through_python_interchange() {
+        // Build a thread message the way the engine does: an assistant
+        // message with action_calls in canonical ActionCall format (the
+        // shape stored in the DB / internal_messages).
+        let msg = ThreadMessage::assistant_with_actions(
+            Some("I'll search for that".to_string()),
+            vec![ActionCall {
+                id: "call_resume_test".to_string(),
+                action_name: "google_drive_tool".to_string(),
+                parameters: serde_json::json!({"query": "budget"}),
+            }],
+        );
+
+        // Serialize through the SAME pattern `build_orchestrator_inputs`
+        // uses. This is the exact code path that was broken before the
+        // fix — it was using `"action_calls": m.action_calls` which
+        // produced canonical field names.
+        let calls_json = msg
+            .action_calls
+            .as_ref()
+            .map(|calls| serde_json::Value::Array(action_calls_to_python_json(calls)));
+        let serialized = serde_json::json!([{
+            "role": "Assistant",
+            "content": msg.content,
+            "action_name": msg.action_name,
+            "action_call_id": msg.action_call_id,
+            "action_calls": calls_json,
+        }]);
+
+        // Parse back through the same path Python's working_messages
+        // takes when it calls __llm_complete__.
+        let parsed = json_to_thread_messages(&serialized).expect("must parse");
+        assert_eq!(parsed.len(), 1);
+
+        let assistant = &parsed[0];
+        let calls = assistant.action_calls.as_ref().expect(
+            "bootstrap context action_calls must survive the round-trip. \
+                 If this fails, a serialization path is using canonical ActionCall \
+                 field names instead of PythonActionCall interchange names.",
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_resume_test");
+        assert_eq!(calls[0].action_name, "google_drive_tool");
+        assert_eq!(calls[0].parameters, serde_json::json!({"query": "budget"}));
+    }
+
+    /// Negative regression: verify that canonical ActionCall field names
+    /// do NOT round-trip. If this test ever PASSES, it means someone
+    /// added `#[serde(rename)]` to ActionCall or changed the parser to
+    /// accept both formats — which is fine, but the PythonActionCall
+    /// interchange type can then be removed. This test documents the
+    /// current contract: canonical names are rejected by the parser.
+    #[test]
+    fn canonical_action_call_field_names_do_not_round_trip() {
+        let serialized_with_canonical_names = serde_json::json!([{
+            "role": "Assistant",
+            "content": "",
+            "action_calls": [{
+                "action_name": "search",
+                "id": "call_x",
+                "parameters": {}
+            }],
+        }]);
+        let parsed =
+            json_to_thread_messages(&serialized_with_canonical_names).expect("messages parse");
+        // The assistant message should have NO action_calls because the
+        // parser rejects canonical field names.
+        assert!(
+            parsed[0].action_calls.is_none(),
+            "canonical ActionCall field names must NOT parse as action_calls. \
+             If this assertion fails, the PythonActionCall interchange type \
+             is no longer needed — either remove it or update the contract."
+        );
+    }
+
+    /// Regression: `action_calls: null` is Python's legitimate "this
+    /// message has no tool calls" signal (text-only response). Before the
+    /// null filter, `python_json_to_action_calls` would fire a warn log
+    /// with "invalid type: null, expected a sequence" on every text-only
+    /// assistant message — a false alarm that masked real drift issues.
+    #[test]
+    fn json_to_thread_messages_handles_null_action_calls_gracefully() {
+        let messages = serde_json::json!([
+            {
+                "role": "Assistant",
+                "content": "Here is your answer.",
+                "action_calls": null
+            }
+        ]);
+        let parsed = json_to_thread_messages(&messages).expect("must parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].role,
+            crate::types::message::MessageRole::Assistant
+        );
+        assert_eq!(parsed[0].content, "Here is your answer.");
+        assert!(
+            parsed[0].action_calls.is_none(),
+            "null action_calls must produce None, not a parse error"
+        );
+    }
+
+    /// Verify that messages WITHOUT the action_calls key at all (the most
+    /// common case for text responses) also parse correctly — this is the
+    /// baseline that the null-filtering regression test extends.
+    #[test]
+    fn json_to_thread_messages_handles_absent_action_calls() {
+        let messages = serde_json::json!([
+            {"role": "Assistant", "content": "Just text, no tools."}
+        ]);
+        let parsed = json_to_thread_messages(&messages).expect("must parse");
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].action_calls.is_none());
+    }
+
+    /// Empty action_calls array is valid (LLM decided not to call any
+    /// tools this turn but the response still has the array field). Must
+    /// produce `Some(vec![])`, not `None`.
+    #[test]
+    fn json_to_thread_messages_handles_empty_action_calls_array() {
+        let messages = serde_json::json!([
+            {
+                "role": "Assistant",
+                "content": "No tools needed.",
+                "action_calls": []
+            }
+        ]);
+        let parsed = json_to_thread_messages(&messages).expect("must parse");
+        assert_eq!(parsed.len(), 1);
+        let calls = parsed[0]
+            .action_calls
+            .as_ref()
+            .expect("empty array should produce Some(vec![])");
+        assert!(calls.is_empty());
     }
 }
