@@ -1085,6 +1085,20 @@ impl Agent {
                 None
             }
         }
+
+        // Set a conversation title from the first user message so the
+        // thread list shows a descriptive name in the sidebar.
+        if let Ok(None) = store
+            .get_conversation_metadata(thread_id)
+            .await
+            .map(|m| m.and_then(|v| v.get("title").and_then(|t| t.as_str()).map(String::from)))
+        {
+            let title_text: String = user_input.chars().take(100).collect();
+            let title_val = serde_json::json!(title_text);
+            let _ = store
+                .update_conversation_metadata_field(thread_id, "title", &title_val)
+                .await;
+        }
     }
 
     /// Persist the assistant response to the DB after the agentic loop completes.
