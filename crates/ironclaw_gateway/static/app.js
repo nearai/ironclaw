@@ -1010,7 +1010,7 @@ function connectSSE(lastEventIdOverride) {
     const data = JSON.parse(e.data);
     handleGateRequired(data);
     // Track approval-type gates in the sidebar tray for cross-thread visibility.
-    var resume = parseGateResumeKind(data.resume_kind);
+    const resume = parseGateResumeKind(data.resume_kind);
     if (!resume || resume.type === 'approval') {
       aqAddGate({
         request_id: data.request_id,
@@ -9259,7 +9259,7 @@ function aqAddGate(data) {
   if (!data.request_id) return;
   if (pendingGates.has(data.request_id)) return; // Avoid duplicates on reconnect
 
-  var entry = {
+  const entry = {
     request_id: data.request_id,
     tool_name: data.tool_name || 'unknown',
     description: data.description || '',
@@ -9275,12 +9275,12 @@ function aqAddGate(data) {
 
 /** Resolve (approve/deny) a gate: animate out, remove from map, update indicators. */
 function aqResolveGate(requestId, action) {
-  var itemEl = document.querySelector('.aq-item[data-request-id="' + CSS.escape(requestId) + '"]');
+  const itemEl = document.querySelector('.aq-item[data-request-id="' + CSS.escape(requestId) + '"]');
   if (itemEl && !itemEl.classList.contains('resolved')) {
-    var actions = itemEl.querySelector('.aq-item-actions');
-    var labelText = action === 'deny' ? 'Denied' : 'Approved';
-    var cls = action === 'deny' ? 'denied' : 'approved';
-    var symbol = action === 'deny' ? '\u2717' : '\u2713';
+    const actions = itemEl.querySelector('.aq-item-actions');
+    const labelText = action === 'deny' ? 'Denied' : 'Approved';
+    const cls = action === 'deny' ? 'denied' : 'approved';
+    const symbol = action === 'deny' ? '\u2717' : '\u2713';
     actions.innerHTML = '<span class="aq-resolved-label ' + cls + '">' + symbol + ' ' + labelText + '</span>';
     itemEl.classList.add('resolved');
     setTimeout(function () { itemEl.remove(); aqUpdateIndicators(); }, 500);
@@ -9292,10 +9292,10 @@ function aqResolveGate(requestId, action) {
 
 /** Render a single tray item and prepend it to the items container. */
 function aqRenderItem(entry) {
-  var container = document.getElementById('aq-items');
+  const container = document.getElementById('aq-items');
   if (!container) return;
 
-  var item = document.createElement('div');
+  const item = document.createElement('div');
   item.className = 'aq-item';
   item.setAttribute('data-request-id', entry.request_id);
   item.setAttribute('data-thread-id', entry.thread_id || '');
@@ -9306,20 +9306,20 @@ function aqRenderItem(entry) {
   });
 
   // Top row: tool name + thread badge + time
-  var top = document.createElement('div');
+  const top = document.createElement('div');
   top.className = 'aq-item-top';
 
-  var toolSpan = document.createElement('span');
+  const toolSpan = document.createElement('span');
   toolSpan.className = 'aq-item-tool';
   toolSpan.textContent = entry.tool_name;
   top.appendChild(toolSpan);
 
-  var threadSpan = document.createElement('span');
+  const threadSpan = document.createElement('span');
   threadSpan.className = 'aq-item-thread';
   threadSpan.textContent = aqThreadLabel(entry.thread_id);
   top.appendChild(threadSpan);
 
-  var timeSpan = document.createElement('span');
+  const timeSpan = document.createElement('span');
   timeSpan.className = 'aq-item-time';
   timeSpan.textContent = 'just now';
   top.appendChild(timeSpan);
@@ -9328,17 +9328,17 @@ function aqRenderItem(entry) {
 
   // Description
   if (entry.description) {
-    var desc = document.createElement('div');
+    const desc = document.createElement('div');
     desc.className = 'aq-item-desc';
     desc.textContent = entry.description;
     item.appendChild(desc);
   }
 
   // Actions row
-  var actions = document.createElement('div');
+  const actions = document.createElement('div');
   actions.className = 'aq-item-actions';
 
-  var approveBtn = document.createElement('button');
+  const approveBtn = document.createElement('button');
   approveBtn.className = 'aq-btn aq-approve';
   approveBtn.textContent = I18n.t('approval.approve');
   approveBtn.addEventListener('click', function (e) {
@@ -9348,7 +9348,7 @@ function aqRenderItem(entry) {
   actions.appendChild(approveBtn);
 
   if (entry.allow_always) {
-    var alwaysBtn = document.createElement('button');
+    const alwaysBtn = document.createElement('button');
     alwaysBtn.className = 'aq-btn aq-always';
     alwaysBtn.textContent = I18n.t('approval.always');
     alwaysBtn.addEventListener('click', function (e) {
@@ -9358,7 +9358,7 @@ function aqRenderItem(entry) {
     actions.appendChild(alwaysBtn);
   }
 
-  var denyBtn = document.createElement('button');
+  const denyBtn = document.createElement('button');
   denyBtn.className = 'aq-btn aq-deny';
   denyBtn.textContent = I18n.t('approval.deny');
   denyBtn.addEventListener('click', function (e) {
@@ -9367,7 +9367,7 @@ function aqRenderItem(entry) {
   });
   actions.appendChild(denyBtn);
 
-  var viewBtn = document.createElement('button');
+  const viewBtn = document.createElement('button');
   viewBtn.className = 'aq-btn aq-view';
   viewBtn.innerHTML = '&#x2192;';
   viewBtn.title = 'Jump to thread';
@@ -9383,10 +9383,10 @@ function aqRenderItem(entry) {
 
 /** Update all approval queue indicators: tray visibility, badge, count. */
 function aqUpdateIndicators() {
-  var count = pendingGates.size;
-  var tray = document.getElementById('approval-tray');
-  var badge = document.getElementById('tab-approval-badge');
-  var countEl = document.getElementById('aq-count');
+  const count = pendingGates.size;
+  const tray = document.getElementById('approval-tray');
+  const badge = document.getElementById('tab-approval-badge');
+  const countEl = document.getElementById('aq-count');
 
   if (tray) {
     tray.classList.toggle('visible', count > 0);
@@ -9410,7 +9410,7 @@ function aqUpdateIndicators() {
 
 /** Check if a thread has any pending gates. */
 function aqThreadHasPendingGate(threadId) {
-  for (var entry of pendingGates.values()) {
+  for (const entry of pendingGates.values()) {
     if (entry.thread_id === threadId) return true;
   }
   return false;
@@ -9427,20 +9427,20 @@ function aqThreadLabel(threadId) {
 
 // Tray collapse/expand toggle
 (function () {
-  var header = document.getElementById('aq-header');
+  const header = document.getElementById('aq-header');
   if (header) {
     header.addEventListener('click', function () {
-      var tray = document.getElementById('approval-tray');
+      const tray = document.getElementById('approval-tray');
       if (tray) tray.classList.toggle('collapsed');
     });
   }
 
   // Batch approve all
-  var approveAll = document.getElementById('aq-approve-all');
+  const approveAll = document.getElementById('aq-approve-all');
   if (approveAll) {
     approveAll.addEventListener('click', function (e) {
       e.stopPropagation();
-      var ids = Array.from(pendingGates.keys());
+      const ids = Array.from(pendingGates.keys());
       ids.forEach(function (id, i) {
         setTimeout(function () { sendApprovalAction(id, 'approve'); }, i * 100);
       });
@@ -9448,11 +9448,11 @@ function aqThreadLabel(threadId) {
   }
 
   // Batch deny all
-  var denyAll = document.getElementById('aq-deny-all');
+  const denyAll = document.getElementById('aq-deny-all');
   if (denyAll) {
     denyAll.addEventListener('click', function (e) {
       e.stopPropagation();
-      var ids = Array.from(pendingGates.keys());
+      const ids = Array.from(pendingGates.keys());
       ids.forEach(function (id, i) {
         setTimeout(function () { sendApprovalAction(id, 'deny'); }, i * 100);
       });
