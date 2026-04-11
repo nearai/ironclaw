@@ -957,12 +957,36 @@ async fn execute_pending_gate_action(
     approval_already_granted: bool,
     approval_event: Option<(String, bool)>,
 ) -> Result<BridgeOutcome, Error> {
-    let thread = state
-        .store
-        .load_thread(pending.thread_id)
-        .await
-        .map_err(|e| engine_err("load thread", e))?
-        .ok_or_else(|| engine_err("load thread", "thread not found"))?;
+    let thread = match state.store.load_thread(pending.thread_id).await {
+        Ok(Some(t)) => t,
+        Ok(None) | Err(_) => {
+            tracing::debug!(
+                thread_id = %pending.thread_id,
+                gate = %pending.gate_name,
+                action = %pending.action_name,
+                "thread not found for pending gate; emitting expired resolution"
+            );
+            if let Some(ref sse) = state.sse {
+                sse.broadcast_for_user(
+                    &message.user_id,
+                    AppEvent::GateResolved {
+                        request_id: pending.request_id.to_string(),
+                        gate_name: pending.gate_name.clone(),
+                        tool_name: pending.action_name.clone(),
+                        resolution: "expired".into(),
+                        message: "Thread no longer exists.".into(),
+                        thread_id: pending
+                            .scope_thread_id
+                            .clone()
+                            .or_else(|| Some(pending.thread_id.to_string())),
+                    },
+                );
+            }
+            return Ok(BridgeOutcome::Respond(
+                "Thread no longer exists. Approval dismissed.".into(),
+            ));
+        }
+    };
     let resolved_call_id = resolved_or_synthetic_call_id_for_pending_action(state, pending).await?;
 
     let lease = resume_lease_for_pending_gate(pending, &state.thread_manager.leases)
