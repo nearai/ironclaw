@@ -50,18 +50,78 @@ impl WorkspaceResolver for FixedWorkspaceResolver {
     }
 }
 
-/// Check if a path controls the execution loop or system prompt.
-/// Writes are blocked when `ORCHESTRATOR_SELF_MODIFY` is disabled.
+/// Normalize a workspace path for security checks.
 ///
-/// Covers both the logical aliases (`orchestrator:*`, `prompt:*`) used by the
-/// engine and the physical workspace paths where these docs are persisted.
-fn is_protected_orchestrator_path(path: &str) -> bool {
-    // Logical engine aliases
-    path.starts_with("orchestrator:")
-        || path.starts_with("prompt:")
-        // Physical workspace paths (match the paths in store_adapter::doc_workspace_path)
-        || path.starts_with("engine/orchestrator/")
-        || path == "engine/orchestrator"
+/// Strips `.` and empty (`//`) segments and rejects any `..` traversal
+/// component outright. Returns `None` when the input contains `..` so the
+/// caller can treat traversal attempts as protected (or reject them).
+///
+/// Examples:
+/// - `engine/./orchestrator/v3.py`      → `Some("engine/orchestrator/v3.py")`
+/// - `engine//orchestrator/v3.py`       → `Some("engine/orchestrator/v3.py")`
+/// - `engine/knowledge/../orchestrator` → `None` (rejected — traversal)
+/// - `./foo/bar`                        → `Some("foo/bar")`
+pub(crate) fn normalize_workspace_path(path: &str) -> Option<String> {
+    let mut segments: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            return None;
+        }
+        segments.push(seg);
+    }
+    Some(segments.join("/"))
+}
+
+/// Check if a path controls the execution loop or system prompt.
+///
+/// Writes are blocked when `ORCHESTRATOR_SELF_MODIFY` is disabled.
+/// Covers both the logical aliases (`orchestrator:*`, `prompt:*`) used by
+/// the engine and the physical workspace paths where these docs are
+/// persisted. Input is normalized first so dot/double-slash/traversal
+/// components cannot bypass the guard (e.g. `engine/./orchestrator/v3.py`
+/// or `engine/knowledge/../orchestrator/v3.py`).
+///
+/// Traversal attempts (`..` segments) are treated as protected — the gate
+/// fires even if the would-be target is not orchestrator-related, so the
+/// caller can reject the write with a clear error.
+pub(crate) fn is_protected_orchestrator_path(path: &str) -> bool {
+    // Logical engine aliases — case-sensitive, plain string match.
+    if path.starts_with("orchestrator:") || path.starts_with("prompt:") {
+        return true;
+    }
+
+    // Physical workspace paths — normalize before matching so traversal
+    // and dot-component tricks can't bypass the check.
+    let Some(canonical) = normalize_workspace_path(path) else {
+        // Traversal attempt (`..`) — treat as protected so the caller
+        // blocks or routes through the approval gate.
+        return true;
+    };
+
+    // Canonical physical paths where the v2 engine persists orchestrator
+    // and prompt overlay documents. Keep both the current `.system/engine/`
+    // root and the pre-#2049 legacy `engine/` root (legacy startup
+    // migration moves files to the new root, but a fresh write targeted
+    // at the legacy path must still hit the gate).
+    const PROTECTED_PREFIXES: &[&str] = &[".system/engine/orchestrator", "engine/orchestrator"];
+
+    for prefix in PROTECTED_PREFIXES {
+        if canonical == *prefix || canonical.starts_with(&format!("{prefix}/")) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Re-export the engine's process-wide self-modify snapshot so the tool
+/// reads the same value as the engine loop, store gate, and self-improvement
+/// mission. See `ironclaw_engine::runtime::self_modify_enabled` for the
+/// rationale (single OnceLock-backed snapshot, can't flip at runtime).
+fn self_modify_enabled() -> bool {
+    ironclaw_engine::runtime::self_modify_enabled()
 }
 
 /// Detect paths that are clearly local filesystem references, not workspace-memory docs.
@@ -290,16 +350,11 @@ impl Tool for MemoryWriteTool {
         // When orchestrator self-modification is enabled, writing to protected
         // paths (orchestrator code, prompt overlays) requires human approval.
         // Uses UnlessAutoApproved (not Always) so the v2 engine gate system
-        // can pause for approval rather than hard-denying the call.
+        // can pause for approval rather than hard-denying the call. When
+        // disabled, execute() returns NotAuthorized before any write.
         let target = params.get("target").and_then(|v| v.as_str()).unwrap_or("");
-        if is_protected_orchestrator_path(target) {
-            let self_modify_enabled = std::env::var("ORCHESTRATOR_SELF_MODIFY")
-                .map(|v| v == "true" || v == "1")
-                .unwrap_or(false);
-            if self_modify_enabled {
-                return ApprovalRequirement::UnlessAutoApproved;
-            }
-            // When disabled, execute() returns NotAuthorized before any write.
+        if is_protected_orchestrator_path(target) && self_modify_enabled() {
+            return ApprovalRequirement::UnlessAutoApproved;
         }
         ApprovalRequirement::Never
     }
@@ -338,20 +393,28 @@ impl Tool for MemoryWriteTool {
             )));
         }
 
+        // Reject any path containing `..` traversal segments before either
+        // the protected check or the write itself sees them. Workspace paths
+        // are always relative; `..` cannot legitimately appear here.
+        if !target.starts_with("orchestrator:")
+            && !target.starts_with("prompt:")
+            && normalize_workspace_path(target).is_none()
+        {
+            return Err(ToolError::InvalidParameters(format!(
+                "'{}' contains a parent-directory ('..') segment, which is not allowed in workspace paths.",
+                target
+            )));
+        }
+
         // Block writes to orchestrator and prompt overlay paths when
         // self-modification is disabled. These are security-sensitive docs
         // that control the execution loop and system prompt.
-        if is_protected_orchestrator_path(target) {
-            let allow = std::env::var("ORCHESTRATOR_SELF_MODIFY")
-                .map(|v| v == "true" || v == "1")
-                .unwrap_or(false);
-            if !allow {
-                return Err(ToolError::NotAuthorized(format!(
-                    "Writing to '{}' is blocked — orchestrator self-modification is disabled. \
-                     Set ORCHESTRATOR_SELF_MODIFY=true to enable runtime patching.",
-                    target
-                )));
-            }
+        if is_protected_orchestrator_path(target) && !self_modify_enabled() {
+            return Err(ToolError::NotAuthorized(format!(
+                "Writing to '{}' is blocked — orchestrator self-modification is disabled. \
+                 Set ORCHESTRATOR_SELF_MODIFY=true to enable runtime patching.",
+                target
+            )));
         }
 
         let workspace = self.resolver.resolve(&ctx.user_id).await;
@@ -924,6 +987,212 @@ mod tests {
         assert!(!looks_like_filesystem_path("MEMORY.md"));
         assert!(!looks_like_filesystem_path("daily/2026-03-11.md"));
         assert!(!looks_like_filesystem_path("projects/alpha/notes.md"));
+    }
+
+    // ── Path normalization & protected-path guard ─────────────
+
+    #[test]
+    fn normalize_strips_dot_and_double_slash_segments() {
+        assert_eq!(
+            normalize_workspace_path("engine/./orchestrator/v3.py").as_deref(),
+            Some("engine/orchestrator/v3.py")
+        );
+        assert_eq!(
+            normalize_workspace_path("engine//orchestrator/v3.py").as_deref(),
+            Some("engine/orchestrator/v3.py")
+        );
+        assert_eq!(
+            normalize_workspace_path(".system/engine/orchestrator/v0.py").as_deref(),
+            Some(".system/engine/orchestrator/v0.py")
+        );
+        assert_eq!(
+            normalize_workspace_path("./foo/bar").as_deref(),
+            Some("foo/bar")
+        );
+        assert_eq!(
+            normalize_workspace_path("foo//bar///baz").as_deref(),
+            Some("foo/bar/baz")
+        );
+    }
+
+    #[test]
+    fn normalize_rejects_parent_traversal() {
+        assert!(normalize_workspace_path("engine/knowledge/../orchestrator/v3.py").is_none());
+        assert!(normalize_workspace_path("../etc/passwd").is_none());
+        assert!(normalize_workspace_path("foo/../bar").is_none());
+        assert!(normalize_workspace_path("foo/bar/..").is_none());
+    }
+
+    #[test]
+    fn protected_path_matches_logical_aliases() {
+        assert!(is_protected_orchestrator_path("orchestrator:main"));
+        assert!(is_protected_orchestrator_path("orchestrator:failures"));
+        assert!(is_protected_orchestrator_path("prompt:codeact_preamble"));
+    }
+
+    #[test]
+    fn protected_path_matches_canonical_physical_paths() {
+        assert!(is_protected_orchestrator_path(
+            ".system/engine/orchestrator/v3.py"
+        ));
+        assert!(is_protected_orchestrator_path(
+            ".system/engine/orchestrator/failures.json"
+        ));
+        assert!(is_protected_orchestrator_path(
+            ".system/engine/orchestrator/codeact-preamble-overlay.md"
+        ));
+        assert!(is_protected_orchestrator_path(
+            ".system/engine/orchestrator"
+        ));
+    }
+
+    #[test]
+    fn protected_path_matches_legacy_physical_paths() {
+        // Pre-#2049 root: legacy startup migration moves files, but a fresh
+        // write to the legacy path must still trip the gate.
+        assert!(is_protected_orchestrator_path("engine/orchestrator/v3.py"));
+        assert!(is_protected_orchestrator_path("engine/orchestrator"));
+    }
+
+    #[test]
+    fn protected_path_blocks_dot_segment_bypass() {
+        // The reviewer-flagged bypass: `engine/./orchestrator/v3.py` was
+        // not caught by the old raw `starts_with` check.
+        assert!(is_protected_orchestrator_path(
+            "engine/./orchestrator/v3.py"
+        ));
+        assert!(is_protected_orchestrator_path(
+            ".system/./engine/orchestrator/v3.py"
+        ));
+    }
+
+    #[test]
+    fn protected_path_blocks_double_slash_bypass() {
+        assert!(is_protected_orchestrator_path("engine//orchestrator/v3.py"));
+        assert!(is_protected_orchestrator_path(
+            ".system/engine//orchestrator/v3.py"
+        ));
+    }
+
+    #[test]
+    fn protected_path_treats_traversal_as_protected() {
+        // Traversal attempts can't be a legitimate workspace path. The
+        // guard treats them as protected so the caller routes through the
+        // approval gate (and `execute()` rejects with InvalidParameters).
+        assert!(is_protected_orchestrator_path(
+            "engine/knowledge/../orchestrator/v3.py"
+        ));
+        assert!(is_protected_orchestrator_path("../engine/orchestrator"));
+    }
+
+    #[test]
+    fn protected_path_rejects_unrelated_workspace_paths() {
+        assert!(!is_protected_orchestrator_path("MEMORY.md"));
+        assert!(!is_protected_orchestrator_path("daily/2026-03-11.md"));
+        assert!(!is_protected_orchestrator_path("projects/alpha/notes.md"));
+        assert!(!is_protected_orchestrator_path(
+            ".system/engine/knowledge/notes/foo.md"
+        ));
+        // Substring inside a path component must not match the prefix.
+        assert!(!is_protected_orchestrator_path("engine_other/file.py"));
+    }
+
+    // ── requires_approval gate (caller-level coverage) ─────────
+
+    fn make_test_write_tool() -> MemoryWriteTool {
+        struct StubResolver;
+        #[async_trait::async_trait]
+        impl WorkspaceResolver for StubResolver {
+            async fn resolve(&self, _user_id: &str) -> Arc<Workspace> {
+                unreachable!("requires_approval should not call resolve")
+            }
+        }
+        MemoryWriteTool::new(Arc::new(StubResolver))
+    }
+
+    #[test]
+    fn requires_approval_protected_path_self_modify_enabled() {
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+        let tool = make_test_write_tool();
+        let result = tool.requires_approval(&serde_json::json!({
+            "target": "orchestrator:main",
+            "content": "anything"
+        }));
+        assert!(matches!(result, ApprovalRequirement::UnlessAutoApproved));
+    }
+
+    #[test]
+    fn requires_approval_protected_path_self_modify_disabled() {
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::disable();
+        let tool = make_test_write_tool();
+        // Falls through to Never — execute() will return NotAuthorized.
+        let result = tool.requires_approval(&serde_json::json!({
+            "target": "orchestrator:main",
+            "content": "anything"
+        }));
+        assert!(matches!(result, ApprovalRequirement::Never));
+    }
+
+    #[test]
+    fn requires_approval_physical_orchestrator_path_with_self_modify() {
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+        let tool = make_test_write_tool();
+        // The reviewer-flagged miss: writing to the physical path bypassed
+        // the approval gate when the guard only matched logical aliases.
+        let result = tool.requires_approval(&serde_json::json!({
+            "target": ".system/engine/orchestrator/v3.py",
+            "content": "anything"
+        }));
+        assert!(matches!(result, ApprovalRequirement::UnlessAutoApproved));
+    }
+
+    #[test]
+    fn requires_approval_dot_segment_bypass_attempt() {
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+        let tool = make_test_write_tool();
+        let result = tool.requires_approval(&serde_json::json!({
+            "target": "engine/./orchestrator/v3.py",
+            "content": "anything"
+        }));
+        assert!(
+            matches!(result, ApprovalRequirement::UnlessAutoApproved),
+            "dot-segment bypass should still trigger the approval gate"
+        );
+    }
+
+    #[test]
+    fn requires_approval_traversal_bypass_attempt() {
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+        let tool = make_test_write_tool();
+        let result = tool.requires_approval(&serde_json::json!({
+            "target": "engine/knowledge/../orchestrator/v3.py",
+            "content": "anything"
+        }));
+        assert!(
+            matches!(result, ApprovalRequirement::UnlessAutoApproved),
+            "traversal bypass should still trigger the approval gate"
+        );
+    }
+
+    #[test]
+    fn requires_approval_unprotected_path_is_never() {
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+        let tool = make_test_write_tool();
+        let result = tool.requires_approval(&serde_json::json!({
+            "target": "daily_log",
+            "content": "regular note"
+        }));
+        assert!(matches!(result, ApprovalRequirement::Never));
+    }
+
+    #[test]
+    fn requires_approval_missing_target_is_never() {
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+        let tool = make_test_write_tool();
+        let result = tool.requires_approval(&serde_json::json!({
+            "content": "no target"
+        }));
+        assert!(matches!(result, ApprovalRequirement::Never));
     }
 
     #[cfg(feature = "postgres")]

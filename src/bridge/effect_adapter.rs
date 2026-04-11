@@ -1849,6 +1849,161 @@ mod tests {
         assert!(matches!(third, Err(EngineError::GatePaused { .. })));
     }
 
+    /// End-to-end gate verification for the real `MemoryWriteTool`.
+    ///
+    /// PR #1958 reviewer-flagged regression: the original code returned
+    /// `ApprovalRequirement::Always` for protected orchestrator targets,
+    /// which `EffectBridgeAdapter::execute_action` maps to `LeaseDenied`
+    /// (a hard refusal). The fix changed it to `UnlessAutoApproved`, which
+    /// must produce a resumable `GatePaused(Approval)`. This test asserts
+    /// the full path: `requires_approval` → adapter → gate, with the
+    /// real tool wired into a real registry.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn memory_write_orchestrator_target_paused_for_approval_when_self_modify_enabled() {
+        use crate::db::Database;
+        use crate::db::libsql::LibSqlBackend;
+        use crate::tools::builtin::memory::MemoryWriteTool;
+        use crate::workspace::Workspace;
+        use ironclaw_safety::SafetyConfig;
+
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LibSqlBackend::new_local(&dir.path().join("gate.db"))
+            .await
+            .expect("libsql");
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+        let workspace = Arc::new(Workspace::new_with_db("test_user", db));
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools
+            .register(Arc::new(MemoryWriteTool::from_workspace(workspace)))
+            .await;
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let result = adapter
+            .execute_action(
+                "memory_write",
+                serde_json::json!({
+                    "target": "orchestrator:main",
+                    "content": "def run_loop(): return 1\n"
+                }),
+                &lease(),
+                &exec_ctx(thread_id, Some("call_orch_approve")),
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused {
+                gate_name,
+                resume_kind,
+                ..
+            }) => {
+                assert_eq!(gate_name, "approval");
+                assert!(matches!(
+                    *resume_kind,
+                    ironclaw_engine::ResumeKind::Approval { .. }
+                ));
+            }
+            Err(EngineError::LeaseDenied { reason }) => {
+                panic!(
+                    "memory_write protected target was hard-denied (LeaseDenied) \
+                     instead of pausing for approval — this is the regression \
+                     that PR #1958's UnlessAutoApproved fix is meant to prevent. \
+                     Reason: {reason}"
+                );
+            }
+            other => panic!("expected GatePaused(approval), got {other:?}"),
+        }
+    }
+
+    /// Sibling check: when self-modify is **disabled**, the tool's
+    /// `execute()` returns `NotAuthorized` and the adapter reports the
+    /// failure as a non-success ToolOutput (not a GatePaused). The agent
+    /// must NOT see this as a resumable gate — it's a permanent refusal.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn memory_write_orchestrator_target_refused_when_self_modify_disabled() {
+        use crate::db::Database;
+        use crate::db::libsql::LibSqlBackend;
+        use crate::tools::builtin::memory::MemoryWriteTool;
+        use crate::workspace::Workspace;
+        use ironclaw_safety::SafetyConfig;
+
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::disable();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LibSqlBackend::new_local(&dir.path().join("gate.db"))
+            .await
+            .expect("libsql");
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+        let workspace = Arc::new(Workspace::new_with_db("test_user", db));
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools
+            .register(Arc::new(MemoryWriteTool::from_workspace(workspace)))
+            .await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let result = adapter
+            .execute_action(
+                "memory_write",
+                serde_json::json!({
+                    "target": "orchestrator:main",
+                    "content": "def run_loop(): return 1\n"
+                }),
+                &lease(),
+                &exec_ctx(thread_id, Some("call_orch_disabled")),
+            )
+            .await;
+
+        // The adapter must NOT pause for approval when self-modify is off
+        // (otherwise the agent could be tricked into accepting a write
+        // that the static gate refuses). What it surfaces — error result
+        // vs. is_error ToolOutput — depends on plumbing; both must mention
+        // the self-modify denial.
+        let surfaced = match result {
+            Ok(output) => {
+                assert!(
+                    output.is_error,
+                    "self-modify-disabled write must surface as is_error"
+                );
+                serde_json::to_string(&output.output).unwrap_or_default()
+            }
+            Err(EngineError::GatePaused { .. }) => panic!(
+                "self-modify-disabled write must NOT pause for approval — \
+                 the gate must surface a permanent refusal so the agent \
+                 cannot loop on it"
+            ),
+            Err(e) => format!("{e:?}"),
+        };
+        assert!(
+            surfaced.contains("self-modification is disabled") || surfaced.contains("self-modify"),
+            "expected self-modify denial in surfaced result; got: {surfaced}"
+        );
+    }
+
     /// Regression for nearai/ironclaw#2206: a `tool_activate`/`tool_auth`
     /// extension result containing a non-https `auth_url` (e.g.
     /// `javascript:alert(1)`) must be sanitized to `None` before it reaches

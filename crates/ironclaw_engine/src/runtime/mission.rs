@@ -1495,10 +1495,16 @@ impl MissionManager {
     /// for the self-improvement mission to diff against when patching. If the
     /// compiled-in code has changed (different content hash), the stored v0 is
     /// updated to match — runtime patches (v1+) are left untouched.
+    ///
+    /// The save runs inside `with_trusted_internal_writes` so the store gate
+    /// recognises this as a system-internal write and bypasses the LLM
+    /// approval check (which is keyed off the task-local flag, not on
+    /// caller-supplied metadata that an LLM tool call could forge).
     async fn seed_orchestrator_v0(&self, project_id: ProjectId) -> Result<(), EngineError> {
         use crate::executor::orchestrator::{
             DEFAULT_ORCHESTRATOR, ORCHESTRATOR_TAG, ORCHESTRATOR_TITLE,
         };
+        use crate::runtime::internal_write::with_trusted_internal_writes;
         use crate::types::memory::{DocType, MemoryDoc};
 
         let docs = self.store.list_shared_memory_docs(project_id).await?;
@@ -1518,13 +1524,16 @@ impl MissionManager {
                 let mut updated = doc.clone();
                 updated.content = DEFAULT_ORCHESTRATOR.to_string();
                 updated.updated_at = chrono::Utc::now();
-                self.store.save_memory_doc(&updated).await?;
+                with_trusted_internal_writes(self.store.save_memory_doc(&updated)).await?;
                 debug!("updated orchestrator v0 to match compiled-in default");
             }
             return Ok(());
         }
 
-        // Create v0 doc
+        // Create v0 doc. The `source: "compiled_in"` metadata field is now
+        // purely informational — the security gate keys off the task-local
+        // trusted-write scope, not this string, so the field cannot be
+        // forged by an LLM-authored doc to bypass the gate.
         let mut doc = MemoryDoc::new(
             project_id,
             shared_owner_id(),
@@ -1534,7 +1543,7 @@ impl MissionManager {
         )
         .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
         doc.metadata = serde_json::json!({"version": 0, "source": "compiled_in"});
-        self.store.save_memory_doc(&doc).await?;
+        with_trusted_internal_writes(self.store.save_memory_doc(&doc)).await?;
         debug!("seeded orchestrator v0 in workspace");
         Ok(())
     }
@@ -2285,10 +2294,10 @@ async fn process_self_improvement_output(
 
     let project_id = mission.project_id;
 
-    // Check if self-modification is allowed before applying prompt/orchestrator changes
-    let allow_self_modify = std::env::var("ORCHESTRATOR_SELF_MODIFY")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false);
+    // Check if self-modification is allowed before applying prompt/orchestrator changes.
+    // Reads the process-wide snapshot so a runtime env mutation cannot flip
+    // the gate mid-mission.
+    let allow_self_modify = crate::runtime::self_modify_enabled();
 
     // Process prompt additions
     if let Some(additions) = json_val.get("prompt_additions").and_then(|v| v.as_array())
@@ -3877,8 +3886,10 @@ mod tests {
         let id = mission.id;
         store.save_mission(&mission).await.unwrap();
 
-        // Enable self-modification for this test so prompt additions are applied
-        unsafe { std::env::set_var("ORCHESTRATOR_SELF_MODIFY", "true") };
+        // Enable self-modification for this test so prompt additions are
+        // applied. The guard restores the previous override on drop, even
+        // on panic, so it's race-safe across parallel tests.
+        let _self_modify = crate::runtime::SelfModifyTestGuard::enable();
 
         let response = r#"{"prompt_additions": ["9. Never call web_fetch — use http() instead."], "fix_patterns": [], "level": 1}"#;
         let outcome = ThreadOutcome::Completed {
@@ -3887,8 +3898,6 @@ mod tests {
         process_mission_outcome(&store, id, ThreadId::new(), &outcome)
             .await
             .unwrap();
-
-        unsafe { std::env::remove_var("ORCHESTRATOR_SELF_MODIFY") };
 
         // Verify prompt overlay was saved
         let docs = store.list_memory_docs(project_id, "system").await.unwrap();
