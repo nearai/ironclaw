@@ -2146,38 +2146,46 @@ async fn slack_relay_oauth_callback_handler(
 
 // --- Chat handlers ---
 
+const MAX_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
+
 /// Convert web gateway upload data to `IncomingAttachment` objects.
 pub(crate) fn uploads_to_attachments(
     uploads: &[ImageData],
 ) -> Result<Vec<crate::channels::IncomingAttachment>, String> {
     use base64::Engine;
-    uploads
-        .iter()
-        .enumerate()
-        .map(|(i, upload)| {
-            let data = base64::engine::general_purpose::STANDARD
-                .decode(&upload.data)
-                .map_err(|e| format!("Invalid base64 data for upload {i}: {e}"))?;
-            let kind = crate::channels::AttachmentKind::from_mime_type(&upload.media_type);
-            let filename = upload
-                .filename
-                .clone()
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or_else(|| default_upload_filename(i, &kind, &upload.media_type));
-            Ok(crate::channels::IncomingAttachment {
-                id: format!("web-upload-{i}"),
-                kind,
-                mime_type: upload.media_type.clone(),
-                filename: Some(filename),
-                size_bytes: Some(data.len() as u64),
-                source_url: None,
-                storage_key: None,
-                extracted_text: None,
-                data,
-                duration_secs: None,
-            })
-        })
-        .collect()
+    let mut attachments = Vec::with_capacity(uploads.len());
+    let mut total_bytes = 0usize;
+    for (i, upload) in uploads.iter().enumerate() {
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(&upload.data)
+            .map_err(|e| format!("Invalid base64 data for upload {i}: {e}"))?;
+        total_bytes = total_bytes
+            .checked_add(data.len())
+            .ok_or_else(|| "Attachments exceed the 10 MB per-message limit".to_string())?;
+        if total_bytes > MAX_UPLOAD_BYTES {
+            return Err("Attachments exceed the 10 MB per-message limit".to_string());
+        }
+
+        let kind = crate::channels::AttachmentKind::from_mime_type(&upload.media_type);
+        let filename = upload
+            .filename
+            .clone()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| default_upload_filename(i, &kind, &upload.media_type));
+        attachments.push(crate::channels::IncomingAttachment {
+            id: format!("web-upload-{i}"),
+            kind,
+            mime_type: upload.media_type.clone(),
+            filename: Some(filename),
+            size_bytes: Some(data.len() as u64),
+            source_url: None,
+            storage_key: None,
+            extracted_text: None,
+            data,
+            duration_secs: None,
+        });
+    }
+    Ok(attachments)
 }
 
 fn default_upload_filename(
@@ -3981,6 +3989,21 @@ mod tests {
         assert_eq!(attachments[0].filename.as_deref(), Some("invoice.pdf"));
         assert_eq!(attachments[0].data, b"%PDF-1.4\ninvoice");
         assert_eq!(attachments[0].size_bytes, Some(16));
+    }
+
+    #[test]
+    fn web_upload_rejects_decoded_payload_over_limit() {
+        use base64::Engine;
+
+        let uploads = vec![ImageData {
+            media_type: "application/pdf".to_string(),
+            data: base64::engine::general_purpose::STANDARD
+                .encode(vec![0_u8; MAX_UPLOAD_BYTES + 1]),
+            filename: Some("large.pdf".to_string()),
+        }];
+
+        let err = uploads_to_attachments(&uploads).unwrap_err();
+        assert!(err.contains("10 MB per-message limit"));
     }
 
     #[test]
