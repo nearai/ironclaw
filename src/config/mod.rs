@@ -183,7 +183,6 @@ impl Config {
                 http: None,
                 gateway: None,
                 signal: None,
-                tui: None,
                 dingtalk: None,
                 tui: None,
                 wasm_channels_dir: std::env::temp_dir().join("ironclaw-test-channels"),

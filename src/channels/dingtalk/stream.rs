@@ -7,7 +7,6 @@
 //! 4. ACK each message to confirm receipt
 //! 5. On disconnect, re-register and reconnect (with backoff)
 
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
