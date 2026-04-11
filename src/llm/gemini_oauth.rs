@@ -1137,6 +1137,9 @@ impl GeminiOauthProvider {
     }
 
     pub fn model_uses_cloud_code_api(model: &str) -> bool {
+        if std::env::var("GEMINI_USE_LEGACY_API").is_ok() {
+            return false;
+        }
         let model = model.to_ascii_lowercase();
         // Models containing "-preview" suffix or "gemini-3" use the Cloud Code API.
         // Using "-preview" (with hyphen) to avoid false positives on unrelated model names.
@@ -1589,6 +1592,21 @@ impl GeminiOauthProvider {
         }
     }
 
+    /// Strip JSON Schema fields unsupported by the public Generative Language API.
+    fn strip_unsupported_schema_fields(val: &mut serde_json::Value) {
+        if let Some(obj) = val.as_object_mut() {
+            obj.remove("additionalProperties");
+            obj.remove("$schema");
+            for (_, v) in obj.iter_mut() {
+                Self::strip_unsupported_schema_fields(v);
+            }
+        } else if let Some(arr) = val.as_array_mut() {
+            for v in arr.iter_mut() {
+                Self::strip_unsupported_schema_fields(v);
+            }
+        }
+    }
+
     fn to_gemini_request(
         messages: &[ChatMessage],
         tools: Option<&[ToolDefinition]>,
@@ -1709,10 +1727,12 @@ impl GeminiOauthProvider {
             let declarations: Vec<serde_json::Value> = tool_defs
                 .iter()
                 .map(|t| {
+                    let mut params = t.parameters.clone();
+                    Self::strip_unsupported_schema_fields(&mut params);
                     serde_json::json!({
                         "name": t.name,
                         "description": t.description,
-                        "parameters": t.parameters
+                        "parameters": params
                     })
                 })
                 .collect();
