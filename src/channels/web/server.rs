@@ -888,7 +888,8 @@ pub async fn start_server(
         .merge(statics)
         .merge(projects)
         .merge(protected)
-        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB max request body (image uploads)
+        // 10 MB decoded upload limit plus base64/JSON overhead.
+        .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
         .layer(tower_http::catch_panic::CatchPanicLayer::custom(
             |panic_info: Box<dyn std::any::Any + Send + 'static>| {
                 let detail = if let Some(s) = panic_info.downcast_ref::<String>() {
@@ -2145,34 +2146,33 @@ async fn slack_relay_oauth_callback_handler(
 
 // --- Chat handlers ---
 
-/// Convert web gateway `ImageData` to `IncomingAttachment` objects.
-pub(crate) fn images_to_attachments(
-    images: &[ImageData],
+/// Convert web gateway upload data to `IncomingAttachment` objects.
+pub(crate) fn uploads_to_attachments(
+    uploads: &[ImageData],
 ) -> Vec<crate::channels::IncomingAttachment> {
     use base64::Engine;
-    images
+    uploads
         .iter()
         .enumerate()
-        .filter_map(|(i, img)| {
-            if !img.media_type.starts_with("image/") {
-                tracing::warn!(
-                    "Skipping image {i}: invalid media type '{}' (must start with 'image/')",
-                    img.media_type
-                );
-                return None;
-            }
-            let data = match base64::engine::general_purpose::STANDARD.decode(&img.data) {
+        .filter_map(|(i, upload)| {
+            let data = match base64::engine::general_purpose::STANDARD.decode(&upload.data) {
                 Ok(d) => d,
                 Err(e) => {
-                    tracing::warn!("Skipping image {i}: invalid base64 data: {e}");
+                    tracing::warn!("Skipping upload {i}: invalid base64 data: {e}");
                     return None;
                 }
             };
+            let kind = crate::channels::AttachmentKind::from_mime_type(&upload.media_type);
+            let filename = upload
+                .filename
+                .clone()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| default_upload_filename(i, &kind, &upload.media_type));
             Some(crate::channels::IncomingAttachment {
-                id: format!("web-image-{i}"),
-                kind: crate::channels::AttachmentKind::Image,
-                mime_type: img.media_type.clone(),
-                filename: Some(format!("image-{i}.{}", mime_to_ext(&img.media_type))),
+                id: format!("web-upload-{i}"),
+                kind,
+                mime_type: upload.media_type.clone(),
+                filename: Some(filename),
                 size_bytes: Some(data.len() as u64),
                 source_url: None,
                 storage_key: None,
@@ -2184,6 +2184,19 @@ pub(crate) fn images_to_attachments(
         .collect()
 }
 
+fn default_upload_filename(
+    index: usize,
+    kind: &crate::channels::AttachmentKind,
+    mime: &str,
+) -> String {
+    let prefix = match kind {
+        crate::channels::AttachmentKind::Audio => "audio",
+        crate::channels::AttachmentKind::Image => "image",
+        crate::channels::AttachmentKind::Document => "file",
+    };
+    format!("{prefix}-{index}.{}", mime_to_ext(mime))
+}
+
 /// Map MIME type to file extension.
 fn mime_to_ext(mime: &str) -> &str {
     match mime {
@@ -2191,7 +2204,22 @@ fn mime_to_ext(mime: &str) -> &str {
         "image/gif" => "gif",
         "image/webp" => "webp",
         "image/svg+xml" => "svg",
-        _ => "jpg",
+        "image/jpeg" => "jpg",
+        "application/pdf" => "pdf",
+        "text/plain" => "txt",
+        "text/csv" => "csv",
+        "application/json" => "json",
+        "text/markdown" => "md",
+        "application/xml" | "text/xml" => "xml",
+        "application/rtf" | "text/rtf" => "rtf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        "application/msword" => "doc",
+        "application/vnd.ms-powerpoint" => "ppt",
+        "application/vnd.ms-excel" => "xls",
+        m if m.starts_with("image/") => "jpg",
+        _ => "bin",
     }
 }
 
@@ -2232,18 +2260,21 @@ async fn chat_send_handler(
     }
     msg = msg.with_metadata(meta);
 
-    // Convert uploaded images to IncomingAttachments
-    if !req.images.is_empty() {
-        let attachments = images_to_attachments(&req.images);
+    // Convert uploaded files to IncomingAttachments. `images` is kept for
+    // older clients; the web UI now sends generic files in `attachments`.
+    let mut uploads = req.attachments;
+    uploads.extend(req.images);
+    if !uploads.is_empty() {
+        let attachments = uploads_to_attachments(&uploads);
         msg = msg.with_attachments(attachments);
     }
 
     let msg_id = msg.id;
     tracing::trace!(
-        "[chat_send_handler] Created message id={}, content_len={}, images={}",
+        "[chat_send_handler] Created message id={}, content_len={}, attachments={}",
         msg_id,
         req.content.len(),
-        req.images.len()
+        msg.attachments.len()
     );
 
     // Clone sender to avoid holding RwLock read guard across send().await
@@ -3930,6 +3961,29 @@ mod tests {
 
         assert!(!readme.content.trim().is_empty());
         assert!(!identity.content.trim().is_empty());
+    }
+
+    #[test]
+    fn web_upload_accepts_document_attachment_data() {
+        use base64::Engine;
+
+        let uploads = vec![ImageData {
+            media_type: "application/pdf".to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.4\ninvoice"),
+            filename: Some("invoice.pdf".to_string()),
+        }];
+
+        let attachments = uploads_to_attachments(&uploads);
+
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(
+            attachments[0].kind,
+            crate::channels::AttachmentKind::Document
+        );
+        assert_eq!(attachments[0].mime_type, "application/pdf");
+        assert_eq!(attachments[0].filename.as_deref(), Some("invoice.pdf"));
+        assert_eq!(attachments[0].data, b"%PDF-1.4\ninvoice");
+        assert_eq!(attachments[0].size_bytes, Some(16));
     }
 
     #[test]

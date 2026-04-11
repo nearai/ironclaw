@@ -91,7 +91,7 @@ let unreadThreads = new Map(); // thread_id -> unread count
 let _loadThreadsTimer = null;
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
-let stagedImages = [];
+let stagedFiles = [];
 let authFlowPending = false;
 let _ghostSuggestion = '';
 let currentSettingsSubtab = 'inference';
@@ -1149,7 +1149,7 @@ function sendMessage() {
   }
   if (_sendCooldown) return;
   const content = input.value.trim();
-  if (!content && stagedImages.length === 0) return;
+  if (!content && stagedFiles.length === 0) return;
 
   // Intercept approval keywords when an unresolved approval card is pending.
   // Find the most recent unresolved card for the current thread (resolved cards
@@ -1183,15 +1183,20 @@ function sendMessage() {
     }
   }
 
-  const userMsg = addMessage('user', content || '(images attached)');
+  const filesForSend = stagedFiles.slice();
+  const userMsg = addMessage('user', content || formatAttachedFilesMessage(filesForSend));
   input.value = '';
   autoResizeTextarea(input);
   input.focus();
 
   const body = { content, thread_id: currentThreadId || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
-  if (stagedImages.length > 0) {
-    body.images = stagedImages.map(img => ({ media_type: img.media_type, data: img.data }));
-    stagedImages = [];
+  if (filesForSend.length > 0) {
+    body.attachments = filesForSend.map(file => ({
+      media_type: file.media_type,
+      data: file.data,
+      filename: file.filename,
+    }));
+    stagedFiles = [];
     renderImagePreviews();
   }
 
@@ -1222,6 +1227,8 @@ function sendMessage() {
         e.preventDefault();
         if (userMsg.parentNode) userMsg.parentNode.removeChild(userMsg);
         input.value = content;
+        stagedFiles = filesForSend.slice();
+        renderImagePreviews();
         sendMessage();
       });
       userMsg.appendChild(retryLink);
@@ -1239,46 +1246,75 @@ function enableChatInput() {
   if (btn) btn.disabled = false;
 }
 
-// --- Image Upload ---
+// --- File Upload ---
 
 function renderImagePreviews() {
   const strip = document.getElementById('image-preview-strip');
   strip.innerHTML = '';
-  stagedImages.forEach((img, idx) => {
+  stagedFiles.forEach((file, idx) => {
     const container = document.createElement('div');
-    container.className = 'image-preview-container';
+    container.className = file.media_type.startsWith('image/')
+      ? 'image-preview-container'
+      : 'file-preview-container';
 
-    const preview = document.createElement('img');
-    preview.className = 'image-preview';
-    preview.src = img.dataUrl;
-    preview.alt = 'Attached image';
+    if (file.media_type.startsWith('image/')) {
+      const preview = document.createElement('img');
+      preview.className = 'image-preview';
+      preview.src = file.dataUrl;
+      preview.alt = file.filename || 'Attached image';
+      container.appendChild(preview);
+    } else {
+      const icon = document.createElement('span');
+      icon.className = 'file-preview-icon';
+      icon.textContent = '\uD83D\uDCCE';
+      const name = document.createElement('span');
+      name.className = 'file-preview-name';
+      name.textContent = file.filename || 'attached file';
+      const meta = document.createElement('span');
+      meta.className = 'file-preview-meta';
+      meta.textContent = formatFileSize(file.size);
+      container.appendChild(icon);
+      container.appendChild(name);
+      container.appendChild(meta);
+    }
 
     const removeBtn = document.createElement('button');
     removeBtn.className = 'image-preview-remove';
     removeBtn.textContent = '\u00d7';
     removeBtn.addEventListener('click', () => {
-      stagedImages.splice(idx, 1);
+      stagedFiles.splice(idx, 1);
       renderImagePreviews();
     });
 
-    container.appendChild(preview);
     container.appendChild(removeBtn);
     strip.appendChild(container);
   });
 }
 
-const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB per image
-const MAX_STAGED_IMAGES = 5;
+function formatAttachedFilesMessage(files) {
+  if (!files || files.length === 0) return '(files attached)';
+  if (files.length === 1) return 'Attached: ' + (files[0].filename || 'file');
+  return 'Attached ' + files.length + ' files';
+}
 
-function handleImageFiles(files) {
+function formatFileSize(bytes) {
+  if (!bytes && bytes !== 0) return '';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return Math.ceil(bytes / 1024) + ' KB';
+  return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB per file
+const MAX_STAGED_FILES = 5;
+
+function handleAttachmentFiles(files) {
   Array.from(files).forEach(file => {
-    if (!file.type.startsWith('image/')) return;
-    if (file.size > MAX_IMAGE_SIZE_BYTES) {
-      alert(I18n.t('chat.imageTooBig', { name: file.name, size: (file.size / 1024 / 1024).toFixed(1) }));
+    if (file.size > MAX_FILE_SIZE_BYTES) {
+      alert(I18n.t('chat.fileTooBig', { name: file.name, size: (file.size / 1024 / 1024).toFixed(1) }));
       return;
     }
-    if (stagedImages.length >= MAX_STAGED_IMAGES) {
-      alert(I18n.t('chat.maxImages', { n: MAX_STAGED_IMAGES }));
+    if (stagedFiles.length >= MAX_STAGED_FILES) {
+      alert(I18n.t('chat.maxFiles', { n: MAX_STAGED_FILES }));
       return;
     }
     const reader = new FileReader();
@@ -1287,8 +1323,14 @@ function handleImageFiles(files) {
       const commaIdx = dataUrl.indexOf(',');
       const meta = dataUrl.substring(0, commaIdx); // e.g. "data:image/png;base64"
       const base64 = dataUrl.substring(commaIdx + 1);
-      const mediaType = meta.replace('data:', '').replace(';base64', '');
-      stagedImages.push({ media_type: mediaType, data: base64, dataUrl: dataUrl });
+      const mediaType = file.type || meta.replace('data:', '').replace(';base64', '') || 'application/octet-stream';
+      stagedFiles.push({
+        media_type: mediaType,
+        data: base64,
+        dataUrl: dataUrl,
+        filename: file.name || 'attachment',
+        size: file.size,
+      });
       renderImagePreviews();
     };
     reader.readAsDataURL(file);
@@ -1300,16 +1342,16 @@ document.getElementById('attach-btn').addEventListener('click', () => {
 });
 
 document.getElementById('image-file-input').addEventListener('change', (e) => {
-  handleImageFiles(e.target.files);
+  handleAttachmentFiles(e.target.files);
   e.target.value = '';
 });
 
 document.getElementById('chat-input').addEventListener('paste', (e) => {
   const items = (e.clipboardData || e.originalEvent.clipboardData).items;
   for (let i = 0; i < items.length; i++) {
-    if (items[i].kind === 'file' && items[i].type.startsWith('image/')) {
+    if (items[i].kind === 'file') {
       const file = items[i].getAsFile();
-      if (file) handleImageFiles([file]);
+      if (file) handleAttachmentFiles([file]);
     }
   }
 });

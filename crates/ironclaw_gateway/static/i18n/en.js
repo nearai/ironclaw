@@ -118,7 +118,7 @@ I18n.register('en', {
   'chat.assistant': 'Assistant',
   'chat.conversations': 'Conversations',
   'chat.send': 'Send',
-  'chat.attachImages': 'Attach Images',
+  'chat.attachImages': 'Attach files',
   'chat.scrollToBottom': 'Scroll to bottom',
   'chat.empty': 'Select a file to view content',
   'chat.loading': 'Loading...',
@@ -678,8 +678,8 @@ I18n.register('en', {
   // Chat (dynamic)
   'chat.authRequiredBeforeSend': 'Complete the auth step before sending chat messages.',
   'chat.rateLimited': 'Rate limited. Please wait.',
-  'chat.imageTooBig': 'Image "{name}" exceeds 5 MB limit ({size} MB)',
-  'chat.maxImages': 'Maximum {n} images allowed per message',
+  'chat.fileTooBig': 'File "{name}" exceeds 10 MB limit ({size} MB)',
+  'chat.maxFiles': 'Maximum {n} files allowed per message',
   'chat.readOnlyThread': 'Read-only thread (external channel)',
   'chat.threadCreateFailed': 'Failed to create thread: {message}',
 

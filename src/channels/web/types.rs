@@ -5,13 +5,16 @@ use uuid::Uuid;
 
 // --- Chat ---
 
-/// Base64-encoded image data sent from the web frontend.
+/// Base64-encoded upload data sent from the web frontend.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ImageData {
-    /// MIME type (e.g., "image/png", "image/jpeg").
+    /// MIME type (e.g., "image/png", "application/pdf").
     pub media_type: String,
-    /// Base64-encoded image data (without data: URL prefix).
+    /// Base64-encoded file data (without data: URL prefix).
     pub data: String,
+    /// Original client-side filename, if available.
+    #[serde(default)]
+    pub filename: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -22,6 +25,9 @@ pub struct SendMessageRequest {
     /// Optional images attached to the message.
     #[serde(default)]
     pub images: Vec<ImageData>,
+    /// Optional generic files attached to the message.
+    #[serde(default)]
+    pub attachments: Vec<ImageData>,
 }
 
 #[derive(Debug, Serialize)]
@@ -689,6 +695,9 @@ pub enum WsClientMessage {
         /// Optional images attached to the message.
         #[serde(default)]
         images: Vec<ImageData>,
+        /// Optional generic files attached to the message.
+        #[serde(default)]
+        attachments: Vec<ImageData>,
     },
     /// Approve or deny a pending tool execution.
     #[serde(rename = "approval")]

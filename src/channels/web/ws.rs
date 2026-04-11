@@ -165,6 +165,7 @@ async fn handle_client_message(
             thread_id,
             timezone,
             images,
+            attachments,
         } => {
             let mut incoming = IncomingMessage::new("gateway", user_id, &content);
             if let Some(ref tz) = timezone {
@@ -174,9 +175,12 @@ async fn handle_client_message(
                 incoming = incoming.with_thread(tid);
             }
 
-            // Convert uploaded images to IncomingAttachments
-            if !images.is_empty() {
-                let attachments = crate::channels::web::server::images_to_attachments(&images);
+            // Convert uploaded files to IncomingAttachments. `images` is kept
+            // for older clients; `attachments` carries generic file uploads.
+            let mut uploads = attachments;
+            uploads.extend(images);
+            if !uploads.is_empty() {
+                let attachments = crate::channels::web::server::uploads_to_attachments(&uploads);
                 incoming = incoming.with_attachments(attachments);
             }
 
@@ -385,6 +389,7 @@ mod tests {
                 thread_id: Some("t1".to_string()),
                 timezone: None,
                 images: Vec::new(),
+                attachments: Vec::new(),
             },
             &state,
             "user1",
@@ -411,6 +416,7 @@ mod tests {
                 thread_id: None,
                 timezone: None,
                 images: Vec::new(),
+                attachments: Vec::new(),
             },
             &state,
             "user1",
