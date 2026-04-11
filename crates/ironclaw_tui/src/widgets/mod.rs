@@ -8,6 +8,7 @@
 pub mod approval;
 pub mod command_palette;
 pub mod conversation;
+pub mod dashboard;
 pub mod header;
 pub mod help_overlay;
 pub mod input_box;
@@ -18,7 +19,6 @@ pub mod status_bar;
 pub mod tab_bar;
 pub mod thread_list;
 pub mod thread_picker;
-pub mod tool_panel;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -34,6 +34,7 @@ use model_picker::ModelPickerState;
 pub enum ActiveTab {
     #[default]
     Conversation,
+    Dashboard,
     Logs,
 }
 
@@ -99,9 +100,6 @@ pub struct AppState {
 
     /// Whether a response is currently streaming.
     pub is_streaming: bool,
-
-    /// Whether the sidebar is visible.
-    pub sidebar_visible: bool,
 
     /// Pending approval request (if any).
     pub pending_approval: Option<ApprovalRequest>,
@@ -191,6 +189,9 @@ pub struct AppState {
     /// Tool detail modal (Ctrl+E).
     pub tool_detail_modal: Option<ToolDetailModal>,
 
+    /// Expanded dashboard panel modal (click panel title to expand).
+    pub expanded_dashboard_panel: Option<DashboardPanelModal>,
+
     /// Images pasted via Ctrl+V, pending submission with the next message.
     pub pending_attachments: Vec<crate::event::TuiAttachment>,
 
@@ -202,6 +203,48 @@ pub struct AppState {
 
     /// Active text selection in the rendered TUI.
     pub text_selection: Option<TextSelection>,
+
+    /// Skills activated this session (deduplicated names).
+    pub activated_skills: Vec<String>,
+
+    /// Dashboard introspection data.
+    pub dashboard: DashboardData,
+
+    /// Animation frame counter for welcome screen gradient reveal.
+    pub welcome_reveal_frame: u16,
+}
+
+/// Data for the Dashboard introspection tab.
+#[derive(Debug, Clone, Default)]
+pub struct DashboardData {
+    /// Memory usage: (current_bytes, max_bytes).
+    pub memory_capacity: Option<(u64, u64)>,
+    /// Number of memory entries by category: (category_name, count).
+    pub memory_categories: Vec<(String, usize)>,
+    /// Total memory entry count.
+    pub total_memories: usize,
+    /// Session history: (session_label, message_count, tool_calls, tokens).
+    pub session_history: Vec<SessionSummary>,
+    /// Token usage over time as sparkline data points (most recent last).
+    pub token_sparkline: Vec<u64>,
+    /// Tool usage frequency: (tool_name, call_count).
+    pub tool_frequency: Vec<(String, usize)>,
+    /// Skills summary: (total, custom_count, builtin_count).
+    pub skills_summary: Option<(usize, usize, usize)>,
+    /// Identity files loaded.
+    pub identity_files: Vec<String>,
+    /// Routine statuses for the routine monitor panel.
+    pub routines: Vec<RoutineInfo>,
+}
+
+/// Summary of a past session for the dashboard.
+#[derive(Debug, Clone)]
+pub struct SessionSummary {
+    pub label: String,
+    pub message_count: usize,
+    pub tool_calls: usize,
+    pub tokens: u64,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
 /// State for the thread resume picker modal.
@@ -236,7 +279,6 @@ impl Default for AppState {
             routines: Vec::new(),
             status_text: String::new(),
             is_streaming: false,
-            sidebar_visible: true,
             pending_approval: None,
             should_quit: false,
             active_tab: ActiveTab::default(),
@@ -267,10 +309,14 @@ impl Default for AppState {
             log_level_filter: LogLevelFilter::default(),
             toasts: Vec::new(),
             tool_detail_modal: None,
+            expanded_dashboard_panel: None,
             pending_attachments: Vec::new(),
             pending_thread_picker: None,
             screen_snapshot: ScreenSnapshot::default(),
             text_selection: None,
+            activated_skills: Vec::new(),
+            dashboard: DashboardData::default(),
+            welcome_reveal_frame: 0,
         }
     }
 }
@@ -572,6 +618,28 @@ pub enum ToastKind {
     Success,
     Warning,
     Error,
+}
+
+/// Which dashboard panel is expanded (if any).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DashboardPanel {
+    TokenUsage,
+    TopTools,
+    System,
+    Workspace,
+    Jobs,
+    Threads,
+    Skills,
+    Learnings,
+    SelfLearning,
+    Missions,
+}
+
+/// State for an expanded dashboard panel modal.
+#[derive(Debug, Clone)]
+pub struct DashboardPanelModal {
+    pub panel: DashboardPanel,
+    pub scroll: u16,
 }
 
 /// Modal showing full tool output, scrollable.

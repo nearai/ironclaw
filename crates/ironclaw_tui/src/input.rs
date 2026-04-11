@@ -11,8 +11,8 @@ pub enum InputAction {
     Submit,
     /// Quit the TUI.
     Quit,
-    /// Toggle sidebar visibility.
-    ToggleSidebar,
+    /// Toggle between Conversation and Dashboard tabs.
+    ToggleDashboard,
     /// Toggle between Conversation and Logs tabs.
     ToggleLogs,
     /// Scroll conversation up.
@@ -65,6 +65,12 @@ pub enum InputAction {
     ToolDetailScrollDown,
     /// Close the tool detail modal.
     ToolDetailClose,
+    /// Close expanded dashboard panel modal.
+    DashboardPanelClose,
+    /// Scroll expanded dashboard panel up.
+    DashboardPanelScrollUp,
+    /// Scroll expanded dashboard panel down.
+    DashboardPanelScrollDown,
     /// Paste image from system clipboard (Ctrl+V).
     ClipboardPaste,
     /// Navigate thread picker up.
@@ -89,6 +95,7 @@ pub fn map_key(
     palette_active: bool,
     search_active: bool,
     help_active: bool,
+    dashboard_panel_active: bool,
     tool_detail_active: bool,
     logs_active: bool,
     thread_picker_active: bool,
@@ -103,6 +110,10 @@ pub fn map_key(
 
     if help_active {
         return map_help_key(key);
+    }
+
+    if dashboard_panel_active {
+        return map_dashboard_panel_key(key);
     }
 
     if tool_detail_active {
@@ -125,7 +136,7 @@ pub fn map_key(
     match (key.code, key.modifiers) {
         (KeyCode::Enter, KeyModifiers::NONE) => InputAction::Submit,
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => InputAction::Quit,
-        (KeyCode::Char('b'), KeyModifiers::CONTROL) => InputAction::ToggleSidebar,
+        (KeyCode::Char('b'), KeyModifiers::CONTROL) => InputAction::ToggleDashboard,
         (KeyCode::Char('l'), KeyModifiers::CONTROL) => InputAction::ToggleLogs,
         (KeyCode::Char('f'), KeyModifiers::CONTROL) => InputAction::SearchToggle,
         (KeyCode::Char('e'), KeyModifiers::CONTROL) => InputAction::ExpandTool,
@@ -162,6 +173,17 @@ fn map_tool_detail_key(key: KeyEvent) -> InputAction {
         (KeyCode::Esc, _) => InputAction::ToolDetailClose,
         (KeyCode::PageUp, _) | (KeyCode::Up, _) => InputAction::ToolDetailScrollUp,
         (KeyCode::PageDown, _) | (KeyCode::Down, _) => InputAction::ToolDetailScrollDown,
+        _ => InputAction::Forward,
+    }
+}
+
+/// Map key events when the expanded dashboard panel modal is active.
+fn map_dashboard_panel_key(key: KeyEvent) -> InputAction {
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => InputAction::Quit,
+        (KeyCode::Esc, _) => InputAction::DashboardPanelClose,
+        (KeyCode::PageUp, _) | (KeyCode::Up, _) => InputAction::DashboardPanelScrollUp,
+        (KeyCode::PageDown, _) | (KeyCode::Down, _) => InputAction::DashboardPanelScrollDown,
         _ => InputAction::Forward,
     }
 }
@@ -245,35 +267,39 @@ mod tests {
     use super::*;
 
     fn map_default(key: KeyEvent) -> InputAction {
-        map_key(key, false, false, false, false, false, false, false)
+        map_key(key, false, false, false, false, false, false, false, false)
     }
 
     fn map_approval(key: KeyEvent) -> InputAction {
-        map_key(key, true, false, false, false, false, false, false)
+        map_key(key, true, false, false, false, false, false, false, false)
     }
 
     fn map_palette(key: KeyEvent) -> InputAction {
-        map_key(key, false, true, false, false, false, false, false)
+        map_key(key, false, true, false, false, false, false, false, false)
     }
 
     fn map_search(key: KeyEvent) -> InputAction {
-        map_key(key, false, false, true, false, false, false, false)
+        map_key(key, false, false, true, false, false, false, false, false)
     }
 
     fn map_logs(key: KeyEvent) -> InputAction {
-        map_key(key, false, false, false, false, false, true, false)
+        map_key(key, false, false, false, false, false, false, true, false)
     }
 
     fn map_help(key: KeyEvent) -> InputAction {
-        map_key(key, false, false, false, true, false, false, false)
+        map_key(key, false, false, false, true, false, false, false, false)
+    }
+
+    fn map_dashboard_panel(key: KeyEvent) -> InputAction {
+        map_key(key, false, false, false, false, true, false, false, false)
     }
 
     fn map_tool_detail(key: KeyEvent) -> InputAction {
-        map_key(key, false, false, false, false, true, false, false)
+        map_key(key, false, false, false, false, false, true, false, false)
     }
 
     fn map_thread_picker(key: KeyEvent) -> InputAction {
-        map_key(key, false, false, false, false, false, false, true)
+        map_key(key, false, false, false, false, false, false, false, true)
     }
 
     #[test]
@@ -289,9 +315,9 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_b_toggles_sidebar() {
+    fn ctrl_b_toggles_dashboard() {
         let key = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
-        assert_eq!(map_default(key), InputAction::ToggleSidebar);
+        assert_eq!(map_default(key), InputAction::ToggleDashboard);
     }
 
     #[test]
@@ -503,6 +529,40 @@ mod tests {
     fn thread_picker_ctrl_c_quits() {
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(map_thread_picker(key), InputAction::Quit);
+    }
+
+    #[test]
+    fn dashboard_panel_esc_closes() {
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(map_dashboard_panel(key), InputAction::DashboardPanelClose);
+    }
+
+    #[test]
+    fn dashboard_panel_scroll() {
+        let up = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
+        assert_eq!(map_dashboard_panel(up), InputAction::DashboardPanelScrollUp);
+        let down = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
+        assert_eq!(
+            map_dashboard_panel(down),
+            InputAction::DashboardPanelScrollDown
+        );
+    }
+
+    #[test]
+    fn dashboard_panel_arrow_scroll() {
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(map_dashboard_panel(up), InputAction::DashboardPanelScrollUp);
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(
+            map_dashboard_panel(down),
+            InputAction::DashboardPanelScrollDown
+        );
+    }
+
+    #[test]
+    fn dashboard_panel_ctrl_c_quits() {
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(map_dashboard_panel(key), InputAction::Quit);
     }
 
     #[test]

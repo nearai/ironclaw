@@ -35,13 +35,13 @@ use crate::widgets::help_overlay::HelpOverlayWidget;
 use crate::widgets::logs::LogsWidget;
 use crate::widgets::model_picker::{ModelPickerState, ModelPickerWidget};
 use crate::widgets::registry::{BuiltinWidgets, create_default_widgets};
-use crate::widgets::thread_list::engine_thread_index_at;
 use crate::widgets::thread_picker::ThreadPickerWidget;
 use crate::widgets::{
     ActiveTab, AppState, ApprovalRequest, ChatMessage, ContextPressureInfo, CostGuardInfo,
-    EngineThreadInfo, JobInfo, JobStatus, MessageRole, RoutineInfo, SandboxInfo, ScreenSnapshot,
-    SecretsInfo, SelectionPoint, SkillCategory, TextSelection, ThreadStatus, Toast, ToastKind,
-    ToolActivity, ToolCategory, ToolDetailModal, ToolStatus, TuiWidget, TurnCostSummary,
+    DashboardPanelModal, EngineThreadInfo, JobInfo, JobStatus, MessageRole, RoutineInfo,
+    SandboxInfo, ScreenSnapshot, SecretsInfo, SelectionPoint, SkillCategory, TextSelection,
+    ThreadStatus, Toast, ToastKind, ToolActivity, ToolCategory, ToolDetailModal, ToolStatus,
+    TuiWidget, TurnCostSummary,
 };
 
 /// Handle returned when the TUI is started. The main crate uses this to
@@ -139,7 +139,6 @@ async fn run_tui(
     let mut state = AppState {
         version: config.version,
         model: config.model,
-        sidebar_visible: config.layout.sidebar.visible,
         context_window: config.context_window,
         welcome_tools: config.tools,
         welcome_skills: config.skills,
@@ -260,7 +259,11 @@ async fn run_tui(
         // Wait for event
         tokio::select! {
             _ = tick_interval.tick() => {
-                // Tick — just triggers a re-render
+                // Tick: advance counters used by spinners and animations
+                state.tick_count = state.tick_count.wrapping_add(1);
+                if state.messages.is_empty() && state.welcome_reveal_frame < u16::MAX {
+                    state.welcome_reveal_frame = state.welcome_reveal_frame.saturating_add(1);
+                }
             }
             event = event_rx.recv() => {
                 let Some(event) = event else {
@@ -364,8 +367,9 @@ async fn handle_event(
             let approval_active = state.pending_approval.is_some();
             let help_active = state.help_visible;
             let tool_detail_active = state.tool_detail_modal.is_some();
+            let dashboard_panel_active = state.expanded_dashboard_panel.is_some();
 
-            if !approval_active && !help_active && !tool_detail_active {
+            if !approval_active && !help_active && !tool_detail_active && !dashboard_panel_active {
                 widgets.input_box.insert_text(&text);
 
                 if state.history_index.is_some() {
@@ -456,12 +460,16 @@ async fn handle_event(
                     let _ = msg_tx.send(TuiUserMessage::text_only("/quit")).await;
                     state.should_quit = true;
                 }
-                InputAction::ToggleSidebar => {
-                    state.sidebar_visible = !state.sidebar_visible;
+                InputAction::ToggleDashboard => {
+                    state.active_tab = match state.active_tab {
+                        ActiveTab::Dashboard => ActiveTab::Conversation,
+                        _ => ActiveTab::Dashboard,
+                    };
                 }
                 InputAction::ToggleLogs => {
                     state.active_tab = match state.active_tab {
-                        ActiveTab::Conversation => ActiveTab::Logs,
+                        ActiveTab::Conversation => ActiveTab::Dashboard,
+                        ActiveTab::Dashboard => ActiveTab::Logs,
                         ActiveTab::Logs => ActiveTab::Conversation,
                     };
                 }
@@ -470,6 +478,7 @@ async fn handle_event(
                         let page = state.conversation_height.max(2).saturating_sub(2) as i16;
                         widgets.conversation.scroll(state, -page);
                     }
+                    ActiveTab::Dashboard => {}
                     ActiveTab::Logs => {
                         LogsWidget::scroll(state, -5);
                     }
@@ -479,6 +488,7 @@ async fn handle_event(
                         let page = state.conversation_height.max(2).saturating_sub(2) as i16;
                         widgets.conversation.scroll(state, page);
                     }
+                    ActiveTab::Dashboard => {}
                     ActiveTab::Logs => {
                         LogsWidget::scroll(state, 5);
                     }
@@ -802,6 +812,19 @@ async fn handle_event(
                         modal.scroll = modal.scroll.saturating_sub(5);
                     }
                 }
+                InputAction::DashboardPanelClose => {
+                    state.expanded_dashboard_panel = None;
+                }
+                InputAction::DashboardPanelScrollUp => {
+                    if let Some(ref mut modal) = state.expanded_dashboard_panel {
+                        modal.scroll = modal.scroll.saturating_add(3);
+                    }
+                }
+                InputAction::DashboardPanelScrollDown => {
+                    if let Some(ref mut modal) = state.expanded_dashboard_panel {
+                        modal.scroll = modal.scroll.saturating_sub(3);
+                    }
+                }
                 InputAction::LogFilter(level) => {
                     state.log_level_filter = level;
                 }
@@ -896,7 +919,13 @@ async fn handle_event(
         }
 
         TuiEvent::MouseScroll(delta) => {
-            if let Some(ref mut modal) = state.tool_detail_modal {
+            if let Some(ref mut modal) = state.expanded_dashboard_panel {
+                if delta < 0 {
+                    modal.scroll = modal.scroll.saturating_add(delta.unsigned_abs());
+                } else {
+                    modal.scroll = modal.scroll.saturating_sub(delta as u16);
+                }
+            } else if let Some(ref mut modal) = state.tool_detail_modal {
                 if delta < 0 {
                     modal.scroll = modal.scroll.saturating_add(delta.unsigned_abs());
                 } else {
@@ -924,11 +953,24 @@ async fn handle_event(
                     ActiveTab::Conversation => {
                         widgets.conversation.scroll(state, delta);
                     }
+                    ActiveTab::Dashboard => {}
                     ActiveTab::Logs => {
                         LogsWidget::scroll(state, delta);
                     }
                 }
             }
+        }
+
+        TuiEvent::SkillActivated { skill_names } => {
+            for name in skill_names {
+                if !state.activated_skills.contains(&name) {
+                    state.activated_skills.push(name);
+                }
+            }
+        }
+
+        TuiEvent::UpdateDashboard(data) => {
+            state.dashboard = *data;
         }
 
         TuiEvent::Resize(_, _) => {
@@ -937,6 +979,10 @@ async fn handle_event(
 
         TuiEvent::Tick => {
             state.tick_count = state.tick_count.wrapping_add(1);
+            // Advance welcome animation (saturates at u16::MAX)
+            if state.messages.is_empty() && state.welcome_reveal_frame < u16::MAX {
+                state.welcome_reveal_frame = state.welcome_reveal_frame.saturating_add(1);
+            }
         }
 
         TuiEvent::Thinking(msg) => {
@@ -1046,7 +1092,16 @@ async fn handle_event(
         }
 
         TuiEvent::Status(msg) => {
-            state.status_text = msg;
+            let trimmed = msg.trim();
+            if trimmed.eq_ignore_ascii_case("done")
+                || trimmed.eq_ignore_ascii_case("interrupted")
+                || trimmed.eq_ignore_ascii_case("rejected")
+            {
+                state.status_text.clear();
+                state.is_streaming = false;
+            } else {
+                state.status_text = msg;
+            }
         }
 
         TuiEvent::Response { content, thread_id } => {
@@ -1441,6 +1496,7 @@ fn resolve_key_action(
     let palette_active = state.command_palette.visible || state.model_picker.visible;
     let search_active = state.search.active;
     let help_active = state.help_visible;
+    let dashboard_panel_active = state.expanded_dashboard_panel.is_some();
     let tool_detail_active = state.tool_detail_modal.is_some();
     let logs_active = state.active_tab == ActiveTab::Logs;
     let thread_picker_active = state.pending_thread_picker.is_some();
@@ -1451,6 +1507,7 @@ fn resolve_key_action(
         palette_active,
         search_active,
         help_active,
+        dashboard_panel_active,
         tool_detail_active,
         logs_active,
         thread_picker_active,
@@ -1465,6 +1522,7 @@ fn resolve_key_action(
         || palette_active
         || search_active
         || help_active
+        || dashboard_panel_active
         || tool_detail_active
         || thread_picker_active
     {
@@ -1730,22 +1788,32 @@ async fn handle_mouse_click(
         return;
     }
 
+    // Click outside expanded dashboard panel closes it
+    if state.expanded_dashboard_panel.is_some() {
+        let modal_area = dashboard_panel_modal_area(terminal);
+        if !rect_contains(modal_area, column, row) {
+            state.expanded_dashboard_panel = None;
+            state.text_selection = None;
+            return;
+        }
+        state.text_selection = None;
+        return;
+    }
+
     if let Some(tab) = tab_at(terminal, layout, state, column, row) {
         state.active_tab = tab;
         state.text_selection = None;
         return;
     }
 
-    if state.tool_detail_modal.is_none()
-        && let Some(area) = thread_list_sidebar_area(terminal, layout, state)
-        && let Some(index) = engine_thread_index_at(area, state, column, row)
-        && let Some(thread) = state.engine_threads.get(index)
-    {
-        let _ = msg_tx
-            .send(TuiUserMessage::open_engine_thread_detail(thread.id.clone()))
-            .await;
-        state.text_selection = None;
-        return;
+    // Click on a dashboard panel opens the expanded modal
+    if state.active_tab == ActiveTab::Dashboard {
+        let main_area = frame_sections(terminal, layout, state)[2];
+        if let Some(panel) = dashboard_panel_at(&widgets_theme(layout), main_area, column, row) {
+            state.expanded_dashboard_panel = Some(DashboardPanelModal { panel, scroll: 0 });
+            state.text_selection = None;
+            return;
+        }
     }
 
     if let Some(bounds) = selectable_area_at(terminal, layout, state, column, row) {
@@ -1847,10 +1915,15 @@ fn tab_at(
         return None;
     }
 
+    // Tab layout: " ◦ Chat  ■ Dashboard  ▸ Logs [badge]"
+    //              0 1234567 89012345678901 234567890...
+    // Ranges are generous to cover icon + label + optional badge.
     let relative_x = column.saturating_sub(tab_bar_area.x);
-    if (2..6).contains(&relative_x) {
+    if relative_x < 8 {
         Some(ActiveTab::Conversation)
-    } else if (8..12).contains(&relative_x) {
+    } else if (8..22).contains(&relative_x) {
+        Some(ActiveTab::Dashboard)
+    } else if relative_x >= 22 {
         Some(ActiveTab::Logs)
     } else {
         None
@@ -1864,6 +1937,14 @@ fn selectable_area_at(
     column: u16,
     row: u16,
 ) -> Option<Rect> {
+    if state.expanded_dashboard_panel.is_some() {
+        let inner = tool_detail_inner_area(dashboard_panel_modal_area(size));
+        if rect_contains(inner, column, row) {
+            return Some(inner);
+        }
+        return None;
+    }
+
     if state.tool_detail_modal.is_some() {
         let inner = tool_detail_inner_area(tool_detail_modal_area(size));
         if rect_contains(inner, column, row) {
@@ -1873,58 +1954,7 @@ fn selectable_area_at(
     }
 
     let main_area = frame_sections(size, layout, state)[2];
-    let selectable = match state.active_tab {
-        ActiveTab::Logs => main_area,
-        ActiveTab::Conversation => {
-            if state.sidebar_visible && main_area.width > 40 {
-                let sidebar_width =
-                    (main_area.width as u32 * layout.sidebar.effective_width() as u32 / 100) as u16;
-                let conversation_width = main_area.width.saturating_sub(sidebar_width + 1);
-
-                Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([
-                        Constraint::Length(conversation_width),
-                        Constraint::Length(1),
-                        Constraint::Length(sidebar_width),
-                    ])
-                    .split(main_area)[0]
-            } else {
-                main_area
-            }
-        }
-    };
-
-    rect_contains(selectable, column, row).then_some(selectable)
-}
-
-fn thread_list_sidebar_area(size: Rect, layout: &TuiLayout, state: &AppState) -> Option<Rect> {
-    if state.active_tab != ActiveTab::Conversation || !state.sidebar_visible {
-        return None;
-    }
-
-    let main_area = frame_sections(size, layout, state)[2];
-    if main_area.width <= 40 {
-        return None;
-    }
-
-    let sidebar_width =
-        (main_area.width as u32 * layout.sidebar.effective_width() as u32 / 100) as u16;
-    let conversation_width = main_area.width.saturating_sub(sidebar_width + 1);
-    let horizontal = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(conversation_width),
-            Constraint::Length(1),
-            Constraint::Length(sidebar_width),
-        ])
-        .split(main_area);
-    let sidebar_area = horizontal[2];
-    let sidebar_split = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(sidebar_area);
-    Some(sidebar_split[1])
+    rect_contains(main_area, column, row).then_some(main_area)
 }
 
 fn approval_action_at(
@@ -1981,6 +2011,37 @@ fn thread_picker_index_at(
     let thread_index = scroll_offset + row_index;
     picker.threads.get(thread_index)?;
     Some(thread_index)
+}
+
+fn dashboard_panel_modal_area(size: Rect) -> Rect {
+    let width = (size.width * 3 / 4)
+        .max(40)
+        .min(size.width.saturating_sub(4));
+    let height = (size.height * 3 / 4)
+        .max(10)
+        .min(size.height.saturating_sub(4));
+    let x = (size.width.saturating_sub(width)) / 2;
+    let y = (size.height.saturating_sub(height)) / 2;
+    Rect::new(x, y, width, height)
+}
+
+fn dashboard_panel_at(
+    theme: &crate::theme::Theme,
+    main_area: Rect,
+    column: u16,
+    row: u16,
+) -> Option<crate::widgets::DashboardPanel> {
+    let widget = crate::widgets::dashboard::DashboardWidget::new(theme.clone());
+    for (panel, area) in widget.panel_areas(main_area) {
+        if rect_contains(area, column, row) {
+            return Some(panel);
+        }
+    }
+    None
+}
+
+fn widgets_theme(layout: &TuiLayout) -> crate::theme::Theme {
+    layout.resolve_theme()
 }
 
 fn tool_detail_modal_area(size: Rect) -> Rect {
@@ -2101,49 +2162,15 @@ fn render_frame(
             // Logs tab takes the full main area (no sidebar)
             widgets.logs.render(main_area, frame.buffer_mut(), state);
         }
+        ActiveTab::Dashboard => {
+            widgets
+                .dashboard
+                .render(main_area, frame.buffer_mut(), state);
+        }
         ActiveTab::Conversation => {
-            if state.sidebar_visible && main_area.width > 40 {
-                let sidebar_width =
-                    (main_area.width as u32 * layout.sidebar.effective_width() as u32 / 100) as u16;
-                let conversation_width = main_area.width.saturating_sub(sidebar_width + 1);
-
-                let horizontal = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([
-                        Constraint::Length(conversation_width),
-                        Constraint::Length(1), // border
-                        Constraint::Length(sidebar_width),
-                    ])
-                    .split(main_area);
-
-                let conv_area = horizontal[0];
-                let border_area = horizontal[1];
-                let sidebar_area = horizontal[2];
-
-                widgets
-                    .conversation
-                    .render(conv_area, frame.buffer_mut(), state);
-
-                // Vertical border
-                render_vertical_border(frame, border_area, layout);
-
-                // Split sidebar into tool panel and thread list
-                let sidebar_split = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .split(sidebar_area);
-
-                widgets
-                    .tool_panel
-                    .render(sidebar_split[0], frame.buffer_mut(), state);
-                widgets
-                    .thread_list
-                    .render(sidebar_split[1], frame.buffer_mut(), state);
-            } else {
-                widgets
-                    .conversation
-                    .render(main_area, frame.buffer_mut(), state);
-            }
+            widgets
+                .conversation
+                .render(main_area, frame.buffer_mut(), state);
         }
     }
 
@@ -2209,6 +2236,13 @@ fn render_frame(
             .render_picker(modal_area, frame.buffer_mut(), state);
     }
 
+    // Expanded dashboard panel modal (click on panel)
+    if state.expanded_dashboard_panel.is_some() {
+        let theme = layout.resolve_theme();
+        let widget = crate::widgets::dashboard::DashboardWidget::new(theme);
+        widget.render_expanded_panel(size, frame.buffer_mut(), state);
+    }
+
     // Tool detail modal (Ctrl+E)
     if state.tool_detail_modal.is_some() {
         render_tool_detail_modal(frame, size, state, layout);
@@ -2254,19 +2288,6 @@ fn update_input_overlays_from_input(
         state.command_palette.open(filter);
     } else {
         state.command_palette.close();
-    }
-}
-
-/// Render a vertical border line.
-fn render_vertical_border(frame: &mut ratatui::Frame<'_>, area: Rect, layout: &TuiLayout) {
-    let theme = layout.resolve_theme();
-    let border_style = theme.border_style();
-
-    for y in area.y..area.y + area.height {
-        if let Some(cell) = frame.buffer_mut().cell_mut((area.x, y)) {
-            cell.set_symbol("\u{2502}");
-            cell.set_style(border_style);
-        }
     }
 }
 
@@ -2791,58 +2812,13 @@ mod tests {
     async fn mouse_click_switches_active_tab() {
         let mut state = AppState::default();
 
-        apply_event(&mut state, TuiEvent::MouseClick { column: 9, row: 0 }).await;
+        // Column 12 hits "Dashboard" in: " ◦ Chat  ■ Dashboard  ▸ Logs"
+        apply_event(&mut state, TuiEvent::MouseClick { column: 12, row: 0 }).await;
+        assert_eq!(state.active_tab, ActiveTab::Dashboard);
 
+        // Column 25 hits "Logs"
+        apply_event(&mut state, TuiEvent::MouseClick { column: 25, row: 0 }).await;
         assert_eq!(state.active_tab, ActiveTab::Logs);
-    }
-
-    #[tokio::test]
-    async fn mouse_click_engine_thread_row_requests_detail_modal_data() {
-        let now = chrono::Utc::now();
-        let mut state = AppState {
-            engine_threads: vec![EngineThreadInfo {
-                id: "eng-1".to_string(),
-                goal: "Check Hacker News hourly".to_string(),
-                thread_type: "Mission".to_string(),
-                status: ThreadStatus::Active,
-                step_count: 5,
-                total_tokens: 4_096,
-                started_at: Some(now - chrono::Duration::minutes(9)),
-                updated_at: Some(now),
-            }],
-            ..Default::default()
-        };
-
-        let layout = TuiLayout::default();
-        let area = thread_list_sidebar_area(Rect::new(0, 0, 80, 24), &layout, &state)
-            .expect("thread list area should exist");
-        let click = (area.y..area.y + area.height)
-            .find_map(|row| {
-                (area.x..area.x + area.width).find_map(|column| {
-                    (engine_thread_index_at(area, &state, column, row) == Some(0))
-                        .then_some((column, row))
-                })
-            })
-            .expect("expected a clickable engine thread row");
-
-        let messages = apply_event_and_take_messages(
-            &mut state,
-            TuiEvent::MouseClick {
-                column: click.0,
-                row: click.1,
-            },
-        )
-        .await;
-
-        assert_eq!(messages.len(), 1);
-        assert!(messages[0].text.is_empty());
-        assert!(messages[0].thread_id.is_none());
-        match &messages[0].ui_action {
-            Some(crate::event::TuiUiAction::OpenEngineThreadDetail { thread_id }) => {
-                assert_eq!(thread_id, "eng-1");
-            }
-            other => panic!("expected engine thread detail action, got {other:?}"),
-        }
     }
 
     #[tokio::test]
@@ -3349,5 +3325,69 @@ mod tests {
             state.recent_tools[0].result_preview.as_deref(),
             Some("preview-2")
         );
+    }
+
+    #[tokio::test]
+    async fn done_status_clears_spinner() {
+        let mut state = AppState::default();
+        state.status_text = "Thinking...".to_string();
+        state.is_streaming = true;
+
+        apply_event(&mut state, TuiEvent::Status("Done".into())).await;
+
+        assert!(
+            state.status_text.is_empty(),
+            "status_text should be cleared on Done"
+        );
+        assert!(!state.is_streaming, "is_streaming should be false on Done");
+    }
+
+    #[tokio::test]
+    async fn interrupted_status_clears_spinner() {
+        let mut state = AppState::default();
+        state.status_text = "Running shell...".to_string();
+
+        apply_event(&mut state, TuiEvent::Status("Interrupted".into())).await;
+
+        assert!(state.status_text.is_empty());
+        assert!(!state.is_streaming);
+    }
+
+    #[tokio::test]
+    async fn non_terminal_status_sets_status_text() {
+        let mut state = AppState::default();
+
+        apply_event(&mut state, TuiEvent::Status("Compacting context...".into())).await;
+
+        assert_eq!(state.status_text, "Compacting context...");
+    }
+
+    #[tokio::test]
+    async fn skill_activated_event_tracks_unique_skills() {
+        let mut state = AppState::default();
+
+        apply_event(
+            &mut state,
+            TuiEvent::SkillActivated {
+                skill_names: vec!["apple".to_string(), "creative".to_string()],
+            },
+        )
+        .await;
+
+        assert_eq!(state.activated_skills.len(), 2);
+        assert!(state.activated_skills.contains(&"apple".to_string()));
+        assert!(state.activated_skills.contains(&"creative".to_string()));
+
+        // Send overlapping names — should dedup
+        apply_event(
+            &mut state,
+            TuiEvent::SkillActivated {
+                skill_names: vec!["creative".to_string(), "research".to_string()],
+            },
+        )
+        .await;
+
+        assert_eq!(state.activated_skills.len(), 3);
+        assert!(state.activated_skills.contains(&"research".to_string()));
     }
 }
