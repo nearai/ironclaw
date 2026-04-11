@@ -4,7 +4,7 @@
 
 use clap::Subcommand;
 
-use crate::config::profile::{list_profiles, ProfileInfo, BUILTIN_PROFILES};
+use crate::config::profile::{BUILTIN_PROFILES, ProfileInfo, list_profiles};
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ProfileCommand {
@@ -62,8 +62,13 @@ fn builtin_description(name: &str) -> Option<String> {
 
 /// Read the description from a user-defined profile TOML file.
 fn user_profile_description(path: &std::path::Path) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
-    extract_description(&content)
+    match std::fs::read_to_string(path) {
+        Ok(content) => extract_description(&content),
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "Failed to read user profile for description");
+            None
+        }
+    }
 }
 
 /// Get the description for a profile, checking built-in first then file.
@@ -84,21 +89,25 @@ fn cmd_list(json: bool) -> anyhow::Result<()> {
         .map(|s| s.to_ascii_lowercase());
 
     if json {
-        let entries: Vec<serde_json::Value> = profiles
+        #[derive(serde::Serialize)]
+        struct ProfileEntry<'a> {
+            name: &'a str,
+            builtin: bool,
+            active: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            path: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            description: Option<String>,
+        }
+
+        let entries: Vec<ProfileEntry> = profiles
             .iter()
-            .map(|p| {
-                let mut v = serde_json::json!({
-                    "name": p.name,
-                    "builtin": p.builtin,
-                    "active": active_name.as_deref() == Some(p.name.as_str()),
-                });
-                if let Some(path) = &p.path {
-                    v["path"] = serde_json::Value::String(path.display().to_string());
-                }
-                if let Some(desc) = profile_description(p) {
-                    v["description"] = serde_json::Value::String(desc);
-                }
-                v
+            .map(|p| ProfileEntry {
+                name: &p.name,
+                builtin: p.builtin,
+                active: active_name.as_deref() == Some(p.name.as_str()),
+                path: p.path.as_ref().map(|path| path.display().to_string()),
+                description: profile_description(p),
             })
             .collect();
         println!(
