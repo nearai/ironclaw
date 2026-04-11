@@ -733,6 +733,8 @@ def run_loop(context, goal, actions, state, config):
                     action_name = r.get("action_name", call.get("name", ""))
                     output = r.get("output")
                     output_str = str(output) if output is not None else "[no output]"
+                    if r.get("is_error", False):
+                        output_str = "[ACTION FAILED] " + action_name + ": " + output_str
                 else:
                     action_name = call.get("name", "unknown")
                     output_str = "[execution skipped]"
@@ -743,6 +745,10 @@ def run_loop(context, goal, actions, state, config):
                     action_name=action_name,
                     action_call_id=call_id,
                 )
+
+            # TODO(#2325): track consecutive action errors here, mirroring the
+            # code error tracking above (lines 623-634). Needs a unified
+            # progress-tracking design across both execution paths.
 
             # Check results for auth/approval interrupts
             for r_idx, r in enumerate(results):
