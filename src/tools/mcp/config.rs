@@ -173,19 +173,8 @@ impl McpServerConfig {
                     });
                 }
 
-                // Remote servers must use HTTPS unless insecure HTTP is explicitly allowed
-                // (e.g. platform-managed containers communicating over a private Docker network).
-                let is_localhost = is_localhost_url(&self.url);
-                let allow_insecure = std::env::var("IRONCLAW_ALLOW_INSECURE_HTTP")
-                    .is_ok_and(|v| v == "true" || v == "1");
-                if !is_localhost
-                    && !allow_insecure
-                    && !self.url.to_lowercase().starts_with("https://")
-                {
-                    return Err(ConfigError::InvalidConfig {
-                        reason: "Remote MCP servers must use HTTPS".to_string(),
-                    });
-                }
+                // HTTP is allowed — this is a forked build used in platform-managed
+                // deployments where containers communicate over private Docker networks.
             }
             EffectiveTransport::Stdio { command, .. } => {
                 if command.is_empty() {
