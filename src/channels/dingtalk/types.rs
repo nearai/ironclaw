@@ -12,20 +12,36 @@ pub struct StreamEndpointResponse {
 }
 
 /// A message frame received over the Stream WebSocket.
+///
+/// Per the DingTalk Stream protocol, `topic` and `messageId` live inside
+/// the `headers` map — NOT as top-level fields. Helper methods extract them.
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamFrame {
-    /// "SYSTEM" for control, "CALLBACK" for messages
+    /// "SYSTEM" for control, "CALLBACK" for messages, "EVENT" for events
     #[serde(rename = "type")]
     pub frame_type: Option<String>,
-    /// Subscription type: "/v1.0/im/bot/messages/get" etc.
-    pub topic: Option<String>,
-    /// Unique message ID for acknowledgement
-    pub message_id: Option<String>,
     /// JSON-encoded payload
     pub data: Option<String>,
-    /// Header fields
+    /// Protocol headers containing topic, messageId, contentType, time, etc.
+    #[serde(default)]
     pub headers: Option<serde_json::Value>,
+}
+
+impl StreamFrame {
+    pub fn topic(&self) -> Option<&str> {
+        self.headers
+            .as_ref()
+            .and_then(|h| h.get("topic"))
+            .and_then(|v| v.as_str())
+    }
+
+    pub fn message_id(&self) -> Option<&str> {
+        self.headers
+            .as_ref()
+            .and_then(|h| h.get("messageId"))
+            .and_then(|v| v.as_str())
+    }
 }
 
 /// DingTalk bot callback message payload (inside StreamFrame.data).

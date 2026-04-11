@@ -211,18 +211,19 @@ fn process_callback(
     dedup: &Arc<Mutex<DedupFilter>>,
     config: &DingTalkConfig,
 ) -> Option<String> {
+    let msg_id_for_ack = frame.message_id().map(String::from);
     let data_str = frame.data.as_ref()?;
     let payload: BotCallbackPayload = match serde_json::from_str(data_str) {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("Failed to parse DingTalk callback: {e}");
-            return frame.message_id.clone();
+            return msg_id_for_ack;
         }
     };
 
     let mut content = extract_content(&payload);
     if content.is_empty() {
-        return frame.message_id.clone();
+        return msg_id_for_ack;
     }
 
     // ── Quoted / reply message prefix ─────────────────────────────────────────
@@ -265,7 +266,7 @@ fn process_callback(
         if let Ok(mut guard) = dedup.try_lock() {
             if guard.is_duplicate(dingtalk_msg_id) {
                 tracing::debug!(msg_id = dingtalk_msg_id, "DingTalk: dropping duplicate");
-                return frame.message_id.clone();
+                return msg_id_for_ack.clone();
             }
         }
     }
@@ -278,7 +279,7 @@ fn process_callback(
             is_group,
             "DingTalk: message blocked by access control"
         );
-        return frame.message_id.clone();
+        return msg_id_for_ack;
     }
 
     // ── Filter 3: @mention gate ────────────────────────────────────────────
@@ -287,7 +288,7 @@ fn process_callback(
             conversation_id,
             "DingTalk: group message dropped (bot not mentioned)"
         );
-        return frame.message_id.clone();
+        return msg_id_for_ack;
     }
 
     let msg_id = Uuid::new_v4();
@@ -335,19 +336,30 @@ fn process_callback(
         tracing::warn!("DingTalk message channel full, dropping message");
     }
 
-    frame.message_id.clone()
+    msg_id_for_ack
 }
 
-/// Build an ACK response for a received message.
-fn build_ack(message_id: &str) -> String {
+/// Build an ACK response per the DingTalk Stream protocol.
+///
+/// The `messageId` must be echoed back inside `headers`, and `data` carries
+/// the response payload as a JSON string.
+fn build_ack(message_id: &str, data: &str) -> String {
     serde_json::json!({
         "code": 200,
-        "headers": {},
+        "headers": {
+            "contentType": "application/json",
+            "messageId": message_id,
+        },
         "message": "OK",
-        "data": message_id,
+        "data": data,
     })
     .to_string()
 }
+
+/// ACK data for bot message callbacks (server ignores the content).
+const CALLBACK_ACK_DATA: &str = r#"{"response": null}"#;
+/// ACK data for event subscriptions.
+const EVENT_ACK_DATA: &str = r#"{"status": "SUCCESS", "message": "ok"}"#;
 
 /// Main Stream listener loop with automatic, bounded reconnection.
 ///
@@ -447,23 +459,34 @@ pub async fn run_stream_listener(
 
                     match frame.frame_type.as_deref() {
                         Some("SYSTEM") => {
-                            tracing::debug!("Stream system message: {:?}", frame.data);
-                            // A "disconnect" system frame means the server is asking
-                            // us to reconnect cleanly.
-                            if frame
-                                .data
-                                .as_deref()
-                                .map(|d| d.contains("disconnect"))
-                                .unwrap_or(false)
-                            {
-                                tracing::debug!(
-                                    "DingTalk: server requested disconnect, will reconnect"
-                                );
-                                break;
+                            let topic = frame.topic().unwrap_or("");
+                            match topic {
+                                "ping" => {
+                                    // Echo back the opaque value per protocol spec.
+                                    let data = frame.data.as_deref().unwrap_or("{}");
+                                    let mid = frame.message_id().unwrap_or("");
+                                    let ack = build_ack(mid, data);
+                                    if let Err(e) =
+                                        ws_sink.send(WsMessage::Text(ack.into())).await
+                                    {
+                                        tracing::warn!(error = %e, "Failed to send ping ACK");
+                                        break;
+                                    }
+                                    tracing::debug!("DingTalk: responded to system ping");
+                                }
+                                "disconnect" => {
+                                    tracing::info!(
+                                        "DingTalk: server requested disconnect, will reconnect"
+                                    );
+                                    break;
+                                }
+                                _ => {
+                                    tracing::debug!(topic, "DingTalk: unknown system topic");
+                                }
                             }
                         }
                         Some("CALLBACK") => {
-                            match frame.topic.as_deref() {
+                            match frame.topic() {
                                 Some(BOT_MESSAGE_TOPIC) => {
                                     if let Some(msg_id) = process_callback(
                                         &frame,
@@ -472,19 +495,17 @@ pub async fn run_stream_listener(
                                         &dedup,
                                         &config,
                                     ) {
-                                        let ack = build_ack(&msg_id);
+                                        let ack = build_ack(&msg_id, CALLBACK_ACK_DATA);
                                         if let Err(e) =
                                             ws_sink.send(WsMessage::Text(ack.into())).await
                                         {
-                                            tracing::debug!(error = %e, "Failed to send ACK");
+                                            tracing::warn!(error = %e, "Failed to send ACK");
                                             break;
                                         }
                                     }
                                 }
                                 Some(CARD_CALLBACK_TOPIC) => {
-                                    // Handle card interaction callbacks (e.g. stop button).
-                                    // Always ACK, optionally inject a /stop message.
-                                    if let Some(msg_id) = &frame.message_id {
+                                    if let Some(msg_id) = frame.message_id() {
                                         if let Some(ref data_str) = frame.data {
                                             if let Ok(data) =
                                                 serde_json::from_str::<serde_json::Value>(data_str)
@@ -522,11 +543,11 @@ pub async fn run_stream_listener(
                                             }
                                         }
 
-                                        let ack = build_ack(msg_id);
+                                        let ack = build_ack(msg_id, CALLBACK_ACK_DATA);
                                         if let Err(e) =
                                             ws_sink.send(WsMessage::Text(ack.into())).await
                                         {
-                                            tracing::debug!(
+                                            tracing::warn!(
                                                 error = %e,
                                                 "Failed to send card callback ACK"
                                             );
@@ -536,14 +557,27 @@ pub async fn run_stream_listener(
                                 }
                                 _ => {
                                     tracing::debug!(
-                                        "Ignoring callback for topic: {:?}",
-                                        frame.topic
+                                        topic = ?frame.topic(),
+                                        "Ignoring callback for unknown topic"
                                     );
                                 }
                             }
                         }
+                        Some("EVENT") => {
+                            // Event subscriptions — ACK to prevent re-delivery.
+                            if let Some(msg_id) = frame.message_id() {
+                                let ack = build_ack(msg_id, EVENT_ACK_DATA);
+                                if let Err(e) =
+                                    ws_sink.send(WsMessage::Text(ack.into())).await
+                                {
+                                    tracing::warn!(error = %e, "Failed to send event ACK");
+                                    break;
+                                }
+                            }
+                            tracing::debug!(topic = ?frame.topic(), "DingTalk: event received (ACK sent)");
+                        }
                         _ => {
-                            tracing::debug!("Unknown frame type: {:?}", frame.frame_type);
+                            tracing::debug!(frame_type = ?frame.frame_type, "Unknown frame type");
                         }
                     }
                 }
