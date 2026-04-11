@@ -4359,6 +4359,7 @@ mod tests {
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
                 engine_v2: true,
+                platform_managed: false,
             },
             deps,
             channels,

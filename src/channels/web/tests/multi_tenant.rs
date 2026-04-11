@@ -990,6 +990,9 @@ mod admin_tool_policy {
             auth_manager: None,
             frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
+            standby_control: None,
+            server_started: std::sync::atomic::AtomicBool::new(false),
+            runtime_overrides: crate::channels::web::server::GatewayRuntimeOverrides::default(),
         })
     }
 

@@ -4488,6 +4488,9 @@ mod tests {
             near_rpc_url: None,
             near_network: None,
             oauth_sweep_shutdown: None,
+            auth_manager: None,
+            frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            tool_dispatcher: None,
             standby_control: Some(control),
             runtime_overrides: GatewayRuntimeOverrides::default(),
         })
