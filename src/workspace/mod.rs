@@ -544,6 +544,10 @@ const BOOTSTRAP_SEED: &str = include_str!("seeds/BOOTSTRAP.md");
 pub struct Workspace {
     /// User identifier (from channel). All writes go to this scope.
     user_id: String,
+    /// Durable owner scope for identity files (SOUL.md, AGENTS.md, etc.).
+    /// Set once at creation and preserved across `scoped_to_user()` calls so
+    /// the agent's persona is consistent regardless of which user is chatting.
+    owner_id: String,
     /// User identifiers for read operations. Includes `user_id` as the first
     /// element, plus any additional scopes added via `with_additional_read_scopes`.
     read_user_ids: Vec<String>,
@@ -583,6 +587,7 @@ impl Workspace {
         let memory_layers = crate::workspace::layer::MemoryLayer::default_for_user(&user_id_str);
         Self {
             read_user_ids: vec![user_id_str.clone()],
+            owner_id: user_id_str.clone(),
             user_id: user_id_str,
             agent_id: None,
             storage: WorkspaceStorage::Repo(Repository::new(pool)),
@@ -605,6 +610,7 @@ impl Workspace {
         let memory_layers = crate::workspace::layer::MemoryLayer::default_for_user(&user_id_str);
         Self {
             read_user_ids: vec![user_id_str.clone()],
+            owner_id: user_id_str.clone(),
             user_id: user_id_str,
             agent_id: None,
             storage: WorkspaceStorage::Db(db),
@@ -786,6 +792,7 @@ impl Workspace {
         let preserve_flags = user_id == self.user_id;
         Self {
             user_id,
+            owner_id: self.owner_id.clone(),
             read_user_ids,
             agent_id: self.agent_id,
             storage: self.storage.clone(),
@@ -870,9 +877,26 @@ impl Workspace {
     /// [`read`] instead.
     pub async fn read_primary(&self, path: &str) -> Result<MemoryDocument, WorkspaceError> {
         let path = normalize_path(path);
-        self.storage
+        let result = self
+            .storage
             .get_document_by_path(&self.user_id, self.agent_id, &path)
-            .await
+            .await;
+
+        // If not found under the current user and the owner scope differs,
+        // fall back to the owner scope. This ensures agent-level identity files
+        // (SOUL.md, AGENTS.md, etc.) are always accessible regardless of which
+        // channel user is chatting.
+        if result.is_err() && self.owner_id != self.user_id {
+            if let Ok(doc) = self
+                .storage
+                .get_document_by_path(&self.owner_id, self.agent_id, &path)
+                .await
+            {
+                return Ok(doc);
+            }
+        }
+
+        result
     }
 
     /// Get or create a document at the given path.
