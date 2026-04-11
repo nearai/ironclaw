@@ -123,16 +123,33 @@ impl LlmBackend for LlmBridgeAdapter {
 
         // Convert response — check for code blocks (CodeAct/RLM pattern)
         let llm_response = if !response.tool_calls.is_empty() {
+            let mut calls: Vec<ironclaw_engine::ActionCall> = response
+                .tool_calls
+                .iter()
+                .map(|tc| ironclaw_engine::ActionCall {
+                    id: tc.id.clone(),
+                    action_name: tc.name.clone(),
+                    parameters: tc.arguments.clone(),
+                })
+                .collect();
+
+            // Resolve `{{call_id.field}}` template references in tool call
+            // parameters. Some models (e.g. Qwen) emit these when making
+            // parallel tool calls that reference results from prior calls.
+            if calls.iter().any(|c| json_has_template_refs(&c.parameters)) {
+                let tool_results = build_tool_result_index(messages);
+                if !tool_results.is_empty() {
+                    for call in &mut calls {
+                        if json_has_template_refs(&call.parameters) {
+                            call.parameters =
+                                resolve_template_refs_in_json(&call.parameters, &tool_results);
+                        }
+                    }
+                }
+            }
+
             LlmResponse::ActionCalls {
-                calls: response
-                    .tool_calls
-                    .iter()
-                    .map(|tc| ironclaw_engine::ActionCall {
-                        id: tc.id.clone(),
-                        action_name: tc.name.clone(),
-                        parameters: tc.arguments.clone(),
-                    })
-                    .collect(),
+                calls,
                 content: response.content.clone(),
             }
         } else {
@@ -161,6 +178,117 @@ impl LlmBackend for LlmBridgeAdapter {
 
     fn model_name(&self) -> &str {
         self.provider.model_name()
+    }
+}
+
+// ── Tool-call template reference resolution ────────────────
+//
+// Some OpenAI-format models (e.g. Qwen) emit template references like
+// `{{chatcmpl-tool-<id>.<field>}}` in parallel tool call arguments,
+// expecting the runtime to resolve them from prior tool results. We
+// resolve these by looking up the referenced call_id in the conversation
+// history and extracting the requested JSON field from the result.
+
+/// Regex-free lightweight scan for `{{<call_id>.<field>}}` patterns.
+/// Returns the resolved string if all references could be substituted,
+/// or the original string if none were found.
+fn resolve_template_refs(value: &str, tool_results: &[(String, serde_json::Value)]) -> String {
+    if !value.contains("{{") {
+        return value.to_string();
+    }
+
+    let mut result = value.to_string();
+    // Iteratively resolve all `{{..}}` patterns (limit iterations to prevent infinite loops)
+    for _ in 0..50 {
+        let Some(start) = result.find("{{") else {
+            break;
+        };
+        let Some(end) = result[start..].find("}}") else {
+            break;
+        };
+        let end = start + end;
+        let ref_str = &result[start + 2..end]; // e.g. "chatcmpl-tool-9816a462feb22da1.project_id"
+
+        let resolved = if let Some(dot_pos) = ref_str.rfind('.') {
+            let call_id = &ref_str[..dot_pos];
+            let field = &ref_str[dot_pos + 1..];
+            tool_results
+                .iter()
+                .find(|(id, _)| id == call_id)
+                .and_then(|(_, json)| json.get(field))
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+        } else {
+            None
+        };
+
+        match resolved {
+            Some(val) => {
+                result.replace_range(start..end + 2, &val);
+            }
+            None => {
+                // Can't resolve — stop to avoid infinite loop on the same pattern
+                break;
+            }
+        }
+    }
+    result
+}
+
+/// Walk a JSON value and resolve any `{{call_id.field}}` template references
+/// found in string values.
+fn resolve_template_refs_in_json(
+    value: &serde_json::Value,
+    tool_results: &[(String, serde_json::Value)],
+) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(s) => {
+            let resolved = resolve_template_refs(s, tool_results);
+            serde_json::Value::String(resolved)
+        }
+        serde_json::Value::Object(map) => {
+            let resolved: serde_json::Map<String, serde_json::Value> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), resolve_template_refs_in_json(v, tool_results)))
+                .collect();
+            serde_json::Value::Object(resolved)
+        }
+        serde_json::Value::Array(arr) => {
+            let resolved: Vec<serde_json::Value> = arr
+                .iter()
+                .map(|v| resolve_template_refs_in_json(v, tool_results))
+                .collect();
+            serde_json::Value::Array(resolved)
+        }
+        other => other.clone(),
+    }
+}
+
+/// Build a lookup table of (call_id -> parsed JSON) from tool result messages
+/// in the conversation.
+fn build_tool_result_index(messages: &[ThreadMessage]) -> Vec<(String, serde_json::Value)> {
+    messages
+        .iter()
+        .filter(|m| m.role == ironclaw_engine::MessageRole::ActionResult)
+        .filter_map(|m| {
+            let call_id = m.action_call_id.as_deref()?;
+            // Try to parse the content as JSON; fall back to wrapping as a string
+            let json = serde_json::from_str(&m.content)
+                .unwrap_or_else(|_| serde_json::Value::String(m.content.clone()));
+            Some((call_id.to_string(), json))
+        })
+        .collect()
+}
+
+/// Returns true if any string value in the JSON contains `{{` template refs.
+fn json_has_template_refs(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(s) => s.contains("{{"),
+        serde_json::Value::Object(map) => map.values().any(json_has_template_refs),
+        serde_json::Value::Array(arr) => arr.iter().any(json_has_template_refs),
+        _ => false,
     }
 }
 
@@ -851,5 +979,119 @@ And also check the token price:\n\
                  LLM API would reject with 'No tool output found'"
             );
         }
+    }
+
+    // ── Template reference resolution tests ────────────────────
+
+    #[test]
+    fn resolve_template_refs_simple_field() {
+        let tool_results = vec![(
+            "chatcmpl-tool-abc123".to_string(),
+            serde_json::json!({"project_id": "068f67da-49b6", "name": "My Project"}),
+        )];
+
+        let input = "{{chatcmpl-tool-abc123.project_id}}";
+        assert_eq!(resolve_template_refs(input, &tool_results), "068f67da-49b6");
+    }
+
+    #[test]
+    fn resolve_template_refs_embedded_in_string() {
+        let tool_results = vec![(
+            "call-1".to_string(),
+            serde_json::json!({"id": "proj-42"}),
+        )];
+
+        let input = "Project ID is {{call-1.id}} here";
+        assert_eq!(
+            resolve_template_refs(input, &tool_results),
+            "Project ID is proj-42 here"
+        );
+    }
+
+    #[test]
+    fn resolve_template_refs_no_match_unchanged() {
+        let tool_results = vec![(
+            "call-1".to_string(),
+            serde_json::json!({"id": "proj-42"}),
+        )];
+
+        let input = "{{call-unknown.id}}";
+        // Can't resolve — returns unchanged
+        assert_eq!(resolve_template_refs(input, &tool_results), input);
+    }
+
+    #[test]
+    fn resolve_template_refs_no_templates_passthrough() {
+        let input = "plain string with no templates";
+        assert_eq!(resolve_template_refs(input, &[]), input);
+    }
+
+    #[test]
+    fn resolve_template_refs_numeric_value() {
+        let tool_results = vec![(
+            "call-1".to_string(),
+            serde_json::json!({"count": 42}),
+        )];
+
+        let input = "{{call-1.count}}";
+        assert_eq!(resolve_template_refs(input, &tool_results), "42");
+    }
+
+    #[test]
+    fn resolve_template_refs_in_json_deep() {
+        let tool_results = vec![(
+            "chatcmpl-tool-9816".to_string(),
+            serde_json::json!({"project_id": "068f67da"}),
+        )];
+
+        let input = serde_json::json!({
+            "name": "Daily Monitoring",
+            "project_id": "{{chatcmpl-tool-9816.project_id}}",
+            "nested": {
+                "ref": "{{chatcmpl-tool-9816.project_id}}"
+            },
+            "list": ["{{chatcmpl-tool-9816.project_id}}", "static"],
+            "number": 42
+        });
+
+        let resolved = resolve_template_refs_in_json(&input, &tool_results);
+        assert_eq!(resolved["project_id"], "068f67da");
+        assert_eq!(resolved["nested"]["ref"], "068f67da");
+        assert_eq!(resolved["list"][0], "068f67da");
+        assert_eq!(resolved["list"][1], "static");
+        assert_eq!(resolved["number"], 42);
+        assert_eq!(resolved["name"], "Daily Monitoring");
+    }
+
+    #[test]
+    fn build_tool_result_index_from_messages() {
+        let messages = vec![
+            ThreadMessage::user("hello"),
+            ThreadMessage::action_result(
+                "call-1",
+                "project_create",
+                r#"{"project_id": "068f67da", "name": "Test"}"#,
+            ),
+            ThreadMessage::assistant("done"),
+            ThreadMessage::action_result("call-2", "memory_write", "plain text result"),
+        ];
+
+        let index = build_tool_result_index(&messages);
+        assert_eq!(index.len(), 2);
+        assert_eq!(index[0].0, "call-1");
+        assert_eq!(index[0].1["project_id"], "068f67da");
+        assert_eq!(index[1].0, "call-2");
+        // Non-JSON content wrapped as string
+        assert_eq!(index[1].1, serde_json::Value::String("plain text result".to_string()));
+    }
+
+    #[test]
+    fn json_has_template_refs_detection() {
+        assert!(json_has_template_refs(&serde_json::json!("{{call.field}}")));
+        assert!(json_has_template_refs(&serde_json::json!({"a": "{{x.y}}"})));
+        assert!(json_has_template_refs(&serde_json::json!(["{{x.y}}"])));
+        assert!(!json_has_template_refs(&serde_json::json!("no refs")));
+        assert!(!json_has_template_refs(&serde_json::json!(42)));
+        assert!(!json_has_template_refs(&serde_json::json!({"a": "b"})));
     }
 }

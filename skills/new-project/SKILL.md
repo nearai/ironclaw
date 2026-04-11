@@ -1,6 +1,6 @@
 ---
 name: new-project
-version: 0.1.0
+version: 0.2.0
 description: Create and structure a new autonomous project — "/new-project <what project does>"
 activation:
   keywords:
@@ -8,9 +8,6 @@ activation:
     - create project
     - new project
     - set up project
-    - project goals
-    - project metrics
-    - organize work
     - autonomous workspace
     - campaign
     - department
@@ -25,77 +22,72 @@ activation:
     - project-management
     - organization
     - goals
-  max_context_tokens: 2500
+  max_context_tokens: 2000
 ---
 
-# Project Management
+# New Project
 
-A **project** is an autonomous workspace — a domain of work with its own goals, metrics, missions, knowledge base, and agent instructions. Examples: a company, a development project, a marketing campaign, a research initiative.
+Create an autonomous project workspace using `memory_write` and `mission_create`.
 
-## Creating a Project
+## Step-by-step procedure
 
-Use `project_create` to create a new project:
+Given the user's description of what the project does, derive a short slug (lowercase, hyphens, e.g. `ai-research`). Then execute these steps **sequentially** (one tool call at a time — do NOT batch calls that depend on each other):
+
+### 1. Write AGENTS.md
 
 ```
-project_create(name: "Acme Corp", description: "Managing Acme Corp operations", goals: ["Hit $1M ARR by Q3", "Launch mobile app by June"])
+memory_write(target: "projects/{slug}/AGENTS.md", content: "# {Project Name}\n\n{What the agent should know about this project: domain, stakeholders, priorities, constraints, tools/APIs to use.}")
 ```
 
-After creation, set up the workspace:
+This file is loaded into the system prompt for every mission in this project. Make it specific and actionable.
 
-1. **Write AGENTS.md** — project-specific agent instructions:
-   ```
-   memory_write(target: "projects/acme-corp/AGENTS.md", content: "# Acme Corp\n\nYou are managing operations for Acme Corp...\n\n## Key context\n- B2B SaaS company\n- 50 employees\n- Main product: ...")
-   ```
+### 2. Write context.md
 
-2. **Add initial knowledge** — store relevant files under `projects/{slug}/`:
-   ```
-   memory_write(target: "projects/acme-corp/context.md", content: "## Current state\n...")
-   ```
+```
+memory_write(target: "projects/{slug}/context.md", content: "# {Project Name} — Context\n\n## Overview\n{What the project is and why it exists.}\n\n## Current State\n{What is known so far.}")
+```
 
-3. **Define metrics** with evaluation instructions:
-   ```
-   project_update(id: "<project-id>", metrics: [
-     {"name": "Monthly Revenue", "unit": "USD", "target": 83333, "evaluation": "Check projects/acme-corp/revenue.md for latest figures"},
-     {"name": "Active Users", "unit": "users", "target": 10000, "evaluation": "Query the analytics dashboard"}
-   ])
-   ```
+### 3. Write goals.md (if the project has clear goals)
 
-4. **Create missions** scoped to the project — always pass `project_id`:
-   ```
-   mission_create(name: "Revenue tracking", goal: "Check and update revenue metrics weekly", cadence: "weekly", project_id: "<project-id>")
-   mission_create(name: "Customer outreach", goal: "Review and respond to support tickets", cadence: "daily", project_id: "<project-id>")
-   ```
+```
+memory_write(target: "projects/{slug}/goals.md", content: "# Goals\n\n- Goal 1\n- Goal 2\n...")
+```
 
-## Project Structure Convention
+Include measurable targets when possible. If the project would benefit from tracked metrics, add a metrics section:
+
+```
+## Metrics
+
+| Metric | Unit | Target | How to measure |
+|--------|------|--------|----------------|
+| {name} | {unit} | {target} | {evaluation instruction — tell the agent HOW to check this: API call, file to read, command to run} |
+```
+
+### 4. Create missions
+
+Create recurring missions scoped to the project. Use the **slug** as `project_id`:
+
+```
+mission_create(name: "...", goal: "...", cadence: "daily", project_id: "{slug}")
+```
+
+Choose appropriate cadences: `hourly`, `daily`, `weekly`, `monthly`, or cron expressions like `0 9 * * 1-5`.
+
+## Project structure convention
 
 ```
 projects/
   {slug}/
-    AGENTS.md          # Project-specific agent instructions (loaded into system prompt)
-    context.md         # Background knowledge, current state
-    goals.md           # Detailed goal breakdown (optional)
-    metrics/           # Metric tracking files (optional)
-    research/          # Research and analysis outputs
-    reports/           # Generated reports
+    AGENTS.md      # Agent instructions (loaded into system prompt)
+    context.md     # Background knowledge, current state
+    goals.md       # Goal breakdown with optional metrics
+    research/      # Research and analysis outputs
+    reports/       # Generated reports
 ```
 
-## Key Rules
+## Rules
 
-- **Always pass `project_id`** when creating missions. Without it, missions land in the Default project.
-- **AGENTS.md is critical** — it gives the agent project context for every mission run. Include: what the project is, key stakeholders, current priorities, tools/APIs to use, constraints.
-- **Metrics need evaluation instructions** — tell the agent *how* to measure each metric (API call, file to read, command to run). Without this, the agent can't track progress.
-- **Use `project_list`** to see all projects and their IDs before creating missions.
-
-## Updating a Project
-
-Use `project_update` to modify goals, metrics, name, or description:
-
-```
-project_update(id: "<id>", goals: ["Updated goal 1", "New goal 2"])
-project_update(id: "<id>", metrics: [{"name": "Revenue", "unit": "USD", "target": 100000, "current": 42000, "evaluation": "..."}])
-```
-
-## When to Create a Project vs. Just a Mission
-
-- **Create a project** when: there are multiple related goals, ongoing work that accumulates knowledge, or a distinct domain that needs its own agent instructions.
-- **Just create a mission** when: it's a single recurring task that doesn't need its own context (e.g., "check disk space daily").
+- Execute tool calls **one at a time**, sequentially. Wait for each result before the next call.
+- Always pass `project_id` when creating missions. Without it, missions land in the Default project.
+- AGENTS.md must be written first — it gives the agent project context.
+- Keep the response concise. After setup, summarize what was created in a short list.
