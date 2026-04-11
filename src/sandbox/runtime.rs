@@ -295,15 +295,20 @@ pub trait ContainerRuntime: Send + Sync {
 // Factory
 // ---------------------------------------------------------------------------
 
-/// Resolve which runtime backend to use from `CONTAINER_RUNTIME` env var
-/// and compiled feature flags.
+/// Resolve which runtime backend to use.
 ///
-/// When the env var is absent, the default depends on which features are
-/// compiled in: if only one runtime feature is enabled, that one is chosen.
-/// If both are enabled, Docker wins as the conservative default.
-pub fn resolve_runtime_backend() -> Result<RuntimeBackend, String> {
+/// Precedence: `CONTAINER_RUNTIME` env var > `config_override` (from DB
+/// settings) > compiled feature flags default.
+///
+/// When no env var, no override, and only one runtime feature is compiled
+/// in, that runtime is chosen. When both are compiled and nothing is set,
+/// Docker wins as the conservative default.
+pub fn resolve_runtime_backend(config_override: Option<&str>) -> Result<RuntimeBackend, String> {
     let default_backend = default_backend_for_compiled_features()?;
-    let requested = std::env::var("CONTAINER_RUNTIME").unwrap_or(default_backend);
+    let requested = std::env::var("CONTAINER_RUNTIME")
+        .ok()
+        .or_else(|| config_override.map(|s| s.to_string()))
+        .unwrap_or(default_backend);
 
     let backend: RuntimeBackend = requested.parse()?;
 
@@ -353,24 +358,37 @@ fn default_backend_for_compiled_features() -> Result<String, String> {
 /// This is the canonical factory for obtaining an `Arc<dyn ContainerRuntime>`.
 /// Both `SandboxManager` and `ContainerJobManager` should call this instead
 /// of hard-coding a specific backend.
-pub async fn connect_runtime() -> Result<Arc<dyn ContainerRuntime>, SandboxError> {
-    let backend = resolve_runtime_backend().map_err(|reason| SandboxError::Config { reason })?;
-    connect_runtime_backend(backend).await
+///
+/// `config_override` is the DB-backed `container_runtime` setting (if any).
+/// `namespace` is the Kubernetes namespace (only used when connecting to a
+/// Kubernetes backend; ignored for Docker).
+pub async fn connect_runtime(
+    config_override: Option<&str>,
+    namespace: &str,
+) -> Result<Arc<dyn ContainerRuntime>, SandboxError> {
+    let backend =
+        resolve_runtime_backend(config_override).map_err(|reason| SandboxError::Config { reason })?;
+    connect_runtime_backend(backend, namespace).await
 }
 
 /// Connect to a specific runtime backend.
+///
+/// `namespace` is used only for `RuntimeBackend::Kubernetes`.
 pub async fn connect_runtime_backend(
     backend: RuntimeBackend,
+    namespace: &str,
 ) -> Result<Arc<dyn ContainerRuntime>, SandboxError> {
     match backend {
         RuntimeBackend::Docker => {
             #[cfg(feature = "docker")]
             {
+                let _ = namespace;
                 let rt = crate::sandbox::docker::DockerRuntime::connect().await?;
                 Ok(Arc::new(rt) as Arc<dyn ContainerRuntime>)
             }
             #[cfg(not(feature = "docker"))]
             {
+                let _ = namespace;
                 Err(SandboxError::Config {
                     reason: "docker feature not compiled in".to_string(),
                 })
@@ -379,11 +397,13 @@ pub async fn connect_runtime_backend(
         RuntimeBackend::Kubernetes => {
             #[cfg(feature = "kubernetes")]
             {
-                let rt = crate::sandbox::kubernetes::KubernetesRuntime::connect().await?;
+                let rt =
+                    crate::sandbox::kubernetes::KubernetesRuntime::connect(namespace).await?;
                 Ok(Arc::new(rt) as Arc<dyn ContainerRuntime>)
             }
             #[cfg(not(feature = "kubernetes"))]
             {
+                let _ = namespace;
                 Err(SandboxError::Config {
                     reason: "kubernetes feature not compiled in".to_string(),
                 })

@@ -85,7 +85,11 @@ pub async fn setup_orchestrator(
 
     let (runtime_status, runtime): (RuntimeStatus, Option<Arc<dyn ContainerRuntime>>) =
         if config.sandbox.enabled {
-            detect_and_connect_runtime().await
+            detect_and_connect_runtime(
+                config.sandbox.container_runtime.as_deref(),
+                &config.sandbox.k8s_namespace,
+            )
+            .await
         } else {
             (RuntimeStatus::Disabled, None)
         };
@@ -119,6 +123,8 @@ pub async fn setup_orchestrator(
                 .unwrap_or(false),
             claude_code_enabled: config.claude_code.enabled,
             acp_enabled: config.acp.enabled,
+            container_runtime: config.sandbox.container_runtime.clone(),
+            k8s_namespace: config.sandbox.k8s_namespace.clone(),
         };
         let jm = Arc::new(ContainerJobManager::with_runtime(
             job_config,
@@ -170,16 +176,19 @@ pub async fn setup_orchestrator(
 
 /// Detect the configured container runtime and connect to it.
 ///
-/// Respects `CONTAINER_RUNTIME` env var via `resolve_runtime_backend()`.
-/// Falls back to Docker when both features are compiled in and the var is unset.
-async fn detect_and_connect_runtime() -> (
+/// Precedence: `CONTAINER_RUNTIME` env var > `config_override` (DB setting)
+/// > compiled features default.
+async fn detect_and_connect_runtime(
+    config_override: Option<&str>,
+    namespace: &str,
+) -> (
     crate::sandbox::RuntimeStatus,
     Option<Arc<dyn crate::sandbox::ContainerRuntime>>,
 ) {
     use crate::sandbox::runtime::resolve_runtime_backend;
     use crate::sandbox::{RuntimeBackend, RuntimeStatus};
 
-    let backend = match resolve_runtime_backend() {
+    let backend = match resolve_runtime_backend(config_override) {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!("Container runtime resolution failed: {e}");
@@ -189,7 +198,7 @@ async fn detect_and_connect_runtime() -> (
 
     match backend {
         RuntimeBackend::Docker => detect_docker_runtime().await,
-        RuntimeBackend::Kubernetes => detect_kubernetes_runtime().await,
+        RuntimeBackend::Kubernetes => detect_kubernetes_runtime(namespace).await,
     }
 }
 
@@ -245,7 +254,9 @@ async fn detect_docker_runtime() -> (
 }
 
 #[allow(unused_variables)]
-async fn detect_kubernetes_runtime() -> (
+async fn detect_kubernetes_runtime(
+    namespace: &str,
+) -> (
     crate::sandbox::RuntimeStatus,
     Option<Arc<dyn crate::sandbox::ContainerRuntime>>,
 ) {
@@ -254,7 +265,7 @@ async fn detect_kubernetes_runtime() -> (
     #[cfg(feature = "kubernetes")]
     {
         use crate::sandbox::ContainerRuntime;
-        match crate::sandbox::kubernetes::KubernetesRuntime::connect().await {
+        match crate::sandbox::kubernetes::KubernetesRuntime::connect(namespace).await {
             Ok(rt) => {
                 let detection = rt.detect().await;
                 match detection.status {

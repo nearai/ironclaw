@@ -24,12 +24,17 @@ pub struct SandboxConfig {
     pub cpu_shares: u32,
     /// Network allowlist for proxied requests.
     pub network_allowlist: Vec<String>,
-    /// Docker image to use for the sandbox.
+    /// Container image to use for the sandbox.
     pub image: String,
     /// Whether to auto-pull the image if not found.
     pub auto_pull_image: bool,
     /// Port for the HTTP proxy (0 = auto-assign).
     pub proxy_port: u16,
+    /// Container runtime backend override from DB/config ("docker" or "kubernetes").
+    /// When None, runtime selection falls through to compiled features default.
+    pub container_runtime: Option<String>,
+    /// Kubernetes namespace for worker pods.
+    pub k8s_namespace: String,
 }
 
 impl Default for SandboxConfig {
@@ -45,6 +50,8 @@ impl Default for SandboxConfig {
             image: "ironclaw-worker:latest".to_string(),
             auto_pull_image: true,
             proxy_port: 0,
+            container_runtime: None,
+            k8s_namespace: "ironclaw".to_string(),
         }
     }
 }

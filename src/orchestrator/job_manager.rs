@@ -107,6 +107,10 @@ pub struct ContainerJobConfig {
     pub claude_code_enabled: bool,
     /// Whether ACP agent mode is available (from ACP_ENABLED).
     pub acp_enabled: bool,
+    /// Container runtime backend override from config ("docker" or "kubernetes").
+    pub container_runtime: Option<String>,
+    /// Kubernetes namespace for worker pods.
+    pub k8s_namespace: String,
 }
 
 impl Default for ContainerJobConfig {
@@ -127,6 +131,8 @@ impl Default for ContainerJobConfig {
             mcp_per_job_enabled: false,
             claude_code_enabled: false,
             acp_enabled: false,
+            container_runtime: None,
+            k8s_namespace: "ironclaw".to_string(),
         }
     }
 }
@@ -329,7 +335,7 @@ impl ContainerJobManager {
     /// Get the container runtime, creating a connection if needed.
     ///
     /// Delegates to the shared `connect_runtime()` factory which respects
-    /// `CONTAINER_RUNTIME` env var and compiled feature flags.
+    /// config override, `CONTAINER_RUNTIME` env var, and compiled feature flags.
     async fn runtime(&self) -> Result<Arc<dyn ContainerRuntime>, OrchestratorError> {
         {
             let guard = self.runtime.read().await;
@@ -338,11 +344,14 @@ impl ContainerJobManager {
             }
         }
 
-        let rt = crate::sandbox::runtime::connect_runtime()
-            .await
-            .map_err(|e| OrchestratorError::Docker {
-                reason: e.to_string(),
-            })?;
+        let rt = crate::sandbox::runtime::connect_runtime(
+            self.config.container_runtime.as_deref(),
+            &self.config.k8s_namespace,
+        )
+        .await
+        .map_err(|e| OrchestratorError::Docker {
+            reason: e.to_string(),
+        })?;
         *self.runtime.write().await = Some(Arc::clone(&rt));
         Ok(rt)
     }

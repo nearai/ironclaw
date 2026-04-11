@@ -663,7 +663,7 @@ async fn check_docker_daemon() -> CheckResult {
     #[cfg(feature = "docker")]
     {
         use crate::sandbox::RuntimeBackend;
-        match crate::sandbox::resolve_runtime_backend() {
+        match crate::sandbox::resolve_runtime_backend(None) {
             Ok(RuntimeBackend::Kubernetes) => {
                 return CheckResult::Skip("kubernetes is the selected runtime".into());
             }
@@ -699,7 +699,7 @@ async fn check_kubernetes_cluster() -> CheckResult {
     #[cfg(feature = "kubernetes")]
     {
         use crate::sandbox::{ContainerRuntime, RuntimeBackend};
-        match crate::sandbox::resolve_runtime_backend() {
+        match crate::sandbox::resolve_runtime_backend(None) {
             Ok(RuntimeBackend::Docker) => {
                 return CheckResult::Skip("docker is the selected runtime".into());
             }
@@ -709,7 +709,7 @@ async fn check_kubernetes_cluster() -> CheckResult {
             _ => {}
         }
 
-        match crate::sandbox::kubernetes::KubernetesRuntime::connect().await {
+        match crate::sandbox::kubernetes::KubernetesRuntime::connect("ironclaw").await {
             Ok(rt) => {
                 if rt.is_available().await {
                     CheckResult::Pass("cluster reachable".into())

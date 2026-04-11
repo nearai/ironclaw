@@ -2863,117 +2863,199 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 8: Docker Sandbox -- check Docker installation and availability.
+    /// Step 8: Container Sandbox -- select runtime, configure, and validate.
     async fn step_docker_sandbox(&mut self) -> Result<(), SetupError> {
-        print_info("IronClaw can execute code, run builds, and use tools inside Docker");
+        print_info("IronClaw can execute code, run builds, and use tools inside");
         print_info("containers. This keeps your system safe -- commands from the LLM run");
         print_info("in an isolated sandbox with no access to your credentials, limited");
         print_info("filesystem access, and network traffic restricted to an allowlist.");
         println!();
-        print_info("Without Docker, code execution tools (shell, file write) run directly");
-        print_info("on your machine with no isolation.");
+        print_info("Without a container runtime, code execution tools (shell, file write)");
+        print_info("run directly on your machine with no isolation.");
         println!();
 
-        if !confirm("Enable Docker sandbox?", false).map_err(SetupError::Io)? {
+        if !confirm("Enable container sandbox?", false).map_err(SetupError::Io)? {
             self.settings.sandbox.enabled = false;
             print_info("Sandbox disabled. You can enable it later with SANDBOX_ENABLED=true.");
             return Ok(());
         }
 
-        // Check container runtime availability
-        #[cfg(feature = "docker")]
+        // Determine which runtime to use
+        #[cfg(all(feature = "docker", feature = "kubernetes"))]
         {
-            let detection = crate::sandbox::detect::check_docker().await;
+            let choice = select_one(
+                "Container runtime:",
+                &["Docker", "Kubernetes"],
+            )
+            .map_err(SetupError::Io)?;
 
-            match detection.status {
-                crate::sandbox::detect::DockerStatus::Available => {
-                    self.settings.sandbox.enabled = true;
-                    print_success("Docker is installed and running. Sandbox enabled.");
-
-                    // Check if the worker image exists
-                    self.ensure_worker_image().await?;
+            match choice {
+                0 => {
+                    self.settings.sandbox.container_runtime = Some("docker".to_string());
+                    self.setup_docker_runtime().await?;
                 }
-                crate::sandbox::detect::DockerStatus::NotInstalled
-                | crate::sandbox::detect::DockerStatus::NotRunning => {
-                    println!();
-                    let not_installed =
-                        detection.status == crate::sandbox::detect::DockerStatus::NotInstalled;
-                    if not_installed {
-                        print_error("Docker is not installed.");
-                        print_info(detection.platform.install_hint());
-                    } else {
-                        print_error("Docker is installed but not running.");
-                        print_info(detection.platform.start_hint());
-                    }
-                    println!();
-
-                    let retry_prompt = if not_installed {
-                        "Retry after installing Docker?"
-                    } else {
-                        "Retry after starting Docker?"
-                    };
-                    if confirm(retry_prompt, false).map_err(SetupError::Io)? {
-                        let retry = crate::sandbox::detect::check_docker().await;
-                        if retry.status.is_ok() {
-                            self.settings.sandbox.enabled = true;
-                            print_success(if not_installed {
-                                "Docker is now available. Sandbox enabled."
-                            } else {
-                                "Docker is now running. Sandbox enabled."
-                            });
-                            // Check if the worker image exists
-                            self.ensure_worker_image().await?;
-                        } else {
-                            self.settings.sandbox.enabled = false;
-                            print_info(if not_installed {
-                                "Docker still not available. Sandbox disabled for now."
-                            } else {
-                                "Docker still not responding. Sandbox disabled for now."
-                            });
-                        }
-                    } else {
-                        self.settings.sandbox.enabled = false;
-                        print_info(if not_installed {
-                            "Sandbox disabled. Install Docker and set SANDBOX_ENABLED=true later."
-                        } else {
-                            "Sandbox disabled. Start Docker and set SANDBOX_ENABLED=true later."
-                        });
-                    }
+                1 => {
+                    self.settings.sandbox.container_runtime = Some("kubernetes".to_string());
+                    self.setup_kubernetes_runtime().await?;
                 }
-                crate::sandbox::detect::DockerStatus::Disabled => {
-                    self.settings.sandbox.enabled = false;
-                }
+                _ => unreachable!(),
             }
         }
-        #[cfg(all(not(feature = "docker"), feature = "kubernetes"))]
+
+        #[cfg(all(feature = "docker", not(feature = "kubernetes")))]
         {
-            use crate::sandbox::ContainerRuntime;
-            print_info("Docker feature not compiled in. Checking Kubernetes cluster...");
-            match crate::sandbox::kubernetes::KubernetesRuntime::connect().await {
-                Ok(rt) => {
-                    if rt.is_available().await {
-                        self.settings.sandbox.enabled = true;
-                        print_success("Kubernetes cluster reachable. Sandbox enabled.");
-                    } else {
-                        self.settings.sandbox.enabled = false;
-                        print_info("Kubernetes cluster not reachable. Sandbox disabled.");
-                    }
-                }
-                Err(_) => {
-                    self.settings.sandbox.enabled = false;
-                    print_info("Could not connect to Kubernetes. Sandbox disabled.");
-                }
-            }
+            self.settings.sandbox.container_runtime = Some("docker".to_string());
+            self.setup_docker_runtime().await?;
         }
+
+        #[cfg(all(feature = "kubernetes", not(feature = "docker")))]
+        {
+            self.settings.sandbox.container_runtime = Some("kubernetes".to_string());
+            self.setup_kubernetes_runtime().await?;
+        }
+
         #[cfg(not(any(feature = "docker", feature = "kubernetes")))]
         {
             self.settings.sandbox.enabled = false;
             print_info("No container runtime feature compiled in. Sandbox disabled.");
         }
 
-        // Claude Code sandbox sub-step (only if Docker sandbox is enabled)
         if self.settings.sandbox.enabled {
             self.step_claude_code_sandbox().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Docker runtime setup: detect, retry, ensure image.
+    #[cfg(feature = "docker")]
+    async fn setup_docker_runtime(&mut self) -> Result<(), SetupError> {
+        let detection = crate::sandbox::detect::check_docker().await;
+
+        match detection.status {
+            crate::sandbox::detect::DockerStatus::Available => {
+                self.settings.sandbox.enabled = true;
+                print_success("Docker is installed and running. Sandbox enabled.");
+                self.ensure_worker_image().await?;
+            }
+            crate::sandbox::detect::DockerStatus::NotInstalled
+            | crate::sandbox::detect::DockerStatus::NotRunning => {
+                println!();
+                let not_installed =
+                    detection.status == crate::sandbox::detect::DockerStatus::NotInstalled;
+                if not_installed {
+                    print_error("Docker is not installed.");
+                    print_info(detection.platform.install_hint());
+                } else {
+                    print_error("Docker is installed but not running.");
+                    print_info(detection.platform.start_hint());
+                }
+                println!();
+
+                let retry_prompt = if not_installed {
+                    "Retry after installing Docker?"
+                } else {
+                    "Retry after starting Docker?"
+                };
+                if confirm(retry_prompt, false).map_err(SetupError::Io)? {
+                    let retry = crate::sandbox::detect::check_docker().await;
+                    if retry.status.is_ok() {
+                        self.settings.sandbox.enabled = true;
+                        print_success(if not_installed {
+                            "Docker is now available. Sandbox enabled."
+                        } else {
+                            "Docker is now running. Sandbox enabled."
+                        });
+                        self.ensure_worker_image().await?;
+                    } else {
+                        self.settings.sandbox.enabled = false;
+                        print_info(if not_installed {
+                            "Docker still not available. Sandbox disabled for now."
+                        } else {
+                            "Docker still not responding. Sandbox disabled for now."
+                        });
+                    }
+                } else {
+                    self.settings.sandbox.enabled = false;
+                    print_info(if not_installed {
+                        "Sandbox disabled. Install Docker and set SANDBOX_ENABLED=true later."
+                    } else {
+                        "Sandbox disabled. Start Docker and set SANDBOX_ENABLED=true later."
+                    });
+                }
+            }
+            crate::sandbox::detect::DockerStatus::Disabled => {
+                self.settings.sandbox.enabled = false;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Kubernetes runtime setup: prompt namespace, validate cluster connectivity.
+    #[cfg(feature = "kubernetes")]
+    async fn setup_kubernetes_runtime(&mut self) -> Result<(), SetupError> {
+        use crate::sandbox::ContainerRuntime;
+
+        println!();
+        let namespace = optional_input("Kubernetes namespace", Some("ironclaw"))
+            .map_err(SetupError::Io)?
+            .unwrap_or_else(|| "ironclaw".to_string());
+        self.settings.sandbox.k8s_namespace = Some(namespace.clone());
+
+        print_info(&format!(
+            "Checking Kubernetes cluster connectivity (namespace: {namespace})..."
+        ));
+        match crate::sandbox::kubernetes::KubernetesRuntime::connect(&namespace).await {
+            Ok(rt) => {
+                if rt.is_available().await {
+                    self.settings.sandbox.enabled = true;
+                    print_success("Kubernetes cluster reachable. Sandbox enabled.");
+                } else {
+                    println!();
+                    print_error("Kubernetes cluster not reachable.");
+                    if confirm("Retry?", false).map_err(SetupError::Io)? {
+                        match crate::sandbox::kubernetes::KubernetesRuntime::connect(&namespace)
+                            .await
+                        {
+                            Ok(rt2) if rt2.is_available().await => {
+                                self.settings.sandbox.enabled = true;
+                                print_success("Kubernetes cluster now reachable. Sandbox enabled.");
+                            }
+                            _ => {
+                                self.settings.sandbox.enabled = false;
+                                print_info(
+                                    "Cluster still not reachable. Sandbox disabled for now.",
+                                );
+                            }
+                        }
+                    } else {
+                        self.settings.sandbox.enabled = false;
+                        print_info("Sandbox disabled. Set SANDBOX_ENABLED=true when cluster is ready.");
+                    }
+                }
+            }
+            Err(e) => {
+                println!();
+                print_error(&format!("Could not connect to Kubernetes: {e}"));
+                if confirm("Retry?", false).map_err(SetupError::Io)? {
+                    match crate::sandbox::kubernetes::KubernetesRuntime::connect(&namespace).await {
+                        Ok(rt2) if rt2.is_available().await => {
+                            self.settings.sandbox.enabled = true;
+                            print_success("Kubernetes cluster now reachable. Sandbox enabled.");
+                        }
+                        _ => {
+                            self.settings.sandbox.enabled = false;
+                            print_info("Cluster still not reachable. Sandbox disabled for now.");
+                        }
+                    }
+                } else {
+                    self.settings.sandbox.enabled = false;
+                    print_info(
+                        "Sandbox disabled. Set SANDBOX_ENABLED=true when cluster is ready.",
+                    );
+                }
+            }
         }
 
         Ok(())

@@ -4,10 +4,10 @@ use crate::config::helpers::{
 };
 use crate::error::ConfigError;
 
-/// Docker sandbox configuration.
+/// Container sandbox configuration.
 #[derive(Debug, Clone)]
 pub struct SandboxModeConfig {
-    /// Whether the Docker sandbox is enabled.
+    /// Whether the container sandbox is enabled.
     pub enabled: bool,
     /// Sandbox policy: "readonly", "workspace_write", or "full_access".
     pub policy: String,
@@ -24,7 +24,7 @@ pub struct SandboxModeConfig {
     pub memory_limit_mb: u64,
     /// CPU shares (relative weight).
     pub cpu_shares: u32,
-    /// Docker image for the sandbox.
+    /// Container image for the sandbox.
     pub image: String,
     /// Whether to auto-pull the image if not found.
     pub auto_pull_image: bool,
@@ -34,6 +34,12 @@ pub struct SandboxModeConfig {
     pub reaper_interval_secs: u64,
     /// Containers older than this with no active job are reaped (seconds). Default: 600 (10 min).
     pub orphan_threshold_secs: u64,
+    /// Container runtime backend: "docker" or "kubernetes".
+    /// Resolved from DB setting > CONTAINER_RUNTIME env var > compiled features default.
+    pub container_runtime: Option<String>,
+    /// Kubernetes namespace for worker pods.
+    /// Resolved from DB setting > IRONCLAW_K8S_NAMESPACE env var > "ironclaw".
+    pub k8s_namespace: String,
 }
 
 impl Default for SandboxModeConfig {
@@ -50,6 +56,8 @@ impl Default for SandboxModeConfig {
             extra_allowed_domains: Vec::new(),
             reaper_interval_secs: 300,
             orphan_threshold_secs: 600,
+            container_runtime: None,
+            k8s_namespace: "ironclaw".to_string(),
         }
     }
 }
@@ -87,6 +95,25 @@ impl SandboxModeConfig {
             });
         }
 
+        // container_runtime: DB setting (if set) > CONTAINER_RUNTIME env var > None (let
+        // resolve_runtime_backend use compiled features default).
+        let container_runtime = ss
+            .container_runtime
+            .clone()
+            .or_else(|| optional_env("CONTAINER_RUNTIME").ok().flatten());
+
+        // k8s_namespace: use db_first_or_default against IRONCLAW_K8S_NAMESPACE env var.
+        let k8s_namespace_default = "ironclaw".to_string();
+        let k8s_namespace_settings = ss
+            .k8s_namespace
+            .clone()
+            .unwrap_or_else(|| k8s_namespace_default.clone());
+        let k8s_namespace: String = db_first_or_default(
+            &k8s_namespace_settings,
+            &k8s_namespace_default,
+            "IRONCLAW_K8S_NAMESPACE",
+        )?;
+
         Ok(Self {
             enabled: db_first_bool(ss.enabled, defaults.enabled, "SANDBOX_ENABLED")?,
             policy: db_first_or_default(&ss.policy, &defaults.policy, "SANDBOX_POLICY")?,
@@ -116,6 +143,8 @@ impl SandboxModeConfig {
             extra_allowed_domains: extra_domains,
             reaper_interval_secs,
             orphan_threshold_secs,
+            container_runtime,
+            k8s_namespace,
         })
     }
 
@@ -154,6 +183,8 @@ impl SandboxModeConfig {
             image: self.image.clone(),
             auto_pull_image: self.auto_pull_image,
             proxy_port: 0, // Auto-assign
+            container_runtime: self.container_runtime.clone(),
+            k8s_namespace: self.k8s_namespace.clone(),
         }
     }
 }
@@ -447,6 +478,8 @@ mod tests {
             reaper_interval_secs: 300,
             orphan_threshold_secs: 600,
             allow_full_access: false,
+            container_runtime: Some("kubernetes".to_string()),
+            k8s_namespace: "custom-ns".to_string(),
         };
         assert!(!cfg.enabled);
         assert_eq!(cfg.policy, "full_access");
@@ -472,6 +505,8 @@ mod tests {
             reaper_interval_secs: 300,
             orphan_threshold_secs: 600,
             allow_full_access: false,
+            container_runtime: None,
+            k8s_namespace: "ironclaw".to_string(),
         };
         let sc = mode.to_sandbox_config();
         assert!(sc.enabled);

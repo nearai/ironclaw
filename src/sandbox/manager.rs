@@ -145,7 +145,12 @@ impl SandboxManager {
         }
 
         // No runtime set yet — try to create one and check
-        match crate::sandbox::runtime::connect_runtime().await {
+        match crate::sandbox::runtime::connect_runtime(
+            self.config.container_runtime.as_deref(),
+            &self.config.k8s_namespace,
+        )
+        .await
+        {
             Ok(rt) => rt.is_available().await,
             Err(_) => false,
         }
@@ -212,10 +217,14 @@ impl SandboxManager {
         Ok(())
     }
 
-    /// Create a container runtime based on `CONTAINER_RUNTIME` env var
-    /// and compiled feature flags via the shared factory.
+    /// Create a container runtime based on config override, env var, and
+    /// compiled feature flags via the shared factory.
     async fn create_runtime(&self) -> Result<Arc<dyn ContainerRuntime>> {
-        crate::sandbox::runtime::connect_runtime().await
+        crate::sandbox::runtime::connect_runtime(
+            self.config.container_runtime.as_deref(),
+            &self.config.k8s_namespace,
+        )
+        .await
     }
 
     /// Shutdown the sandbox (stop proxy, clean up).

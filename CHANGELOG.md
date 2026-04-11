@@ -12,13 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(sandbox)* Container runtime abstraction (`ContainerRuntime` trait) decoupling sandbox/orchestrator/reaper from Docker
 - *(sandbox)* Kubernetes runtime backend (`--features kubernetes`) with pod lifecycle, exec, logs, and cluster-DNS networking
 - *(sandbox)* `CONTAINER_RUNTIME` env var to select Docker or Kubernetes backend at startup
+- *(wizard)* Interactive container runtime selection in onboarding wizard (Docker / Kubernetes menu when both features compiled)
+- *(wizard)* Kubernetes namespace prompt with default "ironclaw" and cluster connectivity validation during onboarding
+- *(settings)* `sandbox.container_runtime` and `sandbox.k8s_namespace` DB-persisted settings for runtime configuration
 - *(doctor)* Kubernetes cluster reachability check (when `kubernetes` feature is enabled)
 
 ### Changed
 
 - *(sandbox)* `bollard` Docker dependency is now optional (gated by `--features docker`, on by default)
+- *(sandbox)* `resolve_runtime_backend()` now accepts config override from DB settings (env var > DB > compiled default)
+- *(sandbox)* `KubernetesRuntime::connect()` accepts namespace parameter instead of reading env var directly
 - *(boot)* Renamed `BootInfo::docker_status` to `runtime_status` for runtime-agnostic naming
-- *(wizard)* Setup wizard probes Kubernetes cluster when docker feature is off but kubernetes is on
+- *(wizard)* Setup wizard Step 8 renamed from "Docker Sandbox" to "Container Sandbox" with runtime-agnostic UX copy
 
 ## [0.24.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.23.0...ironclaw-v0.24.0) - 2026-03-31
 

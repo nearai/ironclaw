@@ -24,7 +24,6 @@ use crate::sandbox::runtime::{
     WorkloadSpec,
 };
 
-const DEFAULT_NAMESPACE: &str = "ironclaw";
 const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
 const MANAGED_BY_VALUE: &str = "ironclaw";
 
@@ -37,22 +36,24 @@ pub struct KubernetesRuntime {
 
 impl KubernetesRuntime {
     /// Connect using the default kubeconfig / in-cluster config.
-    pub async fn connect() -> Result<Self, SandboxError> {
+    ///
+    /// `namespace` is the Kubernetes namespace for worker pods (resolved by
+    /// the config layer from DB setting / env var / default).
+    pub async fn connect(namespace: &str) -> Result<Self, SandboxError> {
         let client = Client::try_default()
             .await
             .map_err(|e| SandboxError::Runtime {
                 reason: format!("failed to create Kubernetes client: {}", e),
             })?;
 
-        let namespace = std::env::var("IRONCLAW_K8S_NAMESPACE")
-            .unwrap_or_else(|_| DEFAULT_NAMESPACE.to_string());
-
         let orchestrator_service = std::env::var("IRONCLAW_K8S_ORCHESTRATOR_SERVICE")
-            .unwrap_or_else(|_| format!("ironclaw-orchestrator.{namespace}.svc.cluster.local"));
+            .unwrap_or_else(|_| {
+                format!("ironclaw-orchestrator.{namespace}.svc.cluster.local")
+            });
 
         Ok(Self {
             client,
-            namespace,
+            namespace: namespace.to_string(),
             orchestrator_service,
         })
     }

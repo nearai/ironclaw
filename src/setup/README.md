@@ -395,48 +395,53 @@ Searches for `registry/` directory in order:
 
 ### Step 8: Container Sandbox
 
-**Module:** `wizard.rs` → `step_docker_sandbox()`
+**Module:** `wizard.rs` → `step_docker_sandbox()`, `setup_docker_runtime()`,
+`setup_kubernetes_runtime()`
 
-**Goal:** Check container runtime availability and configure sandboxed execution.
+**Goal:** Select a container runtime, configure it, validate connectivity,
+and persist the choice.
 
 The sandbox isolates LLM-initiated commands (shell, file writes, tool calls)
 inside ephemeral containers. Without a sandbox, those commands run directly
 on the host with no isolation.
 
-**Runtime selection:** The wizard probes the container runtime determined by
-`CONTAINER_RUNTIME` env var and compiled feature flags (via
-`resolve_runtime_backend()` in `src/sandbox/runtime.rs`). When both
-`docker` and `kubernetes` features are compiled, Docker is the default
-unless `CONTAINER_RUNTIME=kubernetes` is set. When only one feature is
-compiled, that runtime is used automatically.
+**Runtime selection:** When both `docker` and `kubernetes` features are
+compiled, the wizard presents an interactive menu to choose the runtime.
+When only one feature is compiled, that runtime is used automatically.
+The choice is persisted to `sandbox.container_runtime` in the DB settings
+table and respected at startup via `resolve_runtime_backend()`.
 
-**Flow (Docker backend, `#[cfg(feature = "docker")]`):**
+**Flow (both features compiled):**
 
-1. Ask "Enable Docker sandbox?" (default: no)
+1. Ask "Enable container sandbox?" (default: no)
 2. If declined → `sandbox.enabled = false`, done
-3. Call `check_docker()` to detect Docker installation
-4. If available → enable sandbox, check/pull worker image via
+3. Present runtime menu: Docker / Kubernetes
+4. Dispatch to `setup_docker_runtime()` or `setup_kubernetes_runtime()`
+5. Store selected runtime in `sandbox.container_runtime`
+
+**Docker sub-flow (`setup_docker_runtime`):**
+
+1. Call `check_docker()` to detect Docker installation
+2. If available → enable sandbox, check/pull worker image via
    `ensure_worker_image()`
-5. If not installed or not running → print platform hint, offer retry
-6. On retry success → enable + ensure image; on failure → disable
+3. If not installed or not running → print platform hint, offer retry
+4. On retry success → enable + ensure image; on failure → disable
 
-**Flow (Kubernetes backend, `#[cfg(all(not(feature = "docker"), feature = "kubernetes"))]`):**
+**Kubernetes sub-flow (`setup_kubernetes_runtime`):**
 
-1. Ask "Enable Docker sandbox?" (prompt text unchanged)
-2. If declined → `sandbox.enabled = false`, done
-3. Connect to Kubernetes cluster via `KubernetesRuntime::connect()`
+1. Prompt for namespace with default "ironclaw"
+2. Store namespace in `sandbox.k8s_namespace`
+3. Connect to cluster via `KubernetesRuntime::connect(namespace)`
 4. If cluster reachable (`is_available()`) → `sandbox.enabled = true`
-5. If not reachable → `sandbox.enabled = false`
+5. If not reachable → offer retry; on failure → disable
 
 Note: the Kubernetes path does not verify worker image pullability at
 wizard time (deferred to first workload creation).
 
 **Flow (no runtime feature compiled):**
 
-1. Ask "Enable Docker sandbox?"
-2. If user confirms → `sandbox.enabled = true` with a warning that no
-   runtime is compiled in
-3. This is a graceful degradation; actual execution will fail at runtime
+1. Ask "Enable container sandbox?"
+2. `sandbox.enabled = false` with info message
 
 ---
 
