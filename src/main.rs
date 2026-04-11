@@ -124,6 +124,10 @@ async fn async_main() -> anyhow::Result<()> {
             init_cli_tracing();
             return run_pairing_command(pairing_cmd.clone()).await;
         }
+        Some(Command::Profile(profile_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_profile_command(profile_cmd.clone());
+        }
         Some(Command::Service(service_cmd)) => {
             init_cli_tracing();
             return run_service_command(service_cmd);
