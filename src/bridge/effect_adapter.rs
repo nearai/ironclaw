@@ -1152,7 +1152,6 @@ fn contains_scheduling_intent(text: &str) -> bool {
         || lower.contains("every hour")
         || lower.contains("from now on")
         || lower.contains("long-running")
-        || lower.contains("set up")
 }
 
 fn word_set(text: &str) -> HashSet<&str> {
@@ -2463,6 +2462,26 @@ mod tests {
             source_channel: Some("gateway".to_string()),
             user_timezone: None,
             thread_goal: Some("Summarize every product feedback item right now.".to_string()),
+        };
+
+        assert!(should_reject_immediate_mission_create(
+            &ctx,
+            &serde_json::json!({})
+        ));
+    }
+
+    #[test]
+    fn foreground_immediate_set_up_without_schedule_still_rejects_mission_create() {
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: Some("gateway".to_string()),
+            user_timezone: None,
+            thread_goal: Some("Set up the product feedback summary right now.".to_string()),
         };
 
         assert!(should_reject_immediate_mission_create(
