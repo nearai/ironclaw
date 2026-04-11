@@ -394,7 +394,7 @@ mod tests {
                 ')' => {
                     depth -= 1;
                     if depth == 0 {
-                        let answer = remaining[..i].trim();
+                        let answer = remaining[..i].trim(); // safety: i is from char_indices(), always a valid boundary
                         if !answer.is_empty() {
                             return Some(answer.to_string());
                         }
@@ -617,8 +617,12 @@ mod tests {
         let outcome = exec.run().await.unwrap();
         assert!(matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "Done!"));
         assert_eq!(exec.thread.step_count, 2);
-        // Should have: system(nudge not counted), assistant+actions, action_result, assistant
-        assert!(exec.thread.messages.len() >= 3);
+        // Orchestrator-driven flow: working messages live in `internal_messages`
+        // (set by `sync_runtime_state` when the orchestrator persists state),
+        // while `thread.messages` only carries the system prompt + final
+        // assistant response. The full conversation transcript (system,
+        // assistant+actions, action_result, assistant) is in internal_messages.
+        assert!(exec.thread.internal_messages.len() >= 3);
     }
 
     #[tokio::test]
@@ -735,10 +739,12 @@ mod tests {
             matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "The answer is 42")
         );
         assert_eq!(exec.thread.step_count, 2);
-        // Should have nudge system message
+        // Nudge is injected into the orchestrator's working messages, which
+        // are persisted as `thread.internal_messages` (not the user-visible
+        // `messages` transcript).
         assert!(
             exec.thread
-                .messages
+                .internal_messages
                 .iter()
                 .any(|m| m.content.contains("did not include any tool calls"))
         );
@@ -833,7 +839,7 @@ mod tests {
             matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "got result")
         );
         // Should have at least 1 action result recorded
-        assert!(!exec.thread.messages.is_empty());
+        assert!(!exec.thread.internal_messages.is_empty());
     }
 
     #[tokio::test]
@@ -873,10 +879,11 @@ mod tests {
             matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "done, x was 30")
         );
         assert_eq!(exec.thread.step_count, 2);
-        // The output metadata from first step should be in messages
+        // The first step's stdout/output metadata is persisted as part of
+        // the orchestrator's working messages → `internal_messages`.
         assert!(
             exec.thread
-                .messages
+                .internal_messages
                 .iter()
                 .any(|m| m.content.contains("x = 30"))
         );
@@ -904,7 +911,7 @@ mod tests {
         // First step should have error in output metadata
         assert!(
             exec.thread
-                .messages
+                .internal_messages
                 .iter()
                 .any(|m| { m.content.contains("NameError") || m.content.contains("Error") })
         );

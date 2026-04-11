@@ -40,11 +40,13 @@
 
 pub mod agent;
 pub mod app;
+pub mod auth;
 pub mod boot_screen;
 pub mod bootstrap;
 pub mod bridge;
 pub mod channels;
 pub mod cli;
+pub mod code_challenge;
 pub mod config;
 pub mod context;
 pub mod db;
@@ -56,11 +58,13 @@ pub mod extensions;
 pub mod gate;
 pub mod history;
 pub mod hooks;
+pub mod http_intercept;
 #[cfg(feature = "import")]
 pub mod import;
 pub mod llm;
 pub mod observability;
 pub mod orchestrator;
+pub mod ownership;
 pub mod pairing;
 pub mod profile;
 pub mod registry;

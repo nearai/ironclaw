@@ -22,12 +22,13 @@ use std::sync::Arc;
 
 use secrecy::SecretString;
 
+use ironclaw::context::JobContext;
 use ironclaw::secrets::{
     CreateSecretParams, CredentialMapping, InMemorySecretsStore, SecretsCrypto, SecretsStore,
 };
 use ironclaw::tools::builtin::HttpTool;
 use ironclaw::tools::wasm::SharedCredentialRegistry;
-use ironclaw::tools::{ApprovalRequirement, Tool};
+use ironclaw::tools::{ApprovalRequirement, Tool, ToolError};
 use ironclaw_skills::types::*;
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -56,11 +57,11 @@ fn make_skill(
             description: format!("{} skill", name),
             activation: ActivationCriteria::default(),
             credentials,
-            metadata: None,
+            requires: ironclaw_skills::GatingRequirements::default(),
         },
         prompt_content: prompt.to_string(),
         trust: SkillTrust::Trusted,
-        source: SkillSource::User(PathBuf::from("/tmp/test-skills")),
+        source: SkillSource::User(PathBuf::from("/tmp/test-skills")), // safety: dummy path in test, not used for I/O
         content_hash: format!("sha256:{}", name),
         compiled_patterns: vec![],
         lowercased_keywords: vec![],
@@ -268,6 +269,10 @@ fn test_validation_rejects_insecure_and_malformed_specs() {
         oauth: Some(SkillOAuthConfig {
             authorization_url: "http://insecure.example.com/auth".to_string(),
             token_url: "https://secure.example.com/token".to_string(),
+            client_id: None,
+            client_id_env: None,
+            client_secret: None,
+            client_secret_env: None,
             scopes: vec![],
             use_pkce: false,
             extra_params: Default::default(),
@@ -662,4 +667,131 @@ credentials:
         .await
         .unwrap();
     assert_eq!(decrypted.expose(), "ghp_test_secret_42");
+}
+
+// ── Behaviors #6/#7/#8: header rejection at execute() time ───────────────
+//
+// The doc comment at the top of this file enumerates 10 behaviors the
+// pipeline guarantees. The three below are the actual defenses against
+// LLM-mediated credential exfiltration:
+//
+//   #6 LLM-provided auth headers are REJECTED for registered hosts
+//   #7 Non-auth headers PASS THROUGH for registered hosts
+//   #8 Unregistered hosts ALLOW LLM-supplied auth headers
+//
+// `requires_approval` is exercised elsewhere (test #5); these tests drive
+// `HttpTool::execute()` directly so they hit the
+// `block LLM-provided authorization headers` branch in `http.rs:503-520`,
+// not just the upstream gating layer. Each test relies on the rejection
+// happening BEFORE any network call so we never need a real HTTP server.
+
+fn make_registry_with_github() -> Arc<SharedCredentialRegistry> {
+    let registry = Arc::new(SharedCredentialRegistry::new());
+    registry.add_mappings(vec![CredentialMapping::bearer(
+        "github_token",
+        "api.github.com",
+    )]);
+    registry
+}
+
+#[tokio::test]
+async fn test_credentialed_host_rejects_llm_authorization_header() {
+    // Behavior #6: an LLM trying to set `Authorization` for a host that
+    // already has a registered credential mapping must be rejected with
+    // `NotAuthorized`. Otherwise a prompt-injection attack could exfiltrate
+    // arbitrary tokens by sending them to a known credentialed endpoint.
+    let tool =
+        http_tool_with_credentials(make_registry_with_github(), Arc::new(test_secrets_store()));
+    let ctx = JobContext::new("Test", "credentialed authorization header");
+
+    let cases: &[(&str, &str)] = &[
+        ("Authorization", "Bearer ghp_attacker_supplied"),
+        ("authorization", "Bearer ghp_attacker_supplied"),
+        ("X-Api-Key", "k_attacker"),
+        ("api-key", "k_attacker"),
+        ("X-Auth-Token", "tok_attacker"),
+    ];
+
+    for (name, value) in cases {
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://api.github.com/repos/nearai/ironclaw/issues",
+            "headers": [{ "name": *name, "value": *value }],
+        });
+        let err = tool
+            .execute(params, &ctx)
+            .await
+            .expect_err("LLM-supplied auth header should be rejected for credentialed host");
+        match err {
+            ToolError::NotAuthorized(msg) => {
+                assert!(
+                    msg.to_ascii_lowercase()
+                        .contains(&name.to_ascii_lowercase())
+                        || msg.contains("auto-injected"),
+                    "rejection message should mention the offending header or the auto-injection rule, got: {msg}"
+                );
+            }
+            other => panic!("expected NotAuthorized for header '{name}', got: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_credentialed_host_allows_non_auth_headers() {
+    // Behavior #7: non-auth headers (Content-Type, Accept, custom headers
+    // that aren't on the forbidden list) must pass the auth check on a
+    // credentialed host. We assert that the rejection branch does NOT fire
+    // — the request will still fail at the network layer when it tries to
+    // reach api.github.com under test, but it must fail with something
+    // OTHER than NotAuthorized.
+    let tool =
+        http_tool_with_credentials(make_registry_with_github(), Arc::new(test_secrets_store()));
+    let ctx = JobContext::new("Test", "credentialed non-auth headers");
+
+    let params = serde_json::json!({
+        "method": "GET",
+        "url": "https://api.github.com/repos/nearai/ironclaw/issues",
+        "headers": [
+            { "name": "Accept", "value": "application/vnd.github+json" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "X-Custom-Trace-Id", "value": "test-1234" },
+        ],
+    });
+
+    let result = tool.execute(params, &ctx).await;
+    if let Err(ToolError::NotAuthorized(msg)) = &result {
+        panic!(
+            "non-auth headers must NOT be rejected on credentialed host; got NotAuthorized: {msg}"
+        );
+    }
+    // Any other outcome (Ok, ExternalService, Timeout, Sandbox) is fine —
+    // the test only asserts that the auth-rejection branch did not fire.
+}
+
+#[tokio::test]
+async fn test_unregistered_host_allows_llm_authorization_header() {
+    // Behavior #8: when the destination host has NO registered credential
+    // mapping, LLM-supplied auth headers must pass the auth check. The
+    // rationale: rejecting them would prevent legitimate single-shot API
+    // calls to user-specified hosts that the credential system doesn't
+    // know about. Same assertion shape as #7 — we only verify the
+    // NotAuthorized branch does not fire, not that the request actually
+    // reaches the wire.
+    let tool =
+        http_tool_with_credentials(make_registry_with_github(), Arc::new(test_secrets_store()));
+    let ctx = JobContext::new("Test", "unregistered host with auth header");
+
+    // api.example.com is NOT in the registry, only api.github.com is.
+    let params = serde_json::json!({
+        "method": "GET",
+        "url": "https://api.example.com/widgets",
+        "headers": [
+            { "name": "Authorization", "value": "Bearer user_supplied_token" },
+        ],
+    });
+
+    let result = tool.execute(params, &ctx).await;
+    if let Err(ToolError::NotAuthorized(msg)) = &result {
+        panic!("unregistered host must allow LLM-supplied auth headers; got NotAuthorized: {msg}");
+    }
 }

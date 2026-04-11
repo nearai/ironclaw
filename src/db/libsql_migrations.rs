@@ -94,7 +94,8 @@ CREATE TABLE IF NOT EXISTS agent_jobs (
     repair_attempts INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     started_at TEXT,
-    completed_at TEXT
+    completed_at TEXT,
+    restart_params TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_jobs_status ON agent_jobs(status);
@@ -138,6 +139,7 @@ CREATE TABLE IF NOT EXISTS dynamic_tools (
     failure_count INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
     status TEXT NOT NULL DEFAULT 'active',
+    scope TEXT NOT NULL DEFAULT 'user',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
@@ -319,6 +321,7 @@ CREATE TABLE IF NOT EXISTS wasm_tools (
     source_url TEXT,
     trust_level TEXT NOT NULL DEFAULT 'user',
     status TEXT NOT NULL DEFAULT 'active',
+    scope TEXT NOT NULL DEFAULT 'user',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE (user_id, name, version)
@@ -645,12 +648,42 @@ CREATE TABLE IF NOT EXISTS memory_document_versions (
 CREATE INDEX IF NOT EXISTS idx_doc_versions_lookup
     ON memory_document_versions(document_id, version DESC);
 
+-- ==================== Channel Identities (V19) ====================
+
+CREATE TABLE IF NOT EXISTS channel_identities (
+    id          TEXT    NOT NULL PRIMARY KEY,
+    owner_id    TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    channel     TEXT    NOT NULL CHECK (channel = lower(channel)),
+    external_id TEXT    NOT NULL,
+    created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (channel, external_id)
+);
+
+-- ==================== Pairing Requests (V20) ====================
+
+CREATE TABLE IF NOT EXISTS pairing_requests (
+    id          TEXT    NOT NULL PRIMARY KEY,
+    channel     TEXT    NOT NULL CHECK (channel = lower(channel)),
+    external_id TEXT    NOT NULL,
+    code        TEXT    NOT NULL UNIQUE,
+    owner_id    TEXT    REFERENCES users(id) ON DELETE CASCADE,
+    meta        TEXT,
+    created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    expires_at  TEXT    NOT NULL,
+    approved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pairing_requests_channel ON pairing_requests (channel, external_id);
+
 "#;
 
 /// Incremental migrations applied after the base schema.
 ///
 /// Each entry is `(version, name, sql)`. Migrations are idempotent: the
 /// `_migrations` table tracks which versions have been applied.
+// NOTE: libSQL incremental migration version numbers are independent from
+// PostgreSQL migration version numbers (migrations/VN__*.sql). The libSQL
+// version sequence started before the PostgreSQL V15 era, so they are offset
+// by ~1. Do not assume libSQL version N corresponds to PostgreSQL V(N).
 pub const INCREMENTAL_MIGRATIONS: &[(i64, &str, &str)] = &[
     (
         9,
@@ -875,13 +908,94 @@ CREATE INDEX IF NOT EXISTS idx_user_identities_user ON user_identities(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_identities_email ON user_identities(email) WHERE email IS NOT NULL;
 "#,
     ),
+    (
+        18,
+        "tool_scope",
+        // Add scope column to wasm_tools and dynamic_tools for future admin-promoted
+        // global tools. All existing rows default to 'user'. Marked as idempotent
+        // (see IDEMPOTENT_ADD_COLUMN_MIGRATIONS) because the base SCHEMA now
+        // includes this column for fresh installs.
+        r#"
+ALTER TABLE wasm_tools    ADD COLUMN scope TEXT NOT NULL DEFAULT 'user';
+ALTER TABLE dynamic_tools ADD COLUMN scope TEXT NOT NULL DEFAULT 'user';
+"#,
+    ),
+    (
+        19,
+        "channel_identities",
+        // Create channel_identities table mapping external identities to owners.
+        // Uses IF NOT EXISTS because the base SCHEMA already includes this table
+        // for fresh installs.
+        r#"
+CREATE TABLE IF NOT EXISTS channel_identities (
+    id          TEXT    NOT NULL PRIMARY KEY,
+    owner_id    TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    channel     TEXT    NOT NULL CHECK (channel = lower(channel)),
+    external_id TEXT    NOT NULL,
+    created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (channel, external_id)
+);
+"#,
+    ),
+    (
+        20,
+        "pairing_requests",
+        // Create pairing_requests table replacing file-based pairing store.
+        // Uses IF NOT EXISTS because the base SCHEMA already includes this table
+        // for fresh installs.
+        r#"
+CREATE TABLE IF NOT EXISTS pairing_requests (
+    id          TEXT    NOT NULL PRIMARY KEY,
+    channel     TEXT    NOT NULL CHECK (channel = lower(channel)),
+    external_id TEXT    NOT NULL,
+    code        TEXT    NOT NULL UNIQUE,
+    owner_id    TEXT    REFERENCES users(id) ON DELETE CASCADE,
+    meta        TEXT,
+    created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    expires_at  TEXT    NOT NULL,
+    approved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pairing_requests_channel ON pairing_requests (channel, external_id);
+"#,
+    ),
+    (
+        21,
+        "backfill_conversation_source_channel",
+        // Backfill source_channel for pre-V15 conversation rows. Without this,
+        // any conversation created before V15 has NULL source_channel and the
+        // runtime approval check (`is_approval_authorized`) is fail-closed on
+        // None, so legacy threads reject every approval after a restart.
+        // The `channel` column always holds the original creating channel,
+        // so it is the correct backfill value.
+        r#"
+UPDATE conversations
+SET source_channel = channel
+WHERE source_channel IS NULL;
+"#,
+    ),
+    (
+        22,
+        "sandbox_restart_params",
+        // Add restart_params column for sandbox jobs. Holds a JSON blob
+        // with the mcp_servers filter and max_iterations cap so the
+        // original create_job parameters survive a restart. Marked idempotent
+        // (see IDEMPOTENT_ADD_COLUMN_MIGRATIONS) because the base SCHEMA
+        // includes this column for fresh installs.
+        r#"
+ALTER TABLE agent_jobs ADD COLUMN restart_params TEXT;
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already
 /// exists (e.g. because the base SCHEMA was updated to include it).
 /// Each entry is `(version, table_name, column_name)`.
-const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] =
-    &[(15, "conversations", "source_channel")];
+const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] = &[
+    (15, "conversations", "source_channel"),
+    (18, "wasm_tools", "scope"),
+    (18, "dynamic_tools", "scope"),
+    (22, "agent_jobs", "restart_params"),
+];
 
 /// Check whether `table` already contains `column` via `pragma_table_info`.
 async fn column_exists(
@@ -978,16 +1092,26 @@ pub async fn run_incremental(conn: &libsql::Connection) -> Result<(), crate::err
             continue; // Already applied
         }
 
-        // For ADD COLUMN migrations, skip the ALTER if the column already
-        // exists (e.g. because the base SCHEMA was updated to include it)
-        // and just record the migration as applied.
-        let skip_sql = if let Some(&(_, table, column)) = IDEMPOTENT_ADD_COLUMN_MIGRATIONS
+        // For ADD COLUMN migrations, skip the ALTER if ALL the tracked columns
+        // already exist (e.g. because the base SCHEMA was updated to include
+        // them). Each version may have multiple entries — all must be present
+        // to skip the SQL.
+        let idempotent_checks: Vec<(&str, &str)> = IDEMPOTENT_ADD_COLUMN_MIGRATIONS
             .iter()
-            .find(|(v, _, _)| *v == version)
-        {
-            column_exists(conn, table, column).await?
-        } else {
+            .filter(|(v, _, _)| *v == version)
+            .map(|(_, table, column)| (*table, *column))
+            .collect();
+        let skip_sql = if idempotent_checks.is_empty() {
             false
+        } else {
+            let mut all_exist = true;
+            for (table, column) in &idempotent_checks {
+                if !column_exists(conn, table, column).await? {
+                    all_exist = false;
+                    break;
+                }
+            }
+            all_exist
         };
 
         // Wrap migration + recording in a transaction for atomicity.

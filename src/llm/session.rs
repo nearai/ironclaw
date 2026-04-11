@@ -58,6 +58,8 @@ pub struct SessionManager {
     store: RwLock<Option<Arc<dyn crate::db::Database>>>,
     /// User ID for DB settings (default: "default").
     user_id: RwLock<String>,
+    /// Optional encrypted secrets store — preferred over plaintext settings when present.
+    secrets: RwLock<Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>>,
 }
 
 impl SessionManager {
@@ -72,7 +74,10 @@ impl SessionManager {
             token: RwLock::new(None),
             renewal_lock: Mutex::new(()),
             store: RwLock::new(None),
-            user_id: RwLock::new("default".to_string()),
+            // Placeholder; overwritten by attach_store() with the real owner_id at startup.
+            // TODO(ownership): thread owner_id through SessionManager constructors
+            user_id: RwLock::new("<unset>".to_string()),
+            secrets: RwLock::new(None),
         };
 
         // Try to load existing session synchronously during construction
@@ -103,7 +108,10 @@ impl SessionManager {
             token: RwLock::new(None),
             renewal_lock: Mutex::new(()),
             store: RwLock::new(None),
-            user_id: RwLock::new("default".to_string()),
+            // Placeholder; overwritten by attach_store() with the real owner_id at startup.
+            // TODO(ownership): thread owner_id through SessionManager constructors
+            user_id: RwLock::new("<unset>".to_string()),
+            secrets: RwLock::new(None),
         };
 
         if let Err(e) = manager.load_session().await {
@@ -125,6 +133,23 @@ impl SessionManager {
         // Try to load from DB (may have been saved by a previous run)
         if let Err(e) = self.load_session_from_db().await {
             tracing::debug!("No session in DB: {}", e);
+        }
+    }
+
+    /// Attach an encrypted secrets store for secure session token persistence.
+    ///
+    /// When attached, `save_session` writes to the secrets store in addition
+    /// to the disk file, and `load_session_from_db` prefers the secrets store
+    /// over the plaintext settings table.
+    pub async fn attach_secrets(
+        &self,
+        secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
+    ) {
+        *self.secrets.write().await = Some(secrets);
+
+        // Try to load from encrypted secrets (preferred over settings table)
+        if let Err(e) = self.load_session_from_secrets().await {
+            tracing::debug!("No session in secrets store: {}", e);
         }
     }
 
@@ -482,8 +507,21 @@ impl SessionManager {
 
         tracing::debug!("Session saved to {}", self.config.session_path.display());
 
-        // Also save to DB if a store is attached
-        if let Some(ref store) = *self.store.read().await {
+        // Persist to encrypted secrets store (preferred) if attached
+        if let Some(ref secrets) = *self.secrets.read().await {
+            let user_id = self.user_id.read().await.clone();
+            let session_json_str =
+                serde_json::to_string(&session).unwrap_or_else(|_| token.to_string());
+            let params =
+                crate::secrets::CreateSecretParams::new("nearai_session_token", session_json_str)
+                    .with_provider("nearai");
+            if let Err(e) = secrets.create(&user_id, params).await {
+                tracing::warn!("Failed to save session to encrypted secrets: {}", e);
+            } else {
+                tracing::debug!("Session saved to encrypted secrets store");
+            }
+        // Save to DB settings table only as fallback when no secrets store is attached
+        } else if let Some(ref store) = *self.store.read().await {
             let user_id = self.user_id.read().await.clone();
             let session_json = serde_json::to_value(&session)
                 .unwrap_or(serde_json::Value::String(token.to_string()));
@@ -555,6 +593,43 @@ impl SessionManager {
         let mut guard = self.token.write().await;
         *guard = Some(SecretString::from(session.session_token));
         tracing::info!("Loaded session from DB settings");
+
+        Ok(())
+    }
+
+    /// Try to load session from the encrypted secrets store.
+    ///
+    /// The session is stored as a JSON-serialized `SessionData` string under
+    /// the secret name `nearai_session_token`. This is preferred over the
+    /// plaintext settings table when a secrets store is available.
+    async fn load_session_from_secrets(&self) -> Result<(), LlmError> {
+        let secrets_guard = self.secrets.read().await;
+        let secrets = secrets_guard
+            .as_ref()
+            .ok_or_else(|| LlmError::SessionRenewalFailed {
+                provider: "nearai".to_string(),
+                reason: "No secrets store attached".to_string(),
+            })?;
+
+        let user_id = self.user_id.read().await.clone();
+        let decrypted = secrets
+            .get_decrypted(&user_id, "nearai_session_token")
+            .await
+            .map_err(|e| LlmError::SessionRenewalFailed {
+                provider: "nearai".to_string(),
+                reason: format!("Secrets lookup failed: {}", e),
+            })?;
+
+        let session: SessionData = serde_json::from_str(decrypted.expose()).map_err(|e| {
+            LlmError::SessionRenewalFailed {
+                provider: "nearai".to_string(),
+                reason: format!("Failed to parse session from secrets: {}", e),
+            }
+        })?;
+
+        let mut guard = self.token.write().await;
+        *guard = Some(SecretString::from(session.session_token));
+        tracing::info!("Loaded session from encrypted secrets store");
 
         Ok(())
     }

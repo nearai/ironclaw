@@ -237,18 +237,64 @@ pub struct ScorerConfig {
     pub domain_keywords: Option<Vec<String>>,
 }
 
-/// Build a domain regex from a keyword list, with fallback on invalid patterns.
+/// Build a domain regex from a keyword list, tolerating individual bad
+/// entries.
 ///
-/// An empty keyword list falls back to the default keywords so scoring
-/// doesn't break when `domain_keywords: Some(vec![])` is configured.
+/// Keywords are *regex fragments* by design — the default list includes
+/// patterns like `sql.?injection` and `near.?sdk` where `.?` is an
+/// optional separator. We can't blindly `regex::escape()` them.
+///
+/// The previous implementation joined every keyword into a single
+/// alternation and let `Regex::new` accept-or-reject the whole thing.
+/// That meant one typo (e.g. an unclosed bracket) silently dropped the
+/// admin's *entire* keyword list and replaced it with a 3-keyword
+/// fallback (`api|code|deploy`). This new version validates each
+/// keyword in isolation, drops the broken ones with a warning, and
+/// builds the alternation from the survivors. If the joined pattern
+/// somehow still fails (or the user supplied no valid keywords), we
+/// fall back to the well-tested default list.
 fn build_domain_regex(keywords: &[&str]) -> Regex {
     if keywords.is_empty() {
         return RE_DOMAIN_DEFAULT.clone();
     }
-    let pattern = format!(r"(?i)\b({})\b", keywords.join("|"));
+
+    // Filter out keywords that aren't valid regex fragments in isolation.
+    // We compile them with the same `\b(…)\b` shroud they'll appear in,
+    // so issues like unbalanced parens are caught.
+    let valid: Vec<&str> = keywords
+        .iter()
+        .copied()
+        .filter(|k| {
+            let probe = format!(r"(?i)\b({k})\b");
+            match Regex::new(&probe) {
+                Ok(_) => true,
+                Err(e) => {
+                    tracing::warn!(
+                        keyword = k,
+                        error = %e,
+                        "Domain keyword is not a valid regex fragment, dropping it"
+                    );
+                    false
+                }
+            }
+        })
+        .collect();
+
+    if valid.is_empty() {
+        tracing::warn!(
+            "All custom domain keywords were invalid; falling back to default keyword list"
+        );
+        return RE_DOMAIN_DEFAULT.clone();
+    }
+
+    let pattern = format!(r"(?i)\b({})\b", valid.join("|"));
     Regex::new(&pattern).unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "Invalid domain keywords pattern, using minimal fallback");
-        Regex::new(r"(?i)\b(api|code|deploy)\b").expect("fallback regex is valid") // safety: hardcoded literal
+        tracing::warn!(
+            error = %e,
+            "Combined domain keyword pattern failed to compile despite per-keyword validation; \
+             falling back to default keyword list"
+        );
+        RE_DOMAIN_DEFAULT.clone()
     })
 }
 
@@ -1269,6 +1315,62 @@ mod tests {
         assert!(
             custom_domain2 > 0,
             "Custom keywords should match 'myproduct'"
+        );
+    }
+
+    /// Regression test: a single broken keyword in the middle of an
+    /// otherwise valid list must NOT silently nuke the entire list. The
+    /// pre-fix implementation joined every keyword into one alternation,
+    /// so an unclosed bracket on one entry made `Regex::new()` fail and
+    /// the function fell back to a 3-keyword minimal pattern, dropping
+    /// every other keyword the admin had configured.
+    #[test]
+    fn build_domain_regex_drops_only_invalid_keywords() {
+        // "[broken" has an unclosed bracket — the previous code rejected
+        // the whole alternation when this was present. The fix should
+        // drop only this entry and keep the others.
+        let keywords = vec![
+            "valid_one".to_string(),
+            "[broken".to_string(),
+            "valid_two".to_string(),
+        ];
+        let config = ScorerConfig {
+            weights: ScorerWeights::default(),
+            domain_keywords: Some(keywords),
+        };
+
+        // valid_one and valid_two must still match.
+        let r1 = score_complexity_with_config("This is about valid_one stuff", &config);
+        assert!(
+            r1.components.get("domain_specific").copied().unwrap_or(0) > 0,
+            "valid_one should still score after a sibling keyword failed to compile"
+        );
+
+        let r2 = score_complexity_with_config("Talking about valid_two here", &config);
+        assert!(
+            r2.components.get("domain_specific").copied().unwrap_or(0) > 0,
+            "valid_two should still score after a sibling keyword failed to compile"
+        );
+    }
+
+    /// If every custom keyword is broken, fall back to the default list
+    /// (which is rich and well-tested) rather than the previous 3-keyword
+    /// `(api|code|deploy)` minimal stub.
+    #[test]
+    fn build_domain_regex_falls_back_to_defaults_when_all_invalid() {
+        let keywords = vec!["[bad1".to_string(), "(unclosed".to_string()];
+        let config = ScorerConfig {
+            weights: ScorerWeights::default(),
+            domain_keywords: Some(keywords),
+        };
+
+        // "kubernetes" is in DEFAULT_DOMAIN_KEYWORDS, so the fallback
+        // should match it. Under the previous fallback (api|code|deploy),
+        // this assertion would fail.
+        let r = score_complexity_with_config("How do I deploy kubernetes?", &config);
+        assert!(
+            r.components.get("domain_specific").copied().unwrap_or(0) > 0,
+            "kubernetes should match the default keyword fallback"
         );
     }
 

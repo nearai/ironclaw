@@ -10,6 +10,9 @@
 //! types become thin wrappers that delegate to `Arc<dyn Database>`.
 
 #[cfg(feature = "postgres")]
+pub mod migration_fixup;
+
+#[cfg(feature = "postgres")]
 pub mod postgres;
 
 #[cfg(feature = "postgres")]
@@ -38,7 +41,7 @@ use crate::history::{
     AgentJobRecord, AgentJobSummary, ConversationMessage, ConversationSummary, JobEventRecord,
     LlmCallRecord, SandboxJobRecord, SandboxJobSummary, SettingRow,
 };
-use crate::workspace::{MemoryChunk, MemoryDocument, WorkspaceEntry};
+use crate::workspace::{ChunkWrite, MemoryChunk, MemoryDocument, WorkspaceEntry};
 use crate::workspace::{SearchConfig, SearchResult};
 
 /// Create a database backend from configuration, run migrations, and return it.
@@ -330,6 +333,20 @@ pub struct UserRecord {
     pub metadata: serde_json::Value,
 }
 
+impl UserRecord {
+    /// Returns `true` if this user holds the admin role.
+    ///
+    /// Comparison is case-insensitive so a future row that stores
+    /// `"Admin"` (e.g. from a manual SQL fix or a renaming refactor)
+    /// still authenticates as admin instead of silently failing
+    /// closed. Use this helper everywhere instead of literal
+    /// `user.role == "admin"` so the canonicalisation rule lives in
+    /// one place.
+    pub fn is_admin(&self) -> bool {
+        self.role.eq_ignore_ascii_case("admin")
+    }
+}
+
 /// An API token for authenticating requests (hash stored, never plaintext).
 #[derive(Debug, Clone)]
 pub struct ApiTokenRecord {
@@ -519,6 +536,14 @@ pub trait JobStore: Send + Sync {
         actual_time_secs: i32,
         actual_value: Option<Decimal>,
     ) -> Result<(), DatabaseError>;
+
+    /// Create a lightweight system job for audit trail purposes.
+    ///
+    /// System jobs are instantly-completed job records that serve as FK anchors
+    /// for `ActionRecord`s created by non-agent callers (gateway handlers, CLI
+    /// commands, routine engines). They have `category = 'system'` and
+    /// `status = 'completed'` (snake_case to match `JobState::Completed.to_string()`).
+    async fn create_system_job(&self, user_id: &str, source: &str) -> Result<Uuid, DatabaseError>;
 }
 
 #[async_trait]
@@ -722,6 +747,20 @@ pub trait WorkspaceStore: Send + Sync {
         content: &str,
         embedding: Option<&[f32]>,
     ) -> Result<Uuid, WorkspaceError>;
+    /// Atomically replace all chunks for a document.
+    ///
+    /// Runs `DELETE FROM memory_chunks WHERE document_id = ?` followed by one
+    /// `INSERT` per `ChunkWrite` inside a single transaction. This closes the
+    /// TOCTOU race where two concurrent reindexers for the same document
+    /// could both delete, then both try to `INSERT` chunk_index 0 and hit the
+    /// `UNIQUE (document_id, chunk_index)` constraint.
+    ///
+    /// Passing an empty slice is equivalent to `delete_chunks(document_id)`.
+    async fn replace_chunks(
+        &self,
+        document_id: Uuid,
+        chunks: &[ChunkWrite],
+    ) -> Result<(), WorkspaceError>;
     async fn update_chunk_embedding(
         &self,
         chunk_id: Uuid,
@@ -934,6 +973,13 @@ pub trait UserStore: Send + Sync {
 
     /// Create a new user record.
     async fn create_user(&self, user: &UserRecord) -> Result<(), DatabaseError>;
+
+    /// Create the user if they do not already exist. Idempotent.
+    ///
+    /// Each backend must override this with an atomic upsert (PostgreSQL:
+    /// `ON CONFLICT DO NOTHING`; libSQL: `INSERT OR IGNORE`) to avoid the
+    /// TOCTOU race in a SELECT + INSERT sequence.
+    async fn get_or_create_user(&self, user: UserRecord) -> Result<(), DatabaseError>;
     /// Get a user by their string id.
     async fn get_user(&self, id: &str) -> Result<Option<UserRecord>, DatabaseError>;
     /// Get a user by email address.
@@ -1035,6 +1081,79 @@ pub struct UserSummaryStats {
     pub last_active_at: Option<DateTime<Utc>>,
 }
 
+/// A pending pairing request.
+#[derive(Debug, Clone)]
+pub struct PairingRequestRecord {
+    pub id: uuid::Uuid,
+    pub channel: String,
+    pub external_id: String,
+    pub code: String,
+    pub created: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Pairing and channel identity operations.
+/// Named `ChannelPairingStore` to avoid collision with the application-level
+/// `PairingStore` struct in `src/pairing/store.rs`.
+#[async_trait]
+pub trait ChannelPairingStore: Send + Sync {
+    /// Returns the `Identity` for `(channel, external_id)` if the sender has been paired.
+    /// Joins `channel_identities` with `users` to get OwnerId + UserRole in one query.
+    async fn resolve_channel_identity(
+        &self,
+        channel: &str,
+        external_id: &str,
+    ) -> Result<Option<crate::ownership::Identity>, DatabaseError>;
+
+    /// Read paired external IDs for a channel, for compatibility with legacy
+    /// allow-list-based WASM channel admission.
+    async fn read_allow_from(&self, channel: &str) -> Result<Vec<String>, DatabaseError>;
+
+    /// Create or replace the pending pairing request for `(channel, external_id)`.
+    /// Any existing non-expired pending request for the same sender is retired and a new code
+    /// is issued so retrying the claim flow always rotates to a fresh code.
+    async fn upsert_pairing_request(
+        &self,
+        channel: &str,
+        external_id: &str,
+        meta: Option<serde_json::Value>,
+    ) -> Result<PairingRequestRecord, DatabaseError>;
+
+    /// Approve the pairing `code`, mapping `(channel, external_id)` → `owner_id`.
+    /// Sets owner_id on the pairing_requests row + creates channel_identities row — one transaction.
+    /// Returns `Err` if code is invalid, expired, already approved, or belongs to a different channel.
+    async fn approve_pairing(
+        &self,
+        channel: &str,
+        code: &str,
+        owner_id: &str,
+    ) -> Result<(), DatabaseError>;
+
+    /// List pending (unapproved, non-expired) pairing requests for a channel.
+    async fn list_pending_pairings(
+        &self,
+        channel: &str,
+    ) -> Result<Vec<PairingRequestRecord>, DatabaseError>;
+
+    /// Remove a channel identity (unlink a channel from a user).
+    async fn remove_channel_identity(
+        &self,
+        channel: &str,
+        external_id: &str,
+    ) -> Result<(), DatabaseError>;
+}
+
+/// Generates an 8-character pairing code from an unambiguous alphabet.
+pub fn generate_pairing_code() -> String {
+    use rand::Rng;
+    const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut rng = rand::rngs::OsRng;
+    (0..8)
+        .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
+        .collect()
+}
+
 /// Persistence for linked external identities (OAuth/social login providers).
 #[async_trait]
 pub trait IdentityStore: Send + Sync {
@@ -1091,12 +1210,17 @@ pub trait Database:
     + SettingsStore
     + WorkspaceStore
     + UserStore
+    + ChannelPairingStore
     + IdentityStore
     + Send
     + Sync
 {
     /// Run schema migrations for this backend.
     async fn run_migrations(&self) -> Result<(), DatabaseError>;
+
+    /// Rewrite all rows where user_id = 'default' to owner_id across all
+    /// affected tables. Idempotent — safe to call on every startup.
+    async fn migrate_default_owner(&self, owner_id: &str) -> Result<(), DatabaseError>;
 }
 
 #[cfg(test)]

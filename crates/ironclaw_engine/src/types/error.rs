@@ -26,6 +26,9 @@ pub enum EngineError {
     #[error("effect execution error: {reason}")]
     Effect { reason: String },
 
+    #[error("invalid cadence: {reason}")]
+    InvalidCadence { reason: String },
+
     #[error("invalid state transition: {from} -> {to}")]
     InvalidTransition { from: ThreadState, to: ThreadState },
 

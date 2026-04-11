@@ -75,7 +75,10 @@ impl exports::near::agent::tool::Guest for TelegramTool {
     }
 
     fn schema() -> String {
-        SCHEMA.to_string()
+        // Derived from `TelegramAction` via `schemars::JsonSchema` so the
+        // advertised schema can never drift from the serde contract.
+        let schema = schemars::schema_for!(types::TelegramAction);
+        serde_json::to_string(&schema).expect("schema serialization is infallible")
     }
 
     fn description() -> String {
@@ -244,68 +247,5 @@ fn get_api_hash() -> Result<String, String> {
             .into(),
     )
 }
-
-const SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["action"],
-    "properties": {
-        "action": {
-            "type": "string",
-            "enum": ["login", "submit_auth_code", "submit_2fa_password", "get_me", "get_contacts", "get_chats", "get_messages", "send_message", "forward_message", "delete_message", "search_messages", "get_updates"],
-            "description": "The Telegram operation to perform"
-        },
-        "phone_number": {
-            "type": "string",
-            "description": "Phone number in international format (e.g., '+1234567890'). Required for: login"
-        },
-        "code": {
-            "type": "string",
-            "description": "Verification code received via SMS or Telegram. Required for: submit_auth_code"
-        },
-        "password": {
-            "type": "string",
-            "description": "Two-factor authentication password. Required for: submit_2fa_password"
-        },
-        "chat_id": {
-            "type": "integer",
-            "description": "Chat ID (negative for groups/channels). Required for: get_messages, send_message. Optional for: search_messages"
-        },
-        "limit": {
-            "type": "integer",
-            "description": "Maximum number of results (default: 20). Used by: get_chats, get_messages, search_messages",
-            "default": 20
-        },
-        "from_message_id": {
-            "type": "integer",
-            "description": "Start from this message ID for pagination. Used by: get_messages"
-        },
-        "text": {
-            "type": "string",
-            "description": "Message text. Required for: send_message"
-        },
-        "from_chat_id": {
-            "type": "integer",
-            "description": "Source chat ID. Required for: forward_message"
-        },
-        "to_chat_id": {
-            "type": "integer",
-            "description": "Destination chat ID. Required for: forward_message"
-        },
-        "message_ids": {
-            "type": "array",
-            "items": { "type": "integer" },
-            "description": "Message IDs. Required for: forward_message, delete_message"
-        },
-        "revoke": {
-            "type": "boolean",
-            "description": "Also delete for other participants (default: false). Used by: delete_message",
-            "default": false
-        },
-        "query": {
-            "type": "string",
-            "description": "Search query. Required for: search_messages"
-        }
-    }
-}"#;
 
 export!(TelegramTool);

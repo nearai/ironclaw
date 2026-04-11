@@ -1,10 +1,11 @@
 [workspace]
-members = [".", "crates/ironclaw_common", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_engine"]
+members = [".", "crates/ironclaw_common", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_engine", "crates/ironclaw_gateway", "crates/ironclaw_tui"]
 exclude = [
     "channels-src/discord",
     "channels-src/telegram",
     "channels-src/slack",
     "channels-src/whatsapp",
+    "tools-src/composio",
     "tools-src/github",
     "tools-src/gmail",
     "tools-src/google-calendar",
@@ -106,13 +107,20 @@ tower-http = { version = "0.6", features = ["trace", "cors", "set-header", "catc
 # Cron scheduling for routines
 cron = "0.13"
 
+# JSON Schema validation (workspace document metadata).
+# default-features disabled to avoid pulling a second `reqwest` major version
+# for remote $ref resolution (we only validate against in-memory schemas).
+jsonschema = { version = "0.45", default-features = false }
+
 # Shared types
 ironclaw_common = { path = "crates/ironclaw_common", version = "0.1.0" }
 
 # Safety/sanitization
 ironclaw_engine = { path = "crates/ironclaw_engine", version = "0.1.0" }
+ironclaw_gateway = { path = "crates/ironclaw_gateway", version = "0.1.0" }
 ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.0" }
 ironclaw_skills = { path = "crates/ironclaw_skills", version = "0.1.0" }
+ironclaw_tui = { path = "crates/ironclaw_tui", version = "0.1.0", optional = true }
 regex = "1"
 aho-corasick = "1"
 
@@ -122,6 +130,7 @@ serde_yml = "0.0.12"
 # Filesystem paths
 dirs = "6"
 fs4 = "0.6"
+glob = "0.3"
 
 # Semantic versioning
 semver = "1"
@@ -141,9 +150,9 @@ open = "5"
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
 # WASM sandbox for untrusted tool execution
-wasmtime = { version = "28", features = ["component-model"] }
-wasmtime-wasi = "28"  # WASI support for component model
-wasmparser = "0.220"  # WASM binary parsing for validation
+wasmtime = { version = "43.0.1", features = ["component-model"] }
+wasmtime-wasi = "43.0.1"  # WASI support for component model
+wasmparser = "0.245.1"  # WASM binary parsing for validation
 
 # Cryptography for secrets management
 aes-gcm = "0.10"
@@ -218,18 +227,9 @@ testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
 tempfile = "3"
 insta = "1.46.3"
-criterion = "0.5"
-
-[[bench]]
-name = "safety_check"
-harness = false
-
-[[bench]]
-name = "safety_pipeline"
-harness = false
 
 [features]
-default = ["postgres", "libsql", "html-to-markdown"]
+default = ["postgres", "libsql", "html-to-markdown", "tui"]
 postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
@@ -248,6 +248,7 @@ libsql = ["dep:libsql"]
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
+tui = ["dep:ironclaw_tui"]
 import = ["dep:json5", "libsql"]
 
 [[test]]

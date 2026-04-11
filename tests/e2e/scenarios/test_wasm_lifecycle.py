@@ -48,26 +48,26 @@ async def _install_extension(base_url, name):
 @pytest.fixture(scope="module", autouse=True)
 async def extension_lifecycle_cleanup(ironclaw_server):
     """Start and end the module with a clean extension set."""
-    await _ensure_removed(ironclaw_server, "web-search")
+    await _ensure_removed(ironclaw_server, "web_search")
     await _ensure_removed(ironclaw_server, "gmail")
     yield
-    await _ensure_removed(ironclaw_server, "web-search")
+    await _ensure_removed(ironclaw_server, "web_search")
     await _ensure_removed(ironclaw_server, "gmail")
 
 
 @pytest.fixture(scope="module")
 async def web_search_installed(ironclaw_server, extension_lifecycle_cleanup):
-    """Install web-search once for tests that require the pre-configure state."""
-    data = await _install_extension(ironclaw_server, "web-search")
-    return {"name": "web-search", "install": data}
+    """Install web_search once for tests that require the pre-configure state."""
+    data = await _install_extension(ironclaw_server, "web_search")
+    return {"name": "web_search", "install": data}
 
 
 @pytest.fixture(scope="module")
 async def web_search_configured(ironclaw_server, web_search_installed):
-    """Configure web-search once for tests that require the active state."""
+    """Configure web_search once for tests that require the active state."""
     r = await api_post(
         ironclaw_server,
-        "/api/extensions/web-search/setup",
+        "/api/extensions/web_search/setup",
         json={"secrets": {"brave_api_key": "test-key-123"}},
         timeout=30,
     )
@@ -75,7 +75,7 @@ async def web_search_configured(ironclaw_server, web_search_installed):
     data = r.json()
     assert data.get("success") is True, f"Configure failed: {data.get('message', '')}"
     assert data.get("activated") is True, "Should auto-activate after configure"
-    return {"name": "web-search", "configure": data}
+    return {"name": "web_search", "configure": data}
 
 
 @pytest.fixture(scope="module")
@@ -87,22 +87,22 @@ async def gmail_installed(ironclaw_server, extension_lifecycle_cleanup):
 
 @pytest.fixture(scope="module")
 async def web_search_removed(ironclaw_server, web_search_configured):
-    """Remove web-search once for post-uninstall assertions."""
+    """Remove web_search once for post-uninstall assertions."""
     r = await api_post(
-        ironclaw_server, "/api/extensions/web-search/remove", timeout=30
+        ironclaw_server, "/api/extensions/web_search/remove", timeout=30
     )
     assert r.status_code == 200
     data = r.json()
     assert data.get("success") is True, f"Remove failed: {data.get('message', '')}"
-    return {"name": "web-search", "remove": data}
+    return {"name": "web_search", "remove": data}
 
 
 @pytest.fixture(scope="module")
 async def web_search_reinstalled(ironclaw_server, web_search_removed):
-    """Reinstall web-search after removal to verify it returns unconfigured."""
-    await _ensure_removed(ironclaw_server, "web-search")
-    data = await _install_extension(ironclaw_server, "web-search")
-    return {"name": "web-search", "install": data}
+    """Reinstall web_search after removal to verify it returns unconfigured."""
+    await _ensure_removed(ironclaw_server, "web_search")
+    data = await _install_extension(ironclaw_server, "web_search")
+    return {"name": "web_search", "install": data}
 
 
 # ── Section A: Registry Validation ──────────────────────────────────────
@@ -115,7 +115,7 @@ async def test_registry_lists_extensions(ironclaw_server):
     data = r.json()
     assert "entries" in data
     names = [e["name"] for e in data["entries"]]
-    assert "web-search" in names
+    assert "web_search" in names
     assert "gmail" in names
 
 
@@ -136,13 +136,13 @@ async def test_registry_entry_fields(ironclaw_server):
 async def test_registry_installed_flag_false_initially(ironclaw_server):
     """Before any install, all registry entries have installed=False."""
     # Clean up in case previous test run left extensions installed
-    await _ensure_removed(ironclaw_server, "web-search")
+    await _ensure_removed(ironclaw_server, "web_search")
     await _ensure_removed(ironclaw_server, "gmail")
 
     r = await api_get(ironclaw_server, "/api/extensions/registry")
     entries = r.json()["entries"]
     for entry in entries:
-        if entry["name"] in ("web-search", "gmail"):
+        if entry["name"] in ("web_search", "gmail"):
             assert entry["installed"] is False, (
                 f"{entry['name']} should not be installed yet"
             )
@@ -156,7 +156,7 @@ async def test_registry_search_filters(ironclaw_server):
     assert r.status_code == 200
     entries = r.json()["entries"]
     names = [e["name"] for e in entries]
-    assert "web-search" in names
+    assert "web_search" in names
 
 
 async def test_registry_search_no_match(ironclaw_server):
@@ -170,19 +170,19 @@ async def test_registry_search_no_match(ironclaw_server):
     assert len(r.json()["entries"]) == 0
 
 
-# ── Section B: Install Lifecycle (web-search) ───────────────────────────
+# ── Section B: Install Lifecycle (web_search) ───────────────────────────
 
 
 async def test_install_web_search(web_search_installed):
-    """Install web-search from registry. Asserts success — failure here means
+    """Install web_search from registry. Asserts success — failure here means
     the registry/download/build pipeline is broken."""
     assert "message" in web_search_installed["install"]
 
 
 async def test_installed_extension_fields(ironclaw_server, web_search_installed):
     """After install, extension list shows correct fields."""
-    ext = await _get_extension(ironclaw_server, "web-search")
-    assert ext is not None, "web-search not in extensions list after install"
+    ext = await _get_extension(ironclaw_server, "web_search")
+    assert ext is not None, "web_search not in extensions list after install"
     assert ext["kind"] == "wasm_tool"
     assert ext["needs_setup"] is True, "Should need setup (has brave_api_key secret)"
     assert ext["authenticated"] is False, "Should not be authenticated before configure"
@@ -192,14 +192,14 @@ async def test_installed_in_registry(ironclaw_server, web_search_installed):
     """Registry marks installed extension with installed=True."""
     r = await api_get(ironclaw_server, "/api/extensions/registry")
     entries = r.json()["entries"]
-    ws_entry = next((e for e in entries if e["name"] == "web-search"), None)
+    ws_entry = next((e for e in entries if e["name"] == "web_search"), None)
     assert ws_entry is not None
     assert ws_entry["installed"] is True, "Registry should show installed=True"
 
 
 async def test_setup_schema_has_secrets(ironclaw_server, web_search_installed):
     """Setup schema returns brave_api_key with correct field info."""
-    r = await api_get(ironclaw_server, "/api/extensions/web-search/setup")
+    r = await api_get(ironclaw_server, "/api/extensions/web_search/setup")
     assert r.status_code == 200
     data = r.json()
     assert "secrets" in data
@@ -215,36 +215,45 @@ async def test_extension_not_authenticated_before_configure(
     ironclaw_server, web_search_installed
 ):
     """Installed but not configured extension is not authenticated."""
-    ext = await _get_extension(ironclaw_server, "web-search")
+    ext = await _get_extension(ironclaw_server, "web_search")
     assert ext is not None
     # Before configuring secrets, extension shouldn't be fully authenticated
     assert ext["needs_setup"] is True, "Should still need setup before configure"
 
 
 async def test_activate_before_configure_rejected(ironclaw_server, web_search_installed):
-    """Activating a tool that needs setup secrets is rejected."""
+    """Activating a tool that needs setup secrets is rejected.
+
+    The current handler returns the credential's `setup_instructions`
+    field as the user-facing message instead of a generic
+    "requires configuration" string. The invariant pinned by this test is:
+    activation MUST be refused (success=False) and the response MUST carry
+    *some* actionable hint about how to provide the missing credential.
+    The exact wording is the manifest's setup_instructions, so we don't
+    pin specific keywords — we just verify the response is non-empty.
+    """
     r = await api_post(
-        ironclaw_server, "/api/extensions/web-search/activate", timeout=30
+        ironclaw_server, "/api/extensions/web_search/activate", timeout=30
     )
     assert r.status_code == 200
     data = r.json()
     assert data.get("success") is False, (
         f"Activate should fail before configure: {data}"
     )
-    msg = data.get("message", "").lower()
-    assert "requires configuration" in msg or "setup" in msg, (
-        f"Error should mention configuration: {data.get('message')}"
+    msg = data.get("message") or ""
+    assert msg.strip(), (
+        f"Activate-before-configure response must include a setup hint, got empty: {data}"
     )
 
 
-# ── Section C: Configure + Activate (web-search) ────────────────────────
+# ── Section C: Configure + Activate (web_search) ────────────────────────
 
 
 async def test_configure_rejects_unknown_secret(ironclaw_server, web_search_installed):
     """Submitting an unknown secret name is rejected."""
     r = await api_post(
         ironclaw_server,
-        "/api/extensions/web-search/setup",
+        "/api/extensions/web_search/setup",
         json={"secrets": {"fake_unknown_key": "value"}},
     )
     assert r.status_code == 200
@@ -262,7 +271,7 @@ async def test_configure_with_valid_secret(web_search_configured):
 
 async def test_extension_active_after_configure(ironclaw_server, web_search_configured):
     """After configure, extension shows authenticated=True and active=True."""
-    ext = await _get_extension(ironclaw_server, "web-search")
+    ext = await _get_extension(ironclaw_server, "web_search")
     assert ext is not None
     assert ext["authenticated"] is True, "Should be authenticated after configure"
     assert ext["active"] is True, "Should be active after auto-activation"
@@ -271,7 +280,7 @@ async def test_extension_active_after_configure(ironclaw_server, web_search_conf
 
 async def test_setup_shows_provided(ironclaw_server, web_search_configured):
     """After configure, setup schema shows secret as provided."""
-    r = await api_get(ironclaw_server, "/api/extensions/web-search/setup")
+    r = await api_get(ironclaw_server, "/api/extensions/web_search/setup")
     assert r.status_code == 200
     secrets = {s["name"]: s for s in r.json()["secrets"]}
     assert "brave_api_key" in secrets
@@ -285,8 +294,8 @@ async def test_tools_registered_after_activate(
     r = await api_get(ironclaw_server, "/api/extensions/tools")
     assert r.status_code == 200
     tool_names = [t["name"] for t in r.json()["tools"]]
-    assert "web-search" in tool_names, (
-        f"web-search tool not found in tools list: {tool_names}"
+    assert "web_search" in tool_names, (
+        f"web_search tool not found in tools list: {tool_names}"
     )
 
 
@@ -295,7 +304,7 @@ async def test_activate_already_active_idempotent(
 ):
     """Activating an already-active extension succeeds (idempotent)."""
     r = await api_post(
-        ironclaw_server, "/api/extensions/web-search/activate", timeout=30
+        ironclaw_server, "/api/extensions/web_search/activate", timeout=30
     )
     assert r.status_code == 200
     data = r.json()
@@ -308,7 +317,7 @@ async def test_configure_empty_secret_skipped(ironclaw_server, web_search_config
     """Submitting an empty string for a secret skips it (doesn't overwrite)."""
     r = await api_post(
         ironclaw_server,
-        "/api/extensions/web-search/setup",
+        "/api/extensions/web_search/setup",
         json={"secrets": {"brave_api_key": ""}},
         timeout=30,
     )
@@ -317,7 +326,7 @@ async def test_configure_empty_secret_skipped(ironclaw_server, web_search_config
     assert data.get("success") is True
 
     # Verify the secret is still provided (not cleared)
-    r2 = await api_get(ironclaw_server, "/api/extensions/web-search/setup")
+    r2 = await api_get(ironclaw_server, "/api/extensions/web_search/setup")
     secrets = {s["name"]: s for s in r2.json()["secrets"]}
     assert secrets["brave_api_key"]["provided"] is True, (
         "Empty value should not clear existing secret"
@@ -343,10 +352,10 @@ async def test_gmail_fields(ironclaw_server, gmail_installed):
 async def test_both_extensions_listed(
     ironclaw_server, web_search_configured, gmail_installed
 ):
-    """Both web-search and gmail appear in extensions list (no clobbering)."""
+    """Both web_search and gmail appear in extensions list (no clobbering)."""
     r = await api_get(ironclaw_server, "/api/extensions")
     names = [e["name"] for e in r.json()["extensions"]]
-    assert "web-search" in names, f"web-search missing from: {names}"
+    assert "web_search" in names, f"web_search missing from: {names}"
     assert "gmail" in names, f"gmail missing from: {names}"
 
 
@@ -370,14 +379,14 @@ async def test_gmail_setup_schema_auto_resolves(ironclaw_server, gmail_installed
 
 
 async def test_remove_web_search(web_search_removed):
-    """Remove web-search succeeds."""
+    """Remove web_search succeeds."""
     assert web_search_removed["remove"].get("success") is True
 
 
 async def test_removed_not_in_extensions(ironclaw_server, web_search_removed):
     """Removed extension no longer appears in extensions list."""
-    ext = await _get_extension(ironclaw_server, "web-search")
-    assert ext is None, "web-search should not be in extensions list after removal"
+    ext = await _get_extension(ironclaw_server, "web_search")
+    assert ext is None, "web_search should not be in extensions list after removal"
 
 
 async def test_removed_extension_not_listed(ironclaw_server, web_search_removed):
@@ -385,8 +394,8 @@ async def test_removed_extension_not_listed(ironclaw_server, web_search_removed)
     r = await api_get(ironclaw_server, "/api/extensions/tools")
     assert r.status_code == 200
     tool_names = [t["name"] for t in r.json()["tools"]]
-    assert "web-search" not in tool_names, (
-        f"Removed web-search tool should not remain registered: {tool_names}"
+    assert "web_search" not in tool_names, (
+        f"Removed web_search tool should not remain registered: {tool_names}"
     )
 
 
@@ -394,7 +403,7 @@ async def test_removed_not_in_registry_installed(ironclaw_server, web_search_rem
     """Registry shows removed extension as installed=False."""
     r = await api_get(ironclaw_server, "/api/extensions/registry")
     ws_entry = next(
-        (e for e in r.json()["entries"] if e["name"] == "web-search"), None
+        (e for e in r.json()["entries"] if e["name"] == "web_search"), None
     )
     assert ws_entry is not None
     assert ws_entry["installed"] is False, "Registry should show installed=False"
@@ -404,11 +413,11 @@ async def test_activate_after_remove_uses_replacement_bytes_not_cached_module(
     ironclaw_server, wasm_tools_dir, web_search_removed
 ):
     """After removal, activation must use the replacement bytes rather than a stale cache."""
-    wasm_path = Path(wasm_tools_dir) / "web-search.wasm"
+    wasm_path = Path(wasm_tools_dir) / "web_search.wasm"
     wasm_path.write_bytes(b"not-a-valid-wasm-component")
 
     r = await api_post(
-        ironclaw_server, "/api/extensions/web-search/activate", timeout=30
+        ironclaw_server, "/api/extensions/web_search/activate", timeout=30
     )
     assert r.status_code == 200
     data = r.json()
@@ -419,8 +428,8 @@ async def test_activate_after_remove_uses_replacement_bytes_not_cached_module(
 
 async def test_reinstall_after_remove(ironclaw_server, web_search_reinstalled):
     """Extension can be reinstalled after removal without stale activation errors."""
-    ext = await _get_extension(ironclaw_server, "web-search")
-    assert ext is not None, "web-search not found after reinstall"
+    ext = await _get_extension(ironclaw_server, "web_search")
+    assert ext is not None, "web_search not found after reinstall"
     assert ext["active"] is False, "Reinstalled tool should require setup before activation"
     assert ext["authenticated"] is False, "Reinstalled tool should not reuse deleted secrets"
     assert ext["needs_setup"] is True, "Reinstalled tool should require setup again"

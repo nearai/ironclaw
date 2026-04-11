@@ -27,7 +27,6 @@ mod logs;
 mod mcp;
 pub mod memory;
 mod models;
-pub mod oauth_defaults;
 mod pairing;
 mod registry;
 mod routines;
@@ -383,7 +382,7 @@ pub async fn run_routines_cli(
         .await
         .map_err(|e| anyhow::anyhow!("{e:#}"))?;
 
-    let user_id = std::env::var("IRONCLAW_OWNER_ID").unwrap_or_else(|_| "default".to_string());
+    let user_id = config.owner_id.clone();
     run_routines_command(routines_cmd.clone(), db, &user_id).await
 }
 
@@ -397,7 +396,12 @@ pub async fn run_memory_command(mem_cmd: &MemoryCommand) -> anyhow::Result<()> {
 
     let embeddings = config
         .embeddings
-        .create_provider(&config.llm.nearai.base_url, session);
+        .create_provider(
+            &config.llm.nearai.base_url,
+            session,
+            config.llm.bedrock.as_ref(),
+        )
+        .await;
 
     let db: Arc<dyn crate::db::Database> = crate::db::connect_from_config(&config.database)
         .await

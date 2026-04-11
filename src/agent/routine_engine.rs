@@ -34,7 +34,8 @@ use crate::extensions::ExtensionManager;
 use crate::llm::{
     ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
 };
-use crate::tenant::AdminScope;
+use crate::ownership::Owned;
+use crate::tenant::SystemScope;
 use crate::tools::{
     ToolError, ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_message,
     prepare_tool_params,
@@ -81,7 +82,7 @@ pub(crate) fn routine_matches_message(routine: &Routine, message: &IncomingMessa
     }
 
     // User ownership filter — only fire routines scoped to this user.
-    if routine.user_id != message.user_id {
+    if !routine.is_owned_by(&message.user_id) {
         return false;
     }
 
@@ -104,7 +105,7 @@ fn trigger_uses_event_cache(trigger: &Trigger) -> bool {
 /// The routine execution engine.
 pub struct RoutineEngine {
     config: RoutineConfig,
-    store: AdminScope,
+    store: SystemScope,
     llm: Arc<dyn LlmProvider>,
     workspace: Arc<Workspace>,
     /// Sender for notifications (routed to channel manager).
@@ -133,7 +134,7 @@ impl RoutineEngine {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: RoutineConfig,
-        store: AdminScope,
+        store: SystemScope,
         llm: Arc<dyn LlmProvider>,
         workspace: Arc<Workspace>,
         notify_tx: mpsc::Sender<OutgoingResponse>,
@@ -291,7 +292,7 @@ impl RoutineEngine {
             if !routine_matches_message(routine, message) {
                 // User mismatch is expected for multi-user setups — keep at
                 // trace to avoid one log per routine per inbound message.
-                if routine.user_id != message.user_id {
+                if !routine.is_owned_by(&message.user_id) {
                     tracing::trace!(
                         routine = %routine.name,
                         routine_user = %routine.user_id,
@@ -405,7 +406,7 @@ impl RoutineEngine {
             }
 
             if let Some(uid) = user_id
-                && routine.user_id != uid
+                && !routine.is_owned_by(uid)
             {
                 continue;
             }
@@ -770,7 +771,7 @@ impl RoutineEngine {
 
         // Enforce ownership when a user_id is provided (gateway calls).
         if let Some(uid) = user_id
-            && routine.user_id != uid
+            && !routine.is_owned_by(uid)
         {
             return Err(RoutineError::NotAuthorized { id: routine_id });
         }
@@ -812,10 +813,7 @@ impl RoutineEngine {
         let routine_workspace = if routine.user_id == self.workspace.user_id() {
             self.workspace.clone()
         } else {
-            Arc::new(Workspace::new_with_db(
-                &routine.user_id,
-                Arc::clone(self.store.db()),
-            ))
+            Arc::new(self.store.workspace_for_user(&routine.user_id))
         };
 
         // Execute inline for manual triggers (caller wants to wait)
@@ -954,10 +952,7 @@ impl RoutineEngine {
         let routine_workspace = if routine.user_id == self.workspace.user_id() {
             self.workspace.clone()
         } else {
-            Arc::new(Workspace::new_with_db(
-                &routine.user_id,
-                Arc::clone(self.store.db()),
-            ))
+            Arc::new(self.store.workspace_for_user(&routine.user_id))
         };
 
         let engine = EngineContext {
@@ -1018,7 +1013,7 @@ impl RoutineEngine {
 /// an active state (Pending/InProgress/Stuck). Maps the final `JobState` to
 /// a `RunStatus` for the routine run.
 struct FullJobWatcher {
-    store: AdminScope,
+    store: SystemScope,
     job_id: Uuid,
     routine_name: String,
 }
@@ -1029,7 +1024,7 @@ impl FullJobWatcher {
     /// Safety ceiling: 24 hours, derived from POLL_INTERVAL.
     const MAX_POLLS: u32 = (24 * 60 * 60) / Self::POLL_INTERVAL.as_secs() as u32;
 
-    fn new(store: AdminScope, job_id: Uuid, routine_name: String) -> Self {
+    fn new(store: SystemScope, job_id: Uuid, routine_name: String) -> Self {
         Self {
             store,
             job_id,
@@ -1101,7 +1096,7 @@ impl FullJobWatcher {
 /// Shared context passed to the execution function.
 struct EngineContext {
     config: RoutineConfig,
-    store: AdminScope,
+    store: SystemScope,
     llm: Arc<dyn LlmProvider>,
     workspace: Arc<Workspace>,
     notify_tx: mpsc::Sender<OutgoingResponse>,
@@ -1636,6 +1631,11 @@ fn build_lightweight_prompt(
             "Do not claim you lack messaging integrations or ask the user to set one up when \
              a plain reply is sufficient.\n",
         );
+        full_prompt.push_str(
+            "Return the final user-facing notification as normal assistant text. Do not use the \
+             `message` tool for the routine's primary delivery unless the task explicitly requires \
+             an extra follow-up or attachment; even then, still return a concise human-readable summary.\n",
+        );
     }
 
     if !use_tools {
@@ -1723,6 +1723,7 @@ fn handle_text_response(
     total_input_tokens: u32,
     total_output_tokens: u32,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
+    let content = strip_internal_tool_call_text(content);
     let content = content.trim();
 
     // Empty content guard — carry consumed tokens so the retry loop can
@@ -1752,6 +1753,34 @@ fn handle_text_response(
         Some(content.to_string()),
         total_tokens,
     ))
+}
+
+/// Strip internal `[Called tool ...]` and `[Tool ... returned: ...]` markers
+/// from routine summaries before they are persisted or delivered to channels.
+fn strip_internal_tool_call_text(text: &str) -> String {
+    let result = text
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !((trimmed.starts_with("[Called tool ") && trimmed.ends_with(']'))
+                || (trimmed.starts_with("[Tool ")
+                    && trimmed.contains(" returned:")
+                    && trimmed.ends_with(']')))
+        })
+        .fold(String::new(), |mut acc, s| {
+            if !acc.is_empty() {
+                acc.push('\n');
+            }
+            acc.push_str(s);
+            acc
+        });
+
+    let result = result.trim();
+    if result.is_empty() {
+        "I wasn't able to produce a user-facing routine summary.".to_string()
+    } else {
+        result.to_string()
+    }
 }
 
 /// Execute a lightweight routine with tool execution support (agentic loop).
@@ -2317,6 +2346,10 @@ mod tests {
             "delivery guidance should suppress fake setup chatter: {prompt}",
         );
         assert!(
+            prompt.contains("Do not use the `message` tool for the routine's primary delivery"),
+            "delivery guidance should reserve message tool for non-primary delivery: {prompt}",
+        );
+        assert!(
             prompt.contains("Tools are disabled for this routine run"),
             "prompt should explain that tools are disabled: {prompt}",
         );
@@ -2425,7 +2458,6 @@ mod tests {
             id: Uuid::new_v4(),
             channel: channel.to_string(),
             user_id: user_id.to_string(),
-            owner_id: user_id.to_string(),
             sender_id: user_id.to_string(),
             user_name: None,
             content: content.to_string(),
@@ -2436,6 +2468,8 @@ mod tests {
             timezone: None,
             attachments: vec![],
             is_internal: false,
+            is_agent_broadcast: false,
+            triggering_mission_id: None,
         }
     }
 
@@ -2545,6 +2579,39 @@ mod tests {
         );
         assert_eq!(finish_reason_length, crate::llm::FinishReason::Length);
         assert_eq!(finish_reason_stop, crate::llm::FinishReason::Stop);
+    }
+
+    #[test]
+    fn test_handle_text_response_strips_internal_tool_markers() {
+        let result = super::handle_text_response(
+            "Here is the report.\n[Called tool `http` with arguments: {\"url\":\"https://example.com\"}]",
+            crate::llm::FinishReason::Stop,
+            10,
+            5,
+        )
+        .expect("tool marker text should sanitize");
+
+        assert_eq!(result.0, RunStatus::Attention);
+        assert_eq!(result.1.as_deref(), Some("Here is the report."));
+        assert_eq!(result.2, Some(15));
+    }
+
+    #[test]
+    fn test_handle_text_response_replaces_marker_only_text() {
+        let result = super::handle_text_response(
+            "[Called tool `http` with arguments: {\"url\":\"https://example.com\"}]",
+            crate::llm::FinishReason::Stop,
+            4,
+            3,
+        )
+        .expect("marker-only text should fall back to a user-facing summary");
+
+        assert_eq!(result.0, RunStatus::Attention);
+        assert_eq!(
+            result.1.as_deref(),
+            Some("I wasn't able to produce a user-facing routine summary.")
+        );
+        assert_eq!(result.2, Some(7));
     }
 
     #[test]

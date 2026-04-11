@@ -1,0 +1,101 @@
+---
+title: "隧道"
+description: "将本地智能体暴露到互联网"
+icon: cloud
+---
+
+隧道将您本地的 IronClaw 智能体暴露到互联网。当您需要基于 webhook 的频道或希望实现即时消息传递而非轮询时，就需要它。
+
+<Note>
+如果您还没有设置智能体，请先查看我们的[快速开始指南](./quickstart)
+</Note>
+
+---
+
+## 配置
+
+通过引导命令配置隧道：
+
+```bash
+ironclaw onboard --channels-only
+```
+
+### ngrok
+
+`ngrok` 是一个托管隧道服务，设置简单，非常适合刚开始使用 `ironclaw` 的用户。使用前需要从 [ngrok 控制台](https://dashboard.ngrok.com/get-started/your-authtoken) 获取认证令牌。
+
+### Cloudflare
+
+`Cloudflare Tunnel` 通过 `cloudflared` 的仅出站连接将本地服务连接到 Cloudflare。
+
+当您已经使用 Cloudflare Zero Trust 或需要生产级入口层时使用。设置前：
+
+安装 `cloudflared`：
+
+<Tabs>
+  <Tab title="macOS">
+
+```bash
+brew install cloudflared
+```
+
+  </Tab>
+  <Tab title="Ubuntu">
+
+[Cloudflare 包安装指南](https://pkg.cloudflare.com/)。
+
+  </Tab>
+  <Tab title="其他">
+
+[Cloudflare Tunnel 下载页面](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)。
+
+  </Tab>
+</Tabs>
+
+然后，在 [Cloudflare 控制台](https://dash.cloudflare.com) 的 `Zero Trust > Networks > Connectors` 下创建隧道，按照说明获取隧道令牌。
+
+
+### Tailscale
+
+`Tailscale` 是基于 WireGuard 的设备私有网状网络（tailnet）。当您的团队已经使用 Tailscale 网络时使用。
+
+### 自定义
+
+当您想完全控制隧道命令和进程时使用此选项。
+
+提供带有占位符的 shell 命令：
+
+- `{port}` 表示 IronClaw 的本地端口
+- `{host}` 表示 IronClaw 的本地主机
+
+示例：
+
+```bash
+bore local {port} --to bore.pub
+```
+
+### 静态 URL
+
+当隧道在 IronClaw 外部管理且您已有稳定的公共 URL 时使用此选项。
+
+IronClaw 将直接使用该 URL，不会启动或管理任何隧道进程。
+
+---
+
+## 如何选择
+
+| 选项 | 最适合 |
+|---|---|
+| `ngrok` | 最快设置，本地开发 |
+| `Cloudflare` | 使用 Cloudflare 技术栈的生产级设置 |
+| `Tailscale` | 已使用 Tailscale 网络的团队 |
+| `自定义` | 自定义隧道工具和命令控制 |
+| `静态 URL` | 外部管理的入口，固定公共 URL |
+
+---
+
+## 安全注意事项
+
+- 将隧道令牌和 URL 视为敏感凭证。
+- 尽可能使用短期或轮换的令牌。
+- 如果暴露公共端点，请应用频道级认证和最小权限访问。

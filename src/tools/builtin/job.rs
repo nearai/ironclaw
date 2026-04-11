@@ -22,8 +22,11 @@ use crate::db::Database;
 use crate::history::SandboxJobRecord;
 use crate::orchestrator::auth::CredentialGrant;
 use crate::orchestrator::job_manager::{ContainerJobManager, JobCreationParams, JobMode};
+use crate::ownership::Owned;
 use crate::secrets::SecretsStore;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{
+    ApprovalRequirement, EngineCompatibility, Tool, ToolError, ToolOutput, require_str,
+};
 use ironclaw_common::AppEvent;
 
 /// Lazy scheduler reference, filled after Agent::new creates the Scheduler.
@@ -144,6 +147,41 @@ impl CreateJobTool {
         self.job_manager.is_some()
     }
 
+    fn claude_code_enabled(&self) -> bool {
+        self.job_manager
+            .as_ref()
+            .is_some_and(|jm| jm.claude_code_enabled())
+    }
+
+    fn acp_enabled(&self) -> bool {
+        self.job_manager.as_ref().is_some_and(|jm| jm.acp_enabled())
+    }
+
+    fn available_modes(&self) -> Vec<&'static str> {
+        let mut modes = vec!["worker"];
+        if self.claude_code_enabled() {
+            modes.push("claude_code");
+        }
+        if self.acp_enabled() {
+            modes.push("acp");
+        }
+        modes
+    }
+
+    fn mode_description(&self) -> String {
+        let mut desc =
+            String::from("Execution mode. 'worker' (default) uses the IronClaw sub-agent.");
+        if self.claude_code_enabled() {
+            desc.push_str(
+                " 'claude_code' uses Claude Code CLI — prefer this for complex software engineering tasks.",
+            );
+        }
+        if self.acp_enabled() {
+            desc.push_str(" 'acp' uses an ACP-compliant agent (Goose, Codex, Gemini CLI).");
+        }
+        desc
+    }
+
     /// Parse and validate the `credentials` parameter.
     ///
     /// Each key is a secret name (must exist in SecretsStore), each value is the
@@ -212,6 +250,21 @@ impl CreateJobTool {
         }
 
         Ok(grants)
+    }
+
+    /// Load the user's master MCP server config from the DB so the
+    /// orchestrator can mount it into worker containers. Returns `None` when
+    /// no DB is available, when the user has no servers configured, or when
+    /// loading fails — the orchestrator gracefully degrades to "no MCP mount"
+    /// in that case.
+    ///
+    /// This is the source-of-truth fix for staging-regressions issue 3: the
+    /// orchestrator used to read from a hardcoded host file path that
+    /// bootstrap migrates into the DB and renames on first run, so per-job
+    /// MCP filtering silently no-op'd on every typical install.
+    async fn load_master_mcp_config(&self, user_id: &str) -> Option<serde_json::Value> {
+        let store = self.store.as_ref()?;
+        crate::tools::mcp::config::load_master_mcp_config_value(store.as_ref(), user_id).await
     }
 
     /// Persist a sandbox job record (fire-and-forget).
@@ -400,7 +453,11 @@ impl CreateJobTool {
                 ToolError::ExecutionFailed(format!("failed to register sandbox job: {}", e))
             })?;
 
-        // Persist the job to DB before creating the container.
+        // Persist the job to DB before creating the container. The mcp_servers
+        // filter and max_iterations cap are persisted alongside credential
+        // grants so a restart re-applies the original constraints instead of
+        // silently falling back to the master MCP config and the default
+        // worker iteration cap.
         self.persist_job(SandboxJobRecord {
             id: job_id,
             task: task.to_string(),
@@ -413,14 +470,16 @@ impl CreateJobTool {
             started_at: None,
             completed_at: None,
             credential_grants_json,
+            mcp_servers: params.mcp_servers.clone(),
+            max_iterations: params.max_iterations,
         });
 
         // Persist the job mode to DB (for non-default modes).
         // For ACP, store "acp:<agent_name>" so restarts know which agent to use.
+        // Done synchronously so mode is available if the job needs restarting.
         if mode != JobMode::Worker
-            && let Some(store) = self.store.clone()
+            && let Some(ref store) = self.store
         {
-            let job_id_copy = job_id;
             let mode_str = if mode == JobMode::Acp
                 && let Some(ref agent) = params.acp_agent
             {
@@ -428,11 +487,9 @@ impl CreateJobTool {
             } else {
                 mode.as_str().to_string()
             };
-            tokio::spawn(async move {
-                if let Err(e) = store.update_sandbox_job_mode(job_id_copy, &mode_str).await {
-                    tracing::warn!(job_id = %job_id_copy, "Failed to set job mode: {}", e);
-                }
-            });
+            if let Err(e) = store.update_sandbox_job_mode(job_id, &mode_str).await {
+                tracing::warn!(job_id = %job_id, "Failed to set job mode: {}", e);
+            }
         }
 
         // Create the container job with the pre-determined job_id.
@@ -812,8 +869,7 @@ impl Tool for CreateJobTool {
              sub-agent that has shell, file read/write, list_dir, and apply_patch tools. Use this \
              whenever the user asks you to build, create, or work on something. The task \
              description should be detailed enough for the sub-agent to work independently. \
-             Set wait=false to start immediately while continuing the conversation. Set mode \
-             to 'claude_code' for complex software engineering tasks."
+             Set wait=false to start immediately while continuing the conversation."
         } else {
             "Create a new job or task for the agent to work on. Use this when the user wants \
              you to do something substantial that should be tracked as a separate job."
@@ -822,59 +878,74 @@ impl Tool for CreateJobTool {
 
     fn parameters_schema(&self) -> serde_json::Value {
         if self.sandbox_enabled() {
-            serde_json::json!({
+            let mut props = serde_json::Map::new();
+            props.insert(
+                "title".into(),
+                serde_json::json!({
+                    "type": "string",
+                    "description": "Clear description of what to accomplish"
+                }),
+            );
+            props.insert(
+                "description".into(),
+                serde_json::json!({
+                    "type": "string",
+                    "description": "Full description of what needs to be done"
+                }),
+            );
+            props.insert("wait".into(), serde_json::json!({
+                "type": "boolean",
+                "description": "If true (default), wait for the container to complete and return results. \
+                                If false, start the container and return the job_id immediately."
+            }));
+            props.insert("project_dir".into(), serde_json::json!({
+                "type": "string",
+                "description": "Path to an existing project directory to mount into the container. \
+                                Must be under ~/.ironclaw/projects/. If omitted, a fresh directory is created."
+            }));
+            props.insert("credentials".into(), serde_json::json!({
                 "type": "object",
-                "properties": {
-                    "title": {
+                "description": "Map of secret names to env var names. Each secret must exist in the \
+                                secrets store (via 'ironclaw tool auth' or web UI). Example: \
+                                {\"github_token\": \"GITHUB_TOKEN\", \"npm_token\": \"NPM_TOKEN\"}",
+                "additionalProperties": { "type": "string" }
+            }));
+            props.insert("mcp_servers".into(), serde_json::json!({
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Optional list of MCP server names to make available in the container. \
+                                If omitted, the full master config is mounted. If empty, no MCP servers \
+                                are available. Only effective when MCP_PER_JOB_ENABLED=true."
+            }));
+            props.insert("max_iterations".into(), serde_json::json!({
+                "type": "integer",
+                "description": "Maximum number of agent loop iterations for the worker. \
+                                Defaults to 50, capped at 500. Use lower values for simple tasks."
+            }));
+            let modes = self.available_modes();
+            if modes.len() > 1 {
+                props.insert(
+                    "mode".into(),
+                    serde_json::json!({
                         "type": "string",
-                        "description": "Clear description of what to accomplish"
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Full description of what needs to be done"
-                    },
-                    "wait": {
-                        "type": "boolean",
-                        "description": "If true (default), wait for the container to complete and return results. \
-                                        If false, start the container and return the job_id immediately."
-                    },
-                    "mode": {
-                        "type": "string",
-                        "enum": ["worker", "claude_code", "acp"],
-                        "description": "Execution mode. 'worker' (default) uses the IronClaw sub-agent. \
-                                        'claude_code' uses Claude Code CLI. \
-                                        'acp' uses an ACP-compliant agent (Goose, Codex, Gemini CLI)."
-                    },
-                    "agent_name": {
+                        "enum": modes,
+                        "description": self.mode_description(),
+                    }),
+                );
+            }
+            if self.acp_enabled() {
+                props.insert(
+                    "agent_name".into(),
+                    serde_json::json!({
                         "type": "string",
                         "description": "Name of the ACP agent to use (from 'ironclaw acp list'). \
                                         Required when mode is 'acp'."
-                    },
-                    "project_dir": {
-                        "type": "string",
-                        "description": "Path to an existing project directory to mount into the container. \
-                                        Must be under ~/.ironclaw/projects/. If omitted, a fresh directory is created."
-                    },
-                    "credentials": {
-                        "type": "object",
-                        "description": "Map of secret names to env var names. Each secret must exist in the \
-                                        secrets store (via 'ironclaw tool auth' or web UI). Example: \
-                                        {\"github_token\": \"GITHUB_TOKEN\", \"npm_token\": \"NPM_TOKEN\"}",
-                        "additionalProperties": { "type": "string" }
-                    },
-                    "mcp_servers": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Optional list of MCP server names to make available in the container. \
-                                        If omitted, the full master config is mounted. If empty, no MCP servers \
-                                        are available. Only effective when MCP_PER_JOB_ENABLED=true."
-                    },
-                    "max_iterations": {
-                        "type": "integer",
-                        "description": "Maximum number of agent loop iterations for the worker. \
-                                        Defaults to 50, capped at 500. Use lower values for simple tasks."
-                    }
-                },
+                    }),
+                );
+            }
+            serde_json::json!({
+                "type": "object",
+                "properties": props,
                 "required": ["title", "description"]
             })
         } else {
@@ -920,7 +991,18 @@ impl Tool for CreateJobTool {
         if self.sandbox_enabled() {
             let wait = params.get("wait").and_then(|v| v.as_bool()).unwrap_or(true);
 
-            let mode = match params.get("mode").and_then(|v| v.as_str()) {
+            let mode_str = params.get("mode").and_then(|v| v.as_str());
+            if mode_str == Some("claude_code") && !self.claude_code_enabled() {
+                return Err(ToolError::InvalidParameters(
+                    "claude_code mode is not enabled. Set CLAUDE_CODE_ENABLED=true.".into(),
+                ));
+            }
+            if mode_str == Some("acp") && !self.acp_enabled() {
+                return Err(ToolError::InvalidParameters(
+                    "acp mode is not enabled. Set ACP_ENABLED=true.".into(),
+                ));
+            }
+            let mode = match mode_str {
                 Some("claude_code") => JobMode::ClaudeCode,
                 Some("acp") => JobMode::Acp,
                 _ => JobMode::Worker,
@@ -982,6 +1064,15 @@ impl Tool for CreateJobTool {
                 None => None,
             };
 
+            // Load the master MCP config from the per-user DB-backed setting
+            // so the orchestrator can mount it into the worker container. We
+            // load eagerly here regardless of MCP_PER_JOB_ENABLED — the
+            // orchestrator gates the actual mount on the feature flag, and
+            // loading is cheap. Pre-fix the orchestrator read from a
+            // hardcoded host file path that bootstrap moves into the DB on
+            // first run, so per-job MCP filtering silently no-op'd.
+            let master_mcp_config = self.load_master_mcp_config(&ctx.user_id).await;
+
             // Combine title and description into the task prompt for the sub-agent.
             let task = format!("{}\n\n{}", title, description);
             self.execute_sandbox(
@@ -994,6 +1085,7 @@ impl Tool for CreateJobTool {
                     mcp_servers,
                     max_iterations,
                     acp_agent,
+                    master_mcp_config,
                 },
                 ctx,
             )
@@ -1005,6 +1097,10 @@ impl Tool for CreateJobTool {
 
     fn requires_sanitization(&self) -> bool {
         false
+    }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
     }
 }
 
@@ -1148,7 +1244,7 @@ impl Tool for JobStatusTool {
 
         match self.context_manager.get_context(job_id).await {
             Ok(job_ctx) => {
-                if job_ctx.user_id != requester_id {
+                if !job_ctx.is_owned_by(&requester_id) {
                     let result = serde_json::json!({
                         "error": "Job not found".to_string()
                     });
@@ -1251,7 +1347,7 @@ impl Tool for CancelJobTool {
         match self
             .context_manager
             .update_context(job_id, |ctx| {
-                if ctx.user_id != requester_id {
+                if !ctx.is_owned_by(&requester_id) {
                     return Err("Job not found".to_string());
                 }
                 ctx.transition_to(JobState::Cancelled, Some("Cancelled by user".to_string()))
@@ -1322,6 +1418,10 @@ impl Tool for CancelJobTool {
 
     fn requires_sanitization(&self) -> bool {
         false
+    }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
     }
 }
 
@@ -1404,7 +1504,7 @@ impl Tool for JobEventsTool {
                 ))
             })?;
 
-        if job_ctx.user_id != ctx.user_id {
+        if !job_ctx.is_owned_by(&ctx.user_id) {
             return Err(ToolError::ExecutionFailed(format!(
                 "job {} does not belong to current user",
                 job_id
@@ -1542,7 +1642,7 @@ impl Tool for JobPromptTool {
                 ))
             })?;
 
-        if job_ctx.user_id != ctx.user_id {
+        if !job_ctx.is_owned_by(&ctx.user_id) {
             return Err(ToolError::ExecutionFailed(format!(
                 "job {} does not belong to current user",
                 job_id
@@ -1669,9 +1769,15 @@ mod tests {
     async fn test_list_jobs_tool() {
         let manager = Arc::new(ContextManager::new(5));
 
-        // Create some jobs
-        manager.create_job("Job 1", "Desc 1").await.unwrap(); // safety: test
-        manager.create_job("Job 2", "Desc 2").await.unwrap(); // safety: test
+        // Create jobs owned by "default" to match JobContext::default()'s user_id.
+        manager
+            .create_job_for_user("default", "Job 1", "Desc 1")
+            .await
+            .unwrap(); // safety: test
+        manager
+            .create_job_for_user("default", "Job 2", "Desc 2")
+            .await
+            .unwrap(); // safety: test
 
         let tool = ListJobsTool::new(manager);
 
@@ -1686,7 +1792,11 @@ mod tests {
     #[tokio::test]
     async fn test_job_status_tool() {
         let manager = Arc::new(ContextManager::new(5));
-        let job_id = manager.create_job("Test Job", "Description").await.unwrap(); // safety: test
+        // Create job owned by "default" to match JobContext::default()'s user_id.
+        let job_id = manager
+            .create_job_for_user("default", "Test Job", "Description")
+            .await
+            .unwrap(); // safety: test
 
         let tool = JobStatusTool::new(manager);
 
@@ -2350,16 +2460,24 @@ mod tests {
         assert!(result.is_err()); // safety: test
     }
 
-    // ── ACP mode tests ──────────────────────────────────────────
+    // ── ACP / mode-gating tests ─────────────────────────────────
+
+    fn sandbox_tool(claude_code: bool, acp: bool) -> CreateJobTool {
+        let manager = Arc::new(ContextManager::new(5));
+        let jm = Arc::new(ContainerJobManager::new(
+            crate::orchestrator::job_manager::ContainerJobConfig {
+                claude_code_enabled: claude_code,
+                acp_enabled: acp,
+                ..Default::default()
+            },
+            crate::orchestrator::TokenStore::new(),
+        ));
+        CreateJobTool::new(manager).with_sandbox(jm, None)
+    }
 
     #[test]
     fn test_sandbox_schema_includes_acp_mode() {
-        let manager = Arc::new(ContextManager::new(5));
-        let jm = Arc::new(ContainerJobManager::new(
-            crate::orchestrator::job_manager::ContainerJobConfig::default(),
-            crate::orchestrator::TokenStore::new(),
-        ));
-        let tool = CreateJobTool::new(manager).with_sandbox(jm, None);
+        let tool = sandbox_tool(true, true);
         let schema = tool.parameters_schema();
         let mode_enum = schema["properties"]["mode"]["enum"].as_array().unwrap(); // safety: test
         let modes: Vec<&str> = mode_enum.iter().map(|v| v.as_str().unwrap()).collect(); // safety: test
@@ -2370,29 +2488,19 @@ mod tests {
 
     #[test]
     fn test_sandbox_schema_includes_agent_name() {
-        let manager = Arc::new(ContextManager::new(5));
-        let jm = Arc::new(ContainerJobManager::new(
-            crate::orchestrator::job_manager::ContainerJobConfig::default(),
-            crate::orchestrator::TokenStore::new(),
-        ));
-        let tool = CreateJobTool::new(manager).with_sandbox(jm, None);
+        let tool = sandbox_tool(false, true);
         let schema = tool.parameters_schema();
         let props = schema.get("properties").unwrap().as_object().unwrap(); // safety: test
         assert!(
             /* safety: test */
             props.contains_key("agent_name"),
-            "sandbox schema must expose agent_name for ACP mode"
+            "sandbox schema must expose agent_name when ACP is enabled"
         );
     }
 
     #[tokio::test]
     async fn test_acp_mode_requires_agent_name() {
-        let manager = Arc::new(ContextManager::new(5));
-        let jm = Arc::new(ContainerJobManager::new(
-            crate::orchestrator::job_manager::ContainerJobConfig::default(),
-            crate::orchestrator::TokenStore::new(),
-        ));
-        let tool = CreateJobTool::new(manager).with_sandbox(jm, None);
+        let tool = sandbox_tool(false, true);
 
         let params = serde_json::json!({
             "title": "Test ACP job",
@@ -2413,5 +2521,97 @@ mod tests {
     fn test_job_mode_acp_as_str() {
         assert_eq!(JobMode::Acp.as_str(), "acp");
         assert_eq!(JobMode::Acp.to_string(), "acp");
+    }
+
+    #[test]
+    fn test_schema_excludes_mode_and_agent_name_when_only_worker() {
+        let tool = sandbox_tool(false, false);
+        let schema = tool.parameters_schema();
+        let props = schema["properties"].as_object().unwrap(); // safety: test
+        assert!(
+            !props.contains_key("mode"),
+            "mode field should be omitted when only worker is available"
+        );
+        assert!(
+            !props.contains_key("agent_name"),
+            "agent_name field should be omitted when ACP is disabled"
+        );
+    }
+
+    #[test]
+    fn test_schema_includes_claude_code_when_enabled() {
+        let tool = sandbox_tool(true, false);
+        let schema = tool.parameters_schema();
+        let mode_enum = schema["properties"]["mode"]["enum"].as_array().unwrap(); // safety: test
+        let modes: Vec<&str> = mode_enum
+            .iter()
+            .map(|v| v.as_str().unwrap()) // safety: test
+            .collect();
+        assert!(modes.contains(&"claude_code"));
+        assert!(!modes.contains(&"acp"));
+        let props = schema["properties"].as_object().unwrap(); // safety: test
+        assert!(
+            !props.contains_key("agent_name"),
+            "agent_name should be absent when ACP is disabled"
+        );
+    }
+
+    #[test]
+    fn test_schema_includes_acp_when_enabled() {
+        let tool = sandbox_tool(false, true);
+        let schema = tool.parameters_schema();
+        let mode_enum = schema["properties"]["mode"]["enum"].as_array().unwrap(); // safety: test
+        let modes: Vec<&str> = mode_enum
+            .iter()
+            .map(|v| v.as_str().unwrap()) // safety: test
+            .collect();
+        assert!(modes.contains(&"acp"));
+        assert!(!modes.contains(&"claude_code"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_claude_code_when_disabled() {
+        let tool = sandbox_tool(false, false);
+
+        let params = serde_json::json!({
+            "title": "Test job",
+            "description": "Test task",
+            "mode": "claude_code"
+        });
+        let result = tool.execute(params, &JobContext::default()).await;
+        assert!(result.is_err()); // safety: test
+        let err = result.unwrap_err().to_string(); // safety: test
+        assert!(
+            err.contains("claude_code mode is not enabled"),
+            "expected claude_code disabled error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_acp_when_disabled() {
+        let tool = sandbox_tool(false, false);
+
+        let params = serde_json::json!({
+            "title": "Test job",
+            "description": "Test task",
+            "mode": "acp"
+        });
+        let result = tool.execute(params, &JobContext::default()).await;
+        assert!(result.is_err()); // safety: test
+        let err = result.unwrap_err().to_string(); // safety: test
+        assert!(
+            err.contains("acp mode is not enabled"),
+            "expected acp disabled error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_description_omits_mode_guidance() {
+        let tool = sandbox_tool(false, false);
+        let desc = tool.description();
+        assert!(
+            !desc.contains("claude_code"),
+            "description should not mention claude_code when mode is disabled, got: {desc}"
+        );
     }
 }

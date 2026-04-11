@@ -110,6 +110,8 @@ fn v1_skill_to_memory_doc(skill: &LoadedSkill, project_id: ProjectId) -> MemoryD
         code_snippets: vec![], // v1 skills are prompt-only
         metrics: SkillMetrics::default(),
         parent_version: None,
+        revisions: vec![],
+        repairs: vec![],
         content_hash: skill.content_hash.clone(),
     };
 
@@ -142,11 +144,11 @@ mod tests {
                     ..Default::default()
                 },
                 credentials: vec![],
-                metadata: None,
+                requires: ironclaw_skills::GatingRequirements::default(),
             },
             prompt_content: content.to_string(),
             trust: SkillTrust::Trusted,
-            source: SkillSource::User(PathBuf::from("/tmp/test")),
+            source: SkillSource::User(PathBuf::from("/tmp/test")), // safety: dummy path in test, not used for I/O
             content_hash: ironclaw_skills::compute_hash(content),
             compiled_patterns: vec![],
             lowercased_keywords: vec!["test".to_string()],

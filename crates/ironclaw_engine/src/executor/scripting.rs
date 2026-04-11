@@ -35,6 +35,7 @@ use crate::types::event::EventKind;
 use crate::types::message::{MessageRole, ThreadMessage};
 use crate::types::step::{ActionResult, LlmResponse, TokenUsage};
 use crate::types::thread::Thread;
+use ironclaw_common::ValidTimezone;
 
 // ── Configuration ───────────────────────────────────────────
 
@@ -255,6 +256,17 @@ fn build_context_inputs(
         .collect();
     names.push("previous_results".into());
     values.push(MontyObject::dict(result_pairs));
+
+    // `user_timezone` — validated IANA timezone from the user's channel (e.g. "America/New_York")
+    let tz = thread
+        .metadata
+        .get("user_timezone")
+        .and_then(|v| v.as_str())
+        .and_then(ValidTimezone::parse)
+        .map(|vtz| vtz.name().to_string())
+        .unwrap_or_else(|| "UTC".into());
+    names.push("user_timezone".into());
+    values.push(MontyObject::String(tz));
 
     (names, values)
 }
@@ -1298,13 +1310,35 @@ async fn resolve_tool_future(
 ) -> ExtFunctionResult {
     match handle.await {
         Ok(Ok(result)) => {
-            events.push(EventKind::ActionExecuted {
-                step_id: context.step_id,
-                action_name: action_name.into(),
-                call_id: call_id.into(),
-                duration_ms: result.duration.as_millis() as u64,
-                params_summary,
-            });
+            // If the effect adapter wrapped a tool error as an Ok(ActionResult)
+            // with is_error=true (current convention in
+            // `EffectBridgeAdapter::execute_action_internal`), surface it as
+            // ActionFailed so traces, observers, and approval flows see the
+            // failure correctly. Without this, every wrapped error looked like
+            // a successful tool call to downstream consumers.
+            if result.is_error {
+                let error_msg = result
+                    .output
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| result.output.to_string());
+                events.push(EventKind::ActionFailed {
+                    step_id: context.step_id,
+                    action_name: action_name.into(),
+                    call_id: call_id.into(),
+                    error: error_msg,
+                    params_summary,
+                });
+            } else {
+                events.push(EventKind::ActionExecuted {
+                    step_id: context.step_id,
+                    action_name: action_name.into(),
+                    call_id: call_id.into(),
+                    duration_ms: result.duration.as_millis() as u64,
+                    params_summary,
+                });
+            }
             let monty_val = json_to_monty(&result.output);
             action_results.push(result);
             ExtFunctionResult::Return(monty_val)
@@ -1510,6 +1544,19 @@ mod tests {
     use crate::types::thread::{Thread, ThreadConfig, ThreadType};
     use std::sync::Mutex;
 
+    /// Truncate a string to at most `max_bytes`, snapping to a UTF-8 char
+    /// boundary so assertion messages never panic on multibyte output.
+    fn truncate_for_assert(s: &str, max_bytes: usize) -> &str {
+        if s.len() <= max_bytes {
+            return s;
+        }
+        let mut end = max_bytes;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end] // safety: end is walked down to a valid char boundary above
+    }
+
     struct MockEffects {
         results: Mutex<Vec<Result<ActionResult, EngineError>>>,
         actions: Vec<ActionDef>,
@@ -1584,6 +1631,7 @@ mod tests {
             step_id: StepId::new(),
             current_call_id: None,
             source_channel: None,
+            user_timezone: None,
         }
     }
 
@@ -2003,7 +2051,7 @@ while True:
             assert!(
                 r.had_error || r.stdout.contains("Error") || r.stdout.contains("limit"),
                 "resource limit should terminate infinite loop, got stdout: {}",
-                &r.stdout[..r.stdout.len().min(500)],
+                truncate_for_assert(&r.stdout, 500),
             );
         }
         // Err(_) is also acceptable — means the VM was killed by resource limits
@@ -2145,7 +2193,7 @@ while True:
             assert!(
                 r.had_error || r.stdout.contains("Error") || r.stdout.contains("limit"),
                 "cpu-bound loop should be terminated, stdout: {}",
-                &r.stdout[..r.stdout.len().min(500)],
+                truncate_for_assert(&r.stdout, 500),
             );
         }
         // Err(_) is also acceptable — means the VM was killed by resource limits

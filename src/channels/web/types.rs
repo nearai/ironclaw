@@ -146,6 +146,20 @@ pub struct GateResolveRequest {
 
 pub use ironclaw_common::{AppEvent, ToolDecisionDto};
 
+// --- Admin System Prompt ---
+
+#[derive(Debug, Deserialize)]
+pub struct SystemPromptRequest {
+    pub content: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SystemPromptResponse {
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+
 // --- Memory ---
 
 #[derive(Debug, Serialize)]
@@ -324,6 +338,37 @@ pub enum ExtensionActivationStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelOnboardingState {
+    SetupRequired,
+    ActivationInProgress,
+    PairingRequired,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelOnboardingInfo {
+    pub state: ChannelOnboardingState,
+    #[serde(default)]
+    pub requires_pairing: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pairing_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pairing_instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart_instructions: Option<String>,
+}
+
 pub fn classify_wasm_channel_activation(
     ext: &crate::extensions::InstalledExtension,
     has_paired: bool,
@@ -375,11 +420,31 @@ pub struct ExtensionInfo {
     /// Extension version (semver).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onboarding_state: Option<ChannelOnboardingState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onboarding: Option<ChannelOnboardingInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExtensionReadinessInfo {
+    pub name: String,
+    pub kind: String,
+    pub phase: String,
+    pub authenticated: bool,
+    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ExtensionListResponse {
     pub extensions: Vec<ExtensionInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExtensionReadinessResponse {
+    pub extensions: Vec<ExtensionReadinessInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -408,6 +473,10 @@ pub struct ExtensionSetupResponse {
     pub kind: String,
     pub secrets: Vec<SecretFieldInfo>,
     pub fields: Vec<SetupFieldInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onboarding_state: Option<ChannelOnboardingState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onboarding: Option<ChannelOnboardingInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -456,12 +525,13 @@ pub struct ActionResponse {
     /// Whether the channel was successfully activated after setup.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activated: Option<bool>,
-    /// Whether a restart is required for the new configuration to take effect.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub needs_restart: Option<bool>,
-    /// Pending manual verification challenge (for Telegram owner binding, etc.).
+    /// Pending manual verification challenge, if the setup flow requires one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification: Option<crate::extensions::VerificationChallenge>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onboarding_state: Option<ChannelOnboardingState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onboarding: Option<ChannelOnboardingInfo>,
 }
 
 impl ActionResponse {
@@ -473,8 +543,10 @@ impl ActionResponse {
             awaiting_token: None,
             instructions: None,
             activated: None,
-            needs_restart: None,
+
             verification: None,
+            onboarding_state: None,
+            onboarding: None,
         }
     }
 
@@ -486,8 +558,10 @@ impl ActionResponse {
             awaiting_token: None,
             instructions: None,
             activated: None,
-            needs_restart: None,
+
             verification: None,
+            onboarding_state: None,
+            onboarding: None,
         }
     }
 }
@@ -847,6 +921,31 @@ pub struct SettingsExportResponse {
     pub settings: std::collections::HashMap<String, serde_json::Value>,
 }
 
+// --- Tool Permissions ---
+
+/// Single tool entry returned by `GET /api/settings/tools`.
+#[derive(Debug, Serialize)]
+pub struct ToolPermissionEntry {
+    pub name: String,
+    pub description: String,
+    pub current_state: String,
+    pub default_state: String,
+    pub locked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locked_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ToolPermissionsResponse {
+    pub tools: Vec<ToolPermissionEntry>,
+}
+
+/// Body for `PUT /api/settings/tools/:name`.
+#[derive(Debug, Deserialize)]
+pub struct UpdateToolPermissionRequest {
+    pub state: String,
+}
+
 // --- Health ---
 
 #[derive(Debug, Serialize)]
@@ -1174,6 +1273,25 @@ mod tests {
             }
             _ => panic!("Expected Event variant"),
         }
+    }
+
+    #[test]
+    fn test_app_event_pairing_required_serialize() {
+        let event = AppEvent::PairingRequired {
+            channel: "telegram".to_string(),
+            instructions: Some("Send any message to receive a pairing code.".to_string()),
+            onboarding: None,
+            thread_id: Some("thread-1".to_string()),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "pairing_required");
+        assert_eq!(parsed["channel"], "telegram");
+        assert_eq!(
+            parsed["instructions"],
+            "Send any message to receive a pairing code."
+        );
+        assert_eq!(parsed["thread_id"], "thread-1");
     }
 
     #[test]

@@ -220,6 +220,15 @@ pub struct Settings {
     /// Transcription configuration.
     #[serde(default)]
     pub transcription: Option<TranscriptionSettings>,
+
+    /// Per-tool permission overrides.
+    ///
+    /// Keys are tool names; values override the built-in tier defaults from
+    /// `TOOL_RISK_DEFAULTS`.  Absent tools fall back to the tier default, or
+    /// `AskEachTime` if the tool is unknown.
+    #[serde(default)]
+    pub tool_permissions:
+        std::collections::HashMap<String, crate::tools::permissions::PermissionState>,
 }
 
 /// Source for the secrets master key.
@@ -408,6 +417,10 @@ pub struct ChannelSettings {
     /// Directory containing WASM channel modules.
     #[serde(default)]
     pub wasm_channels_dir: Option<PathBuf>,
+
+    /// CLI mode: "tui" for rich terminal UI, empty/absent for simple REPL.
+    #[serde(default)]
+    pub cli_mode: Option<String>,
 }
 
 impl Default for ChannelSettings {
@@ -433,6 +446,7 @@ impl Default for ChannelSettings {
             wasm_channels: Vec::new(),
             wasm_channels_enabled: true,
             wasm_channels_dir: None,
+            cli_mode: None,
         }
     }
 }
