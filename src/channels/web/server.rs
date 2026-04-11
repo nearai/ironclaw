@@ -2566,6 +2566,11 @@ async fn reconfigure_handler(
         }
     }
 
+    // Hot-reload MCP servers: connect new, disconnect removed
+    if let Some(ref ext_mgr) = state.extension_manager {
+        ext_mgr.reload_mcp_servers("").await;
+    }
+
     // Write skill files and trigger hot-reload
     if let Some(ref skill_registry) = state.skill_registry {
         let skills_dir = {

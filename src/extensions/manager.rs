@@ -1193,6 +1193,75 @@ impl ExtensionManager {
         self.mcp_clients.write().await.insert(name, client);
     }
 
+    /// Hot-reload MCP servers from the current config file.
+    ///
+    /// Compares the on-disk config with currently connected MCP clients:
+    /// - New servers (in config but not connected): connect and register tools
+    /// - Removed servers (connected but not in config): unregister tools and disconnect
+    /// - Unchanged servers: left as-is
+    ///
+    /// Called by the reconfigure handler after `apply_runtime_config` writes
+    /// `mcp-servers.json` so MCP changes take effect without a process restart.
+    pub async fn reload_mcp_servers(&self, user_id: &str) {
+        let servers = match self.load_mcp_servers(user_id).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "reconfigure: failed to load MCP config for hot-reload");
+                return;
+            }
+        };
+
+        let desired: std::collections::HashSet<String> = servers
+            .enabled_servers()
+            .map(|s| s.name.clone())
+            .collect();
+
+        // Snapshot current connected MCP names
+        let current: std::collections::HashSet<String> = {
+            let clients = self.mcp_clients.read().await;
+            clients.keys().cloned().collect()
+        };
+
+        // Disconnect removed MCPs
+        for name in current.difference(&desired) {
+            tracing::info!(mcp = %name, "reconfigure: disconnecting removed MCP server");
+            // Unregister all tools prefixed with this server name
+            let tool_names: Vec<String> = self
+                .tool_registry
+                .list()
+                .await
+                .into_iter()
+                .filter(|t| t.starts_with(&format!("{}_", name)))
+                .collect();
+            for tool_name in &tool_names {
+                self.tool_registry.unregister(tool_name).await;
+            }
+            self.mcp_clients.write().await.remove(name);
+        }
+
+        // Connect new MCPs
+        for name in desired.difference(&current) {
+            tracing::info!(mcp = %name, "reconfigure: connecting new MCP server");
+            match self.activate_mcp(name, user_id).await {
+                Ok(result) => {
+                    tracing::info!(
+                        mcp = %name,
+                        tools = result.tools_loaded.len(),
+                        "reconfigure: MCP server activated with {} tools",
+                        result.tools_loaded.len()
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        mcp = %name,
+                        error = %e,
+                        "reconfigure: failed to activate MCP server"
+                    );
+                }
+            }
+        }
+    }
+
     /// Register channel names that were loaded at startup.
     /// Called after WASM channels are loaded so `list()` reports accurate active status.
     pub async fn set_active_channels(&self, names: Vec<String>) {
