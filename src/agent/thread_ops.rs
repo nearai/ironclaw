@@ -1030,7 +1030,7 @@ impl Agent {
         // This prevents a TOCTOU race where the thread could be pruned between
         // separate lock scopes, leaving a tool permanently auto-approved without
         // execution ever starting (#1486).
-        let pending = {
+        let (pending, rejection) = {
             let mut sess = session.lock().await;
 
             // First borrow: validate state and take pending approval
@@ -1075,9 +1075,9 @@ impl Agent {
                 // Inner borrow of `thread` ends here
             };
 
-            // Auto-approve + state transition while we still hold the session
-            // lock. If we dropped the lock first, a concurrent prune could
-            // remove the thread, leaving the tool permanently auto-approved.
+            // State transition while we still hold the session lock.
+            // If we dropped the lock first, a concurrent prune could
+            // remove the thread between lock scopes (#1486).
             if approved {
                 if always {
                     sess.auto_approve_tool(&taken.tool_name);
@@ -1105,10 +1105,34 @@ impl Agent {
                         "Internal error: thread no longer exists",
                     ));
                 }
+                (taken, None)
+            } else {
+                // Rejection: clear pending approval and complete the turn
+                // under the same lock scope that took the approval, preventing
+                // a TOCTOU race where a concurrent prune could remove the
+                // thread while state=AwaitingApproval but pending_approval=None.
+                let rejection = format!(
+                    "Tool '{}' was rejected. The agent will not execute this tool.\n\n\
+                     You can continue the conversation or try a different approach.",
+                    taken.tool_name
+                );
+                if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                    thread.clear_pending_approval();
+                    thread.complete_turn(&rejection);
+                } else {
+                    // Should be unreachable: lock held continuously since the
+                    // thread was validated above.
+                    tracing::error!(
+                        %thread_id,
+                        "Thread disappeared while holding session lock during rejection"
+                    );
+                    return Ok(SubmissionResult::error(
+                        "Internal error: thread no longer exists",
+                    ));
+                }
+                (taken, Some(rejection))
             }
-
-            taken
-            // Lock dropped here — all approval bookkeeping is complete
+            // Lock dropped here — all approval/rejection bookkeeping is complete
         };
 
         if approved {
@@ -1736,38 +1760,33 @@ impl Agent {
                 }
             }
         } else {
-            // Rejected - complete the turn with a rejection message and persist
-            let rejection = format!(
-                "Tool '{}' was rejected. The agent will not execute this tool.\n\n\
-                 You can continue the conversation or try a different approach.",
-                pending.tool_name
-            );
-            {
-                let mut sess = session.lock().await;
-                match sess.threads.get_mut(&thread_id) {
-                    Some(thread) => {
-                        thread.clear_pending_approval();
-                        thread.complete_turn(&rejection);
-                        // User message already persisted at turn start; save rejection response
-                        self.persist_assistant_response(
-                            thread_id,
-                            &message.channel,
-                            &message.user_id,
-                            &rejection,
-                        )
-                        .await;
-                    }
-                    None => {
-                        tracing::error!(
-                            %thread_id,
-                            "Thread disappeared during approval rejection"
-                        );
-                        return Ok(SubmissionResult::error(
-                            "Internal error: thread no longer exists",
-                        ));
-                    }
+            // Rejection bookkeeping (clear_pending_approval + complete_turn)
+            // already happened inside the single lock scope above. Only
+            // persistence and status notification remain.
+            // Safety: `rejection` is always `Some` when `!approved` — set
+            // inside the lock scope above.  Use a fallback rather than
+            // `.expect()` to satisfy the no-panic-in-production rule.
+            let rejection = match rejection {
+                Some(r) => r,
+                None => {
+                    tracing::error!(
+                        %thread_id,
+                        "BUG: rejection message missing for rejected approval"
+                    );
+                    return Ok(SubmissionResult::error(
+                        "Internal error: rejection state inconsistency",
+                    ));
                 }
-            }
+            };
+
+            // User message already persisted at turn start; save rejection response
+            self.persist_assistant_response(
+                thread_id,
+                &message.channel,
+                &message.user_id,
+                &rejection,
+            )
+            .await;
 
             let _ = self
                 .channels
