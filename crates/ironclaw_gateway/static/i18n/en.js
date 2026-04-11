@@ -723,6 +723,8 @@ I18n.register('en', {
   // Thread types
   'thread.heartbeatAlerts': 'Heartbeat Alerts',
   'thread.routine': 'Routine',
+  'thread.newChat': 'New chat',
+  'thread.untitled': 'Untitled chat',
 
   // Extensions (dynamic)
   'extensions.openingAuth': 'Opening authentication for {name}',

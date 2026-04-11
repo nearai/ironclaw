@@ -722,6 +722,8 @@ I18n.register('zh-CN', {
   // 线程类型
   'thread.heartbeatAlerts': '心跳提醒',
   'thread.routine': '定时任务',
+  'thread.newChat': '新对话',
+  'thread.untitled': '未命名对话',
 
   // 扩展（动态）
   'extensions.openingAuth': '正在为 {name} 打开认证',

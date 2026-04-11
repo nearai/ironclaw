@@ -171,12 +171,20 @@ impl ConversationStore for LibSqlBackend {
                 .and_then(|v| v.as_str())
                 .map(String::from);
             let sql_title = get_opt_text(&row, 6);
-            let title = sql_title.or_else(|| {
-                metadata
-                    .get("routine_name")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-            });
+            let title = sql_title
+                .or_else(|| {
+                    metadata
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                })
+                .or_else(|| {
+                    metadata
+                        .get("routine_name")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                });
             results.push(ConversationSummary {
                 id: row
                     .get::<String>(0)
@@ -250,12 +258,20 @@ impl ConversationStore for LibSqlBackend {
                 .and_then(|v| v.as_str())
                 .map(String::from);
             let sql_title = get_opt_text(&row, 6);
-            let title = sql_title.or_else(|| {
-                metadata
-                    .get("routine_name")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-            });
+            let title = sql_title
+                .or_else(|| {
+                    metadata
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                })
+                .or_else(|| {
+                    metadata
+                        .get("routine_name")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                });
             results.push(ConversationSummary {
                 id: row
                     .get::<String>(0)
@@ -1007,6 +1023,87 @@ mod tests {
             source.as_deref(),
             Some("gateway"),
             "assistant thread lookup should backfill a legacy NULL source_channel"
+        );
+    }
+
+    /// Regression test for #2237: conversations with a metadata title should
+    /// use it as a fallback when the message-derived title is NULL.
+    #[tokio::test]
+    async fn test_metadata_title_used_as_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_metadata_title.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conv_id = Uuid::new_v4();
+        let user_id = "user-title-test";
+
+        // Create a conversation with no messages
+        backend
+            .ensure_conversation(conv_id, "gateway", user_id, None, Some("gateway"))
+            .await
+            .unwrap();
+
+        // Set a metadata title (simulating what persist_user_message does)
+        let title_val = serde_json::json!("What is the weather today?");
+        backend
+            .update_conversation_metadata_field(conv_id, "title", &title_val)
+            .await
+            .unwrap();
+
+        // List conversations -- title should come from metadata even without messages
+        let convs = backend
+            .list_conversations_all_channels(user_id, 50)
+            .await
+            .unwrap();
+
+        let conv = convs.iter().find(|c| c.id == conv_id).unwrap();
+        assert_eq!(
+            conv.title.as_deref(),
+            Some("What is the weather today?"),
+            "Conversation title should fall back to metadata title when no user messages exist"
+        );
+    }
+
+    /// Regression test for #2237: message-derived title takes precedence over metadata.
+    #[tokio::test]
+    async fn test_message_title_takes_precedence_over_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_message_title_precedence.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conv_id = Uuid::new_v4();
+        let user_id = "user-title-precedence";
+
+        backend
+            .ensure_conversation(conv_id, "gateway", user_id, None, Some("gateway"))
+            .await
+            .unwrap();
+
+        // Set metadata title
+        let title_val = serde_json::json!("metadata title");
+        backend
+            .update_conversation_metadata_field(conv_id, "title", &title_val)
+            .await
+            .unwrap();
+
+        // Add a user message
+        backend
+            .add_conversation_message(conv_id, "user", "actual user message")
+            .await
+            .unwrap();
+
+        let convs = backend
+            .list_conversations_all_channels(user_id, 50)
+            .await
+            .unwrap();
+
+        let conv = convs.iter().find(|c| c.id == conv_id).unwrap();
+        assert_eq!(
+            conv.title.as_deref(),
+            Some("actual user message"),
+            "Message-derived title should take precedence over metadata title"
         );
     }
 }

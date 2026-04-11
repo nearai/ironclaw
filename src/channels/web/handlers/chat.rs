@@ -170,15 +170,22 @@ pub async fn chat_threads_handler(
     sorted_threads.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
     let threads: Vec<ThreadInfo> = sorted_threads
         .into_iter()
-        .map(|t| ThreadInfo {
-            id: t.id,
-            state: format!("{:?}", t.state),
-            turn_count: t.turns.len(),
-            created_at: t.created_at.to_rfc3339(),
-            updated_at: t.updated_at.to_rfc3339(),
-            title: None,
-            thread_type: None,
-            channel: Some("gateway".to_string()),
+        .map(|t| {
+            let title = t
+                .turns
+                .first()
+                .map(|turn| turn.user_input.chars().take(100).collect::<String>())
+                .filter(|s| !s.is_empty());
+            ThreadInfo {
+                id: t.id,
+                state: format!("{:?}", t.state),
+                turn_count: t.turns.len(),
+                created_at: t.created_at.to_rfc3339(),
+                updated_at: t.updated_at.to_rfc3339(),
+                title,
+                thread_type: None,
+                channel: Some("gateway".to_string()),
+            }
         })
         .collect();
 

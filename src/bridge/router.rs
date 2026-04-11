@@ -2969,6 +2969,20 @@ async fn handle_with_engine_inner(
         };
         if let Some(cid) = v1_conv_id {
             let _ = db.add_conversation_message(cid, "user", content).await;
+            // Set a conversation title from the first user message so the
+            // thread list shows a descriptive name even if the subquery-based
+            // title derivation has timing issues.
+            if let Ok(None) = db
+                .get_conversation_metadata(cid)
+                .await
+                .map(|m| m.and_then(|v| v.get("title").and_then(|t| t.as_str()).map(String::from)))
+            {
+                let title_text: String = content.chars().take(100).collect();
+                let title_val = serde_json::json!(title_text);
+                let _ = db
+                    .update_conversation_metadata_field(cid, "title", &title_val)
+                    .await;
+            }
         }
     }
 

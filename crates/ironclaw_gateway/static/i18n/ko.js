@@ -722,6 +722,8 @@ I18n.register('ko', {
   // 스레드 유형
   'thread.heartbeatAlerts': '하트비트 알림',
   'thread.routine': '루틴',
+  'thread.newChat': '새 대화',
+  'thread.untitled': '제목 없는 대화',
 
   // 확장 (동적)
   'extensions.openingAuth': '{name}에 대한 인증을 여는 중',

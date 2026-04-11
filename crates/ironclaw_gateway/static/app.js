@@ -4213,8 +4213,8 @@ function threadTitle(thread) {
   if (thread.thread_type === 'heartbeat') return I18n.t('thread.heartbeatAlerts');
   if (thread.thread_type === 'routine') return I18n.t('thread.routine');
   if (ch !== 'gateway') return ch.charAt(0).toUpperCase() + ch.slice(1);
-  if (thread.turn_count === 0) return 'New chat';
-  return thread.id.substring(0, 8);
+  if (thread.turn_count === 0) return I18n.t('thread.newChat');
+  return I18n.t('thread.untitled');
 }
 
 function relativeTime(isoStr) {
