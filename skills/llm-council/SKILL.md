@@ -49,6 +49,22 @@ configured model.
 - Getting a "second opinion" from different AI models
 - Research or evaluation tasks that benefit from multiple viewpoints
 
+## Default council line-up
+
+Unless the user requests something specific, use this 4-model council:
+
+```python
+COUNCIL = [
+    "anthropic/claude-opus-4-6",
+    "google/gemini-3-pro",
+    "zai-org/GLM-latest",
+    "openai/gpt-5.4",
+]
+```
+
+These four span the major frontier providers and reasoning styles. If the
+user names specific models, use those instead.
+
 ## API
 
 ### Single call with a model override
@@ -56,34 +72,41 @@ configured model.
 answer = llm_query(
     prompt="What is X?",
     context="Optional background",     # optional
-    model="claude-sonnet-4-20250514",  # optional per-call override
+    model="anthropic/claude-opus-4-6", # optional per-call override
 )
 ```
 
 ### Parallel council (same prompt, many models)
 ```python
-COUNCIL = ["gpt-4o", "claude-sonnet-4-20250514", "llama-3.1-70b-instruct"]
+COUNCIL = [
+    "anthropic/claude-opus-4-6",
+    "google/gemini-3-pro",
+    "zai-org/GLM-latest",
+    "openai/gpt-5.4",
+]
 responses = llm_query_batched(
     prompts=["What are the main risks of X?"] * len(COUNCIL),
     models=COUNCIL,                    # parallel array, length must match prompts
     context="Answer in 3-5 bullet points.",
 )
 # `responses` is a list of strings in the same order as `models`.
+# If a specific model is unavailable, that slot returns "Error: ..." —
+# the rest of the batch still completes.
 ```
 
 ### Single model applied to many prompts
 ```python
 results = llm_query_batched(
     prompts=["Q1", "Q2", "Q3"],
-    model="gpt-4o",                    # singular: applies to every prompt
+    model="anthropic/claude-opus-4-6", # singular: applies to every prompt
 )
 ```
 
-## Recommended council line-ups (NEAR AI backend)
-
-- **Quick (3 models):** `["gpt-4o", "claude-sonnet-4-20250514", "llama-3.1-70b-instruct"]`
-- **Deep (5 models):** add `"qwen-2.5-72b-instruct"`, `"deepseek-chat"`
-- **Reasoning-focused:** `["o3-mini", "claude-sonnet-4-20250514", "deepseek-reasoner"]`
+### Mixing `models=` slots with `None`
+A `None` slot inside `models=[...]` means "no override for this prompt" —
+that call uses the configured default model. The singular `model=` kwarg
+does NOT backfill `None` slots; it is only used when `models=` is omitted
+entirely.
 
 ## After collecting responses
 
@@ -95,7 +118,12 @@ results = llm_query_batched(
 ## Full example
 
 ```repl
-COUNCIL = ["gpt-4o", "claude-sonnet-4-20250514", "llama-3.1-70b-instruct"]
+COUNCIL = [
+    "anthropic/claude-opus-4-6",
+    "google/gemini-3-pro",
+    "zai-org/GLM-latest",
+    "openai/gpt-5.4",
+]
 question = "What are the main risks of relying on a single LLM provider?"
 
 responses = llm_query_batched(

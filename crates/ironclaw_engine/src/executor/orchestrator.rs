@@ -2780,4 +2780,152 @@ mod tests {
         let outcome = parse_outcome(&result);
         assert!(matches!(outcome, ThreadOutcome::Stopped));
     }
+
+    // ── handle_llm_complete model forwarding ────────────────────
+
+    /// LLM backend that records the model from each `complete()` call.
+    /// Used to verify the orchestrator's __llm_complete__ host fn forwards
+    /// `explicit_config["model"]` onto `LlmCallConfig.model`.
+    struct ModelCapturingLlm {
+        captured: tokio::sync::Mutex<Vec<Option<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmBackend for ModelCapturingLlm {
+        fn model_name(&self) -> &str {
+            "capturing"
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ThreadMessage],
+            _actions: &[crate::types::capability::ActionDef],
+            config: &LlmCallConfig,
+        ) -> Result<crate::traits::llm::LlmOutput, EngineError> {
+            self.captured.lock().await.push(config.model.clone());
+            Ok(crate::traits::llm::LlmOutput {
+                response: crate::types::step::LlmResponse::Text("ok".into()),
+                usage: crate::types::step::TokenUsage::default(),
+            })
+        }
+    }
+
+    /// No-op effect executor — handle_llm_complete only consults it for
+    /// `available_actions(...)`, which we satisfy with an empty list.
+    struct NoopEffects;
+
+    #[async_trait::async_trait]
+    impl EffectExecutor for NoopEffects {
+        async fn execute_action(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+            _: &crate::types::capability::CapabilityLease,
+            _: &ThreadExecutionContext,
+        ) -> Result<crate::types::step::ActionResult, EngineError> {
+            Ok(crate::types::step::ActionResult {
+                call_id: String::new(),
+                action_name: String::new(),
+                output: serde_json::json!({}),
+                is_error: false,
+                duration: std::time::Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+        ) -> Result<Vec<crate::types::capability::ActionDef>, EngineError> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_complete_forwards_model_from_explicit_config() {
+        let concrete = Arc::new(ModelCapturingLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let llm: Arc<dyn LlmBackend> = Arc::clone(&concrete) as Arc<dyn LlmBackend>;
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![]));
+
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        // Build the args __llm_complete__ receives from Python:
+        // (messages, actions, config). config = {"model": "gpt-4o"}.
+        let mut total_tokens = TokenUsage::default();
+        let result = handle_llm_complete(
+            &[
+                json_to_monty(&serde_json::json!([{"role":"user","content":"hi"}])),
+                json_to_monty(&serde_json::json!([])),
+                json_to_monty(&serde_json::json!({"model": "gpt-4o"})),
+            ],
+            &[],
+            &mut thread,
+            LlmCompleteDeps {
+                llm: &llm,
+                effects: &effects,
+                leases: &leases,
+                store: Some(&store),
+            },
+            &mut total_tokens,
+        )
+        .await;
+
+        assert!(matches!(result, ExtFunctionResult::Return(_)));
+        let captured = concrete.captured.lock().await;
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].as_deref(), Some("gpt-4o"));
+    }
+
+    #[tokio::test]
+    async fn llm_complete_without_model_passes_none() {
+        let concrete = Arc::new(ModelCapturingLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let llm: Arc<dyn LlmBackend> = Arc::clone(&concrete) as Arc<dyn LlmBackend>;
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![]));
+
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        let mut total_tokens = TokenUsage::default();
+        let _ = handle_llm_complete(
+            &[
+                json_to_monty(&serde_json::json!([{"role":"user","content":"hi"}])),
+                json_to_monty(&serde_json::json!([])),
+                json_to_monty(&serde_json::json!({"max_tokens": 100})),
+            ],
+            &[],
+            &mut thread,
+            LlmCompleteDeps {
+                llm: &llm,
+                effects: &effects,
+                leases: &leases,
+                store: Some(&store),
+            },
+            &mut total_tokens,
+        )
+        .await;
+
+        let captured = concrete.captured.lock().await;
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0], None);
+    }
 }

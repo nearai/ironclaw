@@ -1028,27 +1028,45 @@ async fn handle_llm_query_batched(
     //   - `model="..."` applies the same model to every prompt
     //   - `models=[...]` is a parallel array (must match prompts length); use
     //     this to broadcast the same prompt across a council of models by
-    //     passing `prompts=[same]*N, models=[m1, m2, ...]`
+    //     passing `prompts=[same]*N, models=[m1, m2, ...]`. Within `models`,
+    //     a `None` slot means "no override for this prompt" (the caller
+    //     opted out of routing for that slot); the singular `model=` kwarg
+    //     does NOT fill those slots, since mixing the two would be surprising.
     let single_model = extract_string_arg(&[], kwargs, "model", usize::MAX);
-    let models_list: Option<Vec<Option<String>>> = kwargs
-        .iter()
-        .find_map(|(k, v)| match k {
-            MontyObject::String(key) if key == "models" => Some(v),
-            _ => None,
-        })
-        .and_then(|v| match v {
-            MontyObject::List(items) => Some(
-                items
-                    .iter()
-                    .map(|item| match item {
-                        MontyObject::String(s) => Some(s.clone()),
-                        MontyObject::None => None,
-                        _ => Some(monty_to_string(item)),
-                    })
-                    .collect(),
-            ),
-            _ => None,
-        });
+    let models_kwarg = kwargs.iter().find_map(|(k, v)| match k {
+        MontyObject::String(key) if key == "models" => Some(v),
+        _ => None,
+    });
+
+    let models_list: Option<Vec<Option<String>>> = match models_kwarg {
+        None => None,
+        Some(MontyObject::List(items)) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    MontyObject::String(s) => out.push(Some(s.clone())),
+                    MontyObject::None => out.push(None),
+                    other => {
+                        return ExtFunctionResult::Error(MontyException::new(
+                            ExcType::TypeError,
+                            Some(format!(
+                                "llm_query_batched(): models list entries must be str or None, got {other:?}"
+                            )),
+                        ));
+                    }
+                }
+            }
+            Some(out)
+        }
+        Some(other) => {
+            return ExtFunctionResult::Error(MontyException::new(
+                ExcType::TypeError,
+                Some(format!(
+                    "llm_query_batched(): `models` must be a list of strings, got {other:?}"
+                )),
+            ));
+        }
+    };
 
     if let Some(ref ms) = models_list
         && ms.len() != prompts.len()
@@ -1068,10 +1086,13 @@ async fn handle_llm_query_batched(
         let llm = Arc::clone(llm);
         let ctx = context_arg.clone();
         let prompt = prompt.clone();
-        let model_override = models_list
-            .as_ref()
-            .and_then(|m| m.get(i).cloned().flatten())
-            .or_else(|| single_model.clone());
+        // If `models=` was provided, each slot is authoritative — `None` means
+        // "no override for this prompt" and is NOT backfilled from `model=`.
+        // Otherwise, fall back to the singular `model=` kwarg (or None).
+        let model_override = match models_list.as_ref() {
+            Some(ms) => ms[i].clone(),
+            None => single_model.clone(),
+        };
         let config = LlmCallConfig {
             force_text: true,
             model: model_override,
@@ -2403,6 +2424,66 @@ FINAL(str(x))
         let calls = llm.calls.lock().await;
         assert_eq!(calls.len(), 2);
         assert!(calls.iter().all(|(m, _)| m.as_deref() == Some("gpt-4o")));
+    }
+
+    #[tokio::test]
+    async fn llm_query_batched_rejects_non_string_models_entries() {
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let prompts = MontyObject::List(vec![
+            MontyObject::String("a".into()),
+            MontyObject::String("b".into()),
+        ]);
+        // Integers in the models list should fail loudly, not be coerced to "1"/"2".
+        let models = MontyObject::List(vec![MontyObject::Int(1), MontyObject::Int(2)]);
+        let result = handle_llm_query_batched(
+            &[prompts],
+            &[(MontyObject::String("models".into()), models)],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        assert!(matches!(result, ExtFunctionResult::Error(_)));
+        assert!(llm.calls.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn llm_query_batched_none_in_models_list_does_not_backfill_from_model_kwarg() {
+        // Regression: when `models=[None, "gpt-4o"]` and `model="claude-..."`
+        // are both passed, the None slot must NOT be backfilled by the
+        // singular `model=` kwarg. Each slot is authoritative.
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let prompts = MontyObject::List(vec![
+            MontyObject::String("a".into()),
+            MontyObject::String("b".into()),
+        ]);
+        let models = MontyObject::List(vec![
+            MontyObject::None,
+            MontyObject::String("gpt-4o".into()),
+        ]);
+        let _ = handle_llm_query_batched(
+            &[prompts],
+            &[
+                (MontyObject::String("models".into()), models),
+                (
+                    MontyObject::String("model".into()),
+                    MontyObject::String("claude-sonnet-4-20250514".into()),
+                ),
+            ],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        let calls = llm.calls.lock().await;
+        assert_eq!(calls.len(), 2);
+        // Slot 0 was None — must remain None, not become "claude-sonnet-4-20250514".
+        let slot_a = calls.iter().find(|(_, p)| p == "a").expect("call for a");
+        let slot_b = calls.iter().find(|(_, p)| p == "b").expect("call for b");
+        assert_eq!(slot_a.0, None);
+        assert_eq!(slot_b.0.as_deref(), Some("gpt-4o"));
     }
 
     #[tokio::test]
