@@ -1193,8 +1193,9 @@ function sendMessage() {
       autoResizeTextarea(input);
       input.focus();
       const requestId = approvalCard.getAttribute('data-request-id');
+      const threadId = approvalCard.getAttribute('data-thread-id');
       if (requestId) {
-        sendApprovalAction(requestId, action);
+        sendApprovalAction(requestId, action, threadId);
       }
       return;
     }
@@ -1434,19 +1435,14 @@ function filterSlashCommands(value) {
   }
 }
 
-function sendApprovalAction(requestId, action) {
-  // Resolve using the gate's owning thread, not the currently-viewed thread.
-  var gateThreadId = currentThreadId;
-  var gateData = pendingGates.get(requestId);
-  if (gateData && gateData.thread_id) {
-    gateThreadId = gateData.thread_id;
-  }
-
+function sendApprovalAction(requestId, action, threadId) {
+  const card = document.querySelector('.approval-card[data-request-id="' + requestId + '"]');
+  const targetThreadId = threadId || (card ? card.getAttribute('data-thread-id') : null) || currentThreadId;
   apiFetch('/api/chat/gate/resolve', {
     method: 'POST',
     body: {
       request_id: requestId,
-      thread_id: gateThreadId,
+      thread_id: targetThreadId,
       resolution: action === 'deny' ? 'denied' : 'approved',
       always: action === 'always',
     },
@@ -1454,8 +1450,7 @@ function sendApprovalAction(requestId, action) {
     addMessage('system', 'Failed to send approval: ' + err.message);
   });
 
-  // Disable buttons and show confirmation on the inline card
-  const card = document.querySelector('.approval-card[data-request-id="' + requestId + '"]');
+  // Disable buttons and show confirmation on the card
   if (card) {
     const buttons = card.querySelectorAll('.approval-actions button');
     buttons.forEach((btn) => {
@@ -2200,19 +2195,19 @@ function showApproval(data) {
   const approveBtn = document.createElement('button');
   approveBtn.className = 'approve';
   approveBtn.textContent = I18n.t('approval.approve');
-  approveBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'approve'));
+  approveBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'approve', cardThreadId));
 
   const denyBtn = document.createElement('button');
   denyBtn.className = 'deny';
   denyBtn.textContent = I18n.t('approval.deny');
-  denyBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'deny'));
+  denyBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'deny', cardThreadId));
 
   actions.appendChild(approveBtn);
   if (data.allow_always !== false) {
     const alwaysBtn = document.createElement('button');
     alwaysBtn.className = 'always';
     alwaysBtn.textContent = I18n.t('approval.always');
-    alwaysBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'always'));
+    alwaysBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'always', cardThreadId));
     actions.appendChild(alwaysBtn);
   }
   actions.appendChild(denyBtn);
