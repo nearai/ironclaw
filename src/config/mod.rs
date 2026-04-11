@@ -52,9 +52,8 @@ use crate::settings::Settings;
 pub use self::agent::AgentConfig;
 pub use self::builder::BuilderModeConfig;
 pub use self::channels::{
-    CardStreamMode, ChannelsConfig, CliConfig, DEFAULT_GATEWAY_PORT, DingTalkConfig,
-    DmPolicy, GatewayConfig, GatewayOidcConfig, GroupPolicy, HttpConfig, SignalConfig,
-    TuiChannelConfig,
+    CardStreamMode, ChannelsConfig, CliConfig, DEFAULT_GATEWAY_PORT, DingTalkConfig, DmPolicy,
+    GatewayConfig, GatewayOidcConfig, GroupPolicy, HttpConfig, SignalConfig, TuiChannelConfig,
 };
 pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsql_path};
 pub use self::embeddings::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig};

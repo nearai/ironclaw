@@ -781,7 +781,10 @@ mod tests {
         let cached = CachedProvider::new(stub.clone(), ResponseCacheConfig::default());
 
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        cached.complete_streaming(simple_request(), tx).await.unwrap();
+        cached
+            .complete_streaming(simple_request(), tx)
+            .await
+            .unwrap();
         // Streaming should NOT populate the cache
         assert!(cached.is_empty(), "streaming must not populate the cache");
         // The provider should have been called
@@ -789,7 +792,10 @@ mod tests {
 
         // A second streaming call should also miss the cache
         let (tx2, _rx2) = tokio::sync::mpsc::channel(16);
-        cached.complete_streaming(simple_request(), tx2).await.unwrap();
+        cached
+            .complete_streaming(simple_request(), tx2)
+            .await
+            .unwrap();
         assert_eq!(stub.calls(), 2, "streaming must not use cached responses");
         assert!(cached.is_empty());
     }

@@ -27,12 +27,14 @@ pub async fn create_ai_card(
     conversation_id: &str,
     conversation_type: &str,
 ) -> Result<String, ChannelError> {
-    let card_template_id = config.card_template_id.as_deref().ok_or_else(|| {
-        ChannelError::SendFailed {
-            name: "dingtalk".into(),
-            reason: "card_template_id is not configured (set DINGTALK_CARD_TEMPLATE_ID)".into(),
-        }
-    })?;
+    let card_template_id =
+        config
+            .card_template_id
+            .as_deref()
+            .ok_or_else(|| ChannelError::SendFailed {
+                name: "dingtalk".into(),
+                reason: "card_template_id is not configured (set DINGTALK_CARD_TEMPLATE_ID)".into(),
+            })?;
 
     let is_group = conversation_type == "2";
 
@@ -112,9 +114,7 @@ pub async fn create_ai_card(
         .and_then(|v| v.as_str())
         .ok_or_else(|| ChannelError::SendFailed {
             name: "dingtalk".into(),
-            reason: format!(
-                "createAndDeliver response missing outTrackId: {resp_json}"
-            ),
+            reason: format!("createAndDeliver response missing outTrackId: {resp_json}"),
         })?
         .to_string();
 

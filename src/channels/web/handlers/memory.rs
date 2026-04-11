@@ -271,10 +271,7 @@ async fn write_card_metadata(
     path: &str,
     card: &CardMetadata,
 ) -> Result<(), String> {
-    let doc = workspace
-        .read(path)
-        .await
-        .map_err(|e| e.to_string())?;
+    let doc = workspace.read(path).await.map_err(|e| e.to_string())?;
 
     let mut metadata = doc.metadata.clone();
     merge_card_metadata(&mut metadata, card);
@@ -325,20 +322,19 @@ pub async fn memory_search_handler(
     let mut hits: Vec<SearchHit> = Vec::with_capacity(results.len());
     for r in &results {
         // Try to read document for card metadata
-        let (card_title, card_summary, card_tags) = if let Ok(doc) =
-            workspace.read(&r.document_path).await
-        {
-            match extract_card_metadata(&doc.metadata) {
-                Some(card) => (
-                    Some(card.card_title),
-                    Some(card.card_summary),
-                    Some(card.card_tags),
-                ),
-                None => (None, None, None),
-            }
-        } else {
-            (None, None, None)
-        };
+        let (card_title, card_summary, card_tags) =
+            if let Ok(doc) = workspace.read(&r.document_path).await {
+                match extract_card_metadata(&doc.metadata) {
+                    Some(card) => (
+                        Some(card.card_title),
+                        Some(card.card_summary),
+                        Some(card.card_tags),
+                    ),
+                    None => (None, None, None),
+                }
+            } else {
+                (None, None, None)
+            };
 
         // Build match excerpt if the search query appears in content but not in summary
         let match_excerpt = if let Some(ref summary) = card_summary {

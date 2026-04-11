@@ -91,7 +91,9 @@ pub async fn docs_create(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(send_failed(format!("docs_create returned {status}: {text}")));
+        return Err(send_failed(format!(
+            "docs_create returned {status}: {text}"
+        )));
     }
 
     let result: DocsCreateResponse = resp
@@ -135,7 +137,11 @@ pub async fn docs_append(
         ]
     });
 
-    debug!(document_id = document_id, content_len = content.len(), "docs_append: appending to document");
+    debug!(
+        document_id = document_id,
+        content_len = content.len(),
+        "docs_append: appending to document"
+    );
 
     let resp = client
         .post(&url)
@@ -148,7 +154,9 @@ pub async fn docs_append(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(send_failed(format!("docs_append returned {status}: {text}")));
+        return Err(send_failed(format!(
+            "docs_append returned {status}: {text}"
+        )));
     }
 
     let result: DocsAppendResponse = resp
@@ -183,7 +191,9 @@ pub async fn docs_search(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(send_failed(format!("docs_search returned {status}: {text}")));
+        return Err(send_failed(format!(
+            "docs_search returned {status}: {text}"
+        )));
     }
 
     // The API may wrap results in a top-level object; try both a direct array
@@ -212,10 +222,7 @@ pub async fn docs_search(
 /// List all DingTalk documents accessible to the token.
 ///
 /// GET `https://api.dingtalk.com/v1.0/doc/documents`
-pub async fn docs_list(
-    client: &Client,
-    token: &str,
-) -> Result<Vec<DocsListItem>, ChannelError> {
+pub async fn docs_list(client: &Client, token: &str) -> Result<Vec<DocsListItem>, ChannelError> {
     debug!("docs_list: listing documents");
 
     let resp = client

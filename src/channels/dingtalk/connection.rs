@@ -151,8 +151,7 @@ impl ConnectionManager {
         let result = Duration::from_millis(jittered_ms);
 
         // Advance backoff for next call: double, cap at max.
-        self.backoff_delay =
-            Duration::from_millis((delay_ms * 2).min(BACKOFF_MAX_MS));
+        self.backoff_delay = Duration::from_millis((delay_ms * 2).min(BACKOFF_MAX_MS));
 
         tracing::debug!(
             delay_ms = jittered_ms,
@@ -240,7 +239,7 @@ mod tests {
         let mut cm = manager();
         assert!(!cm.on_heartbeat_miss()); // miss 1
         assert!(!cm.on_heartbeat_miss()); // miss 2
-        assert!(cm.on_heartbeat_miss());  // miss 3 → trigger
+        assert!(cm.on_heartbeat_miss()); // miss 3 → trigger
     }
 
     #[test]

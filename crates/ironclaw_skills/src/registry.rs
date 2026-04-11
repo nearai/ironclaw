@@ -743,9 +743,7 @@ impl SkillRegistry {
     /// 3. Take write lock only to swap the skills vector (instant)
     ///
     /// Returns a list of warning messages from the discovery process.
-    pub async fn reload_skills(
-        registry: &std::sync::RwLock<SkillRegistry>,
-    ) -> Vec<String> {
+    pub async fn reload_skills(registry: &std::sync::RwLock<SkillRegistry>) -> Vec<String> {
         // Phase 1: Read current dir config under a brief read lock
         let (workspace_dir, user_dir, installed_dir, bundled_content, max_scan_depth) = {
             let reg = registry.read().unwrap_or_else(|e| e.into_inner());
@@ -777,10 +775,7 @@ impl SkillRegistry {
             ));
         }
 
-        tracing::debug!(
-            count = loaded_names.len(),
-            "Skill hot-reload completed"
-        );
+        tracing::debug!(count = loaded_names.len(), "Skill hot-reload completed");
 
         // Phase 3: Swap under write lock (instant)
         {

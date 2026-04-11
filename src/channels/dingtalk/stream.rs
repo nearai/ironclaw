@@ -183,20 +183,14 @@ fn extract_quoted_text(replied_msg: &serde_json::Value) -> Option<String> {
         }
     }
 
-    if let Some(text) = replied_msg
-        .get("content")
-        .and_then(|v| v.as_str())
-    {
+    if let Some(text) = replied_msg.get("content").and_then(|v| v.as_str()) {
         let trimmed = text.trim();
         if !trimmed.is_empty() {
             return Some(trimmed.to_string());
         }
     }
 
-    if let Some(text) = replied_msg
-        .get("body")
-        .and_then(|v| v.as_str())
-    {
+    if let Some(text) = replied_msg.get("body").and_then(|v| v.as_str()) {
         let trimmed = text.trim();
         if !trimmed.is_empty() {
             return Some(trimmed.to_string());
@@ -366,10 +360,8 @@ pub async fn run_stream_listener(
     reply_targets: Arc<RwLock<LruCache<Uuid, DingTalkMetadata>>>,
 ) -> Result<(), ChannelError> {
     let dedup = Arc::new(Mutex::new(DedupFilter::new()));
-    let mut conn = ConnectionManager::new(
-        config.max_reconnect_cycles,
-        config.reconnect_deadline_ms,
-    );
+    let mut conn =
+        ConnectionManager::new(config.max_reconnect_cycles, config.reconnect_deadline_ms);
 
     loop {
         // Check whether we are still allowed to (re)connect.
@@ -516,9 +508,10 @@ pub async fn run_stream_listener(
                                                         .unwrap_or("")
                                                         .to_string();
 
-                                                    let incoming =
-                                                        IncomingMessage::new("dingtalk", "", "/stop")
-                                                            .with_thread(&thread_id);
+                                                    let incoming = IncomingMessage::new(
+                                                        "dingtalk", "", "/stop",
+                                                    )
+                                                    .with_thread(&thread_id);
 
                                                     if tx.try_send(incoming).is_err() {
                                                         tracing::warn!(
@@ -591,15 +584,18 @@ pub async fn run_stream_listener(
         }
 
         let delay = conn.next_backoff();
-        tracing::debug!(delay_ms = delay.as_millis(), "DingTalk Stream disconnected, reconnecting...");
+        tracing::debug!(
+            delay_ms = delay.as_millis(),
+            "DingTalk Stream disconnected, reconnecting..."
+        );
         tokio::time::sleep(delay).await;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::{BotCallbackPayload, TextContent};
+    use super::*;
 
     fn make_payload(msgtype: &str) -> BotCallbackPayload {
         BotCallbackPayload {
@@ -625,7 +621,9 @@ mod tests {
     #[test]
     fn extract_content_text_message() {
         let mut p = make_payload("text");
-        p.text = Some(TextContent { content: Some("  hello world  ".to_string()) });
+        p.text = Some(TextContent {
+            content: Some("  hello world  ".to_string()),
+        });
         assert_eq!(extract_content(&p), "hello world");
     }
 
@@ -712,10 +710,7 @@ mod tests {
     #[test]
     fn extract_quoted_text_from_body_field() {
         let replied = serde_json::json!({ "body": "Body text" });
-        assert_eq!(
-            extract_quoted_text(&replied),
-            Some("Body text".to_string())
-        );
+        assert_eq!(extract_quoted_text(&replied), Some("Body text".to_string()));
     }
 
     #[test]

@@ -44,7 +44,11 @@ pub fn split_markdown_chunks(text: &str, limit: usize) -> Vec<String> {
         }
 
         // +1 for the newline we'll add when joining
-        let needed = if current.is_empty() { line.len() } else { line.len() + 1 };
+        let needed = if current.is_empty() {
+            line.len()
+        } else {
+            line.len() + 1
+        };
 
         if !current.is_empty() && current.len() + needed > limit {
             // Need to flush current chunk
@@ -144,10 +148,7 @@ pub fn detect_markdown(text: &str) -> (bool, String) {
         .map(|l| {
             let heading = l.trim_start_matches('#').trim();
             let mut chars = heading.char_indices();
-            let end = chars
-                .nth(30)
-                .map(|(i, _)| i)
-                .unwrap_or(heading.len());
+            let end = chars.nth(30).map(|(i, _)| i).unwrap_or(heading.len());
             heading[..end].to_string()
         })
         .filter(|s| !s.is_empty())
@@ -233,7 +234,10 @@ mod tests {
         assert!(chunks[0].contains("(1/"), "first chunk missing suffix");
         let last = chunks.last().unwrap();
         let total = chunks.len();
-        assert!(last.contains(&format!("({total}/{total})")), "last chunk missing suffix");
+        assert!(
+            last.contains(&format!("({total}/{total})")),
+            "last chunk missing suffix"
+        );
     }
 
     #[test]
@@ -241,7 +245,10 @@ mod tests {
         let text = "Short text";
         let chunks = split_markdown_chunks(text, DEFAULT_CHUNK_LIMIT);
         assert_eq!(chunks.len(), 1);
-        assert!(!chunks[0].contains("(1/1)"), "single chunk should not have suffix");
+        assert!(
+            !chunks[0].contains("(1/1)"),
+            "single chunk should not have suffix"
+        );
     }
 
     #[test]

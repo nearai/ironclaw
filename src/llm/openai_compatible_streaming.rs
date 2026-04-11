@@ -9,7 +9,9 @@
 
 use std::collections::BTreeMap;
 
+use async_openai::Client;
 use async_openai::config::OpenAIConfig;
+use async_openai::types::chat::FunctionCall;
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestMessage,
@@ -18,8 +20,6 @@ use async_openai::types::chat::{
     ChatCompletionToolChoiceOption, ChatCompletionTools, CreateChatCompletionRequestArgs,
     FinishReason as AoFinishReason, FunctionObject, ToolChoiceOptions,
 };
-use async_openai::types::chat::FunctionCall;
-use async_openai::Client;
 use async_trait::async_trait;
 use futures::StreamExt;
 use rust_decimal::Decimal;
@@ -78,12 +78,10 @@ fn translate_messages(
                     name: None,
                 })
             }
-            Role::User => {
-                ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                    content: msg.content.into(),
-                    name: None,
-                })
-            }
+            Role::User => ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                content: msg.content.into(),
+                name: None,
+            }),
             Role::Assistant => {
                 let tool_calls = msg.tool_calls.map(|tcs| {
                     tcs.into_iter()
@@ -115,9 +113,7 @@ fn translate_messages(
                 })
             }
             Role::Tool => {
-                let tool_call_id = msg
-                    .tool_call_id
-                    .unwrap_or_else(|| "unknown".to_string());
+                let tool_call_id = msg.tool_call_id.unwrap_or_else(|| "unknown".to_string());
                 ChatCompletionRequestMessage::Tool(ChatCompletionRequestToolMessage {
                     content: msg.content.into(),
                     tool_call_id,
@@ -161,9 +157,7 @@ fn map_finish_reason(reason: Option<AoFinishReason>, has_tool_calls: bool) -> Fi
     }
 }
 
-fn extract_tool_calls(
-    tool_calls: Option<Vec<ChatCompletionMessageToolCalls>>,
-) -> Vec<ToolCall> {
+fn extract_tool_calls(tool_calls: Option<Vec<ChatCompletionMessageToolCalls>>) -> Vec<ToolCall> {
     tool_calls
         .unwrap_or_default()
         .into_iter()
@@ -185,11 +179,15 @@ fn extract_tool_calls(
 
 fn map_tool_choice(choice: &str) -> Option<ChatCompletionToolChoiceOption> {
     match choice {
-        "auto" => Some(ChatCompletionToolChoiceOption::Mode(ToolChoiceOptions::Auto)),
+        "auto" => Some(ChatCompletionToolChoiceOption::Mode(
+            ToolChoiceOptions::Auto,
+        )),
         "required" => Some(ChatCompletionToolChoiceOption::Mode(
             ToolChoiceOptions::Required,
         )),
-        "none" => Some(ChatCompletionToolChoiceOption::Mode(ToolChoiceOptions::None)),
+        "none" => Some(ChatCompletionToolChoiceOption::Mode(
+            ToolChoiceOptions::None,
+        )),
         _ => None,
     }
 }
@@ -293,23 +291,24 @@ impl LlmProvider for OpenAiCompatibleStreamingProvider {
             reason: format!("Failed to build request: {e}"),
         })?;
 
-        let response = self
-            .client
-            .chat()
-            .create(req)
-            .await
-            .map_err(|e| LlmError::RequestFailed {
-                provider: PROVIDER_NAME.to_string(),
-                reason: format!("{e}"),
-            })?;
+        let response =
+            self.client
+                .chat()
+                .create(req)
+                .await
+                .map_err(|e| LlmError::RequestFailed {
+                    provider: PROVIDER_NAME.to_string(),
+                    reason: format!("{e}"),
+                })?;
 
-        let choice = response
-            .choices
-            .into_iter()
-            .next()
-            .ok_or_else(|| LlmError::EmptyResponse {
-                provider: PROVIDER_NAME.to_string(),
-            })?;
+        let choice =
+            response
+                .choices
+                .into_iter()
+                .next()
+                .ok_or_else(|| LlmError::EmptyResponse {
+                    provider: PROVIDER_NAME.to_string(),
+                })?;
 
         let content = choice.message.content.unwrap_or_default();
         let finish_reason = map_finish_reason(choice.finish_reason, false);
@@ -364,23 +363,24 @@ impl LlmProvider for OpenAiCompatibleStreamingProvider {
             reason: format!("Failed to build request: {e}"),
         })?;
 
-        let response = self
-            .client
-            .chat()
-            .create(req)
-            .await
-            .map_err(|e| LlmError::RequestFailed {
-                provider: PROVIDER_NAME.to_string(),
-                reason: format!("{e}"),
-            })?;
+        let response =
+            self.client
+                .chat()
+                .create(req)
+                .await
+                .map_err(|e| LlmError::RequestFailed {
+                    provider: PROVIDER_NAME.to_string(),
+                    reason: format!("{e}"),
+                })?;
 
-        let choice = response
-            .choices
-            .into_iter()
-            .next()
-            .ok_or_else(|| LlmError::EmptyResponse {
-                provider: PROVIDER_NAME.to_string(),
-            })?;
+        let choice =
+            response
+                .choices
+                .into_iter()
+                .next()
+                .ok_or_else(|| LlmError::EmptyResponse {
+                    provider: PROVIDER_NAME.to_string(),
+                })?;
 
         let tool_calls = extract_tool_calls(choice.message.tool_calls);
         let finish_reason = map_finish_reason(choice.finish_reason, !tool_calls.is_empty());
@@ -439,15 +439,15 @@ impl LlmProvider for OpenAiCompatibleStreamingProvider {
             reason: format!("Failed to build streaming request: {e}"),
         })?;
 
-        let mut stream = self
-            .client
-            .chat()
-            .create_stream(req)
-            .await
-            .map_err(|e| LlmError::RequestFailed {
-                provider: PROVIDER_NAME.to_string(),
-                reason: format!("Failed to create stream: {e}"),
-            })?;
+        let mut stream =
+            self.client
+                .chat()
+                .create_stream(req)
+                .await
+                .map_err(|e| LlmError::RequestFailed {
+                    provider: PROVIDER_NAME.to_string(),
+                    reason: format!("Failed to create stream: {e}"),
+                })?;
 
         let mut full_content = String::new();
         let mut finish_reason = FinishReason::Unknown;
@@ -540,15 +540,15 @@ impl LlmProvider for OpenAiCompatibleStreamingProvider {
             reason: format!("Failed to build streaming request: {e}"),
         })?;
 
-        let mut stream = self
-            .client
-            .chat()
-            .create_stream(req)
-            .await
-            .map_err(|e| LlmError::RequestFailed {
-                provider: PROVIDER_NAME.to_string(),
-                reason: format!("Failed to create stream: {e}"),
-            })?;
+        let mut stream =
+            self.client
+                .chat()
+                .create_stream(req)
+                .await
+                .map_err(|e| LlmError::RequestFailed {
+                    provider: PROVIDER_NAME.to_string(),
+                    reason: format!("Failed to create stream: {e}"),
+                })?;
 
         let mut full_content = String::new();
         let mut tool_acc = ToolCallAccumulator::default();
@@ -647,7 +647,12 @@ mod tests {
     #[test]
     fn accumulator_handles_malformed_json_gracefully() {
         let mut acc = ToolCallAccumulator::default();
-        acc.accumulate(0, Some("id".into()), Some("tool".into()), Some("not json".into()));
+        acc.accumulate(
+            0,
+            Some("id".into()),
+            Some("tool".into()),
+            Some("not json".into()),
+        );
         let calls = acc.into_tool_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].arguments, serde_json::json!({}));
@@ -753,11 +758,8 @@ mod tests {
 
     #[test]
     fn provider_cost_per_token_uses_cost_table() {
-        let provider = OpenAiCompatibleStreamingProvider::new(
-            "http://localhost:8080/v1",
-            "sk-test",
-            "gpt-4o",
-        );
+        let provider =
+            OpenAiCompatibleStreamingProvider::new("http://localhost:8080/v1", "sk-test", "gpt-4o");
         let (input, output) = provider.cost_per_token();
         assert!(input >= Decimal::ZERO);
         assert!(output >= Decimal::ZERO);
@@ -765,11 +767,8 @@ mod tests {
 
     #[test]
     fn resolve_model_uses_override_when_provided() {
-        let provider = OpenAiCompatibleStreamingProvider::new(
-            "http://localhost:8080/v1",
-            "sk-test",
-            "gpt-4o",
-        );
+        let provider =
+            OpenAiCompatibleStreamingProvider::new("http://localhost:8080/v1", "sk-test", "gpt-4o");
         assert_eq!(provider.resolve_model(Some("gpt-4o-mini")), "gpt-4o-mini");
         assert_eq!(provider.resolve_model(None), "gpt-4o");
     }
@@ -809,15 +808,21 @@ mod tests {
     fn map_tool_choice_variants() {
         assert!(matches!(
             map_tool_choice("auto"),
-            Some(ChatCompletionToolChoiceOption::Mode(ToolChoiceOptions::Auto))
+            Some(ChatCompletionToolChoiceOption::Mode(
+                ToolChoiceOptions::Auto
+            ))
         ));
         assert!(matches!(
             map_tool_choice("required"),
-            Some(ChatCompletionToolChoiceOption::Mode(ToolChoiceOptions::Required))
+            Some(ChatCompletionToolChoiceOption::Mode(
+                ToolChoiceOptions::Required
+            ))
         ));
         assert!(matches!(
             map_tool_choice("none"),
-            Some(ChatCompletionToolChoiceOption::Mode(ToolChoiceOptions::None))
+            Some(ChatCompletionToolChoiceOption::Mode(
+                ToolChoiceOptions::None
+            ))
         ));
         assert!(map_tool_choice("other").is_none());
     }

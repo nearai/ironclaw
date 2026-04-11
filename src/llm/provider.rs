@@ -683,10 +683,7 @@ mod streaming_default_tests {
         let (tx, mut rx) = mpsc::channel::<String>(8);
 
         let response = provider
-            .complete_streaming(
-                CompletionRequest::new(vec![ChatMessage::user("hi")]),
-                tx,
-            )
+            .complete_streaming(CompletionRequest::new(vec![ChatMessage::user("hi")]), tx)
             .await
             .expect("blocking fallback should succeed");
 
@@ -742,10 +739,7 @@ mod streaming_default_tests {
         drop(rx);
 
         let response = provider
-            .complete_streaming(
-                CompletionRequest::new(vec![ChatMessage::user("hi")]),
-                tx,
-            )
+            .complete_streaming(CompletionRequest::new(vec![ChatMessage::user("hi")]), tx)
             .await
             .expect("blocking fallback should succeed regardless of receiver state");
 
@@ -762,10 +756,7 @@ mod streaming_default_tests {
 
         let producer = tokio::spawn(async move {
             provider
-                .complete_streaming(
-                    CompletionRequest::new(vec![ChatMessage::user("hi")]),
-                    tx,
-                )
+                .complete_streaming(CompletionRequest::new(vec![ChatMessage::user("hi")]), tx)
                 .await
         });
 

@@ -1263,7 +1263,9 @@ async fn execute_routine(ctx: EngineContext, mut routine: Routine, run: RoutineR
 
     // Fire-and-forget callback to LobsterPool (if configured)
     if let Some(ref callback_url) = ctx.config.cron_callback_url {
-        let duration_ms = Utc::now().signed_duration_since(run.started_at).num_milliseconds();
+        let duration_ms = Utc::now()
+            .signed_duration_since(run.started_at)
+            .num_milliseconds();
         let payload = serde_json::json!({
             "jobName": routine.name,
             "jobId": routine.id.to_string(),

@@ -244,15 +244,14 @@ impl ImageOps {
                     ),
                 })?;
 
-        let context_dir =
-            canonical
-                .parent()
-                .ok_or_else(|| DockerError::ImageOperation {
-                    reason: format!(
-                        "Dockerfile path '{}' has no parent directory",
-                        canonical.display()
-                    ),
-                })?;
+        let context_dir = canonical
+            .parent()
+            .ok_or_else(|| DockerError::ImageOperation {
+                reason: format!(
+                    "Dockerfile path '{}' has no parent directory",
+                    canonical.display()
+                ),
+            })?;
 
         tracing::info!(
             "Building image from {}: {}",
@@ -275,20 +274,18 @@ impl ImageOps {
                 reason: format!("failed to run docker build: {}", e),
             })?;
 
-        let mut stdout_lines =
-            tokio::io::BufReader::new(child.stdout.take().ok_or_else(|| {
-                DockerError::ImageOperation {
-                    reason: "stdout pipe missing".to_string(),
-                }
-            })?)
-            .lines();
-        let mut stderr_lines =
-            tokio::io::BufReader::new(child.stderr.take().ok_or_else(|| {
-                DockerError::ImageOperation {
-                    reason: "stderr pipe missing".to_string(),
-                }
-            })?)
-            .lines();
+        let mut stdout_lines = tokio::io::BufReader::new(child.stdout.take().ok_or_else(|| {
+            DockerError::ImageOperation {
+                reason: "stdout pipe missing".to_string(),
+            }
+        })?)
+        .lines();
+        let mut stderr_lines = tokio::io::BufReader::new(child.stderr.take().ok_or_else(|| {
+            DockerError::ImageOperation {
+                reason: "stderr pipe missing".to_string(),
+            }
+        })?)
+        .lines();
 
         let mut stderr_capture = String::new();
         let mut stdout_done = false;
@@ -506,9 +503,7 @@ mod tests {
         );
 
         assert!(candidates.contains(&PathBuf::from("/home/tester/.docker/run/docker.sock")));
-        assert!(candidates.contains(&PathBuf::from(
-            "/home/tester/.colima/default/docker.sock"
-        )));
+        assert!(candidates.contains(&PathBuf::from("/home/tester/.colima/default/docker.sock")));
         assert!(candidates.contains(&PathBuf::from("/home/tester/.rd/docker.sock")));
         assert!(candidates.contains(&PathBuf::from("/run/user/1000/docker.sock")));
     }

@@ -1211,10 +1211,8 @@ impl ExtensionManager {
             }
         };
 
-        let desired: std::collections::HashSet<String> = servers
-            .enabled_servers()
-            .map(|s| s.name.clone())
-            .collect();
+        let desired: std::collections::HashSet<String> =
+            servers.enabled_servers().map(|s| s.name.clone()).collect();
 
         // Snapshot current connected MCP names
         let current: std::collections::HashSet<String> = {

@@ -52,7 +52,7 @@ use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse,
 use crate::config::{CardStreamMode, DingTalkConfig};
 use crate::error::ChannelError;
 
-use types::{CardPhase, CardState, DingTalkMetadata, MarkdownMsgParam, AccessTokenResponse};
+use types::{AccessTokenResponse, CardPhase, CardState, DingTalkMetadata, MarkdownMsgParam};
 
 const MAX_REPLY_TARGETS: usize = 10000;
 const REPLY_TARGETS_CAP: NonZeroUsize = NonZeroUsize::new(MAX_REPLY_TARGETS).unwrap();
@@ -122,13 +122,14 @@ impl DingTalkChannel {
             .await
             .map_err(|e| ChannelError::Http(format!("parse token: {e}")))?;
 
-        let token = token_resp.access_token.ok_or_else(|| {
-            ChannelError::Http("no access_token in response".to_string())
-        })?;
+        let token = token_resp
+            .access_token
+            .ok_or_else(|| ChannelError::Http("no access_token in response".to_string()))?;
 
         let expires_in = token_resp.expires_in.unwrap_or(7200);
         // Refresh 5 minutes before expiry
-        let expiry = std::time::Instant::now() + Duration::from_secs(expires_in.saturating_sub(300));
+        let expiry =
+            std::time::Instant::now() + Duration::from_secs(expires_in.saturating_sub(300));
 
         let mut cache = self.access_token.write().await;
         *cache = Some((token.clone(), expiry));
@@ -163,7 +164,10 @@ impl DingTalkChannel {
             "https://api.dingtalk.com/v1.0/robot/groupMessages/send"
         } else {
             body["userIds"] = serde_json::Value::Array(
-                user_ids.iter().map(|u| serde_json::Value::String(u.to_string())).collect(),
+                user_ids
+                    .iter()
+                    .map(|u| serde_json::Value::String(u.to_string()))
+                    .collect(),
             );
             "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
         };
@@ -231,7 +235,9 @@ impl Channel for DingTalkChannel {
             return Ok(());
         };
 
-        let robot_code = metadata.robot_code.as_deref()
+        let robot_code = metadata
+            .robot_code
+            .as_deref()
             .or(self.config.robot_code.as_deref())
             .unwrap_or_default();
 
@@ -286,7 +292,11 @@ impl Channel for DingTalkChannel {
             self.send_markdown(
                 &token,
                 robot_code,
-                if is_group { Some(&metadata.conversation_id) } else { None },
+                if is_group {
+                    Some(&metadata.conversation_id)
+                } else {
+                    None
+                },
                 if is_group { &[] } else { &user_ids_vec },
                 &chunk_title,
                 chunk,
@@ -311,7 +321,14 @@ impl Channel for DingTalkChannel {
                 }
             };
 
-            let media_id = match media::upload_media(&self.client, &token, attachment_path, media_type).await {
+            let media_id = match media::upload_media(
+                &self.client,
+                &token,
+                attachment_path,
+                media_type,
+            )
+            .await
+            {
                 Ok(id) => id,
                 Err(e) => {
                     tracing::debug!(
@@ -376,12 +393,13 @@ impl Channel for DingTalkChannel {
             });
 
             let media_url = if is_group {
-                body["openConversationId"] = serde_json::Value::String(metadata.conversation_id.clone());
+                body["openConversationId"] =
+                    serde_json::Value::String(metadata.conversation_id.clone());
                 "https://api.dingtalk.com/v1.0/robot/groupMessages/send"
             } else {
-                body["userIds"] = serde_json::Value::Array(
-                    vec![serde_json::Value::String(metadata.sender_staff_id.clone())],
-                );
+                body["userIds"] = serde_json::Value::Array(vec![serde_json::Value::String(
+                    metadata.sender_staff_id.clone(),
+                )]);
                 "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
             };
 

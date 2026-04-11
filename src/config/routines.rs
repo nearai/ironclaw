@@ -80,8 +80,12 @@ impl RoutineConfig {
                 "ROUTINES_LIGHTWEIGHT_TOOLS",
             )?,
             lightweight_max_iterations: max_iterations.min(5), // cap at 5
-            cron_callback_url: std::env::var("CRON_CALLBACK_URL").ok().filter(|s| !s.is_empty()),
-            cron_callback_token: std::env::var("CRON_CALLBACK_TOKEN").ok().filter(|s| !s.is_empty()),
+            cron_callback_url: std::env::var("CRON_CALLBACK_URL")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            cron_callback_token: std::env::var("CRON_CALLBACK_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty()),
         })
     }
 }

@@ -550,7 +550,10 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let store = make_store(&tmp);
 
-        let rule = store.add_global_rule("always greet in Chinese").await.unwrap();
+        let rule = store
+            .add_global_rule("always greet in Chinese")
+            .await
+            .unwrap();
 
         assert_eq!(rule.content, "always greet in Chinese");
         assert_eq!(rule.scope, RuleScope::Global);
@@ -570,12 +573,12 @@ mod tests {
         let store = make_store(&tmp);
 
         store.add_global_rule("global rule A").await.unwrap();
-        store.add_session_note("sess-1", "session note B").await.unwrap();
-
-        let rules = store
-            .get_active_rules(Some("sess-1"), None)
+        store
+            .add_session_note("sess-1", "session note B")
             .await
             .unwrap();
+
+        let rules = store.get_active_rules(Some("sess-1"), None).await.unwrap();
 
         // Session note should come before global rule.
         assert_eq!(rules.len(), 2);

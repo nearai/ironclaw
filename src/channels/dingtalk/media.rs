@@ -68,7 +68,10 @@ pub async fn download_media(
         })?
         .to_string();
 
-    tracing::debug!(download_code, "DingTalk: got signed media URL, downloading...");
+    tracing::debug!(
+        download_code,
+        "DingTalk: got signed media URL, downloading..."
+    );
 
     // ── Step 2: download the file from the signed URL ─────────────────────────
     let file_resp = client
@@ -100,7 +103,11 @@ pub async fn download_media(
         .and_then(|v| v.to_str().ok())
         .map(|ct| {
             // Strip parameters (e.g. "image/jpeg; charset=utf-8" → "image/jpeg")
-            ct.split(';').next().unwrap_or(ct).trim().to_ascii_lowercase()
+            ct.split(';')
+                .next()
+                .unwrap_or(ct)
+                .trim()
+                .to_ascii_lowercase()
         })
         .unwrap_or_else(|| "application/octet-stream".to_string());
 
@@ -108,8 +115,7 @@ pub async fn download_media(
     let ext = detect_extension(filename, Some(&mime_type));
 
     // ── Step 3: prepare temp directory ───────────────────────────────────────
-    let temp_dir = std::env::temp_dir()
-        .join("ironclaw-dingtalk-media");
+    let temp_dir = std::env::temp_dir().join("ironclaw-dingtalk-media");
     tokio::fs::create_dir_all(&temp_dir)
         .await
         .map_err(|e| ChannelError::Http(format!("create temp dir: {e}")))?;
@@ -178,7 +184,12 @@ pub fn detect_extension(filename: Option<&str>, content_type: Option<&str>) -> S
 
     // Fall back to MIME type mapping.
     if let Some(ct) = content_type {
-        let ct = ct.split(';').next().unwrap_or(ct).trim().to_ascii_lowercase();
+        let ct = ct
+            .split(';')
+            .next()
+            .unwrap_or(ct)
+            .trim()
+            .to_ascii_lowercase();
         let ext = match ct.as_str() {
             "image/jpeg" | "image/jpg" => "jpg",
             "image/png" => "png",
@@ -250,9 +261,8 @@ pub async fn upload_media(
     file_path: &Path,
     media_type: &str,
 ) -> Result<String, ChannelError> {
-    let url = format!(
-        "https://oapi.dingtalk.com/media/upload?access_token={token}&type={media_type}"
-    );
+    let url =
+        format!("https://oapi.dingtalk.com/media/upload?access_token={token}&type={media_type}");
 
     // Read file bytes
     let file_bytes = tokio::fs::read(file_path)
@@ -292,9 +302,7 @@ pub async fn upload_media(
     let media_id = json
         .get("media_id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            ChannelError::Http(format!("no media_id in upload response: {json}"))
-        })?
+        .ok_or_else(|| ChannelError::Http(format!("no media_id in upload response: {json}")))?
         .to_string();
 
     tracing::debug!(
@@ -340,7 +348,10 @@ mod tests {
     #[test]
     fn detect_extension_filename_takes_priority_over_content_type() {
         // filename extension wins over content-type
-        assert_eq!(detect_extension(Some("file.png"), Some("image/jpeg")), "png");
+        assert_eq!(
+            detect_extension(Some("file.png"), Some("image/jpeg")),
+            "png"
+        );
     }
 
     #[test]
@@ -357,7 +368,10 @@ mod tests {
         // Trailing dot — empty extension → ignored, fall through
         assert_eq!(detect_extension(Some("file."), None), "bin");
         // Non-alphanumeric characters in ext → fall through to bin
-        assert_eq!(detect_extension(Some("file.tar.gz"), Some("application/gzip")), "gz");
+        assert_eq!(
+            detect_extension(Some("file.tar.gz"), Some("application/gzip")),
+            "gz"
+        );
     }
 
     #[test]

@@ -19,8 +19,8 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::context::ContextManager;
-use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::docker::connect_docker;
+use crate::orchestrator::job_manager::ContainerJobManager;
 
 /// Configuration for the sandbox reaper.
 #[derive(Debug, Clone)]

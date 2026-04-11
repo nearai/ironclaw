@@ -7,11 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::llm::error::LlmError;
 
+use crate::llm::provider::StreamingChunkSender;
 use crate::llm::{
     ChatMessage, CompletionRequest, FinishReason, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolDefinition,
 };
-use crate::llm::provider::StreamingChunkSender;
 
 /// Token the agent returns when it has nothing to say (e.g. in group chats).
 /// The dispatcher should check for this and suppress the message.
@@ -3192,8 +3192,8 @@ That's my plan."#;
 
     #[test]
     fn test_standalone_mode_has_skill_disclaimer() {
-        let reasoning =
-            make_test_reasoning().with_skill_context("Use the http tool for API calls.".to_string());
+        let reasoning = make_test_reasoning()
+            .with_skill_context("Use the http tool for API calls.".to_string());
 
         let prompt = reasoning.build_system_prompt_with_tools(&[]);
         assert!(
@@ -3273,7 +3273,9 @@ That's my plan."#;
         let prompt = reasoning.build_system_prompt_with_tools(&[]);
 
         // Identity should be at the very beginning
-        let identity_pos = prompt.find("Custom assistant persona.").unwrap_or(usize::MAX);
+        let identity_pos = prompt
+            .find("Custom assistant persona.")
+            .unwrap_or(usize::MAX);
         let guidelines_pos = prompt.find("## Guidelines").unwrap_or(usize::MAX);
         let safety_pos = prompt.find("## Safety").unwrap_or(usize::MAX);
 
@@ -3324,7 +3326,10 @@ That's my plan."#;
 
         let first = reasoning.build_system_prompt_with_tools(&tool_defs);
         let second = reasoning.build_system_prompt_with_tools(&tool_defs);
-        assert_eq!(first, second, "Platform mode system prompt should be deterministic");
+        assert_eq!(
+            first, second,
+            "Platform mode system prompt should be deterministic"
+        );
     }
 
     #[test]

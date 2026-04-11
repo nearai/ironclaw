@@ -461,12 +461,11 @@ impl ChannelsConfig {
         // DingTalk channel: enabled when DINGTALK_CLIENT_ID is set.
         let dingtalk_client_id = optional_env("DINGTALK_CLIENT_ID")?;
         let dingtalk = if let Some(client_id) = dingtalk_client_id {
-            let client_secret = optional_env("DINGTALK_CLIENT_SECRET")?.ok_or(
-                ConfigError::InvalidValue {
+            let client_secret =
+                optional_env("DINGTALK_CLIENT_SECRET")?.ok_or(ConfigError::InvalidValue {
                     key: "DINGTALK_CLIENT_SECRET".to_string(),
                     message: "required when DINGTALK_CLIENT_ID is set".to_string(),
-                },
-            )?;
+                })?;
             Some(DingTalkConfig {
                 enabled: true,
                 client_id,
@@ -492,10 +491,20 @@ impl ChannelsConfig {
                     _ => GroupPolicy::Open,
                 },
                 allow_from: optional_env("DINGTALK_ALLOW_FROM")?
-                    .map(|s| s.split(',').map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).collect())
+                    .map(|s| {
+                        s.split(',')
+                            .map(|v| v.trim().to_string())
+                            .filter(|v| !v.is_empty())
+                            .collect()
+                    })
                     .unwrap_or_default(),
                 group_allow_from: optional_env("DINGTALK_GROUP_ALLOW_FROM")?
-                    .map(|s| s.split(',').map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).collect())
+                    .map(|s| {
+                        s.split(',')
+                            .map(|v| v.trim().to_string())
+                            .filter(|v| !v.is_empty())
+                            .collect()
+                    })
                     .unwrap_or_default(),
                 max_reconnect_cycles: optional_env("DINGTALK_MAX_RECONNECT_CYCLES")?
                     .and_then(|s| s.parse().ok())
@@ -511,21 +520,16 @@ impl ChannelsConfig {
                         match optional_env(&id_key)? {
                             None => break,
                             Some(acc_client_id) => {
-                                let secret_key =
-                                    format!("DINGTALK_ACCOUNT_{idx}_CLIENT_SECRET");
+                                let secret_key = format!("DINGTALK_ACCOUNT_{idx}_CLIENT_SECRET");
                                 let acc_client_secret =
                                     optional_env(&secret_key)?.ok_or_else(|| {
                                         ConfigError::InvalidValue {
                                             key: secret_key.clone(),
-                                            message: format!(
-                                                "required when {id_key} is set"
-                                            ),
+                                            message: format!("required when {id_key} is set"),
                                         }
                                     })?;
-                                let robot_code_key =
-                                    format!("DINGTALK_ACCOUNT_{idx}_ROBOT_CODE");
-                                let agent_id_key =
-                                    format!("DINGTALK_ACCOUNT_{idx}_AGENT_ID");
+                                let robot_code_key = format!("DINGTALK_ACCOUNT_{idx}_ROBOT_CODE");
+                                let agent_id_key = format!("DINGTALK_ACCOUNT_{idx}_AGENT_ID");
                                 accounts.push(DingTalkAccountConfig {
                                     account_id: format!("account_{idx}"),
                                     client_id: acc_client_id,

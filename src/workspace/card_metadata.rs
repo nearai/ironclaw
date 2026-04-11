@@ -32,9 +32,7 @@ const HIDDEN_FROM_CARDS: &[&str] = &[
 /// Check if a path should be hidden from the knowledge card view.
 pub fn is_hidden_from_cards(path: &str) -> bool {
     let file_name = path.rsplit('/').next().unwrap_or(path);
-    HIDDEN_FROM_CARDS.contains(&file_name)
-        || path.starts_with("context/")
-        || file_name == ".config"
+    HIDDEN_FROM_CARDS.contains(&file_name) || path.starts_with("context/") || file_name == ".config"
 }
 
 /// Generate fallback metadata from document content (no LLM needed).
@@ -230,10 +228,7 @@ pub fn merge_card_metadata(metadata: &mut serde_json::Value, card: &CardMetadata
             "card_summary".to_string(),
             serde_json::Value::String(card.card_summary.clone()),
         );
-        obj.insert(
-            "card_tags".to_string(),
-            serde_json::json!(card.card_tags),
-        );
+        obj.insert("card_tags".to_string(), serde_json::json!(card.card_tags));
     }
 }
 
@@ -243,7 +238,8 @@ mod tests {
 
     #[test]
     fn fallback_metadata_from_markdown() {
-        let content = "# My Project Notes\n\nThis is about the deployment process.\nWe use Docker and K8s.\n";
+        let content =
+            "# My Project Notes\n\nThis is about the deployment process.\nWe use Docker and K8s.\n";
         let meta = generate_fallback_metadata(content, "projects/notes.md");
         assert_eq!(meta.card_title, "My Project Notes");
         assert!(meta.card_summary.contains("deployment"));
@@ -290,7 +286,8 @@ mod tests {
 
     #[test]
     fn parse_llm_response_with_fences() {
-        let response = "```json\n{\"title\": \"Test\", \"summary\": \"A test.\", \"tags\": [\"test\"]}\n```";
+        let response =
+            "```json\n{\"title\": \"Test\", \"summary\": \"A test.\", \"tags\": [\"test\"]}\n```";
         let meta = parse_llm_response(response).unwrap();
         assert_eq!(meta.card_title, "Test");
     }

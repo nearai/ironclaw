@@ -116,7 +116,11 @@ impl LlmProvider for TokenRefreshingProvider {
     ) -> Result<CompletionResponse, LlmError> {
         self.ensure_fresh_token().await;
 
-        match self.inner.complete_streaming(request.clone(), chunk_tx.clone()).await {
+        match self
+            .inner
+            .complete_streaming(request.clone(), chunk_tx.clone())
+            .await
+        {
             Err(LlmError::AuthFailed { .. } | LlmError::SessionExpired { .. }) => {
                 tracing::info!(
                     "Auth failure during complete_streaming(), refreshing and retrying once"

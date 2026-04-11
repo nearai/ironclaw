@@ -298,10 +298,8 @@ async fn async_main() -> anyhow::Result<()> {
     let log_broadcaster = Arc::new(LogBroadcaster::new());
 
     if cli.standby {
-        let log_level_handle = ironclaw::channels::web::log_layer::init_tracing(
-            Arc::clone(&log_broadcaster),
-            false,
-        );
+        let log_level_handle =
+            ironclaw::channels::web::log_layer::init_tracing(Arc::clone(&log_broadcaster), false);
         return run_standby(
             &cli,
             startup_start,
@@ -908,8 +906,9 @@ async fn run_agent_with_config(
         && let Some(ref dingtalk_config) = config.channels.dingtalk
     {
         if dingtalk_config.enabled {
-            let dingtalk_channel = ironclaw::channels::DingTalkChannel::new(dingtalk_config.clone())
-                .map_err(|e| anyhow::anyhow!("DingTalk channel init failed: {e}"))?;
+            let dingtalk_channel =
+                ironclaw::channels::DingTalkChannel::new(dingtalk_config.clone())
+                    .map_err(|e| anyhow::anyhow!("DingTalk channel init failed: {e}"))?;
             channel_names.push("dingtalk".to_string());
             channels.add(Box::new(dingtalk_channel)).await;
             tracing::info!(

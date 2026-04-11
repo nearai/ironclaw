@@ -2896,11 +2896,9 @@ impl SetupWizard {
                 // Check if the worker image exists
                 self.ensure_worker_image().await?;
             }
-            crate::docker::DockerStatus::NotInstalled
-            | crate::docker::DockerStatus::NotRunning => {
+            crate::docker::DockerStatus::NotInstalled | crate::docker::DockerStatus::NotRunning => {
                 println!();
-                let not_installed =
-                    detection.status == crate::docker::DockerStatus::NotInstalled;
+                let not_installed = detection.status == crate::docker::DockerStatus::NotInstalled;
                 if not_installed {
                     print_error("Docker is not installed.");
                     print_info(detection.platform.install_hint());

@@ -96,10 +96,7 @@ pub fn check_access(
                 allowed
             }
             GroupPolicy::Disabled => {
-                tracing::debug!(
-                    conversation_id,
-                    "DingTalk access: group disabled — denied"
-                );
+                tracing::debug!(conversation_id, "DingTalk access: group disabled — denied");
                 false
             }
         }
@@ -128,11 +125,7 @@ pub fn check_access(
 /// - DMs are always processed regardless of `require_mention`.
 /// - Group messages: if `require_mention` is `true` the bot must be in the
 ///   `is_in_at_list`; otherwise always processed.
-pub fn should_process(
-    is_in_at_list: Option<bool>,
-    is_group: bool,
-    require_mention: bool,
-) -> bool {
+pub fn should_process(is_in_at_list: Option<bool>, is_group: bool, require_mention: bool) -> bool {
     if !is_group {
         // DMs are always processed
         return true;
@@ -205,8 +198,10 @@ mod tests {
     fn dedup_cleanup_removes_expired() {
         let mut f = DedupFilter::new();
         // Manually insert an expired entry
-        f.seen
-            .insert("old-msg".to_string(), Instant::now() - Duration::from_secs(61));
+        f.seen.insert(
+            "old-msg".to_string(),
+            Instant::now() - Duration::from_secs(61),
+        );
         f.cleanup();
         assert!(!f.seen.contains_key("old-msg"));
     }

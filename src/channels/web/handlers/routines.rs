@@ -425,30 +425,20 @@ pub async fn routines_create_handler(
     ))?;
 
     // Parse trigger from JSON
-    let trigger_type = body
-        .trigger
-        .get("type")
-        .and_then(|v| v.as_str())
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            "trigger must have a 'type' field".to_string(),
-        ))?;
-    let trigger = Trigger::from_db(trigger_type, body.trigger.clone()).map_err(|e| {
-        (StatusCode::BAD_REQUEST, format!("invalid trigger: {e}"))
-    })?;
+    let trigger_type = body.trigger.get("type").and_then(|v| v.as_str()).ok_or((
+        StatusCode::BAD_REQUEST,
+        "trigger must have a 'type' field".to_string(),
+    ))?;
+    let trigger = Trigger::from_db(trigger_type, body.trigger.clone())
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid trigger: {e}")))?;
 
     // Parse action from JSON
-    let action_type = body
-        .action
-        .get("type")
-        .and_then(|v| v.as_str())
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            "action must have a 'type' field".to_string(),
-        ))?;
-    let action = RoutineAction::from_db(action_type, body.action.clone()).map_err(|e| {
-        (StatusCode::BAD_REQUEST, format!("invalid action: {e}"))
-    })?;
+    let action_type = body.action.get("type").and_then(|v| v.as_str()).ok_or((
+        StatusCode::BAD_REQUEST,
+        "action must have a 'type' field".to_string(),
+    ))?;
+    let action = RoutineAction::from_db(action_type, body.action.clone())
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid action: {e}")))?;
 
     // Compute next fire time for cron triggers
     let next_fire = if let Trigger::Cron {
@@ -464,8 +454,7 @@ pub async fn routines_create_handler(
 
     // Parse guardrails or use defaults
     let guardrails = if let Some(g) = body.guardrails {
-        serde_json::from_value::<RoutineGuardrails>(g)
-            .unwrap_or_default()
+        serde_json::from_value::<RoutineGuardrails>(g).unwrap_or_default()
     } else {
         RoutineGuardrails::default()
     };
@@ -557,9 +546,8 @@ pub async fn routines_update_handler(
                 StatusCode::BAD_REQUEST,
                 "trigger must have a 'type' field".to_string(),
             ))?;
-        routine.trigger = Trigger::from_db(&trigger_type, trigger_json).map_err(|e| {
-            (StatusCode::BAD_REQUEST, format!("invalid trigger: {e}"))
-        })?;
+        routine.trigger = Trigger::from_db(&trigger_type, trigger_json)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid trigger: {e}")))?;
     }
     if let Some(action_json) = body.action {
         let action_type = action_json
@@ -570,9 +558,8 @@ pub async fn routines_update_handler(
                 StatusCode::BAD_REQUEST,
                 "action must have a 'type' field".to_string(),
             ))?;
-        routine.action = RoutineAction::from_db(&action_type, action_json).map_err(|e| {
-            (StatusCode::BAD_REQUEST, format!("invalid action: {e}"))
-        })?;
+        routine.action = RoutineAction::from_db(&action_type, action_json)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid action: {e}")))?;
     }
     if let Some(enabled) = body.enabled {
         let was_enabled = routine.enabled;
@@ -585,18 +572,16 @@ pub async fn routines_update_handler(
                 ref timezone,
             } = routine.trigger
         {
-            routine.next_fire_at =
-                next_cron_fire(schedule, timezone.as_deref()).map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Failed to compute next fire: {e}"),
-                    )
-                })?;
+            routine.next_fire_at = next_cron_fire(schedule, timezone.as_deref()).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to compute next fire: {e}"),
+                )
+            })?;
         }
     }
     if let Some(g) = body.guardrails {
-        routine.guardrails = serde_json::from_value::<RoutineGuardrails>(g)
-            .unwrap_or_default();
+        routine.guardrails = serde_json::from_value::<RoutineGuardrails>(g).unwrap_or_default();
     }
 
     // Recompute next_fire_at if trigger changed and routine is enabled
@@ -606,13 +591,12 @@ pub async fn routines_update_handler(
             ref timezone,
         } = routine.trigger
         {
-            routine.next_fire_at =
-                next_cron_fire(schedule, timezone.as_deref()).map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Failed to compute next fire: {e}"),
-                    )
-                })?;
+            routine.next_fire_at = next_cron_fire(schedule, timezone.as_deref()).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to compute next fire: {e}"),
+                )
+            })?;
         }
     }
 

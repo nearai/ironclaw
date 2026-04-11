@@ -118,7 +118,6 @@ impl SandboxModeConfig {
             orphan_threshold_secs,
         })
     }
-
 }
 
 /// Claude Code sandbox configuration.

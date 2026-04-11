@@ -1398,7 +1398,10 @@ mod tests {
 
         let request = ToolCompletionRequest::new(vec![ChatMessage::user("use tool")], vec![]);
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        recorder.complete_with_tools_streaming(request, tx).await.unwrap();
+        recorder
+            .complete_with_tools_streaming(request, tx)
+            .await
+            .unwrap();
 
         let steps = recorder.steps.lock().await;
         assert_eq!(steps.len(), 2);

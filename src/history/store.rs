@@ -3236,7 +3236,10 @@ mod tests {
 
         let ids: Vec<Uuid> = summaries.iter().map(|s| s.id).collect();
         assert!(ids.contains(&kept), "kept conversation should be visible");
-        assert!(ids.contains(&renamed), "renamed conversation should be visible");
+        assert!(
+            ids.contains(&renamed),
+            "renamed conversation should be visible"
+        );
         assert!(
             !ids.contains(&archived),
             "archived conversation must be filtered out (soft-delete)"
@@ -3260,9 +3263,12 @@ mod tests {
         // Cleanup test rows.
         let conn = store.conn().await.unwrap();
         for id in [kept, renamed, archived] {
-            conn.execute("DELETE FROM conversation_messages WHERE conversation_id = $1", &[&id])
-                .await
-                .unwrap();
+            conn.execute(
+                "DELETE FROM conversation_messages WHERE conversation_id = $1",
+                &[&id],
+            )
+            .await
+            .unwrap();
             conn.execute("DELETE FROM conversations WHERE id = $1", &[&id])
                 .await
                 .unwrap();
