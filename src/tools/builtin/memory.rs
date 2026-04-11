@@ -102,18 +102,39 @@ fn map_write_err(e: crate::error::WorkspaceError) -> ToolError {
 /// prior work, decisions, preferences, or any historical context.
 pub struct MemorySearchTool {
     resolver: Arc<dyn WorkspaceResolver>,
+    llm: Option<Arc<dyn crate::llm::LlmProvider>>,
+    reasoning_enabled: bool,
 }
 
 impl MemorySearchTool {
     /// Create a new memory search tool with a workspace resolver.
     pub fn new(resolver: Arc<dyn WorkspaceResolver>) -> Self {
-        Self { resolver }
+        Self {
+            resolver,
+            llm: None,
+            reasoning_enabled: false,
+        }
+    }
+
+    /// Create a memory search tool with optional reasoning-augmented recall.
+    pub fn with_reasoning(
+        resolver: Arc<dyn WorkspaceResolver>,
+        llm: Option<Arc<dyn crate::llm::LlmProvider>>,
+        reasoning_enabled: bool,
+    ) -> Self {
+        Self {
+            resolver,
+            llm,
+            reasoning_enabled,
+        }
     }
 
     /// Create from a fixed workspace (backward compatibility).
     pub fn from_workspace(workspace: Arc<Workspace>) -> Self {
         Self {
             resolver: Arc::new(FixedWorkspaceResolver::new(workspace)),
+            llm: None,
+            reasoning_enabled: false,
         }
     }
 }
@@ -144,6 +165,11 @@ impl Tool for MemorySearchTool {
                     "default": 5,
                     "minimum": 1,
                     "maximum": 20
+                },
+                "reasoning": {
+                    "type": "boolean",
+                    "description": "When true, synthesize search results into a coherent summary using LLM reasoning. Default: controlled by SEARCH_REASONING_ENABLED config.",
+                    "default": false
                 }
             },
             "required": ["query"]
@@ -172,9 +198,71 @@ impl Tool for MemorySearchTool {
             .map_err(|e| ToolError::ExecutionFailed(format!("Search failed: {}", e)))?;
 
         let result_count = results.len();
+
+        let use_reasoning = params
+            .get("reasoning")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(self.reasoning_enabled);
+
+        if use_reasoning
+            && let Some(ref llm) = self.llm
+            && !results.is_empty()
+        {
+            let fragments: String = results
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    format!(
+                        "[{}] (path: {}, score: {:.2})\n{}",
+                        i + 1,
+                        r.document_path,
+                        r.score,
+                        r.content
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+
+            let llm_messages = vec![
+                crate::llm::ChatMessage::system(
+                    "You are a memory synthesis assistant. Given the user's query and \
+                     memory fragments, synthesize a coherent summary of what's known. \
+                     Cite the source paths in brackets.",
+                ),
+                crate::llm::ChatMessage::user(format!(
+                    "Query: {query}\n\nMemory fragments:\n{fragments}"
+                )),
+            ];
+
+            let request = crate::llm::CompletionRequest::new(llm_messages).with_max_tokens(500);
+
+            match llm.complete(request).await {
+                Ok(response) => {
+                    let synthesis = response.content.trim().to_string();
+                    let output = serde_json::json!({
+                        "query": query,
+                        "synthesis": synthesis,
+                        "results": results.iter().map(|r| serde_json::json!({
+                            "content": r.content,
+                            "score": r.score,
+                            "path": r.document_path,
+                            "document_id": r.document_id.to_string(),
+                            "is_hybrid_match": r.is_hybrid(),
+                        })).collect::<Vec<_>>(),
+                        "result_count": result_count,
+                        "reasoning_used": true,
+                    });
+                    return Ok(ToolOutput::success(output, start.elapsed()));
+                }
+                Err(e) => {
+                    tracing::debug!("Reasoning synthesis failed, returning raw results: {e}");
+                }
+            }
+        }
+
         let output = serde_json::json!({
             "query": query,
-            "results": results.into_iter().map(|r| serde_json::json!({
+            "results": results.iter().map(|r| serde_json::json!({
                 "content": r.content,
                 "score": r.score,
                 "path": r.document_path,

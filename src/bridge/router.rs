@@ -938,6 +938,12 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     let budget_gate: Arc<dyn ironclaw_engine::BudgetGate> =
         Arc::new(crate::bridge::CostGuardBudgetGate::new(cost_guard));
     mission_manager_inner = mission_manager_inner.with_budget_gate(budget_gate);
+    let insights_interval: u32 = std::env::var("MISSION_INSIGHTS_INTERVAL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5)
+        .max(1);
+    mission_manager_inner = mission_manager_inner.with_insights_interval(insights_interval);
     let mission_manager = Arc::new(mission_manager_inner);
     if let Err(e) = thread_manager.recover_project_threads(project_id).await {
         debug!("engine v2: recover_project_threads failed: {e}");

@@ -223,6 +223,10 @@ pub struct Settings {
     #[serde(default)]
     pub search: SearchSettings,
 
+    /// Mission configuration.
+    #[serde(default)]
+    pub missions: MissionSettings,
+
     /// Transcription configuration.
     #[serde(default)]
     pub transcription: Option<TranscriptionSettings>,
@@ -1004,6 +1008,11 @@ pub struct SearchSettings {
     /// Vector weight for fusion. `None` = use per-strategy default.
     #[serde(default)]
     pub vector_weight: Option<f32>,
+
+    /// Whether reasoning-augmented recall is enabled for memory search.
+    /// `None` = use env/default (false).
+    #[serde(default)]
+    pub reasoning_enabled: Option<bool>,
 }
 
 fn default_search_fusion_strategy() -> String {
@@ -1021,8 +1030,18 @@ impl Default for SearchSettings {
             rrf_k: default_search_rrf_k(),
             fts_weight: None,
             vector_weight: None,
+            reasoning_enabled: None,
         }
     }
+}
+
+/// Mission-related settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MissionSettings {
+    /// Conversation insights extraction interval (every N completed threads).
+    /// `None` = use env/default (5). Minimum: 1.
+    #[serde(default)]
+    pub insights_interval: Option<u32>,
 }
 
 /// Transcription pipeline settings.
