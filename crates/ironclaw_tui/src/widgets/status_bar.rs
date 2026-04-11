@@ -84,6 +84,7 @@ impl TuiWidget for StatusBarWidget {
 
         let tab_label = match state.active_tab {
             ActiveTab::Conversation => "[Chat]",
+            ActiveTab::Dashboard => "[Dash]",
             ActiveTab::Logs => "[Logs]",
         };
 
@@ -199,7 +200,7 @@ impl TuiWidget for StatusBarWidget {
         left_spans.push(sep);
         left_spans.push(Span::styled(duration_str, self.theme.dim_style()));
 
-        let right_text = "^L logs  ^B sidebar  ^C quit";
+        let right_text = "^L tabs  ^B dashboard  ^C quit";
         let right_span = Span::styled(format!("{right_text}  "), self.theme.dim_style());
 
         // Render left-aligned portion

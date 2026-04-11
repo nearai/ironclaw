@@ -77,7 +77,7 @@ pub fn group_skills_by_tag(
 
 /// Resolve the effective TUI layout from the workspace file plus env-backed
 /// channel config. File-based widget settings are loaded first, then the
-/// explicit config overrides theme and sidebar visibility.
+/// explicit config overrides theme.
 pub fn resolve_tui_layout(
     config: &crate::config::TuiChannelConfig,
     workspace_root: &Path,
@@ -85,7 +85,6 @@ pub fn resolve_tui_layout(
     let layout_path = workspace_root.join("tui").join("layout.json");
     let mut layout = TuiLayout::load_from_file(&layout_path);
     layout.theme = config.theme.clone();
-    layout.sidebar.visible = config.sidebar_visible;
     layout
 }
 
@@ -625,7 +624,10 @@ impl Channel for TuiChannel {
                     }
                 }),
             },
-            StatusUpdate::SkillActivated { .. } | StatusUpdate::ImageGenerated { .. } => {
+            StatusUpdate::SkillActivated { skill_names } => {
+                TuiEvent::SkillActivated { skill_names }
+            }
+            StatusUpdate::ImageGenerated { .. } => {
                 return Ok(());
             }
         };
@@ -669,22 +671,16 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let layout_dir = temp.path().join("tui");
         std::fs::create_dir_all(&layout_dir).expect("layout dir");
-        std::fs::write(
-            layout_dir.join("layout.json"),
-            r#"{"theme":"light","sidebar":{"visible":false,"width_percent":33}}"#,
-        )
-        .expect("layout file");
+        std::fs::write(layout_dir.join("layout.json"), r#"{"theme":"light"}"#)
+            .expect("layout file");
 
         let config = crate::config::TuiChannelConfig {
             theme: "dark".to_string(),
-            sidebar_visible: true,
         };
 
         let layout = super::resolve_tui_layout(&config, temp.path());
 
         assert_eq!(layout.theme, "dark");
-        assert!(layout.sidebar.visible);
-        assert_eq!(layout.sidebar.width_percent, 33);
     }
 
     #[test]

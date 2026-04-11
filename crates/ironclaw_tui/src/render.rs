@@ -1,6 +1,6 @@
 //! Rendering utilities for converting text to styled Ratatui spans.
 
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -140,7 +140,7 @@ pub fn render_markdown(text: &str, max_width: usize, theme: &Theme) -> Vec<Line<
         return vec![];
     }
 
-    let opts = Options::ENABLE_STRIKETHROUGH;
+    let opts = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
     let parser = Parser::new_ext(text, opts);
 
     let mut ctx = MdContext::new(theme);
@@ -292,12 +292,18 @@ pub fn render_markdown(text: &str, max_width: usize, theme: &Theme) -> Vec<Line<
             }
 
             Event::Code(code) => {
-                ctx.segments.push((code.to_string(), theme.success_style()));
+                if let Some(ref mut t) = ctx.table {
+                    t.current_cell.push_str(&code);
+                } else {
+                    ctx.segments.push((code.to_string(), theme.success_style()));
+                }
             }
 
             // ── Text content ─────────────────────────────────────
             Event::Text(txt) => {
-                if ctx.in_code_block {
+                if let Some(ref mut t) = ctx.table {
+                    t.current_cell.push_str(&txt);
+                } else if ctx.in_code_block {
                     for raw_line in txt.lines() {
                         ctx.lines.push(highlight_code_line(raw_line, theme));
                     }
@@ -329,7 +335,64 @@ pub fn render_markdown(text: &str, max_width: usize, theme: &Theme) -> Vec<Line<
                 ctx.first_block = false;
             }
 
-            // Skip events we don't render (tables, footnotes, HTML, etc.)
+            // ── Table handling ─────────────────────────────────
+            Event::Start(Tag::Table(alignments)) => {
+                if ctx.need_blank_line && !ctx.first_block {
+                    ctx.lines.push(Line::from(""));
+                    ctx.need_blank_line = false;
+                }
+                ctx.table = Some(TableState {
+                    alignments,
+                    header: Vec::new(),
+                    rows: Vec::new(),
+                    current_cell: String::new(),
+                    in_header: false,
+                    current_row: Vec::new(),
+                });
+            }
+            Event::End(TagEnd::Table) => {
+                if let Some(table) = ctx.table.take() {
+                    render_table(&table, max_width, theme, &mut ctx.lines);
+                }
+                ctx.need_blank_line = true;
+                ctx.first_block = false;
+            }
+            Event::Start(Tag::TableHead) => {
+                if let Some(ref mut t) = ctx.table {
+                    t.in_header = true;
+                    t.current_row.clear();
+                }
+            }
+            Event::End(TagEnd::TableHead) => {
+                if let Some(ref mut t) = ctx.table {
+                    t.header = std::mem::take(&mut t.current_row);
+                    t.in_header = false;
+                }
+            }
+            Event::Start(Tag::TableRow) => {
+                if let Some(ref mut t) = ctx.table {
+                    t.current_row.clear();
+                }
+            }
+            Event::End(TagEnd::TableRow) => {
+                if let Some(ref mut t) = ctx.table {
+                    let row = std::mem::take(&mut t.current_row);
+                    t.rows.push(row);
+                }
+            }
+            Event::Start(Tag::TableCell) => {
+                if let Some(ref mut t) = ctx.table {
+                    t.current_cell.clear();
+                }
+            }
+            Event::End(TagEnd::TableCell) => {
+                if let Some(ref mut t) = ctx.table {
+                    let cell = std::mem::take(&mut t.current_cell);
+                    t.current_row.push(cell);
+                }
+            }
+
+            // Skip events we don't render (footnotes, HTML, etc.)
             _ => {}
         }
     }
@@ -467,6 +530,16 @@ fn highlight_code_line(line: &str, theme: &Theme) -> Line<'static> {
     }
 }
 
+/// Accumulated table data for rendering when the table block ends.
+struct TableState {
+    alignments: Vec<Alignment>,
+    header: Vec<String>,
+    rows: Vec<Vec<String>>,
+    current_cell: String,
+    in_header: bool,
+    current_row: Vec<String>,
+}
+
 /// Internal state for the markdown event walker.
 struct MdContext {
     style_stack: Vec<Style>,
@@ -477,6 +550,7 @@ struct MdContext {
     in_blockquote: bool,
     need_blank_line: bool,
     first_block: bool,
+    table: Option<TableState>,
 }
 
 impl MdContext {
@@ -490,6 +564,7 @@ impl MdContext {
             in_blockquote: false,
             need_blank_line: false,
             first_block: true,
+            table: None,
         }
     }
 
@@ -518,6 +593,183 @@ impl MdContext {
             self.lines.push(line);
         }
     }
+}
+
+// ── Table rendering ───────────────────────────────────────────────────
+
+/// Render a collected table into styled lines with box-drawing borders.
+fn render_table(
+    table: &TableState,
+    max_width: usize,
+    theme: &Theme,
+    lines: &mut Vec<Line<'static>>,
+) {
+    let num_cols = table
+        .header
+        .len()
+        .max(table.rows.iter().map(|r| r.len()).max().unwrap_or(0));
+    if num_cols == 0 {
+        return;
+    }
+
+    // Compute column widths from content.
+    let mut col_widths: Vec<usize> = vec![0; num_cols];
+    for (i, cell) in table.header.iter().enumerate() {
+        col_widths[i] = col_widths[i].max(UnicodeWidthStr::width(cell.as_str()));
+    }
+    for row in &table.rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i < num_cols {
+                col_widths[i] = col_widths[i].max(UnicodeWidthStr::width(cell.as_str()));
+            }
+        }
+    }
+
+    // Ensure minimum column width of 3.
+    for w in &mut col_widths {
+        *w = (*w).max(3);
+    }
+
+    // Shrink columns if total exceeds max_width.
+    // Total = 1 (left border) + sum(1 + col_w + 1) per col + 1 (right border sep overlaps).
+    // Simplified: border overhead = num_cols + 1 separators + 2*num_cols padding = 3*num_cols + 1
+    let overhead = 3 * num_cols + 1;
+    let content_budget = max_width.saturating_sub(overhead);
+    let total_content: usize = col_widths.iter().sum();
+    if total_content > content_budget && content_budget > 0 {
+        let scale = content_budget as f64 / total_content as f64;
+        for w in &mut col_widths {
+            *w = ((*w as f64 * scale) as usize).max(3);
+        }
+    }
+
+    let header_style = theme.accent_style().add_modifier(Modifier::BOLD);
+    let border_style = theme.dim_style();
+    let cell_style = Style::default().fg(theme.fg.to_color());
+
+    // ┌───┬───┐  top border
+    let top = table_border_line(
+        &col_widths,
+        "\u{250C}",
+        "\u{252C}",
+        "\u{2510}",
+        border_style,
+    );
+    lines.push(top);
+
+    // │ H │ H │  header cells
+    if !table.header.is_empty() {
+        let header_line = table_data_line(
+            &table.header,
+            &col_widths,
+            &table.alignments,
+            header_style,
+            border_style,
+        );
+        lines.push(header_line);
+
+        // ├───┼───┤  header separator
+        let sep = table_border_line(
+            &col_widths,
+            "\u{251C}",
+            "\u{253C}",
+            "\u{2524}",
+            border_style,
+        );
+        lines.push(sep);
+    }
+
+    // │ D │ D │  data rows
+    for row in &table.rows {
+        let data_line = table_data_line(
+            row,
+            &col_widths,
+            &table.alignments,
+            cell_style,
+            border_style,
+        );
+        lines.push(data_line);
+    }
+
+    // └───┴───┘  bottom border
+    let bottom = table_border_line(
+        &col_widths,
+        "\u{2514}",
+        "\u{2534}",
+        "\u{2518}",
+        border_style,
+    );
+    lines.push(bottom);
+}
+
+/// Build a horizontal border line: left + (─ × width + joint) × cols + right.
+fn table_border_line(
+    col_widths: &[usize],
+    left: &str,
+    joint: &str,
+    right: &str,
+    style: Style,
+) -> Line<'static> {
+    let mut s = left.to_string();
+    for (i, &w) in col_widths.iter().enumerate() {
+        s.push_str(&"\u{2500}".repeat(w + 2)); // +2 for cell padding
+        if i + 1 < col_widths.len() {
+            s.push_str(joint);
+        }
+    }
+    s.push_str(right);
+    Line::from(Span::styled(s, style))
+}
+
+/// Build a data row: │ content │ content │
+fn table_data_line(
+    cells: &[String],
+    col_widths: &[usize],
+    alignments: &[Alignment],
+    content_style: Style,
+    border_style: Style,
+) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    spans.push(Span::styled("\u{2502}".to_string(), border_style));
+
+    for (i, width) in col_widths.iter().enumerate() {
+        let text = cells.get(i).map(|s| s.as_str()).unwrap_or("");
+        let text_width = UnicodeWidthStr::width(text);
+        let truncated = if text_width > *width {
+            // Truncate to fit.
+            let mut w = 0;
+            let cut: String = text
+                .chars()
+                .take_while(|c| {
+                    let cw = UnicodeWidthChar::width(*c).unwrap_or(0);
+                    if w + cw + 1 > *width {
+                        return false;
+                    }
+                    w += cw;
+                    true
+                })
+                .collect();
+            format!("{cut}\u{2026}")
+        } else {
+            text.to_string()
+        };
+        let tw = UnicodeWidthStr::width(truncated.as_str());
+        let pad = width.saturating_sub(tw);
+
+        let alignment = alignments.get(i).copied().unwrap_or(Alignment::None);
+        let (pad_left, pad_right) = match alignment {
+            Alignment::Right => (pad, 0),
+            Alignment::Center => (pad / 2, pad - pad / 2),
+            _ => (0, pad),
+        };
+
+        spans.push(Span::raw(format!(" {}", " ".repeat(pad_left))));
+        spans.push(Span::styled(truncated, content_style));
+        spans.push(Span::raw(format!("{} ", " ".repeat(pad_right))));
+        spans.push(Span::styled("\u{2502}".to_string(), border_style));
+    }
+
+    Line::from(spans)
 }
 
 /// Compute continuation-line indent based on current list nesting.
@@ -1014,6 +1266,73 @@ That's all!";
         let text = lines_text(&lines);
         assert!(text.contains("deleted"));
         assert!(has_modifier(&lines, Modifier::CROSSED_OUT));
+    }
+
+    // ── table rendering tests ──────────────────────────────────
+
+    #[test]
+    fn md_simple_table() {
+        let theme = Theme::dark();
+        let md = "| Name | Status |\n|------|--------|\n| foo  | ok     |\n| bar  | fail   |";
+        let lines = render_markdown(md, 80, &theme);
+        let text = lines_text(&lines);
+        // Should contain box-drawing borders.
+        assert!(text.contains("\u{250C}"), "missing top-left corner");
+        assert!(text.contains("\u{2518}"), "missing bottom-right corner");
+        // Should contain header and data.
+        assert!(text.contains("Name"), "missing header 'Name'");
+        assert!(text.contains("Status"), "missing header 'Status'");
+        assert!(text.contains("foo"), "missing data 'foo'");
+        assert!(text.contains("bar"), "missing data 'bar'");
+        // Should contain header separator.
+        assert!(text.contains("\u{253C}"), "missing header separator cross");
+    }
+
+    #[test]
+    fn md_table_with_alignment() {
+        let theme = Theme::dark();
+        let md = "| Left | Center | Right |\n|:-----|:------:|------:|\n| a    | b      | c     |";
+        let lines = render_markdown(md, 80, &theme);
+        let text = lines_text(&lines);
+        assert!(text.contains("Left"));
+        assert!(text.contains("Center"));
+        assert!(text.contains("Right"));
+    }
+
+    #[test]
+    fn md_table_narrow_width() {
+        let theme = Theme::dark();
+        let md = "| Col1 | Col2 |\n|------|------|\n| data | value |";
+        let lines = render_markdown(md, 25, &theme);
+        // Should still render without panic.
+        assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn md_table_empty_cells() {
+        let theme = Theme::dark();
+        let md = "| A | B |\n|---|---|\n|   | x |";
+        let lines = render_markdown(md, 80, &theme);
+        let text = lines_text(&lines);
+        assert!(text.contains("x"));
+    }
+
+    #[test]
+    fn md_table_header_bold_accent() {
+        let theme = Theme::dark();
+        let md = "| Header |\n|--------|\n| data   |";
+        let lines = render_markdown(md, 80, &theme);
+        // Header should have BOLD modifier.
+        let header_line = lines.iter().find(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content.as_ref().contains("Header"))
+        });
+        assert!(header_line.is_some(), "header line not found");
+        let has_bold = header_line.unwrap().spans.iter().any(|s| {
+            s.content.as_ref().contains("Header") && s.style.add_modifier.contains(Modifier::BOLD)
+        });
+        assert!(has_bold, "header should be bold");
     }
 
     // ── highlight_code_line tests ──────────────────────────────

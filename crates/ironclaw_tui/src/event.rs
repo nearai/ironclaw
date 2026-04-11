@@ -353,4 +353,10 @@ pub enum TuiEvent {
         messages: Vec<HistoryMessage>,
         pending_approval: Option<HistoryApprovalRequest>,
     },
+
+    /// Skills activated for a conversation turn.
+    SkillActivated { skill_names: Vec<String> },
+
+    /// Update dashboard introspection data.
+    UpdateDashboard(Box<crate::widgets::DashboardData>),
 }

@@ -17,10 +17,6 @@ pub struct TuiLayout {
     #[serde(default = "default_theme_name")]
     pub theme: String,
 
-    /// Sidebar configuration.
-    #[serde(default)]
-    pub sidebar: SidebarConfig,
-
     /// Header bar configuration.
     #[serde(default)]
     pub header: HeaderConfig,
@@ -50,7 +46,6 @@ impl Default for TuiLayout {
     fn default() -> Self {
         Self {
             theme: default_theme_name(),
-            sidebar: SidebarConfig::default(),
             header: HeaderConfig::default(),
             status_bar: StatusBarConfig::default(),
             conversation: ConversationConfig::default(),
@@ -78,40 +73,8 @@ impl TuiLayout {
     }
 }
 
-/// Sidebar panel configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SidebarConfig {
-    /// Whether the sidebar is visible.
-    #[serde(default = "default_true")]
-    pub visible: bool,
-
-    /// Sidebar width as percentage of terminal width (10-50).
-    #[serde(default = "default_sidebar_width")]
-    pub width_percent: u16,
-}
-
 fn default_true() -> bool {
     true
-}
-
-fn default_sidebar_width() -> u16 {
-    25
-}
-
-impl Default for SidebarConfig {
-    fn default() -> Self {
-        Self {
-            visible: true,
-            width_percent: default_sidebar_width(),
-        }
-    }
-}
-
-impl SidebarConfig {
-    /// Clamp width to valid range.
-    pub fn effective_width(&self) -> u16 {
-        self.width_percent.clamp(10, 50)
-    }
 }
 
 /// Header bar configuration.
@@ -196,8 +159,6 @@ pub enum TuiSlot {
     StatusBarLeft,
     StatusBarCenter,
     StatusBarRight,
-    Sidebar,
-    SidebarSection,
     ConversationBanner,
     InputPrefix,
     Tab,
@@ -211,21 +172,8 @@ mod tests {
     fn default_layout_is_valid() {
         let layout = TuiLayout::default();
         assert_eq!(layout.theme, "dark");
-        assert!(layout.sidebar.visible);
-        assert_eq!(layout.sidebar.effective_width(), 25);
         assert!(!layout.header.visible);
         assert!(layout.status_bar.visible);
-    }
-
-    #[test]
-    fn sidebar_width_clamped() {
-        let mut sb = SidebarConfig {
-            width_percent: 5,
-            ..Default::default()
-        };
-        assert_eq!(sb.effective_width(), 10);
-        sb.width_percent = 80;
-        assert_eq!(sb.effective_width(), 50);
     }
 
     #[test]
@@ -234,7 +182,6 @@ mod tests {
         let json = serde_json::to_string(&layout).expect("serialize");
         let back: TuiLayout = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.theme, "dark");
-        assert_eq!(back.sidebar.width_percent, 25);
     }
 
     #[test]

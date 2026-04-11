@@ -30,6 +30,29 @@ const BANNER: &[&str] = &[
 /// Tagline shown beneath the ASCII art banner.
 const BANNER_TAGLINE: &str = "Secure AI Assistant";
 
+/// Number of characters revealed per tick frame during the boot animation.
+const REVEAL_CHARS_PER_FRAME: u16 = 2;
+
+/// Delay (in frames) between each banner line starting its reveal.
+const REVEAL_LINE_STAGGER: u16 = 8;
+
+/// Reveal a banner line with typewriter animation.
+/// Returns the visible portion of `text` based on the current frame and line index.
+fn reveal_text(text: &str, frame: u16, line_idx: u16) -> String {
+    let stagger_offset = line_idx.saturating_mul(REVEAL_LINE_STAGGER);
+    let effective = frame.saturating_sub(stagger_offset);
+    let visible_chars = (effective as usize).saturating_mul(REVEAL_CHARS_PER_FRAME as usize);
+    if visible_chars >= text.len() {
+        text.to_string()
+    } else {
+        let mut result: String = text.chars().take(visible_chars).collect();
+        // Pad with spaces to maintain layout width
+        let remaining = text.chars().count().saturating_sub(visible_chars);
+        result.extend(std::iter::repeat_n(' ', remaining));
+        result
+    }
+}
+
 #[derive(Default)]
 struct ConversationRenderCache {
     usable_width: usize,
@@ -567,272 +590,132 @@ impl ConversationWidget {
         ])
     }
 
-    /// Render the Hermes-style welcome screen with two columns:
-    /// left = ASCII art + model info, right = tools + skills.
+    /// Render the welcome screen: centered banner + system info + compact capabilities.
     fn render_welcome_screen(
         &self,
         state: &AppState,
-        _usable_width: usize,
+        usable_width: usize,
         all_lines: &mut Vec<Line<'static>>,
     ) {
-        let has_tools = !state.welcome_tools.is_empty();
-        let has_skills = !state.welcome_skills.is_empty();
+        let frame = state.welcome_reveal_frame;
 
-        // If no tools/skills data, fall back to simple centered layout
-        if !has_tools && !has_skills {
-            self.render_welcome_simple(state, all_lines);
-            return;
+        // ── Animated ASCII banner ────────────────────────
+        all_lines.push(Line::from(""));
+        for (i, banner_line) in BANNER.iter().enumerate() {
+            let text = reveal_text(banner_line, frame, i as u16);
+            all_lines.push(Line::from(Span::styled(text, self.theme.accent_style())));
         }
+        let tagline = reveal_text(&format!("  {BANNER_TAGLINE}"), frame, BANNER.len() as u16);
+        all_lines.push(Line::from(Span::styled(tagline, self.theme.dim_style())));
+        all_lines.push(Line::from(""));
 
-        // Build left-column lines (banner + metadata)
-        let mut left_lines: Vec<Line<'static>> = Vec::new();
-
-        // ASCII banner
-        for banner_line in BANNER {
-            left_lines.push(Line::from(Span::styled(
-                (*banner_line).to_string(),
-                self.theme.accent_style(),
-            )));
-        }
-        left_lines.push(Line::from(Span::styled(
-            format!("  {BANNER_TAGLINE}"),
-            self.theme.dim_style(),
-        )));
-
-        // Padding between banner and metadata
-        left_lines.push(Line::from(""));
-        left_lines.push(Line::from(""));
-
-        // Left column width: widest banner line + some padding
-        let left_col_width = BANNER
-            .iter()
-            .map(|l| UnicodeWidthStr::width(*l))
-            .max()
-            .unwrap_or(40)
-            + 4;
-        // Max text width inside the left column (minus the 2-char indent)
-        let left_text_max = left_col_width.saturating_sub(2);
-
-        // Model + version
-        let model_text = truncate(&state.model, left_text_max);
-        left_lines.push(Line::from(vec![
+        // ── System info line ─────────────────────────────
+        let ctx_label = format!("{}K ctx", state.context_window / 1000);
+        let mut info_spans = vec![
             Span::styled("  ".to_string(), Style::default()),
-            Span::styled(model_text, self.theme.accent_style()),
-        ]));
-
-        // Workspace path (truncated to fit left column)
-        if !state.workspace_path.is_empty() {
-            let path_text = truncate(&state.workspace_path, left_text_max);
-            left_lines.push(Line::from(vec![
-                Span::styled("  ".to_string(), Style::default()),
-                Span::styled(path_text, self.theme.dim_style()),
-            ]));
-        }
-
-        // Context window
-        let ctx_label = format!("{}K context", state.context_window / 1000);
-        left_lines.push(Line::from(vec![
-            Span::styled("  ".to_string(), Style::default()),
-            Span::styled(ctx_label, self.theme.dim_style()),
-        ]));
-
-        // Session ID
-        let session_id = state.session_start.format("%Y%m%d_%H%M%S").to_string();
-        left_lines.push(Line::from(vec![
-            Span::styled("  Session: ".to_string(), self.theme.dim_style()),
-            Span::styled(session_id, self.theme.dim_style()),
-        ]));
-
-        // Memory / workspace stats
-        if state.memory_count > 0 || !state.identity_files.is_empty() {
-            left_lines.push(Line::from(""));
-
-            if state.memory_count > 0 {
-                left_lines.push(Line::from(vec![
-                    Span::styled("  \u{25C8} ".to_string(), self.theme.accent_style()),
-                    Span::styled(
-                        format!("{} memories", state.memory_count),
-                        self.theme.dim_style(),
-                    ),
-                ]));
-            }
-
-            if !state.identity_files.is_empty() {
-                let files_str = state.identity_files.join(", ");
-                let files_display = truncate(&files_str, left_text_max.saturating_sub(4));
-                left_lines.push(Line::from(vec![
-                    Span::styled("  \u{25CB} ".to_string(), self.theme.accent_style()),
-                    Span::styled(files_display, self.theme.dim_style()),
-                ]));
-            }
-        }
-
-        // Build right-column lines (tools + skills)
-        let mut right_lines: Vec<Line<'static>> = Vec::new();
-
-        // Available Tools heading
-        if has_tools {
-            right_lines.push(Line::from(Span::styled(
-                "Available Tools".to_string(),
-                self.theme.bold_style(),
-            )));
-
-            let max_display = 12;
-            let tool_count = state.welcome_tools.len();
-            for cat in state.welcome_tools.iter().take(max_display) {
-                right_lines.push(Self::format_category_line(
-                    &cat.name,
-                    &cat.tools,
-                    &self.theme,
-                    true,
-                ));
-            }
-            if tool_count > max_display {
-                right_lines.push(Line::from(Span::styled(
-                    format!("(and {} more toolsets...)", tool_count - max_display),
-                    self.theme.dim_style(),
-                )));
-            }
-        }
-
-        // Blank separator
-        if has_tools && has_skills {
-            right_lines.push(Line::from(""));
-        }
-
-        // Available Skills heading
-        if has_skills {
-            right_lines.push(Line::from(Span::styled(
-                "Available Skills".to_string(),
-                self.theme.bold_style(),
-            )));
-
-            let max_display = 20;
-            let skill_count = state.welcome_skills.len();
-            for cat in state.welcome_skills.iter().take(max_display) {
-                right_lines.push(Self::format_category_line(
-                    &cat.name,
-                    &cat.skills,
-                    &self.theme,
-                    false,
-                ));
-            }
-            if skill_count > max_display {
-                right_lines.push(Line::from(Span::styled(
-                    format!("(and {} more...)", skill_count - max_display),
-                    self.theme.dim_style(),
-                )));
-            }
-        }
-
-        // Footer summary
-        let total_tools: usize = state.welcome_tools.iter().map(|c| c.tools.len()).sum();
-        let total_skills: usize = state.welcome_skills.iter().map(|c| c.skills.len()).sum();
-        right_lines.push(Line::from(""));
-        let mut footer_spans = vec![
-            Span::styled(format!("{total_tools} tools"), self.theme.accent_style()),
+            Span::styled(state.model.clone(), self.theme.accent_style()),
             Span::styled("  \u{00B7}  ".to_string(), self.theme.dim_style()),
-            Span::styled(format!("{total_skills} skills"), self.theme.accent_style()),
+            Span::styled(ctx_label, self.theme.dim_style()),
         ];
-        if state.memory_count > 0 {
-            footer_spans.push(Span::styled(
+        if !state.workspace_path.is_empty() {
+            let max_path = usable_width.saturating_sub(40).min(40);
+            let path = truncate(&state.workspace_path, max_path);
+            info_spans.push(Span::styled(
                 "  \u{00B7}  ".to_string(),
                 self.theme.dim_style(),
             ));
-            footer_spans.push(Span::styled(
-                format!("{} memories", state.memory_count),
-                self.theme.accent_style(),
-            ));
+            info_spans.push(Span::styled(path, self.theme.dim_style()));
         }
-        footer_spans.push(Span::styled(
-            "  \u{00B7}  ".to_string(),
-            self.theme.dim_style(),
-        ));
-        footer_spans.push(Span::styled(
-            "/help for commands".to_string(),
-            self.theme.dim_style(),
-        ));
-        right_lines.push(Line::from(footer_spans));
+        all_lines.push(Line::from(info_spans));
 
-        // Compose two columns side-by-side
-        let total_rows = left_lines.len().max(right_lines.len());
-
-        for row in 0..total_rows {
-            let left = left_lines.get(row);
-            let right = right_lines.get(row);
-
-            match (left, right) {
-                (Some(l), Some(r)) => {
-                    // Compute visual width of left line
-                    let left_visual: usize = l
-                        .spans
-                        .iter()
-                        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-                        .sum();
-                    let padding_needed = left_col_width.saturating_sub(left_visual);
-
-                    let mut spans: Vec<Span<'static>> = Vec::new();
-                    for s in &l.spans {
-                        spans.push(Span::styled(s.content.to_string(), s.style));
-                    }
-                    spans.push(Span::raw(" ".repeat(padding_needed)));
-                    for s in &r.spans {
-                        spans.push(Span::styled(s.content.to_string(), s.style));
-                    }
-                    all_lines.push(Line::from(spans));
-                }
-                (Some(l), None) => {
-                    let spans: Vec<Span<'static>> = l
-                        .spans
-                        .iter()
-                        .map(|s| Span::styled(s.content.to_string(), s.style))
-                        .collect();
-                    all_lines.push(Line::from(spans));
-                }
-                (None, Some(r)) => {
-                    let mut spans = vec![Span::raw(" ".repeat(left_col_width))];
-                    for s in &r.spans {
-                        spans.push(Span::styled(s.content.to_string(), s.style));
-                    }
-                    all_lines.push(Line::from(spans));
-                }
-                (None, None) => {}
+        // ── Identity & memory ────────────────────────────
+        if state.memory_count > 0 || !state.identity_files.is_empty() {
+            let mut meta_spans = vec![Span::styled("  ".to_string(), Style::default())];
+            if state.memory_count > 0 {
+                meta_spans.push(Span::styled(
+                    format!("\u{25C8} {} memories", state.memory_count),
+                    self.theme.dim_style(),
+                ));
             }
+            if !state.identity_files.is_empty() {
+                if state.memory_count > 0 {
+                    meta_spans.push(Span::styled(
+                        "  \u{00B7}  ".to_string(),
+                        self.theme.dim_style(),
+                    ));
+                }
+                meta_spans.push(Span::styled(
+                    format!("\u{25CB} {}", state.identity_files.join(", ")),
+                    self.theme.dim_style(),
+                ));
+            }
+            all_lines.push(Line::from(meta_spans));
         }
 
-        // Trailing blank line
+        // ── Separator ────────────────────────────────────
+        let sep_width = usable_width.min(60);
         all_lines.push(Line::from(""));
-    }
-
-    /// Simple welcome screen (no tools/skills data).
-    fn render_welcome_simple(&self, state: &AppState, all_lines: &mut Vec<Line<'static>>) {
-        for banner_line in BANNER {
-            all_lines.push(Line::from(Span::styled(
-                (*banner_line).to_string(),
-                self.theme.accent_style(),
-            )));
-        }
         all_lines.push(Line::from(Span::styled(
-            format!("  {BANNER_TAGLINE}"),
+            format!("  {}", "\u{2500}".repeat(sep_width)),
             self.theme.dim_style(),
         )));
         all_lines.push(Line::from(""));
 
-        let context_label = format!("{} context", format_tokens(state.context_window));
-        all_lines.push(Line::from(vec![
-            Span::styled("  IronClaw".to_string(), self.theme.accent_style()),
-            Span::styled(format!(" v{}", state.version), self.theme.accent_style()),
-            Span::styled("  \u{00B7}  ".to_string(), self.theme.dim_style()),
-            Span::styled(state.model.clone(), self.theme.dim_style()),
-            Span::styled("  \u{00B7}  ".to_string(), self.theme.dim_style()),
-            Span::styled(context_label, self.theme.dim_style()),
-        ]));
+        // ── Capabilities summary (compact) ───────────────
+        let has_tools = !state.welcome_tools.is_empty();
+        let has_skills = !state.welcome_skills.is_empty();
 
-        let time_str = state.session_start.format("%H:%M UTC").to_string();
-        all_lines.push(Line::from(Span::styled(
-            format!("  Session started {time_str}"),
-            self.theme.dim_style(),
-        )));
+        if has_tools {
+            let total_tools: usize = state.welcome_tools.iter().map(|c| c.tools.len()).sum();
+            let cat_names: Vec<String> = state
+                .welcome_tools
+                .iter()
+                .take(8)
+                .map(|c| c.name.clone())
+                .collect();
+            let more = if state.welcome_tools.len() > 8 {
+                format!(" +{}", state.welcome_tools.len() - 8)
+            } else {
+                String::new()
+            };
+            all_lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  \u{25B8} {total_tools} tools"),
+                    self.theme.accent_style(),
+                ),
+                Span::styled(
+                    format!("  {}{more}", cat_names.join(" \u{00B7} ")),
+                    self.theme.dim_style(),
+                ),
+            ]));
+        }
+
+        if has_skills {
+            let total_skills: usize = state.welcome_skills.iter().map(|c| c.skills.len()).sum();
+            let cat_names: Vec<String> = state
+                .welcome_skills
+                .iter()
+                .take(8)
+                .map(|c| c.name.clone())
+                .collect();
+            let more = if state.welcome_skills.len() > 8 {
+                format!(" +{}", state.welcome_skills.len() - 8)
+            } else {
+                String::new()
+            };
+            all_lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  \u{25B8} {total_skills} skills"),
+                    self.theme.accent_style(),
+                ),
+                Span::styled(
+                    format!("  {}{more}", cat_names.join(" \u{00B7} ")),
+                    self.theme.dim_style(),
+                ),
+            ]));
+        }
+
+        // ── Prompt ───────────────────────────────────────
         all_lines.push(Line::from(""));
         all_lines.push(Line::from(vec![
             Span::styled(
@@ -841,32 +724,6 @@ impl ConversationWidget {
             ),
             Span::styled("  /help for commands".to_string(), self.theme.dim_style()),
         ]));
-    }
-
-    /// Format a "category: item1, item2, item3, ..." line.
-    fn format_category_line(
-        name: &str,
-        items: &[String],
-        theme: &Theme,
-        is_tool: bool,
-    ) -> Line<'static> {
-        let label_style = if is_tool {
-            theme.warning_style()
-        } else {
-            theme.accent_style()
-        };
-
-        let mut items_str = items.join(", ");
-        // Truncate if too long
-        if items_str.len() > 60 {
-            items_str.truncate(57);
-            items_str.push_str("...");
-        }
-
-        Line::from(vec![
-            Span::styled(format!("{name}: "), label_style),
-            Span::styled(items_str, theme.dim_style()),
-        ])
     }
 
     /// Handle scroll up/down with clamping and auto-follow management.

@@ -36,7 +36,6 @@ pub struct CliConfig {
 #[derive(Debug, Clone)]
 pub struct TuiChannelConfig {
     pub theme: String,
-    pub sidebar_visible: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -374,7 +373,6 @@ impl ChannelsConfig {
         let tui = if cli_mode.eq_ignore_ascii_case("tui") {
             Some(TuiChannelConfig {
                 theme: optional_env("TUI_THEME")?.unwrap_or_else(|| "dark".to_string()),
-                sidebar_visible: parse_bool_env("TUI_SIDEBAR", true)?,
             })
         } else {
             None
@@ -652,19 +650,16 @@ mod tests {
         unsafe {
             std::env::set_var("CLI_MODE", "tui");
             std::env::set_var("TUI_THEME", "light");
-            std::env::set_var("TUI_SIDEBAR", "false");
         }
 
         let cfg = ChannelsConfig::resolve(&settings, "owner-scope").expect("resolve");
         let tui = cfg.tui.expect("tui config");
         assert_eq!(tui.theme, "light");
-        assert!(!tui.sidebar_visible);
 
         // SAFETY: under ENV_MUTEX
         unsafe {
             std::env::remove_var("CLI_MODE");
             std::env::remove_var("TUI_THEME");
-            std::env::remove_var("TUI_SIDEBAR");
         }
     }
 }
