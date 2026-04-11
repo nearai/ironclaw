@@ -351,11 +351,17 @@ fn is_dangerous_ip(ip: IpAddr) -> bool {
 }
 
 /// Validate that a URL is safe for server-side requests (SSRF protection).
+///
+/// Both HTTPS and HTTP are accepted. HTTP is safe for localhost/loopback
+/// (no credential exposure) and is also accepted for non-localhost hosts to
+/// support internal network MCP servers (e.g. Docker service names). In that
+/// case SSRF protection is limited to IP-literal checks only; DNS-based checks
+/// are skipped because internal hostnames intentionally resolve to private
+/// addresses and the user has explicitly configured the endpoint.
 async fn validate_url_safe(url: &str) -> Result<(), AuthError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid URL: {}", e)))?;
 
-    // Must be HTTPS. HTTP is only allowed for localhost/loopback (dev scenarios).
     let scheme = parsed.scheme();
     if scheme != "https" && scheme != "http" {
         return Err(AuthError::DiscoveryFailed(format!(
@@ -363,16 +369,9 @@ async fn validate_url_safe(url: &str) -> Result<(), AuthError> {
             scheme
         )));
     }
-    if scheme == "http" {
-        if !crate::tools::mcp::config::is_localhost_url(url) {
-            let host = parsed.host_str().unwrap_or("");
-            return Err(AuthError::DiscoveryFailed(format!(
-                "HTTP is only allowed for localhost; use HTTPS for '{}'",
-                host
-            )));
-        }
-        // Localhost HTTP is allowed for dev — skip SSRF checks since we've
-        // already validated the host is localhost/loopback.
+
+    // Localhost/loopback HTTP — skip all further checks (no SSRF risk).
+    if scheme == "http" && crate::tools::mcp::config::is_localhost_url(url) {
         return Ok(());
     }
 
@@ -380,40 +379,47 @@ async fn validate_url_safe(url: &str) -> Result<(), AuthError> {
         .host_str()
         .ok_or_else(|| AuthError::DiscoveryFailed("URL has no host".to_string()))?;
 
-    // For IP literals, parse directly and check.
-    if let Ok(ip) = host.parse::<IpAddr>()
-        && is_dangerous_ip(ip)
-    {
-        return Err(AuthError::DiscoveryFailed(format!(
-            "URL points to a restricted IP address: {}",
-            host
-        )));
+    // For IP literals, always check regardless of scheme.
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_dangerous_ip(ip) {
+            return Err(AuthError::DiscoveryFailed(format!(
+                "URL points to a restricted IP address: {}",
+                host
+            )));
+        }
+        return Ok(());
     }
 
-    // For hostnames, resolve DNS and check each resolved address.
+    // For HTTP with a hostname (not an IP literal), skip DNS resolution.
+    // The endpoint is a user-configured MCP server (e.g. a Docker service name)
+    // that intentionally lives on an internal network — DNS-based SSRF checks
+    // would incorrectly reject it.
+    if scheme == "http" {
+        return Ok(());
+    }
+
+    // For HTTPS hostnames, resolve DNS and check each resolved address.
     // This prevents DNS-based SSRF where a hostname resolves to an internal IP
     // (e.g., 169.254.169.254 for cloud metadata endpoints).
-    if host.parse::<IpAddr>().is_err() {
-        let addr = format!("{}:{}", host, parsed.port_or_known_default().unwrap_or(443));
-        match tokio::net::lookup_host(&addr).await {
-            Ok(addrs) => {
-                for socket_addr in addrs {
-                    if is_dangerous_ip(socket_addr.ip()) {
-                        return Err(AuthError::DiscoveryFailed(format!(
-                            "URL hostname '{}' resolves to restricted IP address: {}",
-                            host,
-                            socket_addr.ip()
-                        )));
-                    }
+    let addr = format!("{}:{}", host, parsed.port_or_known_default().unwrap_or(443));
+    match tokio::net::lookup_host(&addr).await {
+        Ok(addrs) => {
+            for socket_addr in addrs {
+                if is_dangerous_ip(socket_addr.ip()) {
+                    return Err(AuthError::DiscoveryFailed(format!(
+                        "URL hostname '{}' resolves to restricted IP address: {}",
+                        host,
+                        socket_addr.ip()
+                    )));
                 }
             }
-            Err(e) => {
-                // DNS failure = fail closed (do not allow the request)
-                return Err(AuthError::DiscoveryFailed(format!(
-                    "DNS resolution failed for '{}': {}",
-                    host, e
-                )));
-            }
+        }
+        Err(e) => {
+            // DNS failure = fail closed (do not allow the request)
+            return Err(AuthError::DiscoveryFailed(format!(
+                "DNS resolution failed for '{}': {}",
+                host, e
+            )));
         }
     }
 
@@ -1989,9 +1995,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_validate_url_safe_http_non_localhost_rejected() {
-        // HTTP to non-localhost hosts must be rejected (plaintext credential risk)
-        assert!(validate_url_safe("http://example.com/path").await.is_err());
+    async fn test_validate_url_safe_http_non_localhost_allowed() {
+        // HTTP to non-localhost hostnames is allowed to support internal MCP
+        // servers (e.g. Docker service names) configured by the user.
+        assert!(validate_url_safe("http://example.com/path").await.is_ok());
+        assert!(validate_url_safe("http://lp-mcp-7dbc6634/sse").await.is_ok());
     }
 
     #[tokio::test]
@@ -2004,14 +2012,13 @@ mod tests {
     async fn test_validate_url_safe_private_ip() {
         // 127.0.0.1 over HTTP is allowed (localhost dev scenario)
         assert!(validate_url_safe("http://127.0.0.1/path").await.is_ok());
-        // Private/link-local IPs over HTTPS are blocked (SSRF protection)
+        // Private/link-local IP literals are blocked regardless of scheme (SSRF protection)
         assert!(validate_url_safe("https://10.0.0.1/path").await.is_err());
         assert!(
             validate_url_safe("https://169.254.169.254/latest/meta-data")
                 .await
                 .is_err()
         );
-        // Private IPs over HTTP (non-localhost) are blocked
         assert!(validate_url_safe("http://10.0.0.1/path").await.is_err());
     }
 
