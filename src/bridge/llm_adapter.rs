@@ -708,4 +708,76 @@ And also check the token price:\n\
         let text = "```python\nprint('no closing fence')";
         assert!(extract_code_block(text).is_none());
     }
+
+    /// Regression test: the full ThreadMessage -> ChatMessage -> sanitize
+    /// pipeline must preserve 1:1 correspondence between assistant
+    /// tool_calls and Tool messages. A gap causes the LLM API to reject
+    /// with "No tool output found for function call <id>".
+    #[test]
+    fn tool_call_result_correspondence_after_sanitize() {
+        // Simulate messages that include a "[no output]" placeholder
+        // (the fix for null tool output).
+        let messages: Vec<ThreadMessage> = vec![
+            ThreadMessage::system("system prompt"),
+            ThreadMessage::user("update all tools"),
+            ThreadMessage::assistant_with_actions(
+                Some(String::new()),
+                vec![
+                    ActionCall {
+                        id: "call_AAA".into(),
+                        action_name: "tool_a".into(),
+                        parameters: serde_json::json!({}),
+                    },
+                    ActionCall {
+                        id: "call_BBB".into(),
+                        action_name: "tool_b".into(),
+                        parameters: serde_json::json!({}),
+                    },
+                    ActionCall {
+                        id: "call_CCC".into(),
+                        action_name: "tool_c".into(),
+                        parameters: serde_json::json!({}),
+                    },
+                ],
+            ),
+            ThreadMessage::action_result("call_AAA", "tool_a", "{\"ok\": true}"),
+            // call_BBB had null output; Python now sends "[no output]"
+            ThreadMessage::action_result("call_BBB", "tool_b", "[no output]"),
+            ThreadMessage::action_result("call_CCC", "tool_c", "{\"done\": true}"),
+        ];
+
+        let mut chat_messages: Vec<ChatMessage> = messages.iter().map(thread_msg_to_chat).collect();
+        sanitize_tool_messages(&mut chat_messages);
+
+        // Collect tool_call IDs from assistant messages
+        let mut expected_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for msg in &chat_messages {
+            if msg.role == Role::Assistant
+                && let Some(ref calls) = msg.tool_calls
+            {
+                for tc in calls {
+                    expected_ids.insert(tc.id.clone());
+                }
+            }
+        }
+
+        // Collect tool_call_ids from Tool messages
+        let mut result_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for msg in &chat_messages {
+            if msg.role == Role::Tool
+                && let Some(ref id) = msg.tool_call_id
+            {
+                result_ids.insert(id.clone());
+            }
+        }
+
+        assert_eq!(expected_ids.len(), 3, "assistant should have 3 tool calls");
+        for id in &expected_ids {
+            assert!(
+                result_ids.contains(id),
+                "tool_call {id} has no matching Tool message after sanitize — \
+                 LLM API would reject with 'No tool output found'"
+            );
+        }
+    }
 }

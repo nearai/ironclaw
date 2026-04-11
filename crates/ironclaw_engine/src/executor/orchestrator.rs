@@ -1317,6 +1317,12 @@ async fn handle_execute_actions_parallel(
                         })
                         .unwrap_or_default(),
                     }));
+                    // Pad with nulls for calls that weren't reached so the
+                    // Python-side loop can emit ActionResult placeholders for
+                    // every tool call in the assistant message.
+                    while results_json.len() < parsed.len() {
+                        results_json.push(serde_json::json!(null));
+                    }
                     return ExtFunctionResult::Return(json_to_monty(&serde_json::json!(
                         results_json
                     )));
@@ -3327,5 +3333,75 @@ mod tests {
             .as_ref()
             .expect("empty array should produce Some(vec![])");
         assert!(calls.is_empty());
+    }
+
+    /// Regression test: every assistant tool_call must have a matching
+    /// ActionResult after parsing. If an ActionResult is missing, the LLM
+    /// API rejects with "No tool output found for function call <id>".
+    ///
+    /// This was the root cause of the HTTP 400 from the OpenAI Codex
+    /// provider: a tool returning null output caused the Python
+    /// orchestrator to skip appending the ActionResult.
+    #[test]
+    fn json_to_thread_messages_every_tool_call_has_action_result() {
+        // Simulate working_messages after the Python fix: every call gets
+        // an ActionResult, even when the original output was null.
+        let messages = serde_json::json!([
+            {"role": "System", "content": "You are a helpful assistant."},
+            {"role": "User", "content": "Update all tools."},
+            {
+                "role": "Assistant",
+                "content": "",
+                "action_calls": [
+                    {"call_id": "call_AAA", "name": "tool_a", "params": {}},
+                    {"call_id": "call_BBB", "name": "tool_b", "params": {}},
+                    {"call_id": "call_CCC", "name": "tool_c", "params": {}}
+                ]
+            },
+            {
+                "role": "ActionResult",
+                "content": "{\"ok\": true}",
+                "action_name": "tool_a",
+                "action_call_id": "call_AAA"
+            },
+            {
+                "role": "ActionResult",
+                "content": "[no output]",
+                "action_name": "tool_b",
+                "action_call_id": "call_BBB"
+            },
+            {
+                "role": "ActionResult",
+                "content": "{\"done\": true}",
+                "action_name": "tool_c",
+                "action_call_id": "call_CCC"
+            }
+        ]);
+
+        let parsed = json_to_thread_messages(&messages).expect("must parse");
+        assert_eq!(parsed.len(), 6);
+
+        // Extract call IDs from the assistant message
+        let assistant_calls: std::collections::HashSet<String> = parsed
+            .iter()
+            .filter_map(|m| m.action_calls.as_ref())
+            .flat_map(|calls| calls.iter().map(|c| c.id.clone()))
+            .collect();
+
+        // Extract call IDs from ActionResult messages
+        let result_call_ids: std::collections::HashSet<String> = parsed
+            .iter()
+            .filter(|m| m.role == crate::types::message::MessageRole::ActionResult)
+            .filter_map(|m| m.action_call_id.clone())
+            .collect();
+
+        // Every tool_call must have a matching ActionResult
+        for call_id in &assistant_calls {
+            assert!(
+                result_call_ids.contains(call_id),
+                "tool_call {call_id} has no matching ActionResult — \
+                 this would cause 'No tool output found' from the LLM API"
+            );
+        }
     }
 }
