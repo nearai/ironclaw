@@ -177,6 +177,181 @@ impl EffectBridgeAdapter {
         }
     }
 
+    /// Handle project_* function calls. Returns None if the action name
+    /// is not a project tool.
+    async fn handle_project_call(
+        &self,
+        action_name: &str,
+        params: &serde_json::Value,
+        context: &ThreadExecutionContext,
+    ) -> Option<Result<ActionResult, EngineError>> {
+        let call_id = context
+            .current_call_id
+            .clone()
+            .unwrap_or_else(|| synthetic_action_call_id(action_name));
+
+        match action_name {
+            "project_create" => {
+                let name = params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Untitled Project");
+                let description = params
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let goals: Vec<String> = params
+                    .get("goals")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let mgr = self.mission_manager.read().await;
+                let Some(mgr) = mgr.as_ref() else {
+                    return Some(Err(EngineError::Effect {
+                        reason: "Engine not initialized".to_string(),
+                    }));
+                };
+                let store = mgr.store();
+                let mut project =
+                    ironclaw_engine::Project::new(&context.user_id, name, description);
+                project.goals = goals;
+                match store.save_project(&project).await {
+                    Ok(()) => Some(Ok(ActionResult {
+                        call_id: call_id.clone(),
+                        action_name: action_name.to_string(),
+                        output: serde_json::json!({
+                            "status": "created",
+                            "project_id": project.id.to_string(),
+                            "name": name,
+                            "message": format!(
+                                "Project '{}' created. Use project_id {} when creating missions for this project. \
+                                 Consider writing an AGENTS.md at projects/{}/AGENTS.md with project-specific instructions.",
+                                name,
+                                project.id,
+                                name.to_lowercase().replace(|c: char| !c.is_alphanumeric(), "-"),
+                            ),
+                        }),
+                        is_error: false,
+                        duration: std::time::Duration::ZERO,
+                    })),
+                    Err(e) => Some(Err(EngineError::Effect {
+                        reason: format!("Failed to create project: {e}"),
+                    })),
+                }
+            }
+            "project_update" => {
+                let id_str = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let pid = match uuid::Uuid::parse_str(id_str) {
+                    Ok(u) => ironclaw_engine::ProjectId(u),
+                    Err(e) => {
+                        return Some(Err(EngineError::Effect {
+                            reason: format!("Invalid project_id: {e}"),
+                        }));
+                    }
+                };
+                let mgr = self.mission_manager.read().await;
+                let Some(mgr) = mgr.as_ref() else {
+                    return Some(Err(EngineError::Effect {
+                        reason: "Engine not initialized".to_string(),
+                    }));
+                };
+                let store = mgr.store();
+                let mut project = match store.load_project(pid).await {
+                    Ok(Some(p)) if p.is_owned_by(&context.user_id) => p,
+                    Ok(Some(_)) => {
+                        return Some(Err(EngineError::Effect {
+                            reason: "Project not owned by current user".to_string(),
+                        }));
+                    }
+                    Ok(None) => {
+                        return Some(Err(EngineError::Effect {
+                            reason: "Project not found".to_string(),
+                        }));
+                    }
+                    Err(e) => {
+                        return Some(Err(EngineError::Effect {
+                            reason: format!("Failed to load project: {e}"),
+                        }));
+                    }
+                };
+                if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
+                    project.name = name.to_string();
+                }
+                if let Some(desc) = params.get("description").and_then(|v| v.as_str()) {
+                    project.description = desc.to_string();
+                }
+                if let Some(goals) = params.get("goals").and_then(|v| v.as_array()) {
+                    project.goals = goals
+                        .iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect();
+                }
+                if let Some(metrics) = params.get("metrics").and_then(|v| v.as_array()) {
+                    project.metrics = metrics
+                        .iter()
+                        .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                        .collect();
+                }
+                project.updated_at = chrono::Utc::now();
+                match store.save_project(&project).await {
+                    Ok(()) => Some(Ok(ActionResult {
+                        call_id: call_id.clone(),
+                        action_name: action_name.to_string(),
+                        output: serde_json::json!({
+                            "status": "updated",
+                            "project_id": project.id.to_string(),
+                        }),
+                        is_error: false,
+                        duration: std::time::Duration::ZERO,
+                    })),
+                    Err(e) => Some(Err(EngineError::Effect {
+                        reason: format!("Failed to update project: {e}"),
+                    })),
+                }
+            }
+            "project_list" => {
+                let mgr = self.mission_manager.read().await;
+                let Some(mgr) = mgr.as_ref() else {
+                    return Some(Err(EngineError::Effect {
+                        reason: "Engine not initialized".to_string(),
+                    }));
+                };
+                let store = mgr.store();
+                match store.list_projects(&context.user_id).await {
+                    Ok(projects) => {
+                        let list: Vec<serde_json::Value> = projects
+                            .iter()
+                            .map(|p| {
+                                serde_json::json!({
+                                    "id": p.id.to_string(),
+                                    "name": p.name,
+                                    "description": p.description,
+                                    "goals": p.goals,
+                                })
+                            })
+                            .collect();
+                        Some(Ok(ActionResult {
+                            call_id: call_id.clone(),
+                            action_name: action_name.to_string(),
+                            output: serde_json::json!({ "projects": list }),
+                            is_error: false,
+                            duration: std::time::Duration::ZERO,
+                        }))
+                    }
+                    Err(e) => Some(Err(EngineError::Effect {
+                        reason: format!("Failed to list projects: {e}"),
+                    })),
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Handle mission_* and routine_* function calls. routine_* are aliases:
     /// the routine schema is translated into mission_* parameters and
     /// dispatched through the same mission manager. Returns None if the
@@ -245,9 +420,17 @@ impl EffectBridgeAdapter {
                     } else {
                         vec![]
                     };
+                // Allow explicit project_id override (so agent can create
+                // missions in a specific project from any thread).
+                let target_project = params
+                    .get("project_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                    .map(ironclaw_engine::ProjectId)
+                    .unwrap_or(context.project_id);
                 match mgr
                     .create_mission(
-                        context.project_id,
+                        target_project,
                         &context.user_id,
                         name,
                         goal,
@@ -530,6 +713,16 @@ impl EffectBridgeAdapter {
                     "Tool call limit reached ({MAX_CALLS_PER_STEP} per code step). \
                      Break your task into multiple steps."
                 ),
+            });
+        }
+
+        if let Some(result) = self
+            .handle_project_call(action_name, &parameters, context)
+            .await
+        {
+            return result.map(|mut r| {
+                r.duration = start.elapsed();
+                r
             });
         }
 
