@@ -95,6 +95,7 @@ fn build_state(
         oauth_sweep_shutdown: None,
         frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
+        previous_version: None,
     })
 }
 

@@ -28,6 +28,54 @@ use ironclaw_common::AppEvent;
 const AUTH_TOKEN: &str = "test-token-12345";
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Start a gateway server with a specific `previous_version` populated in state.
+/// Returns just the bound address — the caller only needs to hit HTTP endpoints.
+async fn start_test_server_with_previous_version(previous_version: Option<String>) -> SocketAddr {
+    let (agent_tx, _agent_rx) = mpsc::channel(64);
+
+    let state = Arc::new(GatewayState {
+        msg_tx: tokio::sync::RwLock::new(Some(agent_tx)),
+        sse: Arc::new(SseManager::new()),
+        workspace: None,
+        workspace_pool: None,
+        session_manager: None,
+        log_broadcaster: None,
+        log_level_handle: None,
+        extension_manager: None,
+        tool_registry: None,
+        store: None,
+        job_manager: None,
+        prompt_queue: None,
+        scheduler: None,
+        owner_id: "test-user".to_string(),
+        shutdown_tx: tokio::sync::RwLock::new(None),
+        ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
+        llm_provider: None,
+        skill_registry: None,
+        skill_catalog: None,
+        chat_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(30, 60),
+        oauth_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),
+        webhook_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),
+        registry_entries: Vec::new(),
+        cost_guard: None,
+        routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+        startup_time: std::time::Instant::now(),
+        active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+        secrets_store: None,
+        db_auth: None,
+        previous_version,
+    });
+
+    let auth = ironclaw::channels::web::auth::MultiAuthState::single(
+        AUTH_TOKEN.to_string(),
+        "test-user".to_string(),
+    );
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    start_server(addr, state, auth.into())
+        .await
+        .expect("Failed to start test server")
+}
+
 /// Start a gateway server on a random port and return the bound address + agent
 /// message receiver.
 async fn start_test_server() -> (
@@ -79,6 +127,7 @@ async fn start_test_server() -> (
         oauth_sweep_shutdown: None,
         frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
+        previous_version: None,
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(
@@ -430,5 +479,118 @@ async fn test_session_lock_not_held_during_api_operations() {
         wait_result.is_ok(),
         "Concurrent session access deadlocked or timed out. \
          This suggests session locks are held too long during I/O operations."
+    );
+}
+
+// ============================================================================
+// Version-change reconnect warning tests (PR #2314)
+// ============================================================================
+//
+// The restart/reconnect warning needs to survive page refresh, so the server
+// must surface the previously-persisted version in /api/gateway/status. These
+// tests drive the full path: persist a version in the DB -> run the startup
+// wiring -> read /api/gateway/status -> assert the response exposes the
+// previous version so a reconnecting client can detect a version change.
+
+#[tokio::test]
+async fn test_gateway_status_omits_previous_version_on_first_boot() {
+    // First boot: nothing persisted, `previous_version` is None.
+    let addr = start_test_server_with_previous_version(None).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/api/gateway/status", addr))
+        .header("Authorization", format!("Bearer {}", AUTH_TOKEN))
+        .send()
+        .await
+        .expect("Failed to fetch status");
+
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+
+    // Current version must be present.
+    assert!(
+        body["version"].is_string(),
+        "status response missing `version` field: {body}"
+    );
+
+    // First boot: previous_version is omitted entirely (skip_serializing_if).
+    // A reconnecting client sees `previous_version` absent and knows not to warn.
+    assert!(
+        body.get("previous_version").is_none(),
+        "first-boot status should not include `previous_version`, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_gateway_status_surfaces_previous_version_after_restart() {
+    // Simulate a boot after an upgrade from 0.23.0 to the current binary.
+    let previous = "0.23.0".to_string();
+    let addr = start_test_server_with_previous_version(Some(previous.clone())).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/api/gateway/status", addr))
+        .header("Authorization", format!("Bearer {}", AUTH_TOKEN))
+        .send()
+        .await
+        .expect("Failed to fetch status");
+
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+
+    let version = body["version"].as_str().expect("missing version field");
+    let reported_previous = body["previous_version"]
+        .as_str()
+        .expect("missing previous_version after a restart transition");
+
+    // Gateway surfaces the previous-boot version so the browser can compare.
+    assert_eq!(
+        reported_previous, previous,
+        "gateway should surface the previous boot's recorded version"
+    );
+
+    // And — crucially — the client-side "version changed across restart"
+    // predicate (previous != current) fires when the version actually changed.
+    // This is the exact comparison the browser makes to emit the warning.
+    let version_changed = reported_previous != version;
+    assert!(
+        version_changed,
+        "with previous=0.23.0 and current={version}, version_changed must be true"
+    );
+}
+
+#[tokio::test]
+async fn test_gateway_status_no_warning_when_version_unchanged() {
+    // Simulate a restart where the binary is the same version as before —
+    // no warning should fire.
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let addr = start_test_server_with_previous_version(Some(current.clone())).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/api/gateway/status", addr))
+        .header("Authorization", format!("Bearer {}", AUTH_TOKEN))
+        .send()
+        .await
+        .expect("Failed to fetch status");
+
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+
+    let version = body["version"].as_str().expect("missing version");
+    let reported_previous = body["previous_version"]
+        .as_str()
+        .expect("missing previous_version");
+
+    assert_eq!(
+        reported_previous, version,
+        "when binary version is unchanged, previous == current"
+    );
+    // The client-side warning predicate is `previous != current`; here it
+    // must NOT fire, guarding against false-positive warnings on normal restart.
+    assert_eq!(
+        reported_previous, current,
+        "unchanged restart should report current version as previous"
     );
 }

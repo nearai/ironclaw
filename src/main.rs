@@ -789,6 +789,9 @@ async fn async_main() -> anyhow::Result<()> {
                 Arc::clone(&components.ownership_cache),
             ));
             gw = gw.with_pairing_store(pairing_store);
+            // Forward the previously-recorded version so the gateway can
+            // surface it in /api/gateway/status for reconnect warnings.
+            gw = gw.with_previous_version(components.previous_recorded_version.clone());
             if let Some(ref ss) = components.secrets_store {
                 gw = gw.with_secrets_store(Arc::clone(ss));
             }

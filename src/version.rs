@@ -38,6 +38,17 @@ pub enum VersionTransition {
 /// Call this early during startup (after DB migrations succeed) so that
 /// the warning is visible before any data-modifying operations run.
 pub async fn check_and_record_version(db: &dyn SettingsStore) -> Result<VersionTransition, String> {
+    check_and_record_version_with(db, CURRENT_VERSION).await
+}
+
+/// Same as [`check_and_record_version`], but with an injectable `current` version.
+///
+/// Exists so tests can drive the full transition matrix without needing to
+/// rebuild the binary with a different `CARGO_PKG_VERSION`.
+pub async fn check_and_record_version_with(
+    db: &dyn SettingsStore,
+    current: &str,
+) -> Result<VersionTransition, String> {
     let previous = db
         .get_setting(SYSTEM_USER, VERSION_SETTING_KEY)
         .await
@@ -45,8 +56,8 @@ pub async fn check_and_record_version(db: &dyn SettingsStore) -> Result<VersionT
 
     let transition = match previous.and_then(|v| v.as_str().map(String::from)) {
         None => VersionTransition::Fresh,
-        Some(ref prev) if prev == CURRENT_VERSION => VersionTransition::Unchanged,
-        Some(ref prev) => match compare_semver(prev, CURRENT_VERSION) {
+        Some(ref prev) if prev == current => VersionTransition::Unchanged,
+        Some(ref prev) => match compare_semver(prev, current) {
             std::cmp::Ordering::Greater => VersionTransition::Downgraded {
                 previous: prev.clone(),
             },
@@ -58,12 +69,76 @@ pub async fn check_and_record_version(db: &dyn SettingsStore) -> Result<VersionT
     };
 
     // Always persist the current version so next boot can compare.
-    let value = serde_json::Value::String(CURRENT_VERSION.to_string());
+    let value = serde_json::Value::String(current.to_string());
     db.set_setting(SYSTEM_USER, VERSION_SETTING_KEY, &value)
         .await
         .map_err(|e| format!("failed to persist version setting: {e}"))?;
 
     Ok(transition)
+}
+
+/// Read the previously-recorded version *without* modifying state.
+///
+/// Used by the web gateway to surface the "last known" version to reconnecting
+/// browser clients, so they can detect version changes across restarts even if
+/// their in-memory state was lost (e.g., page refresh during restart).
+pub async fn read_previous_version(db: &dyn SettingsStore) -> Result<Option<String>, String> {
+    let previous = db
+        .get_setting(SYSTEM_USER, VERSION_SETTING_KEY)
+        .await
+        .map_err(|e| format!("failed to read version setting: {e}"))?;
+    Ok(previous.and_then(|v| v.as_str().map(String::from)))
+}
+
+/// Full startup wiring for version tracking.
+///
+/// Runs `check_and_record_version`, matches on the result, and emits the
+/// appropriate tracing log for each transition. This is the function that
+/// `AppBuilder::init_database` calls — extracted here so tests can drive the
+/// full wiring (not just the pure helper) per the "test through the caller"
+/// rule in `.claude/rules/testing.md`.
+///
+/// Returns the `VersionTransition` so callers (including tests) can assert on it.
+/// Never fails startup: a DB error is logged at `warn` and mapped to `Fresh`.
+pub async fn run_startup_version_check(db: &dyn SettingsStore) -> VersionTransition {
+    run_startup_version_check_with(db, CURRENT_VERSION).await
+}
+
+/// Same as [`run_startup_version_check`], with an injectable `current` version.
+pub async fn run_startup_version_check_with(
+    db: &dyn SettingsStore,
+    current: &str,
+) -> VersionTransition {
+    match check_and_record_version_with(db, current).await {
+        Ok(VersionTransition::Fresh) => {
+            tracing::debug!("First startup — recorded version {}", current);
+            VersionTransition::Fresh
+        }
+        Ok(VersionTransition::Unchanged) => VersionTransition::Unchanged,
+        Ok(VersionTransition::Upgraded { previous }) => {
+            tracing::warn!(
+                "IronClaw upgraded from {} to {} — running migrations on newer schema",
+                previous,
+                current
+            );
+            VersionTransition::Upgraded { previous }
+        }
+        Ok(VersionTransition::Downgraded { previous }) => {
+            tracing::error!(
+                "VERSION DOWNGRADE DETECTED: previous version was {}, \
+                 but this binary is {}. Data written by the newer version \
+                 may be incompatible. If this is unintentional, stop the process \
+                 and redeploy the correct version.",
+                previous,
+                current
+            );
+            VersionTransition::Downgraded { previous }
+        }
+        Err(e) => {
+            tracing::warn!("Version check failed (non-fatal): {}", e);
+            VersionTransition::Fresh
+        }
+    }
 }
 
 /// Compare two semver-style version strings (e.g., "0.24.0" vs "0.21.0").
