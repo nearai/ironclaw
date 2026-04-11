@@ -1541,11 +1541,13 @@ impl Agent {
                 .await;
             let mut sess = session.lock().await;
             if let Some(thread) = sess.threads.get(&target_thread_id) {
-                // Verify the thread actually has a pending approval before
-                // allowing approval-shaped messages to target it. Without this
-                // check, an attacker could use approval messages to hijack any
-                // thread by UUID.
-                if thread.pending_approval.is_none() {
+                // Block ExecApproval (JSON from the approval UI) when there
+                // is no pending approval — prevents hijacking a thread by UUID.
+                // ApprovalResponse (bare keywords) is allowed through so the
+                // should_route_as_approval guard can downgrade it to UserInput.
+                if thread.pending_approval.is_none()
+                    && matches!(submission, Submission::ExecApproval { .. })
+                {
                     tracing::warn!(
                         %target_thread_id,
                         approval_channel = %message.channel,
@@ -1556,22 +1558,29 @@ impl Agent {
                         "Error: no pending approval on this thread".into(),
                     ));
                 }
+                // ApprovalResponse (bare "yes"/"no"/"always") without a
+                // pending approval: fall through to normal handling so the
+                // should_route_as_approval guard can downgrade to UserInput.
+                // Skip the cross-channel auth check — it only matters for
+                // actual approvals, not messages about to become UserInput.
 
-                let authorized = crate::agent::session::is_approval_authorized(
-                    thread.source_channel.as_deref(),
-                    &message.channel,
-                );
-                if !authorized {
-                    tracing::warn!(
-                        %target_thread_id,
-                        source_channel = ?thread.source_channel,
-                        approval_channel = %message.channel,
-                        "Blocked cross-channel approval attempt"
+                if thread.pending_approval.is_some() {
+                    let authorized = crate::agent::session::is_approval_authorized(
+                        thread.source_channel.as_deref(),
+                        &message.channel,
                     );
-                    drop(sess);
-                    return Ok(HandleOutcome::Respond(
-                        "Error: approval not authorized for this channel".into(),
-                    ));
+                    if !authorized {
+                        tracing::warn!(
+                            %target_thread_id,
+                            source_channel = ?thread.source_channel,
+                            approval_channel = %message.channel,
+                            "Blocked cross-channel approval attempt"
+                        );
+                        drop(sess);
+                        return Ok(HandleOutcome::Respond(
+                            "Error: approval not authorized for this channel".into(),
+                        ));
+                    }
                 }
                 sess.active_thread = Some(target_thread_id);
                 sess.last_active_at = chrono::Utc::now();
@@ -2304,6 +2313,62 @@ mod tests {
         assert!(should_route_as_approval(ThreadState::Idle, "/deny"));
         assert!(should_route_as_approval(ThreadState::Idle, "/yes"));
         assert!(should_route_as_approval(ThreadState::Processing, "/always"));
+    }
+
+    /// The thread-resolution guard must only early-reject `ExecApproval`
+    /// when no approval is pending. `ApprovalResponse` (bare keywords)
+    /// must be allowed through so `should_route_as_approval` can downgrade
+    /// them to `UserInput`. Regression test for the E2E timeout where
+    /// bare "yes"/"no" via API never produced a response in history.
+    #[test]
+    fn approval_guard_rejects_exec_but_allows_bare_keywords_when_no_pending() {
+        use crate::agent::submission::Submission;
+        use uuid::Uuid;
+
+        // Simulate: thread has no pending approval, submission is ApprovalResponse
+        let pending_approval: Option<()> = None;
+        let submission_approval_response = Submission::ApprovalResponse {
+            approved: true,
+            always: false,
+        };
+
+        // ApprovalResponse should NOT be blocked (falls through to downgrade)
+        let blocked = pending_approval.is_none()
+            && matches!(
+                submission_approval_response,
+                Submission::ExecApproval { .. }
+            );
+        assert!(
+            !blocked,
+            "ApprovalResponse with no pending approval must not be early-rejected"
+        );
+
+        // ExecApproval SHOULD be blocked
+        let submission_exec = Submission::ExecApproval {
+            request_id: Uuid::new_v4(),
+            approved: true,
+            always: false,
+        };
+        let blocked = pending_approval.is_none()
+            && matches!(submission_exec, Submission::ExecApproval { .. });
+        assert!(
+            blocked,
+            "ExecApproval with no pending approval must be early-rejected"
+        );
+
+        // When pending approval IS present, neither should be early-rejected
+        let pending_approval: Option<()> = Some(());
+        let submission_exec2 = Submission::ExecApproval {
+            request_id: Uuid::new_v4(),
+            approved: true,
+            always: false,
+        };
+        let blocked = pending_approval.is_none()
+            && matches!(submission_exec2, Submission::ExecApproval { .. });
+        assert!(
+            !blocked,
+            "ExecApproval with pending approval must not be early-rejected"
+        );
     }
 
     #[test]

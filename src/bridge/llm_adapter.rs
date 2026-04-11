@@ -70,6 +70,9 @@ impl LlmBackend for LlmBridgeAdapter {
                 .with_max_tokens(max_tokens)
                 .with_temperature(temperature);
             request.metadata = config.metadata.clone();
+            if let Some(ref model) = config.model {
+                request.model = Some(model.clone());
+            }
 
             let response = provider
                 .complete(request)
@@ -105,6 +108,9 @@ impl LlmBackend for LlmBridgeAdapter {
             .with_temperature(temperature)
             .with_tool_choice("auto");
         request.metadata = config.metadata.clone();
+        if let Some(ref model) = config.model {
+            request.model = Some(model.clone());
+        }
 
         // Call provider
         let response =
@@ -375,6 +381,7 @@ mod tests {
     struct CapturingProviderState {
         completion_requests: tokio::sync::Mutex<Vec<Vec<ChatMessage>>>,
         tool_requests: tokio::sync::Mutex<Vec<Vec<ChatMessage>>>,
+        models: tokio::sync::Mutex<Vec<Option<String>>>,
     }
 
     struct CapturingProvider {
@@ -395,6 +402,7 @@ mod tests {
             &self,
             req: crate::llm::CompletionRequest,
         ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            self.state.models.lock().await.push(req.model.clone());
             self.state
                 .completion_requests
                 .lock()
@@ -415,6 +423,7 @@ mod tests {
             &self,
             req: ToolCompletionRequest,
         ) -> Result<ToolCompletionResponse, LlmError> {
+            self.state.models.lock().await.push(req.model.clone());
             self.state.tool_requests.lock().await.push(req.messages);
 
             Ok(ToolCompletionResponse {
@@ -554,6 +563,69 @@ mod tests {
         assert_eq!(sent[2].content, "result payload");
         assert_eq!(sent[2].tool_call_id.as_deref(), Some("call_1"));
         assert_eq!(sent[2].name.as_deref(), Some("search"));
+    }
+
+    #[tokio::test]
+    async fn config_model_forwards_to_completion_request() {
+        let state = Arc::new(CapturingProviderState::default());
+        let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
+            state: state.clone(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let config = ironclaw_engine::LlmCallConfig {
+            model: Some("gpt-4o".into()),
+            ..Default::default()
+        };
+
+        // Plain completion path (no tools)
+        adapter
+            .complete(&[ThreadMessage::user("hi")], &[], &config)
+            .await
+            .unwrap();
+
+        // Tool completion path
+        adapter
+            .complete(
+                &[ThreadMessage::user("hi")],
+                &[ActionDef {
+                    name: "echo".into(),
+                    description: "test".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![EffectType::ReadLocal],
+                    requires_approval: false,
+                }],
+                &config,
+            )
+            .await
+            .unwrap();
+
+        let models = state.models.lock().await;
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].as_deref(), Some("gpt-4o"));
+        assert_eq!(models[1].as_deref(), Some("gpt-4o"));
+    }
+
+    #[tokio::test]
+    async fn config_without_model_leaves_request_model_none() {
+        let state = Arc::new(CapturingProviderState::default());
+        let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
+            state: state.clone(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        adapter
+            .complete(
+                &[ThreadMessage::user("hi")],
+                &[],
+                &ironclaw_engine::LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        let models = state.models.lock().await;
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0], None);
     }
 
     // ── extract_code_block tests ────────────────────────────
@@ -707,5 +779,77 @@ And also check the token price:\n\
     fn unclosed_block_returns_none() {
         let text = "```python\nprint('no closing fence')";
         assert!(extract_code_block(text).is_none());
+    }
+
+    /// Regression test: the full ThreadMessage -> ChatMessage -> sanitize
+    /// pipeline must preserve 1:1 correspondence between assistant
+    /// tool_calls and Tool messages. A gap causes the LLM API to reject
+    /// with "No tool output found for function call <id>".
+    #[test]
+    fn tool_call_result_correspondence_after_sanitize() {
+        // Simulate messages that include a "[no output]" placeholder
+        // (the fix for null tool output).
+        let messages: Vec<ThreadMessage> = vec![
+            ThreadMessage::system("system prompt"),
+            ThreadMessage::user("update all tools"),
+            ThreadMessage::assistant_with_actions(
+                Some(String::new()),
+                vec![
+                    ActionCall {
+                        id: "call_AAA".into(),
+                        action_name: "tool_a".into(),
+                        parameters: serde_json::json!({}),
+                    },
+                    ActionCall {
+                        id: "call_BBB".into(),
+                        action_name: "tool_b".into(),
+                        parameters: serde_json::json!({}),
+                    },
+                    ActionCall {
+                        id: "call_CCC".into(),
+                        action_name: "tool_c".into(),
+                        parameters: serde_json::json!({}),
+                    },
+                ],
+            ),
+            ThreadMessage::action_result("call_AAA", "tool_a", "{\"ok\": true}"),
+            // call_BBB had null output; Python now sends "[no output]"
+            ThreadMessage::action_result("call_BBB", "tool_b", "[no output]"),
+            ThreadMessage::action_result("call_CCC", "tool_c", "{\"done\": true}"),
+        ];
+
+        let mut chat_messages: Vec<ChatMessage> = messages.iter().map(thread_msg_to_chat).collect();
+        sanitize_tool_messages(&mut chat_messages);
+
+        // Collect tool_call IDs from assistant messages
+        let mut expected_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for msg in &chat_messages {
+            if msg.role == Role::Assistant
+                && let Some(ref calls) = msg.tool_calls
+            {
+                for tc in calls {
+                    expected_ids.insert(tc.id.clone());
+                }
+            }
+        }
+
+        // Collect tool_call_ids from Tool messages
+        let mut result_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for msg in &chat_messages {
+            if msg.role == Role::Tool
+                && let Some(ref id) = msg.tool_call_id
+            {
+                result_ids.insert(id.clone());
+            }
+        }
+
+        assert_eq!(expected_ids.len(), 3, "assistant should have 3 tool calls");
+        for id in &expected_ids {
+            assert!(
+                result_ids.contains(id),
+                "tool_call {id} has no matching Tool message after sanitize — \
+                 LLM API would reject with 'No tool output found'"
+            );
+        }
     }
 }

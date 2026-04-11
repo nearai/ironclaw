@@ -41,7 +41,7 @@ use crate::history::{
     AgentJobRecord, AgentJobSummary, ConversationMessage, ConversationSummary, JobEventRecord,
     LlmCallRecord, SandboxJobRecord, SandboxJobSummary, SettingRow,
 };
-use crate::workspace::{MemoryChunk, MemoryDocument, WorkspaceEntry};
+use crate::workspace::{ChunkWrite, MemoryChunk, MemoryDocument, WorkspaceEntry};
 use crate::workspace::{SearchConfig, SearchResult};
 
 /// Create a database backend from configuration, run migrations, and return it.
@@ -747,6 +747,20 @@ pub trait WorkspaceStore: Send + Sync {
         content: &str,
         embedding: Option<&[f32]>,
     ) -> Result<Uuid, WorkspaceError>;
+    /// Atomically replace all chunks for a document.
+    ///
+    /// Runs `DELETE FROM memory_chunks WHERE document_id = ?` followed by one
+    /// `INSERT` per `ChunkWrite` inside a single transaction. This closes the
+    /// TOCTOU race where two concurrent reindexers for the same document
+    /// could both delete, then both try to `INSERT` chunk_index 0 and hit the
+    /// `UNIQUE (document_id, chunk_index)` constraint.
+    ///
+    /// Passing an empty slice is equivalent to `delete_chunks(document_id)`.
+    async fn replace_chunks(
+        &self,
+        document_id: Uuid,
+        chunks: &[ChunkWrite],
+    ) -> Result<(), WorkspaceError>;
     async fn update_chunk_embedding(
         &self,
         chunk_id: Uuid,

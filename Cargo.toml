@@ -130,6 +130,7 @@ serde_yml = "0.0.12"
 # Filesystem paths
 dirs = "6"
 fs4 = "0.6"
+glob = "0.3"
 
 # Semantic versioning
 semver = "1"

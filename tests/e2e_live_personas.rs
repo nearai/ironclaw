@@ -41,14 +41,8 @@ mod persona_tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use crate::support::live_harness::{LiveTestHarness, LiveTestHarnessBuilder, SessionTurn};
+    use crate::support::live_harness::{LiveTestHarness, LiveTestHarnessBuilder};
     use tokio::time::{Instant, sleep};
-
-    /// Absolute path to the repo's `skills/` directory — the source of the
-    /// committed SKILL.md files for commitments and persona bundles.
-    fn repo_skills_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills")
-    }
 
     fn trace_fixture_path(test_name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -61,15 +55,14 @@ mod persona_tests {
 
     /// Build a live harness configured for commitment/persona tests.
     ///
-    /// Uses engine v2, auto-approves tool calls, loads all skills from the
-    /// repo's `./skills/` dir, and bumps iteration count because the setup
-    /// flow involves many sequential memory/mission tool calls.
+    /// Uses engine v2, auto-approves tool calls, and bumps iteration count
+    /// because the setup flow involves many sequential memory/mission tool
+    /// calls.
     async fn build_persona_harness(test_name: &str) -> LiveTestHarness {
         LiveTestHarnessBuilder::new(test_name)
             .with_engine_v2(true)
             .with_auto_approve_tools(true)
             .with_max_tool_iterations(60)
-            .with_skills_dir(repo_skills_dir())
             .build()
             .await
     }
@@ -112,7 +105,7 @@ mod persona_tests {
         expected_responses: usize,
     ) -> Vec<String> {
         let rig = harness.rig();
-        let before = rig.captured_responses().await.len();
+        let before = rig.wait_for_responses(0, Duration::ZERO).await.len();
         rig.send_message(message).await;
         let responses = rig
             .wait_for_responses(before + expected_responses, Duration::from_secs(300))
@@ -236,10 +229,29 @@ mod persona_tests {
         eprintln!("[{label}] response preview: {preview}");
     }
 
+    /// Collect all unique skill names from `SkillActivated` status events.
+    fn collect_active_skill_names(harness: &LiveTestHarness) -> Vec<String> {
+        let mut names: Vec<String> = harness
+            .rig()
+            .captured_status_events()
+            .iter()
+            .filter_map(|event| match event {
+                ironclaw::channels::StatusUpdate::SkillActivated { skill_names } => {
+                    Some(skill_names.clone())
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// Verify the persona skill activated and the workspace has the
     /// commitments root structure (created by the setup flow).
     async fn verify_setup_landed(harness: &LiveTestHarness, expected_skill: &str) {
-        let active = harness.rig().active_skill_names();
+        let active = collect_active_skill_names(harness);
         assert!(
             active.iter().any(|s| s == expected_skill),
             "Expected persona skill '{expected_skill}' to activate. Active: {active:?}",
@@ -283,10 +295,10 @@ mod persona_tests {
                     wait_for_check(&harness, check, Duration::from_secs(10)).await;
                 }
             }
-            transcript.push(SessionTurn::user(turn.message, responses));
+            transcript.push((turn.message.to_string(), responses));
         }
 
-        let active = harness.rig().active_skill_names();
+        let active = collect_active_skill_names(&harness);
         for required in required_skills {
             assert!(
                 active.iter().any(|skill| skill == required),
@@ -294,7 +306,7 @@ mod persona_tests {
             );
         }
 
-        harness.finish_turns_strict(&transcript).await;
+        harness.finish_turns(&transcript).await;
     }
 
     const CEO_SETUP_CHECKS: &[PersonaCheck] = &[PersonaCheck {

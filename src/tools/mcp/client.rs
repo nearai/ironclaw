@@ -126,7 +126,7 @@ impl McpClient {
     ///
     /// Use this when you have a configured server name but no authentication.
     pub fn new_with_name(server_name: impl Into<String>, server_url: impl Into<String>) -> Self {
-        let name: String = server_name.into();
+        let name: String = server_name.into().replace('-', "_");
         let url: String = server_url.into();
         let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.clone()));
 
@@ -317,6 +317,14 @@ impl McpClient {
     ///
     /// If the stored token has expired, automatically attempts a refresh using
     /// the stored refresh token before failing.
+    ///
+    /// Falls back to the legacy (pre-normalization) secret name so that
+    /// existing users who stored tokens under the hyphenated server name
+    /// (e.g. `mcp_my-server_access_token`) aren't broken after the
+    /// factory starts normalizing `server.name` to underscores. Without
+    /// this fallback, `is_authenticated` would report `true` (it has its
+    /// own legacy fallback) but the actual request would send no
+    /// `Authorization` header and the MCP server would 401.
     async fn get_access_token(&self) -> Result<Option<String>, ToolError> {
         let Some(ref secrets) = self.secrets else {
             return Ok(None);
@@ -324,7 +332,8 @@ impl McpClient {
         let Some(ref config) = self.server_config else {
             return Ok(None);
         };
-        resolve_access_token_string_with_refresh(
+        // Try canonical (normalized) secret name first.
+        let result = resolve_access_token_string_with_refresh(
             secrets.as_ref(),
             &self.user_id,
             &config.token_secret_name(),
@@ -337,7 +346,24 @@ impl McpClient {
             },
         )
         .await
-        .map_err(|e| ToolError::ExternalService(format!("Failed to get access token: {}", e)))
+        .map_err(|e| ToolError::ExternalService(format!("Failed to get access token: {}", e)))?;
+
+        if result.is_some() {
+            return Ok(result);
+        }
+
+        // Fall back to the legacy (pre-normalization) secret name.
+        // This path is transitional — the user will re-auth once and
+        // get migrated to the canonical name. Bare get_decrypted (no
+        // refresh) is intentional: wiring refresh through the legacy
+        // naming scheme adds complexity for a self-healing compat path.
+        if let Some(legacy_name) = config.legacy_token_secret_name()
+            && let Ok(decrypted) = secrets.get_decrypted(&self.user_id, &legacy_name).await
+        {
+            return Ok(Some(decrypted.expose().to_string()));
+        }
+
+        Ok(None)
     }
 
     /// Build the headers map for a request (auth, session-id, custom headers).
@@ -593,13 +619,52 @@ impl McpClient {
     }
 
     /// Create Tool implementations for all MCP tools.
+    ///
+    /// `mcp_tool_id` normalizes every non-`[A-Za-z0-9_]` character to `_`,
+    /// which is necessary for the registry key to survive LLM tool-name
+    /// normalization but introduces a collision hazard: two MCP tools whose
+    /// names differ only by `-` vs `_` (or `.` vs `_`, etc.) — e.g.
+    /// `search-all` and `search_all` — produce the same registry key. The
+    /// second `ToolRegistry::register` call would silently shadow the first
+    /// with no signal at all, leaving operators debugging an unreachable
+    /// tool with zero breadcrumb. We detect collisions here, where we still
+    /// have both the original name and the normalized id, and emit a
+    /// `warn!` log so the shadowing is observable. Behaviour is unchanged —
+    /// the second tool still wins on register, matching what the LLM would
+    /// emit anyway since it normalizes both names to the same string.
     pub async fn create_tools(&self) -> Result<Vec<Arc<dyn Tool>>, ToolError> {
         let mcp_tools = self.list_tools().await?;
         let client = Arc::new(self.clone());
+
+        // Detect post-normalization collisions before registering. This is
+        // a single linear pass; the n is small (a typical MCP server lists
+        // a few dozen tools).
+        let mut seen_ids: HashMap<String, String> = HashMap::new();
+        for t in &mcp_tools {
+            let id = mcp_tool_id(&self.server_name, &t.name);
+            match seen_ids.get(&id) {
+                Some(prev) if prev != &t.name => {
+                    tracing::warn!(
+                        normalized_id = %id,
+                        first_name = %prev,
+                        colliding_name = %t.name,
+                        server = %self.server_name,
+                        "MCP tool name collision after normalization — second tool will shadow the first in the registry. Operators: rename one of the upstream tools to differ in more than just '-' vs '_' (or '.' vs '_')."
+                    );
+                    // Update so a 3rd collision reports against the most
+                    // recent shadow, not the original entry.
+                    seen_ids.insert(id, t.name.clone());
+                }
+                _ => {
+                    seen_ids.insert(id, t.name.clone());
+                }
+            }
+        }
+
         Ok(mcp_tools
             .into_iter()
             .map(|t| {
-                let prefixed_name = format!("{}_{}", self.server_name, t.name);
+                let prefixed_name = mcp_tool_id(&self.server_name, &t.name);
                 Arc::new(McpToolWrapper {
                     tool: t,
                     prefixed_name,
@@ -650,6 +715,44 @@ fn extract_server_name(url: &str) -> String {
         .and_then(|u| u.host_str().map(|h| h.to_string()))
         .unwrap_or_else(|| "unknown".to_string())
         .replace('.', "_")
+}
+
+/// Build the canonical registry identifier for an MCP tool.
+///
+/// MCP tool names commonly contain dashes (e.g. `notion-search`), and so do
+/// user-supplied server names (`my-server`). The IronClaw runtime converges
+/// on snake_case identifiers (see `ToolRegistry::resolve_name`), and LLMs,
+/// Codex / GPT-5 in particular, silently normalize tool names to valid
+/// Python identifiers by converting dashes to underscores. If we registered
+/// `notion_notion-search` the LLM would emit a call for `notion_notion_search`
+/// and the registry lookup would miss, leaving the tool unreachable.
+///
+/// We replace **every** non-`[A-Za-z0-9_]` character with `_`, not just
+/// dashes. The MCP spec doesn't actually constrain tool names to OpenAI's
+/// `^[a-zA-Z0-9_-]{1,64}$` regex — a server could legally return
+/// `notion.search` or `notion:create_issue` — and the same LLM normalization
+/// that bites on `-` will bite on `.` and `:` too. Replacing them all up
+/// front is a one-line defense that makes the registry key bulletproof.
+/// `extract_server_name` already strips `.` from the host portion of a URL,
+/// but the tool portion of the prefixed name was unprotected. Multi-byte
+/// unicode characters (e.g. emoji or non-ASCII letters) are also normalized
+/// to `_` so the registry key stays a valid Rust identifier suffix.
+///
+/// The original (possibly hyphenated / dotted / unicode) tool name is still
+/// stored on the `McpToolWrapper`'s inner `McpTool` and used verbatim when
+/// forwarding the `tools/call` request to the MCP server, so this
+/// normalization is internal-only and does not affect protocol compatibility.
+pub(crate) fn mcp_tool_id(server_name: &str, tool_name: &str) -> String {
+    format!("{server_name}_{tool_name}")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Wrapper that implements Tool for an MCP tool.
@@ -819,7 +922,7 @@ mod tests {
     #[test]
     fn test_new_with_name_uses_custom_name() {
         let client = McpClient::new_with_name("my-server", "http://localhost:8080");
-        assert_eq!(client.server_name(), "my-server");
+        assert_eq!(client.server_name(), "my_server");
         assert_eq!(client.server_url(), "http://localhost:8080");
         assert_eq!(client.user_id, "<unset>");
         assert!(client.session_manager.is_none());
@@ -846,7 +949,7 @@ mod tests {
         client.next_request_id();
         let cloned = client.clone();
         assert_eq!(cloned.server_url(), "http://localhost:5555");
-        assert_eq!(cloned.server_name(), "cloned-server");
+        assert_eq!(cloned.server_name(), "cloned_server");
         assert_eq!(cloned.user_id, "<unset>");
         assert_eq!(cloned.next_id.load(Ordering::SeqCst), 3);
     }
@@ -1381,6 +1484,293 @@ mod tests {
         };
         let approval = wrapper.requires_approval(&serde_json::json!({}));
         assert_eq!(approval, ApprovalRequirement::Never);
+    }
+
+    // ── mcp_tool_id canonicalization ──────────────────────────────────────
+    //
+    // The runtime keys tools by snake_case identifiers and LLMs (Codex /
+    // GPT-5 in particular) silently normalize tool names to valid Python
+    // identifiers by converting dashes to underscores. If the registered
+    // name contains a dash, the LLM-emitted call won't match the registry
+    // key and the tool becomes unreachable. The helper canonicalizes both
+    // sides of the prefixed name so the registration and the lookup agree.
+
+    #[test]
+    fn test_mcp_tool_id_canonicalizes_dashed_tool_name() {
+        // The Notion MCP server returns tools like "notion-search". The
+        // registered identifier must use underscores so the LLM call
+        // ("notion_notion_search") resolves directly.
+        assert_eq!(
+            mcp_tool_id("notion", "notion-search"),
+            "notion_notion_search"
+        );
+        assert_eq!(
+            mcp_tool_id("notion", "notion-get-users"),
+            "notion_notion_get_users"
+        );
+    }
+
+    #[test]
+    fn test_mcp_tool_id_canonicalizes_dashed_server_name() {
+        // User-supplied server names can contain dashes too. Both sides of
+        // the prefixed name must be normalized.
+        assert_eq!(mcp_tool_id("my-server", "ping"), "my_server_ping");
+        assert_eq!(mcp_tool_id("my-server", "do-thing"), "my_server_do_thing");
+    }
+
+    #[test]
+    fn test_mcp_tool_id_passthrough_for_already_canonical_names() {
+        assert_eq!(mcp_tool_id("github", "list_issues"), "github_list_issues");
+        assert_eq!(mcp_tool_id("local", "ping"), "local_ping");
+    }
+
+    #[test]
+    fn test_mcp_tool_id_normalizes_non_identifier_chars() {
+        // The MCP spec doesn't restrict tool names to OpenAI's
+        // `[a-zA-Z0-9_-]` regex. A server could legally return names with
+        // dots, colons, slashes, spaces, or non-ASCII characters. The same
+        // LLM normalization that bites on `-` will bite on these too, so
+        // canonicalize them all to `_` defensively.
+        assert_eq!(
+            mcp_tool_id("notion", "notion.search"),
+            "notion_notion_search"
+        );
+        assert_eq!(
+            mcp_tool_id("github", "github:create_issue"),
+            "github_github_create_issue"
+        );
+        assert_eq!(
+            mcp_tool_id("local", "do something now"),
+            "local_do_something_now"
+        );
+        // Path-like tool names: every separator becomes `_`.
+        assert_eq!(mcp_tool_id("fs", "files/read"), "fs_files_read");
+        // Multi-byte unicode (each `α` is 2 UTF-8 bytes) → each char
+        // becomes a single `_` in the output. Tests both correct char
+        // iteration AND that the char count translates 1:1.
+        assert_eq!(mcp_tool_id("local", "αβγ"), "local____");
+    }
+
+    /// Regression test (helper level): create_tools must surface the
+    /// canonical snake_case identifier through `Tool::name()` even when the
+    /// MCP server returns tools whose names contain dashes.
+    #[tokio::test]
+    async fn test_create_tools_canonicalizes_dashed_mcp_tool_names() {
+        let init_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(1),
+            result: Some(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "1.0"}
+            })),
+            error: None,
+        };
+        let notification_ack = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            result: None,
+            error: None,
+        };
+        let list_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(2),
+            result: Some(serde_json::json!({
+                "tools": [
+                    {
+                        "name": "notion-search",
+                        "description": "Search Notion",
+                        "inputSchema": {"type": "object"}
+                    },
+                    {
+                        "name": "notion-get-users",
+                        "description": "List Notion users",
+                        "inputSchema": {"type": "object"}
+                    }
+                ]
+            })),
+            error: None,
+        };
+
+        let transport = Arc::new(MockTransport::new(
+            false,
+            vec![init_response, notification_ack, list_response],
+        ));
+        let client =
+            McpClient::new_with_transport("notion", transport.clone(), None, None, "default", None);
+
+        let tools = client
+            .create_tools()
+            .await
+            .expect("create_tools should succeed");
+
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert_eq!(
+            names,
+            vec!["notion_notion_search", "notion_notion_get_users"],
+            "MCP tool names with dashes must be canonicalized to snake_case"
+        );
+
+        // The wrapper must still preserve the original (dashed) name on its
+        // inner McpTool so the wire call to the MCP server uses what the
+        // server actually advertised.
+        for tool in &tools {
+            // Cast through the trait object's parameters_schema as a sanity
+            // check that the wrapper is wired up correctly.
+            assert!(tool.parameters_schema().is_object());
+        }
+    }
+
+    /// Regression test for the post-normalization collision case: an MCP
+    /// server returning two tools whose names differ only by `-` vs `_`
+    /// (`search-all` and `search_all`) produces the same registry key. The
+    /// helper must NOT crash, must produce a wrapper for each tool, and the
+    /// shadowing must be observable via the warn log emitted in
+    /// `create_tools` (the test asserts the structural outcome — the warn
+    /// itself is a side effect we don't capture without `tracing-test`).
+    #[tokio::test]
+    async fn test_create_tools_handles_post_normalization_collision() {
+        let init_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(1),
+            result: Some(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "1.0"}
+            })),
+            error: None,
+        };
+        let notification_ack = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            result: None,
+            error: None,
+        };
+        let list_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(2),
+            result: Some(serde_json::json!({
+                "tools": [
+                    { "name": "search-all", "description": "first",  "inputSchema": {"type": "object"} },
+                    { "name": "search_all", "description": "second", "inputSchema": {"type": "object"} }
+                ]
+            })),
+            error: None,
+        };
+
+        let transport = Arc::new(MockTransport::new(
+            false,
+            vec![init_response, notification_ack, list_response],
+        ));
+        let client =
+            McpClient::new_with_transport("demo", transport.clone(), None, None, "default", None);
+
+        let tools = client
+            .create_tools()
+            .await
+            .expect("create_tools should succeed even with collisions");
+
+        // Both wrappers are produced and both have the same normalized
+        // registry key — this is the collision the warn log calls out.
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].name(), "demo_search_all");
+        assert_eq!(tools[1].name(), "demo_search_all");
+
+        // Register both into a real ToolRegistry: the second wins (this is
+        // the documented shadowing behaviour). Without the warn log there
+        // would be no signal that the first tool became unreachable.
+        let registry = crate::tools::registry::ToolRegistry::new();
+        for tool in tools {
+            registry.register(tool).await;
+        }
+        let resolved = registry.get("demo_search_all").await;
+        assert!(resolved.is_some(), "second tool must be registered");
+        assert_eq!(
+            resolved.unwrap().description(),
+            "second",
+            "the later-registered tool wins on shadow (last-write); operators see the warn log to know it happened"
+        );
+    }
+
+    /// Regression test (caller level): the canonicalized identifier produced
+    /// by `create_tools` must round-trip through the real `ToolRegistry` —
+    /// including `resolve_name`, which is what the v2 effect adapter calls
+    /// when dispatching an LLM-emitted tool call.
+    ///
+    /// This is the "test through the caller, not just the helper" pattern
+    /// from `.claude/rules/testing.md`. A unit test on `mcp_tool_id` alone
+    /// would not catch a regression where the registry path mangles names
+    /// differently from the schema-emitting path.
+    #[tokio::test]
+    async fn test_create_tools_round_trips_through_registry_resolve_name() {
+        use crate::tools::registry::ToolRegistry;
+
+        let init_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(1),
+            result: Some(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "1.0"}
+            })),
+            error: None,
+        };
+        let notification_ack = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            result: None,
+            error: None,
+        };
+        let list_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(2),
+            result: Some(serde_json::json!({
+                "tools": [
+                    {
+                        "name": "notion-search",
+                        "description": "Search Notion",
+                        "inputSchema": {"type": "object"}
+                    }
+                ]
+            })),
+            error: None,
+        };
+
+        let transport = Arc::new(MockTransport::new(
+            false,
+            vec![init_response, notification_ack, list_response],
+        ));
+        let client =
+            McpClient::new_with_transport("notion", transport.clone(), None, None, "default", None);
+
+        let registry = ToolRegistry::new();
+        for tool in client
+            .create_tools()
+            .await
+            .expect("create_tools should succeed")
+        {
+            registry.register(tool).await;
+        }
+
+        // The LLM (Codex / GPT-5) emits the tool name with all underscores.
+        // resolve_name must find it directly without falling through to the
+        // legacy alias path (which only goes underscores → dashes and would
+        // miss the mixed-separator form `notion_notion-search`).
+        let resolved = registry.resolve_name("notion_notion_search").await;
+        assert_eq!(
+            resolved.as_deref(),
+            Some("notion_notion_search"),
+            "LLM-emitted snake_case tool name must resolve to the registered MCP tool"
+        );
+
+        // And the get_resolved path that the effect adapter actually uses
+        // must also produce a working Tool handle.
+        let (resolved_name, tool) = registry
+            .get_resolved("notion_notion_search")
+            .await
+            .expect("get_resolved should return the registered tool");
+        assert_eq!(resolved_name, "notion_notion_search");
+        assert_eq!(tool.name(), "notion_notion_search");
     }
 
     // Regression test: empty/whitespace-only tokens must not produce a

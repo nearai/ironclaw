@@ -13,8 +13,8 @@ use super::{
 use crate::db::WorkspaceStore;
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::workspace::{
-    DocumentVersion, MemoryChunk, MemoryDocument, RankedResult, SearchConfig, SearchResult,
-    VersionSummary, WorkspaceEntry, fuse_results,
+    ChunkWrite, DocumentVersion, MemoryChunk, MemoryDocument, RankedResult, SearchConfig,
+    SearchResult, VersionSummary, WorkspaceEntry, fuse_results,
 };
 
 use chrono::Utc;
@@ -713,6 +713,79 @@ impl WorkspaceStore for LibSqlBackend {
             reason: format!("Insert failed: {}", e),
         })?;
         Ok(id)
+    }
+
+    async fn replace_chunks(
+        &self,
+        document_id: Uuid,
+        chunks: &[ChunkWrite],
+    ) -> Result<(), WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: e.to_string(),
+            })?;
+
+        // BEGIN IMMEDIATE (not the default DEFERRED): grab the RESERVED
+        // write lock at transaction start so the busy_timeout handler fires
+        // on contention. DEFERRED starts as a reader and returns
+        // SQLITE_BUSY *immediately* on the first write when another
+        // transaction already holds the write lock — bypassing busy_timeout
+        // entirely, which turned concurrent reindexers into instant
+        // "database is locked" failures in tests.
+        let tx = conn
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: format!("Begin transaction failed: {}", e),
+            })?;
+
+        tx.execute(
+            "DELETE FROM memory_chunks WHERE document_id = ?1",
+            params![document_id.to_string()],
+        )
+        .await
+        .map_err(|e| WorkspaceError::ChunkingFailed {
+            reason: format!("Delete failed: {}", e),
+        })?;
+
+        for (index, chunk) in chunks.iter().enumerate() {
+            let id = Uuid::new_v4();
+            // Note: embedding dimension is not validated here — the F32_BLOB(N)
+            // column type created by ensure_vector_index() enforces byte length
+            // at the libSQL level and will reject mismatched dimensions.
+            let embedding_blob = chunk.embedding.as_ref().map(|e| {
+                let bytes: Vec<u8> = e.iter().flat_map(|f| f.to_le_bytes()).collect();
+                bytes
+            });
+
+            tx.execute(
+                r#"
+                    INSERT INTO memory_chunks (id, document_id, chunk_index, content, embedding)
+                    VALUES (?1, ?2, ?3, ?4, ?5)
+                    "#,
+                params![
+                    id.to_string(),
+                    document_id.to_string(),
+                    index as i64,
+                    chunk.content.as_str(),
+                    embedding_blob.map(libsql::Value::Blob),
+                ],
+            )
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: format!("Insert failed: {}", e),
+            })?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: format!("Commit failed: {}", e),
+            })?;
+
+        Ok(())
     }
 
     async fn update_chunk_embedding(
