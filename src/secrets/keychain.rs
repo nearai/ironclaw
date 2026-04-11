@@ -27,6 +27,68 @@ const SERVICE_NAME: &str = "ironclaw";
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const MASTER_KEY_ACCOUNT: &str = "master_key";
 
+/// Keystore error distinguishing "no key stored" from "store unavailable".
+///
+/// This distinction is load-bearing for master-key handling: a `NotFound`
+/// is a legitimate signal that we should fall back to file or generate a
+/// new key, but an `Unavailable` (keychain locked, D-Bus down, permission
+/// denied, transient crash) must NEVER be treated as `NotFound` -- doing
+/// so would silently rotate the master key and strand previously
+/// encrypted secrets.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum KeystoreError {
+    /// The keystore is reachable and reports that no entry exists.
+    #[error("keystore entry not found")]
+    NotFound,
+
+    /// The keystore is unavailable, locked, permission-denied, or
+    /// otherwise transiently broken. The caller MUST NOT rotate or
+    /// regenerate keys in response to this error.
+    #[error("keystore unavailable: {reason}")]
+    Unavailable { reason: String },
+}
+
+impl From<KeystoreError> for SecretError {
+    fn from(err: KeystoreError) -> Self {
+        SecretError::KeychainError(err.to_string())
+    }
+}
+
+/// Abstraction over the OS keystore used for master-key storage.
+///
+/// This trait exists so that `SecretsConfig::resolve()` can be tested
+/// with a deterministic stub. Production code uses [`OsKeystore`], which
+/// wraps the platform-specific implementation and maps raw errors to
+/// [`KeystoreError::NotFound`] vs [`KeystoreError::Unavailable`].
+#[async_trait::async_trait]
+pub trait Keystore: Send + Sync {
+    /// Fetch the master key bytes. `NotFound` means "no entry"; any
+    /// other error must surface as `Unavailable`.
+    async fn get_master_key(&self) -> Result<Vec<u8>, KeystoreError>;
+
+    /// Store the master key bytes.
+    async fn store_master_key(&self, key: &[u8]) -> Result<(), KeystoreError>;
+}
+
+/// Production keystore backed by the OS keychain / secret-service.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct OsKeystore;
+
+#[async_trait::async_trait]
+impl Keystore for OsKeystore {
+    async fn get_master_key(&self) -> Result<Vec<u8>, KeystoreError> {
+        platform::get_master_key_typed().await
+    }
+
+    async fn store_master_key(&self, key: &[u8]) -> Result<(), KeystoreError> {
+        platform::store_master_key(key)
+            .await
+            .map_err(|e| KeystoreError::Unavailable {
+                reason: e.to_string(),
+            })
+    }
+}
+
 /// Generate a random 32-byte master key.
 pub fn generate_master_key() -> Vec<u8> {
     use rand::RngCore;
@@ -53,6 +115,30 @@ mod platform {
     };
 
     use super::*;
+
+    /// macOS `errSecItemNotFound` status code.
+    /// See <https://developer.apple.com/documentation/security/errsecitemnotfound>.
+    const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+
+    /// Typed variant of `get_master_key` that distinguishes NotFound from
+    /// transient/unavailable errors.
+    pub async fn get_master_key_typed() -> Result<Vec<u8>, KeystoreError> {
+        match get_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT) {
+            Ok(password) => {
+                let hex_str =
+                    String::from_utf8(password).map_err(|_| KeystoreError::Unavailable {
+                        reason: "invalid UTF-8 in keychain entry".to_string(),
+                    })?;
+                hex_to_bytes(&hex_str).map_err(|e| KeystoreError::Unavailable {
+                    reason: e.to_string(),
+                })
+            }
+            Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Err(KeystoreError::NotFound),
+            Err(e) => Err(KeystoreError::Unavailable {
+                reason: format!("keychain error (code {}): {}", e.code(), e),
+            }),
+        }
+    }
 
     /// Store the master key in the macOS Keychain.
     pub async fn store_master_key(key: &[u8]) -> Result<(), SecretError> {
@@ -98,6 +184,57 @@ mod platform {
     use secret_service::{EncryptionType, SecretService};
 
     use super::*;
+
+    /// Typed variant of `get_master_key` that distinguishes NotFound (empty
+    /// search result from a reachable secret-service) from transient /
+    /// unavailable errors (D-Bus down, collection locked, dbus permission
+    /// denied, etc.).
+    pub async fn get_master_key_typed() -> Result<Vec<u8>, KeystoreError> {
+        let ss = SecretService::connect(EncryptionType::Dh)
+            .await
+            .map_err(|e| KeystoreError::Unavailable {
+                reason: format!("failed to connect to secret service: {e}"),
+            })?;
+
+        let items = ss
+            .search_items(
+                [("service", SERVICE_NAME), ("account", MASTER_KEY_ACCOUNT)]
+                    .into_iter()
+                    .collect(),
+            )
+            .await
+            .map_err(|e| KeystoreError::Unavailable {
+                reason: format!("failed to search secret service: {e}"),
+            })?;
+
+        let item = match items.unlocked.first().or(items.locked.first()) {
+            Some(item) => item,
+            None => return Err(KeystoreError::NotFound),
+        };
+
+        if item.is_locked().await.unwrap_or(true) {
+            item.unlock()
+                .await
+                .map_err(|e| KeystoreError::Unavailable {
+                    reason: format!("failed to unlock secret: {e}"),
+                })?;
+        }
+
+        let secret = item
+            .get_secret()
+            .await
+            .map_err(|e| KeystoreError::Unavailable {
+                reason: format!("failed to read secret: {e}"),
+            })?;
+
+        let hex_str = String::from_utf8(secret).map_err(|_| KeystoreError::Unavailable {
+            reason: "invalid UTF-8 in secret-service entry".to_string(),
+        })?;
+
+        hex_to_bytes(&hex_str).map_err(|e| KeystoreError::Unavailable {
+            reason: e.to_string(),
+        })
+    }
 
     /// Store the master key in the Linux secret service (GNOME Keyring, KWallet).
     pub async fn store_master_key(key: &[u8]) -> Result<(), SecretError> {
@@ -235,6 +372,13 @@ mod platform {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod platform {
     use super::*;
+
+    /// On unsupported platforms there is no OS keystore. Report
+    /// `NotFound` so the caller falls through to the file-based
+    /// fallback, which is the only persistence path available here.
+    pub async fn get_master_key_typed() -> Result<Vec<u8>, KeystoreError> {
+        Err(KeystoreError::NotFound)
+    }
 
     pub async fn store_master_key(_key: &[u8]) -> Result<(), SecretError> {
         Err(SecretError::KeychainError(
