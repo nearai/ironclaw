@@ -150,4 +150,4 @@ FINAL(synthesis)
 - `llm_query_batched()` runs all calls in parallel — total latency is roughly the slowest model.
 - If `models=` is provided, it must be the same length as `prompts`.
 - Use `model=` (singular) when you want one model applied to every prompt; use `models=` (plural list) for the council pattern.
-- Errors from individual models surface as `"Error: ..."` strings in the result list — the batch never raises.
+- Errors from individual models (unavailable model, provider timeout, etc.) surface as `"Error: ..."` strings in the result list, so a single bad model does not fail the whole batch. Argument validation errors — wrong types, or `models`/`prompts` length mismatch — still raise exceptions.

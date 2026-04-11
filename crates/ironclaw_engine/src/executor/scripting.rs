@@ -930,7 +930,14 @@ async fn handle_llm_query(
 ) -> ExtFunctionResult {
     let prompt = extract_string_arg(args, kwargs, "prompt", 0);
     let context_arg = extract_string_arg(args, kwargs, "context", 1);
-    let model_arg = extract_string_arg(args, kwargs, "model", 2);
+    // `model` must be parsed explicitly — `extract_string_arg` coerces via
+    // `monty_to_string`, which turns `MontyObject::None` into the literal
+    // string "None" and stringifies non-string values, both of which would
+    // silently route the call to an invalid model ID. Accept only str or None.
+    let model_arg = match extract_optional_string_kwarg(args, kwargs, "model", 2) {
+        Ok(v) => v,
+        Err(err) => return err,
+    };
 
     let prompt = match prompt {
         Some(p) => p,
@@ -1032,7 +1039,12 @@ async fn handle_llm_query_batched(
     //     a `None` slot means "no override for this prompt" (the caller
     //     opted out of routing for that slot); the singular `model=` kwarg
     //     does NOT fill those slots, since mixing the two would be surprising.
-    let single_model = extract_string_arg(&[], kwargs, "model", usize::MAX);
+    // See note in handle_llm_query: `model` must be parsed explicitly so that
+    // `model=None` doesn't become the literal string "None".
+    let single_model = match extract_optional_string_kwarg(&[], kwargs, "model", usize::MAX) {
+        Ok(v) => v,
+        Err(err) => return err,
+    };
     let models_kwarg = kwargs.iter().find_map(|(k, v)| match k {
         MontyObject::String(key) if key == "models" => Some(v),
         _ => None,
@@ -1062,7 +1074,7 @@ async fn handle_llm_query_batched(
             return ExtFunctionResult::Error(MontyException::new(
                 ExcType::TypeError,
                 Some(format!(
-                    "llm_query_batched(): `models` must be a list of strings, got {other:?}"
+                    "llm_query_batched(): `models` must be a list of str or None, got {other:?}"
                 )),
             ));
         }
@@ -1469,6 +1481,36 @@ fn extract_string_arg(
         }
     }
     args.get(position).map(monty_to_string)
+}
+
+/// Strict optional-string extractor for arguments where silent coercion is
+/// dangerous (e.g. `model=` — passing the wrong type should NOT become an
+/// unintended model ID). Returns:
+///   - `Ok(None)` when the argument is missing or explicitly `None`
+///   - `Ok(Some(s))` when the argument is a string
+///   - `Err(TypeError)` for any other type
+fn extract_optional_string_kwarg(
+    args: &[MontyObject],
+    kwargs: &[(MontyObject, MontyObject)],
+    name: &str,
+    position: usize,
+) -> Result<Option<String>, ExtFunctionResult> {
+    let raw = kwargs
+        .iter()
+        .find_map(|(k, v)| match k {
+            MontyObject::String(key) if key == name => Some(v),
+            _ => None,
+        })
+        .or_else(|| args.get(position));
+
+    match raw {
+        None | Some(MontyObject::None) => Ok(None),
+        Some(MontyObject::String(s)) => Ok(Some(s.clone())),
+        Some(other) => Err(ExtFunctionResult::Error(MontyException::new(
+            ExcType::TypeError,
+            Some(format!("`{name}` must be a string or None, got {other:?}")),
+        ))),
+    }
 }
 
 pub(crate) fn monty_to_string(obj: &MontyObject) -> String {
@@ -2424,6 +2466,92 @@ FINAL(str(x))
         let calls = llm.calls.lock().await;
         assert_eq!(calls.len(), 2);
         assert!(calls.iter().all(|(m, _)| m.as_deref() == Some("gpt-4o")));
+    }
+
+    #[tokio::test]
+    async fn llm_query_model_none_kwarg_is_no_override_not_literal_none_string() {
+        // Regression: `extract_string_arg` would have coerced
+        // MontyObject::None to the literal string "None", silently routing
+        // every model=None call to an invalid model ID. Must stay None.
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let _ = handle_llm_query(
+            &[],
+            &[
+                (
+                    MontyObject::String("prompt".into()),
+                    MontyObject::String("hi".into()),
+                ),
+                (MontyObject::String("model".into()), MontyObject::None),
+            ],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        let calls = llm.calls.lock().await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, None);
+    }
+
+    #[tokio::test]
+    async fn llm_query_rejects_non_string_model_kwarg() {
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let result = handle_llm_query(
+            &[],
+            &[
+                (
+                    MontyObject::String("prompt".into()),
+                    MontyObject::String("hi".into()),
+                ),
+                (MontyObject::String("model".into()), MontyObject::Int(42)),
+            ],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        assert!(matches!(result, ExtFunctionResult::Error(_)));
+        assert!(llm.calls.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn llm_query_batched_single_model_none_kwarg_is_no_override() {
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let prompts = MontyObject::List(vec![
+            MontyObject::String("a".into()),
+            MontyObject::String("b".into()),
+        ]);
+        let _ = handle_llm_query_batched(
+            &[prompts],
+            &[(MontyObject::String("model".into()), MontyObject::None)],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        let calls = llm.calls.lock().await;
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|(m, _)| m.is_none()));
+    }
+
+    #[tokio::test]
+    async fn llm_query_batched_rejects_non_string_single_model() {
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let prompts = MontyObject::List(vec![MontyObject::String("a".into())]);
+        let result = handle_llm_query_batched(
+            &[prompts],
+            &[(MontyObject::String("model".into()), MontyObject::Int(7))],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        assert!(matches!(result, ExtFunctionResult::Error(_)));
+        assert!(llm.calls.lock().await.is_empty());
     }
 
     #[tokio::test]
