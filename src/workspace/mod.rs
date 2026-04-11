@@ -2333,28 +2333,6 @@ impl Workspace {
                 continue;
             };
 
-            // Skip identity files — in platform-managed mode, these are seeded
-            // by the platform via HTTP API after the health check. Importing them
-            // from the filesystem would overwrite the platform's persona with
-            // stale data from a previous deployment.
-            const IDENTITY_SKIP_LIST: &[&str] = &[
-                "SOUL.md",
-                "AGENTS.md",
-                "IDENTITY.md",
-                "USER.md",
-                "CAPABILITIES.md",
-            ];
-            if IDENTITY_SKIP_LIST
-                .iter()
-                .any(|f| file_name.eq_ignore_ascii_case(f))
-            {
-                tracing::debug!(
-                    "Skipping identity file during filesystem import: {}",
-                    file_name
-                );
-                continue;
-            }
-
             // Skip if already exists in DB (never overwrite user edits)
             match self.read(file_name).await {
                 Ok(_) => continue,

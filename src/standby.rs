@@ -43,6 +43,8 @@ pub struct TidePoolConfigureLlm {
 #[serde(rename_all = "camelCase")]
 pub struct TidePoolConfigureMcpServer {
     pub name: String,
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -453,13 +455,24 @@ fn apply_channel_env(channels: &[TidePoolConfigureChannel]) -> Result<(), String
 async fn write_mcp_config(servers: &[TidePoolConfigureMcpServer]) -> Result<(), String> {
     let mut file = McpServersFile::default();
     for server in servers {
-        match resolve_mcp_server(&server.name) {
-            Ok(config) => file.upsert(config),
+        // Prefer the URL provided by LobsterPool (resolved at reconfigure time).
+        // Fall back to the embedded catalog for backward compat with older LP versions.
+        let config = if let Some(ref url) = server.url {
+            if !url.trim().is_empty() {
+                Ok(McpServerConfig::new(&server.name, url))
+            } else {
+                resolve_mcp_server(&server.name)
+            }
+        } else {
+            resolve_mcp_server(&server.name)
+        };
+        match config {
+            Ok(cfg) => file.upsert(cfg),
             Err(e) => {
                 tracing::warn!(
                     server_name = %server.name,
                     error = %e,
-                    "Skipping unknown MCP server during configure (not in embedded catalog)"
+                    "Skipping unknown MCP server during configure (not in embedded catalog and no URL provided)"
                 );
             }
         }
@@ -566,6 +579,7 @@ mod tests {
             },
             mcp_servers: vec![TidePoolConfigureMcpServer {
                 name: "notion".to_string(),
+                url: None,
             }],
             channels: vec![TidePoolConfigureChannel {
                 channel_type: "dingtalk".to_string(),
