@@ -930,6 +930,7 @@ async fn handle_llm_query(
 ) -> ExtFunctionResult {
     let prompt = extract_string_arg(args, kwargs, "prompt", 0);
     let context_arg = extract_string_arg(args, kwargs, "context", 1);
+    let model_arg = extract_string_arg(args, kwargs, "model", 2);
 
     let prompt = match prompt {
         Some(p) => p,
@@ -957,6 +958,7 @@ async fn handle_llm_query(
 
     let config = LlmCallConfig {
         force_text: true,
+        model: model_arg,
         ..LlmCallConfig::default()
     };
 
@@ -1022,18 +1024,59 @@ async fn handle_llm_query_batched(
     // Optional context kwarg
     let context_arg = extract_string_arg(&[], kwargs, "context", usize::MAX);
 
-    // Dispatch all prompts concurrently
-    let config = LlmCallConfig {
-        force_text: true,
-        ..LlmCallConfig::default()
-    };
+    // Optional model overrides:
+    //   - `model="..."` applies the same model to every prompt
+    //   - `models=[...]` is a parallel array (must match prompts length); use
+    //     this to broadcast the same prompt across a council of models by
+    //     passing `prompts=[same]*N, models=[m1, m2, ...]`
+    let single_model = extract_string_arg(&[], kwargs, "model", usize::MAX);
+    let models_list: Option<Vec<Option<String>>> = kwargs
+        .iter()
+        .find_map(|(k, v)| match k {
+            MontyObject::String(key) if key == "models" => Some(v),
+            _ => None,
+        })
+        .and_then(|v| match v {
+            MontyObject::List(items) => Some(
+                items
+                    .iter()
+                    .map(|item| match item {
+                        MontyObject::String(s) => Some(s.clone()),
+                        MontyObject::None => None,
+                        _ => Some(monty_to_string(item)),
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        });
+
+    if let Some(ref ms) = models_list
+        && ms.len() != prompts.len()
+    {
+        return ExtFunctionResult::Error(MontyException::new(
+            ExcType::ValueError,
+            Some(format!(
+                "llm_query_batched(): models list length ({}) must match prompts length ({})",
+                ms.len(),
+                prompts.len()
+            )),
+        ));
+    }
 
     let mut handles = Vec::with_capacity(prompts.len());
-    for prompt in &prompts {
+    for (i, prompt) in prompts.iter().enumerate() {
         let llm = Arc::clone(llm);
-        let config = config.clone();
         let ctx = context_arg.clone();
         let prompt = prompt.clone();
+        let model_override = models_list
+            .as_ref()
+            .and_then(|m| m.get(i).cloned().flatten())
+            .or_else(|| single_model.clone());
+        let config = LlmCallConfig {
+            force_text: true,
+            model: model_override,
+            ..LlmCallConfig::default()
+        };
         handles.push(tokio::spawn(async move {
             let mut messages = Vec::new();
             if let Some(ctx) = ctx {
@@ -2201,5 +2244,185 @@ FINAL(str(x))
             "should contain SyntaxError, got: {}",
             result.stdout,
         );
+    }
+
+    // ── llm_query model parameter plumbing ─────────────────────
+
+    /// LLM backend that records every call's model + prompt for assertions.
+    struct CapturingLlm {
+        calls: tokio::sync::Mutex<Vec<(Option<String>, String)>>,
+    }
+
+    impl CapturingLlm {
+        fn new() -> Self {
+            Self {
+                calls: tokio::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::traits::llm::LlmBackend for CapturingLlm {
+        fn model_name(&self) -> &str {
+            "capturing"
+        }
+
+        async fn complete(
+            &self,
+            messages: &[crate::types::message::ThreadMessage],
+            _actions: &[ActionDef],
+            config: &crate::traits::llm::LlmCallConfig,
+        ) -> Result<crate::traits::llm::LlmOutput, EngineError> {
+            let user_prompt = messages
+                .iter()
+                .rev()
+                .find(|m| matches!(m.role, crate::types::message::MessageRole::User))
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            self.calls
+                .lock()
+                .await
+                .push((config.model.clone(), user_prompt.clone()));
+            Ok(crate::traits::llm::LlmOutput {
+                response: crate::types::step::LlmResponse::Text(format!(
+                    "ack:{}:{user_prompt}",
+                    config.model.as_deref().unwrap_or("default")
+                )),
+                usage: crate::types::step::TokenUsage::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_query_forwards_model_kwarg() {
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let result = handle_llm_query(
+            &[],
+            &[
+                (
+                    MontyObject::String("prompt".into()),
+                    MontyObject::String("what is 2+2?".into()),
+                ),
+                (
+                    MontyObject::String("model".into()),
+                    MontyObject::String("gpt-4o".into()),
+                ),
+            ],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        match result {
+            ExtFunctionResult::Return(MontyObject::String(s)) => {
+                assert!(s.contains("gpt-4o"), "got: {s}");
+            }
+            other => panic!("expected string return, got {other:?}"),
+        }
+
+        let calls = llm.calls.lock().await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0.as_deref(), Some("gpt-4o"));
+        assert_eq!(calls[0].1, "what is 2+2?");
+    }
+
+    #[tokio::test]
+    async fn llm_query_without_model_passes_none() {
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let _ = handle_llm_query(
+            &[MontyObject::String("hello".into())],
+            &[],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        let calls = llm.calls.lock().await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, None);
+    }
+
+    #[tokio::test]
+    async fn llm_query_batched_broadcasts_with_models_list() {
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let prompts = MontyObject::List(vec![
+            MontyObject::String("Q".into()),
+            MontyObject::String("Q".into()),
+            MontyObject::String("Q".into()),
+        ]);
+        let models = MontyObject::List(vec![
+            MontyObject::String("gpt-4o".into()),
+            MontyObject::String("claude-sonnet-4-20250514".into()),
+            MontyObject::String("llama-3.1-70b-instruct".into()),
+        ]);
+        let result = handle_llm_query_batched(
+            &[prompts],
+            &[(MontyObject::String("models".into()), models)],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        match result {
+            ExtFunctionResult::Return(MontyObject::List(items)) => {
+                assert_eq!(items.len(), 3);
+            }
+            other => panic!("expected list return, got {other:?}"),
+        }
+
+        let mut calls = llm.calls.lock().await;
+        calls.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0].0.as_deref(), Some("claude-sonnet-4-20250514"));
+        assert_eq!(calls[1].0.as_deref(), Some("gpt-4o"));
+        assert_eq!(calls[2].0.as_deref(), Some("llama-3.1-70b-instruct"));
+    }
+
+    #[tokio::test]
+    async fn llm_query_batched_single_model_applies_to_all() {
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let prompts = MontyObject::List(vec![
+            MontyObject::String("a".into()),
+            MontyObject::String("b".into()),
+        ]);
+        let _ = handle_llm_query_batched(
+            &[prompts],
+            &[(
+                MontyObject::String("model".into()),
+                MontyObject::String("gpt-4o".into()),
+            )],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        let calls = llm.calls.lock().await;
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|(m, _)| m.as_deref() == Some("gpt-4o")));
+    }
+
+    #[tokio::test]
+    async fn llm_query_batched_models_length_mismatch_errors() {
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let prompts = MontyObject::List(vec![
+            MontyObject::String("a".into()),
+            MontyObject::String("b".into()),
+        ]);
+        let models = MontyObject::List(vec![MontyObject::String("only-one".into())]);
+        let result = handle_llm_query_batched(
+            &[prompts],
+            &[(MontyObject::String("models".into()), models)],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        assert!(matches!(result, ExtFunctionResult::Error(_)));
+        assert!(llm.calls.lock().await.is_empty());
     }
 }

@@ -629,6 +629,11 @@ async fn handle_llm_complete(
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
         depth: thread.config.depth,
+        model: explicit_config
+            .as_ref()
+            .and_then(|cfg| cfg.get("model"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
         metadata: HashMap::new(),
     };
 
