@@ -738,7 +738,10 @@ Respond in JSON format:
             context.available_tools.clone()
         };
 
-        let temperature = context.temperature.unwrap_or(0.7);
+        // Clamp to the provider-supported range. The frontend enforces this
+        // too, but a bad DB value or per-request override must not reach the
+        // provider — some backends reject out-of-range temperatures outright.
+        let temperature = context.temperature.unwrap_or(0.7).clamp(0.0, 2.0);
 
         // If we have tools, use tool completion mode
         if !effective_tools.is_empty() {

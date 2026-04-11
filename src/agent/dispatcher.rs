@@ -592,17 +592,20 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         {
             // Model override: "selected_model" — the same key the /model command
             // persists to via SettingsStore (per-user scoped via TenantScope).
-            if let Ok(Some(value)) = store.get_setting_with_admin_fallback("selected_model").await
+            if let Ok(Some(value)) = store
+                .get_setting_with_admin_fallback("selected_model")
+                .await
                 && let Some(model) = selected_model_override(&value)
             {
                 reason_ctx.model_override = Some(model);
             }
 
             // Temperature override from user or admin settings.
+            // Clamped to the supported range to guard against bad DB values.
             if let Ok(Some(value)) = store.get_setting_with_admin_fallback("temperature").await
                 && let Some(t) = value.as_f64()
             {
-                reason_ctx.temperature = Some(t as f32);
+                reason_ctx.temperature = Some((t as f32).clamp(0.0, 2.0));
             }
         }
 
