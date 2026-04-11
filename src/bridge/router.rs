@@ -401,6 +401,7 @@ async fn execute_pending_gate_action(
             .get("user_timezone")
             .and_then(|v| v.as_str())
             .and_then(ironclaw_engine::ValidTimezone::parse),
+        thread_goal: Some(thread.goal.clone()),
     };
 
     state.effect_adapter.reset_call_count();
@@ -774,7 +775,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         actions: vec![
             ironclaw_engine::ActionDef {
                 name: "mission_create".into(),
-                description: "Create a new mission (routine). Use when the user wants to set up a recurring task, scheduled check, or periodic routine. Results are delivered to the current channel by default.".into(),
+                description: "Create a new mission (routine). Use only when the user explicitly wants to set up a recurring task, scheduled check, automation, monitor, or persistent manual mission. Do not use for immediate one-shot requests like 'do it now', 'right now', or 'immediately'; complete those in the current thread. Results are delivered to the current channel by default.".into(),
                 parameters_schema: serde_json::json!({
                     "type": "object",
                     "properties": {

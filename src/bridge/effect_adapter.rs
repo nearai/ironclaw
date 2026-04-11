@@ -212,6 +212,16 @@ impl EffectBridgeAdapter {
 
         let result = match action_name {
             "mission_create" => {
+                if should_reject_immediate_mission_create(context, params) {
+                    return Some(Err(EngineError::Effect {
+                        reason: "Refusing to create a mission for an immediate one-shot request. \
+                             The user asked for this to run now, so complete the task in the \
+                             current foreground thread. Only call mission_create/routine_create \
+                             when the user explicitly asks to schedule, automate, or create a \
+                             recurring routine/mission."
+                            .to_string(),
+                    }));
+                }
                 let name = params
                     .get("name")
                     .or_else(|| params.get("_args").and_then(|a| a.get(0)))
@@ -1082,6 +1092,75 @@ impl EffectExecutor for EffectBridgeAdapter {
     }
 }
 
+fn should_reject_immediate_mission_create(
+    context: &ThreadExecutionContext,
+    _params: &serde_json::Value,
+) -> bool {
+    if context.thread_type != ironclaw_engine::types::thread::ThreadType::Foreground {
+        return false;
+    }
+
+    let Some(goal) = context.thread_goal.as_deref() else {
+        return false;
+    };
+
+    contains_immediate_execution_marker(goal) && !contains_scheduling_intent(goal)
+}
+
+fn contains_immediate_execution_marker(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let words = word_set(&lower);
+
+    words.contains("now")
+        || words.contains("immediate")
+        || words.contains("immediately")
+        || words.contains("asap")
+        || lower.contains("right away")
+        || lower.contains("right now")
+        || lower.contains("at once")
+        || lower.contains("do it now")
+        || lower.contains("do this now")
+}
+
+fn contains_scheduling_intent(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let words = word_set(&lower);
+
+    const SCHEDULE_WORDS: &[&str] = &[
+        "automate",
+        "automation",
+        "cron",
+        "daily",
+        "hourly",
+        "mission",
+        "monitor",
+        "monthly",
+        "periodic",
+        "recurring",
+        "routine",
+        "schedule",
+        "scheduled",
+        "scheduling",
+        "weekly",
+    ];
+    SCHEDULE_WORDS.iter().any(|word| words.contains(*word))
+        || lower.contains("every day")
+        || lower.contains("every morning")
+        || lower.contains("every evening")
+        || lower.contains("every week")
+        || lower.contains("every month")
+        || lower.contains("every hour")
+        || lower.contains("from now on")
+        || lower.contains("long-running")
+        || lower.contains("set up")
+}
+
+fn word_set(text: &str) -> HashSet<&str> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
 /// Parse a cadence string into a MissionCadence.
 ///
 /// When cadence is a cron expression, `timezone` is used as the scheduling
@@ -1759,6 +1838,7 @@ mod tests {
             current_call_id: call_id.map(str::to_string),
             source_channel: None,
             user_timezone: None,
+            thread_goal: Some("test goal".to_string()),
         }
     }
 
@@ -2321,6 +2401,96 @@ mod tests {
         assert!(routine_to_mission_alias("web_search", &params).is_none());
     }
 
+    #[test]
+    fn foreground_immediate_one_shot_goal_rejects_mission_create() {
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: Some("gateway".to_string()),
+            user_timezone: None,
+            thread_goal: Some(
+                "Summarize the product feedback for me right now. Do it immediately.".to_string(),
+            ),
+        };
+
+        let params = serde_json::json!({
+            "name": "Product feedback summarizer",
+            "goal": "Summarize the product feedback",
+            "cadence": "0 9 * * *",
+        });
+
+        assert!(should_reject_immediate_mission_create(&ctx, &params));
+    }
+
+    #[test]
+    fn foreground_explicit_schedule_allows_mission_create_even_if_run_now() {
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: Some("gateway".to_string()),
+            user_timezone: None,
+            thread_goal: Some(
+                "Create a daily routine to summarize product feedback and run it now.".to_string(),
+            ),
+        };
+
+        let params = serde_json::json!({
+            "name": "Product feedback summarizer",
+            "goal": "Summarize the product feedback",
+            "cadence": "0 9 * * *",
+        });
+
+        assert!(!should_reject_immediate_mission_create(&ctx, &params));
+    }
+
+    #[test]
+    fn foreground_immediate_every_quantifier_still_rejects_mission_create() {
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: Some("gateway".to_string()),
+            user_timezone: None,
+            thread_goal: Some("Summarize every product feedback item right now.".to_string()),
+        };
+
+        assert!(should_reject_immediate_mission_create(
+            &ctx,
+            &serde_json::json!({})
+        ));
+    }
+
+    #[test]
+    fn background_mission_threads_can_create_follow_up_missions() {
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Mission,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: None,
+            user_timezone: None,
+            thread_goal: Some("Summarize feedback immediately.".to_string()),
+        };
+
+        assert!(!should_reject_immediate_mission_create(
+            &ctx,
+            &serde_json::json!({})
+        ));
+    }
+
     // ── extract_credential_name tests ──────────────────────────
 
     #[test]
@@ -2480,6 +2650,7 @@ mod tests {
             current_call_id: None,
             source_channel: None,
             user_timezone: None,
+            thread_goal: None,
         };
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
@@ -2575,6 +2746,7 @@ mod tests {
             current_call_id: Some("call_123".to_string()),
             source_channel: None,
             user_timezone: None,
+            thread_goal: None,
         };
 
         let result = adapter
