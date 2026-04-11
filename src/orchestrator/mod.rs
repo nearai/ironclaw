@@ -65,10 +65,11 @@ pub struct OrchestratorSetup {
     pub container_job_manager: Option<Arc<ContainerJobManager>>,
     pub job_event_tx: Option<broadcast::Sender<(Uuid, String, AppEvent)>>,
     pub prompt_queue: Arc<Mutex<HashMap<Uuid, VecDeque<api::PendingPrompt>>>>,
-    pub docker_status: crate::sandbox::DockerStatus,
+    pub runtime_status: crate::sandbox::RuntimeStatus,
+    pub runtime: Option<Arc<dyn crate::sandbox::ContainerRuntime>>,
 }
 
-/// Detect Docker availability, create the container job manager, and start
+/// Detect runtime availability, create the container job manager, and start
 /// the orchestrator internal API in the background.
 pub async fn setup_orchestrator(
     config: &crate::config::Config,
@@ -76,36 +77,25 @@ pub async fn setup_orchestrator(
     db: Option<&Arc<dyn Database>>,
     secrets_store: Option<&Arc<dyn SecretsStore + Send + Sync>>,
 ) -> OrchestratorSetup {
+    use crate::sandbox::{ContainerRuntime, RuntimeStatus};
+
     let prompt_queue = Arc::new(Mutex::new(
         HashMap::<Uuid, VecDeque<api::PendingPrompt>>::new(),
     ));
 
-    let docker_status = if config.sandbox.enabled {
-        let detection = crate::sandbox::check_docker().await;
-        match detection.status {
-            crate::sandbox::DockerStatus::Available => {
-                tracing::info!("Docker is available");
-            }
-            crate::sandbox::DockerStatus::NotInstalled => {
-                tracing::warn!(
-                    "Docker is not installed -- sandbox disabled for this session. {}",
-                    detection.platform.install_hint()
-                );
-            }
-            crate::sandbox::DockerStatus::NotRunning => {
-                tracing::warn!(
-                    "Docker is installed but not running -- sandbox disabled for this session. {}",
-                    detection.platform.start_hint()
-                );
-            }
-            crate::sandbox::DockerStatus::Disabled => {}
-        }
-        detection.status
-    } else {
-        crate::sandbox::DockerStatus::Disabled
-    };
+    let (runtime_status, runtime): (RuntimeStatus, Option<Arc<dyn ContainerRuntime>>) =
+        if config.sandbox.enabled {
+            detect_and_connect_runtime().await
+        } else {
+            (RuntimeStatus::Disabled, None)
+        };
 
-    let (job_event_tx, container_job_manager) = if config.sandbox.enabled && docker_status.is_ok() {
+    let (job_event_tx, container_job_manager) = if config.sandbox.enabled && runtime_status.is_ok()
+    {
+        let rt = runtime
+            .as_ref()
+            .expect("runtime must be Some when status is Available"); // safety: guarded by is_ok()
+
         let (tx, _) = broadcast::channel(256);
         let job_event_tx = Some(tx);
 
@@ -130,7 +120,11 @@ pub async fn setup_orchestrator(
             claude_code_enabled: config.claude_code.enabled,
             acp_enabled: config.acp.enabled,
         };
-        let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
+        let jm = Arc::new(ContainerJobManager::with_runtime(
+            job_config,
+            token_store.clone(),
+            Arc::clone(rt),
+        ));
 
         let orchestrator_state = api::OrchestratorState {
             llm: Arc::clone(llm),
@@ -169,7 +163,128 @@ pub async fn setup_orchestrator(
         container_job_manager,
         job_event_tx,
         prompt_queue,
-        docker_status,
+        runtime_status,
+        runtime,
+    }
+}
+
+/// Detect the configured container runtime and connect to it.
+///
+/// Respects `CONTAINER_RUNTIME` env var via `resolve_runtime_backend()`.
+/// Falls back to Docker when both features are compiled in and the var is unset.
+async fn detect_and_connect_runtime() -> (
+    crate::sandbox::RuntimeStatus,
+    Option<Arc<dyn crate::sandbox::ContainerRuntime>>,
+) {
+    use crate::sandbox::runtime::resolve_runtime_backend;
+    use crate::sandbox::{RuntimeBackend, RuntimeStatus};
+
+    let backend = match resolve_runtime_backend() {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("Container runtime resolution failed: {e}");
+            return (RuntimeStatus::NotInstalled, None);
+        }
+    };
+
+    match backend {
+        RuntimeBackend::Docker => detect_docker_runtime().await,
+        RuntimeBackend::Kubernetes => detect_kubernetes_runtime().await,
+    }
+}
+
+#[allow(unused_variables)]
+async fn detect_docker_runtime() -> (
+    crate::sandbox::RuntimeStatus,
+    Option<Arc<dyn crate::sandbox::ContainerRuntime>>,
+) {
+    use crate::sandbox::RuntimeStatus;
+
+    #[cfg(feature = "docker")]
+    {
+        use crate::sandbox::ContainerRuntime;
+        match crate::sandbox::docker::DockerRuntime::connect().await {
+            Ok(rt) => {
+                let detection = rt.detect().await;
+                match detection.status {
+                    RuntimeStatus::Available => {
+                        tracing::info!("Docker runtime is available");
+                        (
+                            RuntimeStatus::Available,
+                            Some(Arc::new(rt) as Arc<dyn crate::sandbox::ContainerRuntime>),
+                        )
+                    }
+                    RuntimeStatus::NotInstalled => {
+                        tracing::warn!(
+                            "Docker is not installed -- sandbox disabled for this session. {}",
+                            detection.install_hint
+                        );
+                        (RuntimeStatus::NotInstalled, None)
+                    }
+                    RuntimeStatus::NotRunning => {
+                        tracing::warn!(
+                            "Docker is installed but not running -- sandbox disabled for this session. {}",
+                            detection.start_hint
+                        );
+                        (RuntimeStatus::NotRunning, None)
+                    }
+                    RuntimeStatus::Disabled => (RuntimeStatus::Disabled, None),
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to connect to Docker: {e}");
+                (RuntimeStatus::NotRunning, None)
+            }
+        }
+    }
+    #[cfg(not(feature = "docker"))]
+    {
+        tracing::warn!("Docker feature not compiled in");
+        (RuntimeStatus::NotInstalled, None)
+    }
+}
+
+#[allow(unused_variables)]
+async fn detect_kubernetes_runtime() -> (
+    crate::sandbox::RuntimeStatus,
+    Option<Arc<dyn crate::sandbox::ContainerRuntime>>,
+) {
+    use crate::sandbox::RuntimeStatus;
+
+    #[cfg(feature = "kubernetes")]
+    {
+        use crate::sandbox::ContainerRuntime;
+        match crate::sandbox::kubernetes::KubernetesRuntime::connect().await {
+            Ok(rt) => {
+                let detection = rt.detect().await;
+                match detection.status {
+                    RuntimeStatus::Available => {
+                        tracing::info!("Kubernetes runtime is available");
+                        (
+                            RuntimeStatus::Available,
+                            Some(Arc::new(rt) as Arc<dyn crate::sandbox::ContainerRuntime>),
+                        )
+                    }
+                    RuntimeStatus::NotInstalled | RuntimeStatus::NotRunning => {
+                        tracing::warn!(
+                            "Kubernetes cluster not reachable -- sandbox disabled. {}",
+                            detection.start_hint
+                        );
+                        (detection.status, None)
+                    }
+                    RuntimeStatus::Disabled => (RuntimeStatus::Disabled, None),
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to connect to Kubernetes: {e}");
+                (RuntimeStatus::NotRunning, None)
+            }
+        }
+    }
+    #[cfg(not(feature = "kubernetes"))]
+    {
+        tracing::warn!("Kubernetes feature not compiled in");
+        (RuntimeStatus::NotInstalled, None)
     }
 }
 

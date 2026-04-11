@@ -384,18 +384,18 @@ async fn async_main() -> anyhow::Result<()> {
     let container_job_manager = orch.container_job_manager;
     let job_event_tx = orch.job_event_tx;
     let prompt_queue = orch.prompt_queue;
-    let docker_status = orch.docker_status;
+    let runtime_status = orch.runtime_status;
 
-    // Derive user-facing warning from docker_status for channel notification
-    let docker_user_warning: Option<String> = match docker_status {
-        ironclaw::sandbox::DockerStatus::NotInstalled => Some(
-            "Sandbox is enabled but Docker is not installed -- \
-             full_job routines will fail until Docker is available."
+    // Derive user-facing warning from runtime status for channel notification
+    let runtime_user_warning: Option<String> = match runtime_status {
+        ironclaw::sandbox::RuntimeStatus::NotInstalled => Some(
+            "Sandbox is enabled but the container runtime is not installed -- \
+             full_job routines will fail until a runtime is available."
                 .to_string(),
         ),
-        ironclaw::sandbox::DockerStatus::NotRunning => Some(
-            "Sandbox is enabled but Docker is not running -- \
-             full_job routines will fail until Docker is started."
+        ironclaw::sandbox::RuntimeStatus::NotRunning => Some(
+            "Sandbox is enabled but the container runtime is not running -- \
+             full_job routines will fail until the runtime is started."
                 .to_string(),
         ),
         _ => None,
@@ -964,7 +964,7 @@ async fn async_main() -> anyhow::Result<()> {
             heartbeat_enabled: config.heartbeat.enabled,
             heartbeat_interval_secs: config.heartbeat.interval_secs,
             sandbox_enabled: config.sandbox.enabled,
-            docker_status,
+            runtime_status,
             claude_code_enabled: config.claude_code.enabled,
             acp_enabled: config.acp.enabled,
             routines_enabled: config.routines.enabled,
@@ -1159,7 +1159,7 @@ async fn async_main() -> anyhow::Result<()> {
         )),
         sandbox_readiness: if !config.sandbox.enabled {
             ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig
-        } else if docker_status.is_ok() {
+        } else if runtime_status.is_ok() {
             ironclaw::agent::routine_engine::SandboxReadiness::Available
         } else {
             ironclaw::agent::routine_engine::SandboxReadiness::DockerUnavailable
@@ -1187,9 +1187,10 @@ async fn async_main() -> anyhow::Result<()> {
     // Fill the scheduler slot now that Agent (and its Scheduler) exist.
     *scheduler_slot.write().await = Some(agent.scheduler());
 
-    // Spawn sandbox reaper for orphaned container cleanup
-    if let Some(ref jm) = container_job_manager {
+    // Spawn sandbox reaper for orphaned workload cleanup
+    if let (Some(jm), Some(rt)) = (&container_job_manager, &orch.runtime) {
         let reaper_jm = Arc::clone(jm);
+        let reaper_rt = Arc::clone(rt);
         let reaper_config = ReaperConfig {
             scan_interval: Duration::from_secs(config.sandbox.reaper_interval_secs),
             orphan_threshold: Duration::from_secs(config.sandbox.orphan_threshold_secs),
@@ -1197,10 +1198,8 @@ async fn async_main() -> anyhow::Result<()> {
         };
         let reaper_ctx = Arc::clone(&reaper_context_manager);
         tokio::spawn(async move {
-            match SandboxReaper::new(reaper_jm, reaper_ctx, reaper_config).await {
-                Ok(reaper) => reaper.run().await,
-                Err(e) => tracing::error!("Sandbox reaper failed to initialize: {}", e),
-            }
+            let reaper = SandboxReaper::new(reaper_rt, reaper_jm, reaper_ctx, reaper_config);
+            reaper.run().await;
         });
     }
 
@@ -1380,7 +1379,7 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // Notify user if sandbox is unavailable (Docker missing/not running)
-    if let Some(warning) = docker_user_warning {
+    if let Some(warning) = runtime_user_warning {
         let channels_ref = Arc::clone(&channels_for_warnings);
         tokio::spawn(async move {
             // Delay to let channels finish connecting before sending the warning.

@@ -168,8 +168,10 @@ aws-config = { version = "1", features = ["behavior-version-latest"], optional =
 aws-sdk-bedrockruntime = { version = "1", optional = true }
 aws-smithy-types = { version = "1", optional = true }
 
-# Docker sandbox
-bollard = "0.18"
+# Container runtime backends
+bollard = { version = "0.18", optional = true }
+kube = { version = "0.98", features = ["client", "runtime", "ws"], optional = true }
+k8s-openapi = { version = "0.24", features = ["latest"], optional = true }
 
 # Archive extraction for WASM extension bundles
 flate2 = "1"
@@ -226,7 +228,7 @@ tempfile = "3"
 insta = "1.46.3"
 
 [features]
-default = ["postgres", "libsql", "html-to-markdown", "tui"]
+default = ["postgres", "libsql", "html-to-markdown", "tui", "docker"]
 postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
@@ -245,6 +247,8 @@ libsql = ["dep:libsql"]
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
+docker = ["dep:bollard"]
+kubernetes = ["dep:kube", "dep:k8s-openapi"]
 tui = ["dep:ironclaw_tui"]
 import = ["dep:json5", "libsql"]
 

@@ -86,20 +86,33 @@
 //! - **Timeout enforcement**: Commands are killed after the timeout
 
 pub mod config;
+#[cfg(feature = "docker")]
 pub mod container;
+#[cfg(feature = "docker")]
 pub mod detect;
+#[cfg(feature = "docker")]
+pub mod docker;
 pub mod error;
+#[cfg(feature = "kubernetes")]
+pub mod kubernetes;
 pub mod manager;
 pub mod proxy;
+pub mod runtime;
 
 pub use config::{ResourceLimits, SandboxConfig, SandboxPolicy};
+#[cfg(feature = "docker")]
 pub use container::{ContainerOutput, ContainerRunner, connect_docker};
+#[cfg(feature = "docker")]
 pub use detect::{DockerDetection, DockerStatus, Platform, check_docker};
 pub use error::{Result, SandboxError};
 pub use manager::{ExecOutput, SandboxManager, SandboxManagerBuilder};
 pub use proxy::{
     CredentialResolver, DefaultPolicyDecider, DomainAllowlist, EnvCredentialResolver, HttpProxy,
     NetworkDecision, NetworkPolicyDecider, NetworkProxyBuilder, NetworkRequest,
+};
+pub use runtime::{
+    ContainerRuntime, ManagedWorkload, RuntimeBackend, RuntimeDetection, RuntimeStatus,
+    VolumeMount, WorkloadOutput, WorkloadSpec, connect_runtime, resolve_runtime_backend,
 };
 
 /// Default allowlist getter (re-export for convenience).

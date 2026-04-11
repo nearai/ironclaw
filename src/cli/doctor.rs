@@ -162,6 +162,14 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     );
 
     check(
+        "Kubernetes cluster",
+        check_kubernetes_cluster().await,
+        &mut passed,
+        &mut failed,
+        &mut skipped,
+    );
+
+    check(
         "cloudflared",
         check_binary("cloudflared", &["--version"]),
         &mut passed,
@@ -652,18 +660,69 @@ fn check_service_installed() -> CheckResult {
 // ── Docker daemon ───────────────────────────────────────────
 
 async fn check_docker_daemon() -> CheckResult {
-    let detection = crate::sandbox::check_docker().await;
-    match detection.status {
-        crate::sandbox::DockerStatus::Available => CheckResult::Pass("running".into()),
-        crate::sandbox::DockerStatus::NotInstalled => CheckResult::Skip(format!(
-            "not installed. {}",
-            detection.platform.install_hint()
-        )),
-        crate::sandbox::DockerStatus::NotRunning => CheckResult::Fail(format!(
-            "installed but not running. {}",
-            detection.platform.start_hint()
-        )),
-        crate::sandbox::DockerStatus::Disabled => CheckResult::Skip("sandbox disabled".into()),
+    #[cfg(feature = "docker")]
+    {
+        use crate::sandbox::RuntimeBackend;
+        match crate::sandbox::resolve_runtime_backend() {
+            Ok(RuntimeBackend::Kubernetes) => {
+                return CheckResult::Skip("kubernetes is the selected runtime".into());
+            }
+            Err(_) => {
+                return CheckResult::Skip("no runtime resolved".into());
+            }
+            _ => {}
+        }
+
+        let detection = crate::sandbox::check_docker().await;
+        match detection.status {
+            crate::sandbox::DockerStatus::Available => CheckResult::Pass("running".into()),
+            crate::sandbox::DockerStatus::NotInstalled => CheckResult::Skip(format!(
+                "not installed. {}",
+                detection.platform.install_hint()
+            )),
+            crate::sandbox::DockerStatus::NotRunning => CheckResult::Fail(format!(
+                "installed but not running. {}",
+                detection.platform.start_hint()
+            )),
+            crate::sandbox::DockerStatus::Disabled => CheckResult::Skip("sandbox disabled".into()),
+        }
+    }
+    #[cfg(not(feature = "docker"))]
+    {
+        CheckResult::Skip("docker feature not compiled in".into())
+    }
+}
+
+// ── Kubernetes cluster ──────────────────────────────────────
+
+async fn check_kubernetes_cluster() -> CheckResult {
+    #[cfg(feature = "kubernetes")]
+    {
+        use crate::sandbox::{ContainerRuntime, RuntimeBackend};
+        match crate::sandbox::resolve_runtime_backend() {
+            Ok(RuntimeBackend::Docker) => {
+                return CheckResult::Skip("docker is the selected runtime".into());
+            }
+            Err(_) => {
+                return CheckResult::Skip("no runtime resolved".into());
+            }
+            _ => {}
+        }
+
+        match crate::sandbox::kubernetes::KubernetesRuntime::connect().await {
+            Ok(rt) => {
+                if rt.is_available().await {
+                    CheckResult::Pass("cluster reachable".into())
+                } else {
+                    CheckResult::Fail("cluster not reachable".into())
+                }
+            }
+            Err(e) => CheckResult::Fail(format!("failed to connect: {e}")),
+        }
+    }
+    #[cfg(not(feature = "kubernetes"))]
+    {
+        CheckResult::Skip("kubernetes feature not compiled in".into())
     }
 }
 

@@ -98,7 +98,7 @@ Step 4: Model Selection
 Step 5: Embeddings
 Step 6: Channel Configuration
 Step 7: Extensions (tools)
-Step 8: Docker Sandbox
+Step 8: Container Sandbox
 Step 9: Background Tasks (heartbeat)
        ↓
    save_and_summarize()
@@ -393,7 +393,54 @@ Searches for `registry/` directory in order:
 
 ---
 
-### Step 8: Heartbeat
+### Step 8: Container Sandbox
+
+**Module:** `wizard.rs` → `step_docker_sandbox()`
+
+**Goal:** Check container runtime availability and configure sandboxed execution.
+
+The sandbox isolates LLM-initiated commands (shell, file writes, tool calls)
+inside ephemeral containers. Without a sandbox, those commands run directly
+on the host with no isolation.
+
+**Runtime selection:** The wizard probes the container runtime determined by
+`CONTAINER_RUNTIME` env var and compiled feature flags (via
+`resolve_runtime_backend()` in `src/sandbox/runtime.rs`). When both
+`docker` and `kubernetes` features are compiled, Docker is the default
+unless `CONTAINER_RUNTIME=kubernetes` is set. When only one feature is
+compiled, that runtime is used automatically.
+
+**Flow (Docker backend, `#[cfg(feature = "docker")]`):**
+
+1. Ask "Enable Docker sandbox?" (default: no)
+2. If declined → `sandbox.enabled = false`, done
+3. Call `check_docker()` to detect Docker installation
+4. If available → enable sandbox, check/pull worker image via
+   `ensure_worker_image()`
+5. If not installed or not running → print platform hint, offer retry
+6. On retry success → enable + ensure image; on failure → disable
+
+**Flow (Kubernetes backend, `#[cfg(all(not(feature = "docker"), feature = "kubernetes"))]`):**
+
+1. Ask "Enable Docker sandbox?" (prompt text unchanged)
+2. If declined → `sandbox.enabled = false`, done
+3. Connect to Kubernetes cluster via `KubernetesRuntime::connect()`
+4. If cluster reachable (`is_available()`) → `sandbox.enabled = true`
+5. If not reachable → `sandbox.enabled = false`
+
+Note: the Kubernetes path does not verify worker image pullability at
+wizard time (deferred to first workload creation).
+
+**Flow (no runtime feature compiled):**
+
+1. Ask "Enable Docker sandbox?"
+2. If user confirms → `sandbox.enabled = true` with a warning that no
+   runtime is compiled in
+3. This is a graceful degradation; actual execution will fail at runtime
+
+---
+
+### Step 9: Heartbeat
 
 **Module:** `wizard.rs` → `step_heartbeat()`
 

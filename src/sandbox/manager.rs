@@ -2,7 +2,7 @@
 //!
 //! The `SandboxManager` is the primary entry point for sandboxed execution.
 //! It coordinates:
-//! - Docker container creation and lifecycle
+//! - Container runtime lifecycle (Docker, Kubernetes, or future backends)
 //! - HTTP proxy for network access control
 //! - Credential injection for API calls
 //! - Resource limits and timeouts
@@ -18,12 +18,12 @@
 //! │         ▼                                                                  │
 //! │   ┌──────────────┐     ┌──────────────┐     ┌──────────────────────────┐  │
 //! │   │ Start Proxy  │────▶│ Create       │────▶│ Execute & Collect Output │  │
-//! │   │ (if needed)  │     │ Container    │     │                          │  │
+//! │   │ (if needed)  │     │ Workload     │     │                          │  │
 //! │   └──────────────┘     └──────────────┘     └──────────────────────────┘  │
 //! │                                                        │                   │
 //! │                                                        ▼                   │
 //! │                                              ┌──────────────────────────┐  │
-//! │                                              │ Cleanup Container        │  │
+//! │                                              │ Cleanup Workload         │  │
 //! │                                              └──────────────────────────┘  │
 //! └───────────────────────────────────────────────────────────────────────────┘
 //! ```
@@ -35,12 +35,10 @@ use std::time::Duration;
 
 use tokio::sync::RwLock;
 
-use bollard::Docker;
-
-use crate::sandbox::config::{ResourceLimits, SandboxConfig, SandboxPolicy};
-use crate::sandbox::container::{ContainerOutput, ContainerRunner, connect_docker};
+use crate::sandbox::config::{SandboxConfig, SandboxPolicy};
 use crate::sandbox::error::{Result, SandboxError};
 use crate::sandbox::proxy::{HttpProxy, NetworkProxyBuilder};
+use crate::sandbox::runtime::{ContainerRuntime, VolumeMount, WorkloadOutput, WorkloadSpec};
 
 /// Output from sandbox execution.
 #[derive(Debug, Clone)]
@@ -59,8 +57,30 @@ pub struct ExecOutput {
     pub truncated: bool,
 }
 
-impl From<ContainerOutput> for ExecOutput {
-    fn from(c: ContainerOutput) -> Self {
+impl From<WorkloadOutput> for ExecOutput {
+    fn from(w: WorkloadOutput) -> Self {
+        let output = if w.stderr.is_empty() {
+            w.stdout.clone()
+        } else if w.stdout.is_empty() {
+            w.stderr.clone()
+        } else {
+            format!("{}\n\n--- stderr ---\n{}", w.stdout, w.stderr)
+        };
+
+        Self {
+            exit_code: w.exit_code,
+            stdout: w.stdout,
+            stderr: w.stderr,
+            output,
+            duration: w.duration,
+            truncated: w.truncated,
+        }
+    }
+}
+
+#[cfg(feature = "docker")]
+impl From<crate::sandbox::container::ContainerOutput> for ExecOutput {
+    fn from(c: crate::sandbox::container::ContainerOutput) -> Self {
         let output = if c.stderr.is_empty() {
             c.stdout.clone()
         } else if c.stdout.is_empty() {
@@ -84,7 +104,7 @@ impl From<ContainerOutput> for ExecOutput {
 pub struct SandboxManager {
     config: SandboxConfig,
     proxy: Arc<RwLock<Option<HttpProxy>>>,
-    docker: Arc<RwLock<Option<Docker>>>,
+    runtime: Arc<RwLock<Option<Arc<dyn ContainerRuntime>>>>,
     initialized: std::sync::atomic::AtomicBool,
 }
 
@@ -94,7 +114,7 @@ impl SandboxManager {
         Self {
             config,
             proxy: Arc::new(RwLock::new(None)),
-            docker: Arc::new(RwLock::new(None)),
+            runtime: Arc::new(RwLock::new(None)),
             initialized: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -104,19 +124,34 @@ impl SandboxManager {
         Self::new(SandboxConfig::default())
     }
 
-    /// Check if the sandbox is available (Docker running, etc.).
+    /// Create a sandbox manager with a pre-initialized runtime.
+    pub fn with_runtime(config: SandboxConfig, runtime: Arc<dyn ContainerRuntime>) -> Self {
+        Self {
+            config,
+            proxy: Arc::new(RwLock::new(None)),
+            runtime: Arc::new(RwLock::new(Some(runtime))),
+            initialized: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Check if the sandbox is available (runtime running, etc.).
     pub async fn is_available(&self) -> bool {
         if !self.config.enabled {
             return false;
         }
 
-        match connect_docker().await {
-            Ok(docker) => docker.ping().await.is_ok(),
+        if let Some(ref rt) = *self.runtime.read().await {
+            return rt.is_available().await;
+        }
+
+        // No runtime set yet — try to create one and check
+        match crate::sandbox::runtime::connect_runtime().await {
+            Ok(rt) => rt.is_available().await,
             Err(_) => false,
         }
     }
 
-    /// Initialize the sandbox (connect to Docker, start proxy).
+    /// Initialize the sandbox (connect to runtime, start proxy).
     pub async fn initialize(&self) -> Result<()> {
         if self.initialized.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(());
@@ -128,37 +163,38 @@ impl SandboxManager {
             });
         }
 
-        // Connect to Docker
-        let docker = connect_docker().await?;
-
-        // Check if Docker is responsive
-        docker
-            .ping()
-            .await
-            .map_err(|e| SandboxError::DockerNotAvailable {
-                reason: e.to_string(),
-            })?;
-
-        // Check for / pull image using a temporary runner
-        let checker = ContainerRunner::new(
-            docker.clone(),
-            self.config.image.clone(),
-            self.config.proxy_port,
-        );
-        if !checker.image_exists().await {
-            if self.config.auto_pull_image {
-                checker.pull_image().await?;
-            } else {
-                return Err(SandboxError::ContainerCreationFailed {
-                    reason: format!(
-                        "image {} not found and auto_pull is disabled",
-                        self.config.image
-                    ),
-                });
-            }
+        // Connect to the runtime if not already set
+        if self.runtime.read().await.is_none() {
+            let rt = self.create_runtime().await?;
+            *self.runtime.write().await = Some(rt);
         }
 
-        *self.docker.write().await = Some(docker);
+        {
+            let guard = self.runtime.read().await;
+            let rt = guard.as_ref().ok_or_else(|| SandboxError::Config {
+                reason: "runtime initialization failed".to_string(),
+            })?;
+
+            if !rt.is_available().await {
+                return Err(SandboxError::DockerNotAvailable {
+                    reason: format!("{} runtime is not available", rt.name()),
+                });
+            }
+
+            // Check for / pull image
+            if !rt.image_exists(&self.config.image).await {
+                if self.config.auto_pull_image {
+                    rt.pull_image(&self.config.image).await?;
+                } else {
+                    return Err(SandboxError::ContainerCreationFailed {
+                        reason: format!(
+                            "image {} not found and auto_pull is disabled",
+                            self.config.image
+                        ),
+                    });
+                }
+            }
+        }
 
         // Start the network proxy if we're using a sandboxed policy
         if self.config.policy.is_sandboxed() {
@@ -174,6 +210,12 @@ impl SandboxManager {
 
         tracing::info!("Sandbox initialized");
         Ok(())
+    }
+
+    /// Create a container runtime based on `CONTAINER_RUNTIME` env var
+    /// and compiled feature flags via the shared factory.
+    async fn create_runtime(&self) -> Result<Arc<dyn ContainerRuntime>> {
+        crate::sandbox::runtime::connect_runtime().await
     }
 
     /// Shutdown the sandbox (stop proxy, clean up).
@@ -208,8 +250,6 @@ impl SandboxManager {
         env: HashMap<String, String>,
     ) -> Result<ExecOutput> {
         // FullAccess policy bypasses the sandbox entirely.
-        // Double-check the allow_full_access guard at execution time as well,
-        // in case the policy was overridden per-call via execute_with_policy().
         if policy == SandboxPolicy::FullAccess {
             if !self.config.allow_full_access {
                 tracing::error!(
@@ -220,8 +260,6 @@ impl SandboxManager {
                     reason: "FullAccess policy requires SANDBOX_ALLOW_FULL_ACCESS=true".to_string(),
                 });
             }
-            // Log only the binary name to avoid leaking secrets embedded in
-            // command arguments (e.g. tokens in curl headers).
             let binary = command.split_whitespace().next().unwrap_or("<empty>");
             tracing::warn!(
                 binary = %binary,
@@ -236,14 +274,13 @@ impl SandboxManager {
             self.initialize().await?;
         }
 
-        // Retry transient container failures (Docker daemon glitches, container
-        // creation races) up to MAX_SANDBOX_RETRIES times with exponential backoff.
+        // Retry transient failures with exponential backoff.
         const MAX_SANDBOX_RETRIES: u32 = 2;
         let mut last_err: Option<SandboxError> = None;
 
         for attempt in 0..=MAX_SANDBOX_RETRIES {
             if attempt > 0 {
-                let delay = std::time::Duration::from_secs(1 << attempt); // 2s, 4s
+                let delay = std::time::Duration::from_secs(1 << attempt);
                 tracing::warn!(
                     attempt = attempt + 1,
                     max_attempts = MAX_SANDBOX_RETRIES + 1,
@@ -275,7 +312,7 @@ impl SandboxManager {
         }))
     }
 
-    /// Single attempt at container execution (no retry logic).
+    /// Single attempt at container execution via the runtime trait.
     async fn try_execute_in_container(
         &self,
         command: &str,
@@ -289,25 +326,121 @@ impl SandboxManager {
             0
         };
 
-        let docker =
-            self.docker
-                .read()
-                .await
-                .clone()
-                .ok_or_else(|| SandboxError::DockerNotAvailable {
-                    reason: "Docker connection not initialized".to_string(),
-                })?;
-        let runner = ContainerRunner::new(docker, self.config.image.clone(), proxy_port);
+        let rt_guard = self.runtime.read().await;
+        let rt = rt_guard
+            .as_ref()
+            .ok_or_else(|| SandboxError::DockerNotAvailable {
+                reason: "runtime not initialized".to_string(),
+            })?;
 
-        let limits = ResourceLimits {
-            memory_bytes: self.config.memory_limit_mb * 1024 * 1024,
-            cpu_shares: self.config.cpu_shares,
-            timeout: self.config.timeout,
-            max_output_bytes: 64 * 1024,
+        let orchestrator_host = rt.orchestrator_host();
+
+        // Build environment
+        let mut env_vec: Vec<String> = env
+            .into_iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+
+        if proxy_port > 0 && policy.is_sandboxed() {
+            env_vec.push(format!(
+                "http_proxy=http://{}:{}",
+                orchestrator_host, proxy_port
+            ));
+            env_vec.push(format!(
+                "https_proxy=http://{}:{}",
+                orchestrator_host, proxy_port
+            ));
+            env_vec.push(format!(
+                "HTTP_PROXY=http://{}:{}",
+                orchestrator_host, proxy_port
+            ));
+            env_vec.push(format!(
+                "HTTPS_PROXY=http://{}:{}",
+                orchestrator_host, proxy_port
+            ));
+        }
+
+        // Build volume mounts based on policy
+        let working_dir_str = cwd.display().to_string();
+        let mounts = match policy {
+            SandboxPolicy::ReadOnly => {
+                vec![VolumeMount {
+                    source: working_dir_str,
+                    target: "/workspace".to_string(),
+                    read_only: true,
+                }]
+            }
+            SandboxPolicy::WorkspaceWrite => {
+                vec![VolumeMount {
+                    source: working_dir_str,
+                    target: "/workspace".to_string(),
+                    read_only: false,
+                }]
+            }
+            SandboxPolicy::FullAccess => {
+                vec![
+                    VolumeMount {
+                        source: working_dir_str,
+                        target: "/workspace".to_string(),
+                        read_only: false,
+                    },
+                    VolumeMount {
+                        source: "/tmp".to_string(),
+                        target: "/tmp".to_string(),
+                        read_only: false,
+                    },
+                ]
+            }
         };
 
-        let container_output = runner.execute(command, cwd, policy, &limits, env).await?;
-        Ok(container_output.into())
+        let spec = WorkloadSpec {
+            name: format!("sandbox-{}", uuid::Uuid::new_v4()),
+            image: self.config.image.clone(),
+            command: vec!["sh".to_string(), "-c".to_string(), command.to_string()],
+            env: env_vec,
+            working_dir: "/workspace".to_string(),
+            mounts,
+            tmpfs_mounts: [
+                ("/tmp".to_string(), "size=512M".to_string()),
+                (
+                    "/home/sandbox/.cargo/registry".to_string(),
+                    "size=1G".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            memory_bytes: Some((self.config.memory_limit_mb * 1024 * 1024) as i64),
+            cpu_shares: Some(self.config.cpu_shares as i64),
+            readonly_rootfs: policy != SandboxPolicy::FullAccess,
+            auto_remove: true,
+            ..Default::default()
+        };
+
+        let start_time = std::time::Instant::now();
+
+        let workload_id = rt.create_and_start_workload(&spec).await?;
+
+        let result = tokio::time::timeout(self.config.timeout, async {
+            let exit_code = rt.wait_workload(&workload_id).await?;
+            let (stdout, stderr, truncated) = rt.collect_logs(&workload_id, 64 * 1024).await?;
+            Ok::<WorkloadOutput, SandboxError>(WorkloadOutput {
+                exit_code,
+                stdout,
+                stderr,
+                duration: start_time.elapsed(),
+                truncated,
+            })
+        })
+        .await;
+
+        // Always attempt cleanup
+        let _ = rt.remove_workload(&workload_id).await;
+
+        match result {
+            Ok(Ok(output)) => Ok(output.into()),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(SandboxError::Timeout(self.config.timeout)),
+        }
     }
 
     /// Execute a command directly on the host (no sandbox).
@@ -341,7 +474,7 @@ impl SandboxManager {
                 reason: e.to_string(),
             })?;
 
-        let max_output: usize = 64 * 1024; // 64 KB, matching container path
+        let max_output: usize = 64 * 1024;
         let half_max = max_output / 2;
 
         let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -410,7 +543,6 @@ impl SandboxManager {
 
 impl Drop for SandboxManager {
     fn drop(&mut self) {
-        // Note: async cleanup should be done via shutdown() before dropping
         if self.initialized.load(std::sync::atomic::Ordering::SeqCst) {
             tracing::warn!("SandboxManager dropped without shutdown(), resources may leak");
         }
@@ -418,10 +550,6 @@ impl Drop for SandboxManager {
 }
 
 /// Check whether a sandbox error is transient and worth retrying.
-///
-/// Transient errors are those caused by Docker daemon glitches, container
-/// creation race conditions, or container start failures — not by command
-/// execution failures, timeouts, or policy violations.
 fn is_transient_sandbox_error(err: &SandboxError) -> bool {
     matches!(
         err,
@@ -434,6 +562,7 @@ fn is_transient_sandbox_error(err: &SandboxError) -> bool {
 /// Builder for creating a sandbox manager.
 pub struct SandboxManagerBuilder {
     config: SandboxConfig,
+    runtime: Option<Arc<dyn ContainerRuntime>>,
 }
 
 impl SandboxManagerBuilder {
@@ -441,6 +570,7 @@ impl SandboxManagerBuilder {
     pub fn new() -> Self {
         Self {
             config: SandboxConfig::default(),
+            runtime: None,
         }
     }
 
@@ -451,11 +581,6 @@ impl SandboxManagerBuilder {
     }
 
     /// Set the sandbox policy.
-    ///
-    /// **Note:** `SandboxPolicy::FullAccess` additionally requires
-    /// `allow_full_access(true)` to be set, or the manager will return
-    /// `SandboxError::Config` at execution time. This is an intentional
-    /// double opt-in to prevent accidental host execution.
     pub fn policy(mut self, policy: SandboxPolicy) -> Self {
         self.config.policy = policy;
         self
@@ -479,7 +604,7 @@ impl SandboxManagerBuilder {
         self
     }
 
-    /// Set the Docker image.
+    /// Set the container image.
     pub fn image(mut self, image: &str) -> Self {
         self.config.image = image.to_string();
         self
@@ -491,9 +616,19 @@ impl SandboxManagerBuilder {
         self
     }
 
+    /// Provide a pre-created runtime.
+    pub fn runtime(mut self, runtime: Arc<dyn ContainerRuntime>) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
     /// Build the sandbox manager.
     pub fn build(self) -> SandboxManager {
-        SandboxManager::new(self.config)
+        if let Some(rt) = self.runtime {
+            SandboxManager::with_runtime(self.config, rt)
+        } else {
+            SandboxManager::new(self.config)
+        }
     }
 
     /// Build and initialize the sandbox manager.
@@ -515,8 +650,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_exec_output_from_container_output() {
-        let container = ContainerOutput {
+    fn test_exec_output_from_workload_output() {
+        let workload = WorkloadOutput {
             exit_code: 0,
             stdout: "hello".to_string(),
             stderr: String::new(),
@@ -524,14 +659,14 @@ mod tests {
             truncated: false,
         };
 
-        let exec: ExecOutput = container.into();
+        let exec: ExecOutput = workload.into();
         assert_eq!(exec.exit_code, 0);
         assert_eq!(exec.output, "hello");
     }
 
     #[test]
     fn test_exec_output_combined() {
-        let container = ContainerOutput {
+        let workload = WorkloadOutput {
             exit_code: 1,
             stdout: "out".to_string(),
             stderr: "err".to_string(),
@@ -539,7 +674,7 @@ mod tests {
             truncated: false,
         };
 
-        let exec: ExecOutput = container.into();
+        let exec: ExecOutput = workload.into();
         assert!(exec.output.contains("out"));
         assert!(exec.output.contains("err"));
         assert!(exec.output.contains("stderr"));
@@ -548,7 +683,7 @@ mod tests {
     #[test]
     fn test_builder_defaults() {
         let manager = SandboxManagerBuilder::new().build();
-        assert!(manager.config.enabled); // Enabled by default (startup check disables if Docker unavailable)
+        assert!(manager.config.enabled);
     }
 
     #[test]
@@ -581,9 +716,8 @@ mod tests {
             .execute("echo hello", Path::new("."), HashMap::new())
             .await;
 
-        // This should work even without Docker since FullAccess runs directly
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let output = result.unwrap(); // safety: test
         assert!(output.stdout.contains("hello"));
     }
 
@@ -600,9 +734,8 @@ mod tests {
             .execute("echo hello", Path::new("."), HashMap::new())
             .await;
 
-        // Should be rejected because allow_full_access is false
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        let err = result.unwrap_err().to_string(); // safety: test
         assert!(
             err.contains("SANDBOX_ALLOW_FULL_ACCESS"),
             "Error should mention SANDBOX_ALLOW_FULL_ACCESS, got: {}",
@@ -615,7 +748,6 @@ mod tests {
         let manager = SandboxManagerBuilder::new()
             .enabled(true)
             .policy(SandboxPolicy::FullAccess)
-            // Deliberately omitting .allow_full_access(true)
             .build();
 
         let result = manager
@@ -623,7 +755,7 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        let err = result.unwrap_err().to_string(); // safety: test
         assert!(
             err.contains("SANDBOX_ALLOW_FULL_ACCESS"),
             "Error should mention SANDBOX_ALLOW_FULL_ACCESS, got: {}",
@@ -640,8 +772,6 @@ mod tests {
             ..Default::default()
         });
 
-        // Generate output larger than 32KB (half of 64KB limit)
-        // printf repeats a 100-char line 400 times = 40KB
         let result = manager
             .execute(
                 "printf 'A%.0s' $(seq 1 40000)",
@@ -651,7 +781,7 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let output = result.unwrap(); // safety: test
         assert!(output.truncated);
         assert!(output.stdout.len() <= 32 * 1024);
     }

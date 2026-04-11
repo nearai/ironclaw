@@ -11,16 +11,15 @@
 //! 2. Checks if each job is active in the ContextManager
 //! 3. Cleans up containers with inactive/missing jobs
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use uuid::Uuid;
 
 use crate::context::ContextManager;
 use crate::orchestrator::job_manager::ContainerJobManager;
-use crate::sandbox::connect_docker;
+use crate::sandbox::runtime::ContainerRuntime;
 
 /// Configuration for the sandbox reaper.
 #[derive(Debug, Clone)]
@@ -43,28 +42,28 @@ impl Default for ReaperConfig {
     }
 }
 
-/// Background task that periodically cleans up orphaned Docker containers.
+/// Background task that periodically cleans up orphaned workloads.
 pub struct SandboxReaper {
-    docker: bollard::Docker,
+    runtime: Arc<dyn ContainerRuntime>,
     job_manager: Arc<ContainerJobManager>,
     context_manager: Arc<ContextManager>,
     config: ReaperConfig,
 }
 
 impl SandboxReaper {
-    /// Create a new reaper. Connects to Docker eagerly — returns error if Docker unavailable.
-    pub async fn new(
+    /// Create a new reaper with a pre-initialized runtime.
+    pub fn new(
+        runtime: Arc<dyn ContainerRuntime>,
         job_manager: Arc<ContainerJobManager>,
         context_manager: Arc<ContextManager>,
         config: ReaperConfig,
-    ) -> Result<Self, crate::sandbox::SandboxError> {
-        let docker = connect_docker().await?;
-        Ok(Self {
-            docker,
+    ) -> Self {
+        Self {
+            runtime,
             job_manager,
             context_manager,
             config,
-        })
+        }
     }
 
     /// Run the reaper loop forever. Should be spawned with `tokio::spawn`.
@@ -88,16 +87,19 @@ impl SandboxReaper {
     }
 
     async fn scan_and_reap(&self) {
-        let containers = match self.list_ironclaw_containers().await {
-            Ok(c) => c,
+        let workloads = match self
+            .runtime
+            .list_managed_workloads(&self.config.container_label)
+            .await
+        {
+            Ok(w) => w,
             Err(e) => {
-                tracing::error!(error = %e, "Reaper: failed to list Docker containers");
+                tracing::error!(error = %e, "Reaper: failed to list managed workloads");
                 return;
             }
         };
 
         let now = Utc::now();
-        // Compute threshold once outside the loop
         let threshold = match chrono::Duration::from_std(self.config.orphan_threshold) {
             Ok(d) => d,
             Err(e) => {
@@ -109,124 +111,52 @@ impl SandboxReaper {
             }
         };
 
-        for (container_id, job_id, created_at) in containers {
-            let age = now.signed_duration_since(created_at);
+        for workload in workloads {
+            let age = now.signed_duration_since(workload.created_at);
 
             if age < threshold {
-                continue; // Too young — skip
+                continue;
             }
 
-            // Check if job is still active (any non-terminal state prevents reaping).
-            // Terminal states: Failed, Cancelled, Accepted
-            // Active states: Pending, InProgress, Completed, Submitted, Stuck
-            // If job doesn't exist or is in a terminal state, it's eligible for reaping.
-            let is_active = match self.context_manager.get_context(job_id).await {
+            let is_active = match self.context_manager.get_context(workload.job_id).await {
                 Ok(ctx) => ctx.state.is_active(),
-                Err(_) => false, // Not found — treat as orphaned
+                Err(_) => false,
             };
+
+            let wid_short = &workload.workload_id[..12.min(workload.workload_id.len())];
 
             if is_active {
                 tracing::debug!(
-                    job_id = %job_id,
-                    container_id = %&container_id[..12.min(container_id.len())],
-                    "Reaper: container has active job, skipping"
+                    job_id = %workload.job_id,
+                    workload_id = %wid_short,
+                    "Reaper: workload has active job, skipping"
                 );
                 continue;
             }
 
             tracing::info!(
-                job_id = %job_id,
-                container_id = %&container_id[..12.min(container_id.len())],
+                job_id = %workload.job_id,
+                workload_id = %wid_short,
                 age_secs = age.num_seconds(),
-                "Reaper: orphaned container detected, cleaning up"
+                "Reaper: orphaned workload detected, cleaning up"
             );
 
-            self.reap_container(&container_id, job_id).await;
+            self.reap_workload(&workload.workload_id, workload.job_id)
+                .await;
         }
     }
 
-    /// List all IronClaw-managed containers from Docker.
-    ///
-    /// Returns tuples of (container_id, job_id, created_at).
-    async fn list_ironclaw_containers(
-        &self,
-    ) -> Result<Vec<(String, Uuid, DateTime<Utc>)>, bollard::errors::Error> {
-        use bollard::container::ListContainersOptions;
-
-        let mut filters = HashMap::new();
-        filters.insert("label", vec![self.config.container_label.as_str()]);
-
-        let options = ListContainersOptions {
-            all: true, // include stopped containers
-            filters,
-            ..Default::default()
-        };
-
-        let summaries = self.docker.list_containers(Some(options)).await?;
-        let mut result = Vec::new();
-
-        for summary in summaries {
-            let container_id = match summary.id {
-                Some(id) => id,
-                None => continue,
-            };
-
-            let labels = summary.labels.unwrap_or_default();
-
-            // Parse job_id from label (using configured label key for consistency)
-            let job_id = match labels
-                .get(&self.config.container_label)
-                .and_then(|s| s.parse::<Uuid>().ok())
-            {
-                Some(id) => id,
-                None => {
-                    tracing::warn!(
-                        container_id = %&container_id[..12.min(container_id.len())],
-                        label_key = %&self.config.container_label,
-                        "Reaper: ironclaw container missing valid job_id label"
-                    );
-                    continue;
-                }
-            };
-
-            // Parse created_at from label (set by us at creation time); fall back to Docker timestamp
-            let created_at = match labels
-                .get("ironclaw.created_at")
-                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.with_timezone(&Utc))
-                .or_else(|| {
-                    summary
-                        .created
-                        .and_then(|ts| DateTime::from_timestamp(ts, 0))
-                }) {
-                Some(ts) => ts,
-                None => {
-                    tracing::warn!(
-                        container_id = %&container_id[..12.min(container_id.len())],
-                        "Reaper: could not determine creation time for container, skipping"
-                    );
-                    continue;
-                }
-            };
-
-            result.push((container_id, job_id, created_at));
-        }
-
-        Ok(result)
-    }
-
-    /// Stop and remove a single orphaned container.
+    /// Stop and remove a single orphaned workload.
     ///
     /// First tries `job_manager.stop_job()` (which also revokes the auth token).
-    /// Falls back to direct Docker API if the handle is no longer in the in-memory map
+    /// Falls back to direct runtime API if the handle is no longer in the in-memory map
     /// (e.g., after a process restart).
-    async fn reap_container(&self, container_id: &str, job_id: Uuid) {
-        // Try the high-level stop first (handles token revocation)
+    async fn reap_workload(&self, workload_id: &str, job_id: Uuid) {
         match self.job_manager.stop_job(job_id).await {
             Ok(()) => {
                 tracing::info!(
                     job_id = %job_id,
-                    "Reaper: cleaned up orphaned container via job_manager"
+                    "Reaper: cleaned up orphaned workload via job_manager"
                 );
                 return;
             }
@@ -234,50 +164,34 @@ impl SandboxReaper {
                 tracing::debug!(
                     job_id = %job_id,
                     error = %e,
-                    "Reaper: job_manager.stop_job failed (likely no handle after restart), falling back to direct Docker cleanup"
+                    "Reaper: job_manager.stop_job failed, falling back to direct runtime cleanup"
                 );
             }
         }
 
-        // Fall back: direct Docker stop + force remove
-        if let Err(e) = self
-            .docker
-            .stop_container(
-                container_id,
-                Some(bollard::container::StopContainerOptions { t: 10 }),
-            )
-            .await
-        {
+        let wid_short = &workload_id[..12.min(workload_id.len())];
+
+        if let Err(e) = self.runtime.stop_workload(workload_id, 10).await {
             tracing::debug!(
                 job_id = %job_id,
-                container_id = %&container_id[..12.min(container_id.len())],
+                workload_id = %wid_short,
                 error = %e,
-                "Reaper: stop_container failed (may already be stopped)"
+                "Reaper: stop_workload failed (may already be stopped)"
             );
         }
 
-        if let Err(e) = self
-            .docker
-            .remove_container(
-                container_id,
-                Some(bollard::container::RemoveContainerOptions {
-                    force: true,
-                    ..Default::default()
-                }),
-            )
-            .await
-        {
+        if let Err(e) = self.runtime.remove_workload(workload_id).await {
             tracing::error!(
                 job_id = %job_id,
-                container_id = %&container_id[..12.min(container_id.len())],
+                workload_id = %wid_short,
                 error = %e,
-                "Reaper: failed to remove orphaned container"
+                "Reaper: failed to remove orphaned workload"
             );
         } else {
             tracing::info!(
                 job_id = %job_id,
-                container_id = %&container_id[..12.min(container_id.len())],
-                "Reaper: removed orphaned container via direct Docker API"
+                workload_id = %wid_short,
+                "Reaper: removed orphaned workload via runtime"
             );
         }
     }
@@ -286,7 +200,10 @@ impl SandboxReaper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{DateTime, Utc};
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use uuid::Uuid;
 
     // Test: age threshold filtering
     #[test]

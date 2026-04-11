@@ -23,7 +23,7 @@ pub struct BootInfo {
     pub heartbeat_enabled: bool,
     pub heartbeat_interval_secs: u64,
     pub sandbox_enabled: bool,
-    pub docker_status: crate::sandbox::detect::DockerStatus,
+    pub runtime_status: crate::sandbox::RuntimeStatus,
     pub claude_code_enabled: bool,
     pub acp_enabled: bool,
     pub routines_enabled: bool,
@@ -187,9 +187,9 @@ pub fn print_boot_screen(info: &BootInfo) {
 
     // Sandbox / Docker
     if info.sandbox_enabled {
-        let suffix = match info.docker_status {
-            crate::sandbox::detect::DockerStatus::Available => "",
-            crate::sandbox::detect::DockerStatus::NotRunning => ":stopped",
+        let suffix = match info.runtime_status {
+            crate::sandbox::RuntimeStatus::Available => "",
+            crate::sandbox::RuntimeStatus::NotRunning => ":stopped",
             _ => ":unavail",
         };
         tags.push(format!("sandbox{suffix}"));
@@ -255,7 +255,7 @@ pub fn print_boot_screen(info: &BootInfo) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::detect::DockerStatus;
+    use crate::sandbox::RuntimeStatus;
 
     #[test]
     fn test_print_boot_screen_full() {
@@ -274,7 +274,7 @@ mod tests {
             heartbeat_enabled: true,
             heartbeat_interval_secs: 1800,
             sandbox_enabled: true,
-            docker_status: DockerStatus::Available,
+            runtime_status: RuntimeStatus::Available,
             claude_code_enabled: false,
             acp_enabled: false,
             routines_enabled: true,
@@ -309,7 +309,7 @@ mod tests {
             heartbeat_enabled: false,
             heartbeat_interval_secs: 0,
             sandbox_enabled: false,
-            docker_status: DockerStatus::Disabled,
+            runtime_status: RuntimeStatus::Disabled,
             claude_code_enabled: false,
             acp_enabled: false,
             routines_enabled: false,
@@ -340,7 +340,7 @@ mod tests {
             heartbeat_enabled: false,
             heartbeat_interval_secs: 0,
             sandbox_enabled: false,
-            docker_status: DockerStatus::Disabled,
+            runtime_status: RuntimeStatus::Disabled,
             claude_code_enabled: false,
             acp_enabled: false,
             routines_enabled: false,
