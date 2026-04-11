@@ -295,30 +295,135 @@ The existing `AdminUser` extractor and `AuthenticatedUser` extractor cover all c
 
 ## 8. Testing Strategy
 
-### Unit Tests
+**Rule compliance.** This plan follows `.claude/rules/testing.md` — specifically
+"No mocks, prefer real implementations or stubs" — and the "Test Through the
+Caller, Not Just the Helper" rule from the root `CLAUDE.md`. Every admin route
+gates DB-backed side effects and authorization, so mocked handler tests are
+explicitly forbidden here: they are surface-only coverage and have caused
+regressions in this repo before. Primary coverage is **integration-level
+through the real `/api/admin/*` HTTP routes and real DB methods**, exercised
+against both persistence backends.
 
-| Test | File | What |
-|------|------|------|
-| Admin token list handler | `src/channels/web/handlers/admin.rs` | Mock Database trait, verify response shape |
-| Admin token revoke handler | `src/channels/web/handlers/admin.rs` | Verify 404 for missing token, 200 for success |
-| Usage summary handler | `src/channels/web/handlers/admin.rs` | Verify aggregation logic |
+### 8.1 Primary Tier: Integration Tests Through Real `/api/admin/*` Routes
 
-### Integration Tests (`cargo test --features integration`)
+Run with `cargo test --features integration`. Tests live in
+`tests/admin_panel_integration.rs` (new file) and drive the **actual axum
+router** built by `src/channels/web/server.rs::build_router`, not a handler
+called in isolation. The router is wired to a real `AppState` with a real
+`Database` and the real middleware chain (including the `AdminUser` /
+`AuthenticatedUser` extractors). HTTP requests are issued via `tower::ServiceExt`
+(`oneshot` / `call`) or an ephemeral `hyper` server so the full middleware
+stack runs.
+
+Per `src/db/CLAUDE.md`, every persistence-touching admin route MUST be covered
+against **both PostgreSQL and libSQL** backends. The harness parameterises over
+`Database` implementations using the existing dual-backend test pattern (see
+`tests/workspace_integration.rs` / `src/db/` integration tests) — one test
+function per case, invoked once per backend.
+
+#### 8.1.1 Auth-gating matrix (applied to EVERY `/api/admin/*` route)
+
+For each of: `GET /api/admin/users`, `POST /api/admin/users`,
+`GET /api/admin/users/{id}`, `PATCH /api/admin/users/{id}`,
+`DELETE /api/admin/users/{id}`, `POST /api/admin/users/{id}/suspend`,
+`POST /api/admin/users/{id}/activate`, `GET /api/admin/usage`,
+`GET /api/admin/usage/summary`, `GET /api/admin/tokens`,
+`DELETE /api/admin/tokens/{id}`, `GET /api/admin/users/{id}/secrets`,
+`PUT /api/admin/users/{id}/secrets/{name}`,
+`DELETE /api/admin/users/{id}/secrets/{name}`:
+
+| Case | Setup | Expected |
+|------|-------|----------|
+| Unauthenticated | No `Authorization` header | 401, no DB mutation |
+| Wrong scheme / garbage token | `Authorization: Bearer deadbeef` | 401, no DB mutation |
+| Authenticated member (non-admin) | Real user + real token, `role = "member"` | 403, no DB mutation |
+| Authenticated admin | Real user + real token, `role = "admin"` | 2xx, DB state matches |
+| Revoked admin token | Admin token that was valid, then revoked via `DELETE /api/admin/tokens/{id}` in the same test | 401, no DB mutation |
+
+Every case asserts **both** the HTTP status AND the resulting DB state via a
+follow-up read through the real `Database` trait (e.g. `get_user`,
+`list_tokens_for_user`, `user_usage_stats`) — never a handler-internal hook.
+
+#### 8.1.2 Token revocation end-to-end (critical path)
+
+Single test, both backends:
+
+1. Seed two admin users `A1`, `A2`, each with a valid admin token `T1`, `T2`.
+2. `GET /api/admin/tokens` with `T1` → 200, payload contains both `T1` and `T2`.
+3. `DELETE /api/admin/tokens/{T2.id}` with `T1` → 200. Assert via direct
+   `Database::get_token` that `T2` is marked revoked (or absent, per schema).
+4. `GET /api/admin/users` with `T2` → 401. **This is the regression gate.**
+   The assertion runs through the full middleware chain, so it catches bugs in
+   the auth extractor cache, the revocation-check order, or the token lookup
+   path — none of which a mocked handler test would see.
+5. `GET /api/admin/users` with `T1` → 200 (sibling token still works).
+6. Self-revoke variant: `DELETE /api/admin/tokens/{T1.id}` with `T1` → 200,
+   then any follow-up call with `T1` → 401.
+
+The revocation path uses the **real** `revoke_token_by_id` DB method — no
+revocation store mock, no in-memory shim.
+
+#### 8.1.3 Usage / reporting flows
+
+Seed real users, real job records, and real usage rows via the `Database`
+trait, then call `GET /api/admin/usage` and `GET /api/admin/usage/summary`
+through the real route. Assertions:
+
+- Response payload matches expected aggregation for the seeded data (per-user
+  calls, tokens, cost; summary totals, top-N users).
+- Period selector (`?period=day|week|month`, `?user_id=`) filters correctly
+  against real DB rows.
+- Non-admin caller → 403 and **zero** rows returned; the auth-gating matrix
+  above is applied to both endpoints.
+- Empty-DB case returns a well-formed zero payload, not 500.
+
+#### 8.1.4 User CRUD, secrets, and token-for-user flows
+
+Exercised through the real routes end-to-end, asserting both response shape
+and `Database` state after each call:
+
+- `POST /api/admin/users` → user row exists, initial token row exists.
+- `POST /api/admin/users/{id}/suspend` → `status = "suspended"`; subsequent
+  authentication as that user is rejected (drive this through a real authed
+  request using the suspended user's token).
+- `POST /api/admin/users/{id}/activate` → `status = "active"`; authentication
+  works again.
+- `DELETE /api/admin/users/{id}` → user row gone, owned tokens revoked, owned
+  secrets gone. Verify via direct `Database` reads.
+- `PUT /api/admin/users/{id}/secrets/{name}` and `DELETE .../secrets/{name}`
+  → encrypted secret row present/absent in the real secrets store; value is
+  never echoed back in any response body.
+
+### 8.2 Secondary Tier: Unit Tests for Pure Helpers Only
+
+Unit tests (`cargo test`, in `mod tests {}` at the bottom of each file) are
+permitted ONLY for pure helpers with no I/O and no authorization effect —
+for example, a usage-aggregation reducer over an in-memory `Vec<UsageRow>`, or
+a period-parameter parser. **Unit coverage is never a substitute for the
+integration tier on any route that gates DB side effects or authorization.**
+Handler functions, DB methods, and anything that touches the `AdminUser`
+extractor path MUST be covered at the integration tier above.
+
+Explicitly out of scope at the unit tier (these would be surface-only
+coverage and are forbidden by `.claude/rules/testing.md`):
+
+- Mocked `Database` trait passed into an admin handler.
+- Mocked `AdminUser` / `AuthenticatedUser` extractor.
+- Mocked revocation store.
+- Any test that calls an admin handler function directly without going
+  through the axum router and middleware.
+
+### 8.3 E2E Tests (`tests/e2e/`)
+
+Browser-level smoke tests in Playwright/Python, on top of the integration
+tier — not a substitute for it:
 
 | Test | What |
 |------|------|
-| `list_all_tokens` DB method | Create users+tokens, verify cross-user listing |
-| `revoke_token_by_id` DB method | Revoke token, verify it no longer authenticates |
-| Admin endpoint auth gating | Verify 403 for member role on all `/api/admin/*` endpoints |
-
-### E2E Tests (`tests/e2e/`)
-
-| Test | What |
-|------|------|
-| Admin panel access control | Login as member: verify `/admin` redirects or shows error. Login as admin: verify panel loads. |
-| User CRUD flow | Create user, verify in table, suspend, activate, delete |
-| Token management | Create token for user, verify in admin tokens list, revoke, verify revoked |
-| Usage dashboard | Trigger some LLM calls, verify usage appears in dashboard |
+| Admin panel access control | Login as member: `/admin` redirects or shows error. Login as admin: panel loads. |
+| User CRUD flow | Create user in UI, verify in table, suspend, activate, delete. |
+| Token management | Create token for user, verify in admin tokens list, revoke, verify revoked token cannot make API calls from a second browser context. |
+| Usage dashboard | Trigger LLM calls, verify they appear in the dashboard with correct totals. |
 
 ### Manual Testing Checklist
 
