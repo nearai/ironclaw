@@ -446,7 +446,7 @@ impl Default for ChannelSettings {
             wasm_channels: Vec::new(),
             wasm_channels_enabled: true,
             wasm_channels_dir: None,
-            cli_mode: None,
+            cli_mode: Some("tui".to_string()),
         }
     }
 }
